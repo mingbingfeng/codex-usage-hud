@@ -548,13 +548,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
 
         def refresh() -> None:
+            if window.should_refresh_snapshot():
+                try:
+                    snapshot = build_snapshot(context)
+                except Exception as exc:
+                    snapshot = ParsedSession(status="error", error=str(exc))
+                window.update_display(snapshot)
             try:
-                snapshot = build_snapshot(context)
-            except Exception as exc:
-                snapshot = ParsedSession(status="error", error=str(exc))
-            window.update_display(snapshot)
-            try:
-                window.root.after(context.poll_ms, refresh)
+                window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
             except Exception:
                 return
 

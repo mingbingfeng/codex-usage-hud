@@ -22,6 +22,12 @@ TOP_DOCK_RIGHT = 224
 TOP_DOCK_HEIGHT = 36
 TOP_DOCK_EXPANDED_HEIGHT = 285
 TOP_DOCK_MIN_WIDTH = 1
+TOP_ANCHOR_TOP = 38
+TOP_ANCHOR_LEFT_RATIO = 0.155
+TOP_ANCHOR_RIGHT_RATIO = 0.14
+TOP_ANCHOR_LEFT_MIN = 154
+TOP_ANCHOR_RIGHT_MIN = 172
+TOP_ANCHOR_MIN_WIDTH = 320
 
 REQUEST_DOCK_BOTTOM = 28
 REQUEST_DOCK_LEFT = 520
@@ -30,7 +36,15 @@ REQUEST_DOCK_WIDTH = 380
 REQUEST_DOCK_HEIGHT = 32
 REQUEST_DOCK_EXPANDED_HEIGHT = 180
 REQUEST_DOCK_MIN_WIDTH = 1
+REQUEST_ANCHOR_BOTTOM = 36
+REQUEST_ANCHOR_LEFT_RATIO = 0.30
+REQUEST_ANCHOR_RIGHT_RATIO = 0.28
+REQUEST_ANCHOR_LEFT_MIN = 298
+REQUEST_ANCHOR_RIGHT_MIN = 345
+REQUEST_ANCHOR_MIN_WIDTH = 260
 HUD_SETTINGS_FILENAME = "hud_settings.json"
+FOLLOW_ACTIVE_MS = 16
+FOLLOW_TOMBSTONE_MS = 500
 MARQUEE_START_PAUSE_MS = 1500
 MARQUEE_END_PAUSE_MS = 1500
 MARQUEE_STEP_PX = 1
@@ -41,12 +55,16 @@ NUMERIC_TOKEN_RE = re.compile(r"\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?")
 HUD_BG = "#10161D"
 HUD_PANEL_BG = "#141B24"
 HUD_HEADER_BG = "#202833"
-HUD_WARNING_BG = "#1B1A15"
 HUD_DIVIDER = "#273241"
 HUD_TEXT = "#E8EEF7"
 HUD_MUTED = "#8492A6"
 HUD_ACCENT = "#F3D27A"
 HUD_BLUE = "#9CCBFF"
+REQUEST_BG = "#0B1016"
+REQUEST_HEADER_BG = "#151D27"
+REQUEST_PANEL_BG = "#101821"
+REQUEST_TEXT = "#DCE7F2"
+REQUEST_MUTED = "#718095"
 
 _COST_ESTIMATOR = CostEstimator()
 
@@ -81,6 +99,9 @@ class WindowPlacement:
     relative_x: int | None = None
     relative_y: int | None = None
     relative_bottom: int | None = None
+    relative_x_ratio: float | None = None
+    relative_y_ratio: float | None = None
+    relative_bottom_ratio: float | None = None
     absolute_x: int | None = None
     absolute_y: int | None = None
     width: int | None = None
@@ -94,6 +115,9 @@ class WindowPlacement:
             relative_x=_optional_int(value.get("relative_x")),
             relative_y=_optional_int(value.get("relative_y")),
             relative_bottom=_optional_int(value.get("relative_bottom")),
+            relative_x_ratio=_optional_float(value.get("relative_x_ratio")),
+            relative_y_ratio=_optional_float(value.get("relative_y_ratio")),
+            relative_bottom_ratio=_optional_float(value.get("relative_bottom_ratio")),
             absolute_x=_optional_int(value.get("absolute_x")),
             absolute_y=_optional_int(value.get("absolute_y")),
             width=_optional_int(value.get("width")),
@@ -105,6 +129,9 @@ class WindowPlacement:
             "relative_x": self.relative_x,
             "relative_y": self.relative_y,
             "relative_bottom": self.relative_bottom,
+            "relative_x_ratio": self.relative_x_ratio,
+            "relative_y_ratio": self.relative_y_ratio,
+            "relative_bottom_ratio": self.relative_bottom_ratio,
             "absolute_x": self.absolute_x,
             "absolute_y": self.absolute_y,
             "width": self.width,
@@ -629,6 +656,45 @@ class AttachedHudGeometry:
         return x, y, final_width, final_height
 
 
+def _visual_anchor_geometry(
+    target: str, rect: WindowRect, expanded: bool = False
+) -> tuple[int, int, int, int]:
+    """Place HUDs on Codex chrome landmarks rather than fixed old offsets."""
+    if target == "top":
+        height = TOP_DOCK_EXPANDED_HEIGHT if expanded else TOP_DOCK_HEIGHT
+        left_margin = max(TOP_ANCHOR_LEFT_MIN, int(round(rect.width * TOP_ANCHOR_LEFT_RATIO)))
+        right_margin = max(TOP_ANCHOR_RIGHT_MIN, int(round(rect.width * TOP_ANCHOR_RIGHT_RATIO)))
+        min_width = TOP_ANCHOR_MIN_WIDTH
+        y = rect.top + TOP_ANCHOR_TOP
+    else:
+        height = REQUEST_DOCK_EXPANDED_HEIGHT if expanded else REQUEST_DOCK_HEIGHT
+        left_margin = max(
+            REQUEST_ANCHOR_LEFT_MIN,
+            int(round(rect.width * REQUEST_ANCHOR_LEFT_RATIO)),
+        )
+        right_margin = max(
+            REQUEST_ANCHOR_RIGHT_MIN,
+            int(round(rect.width * REQUEST_ANCHOR_RIGHT_RATIO)),
+        )
+        min_width = REQUEST_ANCHOR_MIN_WIDTH
+        y = rect.bottom - REQUEST_ANCHOR_BOTTOM - height
+
+    left_margin = _fit_anchor_left(rect.width, left_margin, right_margin, min_width)
+    width = max(1, rect.width - left_margin - right_margin)
+    return rect.left + left_margin, y, width, height
+
+
+def _fit_anchor_left(
+    window_width: int,
+    left_margin: int,
+    right_margin: int,
+    min_width: int,
+) -> int:
+    if window_width - left_margin - right_margin >= min_width:
+        return left_margin
+    return max(8, min(left_margin, window_width - right_margin - min_width))
+
+
 class CodexWindowLocator:
     """Locate the Codex desktop window using standard-library native hooks."""
 
@@ -750,6 +816,7 @@ class _WindowsCodexLocator(_BaseLocator):
 
     def __init__(self) -> None:
         self.enabled = False
+        self._last_hwnd = 0
         try:
             import ctypes
             from ctypes import wintypes
@@ -773,6 +840,8 @@ class _WindowsCodexLocator(_BaseLocator):
         self.user32.EnumWindows.restype = wintypes.BOOL
         self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
         self.user32.IsWindowVisible.restype = wintypes.BOOL
+        self.user32.IsWindow.argtypes = [wintypes.HWND]
+        self.user32.IsWindow.restype = wintypes.BOOL
         self.user32.IsIconic.argtypes = [wintypes.HWND]
         self.user32.IsIconic.restype = wintypes.BOOL
         self.user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
@@ -823,6 +892,9 @@ class _WindowsCodexLocator(_BaseLocator):
     def find(self) -> WindowRect | None:
         if not self.enabled:
             return None
+        cached = self._rect_for_hwnd(self._last_hwnd)
+        if cached is not None:
+            return cached
         ctypes = self.ctypes
         wintypes = self.wintypes
         candidates: list[WindowRect] = []
@@ -833,41 +905,57 @@ class _WindowsCodexLocator(_BaseLocator):
         def callback(hwnd: int, _: int) -> bool:
             if not self.user32.IsWindowVisible(hwnd):
                 return True
-            title = self._window_text(hwnd)
-            class_name = self._class_name(hwnd)
-            rect = wintypes.RECT()
-            if not self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            candidate = self._rect_for_hwnd(int(hwnd), verify_codex=True)
+            if candidate is None:
                 return True
-            width = int(rect.right - rect.left)
-            height = int(rect.bottom - rect.top)
-            if width < 300 or height < 200:
-                return True
-
-            pid = wintypes.DWORD()
-            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            process = self._process_name(pid.value)
-            haystack = " ".join([title, class_name, process]).lower()
-            if "codex" not in haystack:
-                return True
-            candidates.append(
-                WindowRect(
-                    hwnd=int(hwnd),
-                    title=title,
-                    process=process,
-                    class_name=class_name,
-                    left=int(rect.left),
-                    top=int(rect.top),
-                    right=int(rect.right),
-                    bottom=int(rect.bottom),
-                    minimized=bool(self.user32.IsIconic(hwnd)),
-                )
-            )
+            candidates.append(candidate)
             return True
 
         self.user32.EnumWindows(enum_proc_type(callback), 0)
         if not candidates:
+            self._last_hwnd = 0
             return None
-        return sorted(candidates, key=self._score_window, reverse=True)[0]
+        best = sorted(candidates, key=self._score_window, reverse=True)[0]
+        self._last_hwnd = best.hwnd
+        return best
+
+    def _rect_for_hwnd(
+        self,
+        hwnd: int,
+        *,
+        verify_codex: bool = False,
+    ) -> WindowRect | None:
+        if not hwnd or not self.user32.IsWindow(hwnd) or not self.user32.IsWindowVisible(hwnd):
+            return None
+        ctypes = self.ctypes
+        wintypes = self.wintypes
+        rect = wintypes.RECT()
+        if not self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        width = int(rect.right - rect.left)
+        height = int(rect.bottom - rect.top)
+        if width < 300 or height < 200:
+            return None
+        title = self._window_text(hwnd)
+        class_name = self._class_name(hwnd)
+        pid = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        process = self._process_name(pid.value)
+        if verify_codex or hwnd != self._last_hwnd:
+            haystack = " ".join([title, class_name, process]).lower()
+            if "codex" not in haystack:
+                return None
+        return WindowRect(
+            hwnd=int(hwnd),
+            title=title,
+            process=process,
+            class_name=class_name,
+            left=int(rect.left),
+            top=int(rect.top),
+            right=int(rect.right),
+            bottom=int(rect.bottom),
+            minimized=bool(self.user32.IsIconic(hwnd)),
+        )
 
     def is_active(self, rect: WindowRect, allowed_hwnds: set[int]) -> bool:
         if not self.enabled:
@@ -954,6 +1042,20 @@ def _format_money(value: float | None) -> str:
 
 def _format_realtime_money(value: float | None, estimated: bool) -> str:
     return f"{'~' if estimated else ''}{_format_money(value)}"
+
+
+def _format_fixed_money(value: float | None, estimated: bool) -> str:
+    amount = max(0.0, float(value or 0.0))
+    marker = "~" if estimated else ""
+    if amount < 1:
+        return f"{marker}${amount:.3f}"
+    if amount < 100:
+        return f"{marker}${amount:.2f}"
+    return f"{marker}${amount:.1f}"
+
+
+def _fixed_token_total(value: int | None) -> str:
+    return _short_num(value)
 
 
 def _format_usage_money(tokens: int | None, cost: float | None) -> str:
@@ -1281,17 +1383,24 @@ def _request_total_line(snapshot: ParsedSession) -> str:
     ) = _task_total(snapshot)
     return " ".join(
         [
+            _format_fixed_money(cost, estimated),
+            f"∑{_fixed_token_total(total_tokens)}",
             f"↑{'~' if estimated else ''}{_short_num(input_tokens)}",
             f"↻{'~' if estimated else ''}{_short_num(cached_tokens)}",
             f"↓{'~' if estimated else ''}{_short_num(output_tokens)}",
             f"◇{'~' if estimated else ''}{_short_num(reasoning_tokens)}",
-            f"∑{'~' if estimated else ''}{_short_num(total_tokens)}",
-            _format_realtime_money(cost, estimated),
         ]
     )
 
 
-def _round_entry(item: RequestRound, fallback_model: str) -> str:
+def _round_entry(
+    item: RequestRound,
+    fallback_model: str,
+    *,
+    index_width: int | None = None,
+    money_width: int | None = None,
+    total_width: int | None = None,
+) -> str:
     cost = item.cost_usd
     estimated = item.estimated or cost is None
     if cost is None:
@@ -1304,20 +1413,52 @@ def _round_entry(item: RequestRound, fallback_model: str) -> str:
         )
     time_source = item.started_at or item.completed_at
     time_text = "--:--:--" if time_source is None else time_source.astimezone().strftime("%H:%M:%S")
+    index_text = str(item.index)
+    money_text = _format_fixed_money(cost, estimated)
+    total_text = _fixed_token_total(item.total_tokens)
+    if index_width is not None:
+        index_text = index_text.rjust(index_width)
+    if money_width is not None:
+        money_text = money_text.rjust(money_width)
+    if total_width is not None:
+        total_text = total_text.rjust(total_width)
     return (
-        f"#{item.index} {time_text} "
+        f"#{index_text} {money_text} "
+        f"∑{total_text} {time_text} "
         f"↑{_short_num(item.input_tokens)} ↻{_short_num(item.cached_tokens)} "
-        f"↓{_short_num(item.output_tokens)} ◇{_short_num(item.reasoning_tokens)} "
-        f"∑{_short_num(item.total_tokens)} {_format_realtime_money(cost, estimated)}"
+        f"↓{_short_num(item.output_tokens)} ◇{_short_num(item.reasoning_tokens)}"
     )
+
+
+def _round_entry_widths(
+    rows: list[RequestRound],
+    fallback_model: str,
+) -> tuple[int, int, int]:
+    index_width = max((len(str(item.index)) for item in rows), default=1)
+    money_width = 1
+    total_width = 1
+    for item in rows:
+        cost = item.cost_usd
+        estimated = item.estimated or cost is None
+        if cost is None:
+            cost = _COST_ESTIMATOR.calculate(
+                item.model or fallback_model,
+                item.input_tokens or 0,
+                item.cached_tokens or 0,
+                item.output_tokens or 0,
+                item.reasoning_tokens or 0,
+            )
+        money_width = max(money_width, len(_format_fixed_money(cost, estimated)))
+        total_width = max(total_width, len(_fixed_token_total(item.total_tokens)))
+    return index_width, money_width, total_width
 
 
 class TokenHudWindow:
     """Two-window HUD: top session/budget bar and bottom request bar."""
 
-    def __init__(self, compact: bool = False, follow_ms: int = 200) -> None:
+    def __init__(self, compact: bool = False, follow_ms: int = FOLLOW_ACTIVE_MS) -> None:
         self.compact = compact
-        self.follow_ms = max(100, int(follow_ms))
+        self.follow_ms = max(16, int(follow_ms))
         self.settings_store = HudSettingsStore()
         self.settings = self.settings_store.load()
         self.locator = CodexWindowLocator()
@@ -1352,6 +1493,7 @@ class TokenHudWindow:
         self.request_expanded = False
         self._attached = False
         self._hidden_for_minimized = False
+        self._tombstoned = False
         self._last_rect: WindowRect | None = None
         self._drag_origin: tuple[int, int] | None = None
         self._drag_window: tk.Toplevel | tk.Tk | None = None
@@ -1454,82 +1596,107 @@ class TokenHudWindow:
         self._resize_handle(frame, "top", self.root).pack(side="right", padx=(6, 0))
 
     def _build_top_expanded(self, frame: tk.Frame) -> None:
-        header = tk.Frame(frame, bg="#20242A")
-        header.pack(fill="x", pady=(2, 8))
+        header = tk.Frame(frame, bg=HUD_HEADER_BG, padx=6, pady=3)
+        header.pack(fill="x", pady=(0, 7))
         self._move_handle(header, "top", self.root).pack(side="left", padx=(0, 4))
         tk.Label(
             header,
             text="Codex 会话 / 预算",
             anchor="w",
-            bg="#20242A",
-            fg="#E8EEF7",
+            bg=HUD_HEADER_BG,
+            fg=HUD_TEXT,
             font=("Microsoft YaHei UI", 9, "bold"),
-        ).pack(side="left", fill="x", expand=True)
-        self._resize_handle(header, "top", self.root).pack(side="right", padx=(6, 0))
+        ).pack(side="left")
         close = tk.Button(
             header,
             text="×",
             command=self._close,
-            bg="#303741",
-            fg="#E8EEF7",
+            bg="#2E3846",
+            fg=HUD_TEXT,
             relief="flat",
             padx=6,
             pady=1,
             font=("Microsoft YaHei UI", 8),
         )
-        close.pack(side="right")
+        close.pack(side="right", padx=(4, 0))
+        self._resize_handle(header, "top", self.root).pack(side="right", padx=(6, 0))
+        self.top_labels["session"] = tk.Label(
+            header,
+            text="",
+            anchor="e",
+            justify="right",
+            bg=HUD_HEADER_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.top_labels["session"].pack(side="left", fill="x", expand=True, padx=(12, 0))
 
-        scroll_host = tk.Frame(frame, bg="#151A20")
+        scroll_host = tk.Frame(frame, bg=HUD_BG)
         scroll_host.pack(fill="both", expand=True)
         canvas = tk.Canvas(
             scroll_host,
-            bg="#151A20",
+            bg=HUD_BG,
             highlightthickness=0,
             borderwidth=0,
+            height=1,
             xscrollincrement=8,
         )
-        xscroll = tk.Scrollbar(
-            scroll_host,
-            orient="horizontal",
-            command=canvas.xview,
-        )
-        canvas.configure(xscrollcommand=xscroll.set)
         canvas.pack(side="top", fill="both", expand=True)
-        xscroll.pack(side="bottom", fill="x")
-        content = tk.Frame(canvas, bg="#151A20")
-        canvas.create_window((0, 0), window=content, anchor="nw")
+        content = tk.Frame(canvas, bg=HUD_BG)
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
 
         def sync_top_scroll_region(event: tk.Event[tk.Misc]) -> None:
             del event
             canvas.configure(scrollregion=canvas.bbox("all"))
 
+        def sync_top_canvas_width(event: tk.Event[tk.Misc]) -> None:
+            content.update_idletasks()
+            canvas.itemconfigure(
+                content_window,
+                width=max(int(event.width), content.winfo_reqwidth()),
+            )
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        canvas.bind("<Configure>", sync_top_canvas_width)
         content.bind("<Configure>", sync_top_scroll_region)
-        content.columnconfigure(0, weight=1)
-        content.columnconfigure(1, weight=0)
+        content.columnconfigure(0, weight=1, minsize=382)
+        content.columnconfigure(1, weight=0, minsize=226)
         content.rowconfigure(0, weight=1)
-        left = tk.Frame(content, bg="#151A20")
-        left.grid(row=0, column=0, sticky="nw", padx=(0, 10))
-        right = tk.Frame(content, bg="#151A20")
-        right.grid(row=0, column=1, sticky="ne")
-        for key, parent, fg, font in [
-            ("session", left, "#9FB3C8", ("Microsoft YaHei UI", 8)),
-            ("confirmed", left, "#E8EEF7", ("Consolas", 10, "bold")),
-            ("cumulative", left, "#DDE7F2", ("Consolas", 9)),
-            ("budget", left, "#F8D57E", ("Microsoft YaHei UI", 8)),
-            ("activity", left, "#BCD7FF", ("Microsoft YaHei UI", 8)),
-            ("warnings", left, "#FFB86B", ("Microsoft YaHei UI", 8)),
-            ("legend", left, "#6F7B88", ("Microsoft YaHei UI", 8)),
-            ("slow", right, "#DDE7F2", ("Microsoft YaHei UI", 8)),
-            ("gap", right, "#B9C2CC", ("Microsoft YaHei UI", 8)),
-            ("status", right, "#9FB3C8", ("Microsoft YaHei UI", 8)),
-            ("error", right, "#FF9C9C", ("Microsoft YaHei UI", 8)),
-        ]:
+        left = tk.Frame(content, bg=HUD_BG)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        right = tk.Frame(content, bg=HUD_PANEL_BG, padx=8, pady=5)
+        right.grid(row=0, column=1, sticky="nsew")
+
+        def section(parent: tk.Misc, text: str, *, bg: str = HUD_BG) -> None:
+            tk.Label(
+                parent,
+                text=text,
+                anchor="w",
+                justify="left",
+                bg=bg,
+                fg=HUD_MUTED,
+                font=("Microsoft YaHei UI", 7, "bold"),
+            ).pack(fill="x", pady=(0, 1))
+
+        def divider(parent: tk.Misc, *, bg: str = HUD_BG) -> None:
+            del bg
+            tk.Frame(parent, bg=HUD_DIVIDER, height=1).pack(fill="x", pady=(4, 5))
+
+        def dynamic_label(
+            key: str,
+            parent: tk.Misc,
+            *,
+            fg: str,
+            font: tuple[str, int] | tuple[str, int, str],
+            bg: str = HUD_BG,
+            pady: tuple[int, int] = (0, 3),
+        ) -> tk.Label:
             label = tk.Label(
                 parent,
                 text="",
                 anchor="w",
                 justify="left",
-                bg="#151A20",
+                bg=bg,
                 fg=fg,
                 font=font,
                 wraplength=0,
@@ -1540,13 +1707,82 @@ class TokenHudWindow:
             if key == "gap":
                 setattr(label, "_hud_handle", True)
                 label.bind("<Button-1>", self._copy_longest_gap_detail)
-            label.pack(fill="x", pady=2)
+            label.pack(fill="x", pady=pady)
             self.top_labels[key] = label
+            return label
+
+        section(left, "实时请求")
+        dynamic_label(
+            "confirmed",
+            left,
+            fg=HUD_ACCENT,
+            font=("Consolas", 11, "bold"),
+            pady=(0, 3),
+        )
+        dynamic_label(
+            "cumulative",
+            left,
+            fg="#DDE7F2",
+            font=("Consolas", 9),
+            pady=(0, 3),
+        )
+        divider(left)
+        section(left, "额度")
+        dynamic_label(
+            "budget",
+            left,
+            fg="#FFD879",
+            font=("Microsoft YaHei UI", 8),
+            pady=(0, 5),
+        )
+        section(left, "当前活动")
+        dynamic_label(
+            "activity",
+            left,
+            fg=HUD_BLUE,
+            font=("Microsoft YaHei UI", 8),
+            pady=(0, 4),
+        )
+        dynamic_label(
+            "warnings",
+            left,
+            fg="#FFB86B",
+            font=("Microsoft YaHei UI", 8),
+            pady=(0, 0),
+        )
+
+        section(right, "等待", bg=HUD_PANEL_BG)
+        dynamic_label(
+            "slow",
+            right,
+            fg="#DDE7F2",
+            font=("Microsoft YaHei UI", 8),
+            bg=HUD_PANEL_BG,
+            pady=(0, 4),
+        )
+        dynamic_label(
+            "gap",
+            right,
+            fg="#B9C2CC",
+            font=("Microsoft YaHei UI", 8),
+            bg=HUD_PANEL_BG,
+            pady=(0, 0),
+        )
+        divider(right, bg=HUD_PANEL_BG)
+        section(right, "状态", bg=HUD_PANEL_BG)
+        dynamic_label(
+            "status",
+            right,
+            fg="#A9BCD2",
+            font=("Microsoft YaHei UI", 8),
+            bg=HUD_PANEL_BG,
+            pady=(0, 0),
+        )
 
     def _rebuild_request_ui(self) -> None:
         for child in self.request_root.winfo_children():
             child.destroy()
-        self.request_root.configure(bg="#0E1217")
+        self.request_root.configure(bg=REQUEST_BG)
         self.request_text = None
         if self.request_expanded:
             self._build_request_expanded()
@@ -1556,79 +1792,98 @@ class TokenHudWindow:
         self._render_request()
 
     def _build_request_collapsed(self) -> None:
-        frame = tk.Frame(self.request_root, bg="#0E1217", padx=8, pady=3)
+        frame = tk.Frame(self.request_root, bg=REQUEST_BG, padx=8, pady=4)
         frame.pack(fill="both", expand=True)
         self._move_handle(frame, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             frame,
             text="↑- ↻- ↓- ◇- ∑- $0.0000",
-            bg="#0E1217",
-            fg="#F3D27A",
+            bg=REQUEST_BG,
+            fg=HUD_ACCENT,
             font=("Consolas", 9, "bold"),
             animate_numbers=True,
             static_align="left",
         )
         self.request_label.pack(side="left", fill="both", expand=True)
-        controls = tk.Frame(frame, bg="#0E1217")
-        controls.pack(side="right", fill="y")
-        hint = tk.Label(
-            controls,
-            text="本次",
-            bg="#0E1217",
-            fg="#617083",
-            font=("Microsoft YaHei UI", 8),
+        self._resize_handle(frame, "request", self.request_root).pack(
+            side="right", padx=(6, 0)
         )
-        hint.pack(side="top", padx=(8, 0), pady=(0, 1))
-        self._resize_handle(controls, "request", self.request_root).pack(side="top", pady=(1, 0))
 
     def _build_request_expanded(self) -> None:
-        frame = tk.Frame(self.request_root, bg="#0E1217", padx=8, pady=6)
+        frame = tk.Frame(self.request_root, bg=REQUEST_BG, padx=8, pady=5)
         frame.pack(fill="both", expand=True)
-        header = tk.Frame(frame, bg="#0E1217")
+        header = tk.Frame(frame, bg=REQUEST_HEADER_BG, padx=5, pady=2)
         header.pack(fill="x", pady=(0, 4))
         self._move_handle(header, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             header,
             text="最近模型请求轮次",
-            bg="#0E1217",
-            fg="#F3D27A",
-            font=("Microsoft YaHei UI", 9, "bold"),
+            bg=REQUEST_HEADER_BG,
+            fg=HUD_ACCENT,
+            font=("Consolas", 9, "bold"),
             animate_numbers=True,
             static_align="left",
         )
         self.request_label.pack(side="left", fill="x", expand=True)
         self._resize_handle(header, "request", self.request_root).pack(side="right", padx=(6, 0))
-        body = tk.Frame(frame, bg="#0E1217")
-        body.pack(fill="both", expand=True)
-        xscroll = tk.Scrollbar(
-            frame,
-            orient="horizontal",
-        )
+
+        list_header = tk.Frame(frame, bg=REQUEST_BG)
+        list_header.pack(fill="x", pady=(0, 2))
+        tk.Label(
+            list_header,
+            text="轮次流水",
+            anchor="w",
+            bg=REQUEST_BG,
+            fg=REQUEST_MUTED,
+            font=("Microsoft YaHei UI", 7, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            list_header,
+            text="最新在上",
+            anchor="e",
+            bg=REQUEST_BG,
+            fg="#566477",
+            font=("Microsoft YaHei UI", 7),
+        ).pack(side="right")
+
+        body = tk.Frame(frame, bg=REQUEST_PANEL_BG, padx=0, pady=0)
+        body.pack(fill="x", expand=False)
         scrollbar = tk.Scrollbar(
             body,
             orient="vertical",
-            bg="#202833",
-            troughcolor="#0E1217",
+            bg=REQUEST_HEADER_BG,
+            troughcolor=REQUEST_PANEL_BG,
+            activebackground=HUD_DIVIDER,
+            width=9,
+            relief="flat",
+            borderwidth=0,
+            elementborderwidth=0,
+            highlightthickness=0,
         )
         self.request_text = tk.Text(
             body,
-            bg="#0E1217",
-            fg="#DDE7F2",
-            insertbackground="#DDE7F2",
+            bg=REQUEST_PANEL_BG,
+            fg=REQUEST_TEXT,
+            insertbackground=REQUEST_TEXT,
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
             font=("Consolas", 8),
             height=8,
             wrap="none",
-            xscrollcommand=xscroll.set,
             yscrollcommand=scrollbar.set,
+            padx=4,
+            pady=2,
+            spacing3=0,
+            selectbackground=HUD_DIVIDER,
+            selectforeground=HUD_TEXT,
         )
-        xscroll.configure(command=self.request_text.xview)
+        self.request_text.tag_configure("recent", foreground=HUD_ACCENT)
+        self.request_text.tag_configure("normal", foreground=REQUEST_TEXT)
+        self.request_text.tag_configure("muted", foreground=REQUEST_MUTED)
         scrollbar.configure(command=self.request_text.yview)
         scrollbar.pack(side="right", fill="y")
-        self.request_text.pack(side="left", fill="both", expand=True)
-        xscroll.pack(side="bottom", fill="x", pady=(4, 0))
+        self.request_text.pack(side="left", fill="x", expand=True)
         self.request_text.configure(state="disabled")
 
     def _bind_click_tree(self, widget: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> None:
@@ -1753,25 +2008,22 @@ class TokenHudWindow:
             self._hide_for_minimized()
         else:
             self._attach_to_rect(rect)
-        self.root.after(self.follow_ms, self._follow_codex_window)
+        self.root.after(self._next_follow_delay(), self._follow_codex_window)
 
     def _attach_to_rect(self, rect: WindowRect) -> None:
-        if self._hidden_for_minimized:
-            self.root.deiconify()
-            self.request_root.deiconify()
-            self._hidden_for_minimized = False
         self._attached = True
         self._last_rect = rect
         active = self.locator.is_active(rect, self._hud_hwnds())
+        if not active:
+            self._enter_tombstone()
+            return
+        self._exit_tombstone()
         self._set_alpha(self.root, 0.94 if active else 0.55)
         self._set_alpha(self.request_root, (0.94 if self.request_expanded else 0.74) if active else 0.45)
         self._apply_geometry()
 
     def _enter_free_mode(self) -> None:
-        if self._hidden_for_minimized:
-            self.root.deiconify()
-            self.request_root.deiconify()
-            self._hidden_for_minimized = False
+        self._exit_tombstone()
         self._attached = False
         self._last_rect = None
         self._set_alpha(self.root, 0.90)
@@ -1784,6 +2036,43 @@ class TokenHudWindow:
             self.root.withdraw()
             self.request_root.withdraw()
             self._hidden_for_minimized = True
+        self._tombstoned = True
+
+    def _enter_tombstone(self) -> None:
+        """Hide HUD chrome while Codex is not foreground and pause expensive refreshes."""
+        if self._tombstoned and self._hidden_for_minimized:
+            return
+        try:
+            self.root.withdraw()
+            self.request_root.withdraw()
+        except tk.TclError:
+            return
+        self._tombstoned = True
+
+    def _exit_tombstone(self) -> None:
+        if not self._tombstoned and not self._hidden_for_minimized:
+            return
+        try:
+            self.root.deiconify()
+            self.request_root.deiconify()
+        except tk.TclError:
+            return
+        self._tombstoned = False
+        self._hidden_for_minimized = False
+
+    def _next_follow_delay(self) -> int:
+        return FOLLOW_TOMBSTONE_MS if self._tombstoned else self.follow_ms
+
+    def should_refresh_snapshot(self) -> bool:
+        """Return whether parser refresh work should run for the visible HUD."""
+        return not self._tombstoned
+
+    def refresh_delay_ms(self, normal_delay_ms: int) -> int:
+        """Throttle parser refreshes while the HUD is hidden in tombstone mode."""
+        delay = max(100, int(normal_delay_ms))
+        if self._tombstoned:
+            return max(delay, FOLLOW_TOMBSTONE_MS)
+        return delay
 
     def _apply_geometry(self) -> None:
         if self._attached and self._last_rect is not None:
@@ -1800,7 +2089,9 @@ class TokenHudWindow:
         self, target: str, rect: WindowRect, expanded: bool
     ) -> tuple[int, int, int, int]:
         geometry = self.top_geometry if target == "top" else self.request_geometry
-        base_x, base_y, base_width, height = geometry.calculate(rect, expanded)
+        base_x, base_y, base_width, height = _visual_anchor_geometry(
+            target, rect, expanded
+        )
         placement = self._placement(target)
         if placement.width_ratio is None and placement.width is not None:
             placement.width_ratio = placement.width / max(1, base_width)
@@ -1812,12 +2103,16 @@ class TokenHudWindow:
         y = base_y
 
         if target == "top":
-            if placement.relative_x is not None and placement.relative_y is not None:
-                x = rect.left + placement.relative_x
-                y = rect.top + placement.relative_y
-        elif placement.relative_x is not None and placement.relative_bottom is not None:
-            x = rect.left + placement.relative_x
-            y = rect.bottom - placement.relative_bottom - height
+            if placement.relative_x_ratio is not None and placement.relative_y_ratio is not None:
+                x = rect.left + int(round(rect.width * placement.relative_x_ratio))
+                y = rect.top + int(round(rect.height * placement.relative_y_ratio))
+        elif (
+            placement.relative_x_ratio is not None
+            and placement.relative_bottom_ratio is not None
+        ):
+            x = rect.left + int(round(rect.width * placement.relative_x_ratio))
+            bottom = int(round(rect.height * placement.relative_bottom_ratio))
+            y = rect.bottom - bottom - height
 
         min_width = geometry.min_width
         min_x = rect.left + 8
@@ -1898,21 +2193,33 @@ class TokenHudWindow:
             self._request_manual_position = (x, y)
 
         if self._attached and self._last_rect is not None:
-            geometry = self.top_geometry if target == "top" else self.request_geometry
-            _, _, base_width, _ = geometry.calculate(
+            _, _, base_width, _ = _visual_anchor_geometry(
+                target,
                 self._last_rect,
                 self.top_expanded if target == "top" else self.request_expanded,
             )
             placement.width_ratio = width / max(1, base_width)
             placement.relative_x = x - self._last_rect.left
+            placement.relative_x_ratio = placement.relative_x / max(1, self._last_rect.width)
             if target == "top":
                 placement.relative_y = y - self._last_rect.top
+                placement.relative_y_ratio = (
+                    placement.relative_y / max(1, self._last_rect.height)
+                )
                 placement.relative_bottom = None
+                placement.relative_bottom_ratio = None
             else:
                 placement.relative_y = None
+                placement.relative_y_ratio = None
                 placement.relative_bottom = self._last_rect.bottom - (y + height)
+                placement.relative_bottom_ratio = (
+                    placement.relative_bottom / max(1, self._last_rect.height)
+                )
         else:
             placement.width_ratio = None
+            placement.relative_x_ratio = None
+            placement.relative_y_ratio = None
+            placement.relative_bottom_ratio = None
 
     def _save_settings(self) -> None:
         self.settings_store.save(self.settings)
@@ -1988,7 +2295,7 @@ class TokenHudWindow:
             )
             if snapshot.error and snapshot.status in {"missing", "error"}:
                 text = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
-            bar.configure(text=text, fg="#FFB86B" if snapshot.budget_warnings else "#E8EEF7")
+            bar.configure(text=text, fg="#FFB86B" if snapshot.budget_warnings else HUD_TEXT)
             return
 
         values = {
@@ -2010,20 +2317,17 @@ class TokenHudWindow:
                 f"金额 {_format_money(session_cost)}"
             ),
             "budget": self._format_budget(snapshot),
-            "warnings": self._format_warnings(snapshot),
+            "warnings": self._format_notice(snapshot),
             "activity": (
-                f"当前活动  {_activity_label(snapshot.activity.kind)}："
+                f"{_activity_label(snapshot.activity.kind)}："
                 f"{_compact(snapshot.activity.detail, 135)}"
             ),
             "slow": self._format_slow_panel(snapshot),
             "gap": self._format_gap_panel(snapshot),
-            "legend": "说明  ↑输入  ↻缓存\n↓输出  ◇推理  ∑总量\n~ 表示估算中",
             "status": (
-                f"状态  {_budget_status(snapshot)}\n"
-                f"最后  {_format_time(snapshot.last_event_time)}\n"
-                f"刷新  {_format_time(snapshot.refreshed_at)}"
+                f"{_budget_status(snapshot)}\n"
+                f"最后 {_format_time(snapshot.last_event_time)}  刷新 {_format_time(snapshot.refreshed_at)}"
             ),
-            "error": snapshot.error,
         }
         for key, text in values.items():
             label = self.top_labels.get(key)
@@ -2041,6 +2345,11 @@ class TokenHudWindow:
                         cursor="hand2" if copyable else "arrow",
                         fg="#BCD7FF" if copyable else "#B9C2CC",
                     )
+                if key == "warnings":
+                    has_warning = bool(
+                        snapshot.error or snapshot.budget_error or snapshot.budget_warnings
+                    )
+                    label.configure(fg="#FFB86B" if has_warning else HUD_MUTED)
 
     def _render_request(self) -> None:
         snapshot = self._snapshot
@@ -2058,17 +2367,37 @@ class TokenHudWindow:
         rows = _task_rows(snapshot)[-30:]
         if not rows:
             rows = [_round_from_snapshot(snapshot)]
-        text = "\n".join(
-            _round_entry(item, snapshot.request.model) for item in reversed(rows)
+        display_rows = list(reversed(rows))
+        index_width, money_width, total_width = _round_entry_widths(
+            display_rows,
+            snapshot.request.model,
         )
-        if not text:
-            text = f"本次请求({_request_status_label(snapshot.request.status)})  {_request_counter(snapshot)}"
+        entries = [
+            _round_entry(
+                item,
+                snapshot.request.model,
+                index_width=index_width,
+                money_width=money_width,
+                total_width=total_width,
+            )
+            for item in display_rows
+        ]
         yview = self.request_text.yview()
         should_follow_head = not yview or yview[0] <= 0.02
         previous_top = yview[0] if yview else 0.0
         self.request_text.configure(state="normal")
         self.request_text.delete("1.0", "end")
-        self.request_text.insert("1.0", text)
+        if entries:
+            for index, entry in enumerate(entries):
+                tag = "recent" if index == 0 else "normal"
+                suffix = "\n" if index < len(entries) - 1 else ""
+                self.request_text.insert("end", entry + suffix, tag)
+        else:
+            self.request_text.insert(
+                "1.0",
+                f"本次请求({_request_status_label(snapshot.request.status)})  {_request_counter(snapshot)}",
+                "muted",
+            )
         self.request_text.configure(state="disabled")
         self.request_text.yview_moveto(0.0 if should_follow_head else previous_top)
 
@@ -2098,6 +2427,12 @@ class TokenHudWindow:
         if snapshot.budget_warnings:
             return "提醒  " + "；".join(snapshot.budget_warnings)
         return "提醒  暂无额度提醒"
+
+    def _format_notice(self, snapshot: ParsedSession) -> str:
+        notice = self._format_warnings(snapshot)
+        if snapshot.error:
+            notice = f"{notice}  |  错误 {_compact(snapshot.error, 80)}"
+        return notice
 
     def _format_slow_panel(self, snapshot: ParsedSession) -> str:
         return "\n".join(

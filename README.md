@@ -1,5 +1,12 @@
 # codex-usage-hud
 
+![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?include_prereleases&label=release)
+[Release Notes](https://github.com/mingbingfeng/codex-usage-hud/releases/tag/v0.1.0)
+
+> `v0.1.0 Alpha` is live. `codex-usage-hud` is a local-first, 100% offline HUD for Codex App with real-time token and cost tracking, exact cached-token discounting, and zero external dependencies.
+>
+> `v0.1.0 Alpha` 已发布。`codex-usage-hud` 是一个面向 Codex App 的 local-first HUD，100% 离线运行，支持实时 token 与成本追踪、精确 cached token 折扣计算，并保持 0 外部依赖。
+
 `codex-usage-hud` 是一个面向 Codex App 的 local-first 监控工具，目标是把 `Codex App token usage`、`cached token cost`、会话级成本变化和实时状态，以轻量 HUD 的方式直接显示在本地终端里。
 
 项目第一阶段聚焦基础骨架：零第三方依赖、纯 Python 标准库、可安装 CLI、清晰的隐私边界，以及为后续 `Codex usage tracker`、`real-time token HUD`、`cost tracker` 能力预留稳定结构。

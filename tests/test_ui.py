@@ -14,7 +14,13 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.cli import budget_warnings, parse_thresholds
-from codex_usage_hud.core.parser import GapTiming, ParsedSession, SlowSummary, ToolCallTiming
+from codex_usage_hud.core.parser import (
+    GapTiming,
+    ParsedSession,
+    RequestRound,
+    SlowSummary,
+    ToolCallTiming,
+)
 from codex_usage_hud.ui.tk_hud import (
     REQUEST_DOCK_BOTTOM,
     REQUEST_DOCK_EXPANDED_HEIGHT,
@@ -38,7 +44,12 @@ from codex_usage_hud.ui.tk_hud import (
     _can_animate_numeric_text,
     _copyable_gap_detail,
     _copyable_tool_command,
+    _fixed_token_total,
     _interpolate_numeric_text,
+    _request_total_line,
+    _round_entry,
+    _round_entry_widths,
+    _visual_anchor_geometry,
 )
 
 
@@ -110,6 +121,22 @@ class OriginalDockGeometryTests(unittest.TestCase):
         self.assertEqual(expanded, (620, 642, 358, 180))
 
 
+class VisualAnchorGeometryTests(unittest.TestCase):
+    def test_top_anchor_tracks_title_bar_content_region(self) -> None:
+        rect = WindowRect(left=240, top=0, right=1230, bottom=740)
+
+        x, y, width, height = _visual_anchor_geometry("top", rect, expanded=False)
+
+        self.assertEqual((x, y, width, height), (394, 38, 664, 36))
+
+    def test_request_anchor_tracks_input_composer_region(self) -> None:
+        rect = WindowRect(left=240, top=0, right=1230, bottom=740)
+
+        x, y, width, height = _visual_anchor_geometry("request", rect, expanded=False)
+
+        self.assertEqual((x, y, width, height), (538, 672, 347, 32))
+
+
 class BudgetHelperTests(unittest.TestCase):
     def test_parse_thresholds_accepts_percent_or_fraction(self) -> None:
         self.assertEqual(parse_thresholds("50,0.8,90"), [0.5, 0.8, 0.9])
@@ -148,6 +175,11 @@ class AutoScrollHelpersTests(unittest.TestCase):
 
         self.assertEqual(text, "↑15 ↻3 ↓6 ◇2 ∑21 $0.7000")
 
+    def test_fixed_token_total_uses_stable_width_units(self) -> None:
+        self.assertEqual(_fixed_token_total(516), "516")
+        self.assertEqual(_fixed_token_total(295_000), "295k")
+        self.assertEqual(_fixed_token_total(2_500_000), "2.5M")
+
     def test_copyable_tool_command_extracts_shell_command_field(self) -> None:
         snapshot = ParsedSession(
             slow=SlowSummary(
@@ -184,6 +216,70 @@ class AutoScrollHelpersTests(unittest.TestCase):
         self.assertIsNotNone(detail)
         self.assertIn("类型: 模型思考", detail)
         self.assertIn("结束事件: reasoning:先看入口和数据流", detail)
+
+    def test_request_total_line_starts_with_aligned_money_and_total(self) -> None:
+        snapshot = ParsedSession()
+        snapshot.request.input_tokens = 194_000
+        snapshot.request.cached_tokens = 93_000
+        snapshot.request.output_tokens = 852
+        snapshot.request.reasoning_tokens = 516
+        snapshot.request.total_tokens = 295_000
+        snapshot.request.cost_usd = 0.094
+        snapshot.request.estimated = False
+
+        self.assertTrue(_request_total_line(snapshot).startswith("$0.094 ∑295k"))
+
+    def test_round_entry_puts_natural_sequence_money_and_total_first(self) -> None:
+        item = RequestRound(
+            index=33,
+            status="confirmed",
+            model="gpt-5.4",
+            input_tokens=194_000,
+            cached_tokens=93_000,
+            output_tokens=852,
+            reasoning_tokens=516,
+            total_tokens=295_000,
+            estimated=False,
+            cost_usd=0.094,
+            started_at=datetime(2026, 5, 28, 20, 36, 26).astimezone(),
+        )
+
+        self.assertTrue(_round_entry(item, "gpt-5.4").startswith("#33 $0.094 ∑295k"))
+
+    def test_round_entry_uses_dynamic_widths_without_leading_zeroes(self) -> None:
+        rows = [
+            RequestRound(
+                index=9,
+                status="confirmed",
+                model="gpt-5.4",
+                input_tokens=1_000,
+                cached_tokens=0,
+                output_tokens=10,
+                reasoning_tokens=0,
+                total_tokens=2_000,
+                estimated=False,
+                cost_usd=0.1,
+            ),
+            RequestRound(
+                index=128,
+                status="confirmed",
+                model="gpt-5.4",
+                input_tokens=1_000_000,
+                cached_tokens=0,
+                output_tokens=10,
+                reasoning_tokens=0,
+                total_tokens=1_200_000,
+                estimated=False,
+                cost_usd=12.34,
+            ),
+        ]
+        widths = _round_entry_widths(rows, "gpt-5.4")
+
+        first = _round_entry(rows[0], "gpt-5.4", index_width=widths[0], money_width=widths[1], total_width=widths[2])
+        second = _round_entry(rows[1], "gpt-5.4", index_width=widths[0], money_width=widths[1], total_width=widths[2])
+
+        self.assertTrue(first.startswith("#  9 $0.100 ∑2,000"))
+        self.assertTrue(second.startswith("#128 $12.34 ∑ 1.2M"))
 
 
 class HudSettingsStoreTests(unittest.TestCase):
@@ -242,11 +338,13 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
             window.settings.top.relative_x = None
             window.settings.top.relative_y = None
+            window.settings.top.relative_x_ratio = None
+            window.settings.top.relative_y_ratio = None
             window.settings.top.width_ratio = 0.5
             x, y, width, height = window._attached_geometry("top", rect, False)
 
-            self.assertEqual((x, y, height), (556, 92, 36))
-            self.assertEqual(width, 260)
+            self.assertEqual((x, y, height), (286, 88, 36))
+            self.assertEqual(width, 421)
         finally:
             window._close()
 
@@ -264,6 +362,22 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             root.root.update_idletasks()
         finally:
             root._close()
+
+    def test_tombstone_mode_hides_and_throttles_refresh_work(self) -> None:
+        window = TokenHudWindow()
+        try:
+            self.assertTrue(window.should_refresh_snapshot())
+
+            window._enter_tombstone()
+
+            self.assertFalse(window.should_refresh_snapshot())
+            self.assertGreaterEqual(window.refresh_delay_ms(100), 500)
+
+            window._exit_tombstone()
+
+            self.assertTrue(window.should_refresh_snapshot())
+        finally:
+            window._close()
 
 
 if __name__ == "__main__":
