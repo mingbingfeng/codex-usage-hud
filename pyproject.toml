@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-usage-hud"
+dynamic = ["version"]
+description = "Local-first real-time token HUD and cost tracker for Codex App usage with accurate cached token pricing."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "codex-usage-hud contributors" },
+]
+dependencies = []
+keywords = [
+  "Codex App token usage",
+  "Codex usage tracker",
+  "real-time token HUD",
+  "cost tracker",
+  "cached token cost",
+  "local-first privacy",
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Monitoring",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/Runa798/codex-usage-hud"
+Repository = "https://github.com/Runa798/codex-usage-hud"
+Documentation = "https://github.com/Runa798/codex-usage-hud/tree/main/docs"
+Issues = "https://github.com/Runa798/codex-usage-hud/issues"
+Description = "https://github.com/Runa798/codex-usage-hud#readme"
+
+[project.scripts]
+codex-hud = "codex_usage_hud.cli:main"
+
+[tool.hatch.version]
+path = "src/codex_usage_hud/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_usage_hud"]
