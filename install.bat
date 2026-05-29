@@ -86,6 +86,9 @@ echo 如果当前终端仍无法识别 codex-hud，请新开一个 PowerShell �
 echo.
 color 07
 
+call :offer_build_exe
+if errorlevel 1 goto build_exe_failed
+
 popd
 endlocal
 exit /b 0
@@ -156,6 +159,29 @@ if errorlevel 1 (
 )
 echo 已注册注册表自启动: HKCU\Software\Microsoft\Windows\CurrentVersion\Run\codex-usage-hud
 exit /b 0
+
+:offer_build_exe
+echo.
+echo 是否现在构建单文件、无黑框控制台的 codex-hud.exe？
+echo [B] Build Single EXE  [S] 跳过
+choice /C BS /N /M "请选择: "
+if errorlevel 2 exit /b 0
+if errorlevel 1 goto build_single_exe
+exit /b 0
+
+:build_single_exe
+echo.
+echo [1/1] 正在通过 tools\build_exe.py 构建 codex-hud.exe ...
+call "%PYTHON_CALL%" %PYTHON_ARGS% "%PROJECT_ROOT%\tools\build_exe.py"
+if errorlevel 1 exit /b 1
+echo [OK] 已生成: %PROJECT_ROOT%\dist\codex-hud.exe
+exit /b 0
+
+:build_exe_failed
+echo [ERROR] 构建单文件 EXE 失败。
+popd
+endlocal
+exit /b 1
 
 :pushd_failed
 echo [ERROR] 无法切换到项目根目录: %PROJECT_ROOT%

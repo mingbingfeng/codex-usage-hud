@@ -1,0 +1,86 @@
+"""Unit tests for the Windows exe build helper."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TOOLS_ROOT = PROJECT_ROOT / "tools"
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
+import build_exe  # noqa: E402
+
+
+class BootstrapSourceTests(unittest.TestCase):
+    def test_bootstrap_entry_uses_package_main(self) -> None:
+        source = build_exe.bootstrap_source()
+
+        self.assertIn("from codex_usage_hud.cli import main", source)
+        self.assertIn("raise SystemExit(main())", source)
+        self.assertNotIn("from .cli import main", source)
+
+    def test_write_bootstrap_entry_creates_expected_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "entry.py"
+
+            written = build_exe.write_bootstrap_entry(path)
+
+            self.assertEqual(written, path)
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_text(encoding="utf-8"), build_exe.bootstrap_source())
+
+
+class PyInstallerCommandTests(unittest.TestCase):
+    def test_command_keeps_analysis_pinned_to_src_and_excludes_repo_junk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            build_root = temp_root / "build"
+            dist_root = temp_root / "dist"
+            entry_script = build_root / build_exe.BOOTSTRAP_FILENAME
+
+            command = build_exe.build_pyinstaller_command(
+                python_executable=Path(r"C:\Python\python.exe"),
+                entry_script=entry_script,
+                src_root=PROJECT_ROOT / "src",
+                dist_root=dist_root,
+                build_root=build_root,
+            )
+
+            self.assertEqual(command[:4], [r"C:\Python\python.exe", "-m", "PyInstaller", "--noconfirm"])
+            self.assertIn("--onefile", command)
+            self.assertIn("--noconsole", command)
+            self.assertIn("--collect-submodules", command)
+            self.assertIn("codex_usage_hud", command)
+            self.assertIn("--paths", command)
+            self.assertIn(str(PROJECT_ROOT / "src"), command)
+            self.assertIn("--distpath", command)
+            self.assertIn(str(dist_root), command)
+            self.assertIn("--workpath", command)
+            self.assertIn(str(build_root / "work"), command)
+            self.assertIn("--specpath", command)
+            self.assertIn(str(build_root / "spec"), command)
+            self.assertIn("--exclude-module", command)
+            self.assertIn("tests", command)
+            self.assertIn("docs", command)
+            self.assertIn("tools", command)
+            self.assertIn("pytest", command)
+            self.assertIn("codex_usage_hud.platforms.linux", command)
+            self.assertIn("codex_usage_hud.platforms.macos", command)
+            self.assertIn("--hidden-import", command)
+            self.assertIn("tkinter.font", command)
+            self.assertEqual(command[-1], str(entry_script))
+
+    def test_format_command_returns_copy_pasteable_string(self) -> None:
+        text = build_exe.format_command(["python", "-m", "PyInstaller", "--name", "codex-hud"])
+
+        self.assertIn("PyInstaller", text)
+        self.assertIn("--name", text)
+        self.assertIn("codex-hud", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
