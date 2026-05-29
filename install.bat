@@ -72,6 +72,8 @@ echo [3/3] 正在执行 editable 安装 ...
 call "%PYTHON_CALL%" %PYTHON_ARGS% -m pip install -e "%PROJECT_ROOT%"
 if errorlevel 1 goto install_failed
 
+call :ensure_command_path
+
 if /I "%ACTIVE_VENV_PATH%"=="%PROJECT_VENV%" if exist "%PROJECT_VENV%\Scripts\activate.bat" call "%PROJECT_VENV%\Scripts\activate.bat" >nul 2>nul
 
 call :offer_startup
@@ -80,11 +82,27 @@ color 0A
 echo.
 echo 安装成功！您现在可以在系统的任何终端直接输入 [codex-hud] 或 [codex-hud --once] 畅快使用！
 echo 守护模式可手动运行: codex-hud --daemon
+echo 如果当前终端仍无法识别 codex-hud，请新开一个 PowerShell 窗口。
 echo.
 color 07
 
 popd
 endlocal
+exit /b 0
+
+:ensure_command_path
+set "CODEX_HUD_SCRIPTS=%ACTIVE_VENV_PATH%\Scripts"
+if not exist "%CODEX_HUD_SCRIPTS%\codex-hud.exe" (
+    echo [WARN] 未找到 codex-hud.exe，跳过 PATH 注册: %CODEX_HUD_SCRIPTS%
+    exit /b 0
+)
+set "CODEX_HUD_PATH_TO_ADD=%CODEX_HUD_SCRIPTS%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$target=$env:CODEX_HUD_PATH_TO_ADD; $current=[Environment]::GetEnvironmentVariable('Path','User'); if ([string]::IsNullOrWhiteSpace($current)) { [Environment]::SetEnvironmentVariable('Path',$target,'User'); exit 0 }; $targetNorm=$target.TrimEnd('\'); $exists=($current -split ';' | Where-Object { $_.TrimEnd('\').Equals($targetNorm,[StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1); if (-not $exists) { [Environment]::SetEnvironmentVariable('Path', $current.TrimEnd(';') + ';' + $target, 'User') }"
+if errorlevel 1 (
+    echo [WARN] 写入用户 PATH 失败；可手动运行: setx PATH "%%PATH%%;%CODEX_HUD_SCRIPTS%"
+    exit /b 0
+)
+echo 已确保命令目录在用户 PATH: %CODEX_HUD_SCRIPTS%
 exit /b 0
 
 :offer_startup
