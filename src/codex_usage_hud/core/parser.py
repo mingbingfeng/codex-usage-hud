@@ -388,6 +388,8 @@ class ParsedSession:
     today_cost_usd: float = 0.0
     week_tokens: int = 0
     week_cost_usd: float = 0.0
+    week_before_today_tokens: int = 0
+    week_before_today_cost_usd: float = 0.0
     daily_limit_usd: float = 100.0
     weekly_limit_usd: float = 400.0
     day_start: datetime | None = None

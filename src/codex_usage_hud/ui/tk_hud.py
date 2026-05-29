@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import subprocess
@@ -22,6 +24,8 @@ TOP_DOCK_RIGHT = 224
 TOP_DOCK_HEIGHT = 36
 TOP_DOCK_EXPANDED_HEIGHT = 285
 TOP_DOCK_MIN_WIDTH = 1
+TOP_DOCK_INTERACTIVE_MIN_WIDTH = 120
+TOP_DOCK_EXPANDED_INTERACTIVE_MIN_WIDTH = 220
 TOP_ANCHOR_TOP = 38
 TOP_ANCHOR_LEFT_RATIO = 0.155
 TOP_ANCHOR_RIGHT_RATIO = 0.14
@@ -36,6 +40,8 @@ REQUEST_DOCK_WIDTH = 380
 REQUEST_DOCK_HEIGHT = 32
 REQUEST_DOCK_EXPANDED_HEIGHT = 180
 REQUEST_DOCK_MIN_WIDTH = 1
+REQUEST_DOCK_INTERACTIVE_MIN_WIDTH = 120
+REQUEST_DOCK_EXPANDED_INTERACTIVE_MIN_WIDTH = 220
 REQUEST_ANCHOR_BOTTOM = 36
 REQUEST_ANCHOR_LEFT_RATIO = 0.30
 REQUEST_ANCHOR_RIGHT_RATIO = 0.28
@@ -65,8 +71,13 @@ REQUEST_HEADER_BG = "#151D27"
 REQUEST_PANEL_BG = "#101821"
 REQUEST_TEXT = "#DCE7F2"
 REQUEST_MUTED = "#718095"
+HUD_GEOMETRY_LOG_FILENAME = "hud_geometry.log"
+HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
 
 _COST_ESTIMATOR = CostEstimator()
+_HUD_GEOMETRY_LOGGER = logging.getLogger("codex_usage_hud.hud_geometry")
+_HUD_GEOMETRY_LOGGER.addHandler(logging.NullHandler())
+_HUD_GEOMETRY_LOGGING_CONFIGURED = False
 
 
 @dataclass(frozen=True)
@@ -92,6 +103,28 @@ class WindowRect:
         return max(0, self.bottom - self.top)
 
 
+@dataclass(frozen=True)
+class HudAnchor:
+    """Dockable region used for manual HUD position and width ratios."""
+
+    left: int
+    top: int
+    right: int
+    bottom: int
+    default_x: int
+    default_y: int
+    default_width: int
+    source: str = "geometry"
+
+    @property
+    def width(self) -> int:
+        return max(1, self.right - self.left)
+
+    @property
+    def height(self) -> int:
+        return max(1, self.bottom - self.top)
+
+
 @dataclass
 class WindowPlacement:
     """Persisted custom placement for one HUD window."""
@@ -106,6 +139,9 @@ class WindowPlacement:
     absolute_y: int | None = None
     width: int | None = None
     width_ratio: float | None = None
+    anchor_x_ratio: float | None = None
+    anchor_y_ratio: float | None = None
+    anchor_source: str | None = None
 
     @classmethod
     def from_dict(cls, value: Any) -> "WindowPlacement":
@@ -122,6 +158,9 @@ class WindowPlacement:
             absolute_y=_optional_int(value.get("absolute_y")),
             width=_optional_int(value.get("width")),
             width_ratio=_optional_float(value.get("width_ratio")),
+            anchor_x_ratio=_optional_float(value.get("anchor_x_ratio")),
+            anchor_y_ratio=_optional_float(value.get("anchor_y_ratio")),
+            anchor_source=_optional_str(value.get("anchor_source")),
         )
 
     def to_dict(self) -> dict[str, int | float | None]:
@@ -136,6 +175,9 @@ class WindowPlacement:
             "absolute_y": self.absolute_y,
             "width": self.width,
             "width_ratio": self.width_ratio,
+            "anchor_x_ratio": self.anchor_x_ratio,
+            "anchor_y_ratio": self.anchor_y_ratio,
+            "anchor_source": self.anchor_source,
         }
 
 
@@ -159,7 +201,7 @@ class HudSettings:
             request=WindowPlacement.from_dict(value.get("request")),
         )
 
-    def to_dict(self) -> dict[str, dict[str, int | None]]:
+    def to_dict(self) -> dict[str, dict[str, int | float | None]]:
         return {
             "top": self.top.to_dict(),
             "request": self.request.to_dict(),
@@ -209,6 +251,46 @@ def default_settings_path() -> Path:
     return base / "codex-usage-hud" / HUD_SETTINGS_FILENAME
 
 
+def hud_geometry_log_path() -> Path:
+    """Return the per-user HUD geometry diagnostics log path."""
+    explicit = os.environ.get("CODEX_USAGE_HUD_GEOMETRY_LOG")
+    if explicit:
+        return Path(explicit).expanduser()
+    return default_settings_path().with_name(HUD_GEOMETRY_LOG_FILENAME)
+
+
+def configure_hud_geometry_logging() -> Path | None:
+    """Configure a small rolling log for manual placement diagnostics."""
+    global _HUD_GEOMETRY_LOGGING_CONFIGURED
+    if _HUD_GEOMETRY_LOGGING_CONFIGURED:
+        return hud_geometry_log_path()
+    path = hud_geometry_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            path,
+            maxBytes=512 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
+    level_name = os.environ.get("CODEX_USAGE_HUD_GEOMETRY_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    _HUD_GEOMETRY_LOGGER.handlers = [
+        item
+        for item in _HUD_GEOMETRY_LOGGER.handlers
+        if not isinstance(item, logging.NullHandler)
+    ]
+    _HUD_GEOMETRY_LOGGER.addHandler(handler)
+    _HUD_GEOMETRY_LOGGER.setLevel(level)
+    _HUD_GEOMETRY_LOGGER.propagate = False
+    _HUD_GEOMETRY_LOGGING_CONFIGURED = True
+    return path
+
+
 def _optional_int(value: Any) -> int | None:
     try:
         return None if value is None else int(value)
@@ -221,6 +303,17 @@ def _optional_float(value: Any) -> float | None:
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _extract_numeric_parts(text: str) -> tuple[list[str], list[str]]:
@@ -684,6 +777,41 @@ def _visual_anchor_geometry(
     return rect.left + left_margin, y, width, height
 
 
+def _fallback_hud_anchor(
+    target: str,
+    rect: WindowRect,
+    base_x: int,
+    base_y: int,
+    base_width: int,
+    hud_height: int,
+) -> HudAnchor:
+    """Build a geometry-only anchor when native UI landmarks are unavailable."""
+    if target == "top":
+        title_height = max(1, min(48, rect.height))
+        return HudAnchor(
+            left=base_x,
+            top=rect.top,
+            right=base_x + max(1, base_width),
+            bottom=rect.top + title_height,
+            default_x=base_x,
+            default_y=base_y,
+            default_width=max(1, base_width),
+            source="geometry",
+        )
+    input_top = base_y + hud_height
+    input_height = max(1, min(64, rect.bottom - input_top))
+    return HudAnchor(
+        left=base_x,
+        top=input_top,
+        right=base_x + max(1, base_width),
+        bottom=input_top + input_height,
+        default_x=base_x,
+        default_y=base_y,
+        default_width=max(1, base_width),
+        source="geometry",
+    )
+
+
 def _fit_anchor_left(
     window_width: int,
     left_margin: int,
@@ -716,6 +844,22 @@ class CodexWindowLocator:
     def is_active(self, rect: WindowRect, allowed_hwnds: set[int]) -> bool:
         return self._impl.is_active(rect, allowed_hwnds)
 
+    def dock_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> tuple[int, int, int] | None:
+        return self._impl.dock_geometry(target, rect, hud_height)
+
+    def anchor_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> HudAnchor | None:
+        return self._impl.anchor_geometry(target, rect, hud_height)
+
 
 class _BaseLocator:
     def set_dpi_aware(self) -> None:
@@ -727,6 +871,24 @@ class _BaseLocator:
     def is_active(self, rect: WindowRect, allowed_hwnds: set[int]) -> bool:
         del rect, allowed_hwnds
         return True
+
+    def dock_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> tuple[int, int, int] | None:
+        del target, rect, hud_height
+        return None
+
+    def anchor_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> HudAnchor | None:
+        del target, rect, hud_height
+        return None
 
 
 class _NullCodexLocator(_BaseLocator):
@@ -817,14 +979,18 @@ class _WindowsCodexLocator(_BaseLocator):
     def __init__(self) -> None:
         self.enabled = False
         self._last_hwnd = 0
+        self._tracker = None
         try:
             import ctypes
             from ctypes import wintypes
+            from ..platforms.windows_tracker import CodexWindowTracker
 
             self.ctypes = ctypes
             self.wintypes = wintypes
             self.user32 = ctypes.windll.user32
             self.kernel32 = ctypes.windll.kernel32
+            self._native_anchors_enabled = _env_flag(HUD_NATIVE_ANCHORS_ENV)
+            self._tracker = CodexWindowTracker(enable_uia=self._native_anchors_enabled)
             self.enabled = True
             self._configure_api()
         except Exception:
@@ -884,6 +1050,12 @@ class _WindowsCodexLocator(_BaseLocator):
     def set_dpi_aware(self) -> None:
         if not self.enabled:
             return
+        if self._tracker is not None:
+            try:
+                self._tracker.set_dpi_aware()
+                return
+            except Exception:
+                pass
         try:
             self.user32.SetProcessDPIAware()
         except Exception:
@@ -892,6 +1064,32 @@ class _WindowsCodexLocator(_BaseLocator):
     def find(self) -> WindowRect | None:
         if not self.enabled:
             return None
+        if self._tracker is not None and getattr(self._tracker, "enabled", False):
+            try:
+                snapshot = self._tracker.get_window_snapshot()
+                if snapshot.status in {"minimized", "hidden", "cloaked"}:
+                    rect = snapshot.window_rect
+                    return WindowRect(
+                        hwnd=snapshot.hwnd,
+                        left=rect.left if rect is not None else 0,
+                        top=rect.top if rect is not None else 0,
+                        right=rect.right if rect is not None else 0,
+                        bottom=rect.bottom if rect is not None else 0,
+                        minimized=snapshot.status in {"minimized", "hidden", "cloaked"},
+                    )
+                if snapshot.status == "visible" and snapshot.window_rect is not None:
+                    self._last_hwnd = snapshot.hwnd
+                    rect = snapshot.window_rect
+                    return WindowRect(
+                        hwnd=snapshot.hwnd,
+                        left=rect.left,
+                        top=rect.top,
+                        right=rect.right,
+                        bottom=rect.bottom,
+                        minimized=False,
+                    )
+            except Exception:
+                pass
         cached = self._rect_for_hwnd(self._last_hwnd)
         if cached is not None:
             return cached
@@ -960,6 +1158,11 @@ class _WindowsCodexLocator(_BaseLocator):
     def is_active(self, rect: WindowRect, allowed_hwnds: set[int]) -> bool:
         if not self.enabled:
             return True
+        if self._tracker is not None and getattr(self._tracker, "enabled", False):
+            try:
+                return self._tracker.is_active(rect.hwnd, allowed_hwnds)
+            except Exception:
+                pass
         if rect.minimized or self.user32.IsIconic(rect.hwnd):
             return False
         foreground = int(self.user32.GetForegroundWindow() or 0)
@@ -1018,6 +1221,81 @@ class _WindowsCodexLocator(_BaseLocator):
         if "codex" in class_name:
             score += 15
         return score, rect.width * rect.height
+
+    def dock_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> tuple[int, int, int] | None:
+        if self._tracker is None or not getattr(self._tracker, "enabled", False):
+            return None
+        if not rect.hwnd:
+            return None
+        tracker_target = "title" if target == "top" else "input"
+        try:
+            snapshot = self._tracker.get_dock_snapshot(
+                target=tracker_target,
+                hud_height=hud_height,
+            )
+        except Exception:
+            return None
+        if snapshot.status != "visible" or snapshot.dock is None:
+            return None
+        if rect.hwnd and snapshot.hwnd and rect.hwnd != snapshot.hwnd:
+            return None
+        return snapshot.dock
+
+    def anchor_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> HudAnchor | None:
+        if self._tracker is None or not getattr(self._tracker, "enabled", False):
+            return None
+        if not rect.hwnd:
+            return None
+        tracker_target = "title" if target == "top" else "input"
+        try:
+            snapshot = self._tracker.get_dock_snapshot(
+                target=tracker_target,
+                hud_height=hud_height,
+            )
+        except Exception:
+            return None
+        if snapshot.status != "visible" or snapshot.dock is None:
+            return None
+        if rect.hwnd and snapshot.hwnd and rect.hwnd != snapshot.hwnd:
+            return None
+        default_x, default_y, default_width = snapshot.dock
+        if target == "top":
+            title_bar = snapshot.title_bar
+            if title_bar is None:
+                return None
+            return HudAnchor(
+                left=int(default_x),
+                top=int(title_bar.top),
+                right=int(default_x + default_width),
+                bottom=int(title_bar.bottom),
+                default_x=int(default_x),
+                default_y=int(default_y),
+                default_width=int(default_width),
+                source=str(snapshot.source or "uia"),
+            )
+        input_box = snapshot.input_box
+        if input_box is None:
+            return None
+        return HudAnchor(
+            left=int(input_box.left),
+            top=int(input_box.top),
+            right=int(input_box.right),
+            bottom=int(input_box.bottom),
+            default_x=int(default_x),
+            default_y=int(default_y),
+            default_width=int(default_width),
+            source=str(snapshot.source or "uia"),
+        )
 
 
 def _short_num(value: int | None) -> str:
@@ -1461,8 +1739,17 @@ class TokenHudWindow:
         self.follow_ms = max(16, int(follow_ms))
         self.settings_store = HudSettingsStore()
         self.settings = self.settings_store.load()
+        self._geometry_log_path = configure_hud_geometry_logging()
+        self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
+        _HUD_GEOMETRY_LOGGER.info(
+            "hud_started native_anchors=%s follow_ms=%s settings_path=%s log_path=%s",
+            self._use_native_anchors,
+            self.follow_ms,
+            self.settings_store.path,
+            self._geometry_log_path,
+        )
         self.top_geometry = DockGeometry(
             top=TOP_DOCK_TOP,
             left=TOP_DOCK_LEFT,
@@ -1493,6 +1780,7 @@ class TokenHudWindow:
         self.request_expanded = False
         self._attached = False
         self._hidden_for_minimized = False
+        self._hidden_reason = ""
         self._tombstoned = False
         self._last_rect: WindowRect | None = None
         self._drag_origin: tuple[int, int] | None = None
@@ -1506,6 +1794,8 @@ class TokenHudWindow:
         self._press_target = ""
         self._top_manual_position: tuple[int, int] | None = None
         self._request_manual_position: tuple[int, int] | None = None
+        self._last_geometry_clamp: dict[str, tuple[int, int, int, int, int, int, str]] = {}
+        self._last_budget_log_signature: tuple[int, int, int, str, str] | None = None
         self._snapshot = ParsedSession(status="waiting")
 
         self.top_labels: dict[str, tk.Misc] = {}
@@ -1524,7 +1814,7 @@ class TokenHudWindow:
         self._set_alpha(self.root, 0.94)
         self._set_alpha(self.request_root, 0.74)
         self._apply_free_defaults()
-        self._follow_codex_window()
+        self.root.after(self.follow_ms, self._follow_codex_window)
 
     def _move_handle(self, parent: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> tk.Label:
         label = tk.Label(
@@ -1584,6 +1874,7 @@ class TokenHudWindow:
 
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
         self._move_handle(frame, "top", self.root).pack(side="left", padx=(0, 4))
+        self._resize_handle(frame, "top", self.root).pack(side="right", padx=(6, 0))
         self.top_labels["bar"] = AutoScrollLabel(
             frame,
             text="读取 token...",
@@ -1593,20 +1884,11 @@ class TokenHudWindow:
             static_align="left",
         )
         self.top_labels["bar"].pack(side="left", fill="both", expand=True)
-        self._resize_handle(frame, "top", self.root).pack(side="right", padx=(6, 0))
 
     def _build_top_expanded(self, frame: tk.Frame) -> None:
         header = tk.Frame(frame, bg=HUD_HEADER_BG, padx=6, pady=3)
         header.pack(fill="x", pady=(0, 7))
         self._move_handle(header, "top", self.root).pack(side="left", padx=(0, 4))
-        tk.Label(
-            header,
-            text="Codex 会话 / 预算",
-            anchor="w",
-            bg=HUD_HEADER_BG,
-            fg=HUD_TEXT,
-            font=("Microsoft YaHei UI", 9, "bold"),
-        ).pack(side="left")
         close = tk.Button(
             header,
             text="×",
@@ -1620,6 +1902,14 @@ class TokenHudWindow:
         )
         close.pack(side="right", padx=(4, 0))
         self._resize_handle(header, "top", self.root).pack(side="right", padx=(6, 0))
+        tk.Label(
+            header,
+            text="Codex 会话 / 预算",
+            anchor="w",
+            bg=HUD_HEADER_BG,
+            fg=HUD_TEXT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(side="left")
         self.top_labels["session"] = tk.Label(
             header,
             text="",
@@ -1795,6 +2085,10 @@ class TokenHudWindow:
         frame = tk.Frame(self.request_root, bg=REQUEST_BG, padx=8, pady=4)
         frame.pack(fill="both", expand=True)
         self._move_handle(frame, "request", self.request_root).pack(side="left", padx=(0, 4))
+        self._resize_handle(frame, "request", self.request_root).pack(
+            side="right",
+            padx=(6, 0),
+        )
         self.request_label = AutoScrollLabel(
             frame,
             text="↑- ↻- ↓- ◇- ∑- $0.0000",
@@ -1805,9 +2099,6 @@ class TokenHudWindow:
             static_align="left",
         )
         self.request_label.pack(side="left", fill="both", expand=True)
-        self._resize_handle(frame, "request", self.request_root).pack(
-            side="right", padx=(6, 0)
-        )
 
     def _build_request_expanded(self) -> None:
         frame = tk.Frame(self.request_root, bg=REQUEST_BG, padx=8, pady=5)
@@ -1815,6 +2106,7 @@ class TokenHudWindow:
         header = tk.Frame(frame, bg=REQUEST_HEADER_BG, padx=5, pady=2)
         header.pack(fill="x", pady=(0, 4))
         self._move_handle(header, "request", self.request_root).pack(side="left", padx=(0, 4))
+        self._resize_handle(header, "request", self.request_root).pack(side="right", padx=(6, 0))
         self.request_label = AutoScrollLabel(
             header,
             text="最近模型请求轮次",
@@ -1825,7 +2117,6 @@ class TokenHudWindow:
             static_align="left",
         )
         self.request_label.pack(side="left", fill="x", expand=True)
-        self._resize_handle(header, "request", self.request_root).pack(side="right", padx=(6, 0))
 
         list_header = tk.Frame(frame, bg=REQUEST_BG)
         list_header.pack(fill="x", pady=(0, 2))
@@ -1926,6 +2217,13 @@ class TokenHudWindow:
         self._move_target = target
         self._drag_window = window
         self._drag_origin = (event.x_root, event.y_root)
+        _HUD_GEOMETRY_LOGGER.info(
+            "move_start target=%s x=%s y=%s width=%s",
+            target,
+            window.winfo_x(),
+            window.winfo_y(),
+            window.winfo_width(),
+        )
         return "break"
 
     def _move_window(self, event: Any) -> str:
@@ -1952,7 +2250,7 @@ class TokenHudWindow:
         self._drag_window = None
         self._drag_origin = None
         if target and window is not None:
-            self._remember_window_state(target, window)
+            self._remember_window_position(target, window, reason="move")
             self._save_settings()
         return "break"
 
@@ -1960,14 +2258,30 @@ class TokenHudWindow:
         self._resize_target = target
         self._resize_window = window
         self._resize_start_x = event.x_root
-        self._resize_start_width = max(1, window.winfo_width())
+        self._resize_start_width = max(
+            self._interactive_min_width(
+                target,
+                self.top_expanded if target == "top" else self.request_expanded,
+            ),
+            window.winfo_width(),
+        )
+        _HUD_GEOMETRY_LOGGER.info(
+            "resize_start target=%s x=%s y=%s width=%s",
+            target,
+            window.winfo_x(),
+            window.winfo_y(),
+            window.winfo_width(),
+        )
         return "break"
 
     def _resize_window_width(self, event: Any) -> str:
         if self._resize_window is None:
             return "break"
         dx = event.x_root - self._resize_start_x
-        min_width = TOP_DOCK_MIN_WIDTH if self._resize_target == "top" else REQUEST_DOCK_MIN_WIDTH
+        min_width = self._interactive_min_width(
+            self._resize_target,
+            self.top_expanded if self._resize_target == "top" else self.request_expanded,
+        )
         width = max(min_width, self._resize_start_width + dx)
         height = max(1, self._resize_window.winfo_height())
         x = self._resize_window.winfo_x()
@@ -1982,7 +2296,8 @@ class TokenHudWindow:
         self._resize_target = ""
         self._resize_window = None
         if target and window is not None:
-            self._remember_window_state(target, window)
+            self._remember_window_position(target, window, reason="resize")
+            self._remember_window_width(target, window, reason="resize")
             self._save_settings()
             self._apply_geometry()
         return "break"
@@ -2015,15 +2330,15 @@ class TokenHudWindow:
         self._last_rect = rect
         active = self.locator.is_active(rect, self._hud_hwnds())
         if not active:
-            self._enter_tombstone()
+            self._enter_tombstone("inactive")
             return
-        self._exit_tombstone()
+        self._exit_tombstone("active")
         self._set_alpha(self.root, 0.94 if active else 0.55)
         self._set_alpha(self.request_root, (0.94 if self.request_expanded else 0.74) if active else 0.45)
         self._apply_geometry()
 
     def _enter_free_mode(self) -> None:
-        self._exit_tombstone()
+        self._exit_tombstone("free-mode")
         self._attached = False
         self._last_rect = None
         self._set_alpha(self.root, 0.90)
@@ -2032,15 +2347,12 @@ class TokenHudWindow:
             self._apply_free_defaults()
 
     def _hide_for_minimized(self) -> None:
-        if not self._hidden_for_minimized:
-            self.root.withdraw()
-            self.request_root.withdraw()
-            self._hidden_for_minimized = True
-        self._tombstoned = True
+        self._enter_tombstone("minimized")
+        self._hidden_for_minimized = True
 
-    def _enter_tombstone(self) -> None:
+    def _enter_tombstone(self, reason: str = "inactive") -> None:
         """Hide HUD chrome while Codex is not foreground and pause expensive refreshes."""
-        if self._tombstoned and self._hidden_for_minimized:
+        if self._tombstoned and self._hidden_reason == reason:
             return
         try:
             self.root.withdraw()
@@ -2048,17 +2360,41 @@ class TokenHudWindow:
         except tk.TclError:
             return
         self._tombstoned = True
+        self._hidden_reason = reason
+        _HUD_GEOMETRY_LOGGER.info("hud_hidden reason=%s", reason)
 
-    def _exit_tombstone(self) -> None:
+    def _exit_tombstone(self, reason: str = "visible") -> None:
         if not self._tombstoned and not self._hidden_for_minimized:
+            self._ensure_hud_visible(reason)
             return
-        try:
-            self.root.deiconify()
-            self.request_root.deiconify()
-        except tk.TclError:
+        previous_reason = self._hidden_reason
+        if not self._ensure_hud_visible(reason):
             return
         self._tombstoned = False
         self._hidden_for_minimized = False
+        self._hidden_reason = ""
+        _HUD_GEOMETRY_LOGGER.info(
+            "hud_shown reason=%s previous_reason=%s",
+            reason,
+            previous_reason,
+        )
+
+    def _ensure_hud_visible(self, reason: str = "visible") -> bool:
+        try:
+            self.root.deiconify()
+            self.request_root.deiconify()
+            self.root.lift()
+            self.request_root.lift()
+            self.root.attributes("-topmost", True)
+            self.request_root.attributes("-topmost", True)
+        except tk.TclError:
+            return False
+        try:
+            if self.root.state() == "withdrawn" or self.request_root.state() == "withdrawn":
+                _HUD_GEOMETRY_LOGGER.info("hud_visibility_recovered reason=%s", reason)
+        except tk.TclError:
+            return False
+        return True
 
     def _next_follow_delay(self) -> int:
         return FOLLOW_TOMBSTONE_MS if self._tombstoned else self.follow_ms
@@ -2088,21 +2424,52 @@ class TokenHudWindow:
     def _attached_geometry(
         self, target: str, rect: WindowRect, expanded: bool
     ) -> tuple[int, int, int, int]:
-        geometry = self.top_geometry if target == "top" else self.request_geometry
-        base_x, base_y, base_width, height = _visual_anchor_geometry(
-            target, rect, expanded
+        legacy_x, legacy_y, legacy_width, height = _visual_anchor_geometry(
+            target,
+            rect,
+            expanded,
+        )
+        anchor = self._target_anchor(
+            target,
+            rect,
+            expanded,
+            legacy_x,
+            legacy_y,
+            legacy_width,
+            height,
         )
         placement = self._placement(target)
-        if placement.width_ratio is None and placement.width is not None:
-            placement.width_ratio = placement.width / max(1, base_width)
-        if placement.width_ratio is not None:
-            width = int(round(base_width * placement.width_ratio))
-        else:
-            width = placement.width or base_width
-        x = base_x
-        y = base_y
+        has_anchor_position = self._has_anchor_position(placement, anchor)
+        has_width_ratio = (
+            placement.width_ratio is not None
+            and (
+                placement.anchor_source is None
+                or placement.anchor_source == anchor.source
+            )
+        )
+        width_base = (
+            anchor.width
+            if has_width_ratio and placement.anchor_source == anchor.source
+            else legacy_width
+        )
 
-        if target == "top":
+        if has_width_ratio:
+            width = int(round(width_base * placement.width_ratio))
+        else:
+            width = placement.width or anchor.default_width
+        x = anchor.default_x
+        y = anchor.default_y
+
+        if has_anchor_position:
+            x = anchor.left + int(round(anchor.width * float(placement.anchor_x_ratio or 0.0)))
+            if target == "top":
+                y = anchor.top + int(round(anchor.height * float(placement.anchor_y_ratio or 0.0)))
+            else:
+                bottom_y = anchor.top + int(
+                    round(anchor.height * float(placement.anchor_y_ratio or 0.0))
+                )
+                y = bottom_y - height
+        elif target == "top":
             if placement.relative_x_ratio is not None and placement.relative_y_ratio is not None:
                 x = rect.left + int(round(rect.width * placement.relative_x_ratio))
                 y = rect.top + int(round(rect.height * placement.relative_y_ratio))
@@ -2114,13 +2481,94 @@ class TokenHudWindow:
             bottom = int(round(rect.height * placement.relative_bottom_ratio))
             y = rect.bottom - bottom - height
 
-        min_width = geometry.min_width
+        min_width = self._interactive_min_width(target, expanded)
         min_x = rect.left + 8
         max_x = max(min_x, rect.right - min_width - 12)
+        original_x = x
+        original_y = y
+        original_width = width
         x = max(min_x, min(x, max_x))
+        min_y = rect.top + 8
+        max_y = max(min_y, rect.bottom - height - 8)
+        y = max(min_y, min(y, max_y))
         max_width = max(1, rect.right - x - 12)
         width = max(1, min(max(min_width, width), max_width))
+        if x != original_x or y != original_y or width != original_width:
+            signature = (original_x, x, original_y, y, original_width, width, anchor.source)
+            should_log = self._last_geometry_clamp.get(target) != signature
+            self._last_geometry_clamp[target] = signature
+        else:
+            should_log = False
+            self._last_geometry_clamp.pop(target, None)
+        if should_log:
+            _HUD_GEOMETRY_LOGGER.info(
+                "geometry_clamp target=%s source=%s x=%s->%s y=%s->%s width=%s->%s "
+                "anchor=(%s,%s,%s,%s)",
+                target,
+                anchor.source,
+                original_x,
+                x,
+                original_y,
+                y,
+                original_width,
+                width,
+                anchor.left,
+                anchor.top,
+                anchor.right,
+                anchor.bottom,
+            )
         return x, y, width, height
+
+    def _target_anchor(
+        self,
+        target: str,
+        rect: WindowRect,
+        expanded: bool,
+        legacy_x: int | None = None,
+        legacy_y: int | None = None,
+        legacy_width: int | None = None,
+        height: int | None = None,
+    ) -> HudAnchor:
+        if legacy_x is None or legacy_y is None or legacy_width is None or height is None:
+            legacy_x, legacy_y, legacy_width, height = _visual_anchor_geometry(
+                target,
+                rect,
+                expanded,
+            )
+        if self._use_native_anchors:
+            native = self.locator.anchor_geometry(target, rect, height)
+            if native is not None:
+                return native
+        return _fallback_hud_anchor(
+            target,
+            rect,
+            legacy_x,
+            legacy_y,
+            legacy_width,
+            height,
+        )
+
+    @staticmethod
+    def _has_anchor_position(placement: WindowPlacement, anchor: HudAnchor) -> bool:
+        return (
+            placement.anchor_x_ratio is not None
+            and placement.anchor_y_ratio is not None
+            and placement.anchor_source == anchor.source
+        )
+
+    @staticmethod
+    def _interactive_min_width(target: str, expanded: bool) -> int:
+        if target == "top":
+            return (
+                TOP_DOCK_EXPANDED_INTERACTIVE_MIN_WIDTH
+                if expanded
+                else TOP_DOCK_INTERACTIVE_MIN_WIDTH
+            )
+        return (
+            REQUEST_DOCK_EXPANDED_INTERACTIVE_MIN_WIDTH
+            if expanded
+            else REQUEST_DOCK_INTERACTIVE_MIN_WIDTH
+        )
 
     def _apply_free_defaults(self, keep_existing: bool = False) -> None:
         screen_width = self.root.winfo_screenwidth()
@@ -2160,31 +2608,40 @@ class TokenHudWindow:
         self.request_root.geometry(f"{request_width}x{request_height}+{rx}+{ry}")
 
     def _top_size(self) -> tuple[int, int]:
-        width = self.settings.top.width or (480 if not self.compact else 360)
+        expanded = self.top_expanded
+        width = max(
+            self._interactive_min_width("top", expanded),
+            self.settings.top.width or (480 if not self.compact else 360),
+        )
         return (
             width,
-            TOP_DOCK_EXPANDED_HEIGHT if self.top_expanded else TOP_DOCK_HEIGHT,
+            TOP_DOCK_EXPANDED_HEIGHT if expanded else TOP_DOCK_HEIGHT,
         )
 
     def _request_size(self) -> tuple[int, int]:
+        expanded = self.request_expanded
         return (
-            self.settings.request.width or REQUEST_DOCK_WIDTH,
-            REQUEST_DOCK_EXPANDED_HEIGHT if self.request_expanded else REQUEST_DOCK_HEIGHT,
+            max(
+                self._interactive_min_width("request", expanded),
+                self.settings.request.width or REQUEST_DOCK_WIDTH,
+            ),
+            REQUEST_DOCK_EXPANDED_HEIGHT if expanded else REQUEST_DOCK_HEIGHT,
         )
 
     def _placement(self, target: str) -> WindowPlacement:
         return self.settings.top if target == "top" else self.settings.request
 
-    def _remember_window_state(self, target: str, window: tk.Tk | tk.Toplevel) -> None:
+    def _remember_window_position(
+        self,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+        *,
+        reason: str,
+    ) -> None:
         placement = self._placement(target)
         x = int(window.winfo_x())
         y = int(window.winfo_y())
-        width = int(window.winfo_width())
         height = int(window.winfo_height())
-        placement.width = max(
-            TOP_DOCK_MIN_WIDTH if target == "top" else REQUEST_DOCK_MIN_WIDTH,
-            width,
-        )
         placement.absolute_x = x
         placement.absolute_y = y
         if target == "top":
@@ -2193,14 +2650,15 @@ class TokenHudWindow:
             self._request_manual_position = (x, y)
 
         if self._attached and self._last_rect is not None:
-            _, _, base_width, _ = _visual_anchor_geometry(
+            anchor = self._target_anchor(
                 target,
                 self._last_rect,
                 self.top_expanded if target == "top" else self.request_expanded,
             )
-            placement.width_ratio = width / max(1, base_width)
             placement.relative_x = x - self._last_rect.left
             placement.relative_x_ratio = placement.relative_x / max(1, self._last_rect.width)
+            placement.anchor_x_ratio = (x - anchor.left) / max(1, anchor.width)
+            placement.anchor_source = anchor.source
             if target == "top":
                 placement.relative_y = y - self._last_rect.top
                 placement.relative_y_ratio = (
@@ -2208,6 +2666,7 @@ class TokenHudWindow:
                 )
                 placement.relative_bottom = None
                 placement.relative_bottom_ratio = None
+                placement.anchor_y_ratio = (y - anchor.top) / max(1, anchor.height)
             else:
                 placement.relative_y = None
                 placement.relative_y_ratio = None
@@ -2215,11 +2674,75 @@ class TokenHudWindow:
                 placement.relative_bottom_ratio = (
                     placement.relative_bottom / max(1, self._last_rect.height)
                 )
+                placement.anchor_y_ratio = ((y + height) - anchor.top) / max(
+                    1,
+                    anchor.height,
+                )
+            _HUD_GEOMETRY_LOGGER.info(
+                "position_saved target=%s reason=%s source=%s x=%s y=%s "
+                "anchor_x_ratio=%.6f anchor_y_ratio=%.6f width_ratio=%s",
+                target,
+                reason,
+                anchor.source,
+                x,
+                y,
+                placement.anchor_x_ratio,
+                placement.anchor_y_ratio,
+                placement.width_ratio,
+            )
         else:
-            placement.width_ratio = None
             placement.relative_x_ratio = None
             placement.relative_y_ratio = None
             placement.relative_bottom_ratio = None
+            placement.anchor_x_ratio = None
+            placement.anchor_y_ratio = None
+            placement.anchor_source = None
+            _HUD_GEOMETRY_LOGGER.info(
+                "position_saved_free target=%s reason=%s x=%s y=%s width_ratio=%s",
+                target,
+                reason,
+                x,
+                y,
+                placement.width_ratio,
+            )
+
+    def _remember_window_width(
+        self,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+        *,
+        reason: str,
+    ) -> None:
+        placement = self._placement(target)
+        expanded = self.top_expanded if target == "top" else self.request_expanded
+        width = max(
+            self._interactive_min_width(target, expanded),
+            int(window.winfo_width()),
+        )
+        placement.width = width
+
+        if self._attached and self._last_rect is not None:
+            anchor = self._target_anchor(target, self._last_rect, expanded)
+            placement.width_ratio = width / max(1, anchor.width)
+            placement.anchor_source = anchor.source
+            _HUD_GEOMETRY_LOGGER.info(
+                "width_saved target=%s reason=%s source=%s width=%s "
+                "anchor_width=%s width_ratio=%.6f",
+                target,
+                reason,
+                anchor.source,
+                width,
+                anchor.width,
+                placement.width_ratio,
+            )
+        else:
+            placement.width_ratio = None
+            _HUD_GEOMETRY_LOGGER.info(
+                "width_saved_free target=%s reason=%s width=%s",
+                target,
+                reason,
+                width,
+            )
 
     def _save_settings(self) -> None:
         self.settings_store.save(self.settings)
@@ -2278,8 +2801,32 @@ class TokenHudWindow:
     def update_display(self, parsed_session: ParsedSession) -> None:
         """Refresh both HUD windows with the latest parsed session snapshot."""
         self._snapshot = parsed_session
+        self._log_budget_snapshot(parsed_session)
         self._render_top()
         self._render_request()
+
+    def _log_budget_snapshot(self, snapshot: ParsedSession) -> None:
+        day_start = snapshot.day_start.isoformat() if snapshot.day_start is not None else ""
+        week_start = snapshot.week_start.isoformat() if snapshot.week_start is not None else ""
+        signature = (
+            int(round(snapshot.today_cost_usd * 100)),
+            int(round(snapshot.week_cost_usd * 100)),
+            int(round(snapshot.week_before_today_cost_usd * 100)),
+            day_start,
+            week_start,
+        )
+        if signature == self._last_budget_log_signature:
+            return
+        self._last_budget_log_signature = signature
+        _HUD_GEOMETRY_LOGGER.info(
+            "budget_snapshot today=%.6f week=%.6f week_before_today=%.6f "
+            "day_start=%s week_start=%s",
+            snapshot.today_cost_usd,
+            snapshot.week_cost_usd,
+            snapshot.week_before_today_cost_usd,
+            day_start,
+            week_start,
+        )
 
     def _render_top(self) -> None:
         snapshot = self._snapshot
@@ -2412,7 +2959,7 @@ class TokenHudWindow:
             if snapshot.weekly_limit_usd > 0
             else 0.0
         )
-        return (
+        text = (
             f"今日累计  {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}  "
             f"额度 {snapshot.today_cost_usd:.2f}/{snapshot.daily_limit_usd:.0f} USD "
             f"({day_ratio:.0%})  起点 {_format_start(snapshot.day_start)}\n"
@@ -2420,6 +2967,13 @@ class TokenHudWindow:
             f"额度 {snapshot.week_cost_usd:.2f}/{snapshot.weekly_limit_usd:.0f} USD "
             f"({week_ratio:.0%})  起点 {_format_start(snapshot.week_start)}"
         )
+        if snapshot.week_before_today_cost_usd > 0:
+            text += (
+                "\n本周拆分  "
+                f"今日前 {_format_usage_money(snapshot.week_before_today_tokens, snapshot.week_before_today_cost_usd)}"
+                f" + 当前日窗 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
+            )
+        return text
 
     def _format_warnings(self, snapshot: ParsedSession) -> str:
         if snapshot.budget_error:

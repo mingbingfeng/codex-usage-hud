@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -13,13 +14,23 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from codex_usage_hud.cli import budget_warnings, parse_thresholds
+from codex_usage_hud.cli import (
+    HudAlreadyRunningError,
+    HudInstanceLock,
+    UsageSummaryCache,
+    budget_warnings,
+    parse_thresholds,
+    snapshot_to_text,
+    stop_running_hud,
+    usage_before_today_in_week,
+)
 from codex_usage_hud.core.parser import (
     GapTiming,
     ParsedSession,
     RequestRound,
     SlowSummary,
     ToolCallTiming,
+    UsageSummary,
 )
 from codex_usage_hud.ui.tk_hud import (
     REQUEST_DOCK_BOTTOM,
@@ -37,6 +48,7 @@ from codex_usage_hud.ui.tk_hud import (
     DockGeometry,
     HudSettings,
     HudSettingsStore,
+    HudAnchor,
     AutoScrollLabel,
     TokenHudWindow,
     WindowPlacement,
@@ -51,6 +63,85 @@ from codex_usage_hud.ui.tk_hud import (
     _round_entry_widths,
     _visual_anchor_geometry,
 )
+
+
+class _FakeWindow:
+    def __init__(self, x: int, y: int, width: int, height: int) -> None:
+        self._x = x
+        self._y = y
+        self._width = width
+        self._height = height
+
+    def winfo_x(self) -> int:
+        return self._x
+
+    def winfo_y(self) -> int:
+        return self._y
+
+    def winfo_width(self) -> int:
+        return self._width
+
+    def winfo_height(self) -> int:
+        return self._height
+
+
+class _FakeAnchorLocator:
+    def __init__(self, anchors: dict[str, HudAnchor], *, active: bool = True) -> None:
+        self.anchors = anchors
+        self.active = active
+
+    def set_dpi_aware(self) -> None:
+        return None
+
+    def find(self) -> WindowRect | None:
+        return None
+
+    def is_active(self, rect: WindowRect, allowed_hwnds: set[int]) -> bool:
+        del rect, allowed_hwnds
+        return self.active
+
+    def dock_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> tuple[int, int, int] | None:
+        del rect, hud_height
+        anchor = self.anchors.get(target)
+        if anchor is None:
+            return None
+        return anchor.default_x, anchor.default_y, anchor.default_width
+
+    def anchor_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> HudAnchor | None:
+        del rect, hud_height
+        return self.anchors.get(target)
+
+
+class _FakeUsageParser:
+    def __init__(self) -> None:
+        self.loads = 0
+
+    def load_records_lenient(self, path: Path) -> list[dict[str, str]]:
+        del path
+        self.loads += 1
+        return []
+
+    def usage_events(self, records: list[dict[str, str]]) -> list[dict[str, str]]:
+        del records
+        return []
+
+    def summarize_usage_events(
+        self,
+        events: list[dict[str, str]],
+        start: datetime,
+    ) -> UsageSummary:
+        del events
+        return UsageSummary(tokens=start.day)
 
 
 class AttachedHudGeometryTests(unittest.TestCase):
@@ -155,6 +246,86 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("超过 80% 阈值", warnings[0])
         self.assertIn("周额度已用 210.00/400 USD", warnings[1])
         self.assertIn("超过 50% 阈值", warnings[1])
+
+    def test_usage_summary_cache_invalidates_when_budget_window_changes(self) -> None:
+        parser = _FakeUsageParser()
+        cache = UsageSummaryCache(parser)  # type: ignore[arg-type]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            path.write_text("{}", encoding="utf-8")
+            first_day = datetime(2026, 5, 28, 10, 0)
+            second_day = datetime(2026, 5, 29, 10, 0)
+            week_start = datetime(2026, 5, 28, 10, 0)
+
+            first, _ = cache.summarize(Path(temp_dir), first_day, week_start)
+            second, _ = cache.summarize(Path(temp_dir), second_day, week_start)
+
+        self.assertEqual(first.tokens, 28)
+        self.assertEqual(second.tokens, 29)
+        self.assertEqual(parser.loads, 2)
+
+    def test_week_before_today_breakdown_subtracts_current_daily_window(self) -> None:
+        week = UsageSummary(tokens=1190, input_tokens=800, cost_usd=119.142012)
+        today = UsageSummary(tokens=202, input_tokens=150, cost_usd=20.226427)
+        day_start = datetime(2026, 5, 29, 10, 0)
+        week_start = datetime(2026, 5, 28, 10, 0)
+
+        prior = usage_before_today_in_week(week, today, day_start, week_start)
+
+        self.assertEqual(prior.tokens, 988)
+        self.assertEqual(prior.input_tokens, 650)
+        self.assertEqual(prior.cost_usd, 98.915585)
+
+    def test_week_before_today_breakdown_is_empty_at_week_reset(self) -> None:
+        week = UsageSummary(tokens=200, cost_usd=20.0)
+        today = UsageSummary(tokens=200, cost_usd=20.0)
+        start = datetime(2026, 5, 28, 10, 0)
+
+        prior = usage_before_today_in_week(week, today, start, start)
+
+        self.assertEqual(prior.tokens, 0)
+        self.assertEqual(prior.cost_usd, 0.0)
+
+    def test_snapshot_text_includes_week_breakdown(self) -> None:
+        snapshot = ParsedSession(
+            today_tokens=202,
+            today_cost_usd=20.226427,
+            week_tokens=1190,
+            week_cost_usd=119.142012,
+            week_before_today_tokens=988,
+            week_before_today_cost_usd=98.915585,
+        )
+
+        text = snapshot_to_text(snapshot)
+
+        self.assertIn("This Week Breakdown:", text)
+        self.assertIn("before today reset $98.915585", text)
+        self.assertIn("today $20.226427", text)
+
+    def test_hud_instance_lock_prevents_duplicate_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud.pid"
+            mutex_name = f"Local\\codex_usage_hud_test_{os.getpid()}_{id(path)}"
+            lock = HudInstanceLock(path, mutex_name=mutex_name)
+            lock.acquire()
+            try:
+                self.assertEqual(path.read_text(encoding="utf-8"), str(os.getpid()))
+                with self.assertRaises(HudAlreadyRunningError):
+                    HudInstanceLock(path, mutex_name=mutex_name).acquire()
+            finally:
+                lock.release()
+
+            self.assertFalse(path.exists())
+
+    def test_stop_running_hud_clears_invalid_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud.pid"
+            path.write_text("not-a-pid", encoding="utf-8")
+
+            message = stop_running_hud(path)
+
+            self.assertIn("No running", message)
+            self.assertFalse(path.exists())
 
 
 class AutoScrollHelpersTests(unittest.TestCase):
@@ -295,6 +466,9 @@ class HudSettingsStoreTests(unittest.TestCase):
                     absolute_y=50,
                     width=640,
                     width_ratio=0.75,
+                    anchor_x_ratio=0.25,
+                    anchor_y_ratio=0.5,
+                    anchor_source="geometry",
                 ),
                 request=WindowPlacement(
                     relative_x=520,
@@ -303,6 +477,9 @@ class HudSettingsStoreTests(unittest.TestCase):
                     absolute_y=790,
                     width=420,
                     width_ratio=1.1,
+                    anchor_x_ratio=0.4,
+                    anchor_y_ratio=0.0,
+                    anchor_source="geometry",
                 ),
             )
 
@@ -313,9 +490,15 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded.top.relative_y, 44)
         self.assertEqual(loaded.top.width, 640)
         self.assertEqual(loaded.top.width_ratio, 0.75)
+        self.assertEqual(loaded.top.anchor_x_ratio, 0.25)
+        self.assertEqual(loaded.top.anchor_y_ratio, 0.5)
+        self.assertEqual(loaded.top.anchor_source, "geometry")
         self.assertEqual(loaded.request.relative_bottom, 28)
         self.assertEqual(loaded.request.width, 420)
         self.assertEqual(loaded.request.width_ratio, 1.1)
+        self.assertEqual(loaded.request.anchor_x_ratio, 0.4)
+        self.assertEqual(loaded.request.anchor_y_ratio, 0.0)
+        self.assertEqual(loaded.request.anchor_source, "geometry")
 
 
 class TokenHudWindowLifecycleTests(unittest.TestCase):
@@ -340,11 +523,207 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.settings.top.relative_y = None
             window.settings.top.relative_x_ratio = None
             window.settings.top.relative_y_ratio = None
+            window.settings.top.anchor_x_ratio = None
+            window.settings.top.anchor_y_ratio = None
+            window.settings.top.anchor_source = None
             window.settings.top.width_ratio = 0.5
             x, y, width, height = window._attached_geometry("top", rect, False)
 
             self.assertEqual((x, y, height), (286, 88, 36))
             self.assertEqual(width, 421)
+        finally:
+            window._close()
+
+    def test_move_saves_anchor_position_without_changing_width_ratio(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "request": HudAnchor(
+                        left=520,
+                        top=700,
+                        right=1020,
+                        bottom=756,
+                        default_x=520,
+                        default_y=668,
+                        default_width=500,
+                        source="test-input",
+                    )
+                }
+            )
+            window._use_native_anchors = True
+            window._attached = True
+            window._last_rect = rect
+            window.settings.request.width_ratio = 0.75
+
+            window._remember_window_position(
+                "request",
+                _FakeWindow(x=650, y=660, width=320, height=32),
+                reason="test-move",
+            )
+
+            self.assertEqual(window.settings.request.width_ratio, 0.75)
+            self.assertAlmostEqual(window.settings.request.anchor_x_ratio or 0.0, 0.26)
+            self.assertAlmostEqual(window.settings.request.anchor_y_ratio or 0.0, -0.142857, places=5)
+        finally:
+            window._close()
+
+    def test_resize_saves_width_ratio_against_current_anchor_width(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "top": HudAnchor(
+                        left=260,
+                        top=80,
+                        right=1060,
+                        bottom=126,
+                        default_x=260,
+                        default_y=85,
+                        default_width=800,
+                        source="test-title",
+                    )
+                }
+            )
+            window._use_native_anchors = True
+            window._attached = True
+            window._last_rect = rect
+
+            fake = _FakeWindow(x=420, y=92, width=400, height=36)
+            window._remember_window_position("top", fake, reason="test-resize")
+            window._remember_window_width("top", fake, reason="test-resize")
+
+            self.assertAlmostEqual(window.settings.top.width_ratio or 0.0, 0.5)
+            self.assertAlmostEqual(window.settings.top.anchor_x_ratio or 0.0, 0.2)
+            self.assertAlmostEqual(window.settings.top.anchor_y_ratio or 0.0, 12 / 46)
+        finally:
+            window._close()
+
+    def test_request_anchor_tracks_input_box_changes(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.settings.request.anchor_x_ratio = 0.2
+            window.settings.request.anchor_y_ratio = 0.0
+            window.settings.request.anchor_source = "test-input"
+            window.settings.request.width_ratio = 0.5
+            window.settings.request.width = None
+            window.locator = _FakeAnchorLocator(
+                {
+                    "request": HudAnchor(
+                        left=600,
+                        top=720,
+                        right=1200,
+                        bottom=776,
+                        default_x=600,
+                        default_y=688,
+                        default_width=600,
+                        source="test-input",
+                    )
+                }
+            )
+            window._use_native_anchors = True
+
+            x, y, width, height = window._attached_geometry("request", rect, False)
+
+            self.assertEqual(height, 32)
+            self.assertEqual((x, y, width), (720, 688, 300))
+        finally:
+            window._close()
+
+    def test_native_anchor_is_disabled_by_default_for_scroll_stability(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "request": HudAnchor(
+                        left=900,
+                        top=300,
+                        right=1200,
+                        bottom=340,
+                        default_x=900,
+                        default_y=268,
+                        default_width=300,
+                        source="test-moving-uia",
+                    )
+                }
+            )
+            window.settings.request.anchor_x_ratio = 0.0
+            window.settings.request.anchor_y_ratio = 0.0
+            window.settings.request.anchor_source = "test-moving-uia"
+            window.settings.request.width = None
+            window.settings.request.width_ratio = None
+            window.settings.request.relative_x_ratio = None
+            window.settings.request.relative_bottom_ratio = None
+
+            x, y, width, height = window._attached_geometry("request", rect, False)
+
+            self.assertEqual((x, y, width, height), (460, 782, 495, 32))
+        finally:
+            window._close()
+
+    def test_attached_geometry_clamp_does_not_rewrite_saved_width_ratio(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=700, bottom=650)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "top": HudAnchor(
+                        left=140,
+                        top=70,
+                        right=640,
+                        bottom=116,
+                        default_x=140,
+                        default_y=75,
+                        default_width=500,
+                        source="test-title",
+                    )
+                }
+            )
+            window._use_native_anchors = True
+            window.settings.top.anchor_x_ratio = 0.9
+            window.settings.top.anchor_y_ratio = 0.0
+            window.settings.top.anchor_source = "test-title"
+            window.settings.top.width_ratio = 2.0
+
+            x, _, width, _ = window._attached_geometry("top", rect, False)
+
+            self.assertLessEqual(x + width, rect.right - 12)
+            self.assertEqual(window.settings.top.width_ratio, 2.0)
+        finally:
+            window._close()
+
+    def test_interactive_min_width_keeps_handles_visible(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "top": HudAnchor(
+                        left=260,
+                        top=80,
+                        right=1060,
+                        bottom=126,
+                        default_x=260,
+                        default_y=85,
+                        default_width=800,
+                        source="test-title",
+                    )
+                }
+            )
+            window._use_native_anchors = True
+            window.settings.top.anchor_x_ratio = 0.0
+            window.settings.top.anchor_y_ratio = 0.0
+            window.settings.top.anchor_source = "test-title"
+            window.settings.top.width = 1
+            window.settings.top.width_ratio = None
+
+            _, _, width, _ = window._attached_geometry("top", rect, False)
+
+            self.assertGreaterEqual(width, 120)
         finally:
             window._close()
 
@@ -376,6 +755,44 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._exit_tombstone()
 
             self.assertTrue(window.should_refresh_snapshot())
+        finally:
+            window._close()
+
+    def test_minimized_hidden_hud_reappears_when_codex_is_active_again(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator({}, active=True)
+
+            window._hide_for_minimized()
+            self.assertFalse(window.should_refresh_snapshot())
+            self.assertTrue(window._hidden_for_minimized)
+
+            window._attach_to_rect(rect)
+
+            self.assertTrue(window.should_refresh_snapshot())
+            self.assertFalse(window._hidden_for_minimized)
+            self.assertFalse(window._tombstoned)
+        finally:
+            window._close()
+
+    def test_inactive_tombstone_reappears_after_active_check_turns_true(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            locator = _FakeAnchorLocator({}, active=False)
+            window.locator = locator
+
+            window._attach_to_rect(rect)
+            self.assertFalse(window.should_refresh_snapshot())
+            self.assertEqual(window._hidden_reason, "inactive")
+
+            locator.active = True
+            window._attach_to_rect(rect)
+
+            self.assertTrue(window.should_refresh_snapshot())
+            self.assertEqual(window._hidden_reason, "")
+            self.assertFalse(window._tombstoned)
         finally:
             window._close()
 

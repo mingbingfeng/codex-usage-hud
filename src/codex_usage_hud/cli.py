@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -23,6 +25,13 @@ DEFAULT_WEEKLY_BUDGET_USD = 400.0
 DEFAULT_BUDGET_THRESHOLDS = "0.5,0.8,0.9,1.0"
 DEFAULT_ACTIVE_SESSION_POLL_MS = 500
 DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
+HUD_LOCK_FILENAME = "codex_usage_hud.pid"
+HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
+ERROR_ALREADY_EXISTS = 183
+
+
+class HudAlreadyRunningError(RuntimeError):
+    """Raised when another HUD instance owns the local runtime lock."""
 
 
 def configure_stdout() -> None:
@@ -32,6 +41,213 @@ def configure_stdout() -> None:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             pass
+
+
+def hud_runtime_dir() -> Path:
+    """Return the per-user directory for lightweight HUD runtime files."""
+    if sys.platform.startswith("win"):
+        root = os.environ.get("LOCALAPPDATA")
+        base = Path(root) if root else Path.home() / "AppData" / "Local"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(
+            os.environ.get("XDG_RUNTIME_DIR")
+            or os.environ.get("XDG_STATE_HOME")
+            or Path.home() / ".local" / "state"
+        )
+    return base / "codex-usage-hud"
+
+
+def hud_lock_path() -> Path:
+    """Return the pid-file lock path used by the interactive HUD."""
+    return hud_runtime_dir() / HUD_LOCK_FILENAME
+
+
+def _read_pid(path: Path) -> int | None:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        pid = int(text)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
+            return True
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _terminate_process(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    return True
+
+
+class HudInstanceLock:
+    """Cross-process lock to keep invisible duplicate HUDs from piling up."""
+
+    def __init__(self, path: Path | None = None, mutex_name: str | None = None) -> None:
+        self.path = path or hud_lock_path()
+        self.mutex_name = mutex_name or HUD_MUTEX_NAME
+        self._owned = False
+        self._mutex_handle: int | None = None
+
+    def acquire(self) -> None:
+        self._mutex_handle = self._acquire_native_mutex()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        existing_pid = _read_pid(self.path)
+        if existing_pid is not None and _process_exists(existing_pid):
+            self._release_native_mutex()
+            raise HudAlreadyRunningError(
+                f"codex-usage-hud is already running as PID {existing_pid}. "
+                "Run `python -m codex_usage_hud --stop` to close it."
+            )
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(str(self.path), flags)
+        except FileExistsError as exc:
+            self._release_native_mutex()
+            raise HudAlreadyRunningError(
+                "codex-usage-hud lock already exists. "
+                "Run `python -m codex_usage_hud --stop` to clear it."
+            ) from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+        self._owned = True
+
+    def _acquire_native_mutex(self) -> int | None:
+        if not sys.platform.startswith("win"):
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateMutexW.argtypes = [
+                wintypes.LPVOID,
+                wintypes.BOOL,
+                wintypes.LPCWSTR,
+            ]
+            kernel32.CreateMutexW.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel32.CreateMutexW(None, True, self.mutex_name)
+            error = ctypes.get_last_error()
+            if not handle:
+                raise OSError(error, "CreateMutexW failed")
+            if error == ERROR_ALREADY_EXISTS:
+                kernel32.CloseHandle(wintypes.HANDLE(handle))
+                raise HudAlreadyRunningError(
+                    "codex-usage-hud is already running "
+                    f"(mutex {self.mutex_name!r} exists). "
+                    "Run `python -m codex_usage_hud --stop` to close it."
+                )
+            return int(handle)
+        except HudAlreadyRunningError:
+            raise
+        except Exception:
+            return None
+
+    def _release_native_mutex(self) -> None:
+        if not self._mutex_handle or not sys.platform.startswith("win"):
+            self._mutex_handle = None
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = wintypes.HANDLE(self._mutex_handle)
+            kernel32.ReleaseMutex(handle)
+            kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+        self._mutex_handle = None
+
+    def release(self) -> None:
+        if not self._owned:
+            self._release_native_mutex()
+            return
+        if _read_pid(self.path) == os.getpid():
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+        self._owned = False
+        self._release_native_mutex()
+
+    def __enter__(self) -> "HudInstanceLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        del exc_type, exc, tb
+        self.release()
+
+
+def stop_running_hud(path: Path | None = None) -> str:
+    """Stop the HUD instance recorded in the local pid-file lock."""
+    lock_path = path or hud_lock_path()
+    pid = _read_pid(lock_path)
+    if pid is None:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        return "No running codex-usage-hud instance was recorded."
+    if not _process_exists(pid):
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        return f"Removed stale codex-usage-hud lock for PID {pid}."
+    if not _terminate_process(pid):
+        return f"Unable to stop codex-usage-hud PID {pid}."
+    for _ in range(20):
+        if not _process_exists(pid):
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            return f"Stopped codex-usage-hud PID {pid}."
+        import time
+
+        time.sleep(0.1)
+    return f"Sent stop signal to codex-usage-hud PID {pid}."
 
 
 def _format_money(value: float | None) -> str:
@@ -75,10 +291,31 @@ def _merge_usage(target: UsageSummary, addition: UsageSummary) -> None:
     target.cost_usd = round(target.cost_usd + addition.cost_usd, 6)
 
 
+def usage_before_today_in_week(
+    week_total: UsageSummary,
+    today_total: UsageSummary,
+    day_start: datetime,
+    week_start: datetime,
+) -> UsageSummary:
+    """Return the part of the weekly window that happened before this daily window."""
+    if day_start <= week_start:
+        return UsageSummary()
+    return UsageSummary(
+        tokens=max(0, week_total.tokens - today_total.tokens),
+        input_tokens=max(0, week_total.input_tokens - today_total.input_tokens),
+        cached_tokens=max(0, week_total.cached_tokens - today_total.cached_tokens),
+        output_tokens=max(0, week_total.output_tokens - today_total.output_tokens),
+        reasoning_tokens=max(0, week_total.reasoning_tokens - today_total.reasoning_tokens),
+        cost_usd=round(max(0.0, week_total.cost_usd - today_total.cost_usd), 6),
+    )
+
+
 @dataclass
 class _UsageCacheEntry:
     mtime: float | None
     file_size: int | None
+    day_start: datetime
+    week_start: datetime
     summary_day: UsageSummary
     summary_week: UsageSummary
 
@@ -133,6 +370,8 @@ class UsageSummaryCache:
             entry is not None
             and entry.mtime == stat.st_mtime
             and entry.file_size == stat.st_size
+            and entry.day_start == day_start
+            and entry.week_start == week_start
         ):
             return entry.summary_day, entry.summary_week
 
@@ -147,6 +386,8 @@ class UsageSummaryCache:
         self._entries[path] = _UsageCacheEntry(
             mtime=stat.st_mtime,
             file_size=stat.st_size,
+            day_start=day_start,
+            week_start=week_start,
             summary_day=summary_day,
             summary_week=summary_week,
         )
@@ -376,6 +617,14 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
     snapshot.today_cost_usd = today_total.cost_usd
     snapshot.week_tokens = week_total.tokens
     snapshot.week_cost_usd = week_total.cost_usd
+    prior_week_total = usage_before_today_in_week(
+        week_total,
+        today_total,
+        day_start,
+        week_start,
+    )
+    snapshot.week_before_today_tokens = prior_week_total.tokens
+    snapshot.week_before_today_cost_usd = prior_week_total.cost_usd
     snapshot.daily_limit_usd = context.daily_budget_usd
     snapshot.weekly_limit_usd = context.weekly_budget_usd
     snapshot.day_start = day_start
@@ -424,6 +673,11 @@ def snapshot_to_text(snapshot: ParsedSession, compact: bool = False) -> str:
             f"{_format_money(snapshot.week_cost_usd)} / "
             f"{_format_money(snapshot.weekly_limit_usd)}"
         ),
+        (
+            "This Week Breakdown: "
+            f"before today reset {_format_money(snapshot.week_before_today_cost_usd)} + "
+            f"today {_format_money(snapshot.today_cost_usd)}"
+        ),
         f"Activity: {snapshot.activity.kind} | {snapshot.activity.detail or 'n/a'}",
         f"Path: {snapshot.session_path or 'n/a'}",
     ]
@@ -444,6 +698,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--once",
         action="store_true",
         help="Print the current local snapshot and exit without opening the HUD.",
+    )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="Stop the currently running HUD instance recorded by the local pid lock.",
     )
     parser.add_argument(
         "--compact",
@@ -533,37 +792,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_stdout()
     parser = build_parser()
     args = parser.parse_args(argv)
-    context = build_runtime_context(args)
-    try:
-        if args.once:
+    if args.stop:
+        print(stop_running_hud())
+        return 0
+
+    if args.once:
+        context = build_runtime_context(args)
+        try:
             if context.active_session_tracker is not None:
                 context.active_session_tracker.wait_for_title()
             print(snapshot_to_text(build_snapshot(context), compact=args.compact))
-            sys.exit(0)
+            return 0
+        finally:
+            context.close()
 
-        try:
-            window = TokenHudWindow(compact=args.compact)
-        except Exception as exc:
-            print(f"codex-usage-hud: unable to open Tkinter HUD: {exc}", file=sys.stderr)
-            return 1
-
-        def refresh() -> None:
-            if window.should_refresh_snapshot():
-                try:
-                    snapshot = build_snapshot(context)
-                except Exception as exc:
-                    snapshot = ParsedSession(status="error", error=str(exc))
-                window.update_display(snapshot)
+    try:
+        with HudInstanceLock():
+            context = build_runtime_context(args)
             try:
-                window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
-            except Exception:
-                return
+                try:
+                    window = TokenHudWindow(compact=args.compact)
+                except Exception as exc:
+                    print(
+                        f"codex-usage-hud: unable to open Tkinter HUD: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
 
-        refresh()
-        window.run()
-        return 0
-    finally:
-        context.close()
+                def refresh() -> None:
+                    if window.should_refresh_snapshot():
+                        try:
+                            snapshot = build_snapshot(context)
+                        except Exception as exc:
+                            snapshot = ParsedSession(status="error", error=str(exc))
+                        window.update_display(snapshot)
+                    try:
+                        window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
+                    except Exception:
+                        return
+
+                refresh()
+                window.run()
+                return 0
+            finally:
+                context.close()
+    except HudAlreadyRunningError as exc:
+        print(f"codex-usage-hud: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
