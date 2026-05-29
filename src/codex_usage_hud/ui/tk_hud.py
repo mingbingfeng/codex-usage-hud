@@ -22,16 +22,19 @@ TOP_DOCK_TOP = 42
 TOP_DOCK_LEFT = 456
 TOP_DOCK_RIGHT = 224
 TOP_DOCK_HEIGHT = 36
-TOP_DOCK_EXPANDED_HEIGHT = 285
+TOP_DOCK_EXPANDED_HEIGHT = 390
 TOP_DOCK_MIN_WIDTH = 1
 TOP_DOCK_INTERACTIVE_MIN_WIDTH = 120
 TOP_DOCK_EXPANDED_INTERACTIVE_MIN_WIDTH = 220
+TOP_DOCK_EXPANDED_INTERACTIVE_MIN_HEIGHT = 240
 TOP_ANCHOR_TOP = 38
 TOP_ANCHOR_LEFT_RATIO = 0.155
 TOP_ANCHOR_RIGHT_RATIO = 0.14
 TOP_ANCHOR_LEFT_MIN = 154
 TOP_ANCHOR_RIGHT_MIN = 172
 TOP_ANCHOR_MIN_WIDTH = 320
+TOP_EXPANDED_STACK_WIDTH = 560
+TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额  ~ 估算"
 
 REQUEST_DOCK_BOTTOM = 28
 REQUEST_DOCK_LEFT = 520
@@ -42,6 +45,7 @@ REQUEST_DOCK_EXPANDED_HEIGHT = 180
 REQUEST_DOCK_MIN_WIDTH = 1
 REQUEST_DOCK_INTERACTIVE_MIN_WIDTH = 120
 REQUEST_DOCK_EXPANDED_INTERACTIVE_MIN_WIDTH = 220
+REQUEST_DOCK_EXPANDED_INTERACTIVE_MIN_HEIGHT = 120
 REQUEST_ANCHOR_BOTTOM = 36
 REQUEST_ANCHOR_LEFT_RATIO = 0.30
 REQUEST_ANCHOR_RIGHT_RATIO = 0.28
@@ -58,6 +62,7 @@ MARQUEE_INTERVAL_MS = 30
 COUNTER_ANIMATION_MS = 360
 COUNTER_STEP_MS = 30
 NUMERIC_TOKEN_RE = re.compile(r"\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?")
+LONG_DISPLAY_TOKEN_RE = re.compile(r"[^\s\u4e00-\u9fff，。；、：！？（）]+")
 HUD_BG = "#10161D"
 HUD_PANEL_BG = "#141B24"
 HUD_HEADER_BG = "#202833"
@@ -138,6 +143,7 @@ class WindowPlacement:
     absolute_x: int | None = None
     absolute_y: int | None = None
     width: int | None = None
+    height: int | None = None
     width_ratio: float | None = None
     anchor_x_ratio: float | None = None
     anchor_y_ratio: float | None = None
@@ -157,6 +163,7 @@ class WindowPlacement:
             absolute_x=_optional_int(value.get("absolute_x")),
             absolute_y=_optional_int(value.get("absolute_y")),
             width=_optional_int(value.get("width")),
+            height=_optional_int(value.get("height")),
             width_ratio=_optional_float(value.get("width_ratio")),
             anchor_x_ratio=_optional_float(value.get("anchor_x_ratio")),
             anchor_y_ratio=_optional_float(value.get("anchor_y_ratio")),
@@ -174,6 +181,7 @@ class WindowPlacement:
             "absolute_x": self.absolute_x,
             "absolute_y": self.absolute_y,
             "width": self.width,
+            "height": self.height,
             "width_ratio": self.width_ratio,
             "anchor_x_ratio": self.anchor_x_ratio,
             "anchor_y_ratio": self.anchor_y_ratio,
@@ -1460,6 +1468,20 @@ def _compact(value: Any, limit: int = 120) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def _wrap_long_display_tokens(value: Any, chunk: int = 24) -> str:
+    text = str(value or "")
+
+    def split_token(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if len(token) <= chunk:
+            return token
+        return "\n".join(
+            token[index : index + chunk] for index in range(0, len(token), chunk)
+        )
+
+    return LONG_DISPLAY_TOKEN_RE.sub(split_token, text)
+
+
 def _display_tokens(
     snapshot: ParsedSession,
 ) -> tuple[int | None, bool, int | None, bool, int | None, bool, int | None, bool]:
@@ -1797,12 +1819,17 @@ class TokenHudWindow:
         self._resize_target = ""
         self._resize_window: tk.Toplevel | tk.Tk | None = None
         self._resize_start_x = 0
+        self._resize_start_y = 0
         self._resize_start_width = 0
+        self._resize_start_height = 0
         self._press_at: tuple[int, int] | None = None
         self._press_target = ""
         self._top_manual_position: tuple[int, int] | None = None
         self._request_manual_position: tuple[int, int] | None = None
-        self._last_geometry_clamp: dict[str, tuple[int, int, int, int, int, int, str]] = {}
+        self._last_geometry_clamp: dict[
+            str,
+            tuple[int, int, int, int, int, int, int, int, str],
+        ] = {}
         self._last_budget_log_signature: tuple[int, int, int, str, str] | None = None
         self._snapshot = ParsedSession(status="waiting")
 
@@ -1851,7 +1878,7 @@ class TokenHudWindow:
     ) -> tk.Label:
         label = tk.Label(
             parent,
-            text="⇆",
+            text="⇲",
             bg=str(parent.cget("bg")),
             fg="#B8C7DE",
             font=("Microsoft YaHei UI", 9, "bold"),
@@ -1863,7 +1890,7 @@ class TokenHudWindow:
             "<ButtonPress-1>",
             lambda event, t=target, w=window: self._start_resize(event, t, w),
         )
-        label.bind("<B1-Motion>", self._resize_window_width)
+        label.bind("<B1-Motion>", self._resize_window_size)
         label.bind("<ButtonRelease-1>", self._finish_resize)
         return label
 
@@ -1932,41 +1959,32 @@ class TokenHudWindow:
         )
         self.top_labels["session"].pack(side="left", fill="x", expand=True, padx=(12, 0))
 
-        scroll_host = tk.Frame(frame, bg=HUD_BG)
-        scroll_host.pack(fill="both", expand=True)
+        body = tk.Frame(frame, bg=HUD_BG)
+        body.pack(fill="both", expand=True)
+        scrollbar = tk.Scrollbar(
+            body,
+            orient="vertical",
+            bg=HUD_HEADER_BG,
+            troughcolor=HUD_BG,
+            activebackground=HUD_DIVIDER,
+            width=9,
+            relief="flat",
+            borderwidth=0,
+            elementborderwidth=0,
+            highlightthickness=0,
+        )
         canvas = tk.Canvas(
-            scroll_host,
+            body,
             bg=HUD_BG,
             highlightthickness=0,
             borderwidth=0,
-            height=1,
-            xscrollincrement=8,
+            yscrollcommand=scrollbar.set,
         )
-        canvas.pack(side="top", fill="both", expand=True)
+        scrollbar.configure(command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
         content = tk.Frame(canvas, bg=HUD_BG)
         content_window = canvas.create_window((0, 0), window=content, anchor="nw")
-
-        def sync_top_scroll_region(event: tk.Event[tk.Misc]) -> None:
-            del event
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def sync_top_canvas_width(event: tk.Event[tk.Misc]) -> None:
-            content.update_idletasks()
-            canvas.itemconfigure(
-                content_window,
-                width=max(int(event.width), content.winfo_reqwidth()),
-            )
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        canvas.bind("<Configure>", sync_top_canvas_width)
-        content.bind("<Configure>", sync_top_scroll_region)
-        content.columnconfigure(0, weight=1, minsize=382)
-        content.columnconfigure(1, weight=0, minsize=226)
-        content.rowconfigure(0, weight=1)
-        left = tk.Frame(content, bg=HUD_BG)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        right = tk.Frame(content, bg=HUD_PANEL_BG, padx=8, pady=5)
-        right.grid(row=0, column=1, sticky="nsew")
 
         def section(parent: tk.Misc, text: str, *, bg: str = HUD_BG) -> None:
             tk.Label(
@@ -2000,8 +2018,19 @@ class TokenHudWindow:
                 bg=bg,
                 fg=fg,
                 font=font,
-                wraplength=0,
+                wraplength=300,
             )
+
+            def sync_label_wrap(event: tk.Event[tk.Misc], widget: tk.Label = label) -> None:
+                wraplength = max(96, int(event.width) - 4)
+                try:
+                    current = int(float(str(widget.cget("wraplength"))))
+                except (tk.TclError, TypeError, ValueError):
+                    current = -1
+                if current != wraplength:
+                    widget.configure(wraplength=wraplength)
+
+            label.bind("<Configure>", sync_label_wrap, add="+")
             if key == "slow":
                 setattr(label, "_hud_handle", True)
                 label.bind("<Button-1>", self._copy_slowest_tool_command)
@@ -2011,6 +2040,64 @@ class TokenHudWindow:
             label.pack(fill="x", pady=pady)
             self.top_labels[key] = label
             return label
+
+        left = tk.Frame(content, bg=HUD_BG)
+        right = tk.Frame(content, bg=HUD_PANEL_BG, padx=8, pady=5)
+
+        def arrange_top_content(width: int) -> None:
+            for column in range(2):
+                content.columnconfigure(column, weight=0, minsize=0)
+            content.rowconfigure(0, weight=0)
+            content.rowconfigure(1, weight=0)
+            if width < TOP_EXPANDED_STACK_WIDTH:
+                left.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+                right.grid(row=1, column=0, sticky="ew", padx=0, pady=(7, 0))
+                content.columnconfigure(0, weight=1, minsize=max(1, width))
+                return
+            side_width = min(260, max(230, int(width * 0.37)))
+            left_width = max(1, width - side_width - 12)
+            left.grid(row=0, column=0, sticky="nsew", padx=(0, 12), pady=0)
+            right.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
+            content.columnconfigure(0, weight=1, minsize=left_width)
+            content.columnconfigure(1, weight=0, minsize=side_width)
+            content.rowconfigure(0, weight=1)
+
+        def sync_top_scroll_region(event: tk.Event[tk.Misc]) -> None:
+            del event
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def sync_top_canvas_width(event: tk.Event[tk.Misc]) -> None:
+            width = max(1, int(event.width))
+            canvas.itemconfigure(content_window, width=width)
+            arrange_top_content(width)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def scroll_top_body(event: tk.Event[tk.Misc]) -> str | None:
+            units = 0
+            button = getattr(event, "num", None)
+            if button == 4:
+                units = -3
+            elif button == 5:
+                units = 3
+            else:
+                delta = int(getattr(event, "delta", 0) or 0)
+                if delta:
+                    units = (-1 if delta > 0 else 1) * max(1, abs(delta) // 120)
+            if units:
+                canvas.yview_scroll(units, "units")
+                return "break"
+            return None
+
+        def bind_top_scroll(widget: tk.Misc) -> None:
+            widget.bind("<MouseWheel>", scroll_top_body, add="+")
+            widget.bind("<Button-4>", scroll_top_body, add="+")
+            widget.bind("<Button-5>", scroll_top_body, add="+")
+            for child in widget.winfo_children():
+                bind_top_scroll(child)
+
+        canvas.bind("<Configure>", sync_top_canvas_width)
+        content.bind("<Configure>", sync_top_scroll_region)
+        arrange_top_content(600)
 
         section(left, "实时请求")
         dynamic_label(
@@ -2044,14 +2131,17 @@ class TokenHudWindow:
             font=("Microsoft YaHei UI", 8),
             pady=(0, 4),
         )
+
+        section(right, "提醒", bg=HUD_PANEL_BG)
         dynamic_label(
             "warnings",
-            left,
+            right,
             fg="#FFB86B",
             font=("Microsoft YaHei UI", 8),
-            pady=(0, 0),
+            bg=HUD_PANEL_BG,
+            pady=(0, 5),
         )
-
+        divider(right, bg=HUD_PANEL_BG)
         section(right, "等待", bg=HUD_PANEL_BG)
         dynamic_label(
             "slow",
@@ -2079,6 +2169,17 @@ class TokenHudWindow:
             bg=HUD_PANEL_BG,
             pady=(0, 0),
         )
+        divider(right, bg=HUD_PANEL_BG)
+        section(right, "符号说明", bg=HUD_PANEL_BG)
+        dynamic_label(
+            "legend",
+            right,
+            fg="#C7D4E4",
+            font=("Microsoft YaHei UI", 8),
+            bg=HUD_PANEL_BG,
+            pady=(0, 0),
+        )
+        bind_top_scroll(content)
 
     def _rebuild_request_ui(self) -> None:
         for child in self.request_root.winfo_children():
@@ -2269,6 +2370,7 @@ class TokenHudWindow:
         self._resize_target = target
         self._resize_window = window
         self._resize_start_x = event.x_root
+        self._resize_start_y = event.y_root
         self._resize_start_width = max(
             self._interactive_min_width(
                 target,
@@ -2276,25 +2378,42 @@ class TokenHudWindow:
             ),
             window.winfo_width(),
         )
+        self._resize_start_height = max(
+            self._interactive_min_height(
+                target,
+                self.top_expanded if target == "top" else self.request_expanded,
+            ),
+            window.winfo_height(),
+        )
         _HUD_GEOMETRY_LOGGER.info(
-            "resize_start target=%s x=%s y=%s width=%s",
+            "resize_start target=%s x=%s y=%s width=%s height=%s",
             target,
             window.winfo_x(),
             window.winfo_y(),
             window.winfo_width(),
+            window.winfo_height(),
         )
         return "break"
 
-    def _resize_window_width(self, event: Any) -> str:
+    def _resize_window_size(self, event: Any) -> str:
         if self._resize_window is None:
             return "break"
         dx = event.x_root - self._resize_start_x
+        dy = event.y_root - self._resize_start_y
+        expanded = (
+            self.top_expanded
+            if self._resize_target == "top"
+            else self.request_expanded
+        )
         min_width = self._interactive_min_width(
             self._resize_target,
-            self.top_expanded if self._resize_target == "top" else self.request_expanded,
+            expanded,
         )
+        min_height = self._interactive_min_height(self._resize_target, expanded)
         width = max(min_width, self._resize_start_width + dx)
-        height = max(1, self._resize_window.winfo_height())
+        height = self._resize_window.winfo_height()
+        if expanded:
+            height = max(min_height, self._resize_start_height + dy)
         x = self._resize_window.winfo_x()
         y = self._resize_window.winfo_y()
         self._resize_window.geometry(f"{width}x{height}+{x}+{y}")
@@ -2309,6 +2428,7 @@ class TokenHudWindow:
         if target and window is not None:
             self._remember_window_position(target, window, reason="resize")
             self._remember_window_width(target, window, reason="resize")
+            self._remember_window_height(target, window, reason="resize")
             self._save_settings()
             self._apply_geometry()
         return "break"
@@ -2446,6 +2566,11 @@ class TokenHudWindow:
             rect,
             expanded,
         )
+        placement = self._placement(target)
+        default_height = height
+        height = self._window_height(target, expanded, placement)
+        if target != "top" and height != default_height:
+            legacy_y -= height - default_height
         anchor = self._target_anchor(
             target,
             rect,
@@ -2455,7 +2580,6 @@ class TokenHudWindow:
             legacy_width,
             height,
         )
-        placement = self._placement(target)
         has_anchor_position = self._has_anchor_position(placement, anchor)
         has_width_ratio = (
             placement.width_ratio is not None
@@ -2504,14 +2628,35 @@ class TokenHudWindow:
         original_x = x
         original_y = y
         original_width = width
+        original_height = height
         x = max(min_x, min(x, max_x))
         min_y = rect.top + 8
+        max_height = max(
+            self._interactive_min_height(target, expanded),
+            rect.bottom - min_y - 8,
+        )
+        height = min(height, max_height)
         max_y = max(min_y, rect.bottom - height - 8)
         y = max(min_y, min(y, max_y))
         max_width = max(1, rect.right - x - 12)
         width = max(1, min(max(min_width, width), max_width))
-        if x != original_x or y != original_y or width != original_width:
-            signature = (original_x, x, original_y, y, original_width, width, anchor.source)
+        if (
+            x != original_x
+            or y != original_y
+            or width != original_width
+            or height != original_height
+        ):
+            signature = (
+                original_x,
+                x,
+                original_y,
+                y,
+                original_width,
+                width,
+                original_height,
+                height,
+                anchor.source,
+            )
             should_log = self._last_geometry_clamp.get(target) != signature
             self._last_geometry_clamp[target] = signature
         else:
@@ -2520,7 +2665,7 @@ class TokenHudWindow:
         if should_log:
             _HUD_GEOMETRY_LOGGER.info(
                 "geometry_clamp target=%s source=%s x=%s->%s y=%s->%s width=%s->%s "
-                "anchor=(%s,%s,%s,%s)",
+                "height=%s->%s anchor=(%s,%s,%s,%s)",
                 target,
                 anchor.source,
                 original_x,
@@ -2529,6 +2674,8 @@ class TokenHudWindow:
                 y,
                 original_width,
                 width,
+                original_height,
+                height,
                 anchor.left,
                 anchor.top,
                 anchor.right,
@@ -2587,6 +2734,35 @@ class TokenHudWindow:
             else REQUEST_DOCK_INTERACTIVE_MIN_WIDTH
         )
 
+    @staticmethod
+    def _interactive_min_height(target: str, expanded: bool) -> int:
+        if target == "top":
+            return (
+                TOP_DOCK_EXPANDED_INTERACTIVE_MIN_HEIGHT
+                if expanded
+                else TOP_DOCK_HEIGHT
+            )
+        return (
+            REQUEST_DOCK_EXPANDED_INTERACTIVE_MIN_HEIGHT
+            if expanded
+            else REQUEST_DOCK_HEIGHT
+        )
+
+    def _window_height(
+        self,
+        target: str,
+        expanded: bool,
+        placement: WindowPlacement | None = None,
+    ) -> int:
+        if target == "top":
+            default = TOP_DOCK_EXPANDED_HEIGHT if expanded else TOP_DOCK_HEIGHT
+        else:
+            default = REQUEST_DOCK_EXPANDED_HEIGHT if expanded else REQUEST_DOCK_HEIGHT
+        if not expanded:
+            return default
+        custom = (placement or self._placement(target)).height
+        return max(self._interactive_min_height(target, expanded), custom or default)
+
     def _apply_free_defaults(self, keep_existing: bool = False) -> None:
         screen_width = self.root.winfo_screenwidth()
         top_width, top_height = self._top_size()
@@ -2632,7 +2808,7 @@ class TokenHudWindow:
         )
         return (
             width,
-            TOP_DOCK_EXPANDED_HEIGHT if expanded else TOP_DOCK_HEIGHT,
+            self._window_height("top", expanded, self.settings.top),
         )
 
     def _request_size(self) -> tuple[int, int]:
@@ -2642,7 +2818,7 @@ class TokenHudWindow:
                 self._interactive_min_width("request", expanded),
                 self.settings.request.width or REQUEST_DOCK_WIDTH,
             ),
-            REQUEST_DOCK_EXPANDED_HEIGHT if expanded else REQUEST_DOCK_HEIGHT,
+            self._window_height("request", expanded, self.settings.request),
         )
 
     def _placement(self, target: str) -> WindowPlacement:
@@ -2760,6 +2936,29 @@ class TokenHudWindow:
                 reason,
                 width,
             )
+
+    def _remember_window_height(
+        self,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+        *,
+        reason: str,
+    ) -> None:
+        expanded = self.top_expanded if target == "top" else self.request_expanded
+        if not expanded:
+            return
+        placement = self._placement(target)
+        height = max(
+            self._interactive_min_height(target, expanded),
+            int(window.winfo_height()),
+        )
+        placement.height = height
+        _HUD_GEOMETRY_LOGGER.info(
+            "height_saved target=%s reason=%s height=%s",
+            target,
+            reason,
+            height,
+        )
 
     def _save_settings(self) -> None:
         self.settings_store.save(self.settings)
@@ -2890,6 +3089,7 @@ class TokenHudWindow:
                 f"{_activity_label(snapshot.activity.kind)}："
                 f"{_compact(snapshot.activity.detail, 135)}"
             ),
+            "legend": TOKEN_LEGEND_TEXT,
             "slow": self._format_slow_panel(snapshot),
             "gap": self._format_gap_panel(snapshot),
             "status": (
@@ -2900,7 +3100,7 @@ class TokenHudWindow:
         for key, text in values.items():
             label = self.top_labels.get(key)
             if label is not None:
-                label.configure(text=text)
+                label.configure(text=_wrap_long_display_tokens(text))
                 if key == "slow":
                     copyable = _copyable_tool_command(snapshot) is not None
                     label.configure(

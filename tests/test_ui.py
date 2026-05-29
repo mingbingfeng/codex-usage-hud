@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import tkinter as tk
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +51,7 @@ from codex_usage_hud.ui.tk_hud import (
     HudSettingsStore,
     HudAnchor,
     AutoScrollLabel,
+    TOKEN_LEGEND_TEXT,
     TokenHudWindow,
     WindowPlacement,
     WindowRect,
@@ -144,6 +146,13 @@ class _FakeUsageParser:
         return UsageSummary(tokens=start.day)
 
 
+def _walk_widgets(widget: tk.Misc) -> list[tk.Misc]:
+    widgets = [widget]
+    for child in widget.winfo_children():
+        widgets.extend(_walk_widgets(child))
+    return widgets
+
+
 class AttachedHudGeometryTests(unittest.TestCase):
     def test_calculate_places_hud_inside_top_right_corner(self) -> None:
         rect = WindowRect(left=100, top=50, right=1100, bottom=850)
@@ -190,7 +199,7 @@ class OriginalDockGeometryTests(unittest.TestCase):
         expanded = geometry.calculate(rect, expanded=True)
 
         self.assertEqual(collapsed, (556, 92, 520, 36))
-        self.assertEqual(expanded, (556, 92, 520, 285))
+        self.assertEqual(expanded, (556, 92, 520, TOP_DOCK_EXPANDED_HEIGHT))
 
     def test_bottom_request_dock_uses_original_offsets_and_fixed_width(self) -> None:
         rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -465,6 +474,7 @@ class HudSettingsStoreTests(unittest.TestCase):
                     absolute_x=900,
                     absolute_y=50,
                     width=640,
+                    height=390,
                     width_ratio=0.75,
                     anchor_x_ratio=0.25,
                     anchor_y_ratio=0.5,
@@ -476,6 +486,7 @@ class HudSettingsStoreTests(unittest.TestCase):
                     absolute_x=920,
                     absolute_y=790,
                     width=420,
+                    height=210,
                     width_ratio=1.1,
                     anchor_x_ratio=0.4,
                     anchor_y_ratio=0.0,
@@ -489,12 +500,14 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded.top.relative_x, 460)
         self.assertEqual(loaded.top.relative_y, 44)
         self.assertEqual(loaded.top.width, 640)
+        self.assertEqual(loaded.top.height, 390)
         self.assertEqual(loaded.top.width_ratio, 0.75)
         self.assertEqual(loaded.top.anchor_x_ratio, 0.25)
         self.assertEqual(loaded.top.anchor_y_ratio, 0.5)
         self.assertEqual(loaded.top.anchor_source, "geometry")
         self.assertEqual(loaded.request.relative_bottom, 28)
         self.assertEqual(loaded.request.width, 420)
+        self.assertEqual(loaded.request.height, 210)
         self.assertEqual(loaded.request.width_ratio, 1.1)
         self.assertEqual(loaded.request.anchor_x_ratio, 0.4)
         self.assertEqual(loaded.request.anchor_y_ratio, 0.0)
@@ -724,6 +737,118 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             _, _, width, _ = window._attached_geometry("top", rect, False)
 
             self.assertGreaterEqual(width, 120)
+        finally:
+            window._close()
+
+    def test_expanded_height_can_be_saved_and_reused(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.top_expanded = True
+            fake = _FakeWindow(x=20, y=20, width=420, height=455)
+
+            window._remember_window_height("top", fake, reason="test-resize")
+
+            self.assertEqual(window.settings.top.height, 455)
+            self.assertEqual(window._top_size()[1], 455)
+        finally:
+            window._close()
+
+    def test_attached_geometry_uses_saved_expanded_height(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.settings.top.height = 430
+
+            _, _, _, height = window._attached_geometry("top", rect, True)
+
+            self.assertEqual(height, 430)
+        finally:
+            window._close()
+
+    def test_top_expanded_body_wraps_and_scrolls_long_content(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            window.root.geometry(f"360x{TOP_DOCK_EXPANDED_HEIGHT}+20+20")
+            now = datetime(2026, 5, 29, 12, 56, 25).astimezone()
+            snapshot = ParsedSession(
+                session_id="1704a2cec6fd",
+                status="live",
+                refreshed_at=now,
+                last_event_time=now,
+                line_count=115,
+                token_events=11,
+                today_tokens=41_100_000,
+                today_cost_usd=39.31,
+                week_tokens=159_500_000,
+                week_cost_usd=138.23,
+                week_before_today_tokens=118_400_000,
+                week_before_today_cost_usd=98.92,
+                day_start=now,
+                week_start=now,
+                budget_warnings=[
+                    "日额度已用 39.31/100 USD，接近本次高峰后仍需完整显示这条很长的提醒内容"
+                ],
+            )
+            snapshot.confirmed.cumulative_total = 451_844
+            snapshot.confirmed.cumulative_input = 429_843
+            snapshot.confirmed.cumulative_cached = 374_400
+            snapshot.confirmed.cumulative_output = 22_001
+            snapshot.confirmed.cumulative_reasoning = 16_612
+            snapshot.request.input_tokens = 43_000
+            snapshot.request.cached_tokens = 41_000
+            snapshot.request.output_tokens = 41_000
+            snapshot.request.reasoning_tokens = 100
+            snapshot.request.total_tokens = 43_000
+            snapshot.request.cost_usd = 0.004
+            snapshot.request.estimated = True
+            snapshot.activity.kind = "agent"
+            snapshot.activity.detail = (
+                "我现在提交这次发布资产，提交说明会按仓库的 Lore 协议来写，"
+                "这是一段足够长的当前活动内容，用来证明布局不会吞掉信息。"
+            )
+            snapshot.slow.slowest_tool = (
+                "2.6s shell_command: pytest tests/test_ui.py --very-long-option-name "
+                "with extra diagnostic context"
+            )
+            snapshot.slow.slowest_user_wait = "无（本任务无用户确认）"
+            snapshot.slow.longest_gap = "12.5s（模型启动）"
+            snapshot.slow.current_gap = "距最后事件 0.4s"
+            snapshot.slow.current_gap_active = True
+
+            window.update_display(snapshot)
+            window.root.update_idletasks()
+
+            canvases = [
+                widget
+                for widget in _walk_widgets(window.root)
+                if isinstance(widget, tk.Canvas) and widget.winfo_toplevel() == window.root
+            ]
+            self.assertEqual(len(canvases), 1)
+            canvas = canvases[0]
+            scroll_region = canvas.bbox("all")
+
+            self.assertIsNotNone(scroll_region)
+            self.assertGreater(scroll_region[3], canvas.winfo_height())
+            self.assertEqual(window.top_labels["legend"].cget("text"), TOKEN_LEGEND_TEXT)
+            for key in ("budget", "activity", "warnings", "legend", "slow", "gap", "status"):
+                label = window.top_labels[key]
+                wraplength = int(float(str(label.cget("wraplength"))))
+                self.assertGreaterEqual(wraplength, 96)
+                self.assertLessEqual(wraplength, max(96, label.winfo_width()))
+            self.assertLess(
+                window.top_labels["warnings"].winfo_rooty(),
+                window.top_labels["slow"].winfo_rooty(),
+            )
+            self.assertGreater(
+                window.top_labels["legend"].winfo_rooty(),
+                window.top_labels["status"].winfo_rooty(),
+            )
+
+            before = canvas.yview()
+            canvas.yview_moveto(1.0)
+            after = canvas.yview()
+            self.assertGreater(after[0], before[0])
         finally:
             window._close()
 
