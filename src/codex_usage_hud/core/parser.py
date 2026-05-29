@@ -369,6 +369,7 @@ class ParsedSession:
 
     session_path: Path | None = None
     session_id: str = "n/a"
+    session_title: str = ""
     status: str = "starting"
     error: str = ""
     refreshed_at: datetime = field(default_factory=lambda: datetime.now().astimezone())

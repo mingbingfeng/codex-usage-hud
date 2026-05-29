@@ -34,6 +34,7 @@ TOP_ANCHOR_LEFT_MIN = 154
 TOP_ANCHOR_RIGHT_MIN = 172
 TOP_ANCHOR_MIN_WIDTH = 320
 TOP_EXPANDED_STACK_WIDTH = 560
+TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额  ~ 估算"
 
 REQUEST_DOCK_BOTTOM = 28
@@ -1482,6 +1483,11 @@ def _wrap_long_display_tokens(value: Any, chunk: int = 24) -> str:
     return LONG_DISPLAY_TOKEN_RE.sub(split_token, text)
 
 
+def _top_expanded_header_title(snapshot: ParsedSession) -> str:
+    title = _compact(snapshot.session_title, 72)
+    return title or TOP_EXPANDED_HEADER_FALLBACK
+
+
 def _display_tokens(
     snapshot: ParsedSession,
 ) -> tuple[int | None, bool, int | None, bool, int | None, bool, int | None, bool]:
@@ -1940,14 +1946,15 @@ class TokenHudWindow:
         )
         close.pack(side="right", padx=(4, 0))
         self._resize_handle(header, "top", self.root).pack(side="right", padx=(6, 0))
-        tk.Label(
+        self.top_labels["title"] = tk.Label(
             header,
-            text="Codex 会话 / 预算",
+            text=TOP_EXPANDED_HEADER_FALLBACK,
             anchor="w",
             bg=HUD_HEADER_BG,
             fg=HUD_TEXT,
             font=("Microsoft YaHei UI", 9, "bold"),
-        ).pack(side="left")
+        )
+        self.top_labels["title"].pack(side="left")
         self.top_labels["session"] = tk.Label(
             header,
             text="",
@@ -3052,6 +3059,9 @@ class TokenHudWindow:
         snapshot = self._snapshot
         confirmed = snapshot.confirmed
         session_cost = _session_cost(snapshot)
+        title_label = self.top_labels.get("title")
+        if title_label is not None:
+            title_label.configure(text=_top_expanded_header_title(snapshot))
         bar = self.top_labels.get("bar")
         if bar is not None:
             text = (

@@ -626,6 +626,11 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
             sse_tracker=context.sse_tracker,
         )
     snapshot.selection_source = selection_source
+    if context.active_session_tracker is not None and session_path is not None:
+        snapshot.session_title = context.active_session_tracker.title_for_session(
+            session_path,
+            snapshot.session_id,
+        )
 
     day_start, week_start = current_budget_windows()
     today_total, week_total = context.usage_cache.summarize(

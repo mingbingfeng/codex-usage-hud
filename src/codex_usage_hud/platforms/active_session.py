@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .base import BasePlatform
+
+_LOGGER = logging.getLogger("codex_usage_hud.active_session")
+_LOGGER.addHandler(logging.NullHandler())
 
 
 def compact_text(value: Any, limit: int = 28) -> str:
@@ -43,6 +48,181 @@ def find_session_file(session_id: str, sessions_root: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+class RealtimeSessionWatcher:
+    """Stream active Codex conversation titles with event-first fallback paths."""
+
+    def __init__(
+        self,
+        platform: BasePlatform,
+        poll_ms: int,
+        on_title: Callable[[str, str, float], None],
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        self.platform = platform
+        self.poll_ms = max(250, int(poll_ms))
+        self.on_title = on_title
+        self.stop_event = stop_event or threading.Event()
+        self.process: subprocess.Popen[str] | None = None
+        self.primary_thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
+        self._last_emitted = ""
+        self._last_event_at = 0.0
+        self._has_realtime_signal = False
+        self._emit_lock = threading.Lock()
+
+    def start(self) -> bool:
+        """Start the best available realtime watcher."""
+        if self.primary_thread is not None or self.process is not None:
+            return True
+
+        self.stop_event.clear()
+        if self.platform.supports_active_title_events():
+            self.primary_thread = self._start_thread(
+                self._event_loop,
+                "codex-hud-active-events",
+            )
+            if self.platform.supports_active_title_polling():
+                self._start_thread(
+                    self._poll_backstop_loop,
+                    "codex-hud-active-poll-backstop",
+                )
+            return True
+
+        if self.platform.supports_active_title_polling():
+            self.primary_thread = self._start_thread(
+                self._poll_loop,
+                "codex-hud-active-poll",
+            )
+            return True
+
+        return self._start_command_sidecar()
+
+    def close(self) -> None:
+        """Stop any background watcher threads or sidecar process."""
+        self.stop_event.set()
+        proc = self.process
+        self.process = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+        current = threading.current_thread()
+        for thread in list(self._threads):
+            if thread is not current and thread.is_alive():
+                thread.join(timeout=0.5)
+        self._threads.clear()
+        self.primary_thread = None
+
+    def _start_thread(
+        self,
+        target: Callable[[], None],
+        name: str,
+    ) -> threading.Thread:
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        self._threads.append(thread)
+        thread.start()
+        return thread
+
+    def _start_command_sidecar(self) -> bool:
+        command = self.platform.build_active_title_command(self.poll_ms)
+        if not command:
+            return False
+
+        kwargs: dict[str, Any] = {}
+        if sys.platform.startswith("win"):
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **kwargs,
+            )
+        except OSError:
+            self.process = None
+            return False
+
+        self.primary_thread = self._start_thread(
+            self._read_loop,
+            "codex-hud-active-sidecar",
+        )
+        return True
+
+    def _event_loop(self) -> None:
+        try:
+            started = self.platform.watch_active_conversation_title(
+                self.stop_event,
+                lambda title: self._emit(title, "event"),
+            )
+        except Exception as exc:
+            _LOGGER.debug("active_session_event_stream_failed error=%s", exc)
+            started = False
+        if started or self.stop_event.is_set():
+            return
+        if self.platform.supports_active_title_polling():
+            self._poll_loop()
+
+    def _poll_backstop_loop(self) -> None:
+        backstop_seconds = max(1.0, (self.poll_ms / 1000.0) * 2.0)
+        if self.stop_event.wait(backstop_seconds):
+            return
+        delay = max(0.5, self.poll_ms / 1000.0)
+        while not self.stop_event.is_set():
+            if not self._has_realtime_signal and (
+                time.monotonic() - self._last_event_at >= backstop_seconds
+            ):
+                self._poll_once("poll-backstop")
+            self.stop_event.wait(delay)
+
+    def _poll_loop(self) -> None:
+        delay = max(250, self.poll_ms) / 1000.0
+        while not self.stop_event.is_set():
+            self._poll_once("poll")
+            self.stop_event.wait(delay)
+
+    def _poll_once(self, source: str) -> None:
+        try:
+            title = self.platform.get_active_conversation_title() or ""
+        except Exception as exc:
+            _LOGGER.debug("active_session_poll_failed error=%s", exc)
+            title = ""
+        self._emit(title, source)
+
+    def _read_loop(self) -> None:
+        proc = self.process
+        if proc is None or proc.stdout is None:
+            return
+
+        for line in proc.stdout:
+            if self.stop_event.is_set():
+                return
+            title = line.rstrip("\r\n")
+            if not title.startswith("TITLE\t"):
+                continue
+            self._emit(title[6:], "sidecar")
+
+    def _emit(self, title: str, source: str) -> None:
+        text = title.strip()
+        if not text:
+            return
+        detected_at = time.monotonic()
+        with self._emit_lock:
+            if text == self._last_emitted:
+                return
+            self._last_emitted = text
+            if source == "event":
+                self._last_event_at = detected_at
+                self._has_realtime_signal = True
+        self.on_title(text, source, detected_at)
+
+
 class ActiveSessionTracker:
     """Track the currently selected Codex conversation and map it to a JSONL path."""
 
@@ -65,53 +245,43 @@ class ActiveSessionTracker:
         self.latest_path: Path | None = None
         self.latest_source = "ui-waiting" if self.enabled else "activity"
         self._mapped_title = ""
+        self._title_cache_key: tuple[str, str] | None = None
+        self._title_cache_value = ""
         self._proc: subprocess.Popen[str] | None = None
         self._thread: threading.Thread | None = None
+        self._watcher: RealtimeSessionWatcher | None = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        self.latest_response_ms = 0.0
+        self.latest_event_source = ""
 
     def start(self) -> None:
         """Begin best-effort platform tracking for the selected Codex conversation."""
-        if not self.enabled or self._proc is not None or self._thread is not None:
+        if not self.enabled or self._watcher is not None:
             return
 
         self._stop_event.clear()
-        if self.platform.supports_active_title_polling():
-            self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-            self._thread.start()
-            return
-
-        command = self.platform.build_active_title_command(self.poll_ms)
-        if not command:
+        watcher = RealtimeSessionWatcher(
+            self.platform,
+            self.poll_ms,
+            self._handle_title_candidate,
+            stop_event=self._stop_event,
+        )
+        if not watcher.start():
             self.enabled = False
             self.latest_source = "activity"
             return
-
-        kwargs: dict[str, Any] = {}
-        if sys.platform.startswith("win"):
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-        try:
-            self._proc = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **kwargs,
-            )
-        except OSError:
-            self.enabled = False
-            self.latest_source = "activity"
-            return
-
-        self._thread = threading.Thread(target=self._read_loop, daemon=True)
-        self._thread.start()
+        self._watcher = watcher
+        self._proc = watcher.process
+        self._thread = watcher.primary_thread
 
     def close(self) -> None:
         """Stop the background title tracker process if one is running."""
         self._stop_event.set()
+        watcher = self._watcher
+        self._watcher = None
+        if watcher is not None:
+            watcher.close()
         proc = self._proc
         self._proc = None
         if proc is not None and proc.poll() is None:
@@ -200,6 +370,34 @@ class ActiveSessionTracker:
         path_text = str(row["rollout_path"] or "")
         return self._normalize_rollout_path(path_text)
 
+    def title_for_session(
+        self,
+        session_path: Path | None,
+        session_id: str = "",
+    ) -> str:
+        """Resolve the display title for the session currently shown in the HUD."""
+        session_key = (session_id or "", self._path_key(session_path))
+        with self._lock:
+            latest_title = self.latest_title.strip()
+            latest_path = self.latest_path
+        if latest_title and self._same_path(latest_path, session_path):
+            self._title_cache_key = session_key
+            self._title_cache_value = latest_title
+            return latest_title
+        if self._title_cache_key == session_key:
+            return self._title_cache_value
+
+        title = ""
+        if session_id:
+            title = self.title_from_session_index_id(session_id)
+            if not title:
+                title = self.title_from_thread_id(session_id)
+        if not title and session_path is not None:
+            title = self.title_from_rollout_path(session_path)
+        self._title_cache_key = session_key
+        self._title_cache_value = title
+        return title
+
     def path_from_session_index(self, title: str) -> Path | None:
         """Map a session title via ``session_index.jsonl`` before hitting SQLite."""
         if not self.session_index_path.exists():
@@ -222,6 +420,27 @@ class ActiveSessionTracker:
         if not best_id:
             return None
         return find_session_file(best_id, self.sessions_root)
+
+    def title_from_session_index_id(self, session_id: str) -> str:
+        """Look up the visible thread title for a known session id."""
+        if not session_id or not self.session_index_path.exists():
+            return ""
+        best_title = ""
+        try:
+            with self.session_index_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(item.get("id") or "") != session_id:
+                        continue
+                    title = str(item.get("thread_name") or "").strip()
+                    if title:
+                        best_title = title
+        except OSError:
+            return ""
+        return best_title
 
     def path_from_thread_id(self, thread_id: str) -> Path | None:
         """Resolve a known thread id to a local rollout JSONL path."""
@@ -248,47 +467,122 @@ class ActiveSessionTracker:
             return None
         return self._normalize_rollout_path(str(row[0] or ""))
 
-    def _read_loop(self) -> None:
-        proc = self._proc
-        if proc is None or proc.stdout is None:
-            return
-
-        for line in proc.stdout:
-            if self._stop_event.is_set():
-                return
-            title = line.rstrip("\r\n")
-            if not title.startswith("TITLE\t"):
-                continue
-            title = title[6:].strip()
-            if not title:
-                continue
-            with self._lock:
-                self.latest_title = title
-                if title != self._mapped_title:
-                    self.latest_path = None
-
-    def _poll_loop(self) -> None:
-        """Poll an in-process platform title probe without spawning PowerShell."""
-        delay = max(250, self.poll_ms) / 1000.0
-        last = ""
-        while not self._stop_event.is_set():
+    def title_from_thread_id(self, thread_id: str) -> str:
+        """Resolve a known thread id to its visible title via the state database."""
+        if not thread_id or not self.state_db.exists():
+            return ""
+        try:
+            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
             try:
-                title = self.platform.get_active_conversation_title() or ""
-            except Exception:
-                title = ""
-            title = title.strip()
-            if title and title != last:
-                last = title
-                with self._lock:
-                    self.latest_title = title
-                    if title != self._mapped_title:
-                        self.latest_path = None
-            self._stop_event.wait(delay)
+                row = con.execute(
+                    """
+                    select title
+                    from threads
+                    where id = ?
+                    order by archived asc, updated_at_ms desc, updated_at desc
+                    limit 1
+                    """,
+                    (thread_id,),
+                ).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return ""
+        if row is None:
+            return ""
+        return str(row[0] or "").strip()
+
+    def title_from_rollout_path(self, session_path: Path) -> str:
+        """Resolve a visible title using the rollout path stored in the state database."""
+        if not self.state_db.exists():
+            return ""
+        raw_path = str(session_path)
+        prefixed_path = raw_path if raw_path.startswith("\\\\?\\") else f"\\\\?\\{raw_path}"
+        try:
+            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    """
+                    select title
+                    from threads
+                    where rollout_path in (?, ?)
+                    order by archived asc, updated_at_ms desc, updated_at desc
+                    limit 1
+                    """,
+                    (raw_path, prefixed_path),
+                ).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return ""
+        if row is None:
+            return ""
+        return str(row[0] or "").strip()
+
+    def _handle_title_candidate(
+        self,
+        title: str,
+        source: str = "event",
+        detected_at: float | None = None,
+    ) -> None:
+        title = title.strip()
+        if not title:
+            return
+        detected = detected_at if detected_at is not None else time.monotonic()
+        previous_title = ""
+        previous_path: Path | None = None
+        with self._lock:
+            previous_title = self.latest_title
+            previous_path = self.latest_path
+
+        path = self.path_for_title(title)
+        if path is None and self.platform.supports_active_title_polling():
+            fallback_title = (self.platform.get_active_conversation_title() or "").strip()
+            if fallback_title and fallback_title != title:
+                fallback_path = self.path_for_title(fallback_title)
+                if fallback_path is not None:
+                    title = fallback_title
+                    path = fallback_path
+                    source = f"{source}+poll-confirm"
+        response_ms = (time.monotonic() - detected) * 1000.0
+        with self._lock:
+            self.latest_title = title
+            self.latest_path = path
+            self._mapped_title = title
+            self.latest_source = (
+                f"ui:{compact_text(title)}" if path is not None else "ui-unmatched"
+            )
+            self.latest_response_ms = response_ms
+            self.latest_event_source = source
+
+        if title != previous_title or path != previous_path:
+            _LOGGER.info(
+                "ACTIVE_SESSION_SWITCH source=%s matched=%s response_ms=%.1f title=%r",
+                source,
+                path is not None,
+                response_ms,
+                compact_text(title, 80),
+            )
 
     def _normalize_rollout_path(self, path_text: str) -> Path | None:
         text = path_text[4:] if path_text.startswith("\\\\?\\") else path_text
         path = Path(text)
         return path if path.exists() else None
+
+    @staticmethod
+    def _path_key(path: Path | None) -> str:
+        if path is None:
+            return ""
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+
+    @classmethod
+    def _same_path(cls, left: Path | None, right: Path | None) -> bool:
+        if left is None or right is None:
+            return False
+        return cls._path_key(left) == cls._path_key(right)
 
 
 class SessionPathResolver:

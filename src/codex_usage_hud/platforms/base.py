@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
+import threading
 
 
 class BasePlatform(ABC):
@@ -25,6 +27,19 @@ class BasePlatform(ABC):
 
     def supports_active_title_polling(self) -> bool:
         """Return whether this platform can poll the Codex title in this process."""
+        return False
+
+    def supports_active_title_events(self) -> bool:
+        """Return whether this platform can stream title changes without polling."""
+        return False
+
+    def watch_active_conversation_title(
+        self,
+        stop_event: threading.Event,
+        on_title: Callable[[str], None],
+    ) -> bool:
+        """Block while streaming active-title changes; return ``False`` on startup failure."""
+        del stop_event, on_title
         return False
 
     def get_active_conversation_title(self) -> str | None:

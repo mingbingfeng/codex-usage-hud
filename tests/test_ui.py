@@ -852,6 +852,27 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
+    def test_top_expanded_header_prefers_session_title_with_fallback(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            snapshot = ParsedSession(session_title="Ship the live session switch check")
+
+            window.update_display(snapshot)
+            self.assertEqual(
+                window.top_labels["title"].cget("text"),
+                "Ship the live session switch check",
+            )
+
+            snapshot.session_title = ""
+            window.update_display(snapshot)
+            self.assertEqual(
+                window.top_labels["title"].cget("text"),
+                "Codex 会话 / 预算",
+            )
+        finally:
+            window._close()
+
     def test_auto_scroll_label_updates_text_without_crashing(self) -> None:
         root = TokenHudWindow()
         try:
