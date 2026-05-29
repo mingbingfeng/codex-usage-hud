@@ -22,7 +22,7 @@ keywords = [
   "local-first privacy",
 ]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
@@ -35,11 +35,14 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Runa798/codex-usage-hud"
-Repository = "https://github.com/Runa798/codex-usage-hud"
-Documentation = "https://github.com/Runa798/codex-usage-hud/tree/main/docs"
-Issues = "https://github.com/Runa798/codex-usage-hud/issues"
-Description = "https://github.com/Runa798/codex-usage-hud#readme"
+Homepage = "https://github.com/mingbingfeng/codex-usage-hud"
+Repository = "https://github.com/mingbingfeng/codex-usage-hud"
+Documentation = "https://github.com/mingbingfeng/codex-usage-hud/tree/main/docs"
+Changelog = "https://github.com/mingbingfeng/codex-usage-hud/blob/main/CHANGELOG.md"
+Contributing = "https://github.com/mingbingfeng/codex-usage-hud/blob/main/CONTRIBUTING.md"
+Privacy = "https://github.com/mingbingfeng/codex-usage-hud/blob/main/docs/PRIVACY.md"
+Issues = "https://github.com/mingbingfeng/codex-usage-hud/issues"
+Description = "https://github.com/mingbingfeng/codex-usage-hud#readme"
 
 [project.scripts]
 codex-hud = "codex_usage_hud.cli:main"

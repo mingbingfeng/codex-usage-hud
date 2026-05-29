@@ -7,6 +7,24 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-29
+
+Smart Daemon Edition and repository polish for the current release line.
+
+### Added
+
+- Added Windows daemon mode for low-noise session tracking and auto-attach.
+- Added optional startup persistence paths in `install.bat`.
+- Added a single-file EXE build helper for local packaging.
+- Added a fuller README homepage structure with install, usage, release, and maintenance sections.
+- Added a top-level contributing guide so new contributors have a single entry point.
+
+### Changed
+
+- Synced the package version with the current `v0.2.0` tag.
+- Updated project metadata links to the current repository.
+- Aligned the release history entry points across README, changelog, and release note drafts.
+
 ## [0.1.0] - 2026-05-28
 
 First public alpha release. The project has moved from a single-file prototype
