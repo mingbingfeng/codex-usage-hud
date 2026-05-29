@@ -74,14 +74,69 @@ if errorlevel 1 goto install_failed
 
 if /I "%ACTIVE_VENV_PATH%"=="%PROJECT_VENV%" if exist "%PROJECT_VENV%\Scripts\activate.bat" call "%PROJECT_VENV%\Scripts\activate.bat" >nul 2>nul
 
+call :offer_startup
+
 color 0A
 echo.
 echo 安装成功！您现在可以在系统的任何终端直接输入 [codex-hud] 或 [codex-hud --once] 畅快使用！
+echo 守护模式可手动运行: codex-hud --daemon
 echo.
 color 07
 
 popd
 endlocal
+exit /b 0
+
+:offer_startup
+echo.
+echo 是否注册开机自启动守护进程？
+echo [Y] 启动文件夹（推荐，无需管理员权限）  [N] 暂不注册  [R] 注册表 Run
+choice /C YNR /N /M "请选择: "
+if errorlevel 3 goto register_run
+if errorlevel 2 exit /b 0
+if errorlevel 1 goto register_startup
+exit /b 0
+
+:resolve_daemon_python
+set "DAEMON_PYTHON=%ACTIVE_VENV_PATH%\Scripts\pythonw.exe"
+if exist "%DAEMON_PYTHON%" exit /b 0
+set "DAEMON_PYTHON=%ACTIVE_VENV_PATH%\Scripts\python.exe"
+if exist "%DAEMON_PYTHON%" exit /b 0
+set "DAEMON_PYTHON=%PYTHON_CALL%"
+exit /b 0
+
+:register_startup
+call :resolve_daemon_python
+if not defined APPDATA (
+    echo [WARN] 未检测到 APPDATA，无法写入启动文件夹；已跳过自启动注册。
+    exit /b 0
+)
+set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+set "STARTUP_SCRIPT=%STARTUP_DIR%\codex-usage-hud-daemon.vbs"
+if not exist "%STARTUP_DIR%" mkdir "%STARTUP_DIR%"
+if errorlevel 1 (
+    echo [WARN] 创建启动文件夹失败；已跳过自启动注册。
+    exit /b 0
+)
+set "CODEX_HUD_DAEMON_PYTHON=%DAEMON_PYTHON%"
+set "CODEX_HUD_STARTUP_SCRIPT=%STARTUP_SCRIPT%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[string][char]34; $cmd=$q + $env:CODEX_HUD_DAEMON_PYTHON + $q + ' -m codex_usage_hud --daemon'; $escaped=$cmd.Replace($q, $q + $q); $line='Set shell = CreateObject(' + $q + 'WScript.Shell' + $q + '): shell.Run ' + $q + $escaped + $q + ', 0, False'; Set-Content -LiteralPath $env:CODEX_HUD_STARTUP_SCRIPT -Encoding ASCII -Value $line"
+if errorlevel 1 (
+    echo [WARN] 写入启动脚本失败；已跳过自启动注册。
+    exit /b 0
+)
+echo 已注册启动文件夹自启动: %STARTUP_SCRIPT%
+exit /b 0
+
+:register_run
+call :resolve_daemon_python
+set "CODEX_HUD_DAEMON_PYTHON=%DAEMON_PYTHON%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[string][char]34; $cmd=$q + $env:CODEX_HUD_DAEMON_PYTHON + $q + ' -m codex_usage_hud --daemon'; Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'codex-usage-hud' -Value $cmd"
+if errorlevel 1 (
+    echo [WARN] 写入注册表 Run 失败；已跳过自启动注册。
+    exit /b 0
+)
+echo 已注册注册表自启动: HKCU\Software\Microsoft\Windows\CurrentVersion\Run\codex-usage-hud
 exit /b 0
 
 :pushd_failed

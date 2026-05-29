@@ -1734,9 +1734,17 @@ def _round_entry_widths(
 class TokenHudWindow:
     """Two-window HUD: top session/budget bar and bottom request bar."""
 
-    def __init__(self, compact: bool = False, follow_ms: int = FOLLOW_ACTIVE_MS) -> None:
+    def __init__(
+        self,
+        compact: bool = False,
+        follow_ms: int = FOLLOW_ACTIVE_MS,
+        hide_until_attached: bool = False,
+        tombstone_follow_ms: int = FOLLOW_TOMBSTONE_MS,
+    ) -> None:
         self.compact = compact
         self.follow_ms = max(16, int(follow_ms))
+        self.tombstone_follow_ms = max(50, int(tombstone_follow_ms))
+        self.hide_until_attached = bool(hide_until_attached)
         self.settings_store = HudSettingsStore()
         self.settings = self.settings_store.load()
         self._geometry_log_path = configure_hud_geometry_logging()
@@ -1814,6 +1822,9 @@ class TokenHudWindow:
         self._set_alpha(self.root, 0.94)
         self._set_alpha(self.request_root, 0.74)
         self._apply_free_defaults()
+        if self.hide_until_attached:
+            self._enter_tombstone("waiting")
+            self.sync_codex_window()
         self.root.after(self.follow_ms, self._follow_codex_window)
 
     def _move_handle(self, parent: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> tk.Label:
@@ -2313,17 +2324,23 @@ class TokenHudWindow:
         self._apply_geometry()
 
     def _follow_codex_window(self) -> None:
+        self.sync_codex_window()
+        self.root.after(self._next_follow_delay(), self._follow_codex_window)
+
+    def sync_codex_window(self) -> None:
+        """Synchronize HUD visibility and geometry with the current Codex window."""
         if self._move_target or self._resize_target:
-            self.root.after(self.follow_ms, self._follow_codex_window)
             return
         rect = self.locator.find()
         if rect is None:
-            self._enter_free_mode()
+            if self.hide_until_attached:
+                self._enter_tombstone("waiting")
+            else:
+                self._enter_free_mode()
         elif rect.minimized:
             self._hide_for_minimized()
         else:
             self._attach_to_rect(rect)
-        self.root.after(self._next_follow_delay(), self._follow_codex_window)
 
     def _attach_to_rect(self, rect: WindowRect) -> None:
         self._attached = True
@@ -2397,7 +2414,7 @@ class TokenHudWindow:
         return True
 
     def _next_follow_delay(self) -> int:
-        return FOLLOW_TOMBSTONE_MS if self._tombstoned else self.follow_ms
+        return self.tombstone_follow_ms if self._tombstoned else self.follow_ms
 
     def should_refresh_snapshot(self) -> bool:
         """Return whether parser refresh work should run for the visible HUD."""
@@ -2788,6 +2805,11 @@ class TokenHudWindow:
 
     def _close(self, event: object | None = None) -> str:
         del event
+        self.close()
+        return "break"
+
+    def close(self) -> None:
+        """Destroy both HUD windows and cancel Tk timers owned by the widgets."""
         try:
             self.request_root.destroy()
         except tk.TclError:
@@ -2796,7 +2818,6 @@ class TokenHudWindow:
             self.root.destroy()
         except tk.TclError:
             pass
-        return "break"
 
     def update_display(self, parsed_session: ParsedSession) -> None:
         """Refresh both HUD windows with the latest parsed session snapshot."""

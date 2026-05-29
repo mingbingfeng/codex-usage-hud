@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
+import logging
 import os
 import signal
 import sys
@@ -12,6 +14,13 @@ from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 
 from .core import JsonlSessionParser, ParsedSession, SseRequestStateMachine, UsageSummary
+from .daemon import (
+    CodexDaemonManager,
+    DEFAULT_DAEMON_POLL_MS,
+    ProcessListenerError,
+    configure_daemon_logging,
+    hide_console_window,
+)
 from .platforms import ActiveSessionTracker, SessionPathResolver, get_current_platform
 from .platforms.base import BasePlatform
 from .ui import TokenHudWindow
@@ -28,6 +37,7 @@ DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
 HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
+_LOGGER = logging.getLogger("codex_usage_hud.cli")
 
 
 class HudAlreadyRunningError(RuntimeError):
@@ -41,6 +51,16 @@ def configure_stdout() -> None:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except (OSError, ValueError):
             pass
+
+
+def _eprint(message: str) -> None:
+    """Print to stderr when a console stream exists."""
+    try:
+        stream = sys.stderr
+        if stream is not None and hasattr(stream, "write"):
+            print(message, file=stream)
+    except Exception:
+        pass
 
 
 def hud_runtime_dir() -> Path:
@@ -705,6 +725,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop the currently running HUD instance recorded by the local pid lock.",
     )
     parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help=(
+            "Run as a hidden Windows daemon: wait for Codex, show the HUD, "
+            "and exit when Codex closes."
+        ),
+    )
+    parser.add_argument(
         "--compact",
         action="store_true",
         help="Use compact output mode for CLI snapshots and the Tkinter HUD.",
@@ -742,6 +770,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Polling interval for tracking the currently selected Codex conversation. "
             f"Default: {DEFAULT_ACTIVE_SESSION_POLL_MS}."
+        ),
+    )
+    parser.add_argument(
+        "--daemon-poll-ms",
+        type=int,
+        default=DEFAULT_DAEMON_POLL_MS,
+        help=(
+            "Windows daemon process polling interval in milliseconds. "
+            f"Default: {DEFAULT_DAEMON_POLL_MS}; values above 500 are clamped."
         ),
     )
     parser.add_argument(
@@ -787,36 +824,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the CLI entry point."""
-    configure_stdout()
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.stop:
-        print(stop_running_hud())
-        return 0
-
-    if args.once:
-        context = build_runtime_context(args)
-        try:
-            if context.active_session_tracker is not None:
-                context.active_session_tracker.wait_for_title()
-            print(snapshot_to_text(build_snapshot(context), compact=args.compact))
-            return 0
-        finally:
-            context.close()
-
+def run_once_snapshot(args: argparse.Namespace) -> int:
+    """Print one local usage snapshot and exit."""
+    context = build_runtime_context(args)
     try:
-        with HudInstanceLock():
+        if context.active_session_tracker is not None:
+            context.active_session_tracker.wait_for_title()
+        print(snapshot_to_text(build_snapshot(context), compact=args.compact))
+        return 0
+    finally:
+        context.close()
+
+
+def run_hud_session(
+    args: argparse.Namespace,
+    *,
+    lock_already_held: bool = False,
+    hide_until_attached: bool = False,
+    daemon_manager: CodexDaemonManager | None = None,
+) -> int:
+    """Run one Tk HUD session with optional daemon process supervision."""
+    lock_context = nullcontext() if lock_already_held else HudInstanceLock()
+    try:
+        with lock_context:
             context = build_runtime_context(args)
             try:
                 try:
-                    window = TokenHudWindow(compact=args.compact)
-                except Exception as exc:
-                    print(
-                        f"codex-usage-hud: unable to open Tkinter HUD: {exc}",
-                        file=sys.stderr,
+                    window = TokenHudWindow(
+                        compact=args.compact,
+                        hide_until_attached=hide_until_attached,
+                        tombstone_follow_ms=(
+                            100 if daemon_manager is not None else 500
+                        ),
                     )
+                except Exception as exc:
+                    _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
                     return 1
 
                 def refresh() -> None:
@@ -831,14 +873,81 @@ def main(argv: Sequence[str] | None = None) -> int:
                     except Exception:
                         return
 
+                def daemon_watchdog() -> None:
+                    if daemon_manager is None:
+                        return
+                    try:
+                        if not daemon_manager.codex_is_running():
+                            _LOGGER.info("daemon_codex_exited")
+                            window.close()
+                            return
+                    except ProcessListenerError as exc:
+                        _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
+                        return
+                    try:
+                        window.root.after(daemon_manager.poll_ms, daemon_watchdog)
+                    except Exception:
+                        return
+
                 refresh()
+                if daemon_manager is not None:
+                    window.root.after(daemon_manager.poll_ms, daemon_watchdog)
                 window.run()
                 return 0
             finally:
                 context.close()
     except HudAlreadyRunningError as exc:
-        print(f"codex-usage-hud: {exc}", file=sys.stderr)
+        _eprint(f"codex-usage-hud: {exc}")
         return 2
+
+
+def run_daemon(args: argparse.Namespace) -> int:
+    """Run the hidden Windows daemon manager, falling back when unsupported."""
+    configure_daemon_logging()
+    hide_console_window()
+    manager = CodexDaemonManager(poll_ms=args.daemon_poll_ms)
+    try:
+        with HudInstanceLock():
+            try:
+                manager.wait_for_codex()
+            except KeyboardInterrupt:
+                return 130
+            except ProcessListenerError as exc:
+                _LOGGER.exception("daemon_listener_failed fallback=%s", exc)
+                return run_hud_session(
+                    args,
+                    lock_already_held=True,
+                    hide_until_attached=False,
+                )
+            return run_hud_session(
+                args,
+                lock_already_held=True,
+                hide_until_attached=True,
+                daemon_manager=manager,
+            )
+    except HudAlreadyRunningError as exc:
+        _eprint(f"codex-usage-hud: {exc}")
+        return 2
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI entry point."""
+    configure_stdout()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.stop:
+        print(stop_running_hud())
+        return 0
+    if args.daemon and args.once:
+        parser.error("--daemon cannot be combined with --once")
+
+    if args.once:
+        return run_once_snapshot(args)
+
+    if args.daemon:
+        return run_daemon(args)
+
+    return run_hud_session(args)
 
 
 if __name__ == "__main__":
