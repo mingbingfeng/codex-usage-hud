@@ -1,13 +1,13 @@
 # codex-usage-hud
 
-[Tag](https://img.shields.io/github/v/tag/mingbingfeng/codex-usage-hud?label=tag)
-[Release Notes](RELEASE_NOTES_v0.2.0_SMART_DAEMON_EDITION.md)
+[Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?include_prereleases&label=release)
+[Release Notes](https://github.com/mingbingfeng/codex-usage-hud/releases/tag/v0.2.0)
 [Changelog](CHANGELOG.md)
 [Privacy](docs/PRIVACY.md)
 
-> `v0.2.0` is the current git tag in this repository. `codex-usage-hud` is a local-first, 100% offline HUD for Codex App with real-time token and cost tracking, exact cached-token discounting, and zero external dependencies.
+> `v0.2.0` is the current release in this repository. `codex-usage-hud` is a local-first, 100% offline HUD for Codex App with real-time token and cost tracking, exact cached-token discounting, and zero external dependencies.
 >
-> `v0.2.0` 是当前标签版本。`codex-usage-hud` 是一个面向 Codex App 的 local-first HUD，100% 离线运行，支持实时 token 与成本追踪、精确 cached token 折扣计算，并保持 0 外部依赖。
+> `v0.2.0` 是当前发布版本。`codex-usage-hud` 是一个面向 Codex App 的 local-first HUD，100% 离线运行，支持实时 token 与成本追踪、精确 cached token 折扣计算，并保持 0 外部依赖。
 
 `codex-usage-hud` is a local-first monitoring tool for Codex App. It reads local JSONL and SQLite logs, tracks token usage and cost, and keeps the current session visible without sending data to external services.
 
