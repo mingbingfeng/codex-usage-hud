@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -89,6 +91,50 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
 
         self.assertEqual(landmarks.source, "geometry")
         self.assertEqual(landmarks.input_box.bottom, 836)
+
+
+class CodexWindowTrackerSelectionTests(unittest.TestCase):
+    def test_cached_hidden_window_does_not_block_visible_codex_window(self) -> None:
+        tracker = CodexWindowTracker(enable_uia=False)
+        hidden = wt._WindowCandidate(
+            hwnd=101,
+            title="",
+            class_name="Chrome_WidgetWin_0",
+            process="Codex.exe",
+            rect=PhysicalRect(left=40, top=20, right=980, bottom=720),
+            visible=False,
+            minimized=False,
+            cloaked=False,
+        )
+        visible = wt._WindowCandidate(
+            hwnd=202,
+            title="Codex",
+            class_name="Chrome_WidgetWin_1",
+            process="Codex.exe",
+            rect=PhysicalRect(left=120, top=60, right=1360, bottom=860),
+            visible=True,
+            minimized=False,
+            cloaked=False,
+        )
+
+        tracker.user32 = SimpleNamespace(IsWindow=lambda hwnd: True)
+        tracker._last_hwnd = hidden.hwnd
+        tracker._last_hwnd_verified_at = time.monotonic()
+        tracker._candidate_from_hwnd = (  # type: ignore[method-assign]
+            lambda hwnd, verify_codex=False: hidden
+            if hwnd == hidden.hwnd
+            else visible
+            if hwnd == visible.hwnd
+            else None
+        )
+        tracker._findwindow_candidates = lambda: [hidden.hwnd, visible.hwnd]  # type: ignore[method-assign]
+        tracker._enum_window_candidates = lambda: []  # type: ignore[method-assign]
+
+        hwnd = tracker.find_main_window()
+
+        self.assertEqual(hwnd, visible.hwnd)
+        self.assertEqual(tracker._last_hwnd, visible.hwnd)
+        self.assertGreater(tracker._last_hwnd_verified_at, 0.0)
 
 
 if __name__ == "__main__":

@@ -639,27 +639,38 @@ class CodexWindowTracker:
             return None
 
         now = time.monotonic()
-        if self._last_hwnd and self.user32.IsWindow(wintypes.HWND(self._last_hwnd)):
-            if now - self._last_hwnd_verified_at <= _HWND_REVERIFY_SECONDS:
-                return self._last_hwnd
-
         cached = self._candidate_from_hwnd(self._last_hwnd, verify_codex=True)
-        if cached is not None:
+        if (
+            cached is not None
+            and self._is_visible_candidate(cached)
+            and self._last_hwnd
+            and self.user32.IsWindow(wintypes.HWND(self._last_hwnd))
+            and now - self._last_hwnd_verified_at <= _HWND_REVERIFY_SECONDS
+        ):
             self._last_hwnd_verified_at = now
             return cached.hwnd
 
-        candidates: list[_WindowCandidate] = []
+        candidates: dict[int, _WindowCandidate] = {}
+        if cached is not None:
+            candidates[cached.hwnd] = cached
         for hwnd in self._findwindow_candidates():
             candidate = self._candidate_from_hwnd(hwnd, verify_codex=True)
             if candidate is not None:
-                candidates.append(candidate)
+                candidates[candidate.hwnd] = candidate
 
-        candidates.extend(self._enum_window_candidates())
+        for candidate in self._enum_window_candidates():
+            candidates[candidate.hwnd] = candidate
         if not candidates:
             self._last_hwnd = 0
             return None
 
-        best = sorted(candidates, key=self._score_candidate, reverse=True)[0]
+        visible_candidates = [
+            candidate
+            for candidate in candidates.values()
+            if self._is_visible_candidate(candidate)
+        ]
+        selected = visible_candidates if visible_candidates else list(candidates.values())
+        best = sorted(selected, key=self._score_candidate, reverse=True)[0]
         self._last_hwnd = best.hwnd
         self._last_hwnd_verified_at = now
         _logger.info(
@@ -673,6 +684,10 @@ class CodexWindowTracker:
             best.cloaked,
         )
         return best.hwnd
+
+    @staticmethod
+    def _is_visible_candidate(candidate: "_WindowCandidate") -> bool:
+        return candidate.visible and not candidate.minimized and not candidate.cloaked
 
     def get_window_rect(self) -> tuple[int, int, int, int] | None:
         """Return the live Codex main window rectangle as ``left, top, right, bottom``."""
