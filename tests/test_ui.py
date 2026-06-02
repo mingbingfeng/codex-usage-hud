@@ -426,6 +426,27 @@ class AutoScrollHelpersTests(unittest.TestCase):
 
         self.assertTrue(_round_entry(item, "gpt-5.4").startswith("#33 $0.094 ∑295k"))
 
+    def test_round_entry_prefers_completed_time_for_confirmed_rounds(self) -> None:
+        item = RequestRound(
+            index=1,
+            status="confirmed",
+            model="gpt-5.4",
+            input_tokens=1_000,
+            cached_tokens=0,
+            output_tokens=10,
+            reasoning_tokens=0,
+            total_tokens=1_010,
+            estimated=False,
+            cost_usd=0.1,
+            started_at=datetime(2026, 5, 28, 20, 0, 0).astimezone(),
+            completed_at=datetime(2026, 5, 28, 20, 1, 30).astimezone(),
+        )
+
+        entry = _round_entry(item, "gpt-5.4")
+
+        self.assertIn("20:01:30", entry)
+        self.assertNotIn("20:00:00", entry)
+
     def test_round_entry_uses_dynamic_widths_without_leading_zeroes(self) -> None:
         rows = [
             RequestRound(

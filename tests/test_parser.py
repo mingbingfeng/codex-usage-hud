@@ -131,7 +131,15 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(snapshot.estimate.output_tokens, estimate_tokens("abcdefgh"))
         self.assertEqual(snapshot.request.status, "running")
         self.assertEqual(snapshot.request.source, "jsonl")
+        self.assertEqual(snapshot.request.started_at, parse_timestamp("2026-05-28T00:00:03Z"))
+        self.assertEqual(snapshot.request.updated_at, parse_timestamp("2026-05-28T00:00:04Z"))
+        self.assertEqual(len(snapshot.request_history), 2)
         self.assertEqual(snapshot.request_history[0].status, "confirmed")
+        self.assertEqual(snapshot.request_history[1].status, "running")
+        self.assertEqual(
+            snapshot.request_history[1].started_at,
+            parse_timestamp("2026-05-28T00:00:03Z"),
+        )
 
     def test_usage_events_can_be_summarized_for_time_windows(self) -> None:
         parser = JsonlSessionParser()

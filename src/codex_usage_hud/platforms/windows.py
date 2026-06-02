@@ -126,7 +126,7 @@ _TITLE_CONTAINER_CONTROL_TYPES = {
     _UIA_DATA_ITEM_CONTROL_TYPE_ID,
 }
 _SIDEBAR_MAX_WIDTH = 340
-_MAIN_TITLE_MIN_LEFT_OFFSET = 260
+_MAIN_TITLE_MIN_LEFT_OFFSET = 220
 
 
 class _GUID(ctypes.Structure):
@@ -353,6 +353,7 @@ class _UiaTitleProbe:
                 walker,
                 _MAX_UIA_TITLE_NODES,
                 window_rect=self._window_rect(hwnd),
+                main_title_only=True,
             )
         finally:
             self._release(walker)
@@ -589,6 +590,7 @@ class _UiaTitleProbe:
         max_nodes: int,
         *,
         window_rect: tuple[int, int, int, int] | None = None,
+        main_title_only: bool = False,
     ) -> str | None:
         best: tuple[int, str] | None = None
         stack: list[tuple[int, bool, int]] = [(root, False, 0)]
@@ -599,7 +601,12 @@ class _UiaTitleProbe:
             try:
                 node = self._node(ptr)
                 if node is not None:
-                    score = self._score_title_node(node, depth, window_rect)
+                    score = self._score_title_node(
+                        node,
+                        depth,
+                        window_rect,
+                        main_title_only=main_title_only,
+                    )
                     if score > 0:
                         if best is None or score > best[0]:
                             best = (score, node.name)
@@ -631,10 +638,13 @@ class _UiaTitleProbe:
         node: _UiaTitleNode,
         depth: int,
         window_rect: tuple[int, int, int, int] | None = None,
+        *,
+        main_title_only: bool = False,
     ) -> int:
         if node.offscreen or not _plausible_conversation_title(node.name):
             return 0
         score = max(1, 400 - (depth * 30))
+        main_title_score = 0
         if (
             window_rect is not None
             and node.rect is not None
@@ -649,7 +659,10 @@ class _UiaTitleProbe:
                 and bottom <= win_top + 185
                 and right <= win_right - 40
             ):
-                score += 15000
+                main_title_score = 15000
+        if main_title_only and main_title_score <= 0:
+            return 0
+        score += main_title_score
         if node.selected:
             score += 10000
         if node.control_type in {
@@ -1093,18 +1106,20 @@ class WindowsPlatform(BasePlatform):
     def get_active_conversation_title(self) -> str | None:
         if self._uia_title_probe is None and self._title_probe is None:
             return None
-        if self._last_observed_title:
-            return self._last_observed_title
         hwnd = self._find_codex_window()
         if hwnd is None:
             return None
         if self._uia_title_probe is not None:
             title = self._uia_title_probe.conversation_title(hwnd)
             if title:
+                self._last_observed_title = title
                 return title
-        if self._title_probe is None:
-            return None
-        return self._title_probe.conversation_title(hwnd)
+        if self._title_probe is not None:
+            title = self._title_probe.conversation_title(hwnd)
+            if title:
+                self._last_observed_title = title
+                return title
+        return self._last_observed_title or None
 
     def watch_active_conversation_title(
         self,
@@ -1152,6 +1167,7 @@ class WindowsPlatform(BasePlatform):
             wintypes.LPWSTR,
             ctypes.c_int,
         ]
+        user32.GetForegroundWindow.restype = wintypes.HWND
         kernel32.OpenProcess.argtypes = [
             wintypes.DWORD,
             wintypes.BOOL,
@@ -1195,6 +1211,8 @@ class WindowsPlatform(BasePlatform):
                 score += 40
             elif "codex" in title_lower:
                 score += 25
+            if int(hwnd) == int(user32.GetForegroundWindow() or 0):
+                score += 10000
             candidates.append((score, width * height, int(hwnd)))
             return True
 

@@ -17,7 +17,13 @@ from codex_usage_hud.platforms import get_current_platform
 from codex_usage_hud.platforms.base import BasePlatform
 from codex_usage_hud.platforms.linux import LinuxPlatform
 from codex_usage_hud.platforms.macos import MacOSPlatform
-from codex_usage_hud.platforms.windows import WindowsPlatform
+from codex_usage_hud.platforms.windows import (
+    _UIA_LIST_ITEM_CONTROL_TYPE_ID,
+    _UIA_TEXT_CONTROL_TYPE_ID,
+    _UiaTitleNode,
+    _UiaTitleProbe,
+    WindowsPlatform,
+)
 
 
 class ActiveSessionDetectionTests(unittest.TestCase):
@@ -58,6 +64,65 @@ class PlatformFactoryTests(unittest.TestCase):
             self.assertIsInstance(platform, LinuxPlatform)
         else:
             self.fail(f"Unexpected platform under test: {sys.platform}")
+
+
+class WindowsActiveTitleTests(unittest.TestCase):
+    def test_uia_title_scoring_ignores_sidebar_rows_for_full_window_poll(self) -> None:
+        window_rect = (570, 167, 1806, 905)
+        main_title = _UiaTitleNode(
+            name="修复 HUD 会话标题错乱",
+            control_type=_UIA_TEXT_CONTROL_TYPE_ID,
+            selected=False,
+            offscreen=False,
+            rect=(826, 216, 976, 236),
+        )
+        pinned_sidebar_row = _UiaTitleNode(
+            name="所有业务分支维护1w",
+            control_type=_UIA_LIST_ITEM_CONTROL_TYPE_ID,
+            selected=False,
+            offscreen=False,
+            rect=(578, 275, 787, 307),
+        )
+
+        main_score = _UiaTitleProbe._score_title_node(
+            main_title,
+            16,
+            window_rect,
+            main_title_only=True,
+        )
+        sidebar_poll_score = _UiaTitleProbe._score_title_node(
+            pinned_sidebar_row,
+            17,
+            window_rect,
+            main_title_only=True,
+        )
+        sidebar_click_score = _UiaTitleProbe._score_title_node(
+            pinned_sidebar_row,
+            17,
+            window_rect,
+        )
+
+        self.assertGreater(main_score, 10_000)
+        self.assertEqual(sidebar_poll_score, 0)
+        self.assertGreater(sidebar_click_score, 0)
+
+    def test_windows_platform_poll_refreshes_before_using_cached_event_title(self) -> None:
+        class _FakeProbe:
+            def __init__(self, title: str | None) -> None:
+                self.title = title
+
+            def conversation_title(self, hwnd: int) -> str | None:
+                del hwnd
+                return self.title
+
+        platform = object.__new__(WindowsPlatform)
+        platform._last_observed_title = "置顶旧标题"
+        platform._uia_title_probe = _FakeProbe("当前窗口标题")
+        platform._title_probe = None
+        platform._find_codex_window = lambda: 123  # type: ignore[method-assign]
+
+        self.assertEqual(platform.get_active_conversation_title(), "当前窗口标题")
+        self.assertEqual(platform._last_observed_title, "当前窗口标题")
 
 
 if __name__ == "__main__":

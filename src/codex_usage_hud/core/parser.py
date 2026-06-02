@@ -234,6 +234,8 @@ class EstimateTokens:
     tool_tokens: int = 0
     total_tokens: int = 0
     source: str = ""
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass
@@ -758,27 +760,38 @@ class JsonlSessionParser:
                 continue
             record_type = record.get("type")
             payload_type = payload.get("type")
+            timestamp = record.get("_dt")
+            contributed = False
 
             if record_type == "event_msg" and payload_type == "user_message":
                 value = estimate_tokens(payload.get("message"))
                 estimate.input_tokens += value
                 if value:
                     sources.append(f"user~{value}")
+                    contributed = True
             elif record_type == "response_item" and payload_type == "message":
                 value = estimate_tokens(message_text(payload))
                 estimate.output_tokens += value
                 if value:
                     sources.append(f"assistant~{value}")
+                    contributed = True
             elif record_type == "response_item" and payload_type == "function_call":
                 value = estimate_tokens(payload.get("arguments"))
                 estimate.output_tokens += value
                 if value:
                     sources.append(f"tool-call~{value}")
+                    contributed = True
             elif record_type == "response_item" and payload_type == "function_call_output":
                 value = estimate_tokens(payload.get("output"))
                 estimate.tool_tokens += value
                 if value:
                     sources.append(f"tool-output~{value}")
+                    contributed = True
+
+            if contributed and isinstance(timestamp, datetime):
+                if estimate.started_at is None:
+                    estimate.started_at = timestamp
+                estimate.updated_at = timestamp
 
         estimate.total_tokens = (
             estimate.input_tokens + estimate.output_tokens + estimate.tool_tokens
@@ -1107,6 +1120,8 @@ class JsonlSessionParser:
 
         request = self.fallback_request_tokens(snapshot, latest_model)
         if history:
+            if request.status == "running":
+                history.append(self.round_from_request(request, snapshot, latest_model))
             snapshot.request_history = self.reindex_rounds(history)
         elif request.status != "waiting":
             snapshot.request_history = self.reindex_rounds(
@@ -1139,6 +1154,8 @@ class JsonlSessionParser:
                 total_tokens=snapshot.estimate.total_tokens,
                 estimated=True,
                 source="jsonl",
+                updated_at=snapshot.estimate.updated_at or snapshot.last_event_time,
+                started_at=snapshot.estimate.started_at or snapshot.last_event_time,
             )
         confirmed = snapshot.confirmed
         cost = self.cost_estimator.calculate(

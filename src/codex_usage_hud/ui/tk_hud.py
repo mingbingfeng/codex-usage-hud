@@ -1717,7 +1717,7 @@ def _round_entry(
             item.output_tokens or 0,
             item.reasoning_tokens or 0,
         )
-    time_source = item.started_at or item.completed_at
+    time_source = item.completed_at or item.started_at
     time_text = "--:--:--" if time_source is None else time_source.astimezone().strftime("%H:%M:%S")
     index_text = str(item.index)
     money_text = _format_fixed_money(cost, estimated)
