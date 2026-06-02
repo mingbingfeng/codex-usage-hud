@@ -796,13 +796,31 @@ class CodexWindowTracker:
         return snapshot
 
     def is_active(self, hwnd: int, allowed_hwnds: set[int] | None = None) -> bool:
-        """Return whether the tracked Codex window is still visibly present."""
+        """Return whether Codex or one of its own windows is foreground."""
         if not self.enabled or not hwnd:
             return True
+        allowed_hwnds = allowed_hwnds or set()
         try:
             if self.user32.IsIconic(wintypes.HWND(hwnd)) or self._is_cloaked(hwnd):
                 return False
-            return bool(self.user32.IsWindowVisible(wintypes.HWND(hwnd)))
+            foreground = int(self.user32.GetForegroundWindow() or 0)
+            if foreground == hwnd or foreground in allowed_hwnds:
+                return True
+            hwnd_pid = wintypes.DWORD()
+            foreground_pid = wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(
+                wintypes.HWND(hwnd),
+                ctypes.byref(hwnd_pid),
+            )
+            self.user32.GetWindowThreadProcessId(
+                wintypes.HWND(foreground),
+                ctypes.byref(foreground_pid),
+            )
+            if int(foreground_pid.value or 0) == int(hwnd_pid.value or 0):
+                return True
+            if int(foreground_pid.value or 0) == os.getpid():
+                return True
+            return "codex" in self._process_name(int(foreground_pid.value or 0)).lower()
         except Exception:
             return True
 

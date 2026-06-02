@@ -1174,7 +1174,18 @@ class _WindowsCodexLocator(_BaseLocator):
                 pass
         if rect.minimized or self.user32.IsIconic(rect.hwnd):
             return False
-        return bool(self.user32.IsWindowVisible(rect.hwnd))
+        foreground = int(self.user32.GetForegroundWindow() or 0)
+        if foreground == rect.hwnd or foreground in allowed_hwnds:
+            return True
+        hwnd_pid = self.wintypes.DWORD()
+        foreground_pid = self.wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(rect.hwnd, self.ctypes.byref(hwnd_pid))
+        self.user32.GetWindowThreadProcessId(foreground, self.ctypes.byref(foreground_pid))
+        if int(foreground_pid.value or 0) == int(hwnd_pid.value or 0):
+            return True
+        if int(foreground_pid.value or 0) == os.getpid():
+            return True
+        return "codex" in self._process_name(int(foreground_pid.value or 0)).lower()
 
     def _window_text(self, hwnd: int) -> str:
         length = int(self.user32.GetWindowTextLengthW(hwnd) or 0)

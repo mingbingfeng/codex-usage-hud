@@ -37,6 +37,7 @@ DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
 HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
+STILL_ACTIVE = 259
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 
 
@@ -106,11 +107,20 @@ def _process_exists(pid: int) -> bool:
             import ctypes
             from ctypes import wintypes
 
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, pid)
             if not handle:
                 return False
-            ctypes.windll.kernel32.CloseHandle(wintypes.HANDLE(handle))
-            return True
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(
+                    wintypes.HANDLE(handle),
+                    ctypes.byref(exit_code),
+                ):
+                    return False
+                return int(exit_code.value or 0) == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(wintypes.HANDLE(handle))
         except Exception:
             return False
     try:

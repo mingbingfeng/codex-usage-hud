@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import subprocess
 import tkinter as tk
 import unittest
 from datetime import datetime
@@ -334,6 +335,20 @@ class BudgetHelperTests(unittest.TestCase):
             message = stop_running_hud(path)
 
             self.assertIn("No running", message)
+            self.assertFalse(path.exists())
+
+    def test_stop_running_hud_clears_stale_process_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud.pid"
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(0.1)"]
+            )
+            proc.wait(timeout=5)
+            path.write_text(str(proc.pid), encoding="utf-8")
+
+            message = stop_running_hud(path)
+
+            self.assertIn("Removed stale", message)
             self.assertFalse(path.exists())
 
 
