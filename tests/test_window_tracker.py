@@ -136,6 +136,63 @@ class CodexWindowTrackerSelectionTests(unittest.TestCase):
         self.assertEqual(tracker._last_hwnd, visible.hwnd)
         self.assertGreater(tracker._last_hwnd_verified_at, 0.0)
 
+    def test_empty_title_popup_does_not_replace_cached_minimized_main_window(self) -> None:
+        tracker = CodexWindowTracker(enable_uia=False)
+        minimized_main = wt._WindowCandidate(
+            hwnd=101,
+            title="Codex",
+            class_name="Chrome_WidgetWin_1",
+            process="Codex.exe",
+            rect=None,
+            visible=True,
+            minimized=True,
+            cloaked=False,
+        )
+        popup = wt._WindowCandidate(
+            hwnd=202,
+            title="",
+            class_name="Chrome_WidgetWin_1",
+            process="Codex.exe",
+            rect=PhysicalRect(left=120, top=60, right=420, bottom=360),
+            visible=True,
+            minimized=False,
+            cloaked=False,
+        )
+
+        tracker.user32 = SimpleNamespace(IsWindow=lambda hwnd: True)
+        tracker._last_hwnd = minimized_main.hwnd
+        tracker._last_hwnd_verified_at = time.monotonic()
+        tracker._candidate_from_hwnd = (  # type: ignore[method-assign]
+            lambda hwnd, verify_codex=False: minimized_main
+            if hwnd == minimized_main.hwnd
+            else popup
+            if hwnd == popup.hwnd
+            else None
+        )
+        tracker._findwindow_candidates = lambda: [popup.hwnd]  # type: ignore[method-assign]
+        tracker._enum_window_candidates = lambda: []  # type: ignore[method-assign]
+
+        hwnd = tracker.find_main_window()
+
+        self.assertEqual(hwnd, minimized_main.hwnd)
+        self.assertEqual(tracker._last_hwnd, minimized_main.hwnd)
+        self.assertGreater(tracker._last_hwnd_verified_at, 0.0)
+
+    def test_is_active_ignores_foreground_focus_changes(self) -> None:
+        tracker = CodexWindowTracker(enable_uia=False)
+        tracker.enabled = True
+        tracker.user32 = SimpleNamespace(
+            IsIconic=lambda hwnd: False,
+            IsWindowVisible=lambda hwnd: True,
+            GetForegroundWindow=lambda: 999,
+            GetWindowThreadProcessId=lambda hwnd, pid_ptr: (_ for _ in ()).throw(
+                AssertionError("foreground pid should be ignored")
+            ),
+        )
+        tracker._is_cloaked = lambda hwnd: False  # type: ignore[method-assign]
+
+        self.assertTrue(tracker.is_active(123, {456}))
+
 
 if __name__ == "__main__":
     unittest.main()

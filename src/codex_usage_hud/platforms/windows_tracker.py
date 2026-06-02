@@ -664,13 +664,21 @@ class CodexWindowTracker:
             self._last_hwnd = 0
             return None
 
-        visible_candidates = [
+        # Prefer the real main surface over transient Codex popups so tray
+        # menus and other temporary overlays do not steal the dock anchor.
+        stable_candidates = [
             candidate
             for candidate in candidates.values()
-            if self._is_visible_candidate(candidate)
+            if self._is_stable_candidate(candidate)
         ]
-        selected = visible_candidates if visible_candidates else list(candidates.values())
-        best = sorted(selected, key=self._score_candidate, reverse=True)[0]
+        if not stable_candidates:
+            if cached is not None and self.user32.IsWindow(wintypes.HWND(cached.hwnd)):
+                self._last_hwnd_verified_at = now
+                return cached.hwnd
+            self._last_hwnd = 0
+            return None
+
+        best = sorted(stable_candidates, key=self._score_candidate, reverse=True)[0]
         self._last_hwnd = best.hwnd
         self._last_hwnd_verified_at = now
         _logger.info(
@@ -688,6 +696,18 @@ class CodexWindowTracker:
     @staticmethod
     def _is_visible_candidate(candidate: "_WindowCandidate") -> bool:
         return candidate.visible and not candidate.minimized and not candidate.cloaked
+
+    @staticmethod
+    def _is_stable_candidate(candidate: "_WindowCandidate") -> bool:
+        if not CodexWindowTracker._is_visible_candidate(candidate):
+            return False
+        title = candidate.title.strip().lower()
+        if title == "codex":
+            return True
+        rect = candidate.rect
+        if rect is None:
+            return False
+        return rect.width * rect.height >= 300_000
 
     def get_window_rect(self) -> tuple[int, int, int, int] | None:
         """Return the live Codex main window rectangle as ``left, top, right, bottom``."""
@@ -776,24 +796,13 @@ class CodexWindowTracker:
         return snapshot
 
     def is_active(self, hwnd: int, allowed_hwnds: set[int] | None = None) -> bool:
-        """Return whether Codex or one of the HUD windows is foreground."""
+        """Return whether the tracked Codex window is still visibly present."""
         if not self.enabled or not hwnd:
             return True
-        allowed_hwnds = allowed_hwnds or set()
         try:
             if self.user32.IsIconic(wintypes.HWND(hwnd)) or self._is_cloaked(hwnd):
                 return False
-            foreground = int(self.user32.GetForegroundWindow() or 0)
-            if foreground == hwnd or foreground in allowed_hwnds:
-                return True
-            pid = wintypes.DWORD()
-            self.user32.GetWindowThreadProcessId(
-                wintypes.HWND(foreground),
-                ctypes.byref(pid),
-            )
-            if int(pid.value or 0) == os.getpid():
-                return True
-            return "codex" in self._process_name(int(pid.value or 0)).lower()
+            return bool(self.user32.IsWindowVisible(wintypes.HWND(hwnd)))
         except Exception:
             return True
 

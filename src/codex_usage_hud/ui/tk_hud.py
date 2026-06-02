@@ -983,7 +983,7 @@ return ""
 
 
 class _WindowsCodexLocator(_BaseLocator):
-    """Windows locator based on user32 EnumWindows and foreground checks."""
+    """Windows locator based on user32 EnumWindows and visibility checks."""
 
     def __init__(self) -> None:
         self.enabled = False
@@ -1174,14 +1174,7 @@ class _WindowsCodexLocator(_BaseLocator):
                 pass
         if rect.minimized or self.user32.IsIconic(rect.hwnd):
             return False
-        foreground = int(self.user32.GetForegroundWindow() or 0)
-        if foreground == rect.hwnd or foreground in allowed_hwnds:
-            return True
-        pid = self.wintypes.DWORD()
-        self.user32.GetWindowThreadProcessId(foreground, self.ctypes.byref(pid))
-        if int(pid.value or 0) == os.getpid():
-            return True
-        return "codex" in self._process_name(pid.value).lower()
+        return bool(self.user32.IsWindowVisible(rect.hwnd))
 
     def _window_text(self, hwnd: int) -> str:
         length = int(self.user32.GetWindowTextLengthW(hwnd) or 0)
