@@ -46,6 +46,10 @@ class BasePlatform(ABC):
         """Return the currently selected Codex conversation title, if available."""
         return None
 
+    def get_active_conversation_ref(self) -> tuple[str, str] | None:
+        """Return ``(session_id, title)`` for the selected Codex conversation."""
+        return None
+
     @staticmethod
     def _detect_latest_jsonl_by_mtime(sessions_root: Path) -> Path | None:
         """Find the most recently modified JSONL file under ``sessions_root``."""

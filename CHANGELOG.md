@@ -7,6 +7,48 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-05
+
+Renderer Timeline Edition, focused on keeping the HUD in the Codex renderer
+surface while preserving the Tk fallback path.
+
+### Added
+
+- Added a renderer-injected HUD driven through local Chrome DevTools Protocol,
+  with top session/budget status and bottom request timeline panels rendered
+  inside the Codex UI.
+- Added CDP-based active conversation probing so the HUD can resolve the active
+  Codex thread by session id or title before falling back to native title
+  tracking.
+- Added CLI switches to prefer the renderer HUD by default and force the legacy
+  Tk HUD with `--tk-hud` / `--no-renderer-hud`.
+- Added regression coverage for CDP target selection, renderer payloads, and
+  renderer HUD client installation/update behavior.
+
+### Changed
+
+- Updated the live HUD command to prefer renderer injection when Codex exposes a
+  local CDP target, with automatic fallback to Tk when renderer injection is not
+  available.
+- Improved top HUD anchoring so long Codex conversation titles, the three-dot
+  conversation menu, and right-side header actions are treated as hard
+  avoidance zones.
+- Improved bottom request HUD anchoring so it follows the composer footer row
+  and remains stable when attachments or image previews expand the composer.
+- Refined request timeline formatting so cache hit rate follows input tokens,
+  cached tokens are second-last, and total tokens are last.
+- Kept Tk anchoring and geometry behavior aligned with the renderer follow
+  model while preserving its fallback role.
+
+### Fixed
+
+- Preserved the application title-bar drag region while allowing HUD panels to
+  be moved and resized inside the renderer.
+- Removed duplicate reset controls and redundant HUD glyphs that cluttered the
+  renderer panels.
+- Fixed the bottom expanded timeline header so "round flow / newest first" no
+  longer overlaps the request list.
+
 ## [0.2.0] - 2026-05-29
 
 Smart Daemon Edition and repository polish for the current release line.

@@ -84,11 +84,23 @@ REQUEST_TEXT = "#DCE7F2"
 REQUEST_MUTED = "#718095"
 HUD_GEOMETRY_LOG_FILENAME = "hud_geometry.log"
 HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
+HUD_CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
+HUD_NATIVE_GEOMETRY_ENV = "CODEX_USAGE_HUD_NATIVE_GEOMETRY"
+HUD_AUTO_REANCHOR_ENV = "CODEX_USAGE_HUD_AUTO_REANCHOR"
+NATIVE_ANCHOR_STABLE_FRAMES = 3
 
 _COST_ESTIMATOR = CostEstimator()
 _HUD_GEOMETRY_LOGGER = logging.getLogger("codex_usage_hud.hud_geometry")
 _HUD_GEOMETRY_LOGGER.addHandler(logging.NullHandler())
 _HUD_GEOMETRY_LOGGING_CONFIGURED = False
+
+
+class _QuietRotatingFileHandler(RotatingFileHandler):
+    """Suppress diagnostic-log rollover noise when another HUD owns the file."""
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        del record
+        return
 
 
 @dataclass(frozen=True)
@@ -134,6 +146,17 @@ class HudAnchor:
     @property
     def height(self) -> int:
         return max(1, self.bottom - self.top)
+
+
+@dataclass(frozen=True)
+class _NativeAnchorState:
+    signature: tuple[str, int, int, int, int, int, int, int]
+    frames: int
+    anchor: HudAnchor
+    window_left: int
+    window_top: int
+    window_width: int
+    window_height: int
 
 
 @dataclass
@@ -281,7 +304,7 @@ def configure_hud_geometry_logging() -> Path | None:
     path = hud_geometry_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
+        handler = _QuietRotatingFileHandler(
             path,
             maxBytes=512 * 1024,
             backupCount=3,
@@ -326,8 +349,14 @@ def _optional_str(value: Any) -> str | None:
     return text or None
 
 
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    return normalized in {"1", "true", "yes", "on"}
 
 
 def _extract_numeric_parts(text: str) -> tuple[list[str], list[str]]:
@@ -826,6 +855,74 @@ def _fallback_hud_anchor(
     )
 
 
+def _offset_hud_anchor(anchor: HudAnchor, dx: int, dy: int) -> HudAnchor:
+    return HudAnchor(
+        left=anchor.left + dx,
+        top=anchor.top + dy,
+        right=anchor.right + dx,
+        bottom=anchor.bottom + dy,
+        default_x=anchor.default_x + dx,
+        default_y=anchor.default_y + dy,
+        default_width=anchor.default_width,
+        source=anchor.source,
+    )
+
+
+def _project_hud_anchor(
+    anchor: HudAnchor,
+    from_rect: WindowRect,
+    to_rect: WindowRect,
+) -> HudAnchor:
+    if from_rect.width == to_rect.width and from_rect.height == to_rect.height:
+        return _offset_hud_anchor(
+            anchor,
+            to_rect.left - from_rect.left,
+            to_rect.top - from_rect.top,
+        )
+    x_scale = to_rect.width / max(1, from_rect.width)
+    y_scale = to_rect.height / max(1, from_rect.height)
+
+    def project_x(value: int) -> int:
+        return to_rect.left + int(round((value - from_rect.left) * x_scale))
+
+    def project_y(value: int) -> int:
+        return to_rect.top + int(round((value - from_rect.top) * y_scale))
+
+    projected = HudAnchor(
+        left=project_x(anchor.left),
+        top=project_y(anchor.top),
+        right=project_x(anchor.right),
+        bottom=project_y(anchor.bottom),
+        default_x=project_x(anchor.default_x),
+        default_y=project_y(anchor.default_y),
+        default_width=max(1, int(round(anchor.default_width * x_scale))),
+        source=anchor.source,
+    )
+    if projected.width <= 0 or projected.height <= 0:
+        return _offset_hud_anchor(
+            anchor,
+            to_rect.left - from_rect.left,
+            to_rect.top - from_rect.top,
+        )
+    return projected
+
+
+def _relative_anchor_signature(
+    anchor: HudAnchor,
+    rect: WindowRect,
+) -> tuple[str, int, int, int, int, int, int, int]:
+    return (
+        anchor.source,
+        anchor.left - rect.left,
+        anchor.top - rect.top,
+        anchor.right - rect.left,
+        anchor.bottom - rect.top,
+        anchor.default_x - rect.left,
+        anchor.default_y - rect.top,
+        anchor.default_width,
+    )
+
+
 def _fit_anchor_left(
     window_width: int,
     left_margin: int,
@@ -835,6 +932,52 @@ def _fit_anchor_left(
     if window_width - left_margin - right_margin >= min_width:
         return left_margin
     return max(8, min(left_margin, window_width - right_margin - min_width))
+
+
+def _set_native_window_geometry(
+    window: tk.Tk | tk.Toplevel,
+    geometry: tuple[int, int, int, int],
+) -> bool:
+    if not _env_flag(HUD_NATIVE_GEOMETRY_ENV):
+        return False
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = int(window.winfo_id())
+        if not hwnd:
+            return False
+        x, y, width, height = geometry
+        swp_nozorder = 0x0004
+        swp_noactivate = 0x0010
+        swp_noownerzorder = 0x0200
+        flags = swp_nozorder | swp_noactivate | swp_noownerzorder
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        return bool(
+            user32.SetWindowPos(
+                wintypes.HWND(hwnd),
+                0,
+                int(x),
+                int(y),
+                int(width),
+                int(height),
+                flags,
+            )
+        )
+    except Exception:
+        return False
 
 
 class CodexWindowLocator:
@@ -994,16 +1137,22 @@ class _WindowsCodexLocator(_BaseLocator):
         self.enabled = False
         self._last_hwnd = 0
         self._tracker = None
+        self._cdp_probe = None
+        self._last_cdp_anchor_status: dict[str, tuple[str, str]] = {}
         try:
             import ctypes
             from ctypes import wintypes
+            from ..platforms.cdp_probe import CodexCdpProbe
             from ..platforms.windows_tracker import CodexWindowTracker
 
             self.ctypes = ctypes
             self.wintypes = wintypes
             self.user32 = ctypes.windll.user32
             self.kernel32 = ctypes.windll.kernel32
+            self._dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=True)
             self._native_anchors_enabled = _env_flag(HUD_NATIVE_ANCHORS_ENV)
+            if self._dom_anchors_enabled:
+                self._cdp_probe = CodexCdpProbe()
             self._tracker = CodexWindowTracker(enable_uia=self._native_anchors_enabled)
             self.enabled = True
             self._configure_api()
@@ -1270,6 +1419,11 @@ class _WindowsCodexLocator(_BaseLocator):
         rect: WindowRect,
         hud_height: int,
     ) -> HudAnchor | None:
+        cdp_anchor = self._cdp_anchor_geometry(target, rect, hud_height)
+        if cdp_anchor is not None:
+            return cdp_anchor
+        if not self._native_anchors_enabled:
+            return None
         if self._tracker is None or not getattr(self._tracker, "enabled", False):
             return None
         if not rect.hwnd:
@@ -1314,6 +1468,130 @@ class _WindowsCodexLocator(_BaseLocator):
             default_width=int(default_width),
             source=str(snapshot.source or "uia"),
         )
+
+    def _cdp_anchor_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> HudAnchor | None:
+        if self._cdp_probe is None:
+            self._log_cdp_anchor_status(target, "disabled", "probe=none")
+            return None
+        try:
+            snapshot = self._cdp_probe.snapshot()
+        except Exception:
+            self._log_cdp_anchor_status(target, "failed", "snapshot_exception")
+            return None
+        if snapshot is None:
+            status = str(getattr(self._cdp_probe, "last_status", "none"))
+            error = str(getattr(self._cdp_probe, "last_error", ""))
+            self._log_cdp_anchor_status(target, status, error)
+            return None
+        dpr = max(0.1, float(snapshot.device_pixel_ratio or 1.0))
+        if target == "top":
+            header = self._physical_rect_from_cdp(snapshot.header_rect, rect, dpr)
+            title = self._physical_rect_from_cdp(snapshot.title_rect, rect, dpr)
+            source = header or title
+            if source is None or source.width < 160:
+                self._log_cdp_anchor_status(
+                    target,
+                    "no-title-anchor",
+                    f"session={snapshot.session_id or '-'} header={bool(header)} title={bool(title)}",
+                )
+                return None
+            right_margin = max(
+                TOP_ANCHOR_RIGHT_MIN,
+                int(round(source.width * TOP_ANCHOR_RIGHT_RATIO)),
+            )
+            if title is not None and title.left >= source.left and title.left < source.right:
+                left = title.left
+            else:
+                left_margin = max(
+                    TOP_ANCHOR_LEFT_MIN,
+                    int(round(source.width * TOP_ANCHOR_LEFT_RATIO)),
+                )
+                left = source.left + _fit_anchor_left(
+                    source.width,
+                    left_margin,
+                    right_margin,
+                    TOP_ANCHOR_MIN_WIDTH,
+                )
+            right = max(left + 1, source.right - right_margin)
+            y = source.top + max(0, (source.height - max(1, hud_height)) // 2)
+            self._log_cdp_anchor_status(
+                target,
+                "ok",
+                f"source=cdp:title session={snapshot.session_id or '-'} "
+                f"header={bool(header)} title={bool(title)} dpr={dpr:.2f}",
+            )
+            return HudAnchor(
+                left=left,
+                top=source.top,
+                right=right,
+                bottom=source.bottom,
+                default_x=left,
+                default_y=y,
+                default_width=max(1, right - left),
+                source="cdp:title",
+            )
+
+        composer = self._physical_rect_from_cdp(snapshot.composer_rect, rect, dpr)
+        if composer is None or composer.width < 180 or composer.height < 24:
+            self._log_cdp_anchor_status(
+                target,
+                "no-composer-anchor",
+                f"session={snapshot.session_id or '-'} composer={bool(composer)}",
+            )
+            return None
+        self._log_cdp_anchor_status(
+            target,
+            "ok",
+            f"source=cdp:composer session={snapshot.session_id or '-'} "
+            f"composer=True dpr={dpr:.2f}",
+        )
+        return HudAnchor(
+            left=composer.left,
+            top=composer.top,
+            right=composer.right,
+            bottom=composer.bottom,
+            default_x=composer.left,
+            default_y=max(0, composer.top - max(1, hud_height)),
+            default_width=max(1, composer.width),
+            source="cdp:composer",
+        )
+
+    def _log_cdp_anchor_status(self, target: str, status: str, detail: str) -> None:
+        signature = (str(status), str(detail))
+        if self._last_cdp_anchor_status.get(target) == signature:
+            return
+        self._last_cdp_anchor_status[target] = signature
+        _HUD_GEOMETRY_LOGGER.info(
+            "cdp_anchor_status target=%s status=%s detail=%s",
+            target,
+            status,
+            detail,
+        )
+
+    @staticmethod
+    def _physical_rect_from_cdp(
+        cdp_rect: Any,
+        window_rect: WindowRect,
+        device_pixel_ratio: float,
+    ) -> WindowRect | None:
+        if cdp_rect is None:
+            return None
+        left = window_rect.left + int(round(float(cdp_rect.left) * device_pixel_ratio))
+        top = window_rect.top + int(round(float(cdp_rect.top) * device_pixel_ratio))
+        right = window_rect.left + int(round(float(cdp_rect.right) * device_pixel_ratio))
+        bottom = window_rect.top + int(round(float(cdp_rect.bottom) * device_pixel_ratio))
+        left = max(window_rect.left, min(left, window_rect.right))
+        top = max(window_rect.top, min(top, window_rect.bottom))
+        right = max(window_rect.left, min(right, window_rect.right))
+        bottom = max(window_rect.top, min(bottom, window_rect.bottom))
+        if right - left <= 0 or bottom - top <= 0:
+            return None
+        return WindowRect(left=left, top=top, right=right, bottom=bottom, hwnd=window_rect.hwnd)
 
 
 def _short_num(value: int | None) -> str:
@@ -1778,6 +2056,36 @@ def _request_total_line(snapshot: ParsedSession) -> str:
     )
 
 
+def _round_is_running(item: RequestRound) -> bool:
+    return item.status == "running" and item.completed_at is None and item.started_at is not None
+
+
+def _round_elapsed_text(
+    started_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    if started_at is None:
+        return "--:--:--"
+    if started_at.tzinfo is None:
+        current = (now or datetime.now()).replace(tzinfo=None)
+    else:
+        current = (now or datetime.now().astimezone()).astimezone(started_at.tzinfo)
+    elapsed_seconds = max(0, int((current - started_at).total_seconds()))
+    return f"{elapsed_seconds}s".rjust(8)
+
+
+def _round_time_text(
+    item: RequestRound,
+    *,
+    now: datetime | None = None,
+) -> str:
+    if _round_is_running(item):
+        return _round_elapsed_text(item.started_at, now=now)
+    time_source = item.completed_at or item.started_at
+    return "--:--:--" if time_source is None else time_source.astimezone().strftime("%H:%M:%S")
+
+
 def _round_entry(
     item: RequestRound,
     fallback_model: str,
@@ -1785,6 +2093,7 @@ def _round_entry(
     index_width: int | None = None,
     money_width: int | None = None,
     total_width: int | None = None,
+    now: datetime | None = None,
 ) -> str:
     cost = item.cost_usd
     estimated = item.estimated or cost is None
@@ -1796,8 +2105,7 @@ def _round_entry(
             item.output_tokens or 0,
             item.reasoning_tokens or 0,
         )
-    time_source = item.completed_at or item.started_at
-    time_text = "--:--:--" if time_source is None else time_source.astimezone().strftime("%H:%M:%S")
+    time_text = _round_time_text(item, now=now)
     index_text = str(item.index)
     money_text = _format_fixed_money(cost, estimated)
     total_text = _fixed_token_total(item.total_tokens)
@@ -1856,11 +2164,13 @@ class TokenHudWindow:
         self.settings_store = HudSettingsStore()
         self.settings = self.settings_store.load()
         self._geometry_log_path = configure_hud_geometry_logging()
+        self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=True)
         self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
         _HUD_GEOMETRY_LOGGER.info(
-            "hud_started native_anchors=%s follow_ms=%s settings_path=%s log_path=%s",
+            "hud_started dom_anchors=%s native_anchors=%s follow_ms=%s settings_path=%s log_path=%s",
+            self._use_dom_anchors,
             self._use_native_anchors,
             self.follow_ms,
             self.settings_store.path,
@@ -1917,6 +2227,11 @@ class TokenHudWindow:
             str,
             tuple[int, int, int, int, int, int, int, int, str],
         ] = {}
+        self._last_applied_geometry: dict[str, tuple[int, int, int, int]] = {}
+        self._last_geometry_backend: dict[str, str] = {}
+        self._native_anchor_candidates: dict[str, _NativeAnchorState] = {}
+        self._stable_native_anchors: dict[str, _NativeAnchorState] = {}
+        self._last_anchor_decisions: dict[str, tuple[str, str, str, str]] = {}
         self._last_budget_log_signature: tuple[int, int, int, str, str] | None = None
         self._snapshot = ParsedSession(status="waiting")
 
@@ -2641,10 +2956,34 @@ class TokenHudWindow:
             request = self._attached_geometry(
                 "request", self._last_rect, self.request_expanded
             )
-            self.root.geometry(f"{top[2]}x{top[3]}+{top[0]}+{top[1]}")
-            self.request_root.geometry(f"{request[2]}x{request[3]}+{request[0]}+{request[1]}")
+            self._apply_window_geometry("top", self.root, top)
+            self._apply_window_geometry("request", self.request_root, request)
             return
         self._apply_free_defaults(keep_existing=True)
+
+    def _apply_window_geometry(
+        self,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+        geometry: tuple[int, int, int, int],
+    ) -> None:
+        """Avoid asking Tk to re-apply identical screen geometry every frame."""
+        if self._last_applied_geometry.get(target) == geometry:
+            return
+        if _set_native_window_geometry(window, geometry):
+            backend = "native-setwindowpos"
+        else:
+            x, y, width, height = geometry
+            window.geometry(f"{width}x{height}+{x}+{y}")
+            backend = "tk-geometry"
+        if self._last_geometry_backend.get(target) != backend:
+            self._last_geometry_backend[target] = backend
+            _HUD_GEOMETRY_LOGGER.info(
+                "geometry_backend target=%s backend=%s",
+                target,
+                backend,
+            )
+        self._last_applied_geometry[target] = geometry
 
     def _attached_geometry(
         self, target: str, rect: WindowRect, expanded: bool
@@ -2684,12 +3023,20 @@ class TokenHudWindow:
 
         if has_width_ratio:
             width = int(round(width_base * placement.width_ratio))
+            width_mode = (
+                "anchor-ratio"
+                if placement.anchor_source == anchor.source
+                else "legacy-ratio"
+            )
         else:
             width = placement.width or anchor.default_width
+            width_mode = "saved-width" if placement.width else "anchor-default"
         x = anchor.default_x
         y = anchor.default_y
+        position_mode = "anchor-default"
 
         if has_anchor_position:
+            position_mode = "anchor-ratio"
             x = anchor.left + int(round(anchor.width * float(placement.anchor_x_ratio or 0.0)))
             if target == "top":
                 y = anchor.top + int(round(anchor.height * float(placement.anchor_y_ratio or 0.0)))
@@ -2700,15 +3047,35 @@ class TokenHudWindow:
                 y = bottom_y - height
         elif target == "top":
             if placement.relative_x_ratio is not None and placement.relative_y_ratio is not None:
+                position_mode = "window-relative"
                 x = rect.left + int(round(rect.width * placement.relative_x_ratio))
                 y = rect.top + int(round(rect.height * placement.relative_y_ratio))
         elif (
             placement.relative_x_ratio is not None
             and placement.relative_bottom_ratio is not None
         ):
+            position_mode = "window-relative"
             x = rect.left + int(round(rect.width * placement.relative_x_ratio))
             bottom = int(round(rect.height * placement.relative_bottom_ratio))
             y = rect.bottom - bottom - height
+        if self._maybe_reanchor_geometry_to_dom(
+            target,
+            placement,
+            anchor,
+            x,
+            y,
+            width,
+            height,
+        ):
+            position_mode = "auto-reanchored"
+            width_mode = "anchor-ratio"
+        self._log_anchor_decision(
+            target,
+            anchor,
+            placement,
+            position_mode,
+            width_mode,
+        )
 
         min_width = self._interactive_min_width(target, expanded)
         min_x = rect.left + 8
@@ -2771,6 +3138,84 @@ class TokenHudWindow:
             )
         return x, y, width, height
 
+    def _log_anchor_decision(
+        self,
+        target: str,
+        anchor: HudAnchor,
+        placement: WindowPlacement,
+        position_mode: str,
+        width_mode: str,
+    ) -> None:
+        signature = (
+            anchor.source,
+            placement.anchor_source or "",
+            position_mode,
+            width_mode,
+        )
+        if self._last_anchor_decisions.get(target) == signature:
+            return
+        self._last_anchor_decisions[target] = signature
+        _HUD_GEOMETRY_LOGGER.info(
+            "anchor_decision target=%s anchor_source=%s placement_source=%s "
+            "position_mode=%s width_mode=%s anchor=(%s,%s,%s,%s)",
+            target,
+            anchor.source,
+            placement.anchor_source or "-",
+            position_mode,
+            width_mode,
+            anchor.left,
+            anchor.top,
+            anchor.right,
+            anchor.bottom,
+        )
+
+    def _maybe_reanchor_geometry_to_dom(
+        self,
+        target: str,
+        placement: WindowPlacement,
+        anchor: HudAnchor,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> bool:
+        if not _env_flag(HUD_AUTO_REANCHOR_ENV):
+            return False
+        if placement.anchor_source != "geometry":
+            return False
+        if not anchor.source.startswith("cdp:"):
+            return False
+        if anchor.width <= 0 or anchor.height <= 0:
+            return False
+        previous_source = placement.anchor_source
+        previous_x_ratio = placement.anchor_x_ratio
+        previous_y_ratio = placement.anchor_y_ratio
+        previous_width_ratio = placement.width_ratio
+        placement.anchor_x_ratio = (x - anchor.left) / max(1, anchor.width)
+        if target == "top":
+            placement.anchor_y_ratio = (y - anchor.top) / max(1, anchor.height)
+        else:
+            placement.anchor_y_ratio = ((y + height) - anchor.top) / max(
+                1,
+                anchor.height,
+            )
+        placement.width_ratio = width / max(1, anchor.width)
+        placement.anchor_source = anchor.source
+        _HUD_GEOMETRY_LOGGER.info(
+            "anchor_reanchored target=%s from_source=%s to_source=%s "
+            "anchor_x_ratio=%s->%.6f anchor_y_ratio=%s->%.6f width_ratio=%s->%.6f",
+            target,
+            previous_source,
+            anchor.source,
+            previous_x_ratio,
+            placement.anchor_x_ratio,
+            previous_y_ratio,
+            placement.anchor_y_ratio,
+            previous_width_ratio,
+            placement.width_ratio,
+        )
+        return True
+
     def _target_anchor(
         self,
         target: str,
@@ -2787,8 +3232,8 @@ class TokenHudWindow:
                 rect,
                 expanded,
             )
-        if self._use_native_anchors:
-            native = self.locator.anchor_geometry(target, rect, height)
+        if self._use_dom_anchors or self._use_native_anchors:
+            native = self._stable_native_anchor(target, rect, height)
             if native is not None:
                 return native
         return _fallback_hud_anchor(
@@ -2798,6 +3243,88 @@ class TokenHudWindow:
             legacy_y,
             legacy_width,
             height,
+        )
+
+    def _stable_native_anchor(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> HudAnchor | None:
+        projected = self._projected_stable_native_anchor(target, rect)
+        state = self._stable_native_anchors.get(target)
+        if (
+            state is not None
+            and projected is not None
+            and state.window_width == rect.width
+            and state.window_height == rect.height
+            and (state.window_left != rect.left or state.window_top != rect.top)
+        ):
+            return projected
+
+        native = self.locator.anchor_geometry(target, rect, hud_height)
+        if native is None:
+            self._native_anchor_candidates.pop(target, None)
+            return projected
+
+        signature = _relative_anchor_signature(native, rect)
+        previous = self._native_anchor_candidates.get(target)
+        frames = (
+            previous.frames + 1
+            if previous is not None and previous.signature == signature
+            else 1
+        )
+        state = _NativeAnchorState(
+            signature=signature,
+            frames=frames,
+            anchor=native,
+            window_left=rect.left,
+            window_top=rect.top,
+            window_width=rect.width,
+            window_height=rect.height,
+        )
+        self._native_anchor_candidates[target] = state
+        if frames >= NATIVE_ANCHOR_STABLE_FRAMES:
+            previous_stable = self._stable_native_anchors.get(target)
+            if previous_stable is None or previous_stable.signature != signature:
+                _HUD_GEOMETRY_LOGGER.info(
+                    "native_anchor_stable target=%s source=%s frames=%s "
+                    "window=(%s,%s,%s,%s) anchor=(%s,%s,%s,%s)",
+                    target,
+                    native.source,
+                    frames,
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    native.left,
+                    native.top,
+                    native.right,
+                    native.bottom,
+                )
+            self._stable_native_anchors[target] = state
+            return native
+
+        return projected
+
+    def _projected_stable_native_anchor(
+        self,
+        target: str,
+        rect: WindowRect,
+    ) -> HudAnchor | None:
+        state = self._stable_native_anchors.get(target)
+        if state is None:
+            return None
+        source_rect = WindowRect(
+            left=state.window_left,
+            top=state.window_top,
+            right=state.window_left + state.window_width,
+            bottom=state.window_top + state.window_height,
+        )
+        return _project_hud_anchor(
+            state.anchor,
+            source_rect,
+            rect,
         )
 
     @staticmethod
@@ -2885,8 +3412,12 @@ class TokenHudWindow:
                 )
         tx, ty = self._top_manual_position
         rx, ry = self._request_manual_position
-        self.root.geometry(f"{top_width}x{top_height}+{tx}+{ty}")
-        self.request_root.geometry(f"{request_width}x{request_height}+{rx}+{ry}")
+        self._apply_window_geometry("top", self.root, (tx, ty, top_width, top_height))
+        self._apply_window_geometry(
+            "request",
+            self.request_root,
+            (rx, ry, request_width, request_height),
+        )
 
     def _top_size(self) -> tuple[int, int]:
         expanded = self.top_expanded

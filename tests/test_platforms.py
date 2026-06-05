@@ -117,12 +117,34 @@ class WindowsActiveTitleTests(unittest.TestCase):
 
         platform = object.__new__(WindowsPlatform)
         platform._last_observed_title = "置顶旧标题"
+        platform._last_observed_session_id = ""
+        platform._cdp_probe = None
         platform._uia_title_probe = _FakeProbe("当前窗口标题")
         platform._title_probe = None
         platform._find_codex_window = lambda: 123  # type: ignore[method-assign]
 
         self.assertEqual(platform.get_active_conversation_title(), "当前窗口标题")
         self.assertEqual(platform._last_observed_title, "当前窗口标题")
+
+    def test_windows_platform_falls_back_to_uia_when_cdp_snapshot_missing(self) -> None:
+        class _FakeCdpProbe:
+            def snapshot(self) -> object | None:
+                return None
+
+        class _FakeTitleProbe:
+            def conversation_title(self, hwnd: int) -> str | None:
+                del hwnd
+                return "UIA 降级标题"
+
+        platform = object.__new__(WindowsPlatform)
+        platform._last_observed_title = ""
+        platform._last_observed_session_id = ""
+        platform._cdp_probe = _FakeCdpProbe()
+        platform._uia_title_probe = _FakeTitleProbe()
+        platform._title_probe = None
+        platform._find_codex_window = lambda: 123  # type: ignore[method-assign]
+
+        self.assertEqual(platform.get_active_conversation_title(), "UIA 降级标题")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,16 @@ class FakeInProcessTitlePlatform(FakePlatform):
         return ["unexpected-powershell-fallback"]
 
 
+class FakeCdpRefPlatform(FakePlatform):
+    def __init__(self, session_id: str, title: str) -> None:
+        super().__init__()
+        self.session_id = session_id
+        self.title = title
+
+    def get_active_conversation_ref(self) -> tuple[str, str] | None:
+        return self.session_id, self.title
+
+
 class FakeEventTitlePlatform(FakeInProcessTitlePlatform):
     def __init__(self, event_titles: list[str], poll_titles: list[str] | None = None) -> None:
         super().__init__(poll_titles or [])
@@ -249,6 +259,31 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 tracker.path_for_title("Visible Conversation"),
                 session_path,
             )
+
+    def test_current_path_prefers_cdp_session_id_over_title_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-cdp-thread-123.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            session_index = root / "session_index.jsonl"
+            session_index.write_text(
+                '{"id":"other-thread","thread_name":"Duplicate Title","updated_at":"2026-05-28T00:00:00Z"}\n',
+                encoding="utf-8",
+            )
+
+            tracker = ActiveSessionTracker(
+                platform=FakeCdpRefPlatform("cdp-thread-123", "Duplicate Title"),
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=500,
+                enabled=True,
+            )
+
+            self.assertEqual(tracker.current_path(), session_path)
+            self.assertEqual(tracker.latest_source, "cdp:Duplicate Title")
 
     def test_start_uses_in_process_title_polling_without_command_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

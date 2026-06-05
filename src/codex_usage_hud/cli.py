@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, time as datetime_time, timedelta
@@ -24,6 +25,7 @@ from .daemon import (
 from .platforms import ActiveSessionTracker, SessionPathResolver, get_current_platform
 from .platforms.base import BasePlatform
 from .ui import TokenHudWindow
+from .ui.renderer_hud import RendererHudClient, wait_for_renderer
 
 DEFAULT_POLL_MS = 500
 DEFAULT_SQLITE_LOG = "logs_2.sqlite"
@@ -39,6 +41,9 @@ HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
 DAEMON_RESTART_REQUESTED = 10
+RENDERER_HUD_UNAVAILABLE = 20
+RENDERER_INITIAL_TIMEOUT_SECONDS = 0.7
+DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 2.0
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 
 
@@ -753,6 +758,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use compact output mode for CLI snapshots and the Tkinter HUD.",
     )
+    parser.set_defaults(renderer_hud=True)
+    parser.add_argument(
+        "--renderer-hud",
+        dest="renderer_hud",
+        action="store_true",
+        help=(
+            "Prefer the renderer-injected HUD when Codex exposes a local CDP "
+            "target, falling back to the Tk HUD otherwise. Enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--tk-hud",
+        "--no-renderer-hud",
+        dest="renderer_hud",
+        action="store_false",
+        help="Force the legacy Tk HUD and skip renderer injection.",
+    )
     parser.add_argument(
         "--session-file",
         help="Optional exact session JSONL file to monitor.",
@@ -853,6 +875,104 @@ def run_once_snapshot(args: argparse.Namespace) -> int:
 
 
 def run_hud_session(
+    args: argparse.Namespace,
+    *,
+    lock_already_held: bool = False,
+    hide_until_attached: bool = False,
+    daemon_manager: CodexDaemonManager | None = None,
+) -> int:
+    """Run one HUD session, preferring renderer injection with Tk fallback."""
+    if getattr(args, "renderer_hud", False):
+        renderer_exit = run_renderer_hud_session(
+            args,
+            lock_already_held=lock_already_held,
+            daemon_manager=daemon_manager,
+        )
+        if renderer_exit != RENDERER_HUD_UNAVAILABLE:
+            return renderer_exit
+        _LOGGER.info("renderer_hud_unavailable falling_back=tk")
+    return run_tk_hud_session(
+        args,
+        lock_already_held=lock_already_held,
+        hide_until_attached=hide_until_attached,
+        daemon_manager=daemon_manager,
+    )
+
+
+def run_renderer_hud_session(
+    args: argparse.Namespace,
+    *,
+    lock_already_held: bool = False,
+    daemon_manager: CodexDaemonManager | None = None,
+) -> int:
+    """Run the in-renderer HUD over CDP, or report that it is unavailable."""
+    lock_context = nullcontext() if lock_already_held else HudInstanceLock()
+    try:
+        with lock_context:
+            context = build_runtime_context(args)
+            client = RendererHudClient()
+
+            def snapshot_or_error() -> ParsedSession:
+                try:
+                    return build_snapshot(context)
+                except Exception as exc:
+                    return ParsedSession(status="error", error=str(exc))
+
+            try:
+                initial_timeout = (
+                    DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS
+                    if daemon_manager is not None
+                    else RENDERER_INITIAL_TIMEOUT_SECONDS
+                )
+                if not wait_for_renderer(
+                    client,
+                    snapshot_or_error,
+                    timeout_seconds=initial_timeout,
+                ):
+                    _LOGGER.info(
+                        "renderer_hud_initial_connect_failed status=%s error=%s",
+                        client.last_status,
+                        client.last_error,
+                    )
+                    return RENDERER_HUD_UNAVAILABLE
+
+                failures = 0
+                while True:
+                    started = time.monotonic()
+                    if daemon_manager is not None:
+                        try:
+                            if not daemon_manager.codex_is_running():
+                                _LOGGER.info("daemon_codex_exited")
+                                return DAEMON_RESTART_REQUESTED
+                        except ProcessListenerError as exc:
+                            _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
+                            return RENDERER_HUD_UNAVAILABLE
+                    if client.update(snapshot_or_error()):
+                        failures = 0
+                    else:
+                        failures += 1
+                        _LOGGER.info(
+                            "renderer_hud_update_failed failures=%s status=%s error=%s",
+                            failures,
+                            client.last_status,
+                            client.last_error,
+                        )
+                        if failures >= 6:
+                            return RENDERER_HUD_UNAVAILABLE
+                    elapsed = time.monotonic() - started
+                    delay = max(0.1, (context.poll_ms / 1000.0) - elapsed)
+                    time.sleep(delay)
+            except KeyboardInterrupt:
+                return 130
+            finally:
+                client.close()
+                context.close()
+    except HudAlreadyRunningError as exc:
+        _eprint(f"codex-usage-hud: {exc}")
+        return 2
+
+
+def run_tk_hud_session(
     args: argparse.Namespace,
     *,
     lock_already_held: bool = False,

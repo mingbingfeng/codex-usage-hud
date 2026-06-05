@@ -8,7 +8,7 @@ import tempfile
 import subprocess
 import tkinter as tk
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -46,6 +46,7 @@ from codex_usage_hud.ui.tk_hud import (
     REQUEST_DOCK_LEFT,
     REQUEST_DOCK_RIGHT,
     REQUEST_DOCK_WIDTH,
+    NATIVE_ANCHOR_STABLE_FRAMES,
     TOP_DOCK_EXPANDED_HEIGHT,
     TOP_DOCK_HEIGHT,
     TOP_DOCK_LEFT,
@@ -93,6 +94,14 @@ class _FakeWindow:
         return self._height
 
 
+class _RecordingGeometryWindow:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def geometry(self, value: str) -> None:
+        self.calls.append(value)
+
+
 class _FakeAnchorLocator:
     def __init__(self, anchors: dict[str, HudAnchor], *, active: bool = True) -> None:
         self.anchors = anchors
@@ -128,6 +137,18 @@ class _FakeAnchorLocator:
     ) -> HudAnchor | None:
         del rect, hud_height
         return self.anchors.get(target)
+
+
+def _attached_geometry_after_stable(
+    window: TokenHudWindow,
+    target: str,
+    rect: WindowRect,
+    expanded: bool = False,
+) -> tuple[int, int, int, int]:
+    result = window._attached_geometry(target, rect, expanded)
+    for _ in range(NATIVE_ANCHOR_STABLE_FRAMES - 1):
+        result = window._attached_geometry(target, rect, expanded)
+    return result
 
 
 class _FakeUsageParser:
@@ -495,6 +516,31 @@ class AutoScrollHelpersTests(unittest.TestCase):
         self.assertIn("20:01:30", entry)
         self.assertNotIn("20:00:00", entry)
 
+    def test_round_entry_uses_elapsed_seconds_for_running_rounds(self) -> None:
+        started_at = datetime(2026, 5, 28, 20, 0, 0).astimezone()
+        item = RequestRound(
+            index=1,
+            status="running",
+            model="gpt-5.4",
+            input_tokens=1_000,
+            cached_tokens=0,
+            output_tokens=10,
+            reasoning_tokens=0,
+            total_tokens=1_010,
+            estimated=True,
+            cost_usd=0.1,
+            started_at=started_at,
+        )
+
+        entry = _round_entry(
+            item,
+            "gpt-5.4",
+            now=started_at + timedelta(seconds=42),
+        )
+
+        self.assertIn("42s", entry)
+        self.assertNotIn("20:00:00", entry)
+
     def test_round_entry_uses_dynamic_widths_without_leading_zeroes(self) -> None:
         rows = [
             RequestRound(
@@ -698,6 +744,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._attached = True
             window._last_rect = rect
             window.settings.request.width_ratio = 0.75
+            _attached_geometry_after_stable(window, "request", rect)
 
             window._remember_window_position(
                 "request",
@@ -732,6 +779,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._use_native_anchors = True
             window._attached = True
             window._last_rect = rect
+            _attached_geometry_after_stable(window, "top", rect)
 
             fake = _FakeWindow(x=420, y=92, width=400, height=36)
             window._remember_window_position("top", fake, reason="test-resize")
@@ -768,7 +816,11 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             )
             window._use_native_anchors = True
 
-            x, y, width, height = window._attached_geometry("request", rect, False)
+            x, y, width, height = _attached_geometry_after_stable(
+                window,
+                "request",
+                rect,
+            )
 
             self.assertEqual(height, 32)
             self.assertEqual((x, y, width), (720, 688, 300))
@@ -800,10 +852,102 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.settings.request.width_ratio = None
             window.settings.request.relative_x_ratio = None
             window.settings.request.relative_bottom_ratio = None
+            window._use_dom_anchors = False
 
             x, y, width, height = window._attached_geometry("request", rect, False)
 
             self.assertEqual((x, y, width, height), (460, 782, 495, 32))
+        finally:
+            window._close()
+
+    def test_native_anchor_waits_for_stable_frames(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "request": HudAnchor(
+                        left=600,
+                        top=720,
+                        right=1200,
+                        bottom=776,
+                        default_x=600,
+                        default_y=688,
+                        default_width=600,
+                        source="test-input",
+                    )
+                }
+            )
+            window._use_native_anchors = True
+            window.settings.request = WindowPlacement()
+
+            first = window._attached_geometry("request", rect, False)
+            stable = _attached_geometry_after_stable(window, "request", rect)
+            moved_rect = WindowRect(left=140, top=90, right=1340, bottom=890)
+            translated = window._attached_geometry("request", moved_rect, False)
+
+            self.assertNotEqual(first, (600, 688, 600, 32))
+            self.assertEqual(stable, (600, 688, 600, 32))
+            self.assertEqual(translated, (640, 728, 600, 32))
+        finally:
+            window._close()
+
+    def test_stable_anchor_is_projected_during_resize_gate(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "request": HudAnchor(
+                        left=600,
+                        top=720,
+                        right=1200,
+                        bottom=776,
+                        default_x=600,
+                        default_y=688,
+                        default_width=600,
+                        source="test-input",
+                    )
+                }
+            )
+            window._use_native_anchors = True
+            window.settings.request = WindowPlacement()
+            stable = _attached_geometry_after_stable(window, "request", rect)
+            self.assertEqual(stable, (600, 688, 600, 32))
+
+            window.locator = _FakeAnchorLocator(
+                {
+                    "request": HudAnchor(
+                        left=680,
+                        top=790,
+                        right=1380,
+                        bottom=853,
+                        default_x=680,
+                        default_y=758,
+                        default_width=700,
+                        source="test-input",
+                    )
+                }
+            )
+            resized_rect = WindowRect(left=100, top=50, right=1500, bottom=950)
+
+            projected = window._attached_geometry("request", resized_rect, False)
+
+            self.assertNotEqual(projected, (520, 900, 588, 32))
+            self.assertEqual(projected, (683, 768, 700, 32))
+        finally:
+            window._close()
+
+    def test_window_geometry_is_not_reapplied_when_unchanged(self) -> None:
+        window = TokenHudWindow()
+        try:
+            fake = _RecordingGeometryWindow()
+
+            window._apply_window_geometry("top", fake, (10, 20, 300, 32))
+            window._apply_window_geometry("top", fake, (10, 20, 300, 32))
+            window._apply_window_geometry("top", fake, (11, 20, 300, 32))
+
+            self.assertEqual(fake.calls, ["300x32+10+20", "300x32+11+20"])
         finally:
             window._close()
 
@@ -831,7 +975,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.settings.top.anchor_source = "test-title"
             window.settings.top.width_ratio = 2.0
 
-            x, _, width, _ = window._attached_geometry("top", rect, False)
+            x, _, width, _ = _attached_geometry_after_stable(window, "top", rect)
 
             self.assertLessEqual(x + width, rect.right - 12)
             self.assertEqual(window.settings.top.width_ratio, 2.0)
@@ -863,7 +1007,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.settings.top.width = 1
             window.settings.top.width_ratio = None
 
-            _, _, width, _ = window._attached_geometry("top", rect, False)
+            _, _, width, _ = _attached_geometry_after_stable(window, "top", rect)
 
             self.assertGreaterEqual(width, 120)
         finally:

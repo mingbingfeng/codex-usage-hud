@@ -1,13 +1,13 @@
 # codex-usage-hud
 
 [Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?include_prereleases&label=release)
-[Release Notes](https://github.com/mingbingfeng/codex-usage-hud/releases/tag/v0.2.0)
+[Release Notes](https://github.com/mingbingfeng/codex-usage-hud/releases/tag/v0.3.0)
 [Changelog](CHANGELOG.md)
 [Privacy](docs/PRIVACY.md)
 
-> `v0.2.0` is the current release in this repository. `codex-usage-hud` is a local-first, 100% offline HUD for Codex App with real-time token and cost tracking, exact cached-token discounting, and zero external dependencies.
+> `v0.3.0` is the current release in this repository. `codex-usage-hud` is a local-first, 100% offline HUD for Codex App with renderer injection, Tk fallback, real-time token and cost tracking, exact cached-token discounting, and zero external dependencies.
 >
-> `v0.2.0` 是当前发布版本。`codex-usage-hud` 是一个面向 Codex App 的 local-first HUD，100% 离线运行，支持实时 token 与成本追踪、精确 cached token 折扣计算，并保持 0 外部依赖。
+> `v0.3.0` 是当前发布版本。`codex-usage-hud` 是一个面向 Codex App 的 local-first HUD，100% 离线运行，支持 renderer 注入、Tk 回退、实时 token 与成本追踪、精确 cached token 折扣计算，并保持 0 外部依赖。
 
 `codex-usage-hud` is a local-first monitoring tool for Codex App. It reads local JSONL and SQLite logs, tracks token usage and cost, and keeps the current session visible without sending data to external services.
 
@@ -16,12 +16,12 @@
 ## What this repo is / 这是什么
 
 - An installable Python package with a standard `src/` layout.
-- A one-shot CLI snapshot and a live Tk HUD for local usage review.
+- A one-shot CLI snapshot and a live HUD for local usage review, with renderer injection when Codex exposes local CDP and Tk fallback otherwise.
 - A Windows-first daemon mode that can attach the HUD when Codex starts.
 - A repo that keeps tags, changelog, release notes, and docs in one maintenance loop.
 
 - 一个可安装的 Python 包，使用标准 `src/` 布局。
-- 一个可一次性查看的 CLI 快照，以及一个本地运行的 Tk HUD。
+- 一个可一次性查看的 CLI 快照，以及一个本地运行的实时 HUD：Codex 暴露本地 CDP 时优先注入 renderer，否则回退到 Tk HUD。
 - 一个 Windows 优先的守护进程模式，可在 Codex 启动时自动挂上 HUD。
 - 一个把 tag、changelog、release notes 和文档放在同一维护闭环里的仓库。
 
@@ -80,7 +80,7 @@ python -m codex_usage_hud --once
 | Surface | Command | When to use |
 | --- | --- | --- |
 | Snapshot | `codex-hud --once` | Print the current local usage summary and exit. |
-| Live HUD | `codex-hud` | Open the interactive HUD and keep it refreshing. |
+| Live HUD | `codex-hud` | Prefer the renderer-injected HUD and keep it refreshing; falls back to Tk when CDP is unavailable. |
 | Windows daemon | `codex-hud --daemon` | Wait for Codex, then attach the HUD automatically. |
 | Stop | `codex-hud --stop` | Clear the local PID lock and stop the running HUD. |
 
@@ -89,12 +89,12 @@ python -m codex_usage_hud --once
 - The app resolves a session from explicit file path, session id, active conversation, or activity-based fallback.
 - It parses local JSONL and SQLite logs into a single usage snapshot.
 - It keeps privacy boundaries local by design: no network, no telemetry, no upload.
-- It renders either a CLI snapshot or a Tk HUD from the same local data model.
+- It renders either a CLI snapshot, a renderer-injected HUD, or a Tk fallback from the same local data model.
 
 - 它会从显式文件、会话 id、当前活动会话或活动回退路径里定位一个会话。
 - 它把本地 JSONL 和 SQLite 日志解析成同一份用量快照。
 - 它的隐私边界默认只在本地：不联网、不遥测、不上传。
-- 它会基于同一份本地数据模型渲染 CLI 快照或 Tk HUD。
+- 它会基于同一份本地数据模型渲染 CLI 快照、renderer 注入 HUD 或 Tk 回退 HUD。
 
 ## Project structure / 仓库结构
 
@@ -115,15 +115,15 @@ python -m codex_usage_hud --once
 ## Releases and maintenance / 发布与维护
 
 - Tags follow semantic versioning: `vX.Y.Z`.
-- Current latest tag: `v0.2.0`.
-- `v0.1.0` was the first alpha release; `v0.2.0` is the Smart Daemon Edition.
+- Current latest tag: `v0.3.0`.
+- `v0.1.0` was the first alpha release; `v0.2.0` is the Smart Daemon Edition; `v0.3.0` is the Renderer Timeline Edition.
 - `CHANGELOG.md` is the long-form history that should stay aligned with tags.
 - The release-note files are maintained as ready-to-paste GitHub release bodies.
 - When a release lands, update the version string, changelog, README release section, and release note file together.
 
 - 标签遵循语义化版本：`vX.Y.Z`。
-- 当前最新 tag：`v0.2.0`。
-- `v0.1.0` 是首个 alpha 版本；`v0.2.0` 是 Smart Daemon Edition。
+- 当前最新 tag：`v0.3.0`。
+- `v0.1.0` 是首个 alpha 版本；`v0.2.0` 是 Smart Daemon Edition；`v0.3.0` 是 Renderer Timeline Edition。
 - `CHANGELOG.md` 是长期历史记录，应该和 tag 保持一致。
 - release note 文件用于维护可直接贴到 GitHub Release 的正文。
 - 每次发布时，建议同步更新版本号、changelog、README 发布区和 release note 文件。

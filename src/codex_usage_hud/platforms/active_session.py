@@ -311,6 +311,24 @@ class ActiveSessionTracker:
         """Resolve the latest observed Codex conversation title to a JSONL path."""
         if not self.enabled:
             return None
+        ref = self.platform.get_active_conversation_ref()
+        if ref is not None:
+            session_id, title = ref
+            path = self.path_from_thread_id(session_id) if session_id else None
+            if path is None and title:
+                path = self.path_for_title(title)
+            if path is not None or title or session_id:
+                with self._lock:
+                    self.latest_title = title or self.latest_title
+                    self.latest_path = path
+                    self._mapped_title = title or self._mapped_title
+                    self.latest_source = (
+                        f"cdp:{compact_text(title or session_id)}"
+                        if path is not None
+                        else "cdp-unmatched"
+                    )
+                    self.latest_event_source = "cdp"
+                return path
         with self._lock:
             title = self.latest_title
         if not title:
