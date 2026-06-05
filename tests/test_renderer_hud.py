@@ -183,6 +183,15 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertFalse(details[1]["running"])
         self.assertEqual(details[1]["time"], "13:00:05")
 
+    def test_renderer_script_resizes_request_panel_from_fixed_bottom(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn("height = clamp(gesture.height - dy", script)
+        self.assertIn("top = bottom - height", script)
+        self.assertIn("patch.bottomOffset", script)
+        self.assertIn("anchor.top + anchor.height + bottomOffset - height", script)
+        self.assertIn(": clamp(anchor.top + Number(state.yOffset || 0)", script)
+
 
 class RendererHudClientTests(unittest.TestCase):
     def test_client_installs_renderer_script_once_and_pushes_payloads(self) -> None:

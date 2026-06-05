@@ -605,8 +605,8 @@ RENDERER_HUD_SCRIPT = r"""
         if (gesture.expanded) {
           if (name === "request") {
             const bottom = gesture.top + gesture.height;
-            height = clamp(gesture.height + dy, minHeight, Math.max(minHeight, bottom - 8));
-            top = clamp(bottom - height, 8, Math.max(8, innerHeight - height - 8));
+            height = clamp(gesture.height - dy, minHeight, Math.max(minHeight, bottom - 8));
+            top = bottom - height;
           } else {
             height = clamp(gesture.height + dy, minHeight, Math.max(minHeight, innerHeight - gesture.top - 8));
           }
@@ -652,9 +652,15 @@ RENDERER_HUD_SCRIPT = r"""
     }
     const area = anchor.area;
     const free = Math.max(0, area.width - width);
+    const patchHeight = Number(
+      base.expandedHeight || base.collapsedHeight || anchor.height || 0
+    );
     patch.anchorSource = anchor.source;
     patch.xRatio = free > 0 ? clamp((left - area.left) / free, 0, 1) : 0.5;
     patch.yOffset = Math.round(top - anchor.top);
+    patch.bottomOffset = Number.isFinite(patchHeight) && patchHeight > 0
+      ? Math.round((top + patchHeight) - (anchor.top + anchor.height))
+      : 0;
     patch.widthRatio = clamp(width / Math.max(1, area.width), 0.1, 1);
     return patch;
   }
@@ -1062,8 +1068,10 @@ RENDERER_HUD_SCRIPT = r"""
     const free = Math.max(0, anchor.area.width - width);
     const xRatio = clamp(Number(state.xRatio ?? 0.5), 0, 1);
     const left = clamp(anchor.area.left + (free * xRatio), 8, Math.max(8, innerWidth - width - 8));
-    const yOffset = Number(state.yOffset || 0);
-    const top = clamp(anchor.top + yOffset, 8, Math.max(8, innerHeight - height - 8));
+    const bottomOffset = Number(state.bottomOffset);
+    const top = Number.isFinite(bottomOffset)
+      ? clamp(anchor.top + anchor.height + bottomOffset - height, 8, Math.max(8, innerHeight - height - 8))
+      : clamp(anchor.top + Number(state.yOffset || 0), 8, Math.max(8, innerHeight - height - 8));
     return { left, top, width };
   }
 
