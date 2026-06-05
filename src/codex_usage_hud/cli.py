@@ -38,6 +38,7 @@ HUD_LOCK_FILENAME = "codex_usage_hud.pid"
 HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
+DAEMON_RESTART_REQUESTED = 10
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 
 
@@ -894,7 +895,7 @@ def run_hud_session(
                     try:
                         if not daemon_manager.codex_is_running():
                             _LOGGER.info("daemon_codex_exited")
-                            window.close()
+                            window.close("daemon_codex_exited")
                             return
                     except ProcessListenerError as exc:
                         _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
@@ -908,6 +909,8 @@ def run_hud_session(
                 if daemon_manager is not None:
                     window.root.after(daemon_manager.poll_ms, daemon_watchdog)
                 window.run()
+                if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
+                    return DAEMON_RESTART_REQUESTED
                 return 0
             finally:
                 context.close()
@@ -923,23 +926,28 @@ def run_daemon(args: argparse.Namespace) -> int:
     manager = CodexDaemonManager(poll_ms=args.daemon_poll_ms)
     try:
         with HudInstanceLock():
-            try:
-                manager.wait_for_codex()
-            except KeyboardInterrupt:
-                return 130
-            except ProcessListenerError as exc:
-                _LOGGER.exception("daemon_listener_failed fallback=%s", exc)
-                return run_hud_session(
+            while True:
+                try:
+                    manager.wait_for_codex()
+                except KeyboardInterrupt:
+                    return 130
+                except ProcessListenerError as exc:
+                    _LOGGER.exception("daemon_listener_failed fallback=%s", exc)
+                    return run_hud_session(
+                        args,
+                        lock_already_held=True,
+                        hide_until_attached=False,
+                    )
+                exit_code = run_hud_session(
                     args,
                     lock_already_held=True,
-                    hide_until_attached=False,
+                    hide_until_attached=True,
+                    daemon_manager=manager,
                 )
-            return run_hud_session(
-                args,
-                lock_already_held=True,
-                hide_until_attached=True,
-                daemon_manager=manager,
-            )
+                if exit_code == DAEMON_RESTART_REQUESTED:
+                    _LOGGER.info("daemon_restarting_wait_for_codex")
+                    continue
+                return exit_code
     except HudAlreadyRunningError as exc:
         _eprint(f"codex-usage-hud: {exc}")
         return 2

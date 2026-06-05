@@ -35,7 +35,12 @@ TOP_ANCHOR_RIGHT_MIN = 172
 TOP_ANCHOR_MIN_WIDTH = 320
 TOP_EXPANDED_STACK_WIDTH = 560
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
-TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额  ~ 估算"
+CACHE_HIT_RATE_SYMBOL = "◎"
+TOKEN_LEGEND_TEXT = (
+    "↑ 输入  ↻ 缓存  ↓ 输出\n"
+    "◇ 推理  ∑ 合计  $ 金额\n"
+    f"{CACHE_HIT_RATE_SYMBOL} 缓存命中率  ~ 估算"
+)
 
 REQUEST_DOCK_BOTTOM = 28
 REQUEST_DOCK_LEFT = 520
@@ -1527,6 +1532,75 @@ def _display_tokens(
     )
 
 
+def _display_cached_tokens(
+    snapshot: ParsedSession,
+    input_tokens: int | None,
+    input_estimated: bool,
+) -> tuple[int | None, bool]:
+    cached_tokens = snapshot.request.cached_tokens
+    cached_estimated = snapshot.request.estimated and cached_tokens is not None
+    if cached_tokens is None and input_tokens is not None:
+        cached_tokens = min(snapshot.confirmed.last_cached, int(input_tokens))
+        cached_estimated = input_estimated or snapshot.request.estimated
+    return cached_tokens, cached_estimated
+
+
+def _format_rate_marker(value: float | None, estimated: bool) -> str:
+    if value is None:
+        return f"{CACHE_HIT_RATE_SYMBOL}-"
+    clamped = max(0.0, min(float(value), 1.0))
+    return f"{CACHE_HIT_RATE_SYMBOL}{'~' if estimated else ''}{clamped:.0%}"
+
+
+def _session_cache_hit_rate(snapshot: ParsedSession) -> tuple[float | None, bool]:
+    input_tokens = int(snapshot.confirmed.cumulative_input or 0)
+    cached_tokens = int(snapshot.confirmed.cumulative_cached or 0)
+    estimated = False
+    if snapshot.request.status == "running" or input_tokens <= 0:
+        (
+            request_input_tokens,
+            input_estimated,
+            _output_tokens,
+            _output_estimated,
+            _reasoning_tokens,
+            _reasoning_estimated,
+            _total_tokens,
+            _total_estimated,
+        ) = _display_tokens(snapshot)
+        request_cached_tokens, cached_estimated = _display_cached_tokens(
+            snapshot,
+            request_input_tokens,
+            input_estimated,
+        )
+        if request_input_tokens is not None and int(request_input_tokens) > 0:
+            request_input = int(request_input_tokens)
+            request_cached = int(request_cached_tokens or 0)
+            if snapshot.request.status == "running":
+                input_tokens += request_input
+                cached_tokens += request_cached
+            else:
+                input_tokens = request_input
+                cached_tokens = request_cached
+            estimated = input_estimated or cached_estimated or snapshot.request.estimated
+    if input_tokens <= 0:
+        return None, estimated
+    cached_tokens = max(0, min(cached_tokens, input_tokens))
+    return cached_tokens / max(1, input_tokens), estimated
+
+
+def _session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
+    ratio, estimated = _session_cache_hit_rate(snapshot)
+    return _format_rate_marker(ratio, estimated)
+
+
+def _round_cache_hit_rate_label(item: RequestRound) -> str:
+    input_tokens = item.input_tokens
+    if input_tokens is None or int(input_tokens) <= 0:
+        return _format_rate_marker(None, item.estimated)
+    cached_tokens = max(0, min(int(item.cached_tokens or 0), int(input_tokens)))
+    return _format_rate_marker(cached_tokens / max(1, int(input_tokens)), item.estimated)
+
+
 def _request_cost(snapshot: ParsedSession) -> tuple[float | None, bool]:
     request = snapshot.request
     if request.cost_usd is not None and not request.estimated:
@@ -1664,11 +1738,11 @@ def _request_counter(snapshot: ParsedSession) -> str:
         total_estimated,
     ) = _display_tokens(snapshot)
     cost, cost_estimated = _request_cost(snapshot)
-    cached_tokens = snapshot.request.cached_tokens
-    cached_estimated = snapshot.request.estimated and cached_tokens is not None
-    if cached_tokens is None and input_tokens is not None:
-        cached_tokens = min(snapshot.confirmed.last_cached, int(input_tokens))
-        cached_estimated = input_estimated or snapshot.request.estimated
+    cached_tokens, cached_estimated = _display_cached_tokens(
+        snapshot,
+        input_tokens,
+        input_estimated,
+    )
     return " ".join(
         [
             f"↑{'~' if input_estimated else ''}{_short_num(input_tokens)}",
@@ -1697,6 +1771,7 @@ def _request_total_line(snapshot: ParsedSession) -> str:
             f"∑{_fixed_token_total(total_tokens)}",
             f"↑{'~' if estimated else ''}{_short_num(input_tokens)}",
             f"↻{'~' if estimated else ''}{_short_num(cached_tokens)}",
+            _session_cache_hit_rate_label(snapshot),
             f"↓{'~' if estimated else ''}{_short_num(output_tokens)}",
             f"◇{'~' if estimated else ''}{_short_num(reasoning_tokens)}",
         ]
@@ -1736,6 +1811,7 @@ def _round_entry(
         f"#{index_text} {money_text} "
         f"∑{total_text} {time_text} "
         f"↑{_short_num(item.input_tokens)} ↻{_short_num(item.cached_tokens)} "
+        f"{_round_cache_hit_rate_label(item)} "
         f"↓{_short_num(item.output_tokens)} ◇{_short_num(item.reasoning_tokens)}"
     )
 
@@ -1815,6 +1891,7 @@ class TokenHudWindow:
         self.root.attributes("-topmost", True)
         self.root.configure(bg="#0E1217")
         self.root.bind("<Escape>", self._close)
+        self._exit_reason = ""
 
         self.top_expanded = False
         self.request_expanded = False
@@ -3015,11 +3092,17 @@ class TokenHudWindow:
 
     def _close(self, event: object | None = None) -> str:
         del event
-        self.close()
+        self.close("user")
         return "break"
 
-    def close(self) -> None:
+    @property
+    def exit_reason(self) -> str:
+        return self._exit_reason
+
+    def close(self, reason: str = "user") -> None:
         """Destroy both HUD windows and cancel Tk timers owned by the widgets."""
+        if not self._exit_reason:
+            self._exit_reason = reason
         try:
             self.request_root.destroy()
         except tk.TclError:
@@ -3070,6 +3153,7 @@ class TokenHudWindow:
         if bar is not None:
             text = (
                 f"会话 {_format_usage_money(confirmed.cumulative_total, session_cost)} | "
+                f"命中 {_session_cache_hit_rate_label(snapshot)} | "
                 f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)} | "
                 f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)} | "
                 f"状态 {_budget_status(snapshot)}"
@@ -3092,7 +3176,8 @@ class TokenHudWindow:
                 "累计确认  "
                 f"总 {confirmed.cumulative_total:,}   "
                 f"输入 {confirmed.cumulative_input:,}   "
-                f"缓存 {confirmed.cumulative_cached:,}\n"
+                f"缓存 {confirmed.cumulative_cached:,}   "
+                f"命中 {_session_cache_hit_rate_label(snapshot)}\n"
                 f"输出 {confirmed.cumulative_output:,}   "
                 f"推理 {confirmed.cumulative_reasoning:,}   "
                 f"金额 {_format_money(session_cost)}"

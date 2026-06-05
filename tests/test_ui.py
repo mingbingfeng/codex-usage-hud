@@ -10,6 +10,8 @@ import tkinter as tk
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -17,12 +19,15 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.cli import (
+    DAEMON_RESTART_REQUESTED,
     HudAlreadyRunningError,
     HudInstanceLock,
     UsageSummaryCache,
     budget_warnings,
     parse_thresholds,
     snapshot_to_text,
+    run_daemon,
+    run_hud_session,
     stop_running_hud,
     usage_before_today_in_week,
 )
@@ -424,6 +429,18 @@ class AutoScrollHelpersTests(unittest.TestCase):
 
         self.assertTrue(_request_total_line(snapshot).startswith("$0.094 ∑295k"))
 
+    def test_request_total_line_includes_session_cache_hit_rate(self) -> None:
+        snapshot = ParsedSession()
+        snapshot.request.input_tokens = 194_000
+        snapshot.request.cached_tokens = 93_000
+        snapshot.request.output_tokens = 852
+        snapshot.request.reasoning_tokens = 516
+        snapshot.request.total_tokens = 295_000
+        snapshot.request.cost_usd = 0.094
+        snapshot.request.estimated = False
+
+        self.assertIn("◎48%", _request_total_line(snapshot))
+
     def test_round_entry_puts_natural_sequence_money_and_total_first(self) -> None:
         item = RequestRound(
             index=33,
@@ -440,6 +457,22 @@ class AutoScrollHelpersTests(unittest.TestCase):
         )
 
         self.assertTrue(_round_entry(item, "gpt-5.4").startswith("#33 $0.094 ∑295k"))
+
+    def test_round_entry_includes_round_cache_hit_rate(self) -> None:
+        item = RequestRound(
+            index=33,
+            status="confirmed",
+            model="gpt-5.4",
+            input_tokens=194_000,
+            cached_tokens=93_000,
+            output_tokens=852,
+            reasoning_tokens=516,
+            total_tokens=295_000,
+            estimated=False,
+            cost_usd=0.094,
+        )
+
+        self.assertIn("◎48%", _round_entry(item, "gpt-5.4"))
 
     def test_round_entry_prefers_completed_time_for_confirmed_rounds(self) -> None:
         item = RequestRound(
@@ -561,6 +594,66 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
             window.toggle_top_expanded()
             self.assertEqual(window.request_root.winfo_exists(), 1)
+        finally:
+            window._close()
+
+    def test_collapsed_top_bar_shows_session_cache_hit_rate(self) -> None:
+        window = TokenHudWindow()
+        try:
+            snapshot = ParsedSession()
+            snapshot.confirmed.cumulative_total = 451_844
+            snapshot.confirmed.cumulative_input = 429_843
+            snapshot.confirmed.cumulative_cached = 374_400
+            snapshot.today_tokens = 41_100_000
+            snapshot.today_cost_usd = 39.31
+            snapshot.week_tokens = 159_500_000
+            snapshot.week_cost_usd = 138.23
+
+            window.update_display(snapshot)
+
+            self.assertIn("命中 ◎87%", window.top_labels["bar"].cget("text"))
+        finally:
+            window._close()
+
+    def test_request_expanded_rows_show_round_cache_hit_rate(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_request_expanded()
+            snapshot = ParsedSession()
+            snapshot.request.model = "gpt-5.4"
+            snapshot.request_history = [
+                RequestRound(
+                    index=1,
+                    status="confirmed",
+                    model="gpt-5.4",
+                    input_tokens=1_000,
+                    cached_tokens=500,
+                    output_tokens=20,
+                    reasoning_tokens=0,
+                    total_tokens=1_020,
+                    estimated=False,
+                    cost_usd=0.1,
+                ),
+                RequestRound(
+                    index=2,
+                    status="confirmed",
+                    model="gpt-5.4",
+                    input_tokens=2_000,
+                    cached_tokens=500,
+                    output_tokens=50,
+                    reasoning_tokens=10,
+                    total_tokens=2_050,
+                    estimated=False,
+                    cost_usd=0.2,
+                ),
+            ]
+
+            window.update_display(snapshot)
+            window.root.update_idletasks()
+            request_rows = window.request_text.get("1.0", "end-1c")
+
+            self.assertIn("◎50%", request_rows)
+            self.assertIn("◎25%", request_rows)
         finally:
             window._close()
 
@@ -867,6 +960,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(scroll_region)
             self.assertGreater(scroll_region[3], canvas.winfo_height())
             self.assertEqual(window.top_labels["legend"].cget("text"), TOKEN_LEGEND_TEXT)
+            self.assertIn("命中 ◎87%", window.top_labels["cumulative"].cget("text"))
+            self.assertIn("◎87%", window.request_label.cget("text"))
             for key in ("budget", "activity", "warnings", "legend", "slow", "gap", "status"):
                 label = window.top_labels[key]
                 wraplength = int(float(str(label.cget("wraplength"))))
@@ -977,6 +1072,61 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertFalse(window._tombstoned)
         finally:
             window._close()
+
+
+class DaemonLifecycleTests(unittest.TestCase):
+    def test_run_hud_session_returns_restart_code_when_codex_exits(self) -> None:
+        fake_context = SimpleNamespace(poll_ms=250, close=MagicMock())
+        fake_window = SimpleNamespace(
+            exit_reason="daemon_codex_exited",
+            root=SimpleNamespace(after=lambda *args, **kwargs: None),
+            should_refresh_snapshot=lambda: False,
+            refresh_delay_ms=lambda normal_delay_ms: normal_delay_ms,
+            run=lambda: None,
+            update_display=lambda snapshot: None,
+        )
+        args = SimpleNamespace(compact=False)
+        daemon_manager = SimpleNamespace(poll_ms=250)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window),
+        ):
+            exit_code = run_hud_session(
+                args,
+                lock_already_held=True,
+                hide_until_attached=True,
+                daemon_manager=daemon_manager,
+            )
+
+        self.assertEqual(exit_code, DAEMON_RESTART_REQUESTED)
+        fake_context.close.assert_called_once()
+
+    def test_run_daemon_waits_for_next_codex_start_after_session_exit(self) -> None:
+        fake_manager = SimpleNamespace(
+            poll_ms=250,
+            wait_for_codex=MagicMock(side_effect=[object(), object(), KeyboardInterrupt()]),
+        )
+        args = SimpleNamespace(daemon_poll_ms=250)
+        lock_instance = MagicMock()
+        lock_instance.__enter__.return_value = lock_instance
+        lock_instance.__exit__.return_value = False
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging", return_value=None),
+            patch("codex_usage_hud.cli.hide_console_window", return_value=None),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=fake_manager),
+            patch("codex_usage_hud.cli.HudInstanceLock", return_value=lock_instance),
+            patch(
+                "codex_usage_hud.cli.run_hud_session",
+                side_effect=[DAEMON_RESTART_REQUESTED, 0],
+            ) as run_session,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_manager.wait_for_codex.call_count, 2)
+        self.assertEqual(run_session.call_count, 2)
 
 
 if __name__ == "__main__":
