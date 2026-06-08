@@ -1149,9 +1149,10 @@ class _WindowsCodexLocator(_BaseLocator):
             self.wintypes = wintypes
             self.user32 = ctypes.windll.user32
             self.kernel32 = ctypes.windll.kernel32
+            self._top_dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=True)
             self._dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=False)
             self._native_anchors_enabled = _env_flag(HUD_NATIVE_ANCHORS_ENV)
-            if self._dom_anchors_enabled:
+            if self._top_dom_anchors_enabled or self._dom_anchors_enabled:
                 self._cdp_probe = CodexCdpProbe()
             self._tracker = CodexWindowTracker(enable_uia=self._native_anchors_enabled)
             self.enabled = True
@@ -1475,6 +1476,13 @@ class _WindowsCodexLocator(_BaseLocator):
         rect: WindowRect,
         hud_height: int,
     ) -> HudAnchor | None:
+        if target == "top":
+            if not getattr(self, "_top_dom_anchors_enabled", False):
+                self._log_cdp_anchor_status(target, "disabled", "top_probe=off")
+                return None
+        elif not self._dom_anchors_enabled:
+            self._log_cdp_anchor_status(target, "disabled", "probe=off")
+            return None
         if self._cdp_probe is None:
             self._log_cdp_anchor_status(target, "disabled", "probe=none")
             return None
@@ -2177,6 +2185,7 @@ class TokenHudWindow:
         self._settings_support_images: list[tk.PhotoImage] = []
         self._geometry_log_path = configure_hud_geometry_logging()
         self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
+        self._use_top_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=True)
         self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
@@ -4005,7 +4014,11 @@ class TokenHudWindow:
                 rect,
                 expanded,
             )
-        if self._use_dom_anchors or self._use_native_anchors:
+        if (
+            self._use_dom_anchors
+            or self._use_native_anchors
+            or (target == "top" and self._use_top_dom_anchors)
+        ):
             native = self._stable_native_anchor(target, rect, height)
             if native is not None:
                 return native

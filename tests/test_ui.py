@@ -751,6 +751,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window = TokenHudWindow()
             try:
                 self.assertFalse(window._use_dom_anchors)
+                self.assertTrue(window._use_top_dom_anchors)
             finally:
                 window._close()
 
@@ -760,6 +761,88 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 self.assertTrue(window._use_dom_anchors)
             finally:
                 window._close()
+
+    def test_top_uses_default_dom_anchor_without_enabling_request_anchor(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {
+                    "top": HudAnchor(
+                        left=320,
+                        top=80,
+                        right=1180,
+                        bottom=126,
+                        default_x=320,
+                        default_y=86,
+                        default_width=860,
+                        source="cdp:title",
+                    ),
+                    "request": HudAnchor(
+                        left=600,
+                        top=720,
+                        right=1200,
+                        bottom=776,
+                        default_x=600,
+                        default_y=688,
+                        default_width=600,
+                        source="cdp:composer",
+                    ),
+                }
+            )
+            window._use_dom_anchors = False
+            window._use_native_anchors = False
+            window._use_top_dom_anchors = True
+            window.settings.top = WindowPlacement()
+            window.settings.request = WindowPlacement()
+
+            top = _attached_geometry_after_stable(window, "top", rect)
+            request = _attached_geometry_after_stable(window, "request", rect)
+
+            self.assertEqual(top, (320, 86, 860, TOP_DOCK_HEIGHT))
+            self.assertNotEqual(request[:3], (600, 688, 600))
+        finally:
+            window._close()
+
+    def test_top_dom_anchor_updates_when_title_region_changes(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            first_anchor = HudAnchor(
+                left=300,
+                top=80,
+                right=1180,
+                bottom=126,
+                default_x=300,
+                default_y=86,
+                default_width=880,
+                source="cdp:title",
+            )
+            second_anchor = HudAnchor(
+                left=460,
+                top=80,
+                right=1180,
+                bottom=126,
+                default_x=460,
+                default_y=86,
+                default_width=720,
+                source="cdp:title",
+            )
+            locator = _FakeAnchorLocator({"top": first_anchor})
+            window.locator = locator
+            window._use_dom_anchors = False
+            window._use_native_anchors = False
+            window._use_top_dom_anchors = True
+            window.settings.top = WindowPlacement()
+
+            first = _attached_geometry_after_stable(window, "top", rect)
+            locator.anchors["top"] = second_anchor
+            second = _attached_geometry_after_stable(window, "top", rect)
+
+            self.assertEqual(first, (300, 86, 880, TOP_DOCK_HEIGHT))
+            self.assertEqual(second, (460, 86, 720, TOP_DOCK_HEIGHT))
+        finally:
+            window._close()
 
     def test_collapsed_top_bar_shows_session_cache_hit_rate(self) -> None:
         window = TokenHudWindow()
