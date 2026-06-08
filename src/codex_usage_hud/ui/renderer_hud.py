@@ -6,9 +6,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import os
+from pathlib import Path
 import time
 from typing import Any
 
+from ..config import UserConfig
 from ..core.parser import CostEstimator, ParsedSession, RequestRound
 from ..platforms.cdp_probe import (
     cdp_port_from_env,
@@ -27,6 +29,12 @@ TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
 
 _COST_ESTIMATOR = CostEstimator()
 
+
+def set_cost_estimator(estimator: CostEstimator) -> None:
+    """Use the current user-configured price table for renderer formatting."""
+    global _COST_ESTIMATOR
+    _COST_ESTIMATOR = estimator
+
 RENDERER_HUD_SCRIPT = r"""
 (() => {
   const version = "5";
@@ -44,7 +52,10 @@ RENDERER_HUD_SCRIPT = r"""
   const settleTimerName = "__codexUsageHudSettleTimers";
   const runningTimerName = "__codexUsageHudRunningTimer";
   const storageKey = "codexUsageHudPanelState:v5";
+  const settingsModalId = "codex-usage-hud-settings-modal";
   let topSlotCache = null;
+  const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
+  const numericAnimations = new WeakMap();
 
   try {
     if (typeof window.__codexUsageHudRemove === "function") {
@@ -136,6 +147,9 @@ RENDERER_HUD_SCRIPT = r"""
         gap: 6px;
         padding: 4px 7px 4px 8px;
       }
+      #${rootId} .codex-usage-hud-collapsed[data-has-settings="true"] {
+        grid-template-columns: 20px minmax(0, 1fr) 22px 14px;
+      }
       #${rootId} .codex-usage-hud-expanded-shell {
         display: none;
         grid-template-rows: auto minmax(0, 1fr);
@@ -154,7 +168,8 @@ RENDERER_HUD_SCRIPT = r"""
         font: inherit;
       }
       #${rootId} .codex-usage-hud-handle,
-      #${rootId} .codex-usage-hud-resize {
+      #${rootId} .codex-usage-hud-resize,
+      #${rootId} .codex-usage-hud-settings-button {
         display: inline-grid;
         place-items: center;
         box-sizing: border-box;
@@ -182,7 +197,19 @@ RENDERER_HUD_SCRIPT = r"""
         color: #718095;
         cursor: nwse-resize;
       }
+      #${rootId} .codex-usage-hud-settings-button {
+        width: 22px;
+        height: 22px;
+        border-radius: 5px;
+        background: transparent;
+        color: #a9bcd2;
+        font-size: 13px;
+      }
       #${rootId} .codex-usage-hud-handle:hover {
+        background: rgba(62, 74, 92, .92);
+        color: #f3d27a;
+      }
+      #${rootId} .codex-usage-hud-settings-button:hover {
         background: rgba(62, 74, 92, .92);
         color: #f3d27a;
       }
@@ -215,6 +242,7 @@ RENDERER_HUD_SCRIPT = r"""
         font: 700 12px ui-monospace, "Cascadia Mono", Consolas, monospace;
       }
       #${rootId} .codex-usage-hud-line {
+        position: relative;
         min-width: 0;
         white-space: nowrap;
         overflow: hidden;
@@ -222,6 +250,30 @@ RENDERER_HUD_SCRIPT = r"""
         font-size: 12px;
         font-weight: 700;
         letter-spacing: 0;
+      }
+      #${rootId} .codex-usage-hud-line-inner {
+        display: inline-block;
+        max-width: none;
+        white-space: nowrap;
+        transform: translateX(0);
+        will-change: transform;
+      }
+      #${rootId} .codex-usage-hud-line[data-marquee="true"] .codex-usage-hud-line-inner {
+        animation-name: codex-usage-hud-marquee;
+        animation-duration: var(--codex-usage-hud-marquee-duration, 6000ms);
+        animation-timing-function: linear;
+        animation-iteration-count: infinite;
+      }
+      @keyframes codex-usage-hud-marquee {
+        0%, 22% {
+          transform: translateX(0);
+        }
+        48%, 70% {
+          transform: translateX(calc(var(--codex-usage-hud-marquee-distance, 0px) * -1));
+        }
+        100% {
+          transform: translateX(0);
+        }
       }
       #${rootId} .${requestClass} .codex-usage-hud-line {
         color: #f3d27a;
@@ -238,6 +290,9 @@ RENDERER_HUD_SCRIPT = r"""
         padding: 2px 5px;
         border-radius: 5px;
         background: #202833;
+      }
+      #${rootId} .${topClass} .codex-usage-hud-panel-header {
+        grid-template-columns: 20px minmax(0, auto) minmax(0, 1fr) 22px 14px;
       }
       #${rootId} .${requestClass} .codex-usage-hud-panel-header {
         background: #151d27;
@@ -373,12 +428,169 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .${warningClass} {
         color: #ffb86b !important;
       }
+      #${rootId} .codex-usage-hud-settings-modal[hidden] {
+        display: none !important;
+      }
+      #${rootId} .codex-usage-hud-settings-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 2147482750;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: rgba(3, 7, 12, .48);
+        pointer-events: auto;
+      }
+      #${rootId} .codex-usage-hud-settings-dialog {
+        width: min(760px, calc(100vw - 32px));
+        max-height: min(720px, calc(100vh - 32px));
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        border: 1px solid rgba(140, 153, 174, .28);
+        border-radius: 8px;
+        background: #10161d;
+        color: #e8eef7;
+        box-shadow: 0 24px 70px rgba(0, 0, 0, .44);
+        overflow: hidden;
+        font: 12px "Microsoft YaHei UI", system-ui, sans-serif;
+      }
+      #${rootId} .codex-usage-hud-settings-head,
+      #${rootId} .codex-usage-hud-settings-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        background: #151d27;
+      }
+      #${rootId} .codex-usage-hud-settings-title {
+        font-size: 13px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-settings-close,
+      #${rootId} .codex-usage-hud-settings-action {
+        border: 0;
+        border-radius: 5px;
+        background: #2e3846;
+        color: #dde7f2;
+        min-height: 28px;
+        padding: 4px 9px;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-settings-action[data-primary="true"] {
+        background: #f3d27a;
+        color: #10161d;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-settings-tabs {
+        display: flex;
+        gap: 6px;
+        padding: 8px 12px;
+        border-top: 1px solid #202833;
+        border-bottom: 1px solid #202833;
+        background: #10161d;
+      }
+      #${rootId} .codex-usage-hud-settings-tab {
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: #a9bcd2;
+        padding: 5px 9px;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-settings-tab[data-active="true"] {
+        background: #202833;
+        color: #f3d27a;
+      }
+      #${rootId} .codex-usage-hud-settings-body {
+        min-height: 0;
+        overflow: auto;
+        padding: 12px;
+        scrollbar-width: thin;
+        scrollbar-color: #273241 #10161d;
+      }
+      #${rootId} .codex-usage-hud-settings-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      #${rootId} .codex-usage-hud-settings-field,
+      #${rootId} .codex-usage-hud-price-table {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+      #${rootId} .codex-usage-hud-settings-field label,
+      #${rootId} .codex-usage-hud-price-title {
+        color: #8492a6;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-settings-field input,
+      #${rootId} .codex-usage-hud-settings-field select,
+      #${rootId} .codex-usage-hud-price-row input {
+        min-width: 0;
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #273241;
+        border-radius: 5px;
+        background: #141b24;
+        color: #e8eef7;
+        min-height: 30px;
+        padding: 5px 7px;
+        outline: none;
+      }
+      #${rootId} .codex-usage-hud-settings-field input:focus,
+      #${rootId} .codex-usage-hud-settings-field select:focus,
+      #${rootId} .codex-usage-hud-price-row input:focus {
+        border-color: #f3d27a;
+      }
+      #${rootId} .codex-usage-hud-price-table {
+        grid-column: 1 / -1;
+        margin-top: 4px;
+      }
+      #${rootId} .codex-usage-hud-price-row,
+      #${rootId} .codex-usage-hud-price-header {
+        display: grid;
+        grid-template-columns: minmax(130px, 1.4fr) repeat(4, minmax(72px, 1fr));
+        gap: 6px;
+        align-items: center;
+      }
+      #${rootId} .codex-usage-hud-price-header {
+        color: #8492a6;
+        font-size: 10px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-settings-status {
+        min-width: 0;
+        color: #a9bcd2;
+        font-size: 11px;
+      }
+      #${rootId} .codex-usage-hud-settings-status[data-kind="error"] {
+        color: #ffb86b;
+      }
+      #${rootId} .codex-usage-hud-support {
+        display: grid;
+        gap: 10px;
+        color: #dde7f2;
+        line-height: 1.55;
+      }
+      #${rootId} .codex-usage-hud-support a {
+        color: #9ccbff;
+      }
       @media (max-width: 760px) {
         #${rootId} .codex-usage-hud-top-grid {
           grid-template-columns: minmax(0, 1fr);
         }
         #${rootId} .codex-usage-hud-session-meta {
           display: none;
+        }
+        #${rootId} .codex-usage-hud-settings-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-price-row,
+        #${rootId} .codex-usage-hud-price-header {
+          grid-template-columns: minmax(110px, 1fr) repeat(2, minmax(68px, 1fr));
         }
       }
     `;
@@ -387,14 +599,18 @@ RENDERER_HUD_SCRIPT = r"""
 
   function panelMarkup(name, glyph, ariaLabel) {
     const glyphMarkup = glyph ? `<span class="codex-usage-hud-glyph">${glyph}</span>` : "";
+    const settingsButtonMarkup = name === "top"
+      ? `<button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>`
+      : "";
     return `
       <div class="codex-usage-hud-panel ${PANEL[name].className}" data-panel="${name}" data-expanded="false" role="status" aria-live="polite">
-        <div class="codex-usage-hud-collapsed">
+        <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}">
           <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
           <button class="codex-usage-hud-main" data-action="toggle" data-has-glyph="${glyph ? "true" : "false"}" aria-label="${ariaLabel}">
             ${glyphMarkup}
             <span class="codex-usage-hud-line" data-field="${name}Line"></span>
           </button>
+          ${settingsButtonMarkup}
           <button class="codex-usage-hud-resize" data-action="resize" title="调整大小" aria-label="调整大小">◢</button>
         </div>
         ${name === "top" ? topExpandedMarkup() : requestExpandedMarkup()}
@@ -409,6 +625,7 @@ RENDERER_HUD_SCRIPT = r"""
           <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
           <div class="codex-usage-hud-title" data-action="toggle" data-field="topTitle"></div>
           <div class="codex-usage-hud-session-meta" data-field="topSession"></div>
+          <button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>
           <button class="codex-usage-hud-resize" data-action="resize" title="调整大小" aria-label="调整大小">◢</button>
         </div>
         <div class="codex-usage-hud-top-body">
@@ -474,6 +691,313 @@ RENDERER_HUD_SCRIPT = r"""
     `;
   }
 
+  function settingsChromeMarkup() {
+    return `
+      <div id="${settingsModalId}" class="codex-usage-hud-settings-modal" hidden></div>
+    `;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }[char]));
+  }
+
+  function currentPayload() {
+    return window[stateName]?.payload || {};
+  }
+
+  function defaultHudSettings() {
+    return {
+      daily_budget_usd: 100,
+      weekly_budget_usd: 400,
+      daily_reset_time: "10:00",
+      weekly_reset_weekday: 3,
+      weekly_reset_time: "10:00",
+      display_mode: "auto",
+      pricing_url: "",
+      budget_thresholds: [0.5, 0.8, 0.9, 1.0],
+      weekly_adjustment_usd: 0,
+      support_url: "https://github.com/mingbingfeng/codex-usage-hud",
+      model_prices: {},
+    };
+  }
+
+  function hudSettingsFromPayload() {
+    const raw = currentPayload()?.settings || {};
+    return { ...defaultHudSettings(), ...(raw && typeof raw === "object" ? raw : {}) };
+  }
+
+  function settingsBridgeUrl() {
+    return String(currentPayload()?.settingsBridgeUrl || "").replace(/\/+$/, "");
+  }
+
+  function settingsPathLabel() {
+    return String(currentPayload()?.settingsPath || "");
+  }
+
+  function thresholdText(settings) {
+    const items = Array.isArray(settings.budget_thresholds) ? settings.budget_thresholds : [];
+    return items.map((value) => Number(value || 0)).filter((value) => value > 0).join(",");
+  }
+
+  function priceRowsHtml(settings) {
+    const prices = settings.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
+    const entries = Object.entries(prices);
+    if (!entries.length) entries.push(["gpt-5.5", { input: 5, cached_input: 0.5, output: 30, reasoning: 30 }]);
+    return entries.map(([model, price]) => `
+      <div class="codex-usage-hud-price-row" data-price-row="true">
+        <input data-price-field="model" value="${escapeHtml(model)}" aria-label="模型">
+        <input data-price-field="input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.input ?? 0)}" aria-label="输入单价">
+        <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cached_input ?? 0)}" aria-label="缓存输入单价">
+        <input data-price-field="output" type="number" min="0" step="0.000001" value="${escapeHtml(price?.output ?? 0)}" aria-label="输出单价">
+        <input data-price-field="reasoning" type="number" min="0" step="0.000001" value="${escapeHtml(price?.reasoning ?? 0)}" aria-label="推理单价">
+      </div>
+    `).join("");
+  }
+
+  function renderSettingsModal(tab = "settings", status = "") {
+    const root = document.getElementById(rootId);
+    const modal = document.getElementById(settingsModalId);
+    if (!root || !modal) return;
+    const settings = hudSettingsFromPayload();
+    const activeTab = tab === "support" ? "support" : "settings";
+    const path = settingsPathLabel();
+    const bridge = settingsBridgeUrl();
+    modal.innerHTML = `
+      <div class="codex-usage-hud-settings-dialog" role="dialog" aria-modal="true" aria-label="codex-usage-hud 设置">
+        <div class="codex-usage-hud-settings-head">
+          <div class="codex-usage-hud-settings-title">codex-usage-hud</div>
+          <button type="button" class="codex-usage-hud-settings-close" data-action="settings-close" aria-label="关闭">×</button>
+        </div>
+        <div class="codex-usage-hud-settings-tabs" role="tablist">
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="settings" data-active="${activeTab === "settings"}">设置</button>
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="support" data-active="${activeTab === "support"}">请作者喝咖啡</button>
+        </div>
+        <div class="codex-usage-hud-settings-body">
+          ${activeTab === "support" ? supportPanelHtml(settings, path) : settingsPanelHtml(settings, bridge, path)}
+        </div>
+        <div class="codex-usage-hud-settings-actions">
+          <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件"))}</div>
+          <div>
+            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取价格</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+          </div>
+        </div>
+      </div>
+    `;
+    modal.hidden = false;
+  }
+
+  function settingsPanelHtml(settings, bridge, path) {
+    const weekdayOptions = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+      .map((label, index) => `<option value="${index}" ${Number(settings.weekly_reset_weekday) === index ? "selected" : ""}>${label}</option>`)
+      .join("");
+    return `
+      <div class="codex-usage-hud-settings-grid">
+        <div class="codex-usage-hud-settings-field">
+          <label>日额度 USD</label>
+          <input data-setting-key="daily_budget_usd" type="number" min="0" step="0.01" value="${escapeHtml(settings.daily_budget_usd)}">
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>周额度 USD</label>
+          <input data-setting-key="weekly_budget_usd" type="number" min="0" step="0.01" value="${escapeHtml(settings.weekly_budget_usd)}">
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>日额度重置时间</label>
+          <input data-setting-key="daily_reset_time" type="time" value="${escapeHtml(settings.daily_reset_time)}">
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>周额度重置</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+            <select data-setting-key="weekly_reset_weekday">${weekdayOptions}</select>
+            <input data-setting-key="weekly_reset_time" type="time" value="${escapeHtml(settings.weekly_reset_time)}">
+          </div>
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>HUD 显示方案</label>
+          <select data-setting-key="display_mode">
+            <option value="auto" ${settings.display_mode === "auto" ? "selected" : ""}>自动：优先 renderer 注入，失败回退 Tk</option>
+            <option value="renderer" ${settings.display_mode === "renderer" ? "selected" : ""}>优先 renderer 注入，失败回退 Tk</option>
+            <option value="tk" ${settings.display_mode === "tk" ? "selected" : ""}>Tk 窗口</option>
+          </select>
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>超额提醒阈值</label>
+          <input data-setting-key="budget_thresholds" value="${escapeHtml(thresholdText(settings))}">
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>本周补充已使用额度 USD</label>
+          <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(settings.weekly_adjustment_usd)}">
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>请作者喝咖啡链接</label>
+          <input data-setting-key="support_url" value="${escapeHtml(settings.support_url)}">
+        </div>
+        <div class="codex-usage-hud-settings-field" style="grid-column:1/-1">
+          <label>计费单价获取地址</label>
+          <input data-setting-key="pricing_url" value="${escapeHtml(settings.pricing_url)}" placeholder="https://example.com/model-prices.json">
+        </div>
+        <div class="codex-usage-hud-price-table">
+          <div class="codex-usage-hud-price-title">模型单价（USD / 1M tokens）</div>
+          <div class="codex-usage-hud-price-header">
+            <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div>
+          </div>
+          <div data-price-rows="true">${priceRowsHtml(settings)}</div>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model" style="justify-self:start;margin-top:6px">添加模型</button>
+        </div>
+        <div class="codex-usage-hud-settings-status" style="grid-column:1/-1">配置文件：${escapeHtml(path || "未提供")} ${bridge ? "" : "（桥接未连接）"}</div>
+      </div>
+    `;
+  }
+
+  function supportPanelHtml(settings, path) {
+    const url = String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud");
+    return `
+      <div class="codex-usage-hud-support">
+        <div>如果这个 HUD 帮你节省了排查 token 和费用的时间，可以通过下面的链接支持维护。</div>
+        <div><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></div>
+        <div>当前配置文件：${escapeHtml(path || "未提供")}</div>
+      </div>
+    `;
+  }
+
+  function setSettingsStatus(text, kind = "") {
+    const node = document.querySelector(`#${settingsModalId} [data-settings-status="true"]`);
+    if (!node) return;
+    node.textContent = String(text || "");
+    node.dataset.kind = kind;
+  }
+
+  function collectSettingsForm() {
+    const modal = document.getElementById(settingsModalId);
+    const settings = hudSettingsFromPayload();
+    const read = (key) => modal?.querySelector(`[data-setting-key="${key}"]`)?.value;
+    const numberValue = (key, fallback) => {
+      const value = Number(read(key));
+      return Number.isFinite(value) && value >= 0 ? value : fallback;
+    };
+    const modelPrices = {};
+    modal?.querySelectorAll("[data-price-row='true']").forEach((row) => {
+      const model = String(row.querySelector("[data-price-field='model']")?.value || "").trim();
+      if (!model) return;
+      const field = (name) => {
+        const value = Number(row.querySelector(`[data-price-field="${name}"]`)?.value);
+        return Number.isFinite(value) && value >= 0 ? value : 0;
+      };
+      modelPrices[model] = {
+        input: field("input"),
+        cached_input: field("cached_input"),
+        output: field("output"),
+        reasoning: field("reasoning"),
+      };
+    });
+    return {
+      ...settings,
+      daily_budget_usd: numberValue("daily_budget_usd", settings.daily_budget_usd),
+      weekly_budget_usd: numberValue("weekly_budget_usd", settings.weekly_budget_usd),
+      daily_reset_time: String(read("daily_reset_time") || settings.daily_reset_time),
+      weekly_reset_weekday: Number(read("weekly_reset_weekday") ?? settings.weekly_reset_weekday),
+      weekly_reset_time: String(read("weekly_reset_time") || settings.weekly_reset_time),
+      display_mode: String(read("display_mode") || settings.display_mode),
+      pricing_url: String(read("pricing_url") || "").trim(),
+      budget_thresholds: String(read("budget_thresholds") || "")
+        .split(",")
+        .map((item) => Number(item.trim()))
+        .filter((item) => Number.isFinite(item) && item > 0),
+      weekly_adjustment_usd: numberValue("weekly_adjustment_usd", settings.weekly_adjustment_usd),
+      support_url: String(read("support_url") || "").trim(),
+      model_prices: modelPrices,
+    };
+  }
+
+  async function saveSettingsFromModal() {
+    const settings = collectSettingsForm();
+    const bridge = settingsBridgeUrl();
+    if (!bridge) {
+      await copyHudText(JSON.stringify({ user: settings }, null, 2));
+      setSettingsStatus("桥接未连接，已复制配置 JSON", "error");
+      return;
+    }
+    setSettingsStatus("正在保存...");
+    try {
+      const response = await fetch(`${bridge}/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings }),
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== "ok") throw new Error(result.message || `HTTP ${response.status}`);
+      window[stateName] = { ...(window[stateName] || {}), payload: { ...currentPayload(), settings: result.settings, settingsPath: result.settingsPath } };
+      renderSettingsModal("settings", "已保存；显示方案切换需重启 HUD 生效");
+    } catch (error) {
+      setSettingsStatus(`保存失败：无法连接本地设置桥接 ${bridge}；请等待 HUD 自动刷新或重启 daemon 后再试（${error?.message || error}）`, "error");
+    }
+  }
+
+  async function fetchPricesFromModal() {
+    const settings = collectSettingsForm();
+    const bridge = settingsBridgeUrl();
+    if (!bridge) {
+      setSettingsStatus("桥接未连接，无法从页面直接拉取价格", "error");
+      return;
+    }
+    setSettingsStatus("正在拉取价格...");
+    try {
+      const response = await fetch(`${bridge}/prices/fetch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: settings.pricing_url }),
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== "ok") throw new Error(result.message || `HTTP ${response.status}`);
+      window[stateName] = { ...(window[stateName] || {}), payload: { ...currentPayload(), settings: result.settings, settingsPath: result.settingsPath } };
+      renderSettingsModal("settings", result.message || "价格已更新");
+    } catch (error) {
+      setSettingsStatus(`拉取失败：无法连接本地设置桥接 ${bridge}；请等待 HUD 自动刷新或重启 daemon 后再试（${error?.message || error}）`, "error");
+    }
+  }
+
+  function exportSettingsFromModal() {
+    const settings = collectSettingsForm();
+    const data = JSON.stringify({ user: settings }, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "codex-usage-hud-settings.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setSettingsStatus("已导出 JSON");
+  }
+
+  function addModelPriceRow() {
+    const rows = document.querySelector(`#${settingsModalId} [data-price-rows="true"]`);
+    if (!rows) return;
+    const row = document.createElement("div");
+    row.className = "codex-usage-hud-price-row";
+    row.dataset.priceRow = "true";
+    row.innerHTML = `
+      <input data-price-field="model" value="" aria-label="模型">
+      <input data-price-field="input" type="number" min="0" step="0.000001" value="0" aria-label="输入单价">
+      <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="0" aria-label="缓存输入单价">
+      <input data-price-field="output" type="number" min="0" step="0.000001" value="0" aria-label="输出单价">
+      <input data-price-field="reasoning" type="number" min="0" step="0.000001" value="0" aria-label="推理单价">
+    `;
+    rows.appendChild(row);
+    row.querySelector("input")?.focus?.();
+  }
+
+  function closeSettingsModal() {
+    const modal = document.getElementById(settingsModalId);
+    if (modal) modal.hidden = true;
+  }
+
   function ensureRoot() {
     ensureStyle();
     let root = document.getElementById(rootId);
@@ -483,7 +1007,7 @@ RENDERER_HUD_SCRIPT = r"""
     root = document.createElement("div");
     root.id = rootId;
     root.dataset.version = version;
-    root.innerHTML = panelMarkup("top", "", "展开顶部 HUD") + panelMarkup("request", "", "展开请求 HUD");
+    root.innerHTML = panelMarkup("top", "", "展开顶部 HUD") + panelMarkup("request", "", "展开请求 HUD") + settingsChromeMarkup();
     document.body.appendChild(root);
     applyPanelStates(root);
     bindRoot(root);
@@ -528,6 +1052,12 @@ RENDERER_HUD_SCRIPT = r"""
     if (root.dataset.bound === "true") return;
     root.dataset.bound = "true";
     root.addEventListener("click", (event) => {
+      if (event.target?.id === settingsModalId) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsModal();
+        return;
+      }
       const copyNode = event.target?.closest?.("[data-copyable='true']");
       if (copyNode && root.contains(copyNode)) {
         event.preventDefault();
@@ -539,6 +1069,48 @@ RENDERER_HUD_SCRIPT = r"""
       }
       const action = event.target?.closest?.("[data-action]");
       if (!action || !root.contains(action)) return;
+      if (action.dataset.action === "settings-open") {
+        event.preventDefault();
+        event.stopPropagation();
+        renderSettingsModal("settings");
+        return;
+      }
+      if (action.dataset.action === "settings-close") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsModal();
+        return;
+      }
+      if (action.dataset.action === "settings-tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        renderSettingsModal(action.dataset.tab || "settings");
+        return;
+      }
+      if (action.dataset.action === "settings-add-model") {
+        event.preventDefault();
+        event.stopPropagation();
+        addModelPriceRow();
+        return;
+      }
+      if (action.dataset.action === "settings-save") {
+        event.preventDefault();
+        event.stopPropagation();
+        void saveSettingsFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-fetch-prices") {
+        event.preventDefault();
+        event.stopPropagation();
+        void fetchPricesFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-export") {
+        event.preventDefault();
+        event.stopPropagation();
+        exportSettingsFromModal();
+        return;
+      }
       if (action.dataset.action !== "toggle") return;
       const panel = action.closest("[data-panel]");
       const name = panel?.dataset.panel;
@@ -1122,6 +1694,7 @@ RENDERER_HUD_SCRIPT = r"""
       }
       applyRect(panel, left, top, width, height);
     }
+    refreshAllMarquees(root);
   }
 
   function syncPositionSettled() {
@@ -1133,8 +1706,164 @@ RENDERER_HUD_SCRIPT = r"""
     ];
   }
 
+  function lineInner(node) {
+    let inner = node.querySelector(":scope > .codex-usage-hud-line-inner");
+    if (!inner) {
+      const text = node.textContent || "";
+      node.textContent = "";
+      inner = document.createElement("span");
+      inner.className = "codex-usage-hud-line-inner";
+      inner.textContent = text;
+      node.appendChild(inner);
+    }
+    return inner;
+  }
+
+  function refreshMarquee(node) {
+    if (!node?.classList?.contains("codex-usage-hud-line") || !node.isConnected) return;
+    const inner = node.querySelector(":scope > .codex-usage-hud-line-inner");
+    if (!inner) return;
+    const available = Math.max(1, node.clientWidth || node.getBoundingClientRect().width || 0);
+    const overflow = Math.ceil((inner.scrollWidth || inner.getBoundingClientRect().width || 0) - available);
+    if (overflow > 1) {
+      node.dataset.marquee = "true";
+      node.style.setProperty("--codex-usage-hud-marquee-distance", `${overflow}px`);
+      node.style.setProperty("--codex-usage-hud-marquee-duration", `${Math.max(4000, 3000 + (overflow * 60))}ms`);
+      return;
+    }
+    delete node.dataset.marquee;
+    node.style.removeProperty("--codex-usage-hud-marquee-distance");
+    node.style.removeProperty("--codex-usage-hud-marquee-duration");
+  }
+
+  function refreshAllMarquees(root = document.getElementById(rootId)) {
+    if (!root) return;
+    root.querySelectorAll(".codex-usage-hud-line").forEach(refreshMarquee);
+  }
+
+  function applyLineText(node, value, { refresh = true } = {}) {
+    const text = String(value || "");
+    const inner = lineInner(node);
+    inner.textContent = text;
+    node.dataset.currentText = text;
+    if (refresh) requestAnimationFrame(() => refreshMarquee(node));
+  }
+
+  function cancelNumericAnimation(node) {
+    const animation = numericAnimations.get(node);
+    if (!animation) return;
+    cancelAnimationFrame(animation.raf);
+    numericAnimations.delete(node);
+  }
+
+  function extractNumericParts(text) {
+    const source = String(text || "");
+    const parts = [];
+    const tokens = [];
+    let cursor = 0;
+    numericTokenRe.lastIndex = 0;
+    for (const match of source.matchAll(numericTokenRe)) {
+      parts.push(source.slice(cursor, match.index));
+      tokens.push(match[0]);
+      cursor = Number(match.index || 0) + match[0].length;
+    }
+    parts.push(source.slice(cursor));
+    return { parts, tokens };
+  }
+
+  function parseNumericToken(token) {
+    const match = String(token || "").match(/^(\$?)(\d+(?:,\d{3})*(?:\.\d+)?)([kM%]?)$/);
+    if (!match) return null;
+    const [, prefix, amount, suffix] = match;
+    const decimals = amount.includes(".") ? amount.split(".", 2)[1].length : 0;
+    const usesGrouping = amount.includes(",");
+    const value = Number(amount.replace(/,/g, ""));
+    if (!Number.isFinite(value)) return null;
+    return { prefix, value, suffix, decimals, usesGrouping };
+  }
+
+  function formatNumericToken(value, template) {
+    const decimals = Math.max(0, template.decimals || 0);
+    let body = "";
+    if (decimals <= 0) {
+      const rounded = Math.round(value);
+      body = template.usesGrouping ? rounded.toLocaleString("en-US") : String(rounded);
+    } else if (template.usesGrouping) {
+      body = value.toLocaleString("en-US", {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+      });
+    } else {
+      body = value.toFixed(decimals);
+    }
+    return `${template.prefix}${body}${template.suffix}`;
+  }
+
+  function canAnimateNumericText(startText, endText) {
+    const start = extractNumericParts(startText);
+    const end = extractNumericParts(endText);
+    if (!start.tokens.length || start.tokens.length !== end.tokens.length) return false;
+    if (start.parts.length !== end.parts.length || start.parts.some((part, index) => part !== end.parts[index])) return false;
+    return start.tokens.every((token, index) => {
+      const startToken = parseNumericToken(token);
+      const endToken = parseNumericToken(end.tokens[index]);
+      return !!startToken && !!endToken && startToken.prefix === endToken.prefix && startToken.suffix === endToken.suffix;
+    });
+  }
+
+  function interpolateNumericText(startText, endText, progress) {
+    const start = extractNumericParts(startText);
+    const end = extractNumericParts(endText);
+    const clamped = clamp(progress, 0, 1);
+    const pieces = [];
+    for (let index = 0; index < end.parts.length - 1; index += 1) {
+      pieces.push(end.parts[index]);
+      const startToken = parseNumericToken(start.tokens[index]);
+      const endToken = parseNumericToken(end.tokens[index]);
+      if (!startToken || !endToken) {
+        pieces.push(end.tokens[index]);
+        continue;
+      }
+      const value = startToken.value + ((endToken.value - startToken.value) * clamped);
+      pieces.push(formatNumericToken(value, endToken));
+    }
+    pieces.push(end.parts[end.parts.length - 1]);
+    return pieces.join("");
+  }
+
+  function setAnimatedLineText(node, value) {
+    const next = String(value || "");
+    const current = node.dataset.currentText ?? node.textContent ?? "";
+    cancelNumericAnimation(node);
+    if (!current || current === next || !canAnimateNumericText(current, next)) {
+      applyLineText(node, next);
+      return;
+    }
+    const startedAt = performance.now();
+    const step = (now) => {
+      const progress = clamp((now - startedAt) / 360, 0, 1);
+      applyLineText(node, interpolateNumericText(current, next, progress), { refresh: progress >= 1 });
+      if (progress >= 1) {
+        applyLineText(node, next);
+        numericAnimations.delete(node);
+        return;
+      }
+      numericAnimations.set(node, { raf: requestAnimationFrame(step) });
+    };
+    numericAnimations.set(node, { raf: requestAnimationFrame(step) });
+  }
+
   function setText(root, field, value) {
     root.querySelectorAll(`[data-field="${field}"]`).forEach((node) => {
+      if (node.classList.contains("codex-usage-hud-line")) {
+        if (field === "requestLine" || field === "requestLineExpanded") {
+          setAnimatedLineText(node, value);
+        } else {
+          cancelNumericAnimation(node);
+          applyLineText(node, value);
+        }
+        return;
+      }
       node.textContent = value || "";
     });
   }
@@ -1332,7 +2061,9 @@ RENDERER_HUD_SCRIPT = r"""
   };
 
   window.__codexUsageHudRemove = () => {
-    document.getElementById(rootId)?.remove();
+    const root = document.getElementById(rootId);
+    root?.querySelectorAll(".codex-usage-hud-line").forEach(cancelNumericAnimation);
+    root?.remove();
     document.getElementById(styleId)?.remove();
     window.removeEventListener("resize", window[resizeHandlerName]);
     window.removeEventListener("scroll", window[scrollHandlerName], true);
@@ -1395,6 +2126,9 @@ class RendererHudPayload:
     top_copies: dict[str, str] = field(default_factory=dict)
     request_rows: list[str] = field(default_factory=list)
     request_row_details: list[dict[str, object]] = field(default_factory=list)
+    settings: dict[str, object] = field(default_factory=dict)
+    settings_path: str = ""
+    settings_bridge_url: str = ""
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -1411,6 +2145,9 @@ class RendererHudPayload:
             "topCopies": dict(self.top_copies),
             "requestRows": list(self.request_rows),
             "requestRowDetails": [dict(item) for item in self.request_row_details],
+            "settings": dict(self.settings),
+            "settingsPath": self.settings_path,
+            "settingsBridgeUrl": self.settings_bridge_url,
         }
 
 
@@ -1433,8 +2170,22 @@ class RendererHudClient:
         self._script_identifier = ""
         self._websocket_url = ""
 
-    def update(self, snapshot: ParsedSession) -> bool:
-        return self.update_payload(payload_from_snapshot(snapshot).to_json())
+    def update(
+        self,
+        snapshot: ParsedSession,
+        *,
+        settings: UserConfig | None = None,
+        settings_path: Path | str | None = None,
+        settings_bridge_url: str = "",
+    ) -> bool:
+        return self.update_payload(
+            payload_from_snapshot(
+                snapshot,
+                settings=settings,
+                settings_path=settings_path,
+                settings_bridge_url=settings_bridge_url,
+            ).to_json()
+        )
 
     def update_payload(self, payload: dict[str, object]) -> bool:
         if not self.enabled:
@@ -1538,7 +2289,13 @@ def renderer_enabled_from_env(default: bool = True) -> bool:
     return normalized not in {"0", "false", "no", "off"}
 
 
-def payload_from_snapshot(snapshot: ParsedSession) -> RendererHudPayload:
+def payload_from_snapshot(
+    snapshot: ParsedSession,
+    *,
+    settings: UserConfig | None = None,
+    settings_path: Path | str | None = None,
+    settings_bridge_url: str = "",
+) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
     top_line = (
         f"{_top_session_usage_summary(snapshot, session_cost)} | "
@@ -1570,6 +2327,9 @@ def payload_from_snapshot(snapshot: ParsedSession) -> RendererHudPayload:
         top_copies=_top_copy_texts(snapshot),
         request_rows=_request_rows(snapshot),
         request_row_details=_request_row_details(snapshot),
+        settings=(settings or UserConfig.defaults()).to_dict(),
+        settings_path=str(settings_path or ""),
+        settings_bridge_url=settings_bridge_url,
     )
 
 
@@ -2264,6 +3024,8 @@ def _format_budget(snapshot: ParsedSession) -> str:
             f"今日前 {_format_usage_money(snapshot.week_before_today_tokens, snapshot.week_before_today_cost_usd)}"
             f" + 当前日窗 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
         )
+    if snapshot.week_adjustment_usd > 0:
+        text += f" + 人工补充 {_format_money(snapshot.week_adjustment_usd)}"
     return text
 
 
@@ -2348,5 +3110,6 @@ __all__ = [
     "RendererHudPayload",
     "payload_from_snapshot",
     "renderer_enabled_from_env",
+    "set_cost_estimator",
     "wait_for_renderer",
 ]

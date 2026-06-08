@@ -22,8 +22,10 @@ from codex_usage_hud.cli import (
     DAEMON_RESTART_REQUESTED,
     HudAlreadyRunningError,
     HudInstanceLock,
+    RENDERER_HUD_UNAVAILABLE,
     UsageSummaryCache,
     budget_warnings,
+    main,
     parse_thresholds,
     snapshot_to_text,
     run_daemon,
@@ -31,6 +33,7 @@ from codex_usage_hud.cli import (
     stop_running_hud,
     usage_before_today_in_week,
 )
+from codex_usage_hud.config import UserConfig
 from codex_usage_hud.core.parser import (
     GapTiming,
     ParsedSession,
@@ -330,6 +333,7 @@ class BudgetHelperTests(unittest.TestCase):
             week_cost_usd=119.142012,
             week_before_today_tokens=988,
             week_before_today_cost_usd=98.915585,
+            week_adjustment_usd=12.5,
         )
 
         text = snapshot_to_text(snapshot)
@@ -337,6 +341,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("This Week Breakdown:", text)
         self.assertIn("before today reset $98.915585", text)
         self.assertIn("today $20.226427", text)
+        self.assertIn("This Week Manual Adjustment: $12.500000", text)
 
     def test_hud_instance_lock_prevents_duplicate_instances(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -627,6 +632,22 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded.request.anchor_x_ratio, 0.4)
         self.assertEqual(loaded.request.anchor_y_ratio, 0.0)
         self.assertEqual(loaded.request.anchor_source, "geometry")
+
+    def test_geometry_save_preserves_user_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text(
+                '{"user":{"weekly_adjustment_usd":7.5},"future":{"keep":true}}',
+                encoding="utf-8",
+            )
+            store = HudSettingsStore(path)
+
+            store.save(HudSettings(top=WindowPlacement(width=320), request=WindowPlacement()))
+
+            raw = path.read_text(encoding="utf-8")
+
+        self.assertIn('"weekly_adjustment_usd": 7.5', raw)
+        self.assertIn('"future"', raw)
 
 
 class TokenHudWindowLifecycleTests(unittest.TestCase):
@@ -1219,6 +1240,66 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_main_defaults_to_renderer_first_from_auto_config(self) -> None:
+        config = UserConfig.defaults()
+
+        with (
+            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
+            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+        ):
+            store_class.return_value.load.return_value = config
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 0)
+        args = run_session.call_args.args[0]
+        self.assertTrue(args.renderer_hud)
+
+    def test_hud_mode_renderer_overrides_tk_config_for_renderer_first(self) -> None:
+        config = UserConfig.defaults()
+        config.display_mode = "tk"
+
+        with (
+            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
+            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+        ):
+            store_class.return_value.load.return_value = config
+            exit_code = main(["--hud-mode", "renderer"])
+
+        self.assertEqual(exit_code, 0)
+        args = run_session.call_args.args[0]
+        self.assertTrue(args.renderer_hud)
+
+    def test_tk_config_skips_renderer_path(self) -> None:
+        config = UserConfig.defaults()
+        config.display_mode = "tk"
+
+        with (
+            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
+            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+        ):
+            store_class.return_value.load.return_value = config
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 0)
+        args = run_session.call_args.args[0]
+        self.assertFalse(args.renderer_hud)
+
+    def test_renderer_first_falls_back_to_tk_when_injection_unavailable(self) -> None:
+        args = SimpleNamespace(renderer_hud=True)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_renderer_hud_session",
+                return_value=RENDERER_HUD_UNAVAILABLE,
+            ) as renderer_session,
+            patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        renderer_session.assert_called_once()
+        tk_session.assert_called_once()
+
     def test_run_hud_session_returns_restart_code_when_codex_exits(self) -> None:
         fake_context = SimpleNamespace(poll_ms=250, close=MagicMock())
         fake_window = SimpleNamespace(

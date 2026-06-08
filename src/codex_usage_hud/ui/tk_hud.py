@@ -11,11 +11,22 @@ import subprocess
 import sys
 import tkinter as tk
 from tkinter import font as tkfont
+from tkinter import messagebox, ttk
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..config import (
+    USER_CONFIG_KEY,
+    UserConfig,
+    UserConfigStore,
+    default_settings_path as shared_default_settings_path,
+    fetch_model_prices,
+    parse_thresholds as parse_config_thresholds,
+    read_json_object,
+    write_json_object,
+)
 from ..core.parser import CostEstimator, ParsedSession, RequestRound
 
 TOP_DOCK_TOP = 42
@@ -93,6 +104,12 @@ _COST_ESTIMATOR = CostEstimator()
 _HUD_GEOMETRY_LOGGER = logging.getLogger("codex_usage_hud.hud_geometry")
 _HUD_GEOMETRY_LOGGER.addHandler(logging.NullHandler())
 _HUD_GEOMETRY_LOGGING_CONFIGURED = False
+
+
+def set_cost_estimator(estimator: CostEstimator) -> None:
+    """Use the current user-configured price table for Tk formatting."""
+    global _COST_ESTIMATOR
+    _COST_ESTIMATOR = estimator
 
 
 class _QuietRotatingFileHandler(RotatingFileHandler):
@@ -252,40 +269,20 @@ class HudSettingsStore:
         self.path = path or default_settings_path()
 
     def load(self) -> HudSettings:
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return HudSettings.empty()
-        return HudSettings.from_dict(raw)
+        return HudSettings.from_dict(read_json_object(self.path))
 
     def save(self, settings: HudSettings) -> None:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps(settings.to_dict(), indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
+            raw = read_json_object(self.path)
+            raw.update(settings.to_dict())
+            write_json_object(self.path, raw)
         except OSError:
             return
 
 
 def default_settings_path() -> Path:
     """Return the per-user HUD settings path."""
-    if sys.platform.startswith("win"):
-        root = os.environ.get("LOCALAPPDATA")
-        base = Path(root) if root else Path.home() / "AppData" / "Local"
-        return base / "codex-usage-hud" / HUD_SETTINGS_FILENAME
-    if sys.platform == "darwin":
-        return (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "codex-usage-hud"
-            / HUD_SETTINGS_FILENAME
-        )
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".config"
-    return base / "codex-usage-hud" / HUD_SETTINGS_FILENAME
+    return shared_default_settings_path()
 
 
 def hud_geometry_log_path() -> Path:
@@ -2156,6 +2153,7 @@ class TokenHudWindow:
         follow_ms: int = FOLLOW_ACTIVE_MS,
         hide_until_attached: bool = False,
         tombstone_follow_ms: int = FOLLOW_TOMBSTONE_MS,
+        user_settings_store: UserConfigStore | None = None,
     ) -> None:
         self.compact = compact
         self.follow_ms = max(16, int(follow_ms))
@@ -2163,6 +2161,9 @@ class TokenHudWindow:
         self.hide_until_attached = bool(hide_until_attached)
         self.settings_store = HudSettingsStore()
         self.settings = self.settings_store.load()
+        self.user_settings_store = user_settings_store or UserConfigStore()
+        self.user_settings = self.user_settings_store.load()
+        self._settings_dialog: tk.Toplevel | None = None
         self._geometry_log_path = configure_hud_geometry_logging()
         self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=True)
         self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
@@ -2296,6 +2297,301 @@ class TokenHudWindow:
         label.bind("<ButtonRelease-1>", self._finish_resize)
         return label
 
+    def _settings_button(self, parent: tk.Misc) -> tk.Button:
+        button = tk.Button(
+            parent,
+            text="⚙",
+            command=lambda: self._show_settings_menu(button),
+            bg=str(parent.cget("bg")),
+            fg="#A9BCD2",
+            activebackground="#2E3846",
+            activeforeground=HUD_ACCENT,
+            relief="flat",
+            padx=5,
+            pady=1,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            cursor="hand2",
+        )
+        setattr(button, "_hud_handle", True)
+        return button
+
+    def _show_settings_menu(self, button: tk.Widget) -> None:
+        menu = tk.Menu(self.root, tearoff=False, bg=HUD_PANEL_BG, fg=HUD_TEXT)
+        menu.add_command(label="设置", command=self._open_settings_dialog)
+        menu.add_command(label="请作者喝咖啡", command=self._open_support_dialog)
+        try:
+            menu.tk_popup(button.winfo_rootx(), button.winfo_rooty() + button.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _open_settings_dialog(self) -> None:
+        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+            self._settings_dialog.lift()
+            return
+        settings = self.user_settings_store.load()
+        self.user_settings = settings
+        dialog = tk.Toplevel(self.root)
+        self._settings_dialog = dialog
+        dialog.title("codex-usage-hud 设置")
+        dialog.configure(bg=HUD_BG)
+        dialog.attributes("-topmost", True)
+        dialog.geometry("760x620")
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        settings_frame = tk.Frame(notebook, bg=HUD_BG, padx=10, pady=10)
+        support_frame = tk.Frame(notebook, bg=HUD_BG, padx=10, pady=10)
+        notebook.add(settings_frame, text="设置")
+        notebook.add(support_frame, text="请作者喝咖啡")
+
+        entries: dict[str, tk.Entry | ttk.Combobox] = {}
+
+        def add_field(row: int, column: int, key: str, label: str, value: object) -> None:
+            frame = tk.Frame(settings_frame, bg=HUD_BG)
+            frame.grid(row=row, column=column, sticky="ew", padx=5, pady=4)
+            tk.Label(
+                frame,
+                text=label,
+                anchor="w",
+                bg=HUD_BG,
+                fg=HUD_MUTED,
+                font=("Microsoft YaHei UI", 8, "bold"),
+            ).pack(fill="x")
+            entry = tk.Entry(frame, bg=HUD_PANEL_BG, fg=HUD_TEXT, insertbackground=HUD_TEXT)
+            entry.insert(0, str(value))
+            entry.pack(fill="x")
+            entries[key] = entry
+
+        settings_frame.columnconfigure(0, weight=1)
+        settings_frame.columnconfigure(1, weight=1)
+        add_field(0, 0, "daily_budget_usd", "日额度 USD", settings.daily_budget_usd)
+        add_field(0, 1, "weekly_budget_usd", "周额度 USD", settings.weekly_budget_usd)
+        add_field(1, 0, "daily_reset_time", "日额度重置时间 HH:MM", settings.daily_reset_time)
+        add_field(1, 1, "weekly_reset_time", "周额度重置时间 HH:MM", settings.weekly_reset_time)
+        add_field(2, 0, "budget_thresholds", "超额提醒阈值", ",".join(str(item) for item in settings.budget_thresholds))
+        add_field(2, 1, "weekly_adjustment_usd", "本周补充已使用额度 USD", settings.weekly_adjustment_usd)
+        add_field(3, 0, "pricing_url", "计费单价获取地址", settings.pricing_url)
+        add_field(3, 1, "support_url", "请作者喝咖啡链接", settings.support_url)
+
+        mode_frame = tk.Frame(settings_frame, bg=HUD_BG)
+        mode_frame.grid(row=4, column=0, sticky="ew", padx=5, pady=4)
+        tk.Label(
+            mode_frame,
+            text="HUD 显示方案",
+            anchor="w",
+            bg=HUD_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill="x")
+        mode = ttk.Combobox(
+            mode_frame,
+            values=[
+                "auto - 优先 renderer 注入，失败回退 Tk",
+                "renderer - 优先 renderer 注入，失败回退 Tk",
+                "tk - 仅使用 Tk 窗口",
+            ],
+            state="readonly",
+        )
+        mode.set(
+            {
+                "auto": "auto - 优先 renderer 注入，失败回退 Tk",
+                "renderer": "renderer - 优先 renderer 注入，失败回退 Tk",
+                "tk": "tk - 仅使用 Tk 窗口",
+            }.get(settings.display_mode, "auto - 优先 renderer 注入，失败回退 Tk")
+        )
+        mode.pack(fill="x")
+        entries["display_mode"] = mode
+
+        weekday_frame = tk.Frame(settings_frame, bg=HUD_BG)
+        weekday_frame.grid(row=4, column=1, sticky="ew", padx=5, pady=4)
+        tk.Label(
+            weekday_frame,
+            text="周额度重置日",
+            anchor="w",
+            bg=HUD_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill="x")
+        weekday = ttk.Combobox(
+            weekday_frame,
+            values=["0 周一", "1 周二", "2 周三", "3 周四", "4 周五", "5 周六", "6 周日"],
+            state="readonly",
+        )
+        weekday.set(f"{settings.weekly_reset_weekday} " + ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][settings.weekly_reset_weekday])
+        weekday.pack(fill="x")
+        entries["weekly_reset_weekday"] = weekday
+
+        tk.Label(
+            settings_frame,
+            text="模型单价 JSON（USD / 1M tokens，字段：input / cached_input / output / reasoning）",
+            anchor="w",
+            bg=HUD_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=5, pady=(10, 2))
+        prices_text = tk.Text(
+            settings_frame,
+            height=10,
+            wrap="none",
+            bg=REQUEST_PANEL_BG,
+            fg=REQUEST_TEXT,
+            insertbackground=REQUEST_TEXT,
+            relief="flat",
+            padx=6,
+            pady=5,
+            font=("Consolas", 9),
+        )
+        prices_text.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=5, pady=(0, 8))
+        settings_frame.rowconfigure(6, weight=1)
+        prices_text.insert(
+            "1.0",
+            json.dumps(
+                {
+                    name: price.to_dict()
+                    for name, price in sorted(settings.model_prices.items())
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+        )
+
+        actions = tk.Frame(settings_frame, bg=HUD_BG)
+        actions.grid(row=7, column=0, columnspan=2, sticky="ew", padx=5)
+        tk.Label(
+            actions,
+            text=f"配置文件：{self.user_settings_store.path}",
+            anchor="w",
+            bg=HUD_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 8),
+        ).pack(side="left", fill="x", expand=True)
+        tk.Button(
+            actions,
+            text="拉取价格",
+            command=lambda: self._settings_fetch_prices(entries, prices_text),
+            bg="#2E3846",
+            fg=HUD_TEXT,
+            relief="flat",
+            padx=8,
+        ).pack(side="right", padx=(6, 0))
+        tk.Button(
+            actions,
+            text="保存",
+            command=lambda: self._settings_save(entries, prices_text),
+            bg=HUD_ACCENT,
+            fg=HUD_BG,
+            relief="flat",
+            padx=10,
+        ).pack(side="right")
+
+        tk.Label(
+            support_frame,
+            text=(
+                "如果这个 HUD 帮你节省了排查 token 和费用的时间，可以通过下面的链接支持维护。\n\n"
+                f"{settings.support_url}\n\n"
+                f"配置文件：{self.user_settings_store.path}"
+            ),
+            justify="left",
+            anchor="nw",
+            bg=HUD_BG,
+            fg=HUD_TEXT,
+            wraplength=680,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="both", expand=True)
+
+    def _config_from_settings_dialog(
+        self,
+        entries: dict[str, tk.Entry | ttk.Combobox],
+        prices_text: tk.Text,
+    ) -> UserConfig:
+        raw_prices = prices_text.get("1.0", "end").strip()
+        try:
+            price_payload = json.loads(raw_prices) if raw_prices else {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"模型单价 JSON 无效：{exc}") from exc
+        raw: dict[str, object] = {
+            "daily_budget_usd": entries["daily_budget_usd"].get(),
+            "weekly_budget_usd": entries["weekly_budget_usd"].get(),
+            "daily_reset_time": entries["daily_reset_time"].get(),
+            "weekly_reset_time": entries["weekly_reset_time"].get(),
+            "weekly_reset_weekday": str(entries["weekly_reset_weekday"].get()).split(" ", 1)[0],
+            "display_mode": entries["display_mode"].get().split(" ", 1)[0],
+            "budget_thresholds": parse_config_thresholds(entries["budget_thresholds"].get()),
+            "weekly_adjustment_usd": entries["weekly_adjustment_usd"].get(),
+            "pricing_url": entries["pricing_url"].get(),
+            "support_url": entries["support_url"].get(),
+            "model_prices": price_payload.get("model_prices", price_payload)
+            if isinstance(price_payload, dict)
+            else {},
+        }
+        return UserConfig.from_dict(raw)
+
+    def _settings_save(
+        self,
+        entries: dict[str, tk.Entry | ttk.Combobox],
+        prices_text: tk.Text,
+    ) -> None:
+        try:
+            config = self._config_from_settings_dialog(entries, prices_text)
+            self.user_settings_store.save(config)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("保存失败", str(exc), parent=self._settings_dialog)
+            return
+        self.user_settings = config
+        messagebox.showinfo(
+            "设置已保存",
+            "预算和计费设置会在下一次刷新生效；显示方案切换需重启 HUD。",
+            parent=self._settings_dialog,
+        )
+
+    def _settings_fetch_prices(
+        self,
+        entries: dict[str, tk.Entry | ttk.Combobox],
+        prices_text: tk.Text,
+    ) -> None:
+        url = entries["pricing_url"].get().strip()
+        try:
+            fetched = fetch_model_prices(url)
+            config = self._config_from_settings_dialog(entries, prices_text).with_price_updates(
+                fetched,
+                pricing_url=url,
+            )
+            self.user_settings_store.save(config)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("拉取失败", str(exc), parent=self._settings_dialog)
+            return
+        self.user_settings = config
+        prices_text.delete("1.0", "end")
+        prices_text.insert(
+            "1.0",
+            json.dumps(
+                {
+                    name: price.to_dict()
+                    for name, price in sorted(config.model_prices.items())
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+        )
+        messagebox.showinfo(
+            "价格已更新",
+            f"已更新 {len(fetched)} 个模型价格。",
+            parent=self._settings_dialog,
+        )
+
+    def _open_support_dialog(self) -> None:
+        settings = self.user_settings_store.load()
+        messagebox.showinfo(
+            "请作者喝咖啡",
+            (
+                "如果这个 HUD 帮你节省了排查 token 和费用的时间，可以通过下面的链接支持维护。\n\n"
+                f"{settings.support_url}"
+            ),
+            parent=self.root,
+        )
+
     def _rebuild_top_ui(self) -> None:
         for child in self.root.winfo_children():
             if child is getattr(self, "request_root", None):
@@ -2315,6 +2611,7 @@ class TokenHudWindow:
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
         self._move_handle(frame, "top", self.root).pack(side="left", padx=(0, 4))
         self._resize_handle(frame, "top", self.root).pack(side="right", padx=(6, 0))
+        self._settings_button(frame).pack(side="right", padx=(4, 0))
         self.top_labels["bar"] = AutoScrollLabel(
             frame,
             text="读取 token...",
@@ -2342,6 +2639,7 @@ class TokenHudWindow:
         )
         close.pack(side="right", padx=(4, 0))
         self._resize_handle(header, "top", self.root).pack(side="right", padx=(6, 0))
+        self._settings_button(header).pack(side="right", padx=(4, 0))
         self.top_labels["title"] = tk.Label(
             header,
             text=TOP_EXPANDED_HEADER_FALLBACK,
@@ -3824,6 +4122,8 @@ class TokenHudWindow:
                 f"今日前 {_format_usage_money(snapshot.week_before_today_tokens, snapshot.week_before_today_cost_usd)}"
                 f" + 当前日窗 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
             )
+        if snapshot.week_adjustment_usd > 0:
+            text += f" + 人工补充 {_format_money(snapshot.week_adjustment_usd)}"
         return text
 
     def _format_warnings(self, snapshot: ParsedSession) -> str:

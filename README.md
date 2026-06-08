@@ -84,6 +84,34 @@ python -m codex_usage_hud --once
 | Windows daemon | `codex-hud --daemon` | Wait for Codex, then attach the HUD automatically. |
 | Stop | `codex-hud --stop` | Clear the local PID lock and stop the running HUD. |
 
+### Settings / 设置
+
+The top HUD has a gear button on the right. It opens the settings panel directly; the panel also includes a **Buy the author coffee** tab. Settings are stored in the per-user `hud_settings.json` file together with HUD placement data.
+
+The settings panel covers:
+
+- daily / weekly USD budgets and their reset time;
+- HUD display mode: renderer-first injection with Tk fallback, or Tk-only;
+- warning thresholds;
+- model prices per 1M tokens: input, cached input, output, and reasoning;
+- optional pricing JSON URL for pulling model prices;
+- manual weekly USD adjustment for usage that should count toward this week.
+
+顶部 HUD 右侧有齿轮按钮，点击后会直接打开设置界面；设置界面里保留 **请作者喝咖啡** 标签页。设置会和 HUD 位置一起保存在当前用户的 `hud_settings.json`。
+
+设置面板包括：
+
+- 日 / 周 USD 额度和重置时间；
+- HUD 显示方案：renderer 注入优先并在失败时回退 Tk，或仅使用 Tk；
+- 超额提醒阈值；
+- 模型每 100 万 token 单价：输入、缓存输入、输出、推理；
+- 可选的计费单价 JSON 拉取地址；
+- 本周人工补充已使用 USD 额度。
+
+The default display path mirrors Codex++'s external CDP enhancement style: inject into the Codex renderer first, then keep the Tk HUD as the local fallback when CDP is unavailable. Switching between renderer-first and Tk-only takes effect on the next HUD restart. Budget and pricing edits are reloaded while the HUD is running.
+
+默认显示路径参考 Codex++ 的外部 CDP 增强方式：优先注入到 Codex renderer，CDP 不可用时保留 Tk HUD 作为本地回退。renderer 优先和仅 Tk 的切换会在下次 HUD 重启后生效；预算和计费设置会在 HUD 运行中自动重新读取。
+
 ## Mental model / 心智模型
 
 - The app resolves a session from explicit file path, session id, active conversation, or activity-based fallback.

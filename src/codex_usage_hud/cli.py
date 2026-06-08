@@ -10,11 +10,28 @@ import signal
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 
-from .core import JsonlSessionParser, ParsedSession, SseRequestStateMachine, UsageSummary
+from .config import (
+    DEFAULT_BUDGET_THRESHOLDS,
+    DEFAULT_DAILY_BUDGET_USD,
+    DEFAULT_WEEKLY_BUDGET_USD,
+    UserConfig,
+    UserConfigStore,
+    normalize_display_mode,
+    parse_thresholds as parse_config_thresholds,
+    time_parts,
+)
+from .core import (
+    CostEstimator,
+    JsonlSessionParser,
+    ParsedSession,
+    SseRequestStateMachine,
+    UsageCalculator,
+    UsageSummary,
+)
 from .daemon import (
     CodexDaemonManager,
     DEFAULT_DAEMON_POLL_MS,
@@ -26,14 +43,13 @@ from .platforms import ActiveSessionTracker, SessionPathResolver, get_current_pl
 from .platforms.base import BasePlatform
 from .ui import TokenHudWindow
 from .ui.renderer_hud import RendererHudClient, wait_for_renderer
+from .settings_bridge import SettingsBridgeServer
 
 DEFAULT_POLL_MS = 500
 DEFAULT_SQLITE_LOG = "logs_2.sqlite"
 DEFAULT_STATE_DB = "state_5.sqlite"
 DEFAULT_SESSION_INDEX = "session_index.jsonl"
-DEFAULT_DAILY_BUDGET_USD = 100.0
-DEFAULT_WEEKLY_BUDGET_USD = 400.0
-DEFAULT_BUDGET_THRESHOLDS = "0.5,0.8,0.9,1.0"
+DEFAULT_BUDGET_THRESHOLDS_TEXT = ",".join(f"{item:g}" for item in DEFAULT_BUDGET_THRESHOLDS)
 DEFAULT_ACTIVE_SESSION_POLL_MS = 500
 DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
@@ -442,6 +458,9 @@ class RuntimeContext:
     daily_budget_usd: float
     weekly_budget_usd: float
     budget_thresholds: list[float]
+    user_config: UserConfig
+    settings_store: UserConfigStore
+    settings_mtime: float | None
     parser: JsonlSessionParser
     sse_tracker: SseRequestStateMachine | None
     active_session_tracker: ActiveSessionTracker | None
@@ -452,6 +471,26 @@ class RuntimeContext:
         """Release any background helpers created for the runtime context."""
         if self.active_session_tracker is not None:
             self.active_session_tracker.close()
+
+    def reload_user_config(self) -> None:
+        """Reload user config and reset cost caches when pricing changes."""
+        mtime = self.settings_store.mtime()
+        if mtime == self.settings_mtime:
+            return
+        next_config = self.settings_store.load()
+        prices_changed = next_config.price_table() != self.user_config.price_table()
+        self.user_config = next_config
+        self.settings_mtime = mtime
+        self.daily_budget_usd = max(0.0, float(next_config.daily_budget_usd))
+        self.weekly_budget_usd = max(0.0, float(next_config.weekly_budget_usd))
+        self.budget_thresholds = list(next_config.budget_thresholds)
+        if prices_changed:
+            estimator = _cost_estimator_from_config(next_config)
+            self.parser.cost_estimator = estimator
+            if self.sse_tracker is not None:
+                self.sse_tracker.cost_estimator = estimator
+            self.usage_cache = UsageSummaryCache(self.parser)
+            _configure_ui_cost_estimators(estimator)
 
 
 def _candidate_data_dirs(platform: BasePlatform | None = None) -> list[Path]:
@@ -494,37 +533,63 @@ def _discover_sessions_root(platform: BasePlatform, explicit_root: str | None) -
     return _candidate_data_dirs(platform)[0] / "sessions"
 
 
-def parse_thresholds(value: str) -> list[float]:
+def parse_thresholds(value: object) -> list[float]:
     """Parse comma-separated budget warning thresholds."""
-    thresholds: list[float] = []
-    for part in value.split(","):
-        text = part.strip()
-        if not text:
-            continue
-        try:
-            amount = float(text)
-        except ValueError:
-            continue
-        if amount > 1:
-            amount /= 100.0
-        if amount > 0:
-            thresholds.append(amount)
-    return sorted(set(thresholds)) or [0.5, 0.8, 0.9, 1.0]
+    return parse_config_thresholds(value)
 
 
-def current_budget_windows() -> tuple[datetime, datetime]:
-    """Return original HUD budget windows: daily 10:00 and weekly Thursday 10:00."""
-    now = datetime.now().astimezone()
+def _cost_estimator_from_config(config: UserConfig) -> CostEstimator:
+    return CostEstimator(UsageCalculator(config.price_table()))
+
+
+def _configure_ui_cost_estimators(estimator: CostEstimator) -> None:
+    try:
+        from .ui import renderer_hud, tk_hud
+
+        renderer_hud.set_cost_estimator(estimator)
+        tk_hud.set_cost_estimator(estimator)
+    except Exception:
+        return
+
+
+def _apply_cli_config_overrides(
+    config: UserConfig,
+    args: argparse.Namespace,
+) -> UserConfig:
+    patch: dict[str, object] = {}
+    if getattr(args, "daily_budget_usd", None) is not None:
+        patch["daily_budget_usd"] = max(0.0, float(args.daily_budget_usd))
+    if getattr(args, "weekly_budget_usd", None) is not None:
+        patch["weekly_budget_usd"] = max(0.0, float(args.weekly_budget_usd))
+    if getattr(args, "budget_thresholds", None) is not None:
+        patch["budget_thresholds"] = parse_thresholds(args.budget_thresholds)
+    if getattr(args, "hud_mode", None):
+        patch["display_mode"] = normalize_display_mode(args.hud_mode)
+    if not patch:
+        return config
+    return replace(config, **patch)
+
+
+def current_budget_windows(
+    config: UserConfig | None = None,
+    *,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Return daily and weekly budget windows using user reset settings."""
+    config = config or UserConfig.defaults()
+    now = now or datetime.now().astimezone()
+    day_hour, day_minute = time_parts(config.daily_reset_time)
+    week_hour, week_minute = time_parts(config.weekly_reset_time)
     day_start = datetime.combine(
-        now.date(), datetime_time(hour=10), tzinfo=now.tzinfo
+        now.date(), datetime_time(hour=day_hour, minute=day_minute), tzinfo=now.tzinfo
     )
     if now < day_start:
         day_start -= timedelta(days=1)
 
-    days_since_thursday = (now.weekday() - 3) % 7
+    days_since_thursday = (now.weekday() - int(config.weekly_reset_weekday)) % 7
     week_date = now.date() - timedelta(days=days_since_thursday)
     week_start = datetime.combine(
-        week_date, datetime_time(hour=10), tzinfo=now.tzinfo
+        week_date, datetime_time(hour=week_hour, minute=week_minute), tzinfo=now.tzinfo
     )
     if now < week_start:
         week_start -= timedelta(days=7)
@@ -559,7 +624,11 @@ def budget_warnings(
 
 def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
     platform = get_current_platform()
-    parser = JsonlSessionParser(estimate_enabled=True)
+    settings_store = UserConfigStore()
+    user_config = _apply_cli_config_overrides(settings_store.load(), args)
+    estimator = _cost_estimator_from_config(user_config)
+    _configure_ui_cost_estimators(estimator)
+    parser = JsonlSessionParser(estimate_enabled=True, cost_estimator=estimator)
     sessions_root = _discover_sessions_root(platform, args.sessions_root)
     sqlite_log_path = _discover_path(platform, args.sse_db, DEFAULT_SQLITE_LOG)
     state_db_path = _discover_path(platform, args.state_db, DEFAULT_STATE_DB)
@@ -588,7 +657,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
     sse_tracker = (
         None
         if args.no_sse
-        else SseRequestStateMachine(db_path=sqlite_log_path)
+        else SseRequestStateMachine(db_path=sqlite_log_path, cost_estimator=estimator)
     )
     return RuntimeContext(
         platform=platform,
@@ -598,9 +667,12 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         state_db_path=state_db_path,
         session_index_path=session_index_path,
         poll_ms=max(100, int(args.poll_ms)),
-        daily_budget_usd=max(0.0, float(args.daily_budget_usd)),
-        weekly_budget_usd=max(0.0, float(args.weekly_budget_usd)),
-        budget_thresholds=parse_thresholds(args.budget_thresholds),
+        daily_budget_usd=max(0.0, float(user_config.daily_budget_usd)),
+        weekly_budget_usd=max(0.0, float(user_config.weekly_budget_usd)),
+        budget_thresholds=list(user_config.budget_thresholds),
+        user_config=user_config,
+        settings_store=settings_store,
+        settings_mtime=settings_store.mtime(),
         parser=parser,
         sse_tracker=sse_tracker,
         active_session_tracker=active_session_tracker,
@@ -610,6 +682,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
 
 
 def build_snapshot(context: RuntimeContext) -> ParsedSession:
+    context.reload_user_config()
     session_path, selection_source = context.session_resolver.resolve()
 
     if session_path is None:
@@ -648,16 +721,17 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
             snapshot.session_id,
         )
 
-    day_start, week_start = current_budget_windows()
+    day_start, week_start = current_budget_windows(context.user_config)
     today_total, week_total = context.usage_cache.summarize(
         context.sessions_root,
         day_start,
         week_start,
     )
+    week_adjustment_usd = max(0.0, float(context.user_config.weekly_adjustment_usd))
     snapshot.today_tokens = today_total.tokens
     snapshot.today_cost_usd = today_total.cost_usd
     snapshot.week_tokens = week_total.tokens
-    snapshot.week_cost_usd = week_total.cost_usd
+    snapshot.week_cost_usd = round(week_total.cost_usd + week_adjustment_usd, 6)
     prior_week_total = usage_before_today_in_week(
         week_total,
         today_total,
@@ -666,13 +740,14 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
     )
     snapshot.week_before_today_tokens = prior_week_total.tokens
     snapshot.week_before_today_cost_usd = prior_week_total.cost_usd
+    snapshot.week_adjustment_usd = week_adjustment_usd
     snapshot.daily_limit_usd = context.daily_budget_usd
     snapshot.weekly_limit_usd = context.weekly_budget_usd
     snapshot.day_start = day_start
     snapshot.week_start = week_start
     snapshot.budget_warnings = budget_warnings(
         today_total.cost_usd,
-        week_total.cost_usd,
+        snapshot.week_cost_usd,
         context.daily_budget_usd,
         context.weekly_budget_usd,
         context.budget_thresholds,
@@ -722,6 +797,11 @@ def snapshot_to_text(snapshot: ParsedSession, compact: bool = False) -> str:
         f"Activity: {snapshot.activity.kind} | {snapshot.activity.detail or 'n/a'}",
         f"Path: {snapshot.session_path or 'n/a'}",
     ]
+    if snapshot.week_adjustment_usd > 0:
+        lines.append(
+            "This Week Manual Adjustment: "
+            f"{_format_money(snapshot.week_adjustment_usd)}"
+        )
     if snapshot.budget_warnings:
         lines.append("Budget Warnings: " + " | ".join(snapshot.budget_warnings))
     if snapshot.error:
@@ -758,7 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use compact output mode for CLI snapshots and the Tkinter HUD.",
     )
-    parser.set_defaults(renderer_hud=True)
+    parser.set_defaults(renderer_hud=None)
     parser.add_argument(
         "--renderer-hud",
         dest="renderer_hud",
@@ -774,6 +854,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="renderer_hud",
         action="store_false",
         help="Force the legacy Tk HUD and skip renderer injection.",
+    )
+    parser.add_argument(
+        "--hud-mode",
+        choices=["auto", "renderer", "tk"],
+        help=(
+            "Override the configured HUD display mode for this run. "
+            "auto and renderer both try renderer injection first; tk skips injection."
+        ),
     )
     parser.add_argument(
         "--session-file",
@@ -842,21 +930,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--daily-budget-usd",
         type=float,
-        default=DEFAULT_DAILY_BUDGET_USD,
-        help=f"Daily reminder budget in USD. Default: {DEFAULT_DAILY_BUDGET_USD:g}.",
+        default=None,
+        help=(
+            "Daily reminder budget in USD. "
+            f"Configured default: {DEFAULT_DAILY_BUDGET_USD:g}."
+        ),
     )
     parser.add_argument(
         "--weekly-budget-usd",
         type=float,
-        default=DEFAULT_WEEKLY_BUDGET_USD,
-        help=f"Weekly reminder budget in USD. Default: {DEFAULT_WEEKLY_BUDGET_USD:g}.",
+        default=None,
+        help=(
+            "Weekly reminder budget in USD. "
+            f"Configured default: {DEFAULT_WEEKLY_BUDGET_USD:g}."
+        ),
     )
     parser.add_argument(
         "--budget-thresholds",
-        default=DEFAULT_BUDGET_THRESHOLDS,
+        default=None,
         help=(
             "Comma-separated budget warning thresholds. "
-            f"Default: {DEFAULT_BUDGET_THRESHOLDS}."
+            f"Configured default: {DEFAULT_BUDGET_THRESHOLDS_TEXT}."
         ),
     )
     return parser
@@ -911,6 +1005,8 @@ def run_renderer_hud_session(
         with lock_context:
             context = build_runtime_context(args)
             client = RendererHudClient()
+            bridge = SettingsBridgeServer(context.settings_store)
+            bridge_url = bridge.start()
 
             def snapshot_or_error() -> ParsedSession:
                 try:
@@ -947,7 +1043,13 @@ def run_renderer_hud_session(
                         except ProcessListenerError as exc:
                             _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
                             return RENDERER_HUD_UNAVAILABLE
-                    if client.update(snapshot_or_error()):
+                    context.reload_user_config()
+                    if client.update(
+                        snapshot_or_error(),
+                        settings=context.user_config,
+                        settings_path=context.settings_store.path,
+                        settings_bridge_url=bridge_url,
+                    ):
                         failures = 0
                     else:
                         failures += 1
@@ -966,6 +1068,7 @@ def run_renderer_hud_session(
                 return 130
             finally:
                 client.close()
+                bridge.close()
                 context.close()
     except HudAlreadyRunningError as exc:
         _eprint(f"codex-usage-hud: {exc}")
@@ -992,6 +1095,7 @@ def run_tk_hud_session(
                         tombstone_follow_ms=(
                             100 if daemon_manager is not None else 500
                         ),
+                        user_settings_store=getattr(context, "settings_store", None),
                     )
                 except Exception as exc:
                     _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
@@ -1078,6 +1182,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_stdout()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.renderer_hud is None:
+        configured_mode = normalize_display_mode(
+            args.hud_mode or UserConfigStore().load().display_mode
+        )
+        args.renderer_hud = configured_mode != "tk"
     if args.stop:
         print(stop_running_hud())
         return 0
