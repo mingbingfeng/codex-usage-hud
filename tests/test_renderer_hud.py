@@ -21,6 +21,7 @@ from codex_usage_hud.core.parser import (
     SlowSummary,
     ToolCallTiming,
 )
+from codex_usage_hud.support_assets import support_qr_asset_paths, support_qr_payload
 from codex_usage_hud.ui import renderer_hud
 from codex_usage_hud.ui.renderer_hud import RendererHudClient, payload_from_snapshot
 
@@ -95,6 +96,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settingsCommandKey", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("localStorage.setItem", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("fetch(`${bridge}", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-support-qr-grid", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-support-qr-title", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("previousPayload.supportImages?.length", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settingsBridgeUrl", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("navigator.clipboard", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("requestRowDetails", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -138,6 +142,29 @@ class RendererHudPayloadTests(unittest.TestCase):
         request_row_details = payload["requestRowDetails"]
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
+
+    def test_support_qr_assets_are_available_for_renderer_payload(self) -> None:
+        images = support_qr_payload()
+        paths = support_qr_asset_paths()
+
+        self.assertEqual([item["key"] for item in images], ["alipay", "wechat"])
+        self.assertEqual([item["key"] for item in paths], ["alipay", "wechat"])
+        self.assertTrue(images[0]["src"].startswith("data:image/jpeg;base64,"))
+        self.assertTrue(images[1]["src"].startswith("data:image/jpeg;base64,"))
+        self.assertGreater(len(images[0]["src"]), 1000)
+        self.assertGreater(len(images[1]["src"]), 1000)
+        self.assertTrue(Path(paths[0]["path"]).exists())
+        self.assertTrue(Path(paths[1]["path"]).exists())
+
+    def test_payload_can_include_support_qr_images(self) -> None:
+        snapshot = ParsedSession(status="waiting")
+        images = support_qr_payload()
+
+        payload = payload_from_snapshot(snapshot, support_images=images).to_json()
+
+        self.assertEqual(payload["supportImages"][0]["label"], "支付宝")
+        self.assertEqual(payload["supportImages"][1]["label"], "微信赞赏")
+        self.assertTrue(payload["supportImages"][0]["src"].startswith("data:image/jpeg;base64,"))
 
     def test_payload_exposes_top_copy_targets_and_live_request_row_details(self) -> None:
         started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()

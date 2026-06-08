@@ -96,6 +96,7 @@ The settings panel covers:
 - model prices per 1M tokens: input, cached input, output, and reasoning;
 - optional pricing JSON URL for pulling model prices;
 - manual weekly USD adjustment for usage that should count toward this week.
+- a support tab with bundled Alipay and WeChat QR codes.
 
 顶部 HUD 右侧有齿轮按钮，点击后会直接打开设置界面；设置界面里保留 **请作者喝咖啡** 标签页。设置会和 HUD 位置一起保存在当前用户的 `hud_settings.json`。
 
@@ -107,6 +108,7 @@ The settings panel covers:
 - 模型每 100 万 token 单价：输入、缓存输入、输出、推理；
 - 可选的计费单价 JSON 拉取地址；
 - 本周人工补充已使用 USD 额度。
+- 内置支付宝和微信赞赏码的支持页。
 
 The default display path mirrors Codex++'s external CDP enhancement style: inject into the Codex renderer first, then keep the Tk HUD as the local fallback when CDP is unavailable. Switching between renderer-first and Tk-only takes effect on the next HUD restart. Budget and pricing edits are reloaded while the HUD is running.
 

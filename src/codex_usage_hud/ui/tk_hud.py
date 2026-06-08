@@ -28,6 +28,7 @@ from ..config import (
     write_json_object,
 )
 from ..core.parser import CostEstimator, ParsedSession, RequestRound
+from ..support_assets import support_qr_asset_paths
 
 TOP_DOCK_TOP = 42
 TOP_DOCK_LEFT = 456
@@ -2491,6 +2492,7 @@ class TokenHudWindow:
             text=(
                 "如果这个 HUD 帮你节省了排查 token 和费用的时间，可以通过下面的链接支持维护。\n\n"
                 f"{settings.support_url}\n\n"
+                "renderer 设置页会直接显示支付宝和微信赞赏码；Tk 回退模式可用下面按钮打开图片。\n\n"
                 f"配置文件：{self.user_settings_store.path}"
             ),
             justify="left",
@@ -2500,6 +2502,18 @@ class TokenHudWindow:
             wraplength=680,
             font=("Microsoft YaHei UI", 9),
         ).pack(fill="both", expand=True)
+        support_actions = tk.Frame(support_frame, bg=HUD_BG)
+        support_actions.pack(fill="x", pady=(8, 0))
+        for item in support_qr_asset_paths():
+            tk.Button(
+                support_actions,
+                text=f"打开{item['label']}码",
+                command=lambda path=item["path"]: self._open_support_image(path),
+                bg="#2E3846",
+                fg=HUD_TEXT,
+                relief="flat",
+                padx=8,
+            ).pack(side="left", padx=(0, 6))
 
     def _config_from_settings_dialog(
         self,
@@ -2587,10 +2601,22 @@ class TokenHudWindow:
             "请作者喝咖啡",
             (
                 "如果这个 HUD 帮你节省了排查 token 和费用的时间，可以通过下面的链接支持维护。\n\n"
-                f"{settings.support_url}"
+                f"{settings.support_url}\n\n"
+                "打开设置窗口的“请作者喝咖啡”标签页可查看或打开赞赏码。"
             ),
             parent=self.root,
         )
+
+    def _open_support_image(self, path: str) -> None:
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as exc:
+            messagebox.showerror("打开失败", str(exc), parent=self._settings_dialog)
 
     def _rebuild_top_ui(self) -> None:
         for child in self.root.winfo_children():

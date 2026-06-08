@@ -52,3 +52,7 @@ path = "src/codex_usage_hud/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codex_usage_hud"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/codex_usage_hud/assets/sponsor_alipay.jpg" = "codex_usage_hud/assets/sponsor_alipay.jpg"
+"src/codex_usage_hud/assets/sponsor_wechat.jpg" = "codex_usage_hud/assets/sponsor_wechat.jpg"

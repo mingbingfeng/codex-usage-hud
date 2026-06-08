@@ -20,6 +20,7 @@ from ..platforms.cdp_probe import (
     remove_new_document_script,
     send_cdp_command,
 )
+from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
 RENDERER_HUD_VERSION = "5"
@@ -574,12 +575,55 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-support {
         display: grid;
-        gap: 10px;
+        gap: 12px;
         color: #dde7f2;
         line-height: 1.55;
       }
       #${rootId} .codex-usage-hud-support a {
         color: #9ccbff;
+      }
+      #${rootId} .codex-usage-hud-support-note {
+        color: #a9bcd2;
+        font-size: 12px;
+      }
+      #${rootId} .codex-usage-hud-support-qr-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        align-items: start;
+      }
+      #${rootId} .codex-usage-hud-support-qr {
+        min-width: 0;
+        display: grid;
+        gap: 8px;
+        justify-items: center;
+        padding: 10px;
+        border: 1px solid #273241;
+        border-radius: 8px;
+        background: #141b24;
+      }
+      #${rootId} .codex-usage-hud-support-qr-title {
+        width: 100%;
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        color: #e8eef7;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-support-qr-title span:last-child {
+        color: #8492a6;
+        font-size: 10px;
+        font-weight: 600;
+      }
+      #${rootId} .codex-usage-hud-support-qr img {
+        display: block;
+        width: 100%;
+        max-width: 260px;
+        max-height: 360px;
+        object-fit: contain;
+        border-radius: 6px;
+        background: #ffffff;
       }
       @media (max-width: 760px) {
         #${rootId} .codex-usage-hud-top-grid {
@@ -589,6 +633,9 @@ RENDERER_HUD_SCRIPT = r"""
           display: none;
         }
         #${rootId} .codex-usage-hud-settings-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-support-qr-grid {
           grid-template-columns: minmax(0, 1fr);
         }
         #${rootId} .codex-usage-hud-price-row,
@@ -859,11 +906,24 @@ RENDERER_HUD_SCRIPT = r"""
 
   function supportPanelHtml(settings, path) {
     const url = String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud");
+    const images = Array.isArray(currentPayload()?.supportImages) ? currentPayload().supportImages : [];
+    const qrItems = images.map((item) => `
+      <div class="codex-usage-hud-support-qr">
+        <div class="codex-usage-hud-support-qr-title">
+          <span>${escapeHtml(item?.label || "赞赏码")}</span>
+          <span>${escapeHtml(item?.hint || "扫码支持")}</span>
+        </div>
+        <img src="${escapeHtml(item?.src || "")}" alt="${escapeHtml(item?.label || "赞赏码")}">
+      </div>
+    `).join("");
     return `
       <div class="codex-usage-hud-support">
-        <div>如果这个 HUD 帮你节省了排查 token 和费用的时间，可以通过下面的链接支持维护。</div>
-        <div><a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></div>
-        <div>当前配置文件：${escapeHtml(path || "未提供")}</div>
+        <div class="codex-usage-hud-support-note">如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。</div>
+        <div class="codex-usage-hud-support-qr-grid">
+          ${qrItems || '<div class="codex-usage-hud-support-note">赞赏码资源未加载，请等待 HUD 刷新。</div>'}
+        </div>
+        <div class="codex-usage-hud-support-note">项目链接：<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></div>
+        <div class="codex-usage-hud-support-note">当前配置文件：${escapeHtml(path || "未提供")}</div>
       </div>
     `;
   }
@@ -2118,21 +2178,29 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   window.__codexUsageHudUpdate = (payload) => {
-    window[stateName] = { payload, updatedAt: Date.now() };
+    const previousPayload = window[stateName]?.payload || {};
+    const nextPayload = { ...previousPayload, ...(payload || {}) };
+    if (
+      (!payload?.supportImages || !payload.supportImages.length) &&
+      previousPayload.supportImages?.length
+    ) {
+      nextPayload.supportImages = previousPayload.supportImages;
+    }
+    window[stateName] = { payload: nextPayload, updatedAt: Date.now() };
     const root = ensureRoot();
     if (!root) return false;
-    setText(root, "topLine", payload?.topLine || "codex-usage-hud 等待数据");
-    setText(root, "requestLine", payload?.requestLine || "本次请求 等待");
-    setText(root, "requestLineExpanded", payload?.requestLine || "最近模型请求轮次");
+    setText(root, "topLine", nextPayload?.topLine || "codex-usage-hud 等待数据");
+    setText(root, "requestLine", nextPayload?.requestLine || "本次请求 等待");
+    setText(root, "requestLineExpanded", nextPayload?.requestLine || "最近模型请求轮次");
     root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
-      node.classList.toggle(warningClass, !!payload?.warning);
+      node.classList.toggle(warningClass, !!nextPayload?.warning);
     });
     root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
-      node.classList.toggle(warningClass, payload?.requestStatus === "error");
+      node.classList.toggle(warningClass, nextPayload?.requestStatus === "error");
     });
-    renderTopDetails(root, payload || {});
-    renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || []);
-    applySettingsCommandStatus(payload || {});
+    renderTopDetails(root, nextPayload || {});
+    renderRequestRows(root, nextPayload?.requestRows || [], nextPayload?.requestRowDetails || []);
+    applySettingsCommandStatus(nextPayload || {});
     syncPosition();
     syncPositionSettled();
     return true;
@@ -2217,6 +2285,7 @@ class RendererHudPayload:
     settings_path: str = ""
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
+    support_images: list[dict[str, str]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -2237,6 +2306,7 @@ class RendererHudPayload:
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
+            "supportImages": [dict(item) for item in self.support_images],
         }
 
 
@@ -2258,6 +2328,7 @@ class RendererHudClient:
         self._target_id = ""
         self._script_identifier = ""
         self._websocket_url = ""
+        self._support_images_sent = False
 
     def update(
         self,
@@ -2268,15 +2339,20 @@ class RendererHudClient:
         settings_bridge_url: str = "",
         settings_command_status: dict[str, object] | None = None,
     ) -> bool:
-        return self.update_payload(
-            payload_from_snapshot(
-                snapshot,
-                settings=settings,
-                settings_path=settings_path,
-                settings_bridge_url=settings_bridge_url,
-                settings_command_status=settings_command_status,
-            ).to_json()
-        )
+        support_images = [] if self._support_images_sent else support_qr_payload()
+        payload = payload_from_snapshot(
+            snapshot,
+            settings=settings,
+            settings_path=settings_path,
+            settings_bridge_url=settings_bridge_url,
+            settings_command_status=settings_command_status,
+            support_images=support_images,
+        ).to_json()
+        if self.update_payload(payload):
+            if support_images:
+                self._support_images_sent = True
+            return True
+        return False
 
     def update_payload(self, payload: dict[str, object]) -> bool:
         if not self.enabled:
@@ -2389,6 +2465,7 @@ class RendererHudClient:
         )
         self._target_id = target_id
         self._websocket_url = websocket_url
+        self._support_images_sent = False
 
     def _send_update(self, websocket_url: str, payload: dict[str, object]) -> bool:
         expression = (
@@ -2425,6 +2502,7 @@ def payload_from_snapshot(
     settings_path: Path | str | None = None,
     settings_bridge_url: str = "",
     settings_command_status: dict[str, object] | None = None,
+    support_images: list[dict[str, str]] | None = None,
 ) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
     top_line = (
@@ -2461,6 +2539,7 @@ def payload_from_snapshot(
         settings_path=str(settings_path or ""),
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},
+        support_images=support_images or [],
     )
 
 
