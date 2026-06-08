@@ -13,6 +13,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
+from threading import Event
+from typing import Any, Mapping
 
 from .config import (
     DEFAULT_BUDGET_THRESHOLDS,
@@ -20,6 +22,7 @@ from .config import (
     DEFAULT_WEEKLY_BUDGET_USD,
     UserConfig,
     UserConfigStore,
+    fetch_model_prices,
     normalize_display_mode,
     parse_thresholds as parse_config_thresholds,
     time_parts,
@@ -570,6 +573,81 @@ def _apply_cli_config_overrides(
     return replace(config, **patch)
 
 
+def _config_from_settings_payload(
+    current: UserConfig,
+    payload: object,
+) -> UserConfig:
+    merged = current.to_dict()
+    if isinstance(payload, Mapping):
+        merged.update(dict(payload))
+    return UserConfig.from_dict(merged)
+
+
+def _save_renderer_user_config(context: RuntimeContext, config: UserConfig) -> None:
+    context.settings_store.save(config)
+    context.settings_mtime = None
+    context.reload_user_config()
+
+
+def _renderer_settings_status(
+    message: str,
+    *,
+    kind: str = "",
+    restart_visible: bool = False,
+) -> dict[str, object]:
+    return {
+        "message": message,
+        "kind": kind,
+        "restartVisible": restart_visible,
+    }
+
+
+def _handle_renderer_settings_command(
+    command: Mapping[str, Any],
+    context: RuntimeContext,
+    restart_requested: Event,
+) -> dict[str, object]:
+    action = str(command.get("action") or "").strip()
+    try:
+        if action == "save":
+            config = _config_from_settings_payload(
+                context.settings_store.load(),
+                command.get("settings"),
+            )
+            _save_renderer_user_config(context, config)
+            return _renderer_settings_status(
+                "已保存到本地配置；预算和价格会自动刷新，显示方案切换需重启 HUD 生效。",
+                restart_visible=True,
+            )
+        if action == "fetchPrices":
+            config = _config_from_settings_payload(
+                context.settings_store.load(),
+                command.get("settings"),
+            )
+            prices = fetch_model_prices(config.pricing_url)
+            config = config.with_price_updates(prices, pricing_url=config.pricing_url)
+            _save_renderer_user_config(context, config)
+            return _renderer_settings_status(
+                f"已拉取并保存 {len(prices)} 个模型价格。",
+                restart_visible=True,
+            )
+        if action == "restart":
+            restart_requested.set()
+            return _renderer_settings_status(
+                "已请求重启 HUD；daemon 模式会自动恢复。",
+            )
+        return _renderer_settings_status(
+            f"无法处理未知设置命令：{action or 'empty'}",
+            kind="error",
+        )
+    except Exception as exc:
+        return _renderer_settings_status(
+            f"设置命令执行失败：{exc}",
+            kind="error",
+            restart_visible=True,
+        )
+
+
 def current_budget_windows(
     config: UserConfig | None = None,
     *,
@@ -1005,7 +1083,11 @@ def run_renderer_hud_session(
         with lock_context:
             context = build_runtime_context(args)
             client = RendererHudClient()
-            bridge = SettingsBridgeServer(context.settings_store)
+            restart_requested = Event()
+            bridge = SettingsBridgeServer(
+                context.settings_store,
+                restart_callback=restart_requested.set,
+            )
             bridge_url = bridge.start()
 
             def snapshot_or_error() -> ParsedSession:
@@ -1033,6 +1115,7 @@ def run_renderer_hud_session(
                     return RENDERER_HUD_UNAVAILABLE
 
                 failures = 0
+                settings_command_status: dict[str, object] = {}
                 while True:
                     started = time.monotonic()
                     if daemon_manager is not None:
@@ -1043,13 +1126,29 @@ def run_renderer_hud_session(
                         except ProcessListenerError as exc:
                             _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
                             return RENDERER_HUD_UNAVAILABLE
+                    command = client.take_settings_command()
+                    if command:
+                        settings_command_status = _handle_renderer_settings_command(
+                            command,
+                            context,
+                            restart_requested,
+                        )
+                    if restart_requested.is_set():
+                        _LOGGER.info("renderer_hud_restart_requested")
+                        return (
+                            DAEMON_RESTART_REQUESTED
+                            if daemon_manager is not None
+                            else 0
+                        )
                     context.reload_user_config()
                     if client.update(
                         snapshot_or_error(),
                         settings=context.user_config,
                         settings_path=context.settings_store.path,
                         settings_bridge_url=bridge_url,
+                        settings_command_status=settings_command_status,
                     ):
+                        settings_command_status = {}
                         failures = 0
                     else:
                         failures += 1

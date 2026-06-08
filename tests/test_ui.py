@@ -24,6 +24,7 @@ from codex_usage_hud.cli import (
     HudInstanceLock,
     RENDERER_HUD_UNAVAILABLE,
     UsageSummaryCache,
+    _handle_renderer_settings_command,
     budget_warnings,
     main,
     parse_thresholds,
@@ -33,7 +34,7 @@ from codex_usage_hud.cli import (
     stop_running_hud,
     usage_before_today_in_week,
 )
-from codex_usage_hud.config import UserConfig
+from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.core.parser import (
     GapTiming,
     ParsedSession,
@@ -1240,6 +1241,43 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_renderer_settings_command_merges_partial_save_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            existing = UserConfig.defaults()
+            existing.daily_budget_usd = 12.34
+            existing.weekly_budget_usd = 56.78
+            existing.daily_reset_time = "10:00"
+            store.save(existing)
+            reload_calls = 0
+
+            def reload_user_config() -> None:
+                nonlocal reload_calls
+                reload_calls += 1
+
+            context = SimpleNamespace(
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                reload_user_config=reload_user_config,
+            )
+            restart_requested = MagicMock()
+
+            status = _handle_renderer_settings_command(
+                {"action": "save", "settings": {"daily_reset_time": "09:30"}},
+                context,
+                restart_requested,
+            )
+            saved = store.load()
+
+        self.assertEqual(status["kind"], "")
+        self.assertEqual(status["restartVisible"], True)
+        self.assertEqual(saved.daily_reset_time, "09:30")
+        self.assertEqual(saved.daily_budget_usd, 12.34)
+        self.assertEqual(saved.weekly_budget_usd, 56.78)
+        self.assertIsNone(context.settings_mtime)
+        self.assertEqual(reload_calls, 1)
+        restart_requested.set.assert_not_called()
+
     def test_main_defaults_to_renderer_first_from_auto_config(self) -> None:
         config = UserConfig.defaults()
 

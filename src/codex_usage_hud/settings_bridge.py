@@ -5,7 +5,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from threading import Thread
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from .config import UserConfig, UserConfigStore, fetch_model_prices
@@ -21,10 +21,12 @@ class SettingsBridgeServer:
         store: UserConfigStore,
         host: str = "127.0.0.1",
         port: int = DEFAULT_SETTINGS_BRIDGE_PORT,
+        restart_callback: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
         self.host = host
         self.port = max(0, int(port))
+        self.restart_callback = restart_callback
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
         self.url = ""
@@ -61,6 +63,7 @@ class SettingsBridgeServer:
 
     def _handler_type(self) -> type[BaseHTTPRequestHandler]:
         store = self.store
+        restart_callback = self.restart_callback
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "codex-usage-hud-settings"
@@ -86,12 +89,19 @@ class SettingsBridgeServer:
                 if path == "/prices/fetch":
                     self._fetch_prices()
                     return
+                if path == "/restart":
+                    self._request_restart()
+                    return
                 self._send_json({"status": "failed", "message": "not found"}, 404)
 
             def _save_settings(self) -> None:
                 body = self._read_json()
                 payload = body.get("settings", body)
-                config = UserConfig.from_dict(payload)
+                current = store.load()
+                merged = current.to_dict()
+                if isinstance(payload, dict):
+                    merged.update(payload)
+                config = UserConfig.from_dict(merged)
                 try:
                     store.save(config)
                 except OSError as exc:
@@ -121,6 +131,31 @@ class SettingsBridgeServer:
                     "ok",
                     f"fetched {len(prices)} model price entries",
                     extra={"fetched": len(prices)},
+                )
+
+            def _request_restart(self) -> None:
+                if restart_callback is None:
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": "restart is not available for this HUD session",
+                        },
+                        503,
+                    )
+                    return
+                try:
+                    restart_callback()
+                except Exception as exc:
+                    self._send_json(
+                        {"status": "failed", "message": f"restart failed: {exc}"},
+                        500,
+                    )
+                    return
+                self._send_json(
+                    {
+                        "status": "ok",
+                        "message": "HUD restart requested; daemon mode will relaunch it shortly",
+                    }
                 )
 
             def _read_json(self) -> dict[str, Any]:

@@ -26,6 +26,7 @@ RENDERER_HUD_VERSION = "5"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
+SETTINGS_COMMAND_STORAGE_KEY = "codexUsageHudSettingsCommand:v1"
 
 _COST_ESTIMATOR = CostEstimator()
 
@@ -52,8 +53,10 @@ RENDERER_HUD_SCRIPT = r"""
   const settleTimerName = "__codexUsageHudSettleTimers";
   const runningTimerName = "__codexUsageHudRunningTimer";
   const storageKey = "codexUsageHudPanelState:v5";
+  const settingsCommandKey = "codexUsageHudSettingsCommand:v1";
   const settingsModalId = "codex-usage-hud-settings-modal";
   let topSlotCache = null;
+  let pendingSyncPanels = null;
   const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
   const numericAnimations = new WeakMap();
 
@@ -784,7 +787,7 @@ RENDERER_HUD_SCRIPT = r"""
         <div class="codex-usage-hud-settings-actions">
           <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件"))}</div>
           <div>
-            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取价格</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取价格</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
           </div>
         </div>
       </div>
@@ -872,6 +875,41 @@ RENDERER_HUD_SCRIPT = r"""
     node.dataset.kind = kind;
   }
 
+  function setSettingsRestartVisible(visible) {
+    const node = document.querySelector(`#${settingsModalId} [data-action="settings-restart"]`);
+    if (node) node.hidden = !visible;
+  }
+
+  function showSettingsRestartPrompt(message, kind = "error") {
+    setSettingsStatus(`${message} 是否立即重启 HUD？`, kind);
+    setSettingsRestartVisible(true);
+  }
+
+  function applySettingsCommandStatus(payload) {
+    const modal = document.getElementById(settingsModalId);
+    const status = payload?.settingsCommandStatus;
+    if (!modal || modal.hidden || !status || typeof status !== "object") return;
+    setSettingsStatus(status.message || "", status.kind || "");
+    setSettingsRestartVisible(!!status.restartVisible);
+  }
+
+  function submitSettingsCommand(command, pendingMessage) {
+    const payload = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      createdAt: Date.now(),
+      ...command,
+    };
+    try {
+      localStorage.setItem(settingsCommandKey, JSON.stringify(payload));
+    } catch (error) {
+      setSettingsStatus(`无法提交设置命令：${error?.message || error}`, "error");
+      return false;
+    }
+    setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
+    setSettingsRestartVisible(false);
+    return true;
+  }
+
   function collectSettingsForm() {
     const modal = document.getElementById(settingsModalId);
     const settings = hudSettingsFromPayload();
@@ -914,51 +952,27 @@ RENDERER_HUD_SCRIPT = r"""
     };
   }
 
-  async function saveSettingsFromModal() {
+  function saveSettingsFromModal() {
     const settings = collectSettingsForm();
-    const bridge = settingsBridgeUrl();
-    if (!bridge) {
-      await copyHudText(JSON.stringify({ user: settings }, null, 2));
-      setSettingsStatus("桥接未连接，已复制配置 JSON", "error");
-      return;
-    }
-    setSettingsStatus("正在保存...");
-    try {
-      const response = await fetch(`${bridge}/settings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ settings }),
-      });
-      const result = await response.json();
-      if (!response.ok || result.status !== "ok") throw new Error(result.message || `HTTP ${response.status}`);
-      window[stateName] = { ...(window[stateName] || {}), payload: { ...currentPayload(), settings: result.settings, settingsPath: result.settingsPath } };
-      renderSettingsModal("settings", "已保存；显示方案切换需重启 HUD 生效");
-    } catch (error) {
-      setSettingsStatus(`保存失败：无法连接本地设置桥接 ${bridge}；请等待 HUD 自动刷新或重启 daemon 后再试（${error?.message || error}）`, "error");
-    }
+    submitSettingsCommand(
+      { action: "save", settings },
+      "保存请求已提交，等待 HUD daemon 写入本地配置..."
+    );
   }
 
-  async function fetchPricesFromModal() {
+  function fetchPricesFromModal() {
     const settings = collectSettingsForm();
-    const bridge = settingsBridgeUrl();
-    if (!bridge) {
-      setSettingsStatus("桥接未连接，无法从页面直接拉取价格", "error");
-      return;
-    }
-    setSettingsStatus("正在拉取价格...");
-    try {
-      const response = await fetch(`${bridge}/prices/fetch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: settings.pricing_url }),
-      });
-      const result = await response.json();
-      if (!response.ok || result.status !== "ok") throw new Error(result.message || `HTTP ${response.status}`);
-      window[stateName] = { ...(window[stateName] || {}), payload: { ...currentPayload(), settings: result.settings, settingsPath: result.settingsPath } };
-      renderSettingsModal("settings", result.message || "价格已更新");
-    } catch (error) {
-      setSettingsStatus(`拉取失败：无法连接本地设置桥接 ${bridge}；请等待 HUD 自动刷新或重启 daemon 后再试（${error?.message || error}）`, "error");
-    }
+    submitSettingsCommand(
+      { action: "fetchPrices", settings },
+      "价格拉取请求已提交，等待 HUD daemon 拉取并写入..."
+    );
+  }
+
+  function restartHudFromModal() {
+    submitSettingsCommand(
+      { action: "restart", reason: "settings" },
+      "重启请求已提交，等待 HUD daemon 处理..."
+    );
   }
 
   function exportSettingsFromModal() {
@@ -1097,6 +1111,12 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         void saveSettingsFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-restart") {
+        event.preventDefault();
+        event.stopPropagation();
+        void restartHudFromModal();
         return;
       }
       if (action.dataset.action === "settings-fetch-prices") {
@@ -1357,21 +1377,12 @@ RENDERER_HUD_SCRIPT = r"""
     return visible(best) ? best.getBoundingClientRect() : null;
   }
 
-  function headerLeftControlEdge(header) {
-    const controls = Array.from(document.querySelectorAll("button, [role='button'], a"))
-      .filter((node) => visible(node) && !node.closest(`#${rootId}`))
-      .map((node) => node.getBoundingClientRect())
-      .filter((rect) => (
-        rect.width > 0
-        && rect.height > 0
-        && rect.left >= header.left - 2
-        && rect.right <= header.right + 2
-        && rect.top >= header.top - 2
-        && rect.bottom <= header.bottom + 2
-        && rect.left < header.left + (header.width * .55)
-      ));
-    if (!controls.length) return 0;
-    return Math.max(...controls.map((rect) => rect.right - header.left)) + 14;
+  function headerLeftControlEdge(headerNode, header, controls = headerControlButtons(headerNode, header)) {
+    const leftControls = controls
+      .map((item) => item.rect)
+      .filter((rect) => rect.left < header.left + (header.width * .55));
+    if (!leftControls.length) return 0;
+    return Math.max(...leftControls.map((rect) => rect.right - header.left)) + 14;
   }
 
   function headerTitleTextEdge(headerNode, header) {
@@ -1395,21 +1406,12 @@ RENDERER_HUD_SCRIPT = r"""
     return Math.max(...textRects.map((rect) => rect.right - header.left)) + 14;
   }
 
-  function headerRightControlStart(header) {
-    const controls = Array.from(document.querySelectorAll("button, [role='button'], a"))
-      .filter((node) => visible(node) && !node.closest(`#${rootId}`))
-      .map((node) => node.getBoundingClientRect())
-      .filter((rect) => (
-        rect.width > 0
-        && rect.height > 0
-        && rect.left >= header.left - 2
-        && rect.right <= header.right + 2
-        && rect.top >= header.top - 2
-        && rect.bottom <= header.bottom + 2
-        && rect.right > header.right - Math.min(260, Math.max(160, header.width * .24))
-      ));
-    if (!controls.length) return header.right;
-    return Math.min(...controls.map((rect) => rect.left));
+  function headerRightControlStart(headerNode, header, controls = headerControlButtons(headerNode, header)) {
+    const rightControls = controls
+      .map((item) => item.rect)
+      .filter((rect) => rect.right > header.right - Math.min(260, Math.max(160, header.width * .24)));
+    if (!rightControls.length) return header.right;
+    return Math.min(...rightControls.map((rect) => rect.left));
   }
 
   function headerControlButtons(headerNode, header) {
@@ -1432,21 +1434,45 @@ RENDERER_HUD_SCRIPT = r"""
       .sort((left, right) => (left.rect.left - right.rect.left) || (left.index - right.index));
   }
 
+  function headerLayoutSignature(headerNode, header, controls) {
+    const textParts = Array.from(headerNode.querySelectorAll("span, h1, h2, [data-thread-title]"))
+      .filter((node) => visible(node) && !node.closest(`#${rootId}`))
+      .filter((node) => normalize(node.textContent).length > 0)
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        return [
+          normalize(node.textContent).slice(0, 120),
+          Math.round(rect.left - header.left),
+          Math.round(rect.right - header.left),
+        ].join("@");
+      })
+      .join("|");
+    const controlParts = controls
+      .map((item) => [
+        item.label.slice(0, 80),
+        Math.round(item.rect.left - header.left),
+        Math.round(item.rect.right - header.left),
+      ].join("@"))
+      .join("|");
+    return `${textParts}::${controlParts}`;
+  }
+
   function topTitlebarSlot(headerNode, header) {
     if (!headerNode || !header) return null;
+    const controls = headerControlButtons(headerNode, header);
     const cacheKey = [
       Math.round(innerWidth),
       Math.round(header.left),
       Math.round(header.right),
       Math.round(header.top),
       Math.round(header.bottom),
+      headerLayoutSignature(headerNode, header, controls),
     ].join(":");
     if (topSlotCache?.key === cacheKey) return topSlotCache.slot;
-    const controls = headerControlButtons(headerNode, header);
     const chatActions = controls.find((item) => /chat actions/i.test(item.label));
     const openIn = controls.find((item) => /^open in\b/i.test(item.label));
     const titleEdge = headerTitleTextEdge(headerNode, header);
-    const leftControlEdge = headerLeftControlEdge(header);
+    const leftControlEdge = headerLeftControlEdge(headerNode, header, controls);
     const fallbackLeft = Math.max(160, Math.min(header.width * .14, 240));
     const left = clamp(
       (chatActions ? chatActions.rect.right + 10 : header.left + Math.max(fallbackLeft, titleEdge, leftControlEdge)),
@@ -1455,7 +1481,7 @@ RENDERER_HUD_SCRIPT = r"""
     );
     const rightMargin = Math.max(12, header.width * .04);
     const right = clamp(
-      (openIn ? openIn.rect.left - 10 : Math.min(header.right - rightMargin, headerRightControlStart(header) - 10)),
+      (openIn ? openIn.rect.left - 10 : Math.min(header.right - rightMargin, headerRightControlStart(headerNode, header, controls) - 10)),
       left,
       header.right - 8
     );
@@ -1468,8 +1494,9 @@ RENDERER_HUD_SCRIPT = r"""
   function topHeaderSlot(headerNode, header) {
     const titlebarSlot = topTitlebarSlot(headerNode, header);
     if (titlebarSlot) return titlebarSlot;
+    const controls = headerControlButtons(headerNode, header);
     const titleEdge = headerTitleTextEdge(headerNode, header);
-    const leftControlEdge = headerLeftControlEdge(header);
+    const leftControlEdge = headerLeftControlEdge(headerNode, header, controls);
     const fallbackLeft = Math.max(160, Math.min(header.width * .14, 240));
     const left = clamp(
       header.left + Math.max(fallbackLeft, titleEdge, leftControlEdge),
@@ -1478,7 +1505,7 @@ RENDERER_HUD_SCRIPT = r"""
     );
     const rightMargin = Math.max(12, header.width * .04);
     const right = clamp(
-      Math.min(header.right - rightMargin, headerRightControlStart(header) - 10),
+      Math.min(header.right - rightMargin, headerRightControlStart(headerNode, header, controls) - 10),
       left,
       header.right - 8
     );
@@ -1660,11 +1687,12 @@ RENDERER_HUD_SCRIPT = r"""
     return { left, top, width };
   }
 
-  function syncPosition() {
+  function syncPosition(names = Object.keys(PANEL)) {
     const root = ensureRoot();
     if (!root) return;
     applyPanelStates(root);
-    for (const name of Object.keys(PANEL)) {
+    const panelNames = Array.isArray(names) ? names.filter((name) => PANEL[name]) : Object.keys(PANEL);
+    for (const name of panelNames) {
       const panel = root.querySelector(`[data-panel="${name}"]`);
       if (!panel) continue;
       const state = getPanelState(name);
@@ -1697,13 +1725,62 @@ RENDERER_HUD_SCRIPT = r"""
     refreshAllMarquees(root);
   }
 
-  function syncPositionSettled() {
+  function syncPositionSettled(names = Object.keys(PANEL)) {
     for (const timer of (window[settleTimerName] || [])) clearTimeout(timer);
     window[settleTimerName] = [
-      setTimeout(syncPosition, 50),
-      setTimeout(syncPosition, 140),
-      setTimeout(syncPosition, 260),
+      setTimeout(() => syncPosition(names), 50),
+      setTimeout(() => syncPosition(names), 140),
+      setTimeout(() => syncPosition(names), 260),
     ];
+  }
+
+  function scheduleForPanels(names = Object.keys(PANEL), { invalidateTop = false } = {}) {
+    const panelNames = Array.isArray(names) ? names.filter((name) => PANEL[name]) : Object.keys(PANEL);
+    if (invalidateTop || panelNames.includes("top")) topSlotCache = null;
+    if (!pendingSyncPanels) pendingSyncPanels = new Set();
+    for (const name of panelNames) pendingSyncPanels.add(name);
+    cancelAnimationFrame(window[rafName] || 0);
+    window[rafName] = requestAnimationFrame(() => {
+      const nextPanels = Array.from(pendingSyncPanels || Object.keys(PANEL));
+      pendingSyncPanels = null;
+      syncPosition(nextPanels);
+    });
+  }
+
+  function headerScopeSelector() {
+    return [
+      "header.app-header-tint",
+      "[data-testid='app-shell-header']",
+      "[data-testid='app-shell-header-context-menu-surface']",
+      ".app-header-tint",
+    ].join(", ");
+  }
+
+  function elementFromMutationNode(node) {
+    if (!node) return null;
+    return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  }
+
+  function nodeTouchesHeaderScope(node) {
+    const element = elementFromMutationNode(node);
+    if (!element || element.closest?.(`#${rootId}`)) return false;
+    const selector = headerScopeSelector();
+    return !!(
+      element.closest?.(selector)
+      || element.matches?.(selector)
+      || element.querySelector?.(selector)
+    );
+  }
+
+  function mutationTouchesHeaderScope(mutation) {
+    if (nodeTouchesHeaderScope(mutation.target)) return true;
+    for (const node of mutation.addedNodes || []) {
+      if (nodeTouchesHeaderScope(node)) return true;
+    }
+    for (const node of mutation.removedNodes || []) {
+      if (nodeTouchesHeaderScope(node)) return true;
+    }
+    return false;
   }
 
   function lineInner(node) {
@@ -2055,6 +2132,7 @@ RENDERER_HUD_SCRIPT = r"""
     });
     renderTopDetails(root, payload || {});
     renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || []);
+    applySettingsCommandStatus(payload || {});
     syncPosition();
     syncPositionSettled();
     return true;
@@ -2083,16 +2161,25 @@ RENDERER_HUD_SCRIPT = r"""
     return true;
   };
 
-  window[scheduleName] = () => {
-    cancelAnimationFrame(window[rafName] || 0);
-    window[rafName] = requestAnimationFrame(syncPosition);
-  };
+  window[scheduleName] = () => scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
   window[resizeHandlerName] = window[scheduleName];
-  window[scrollHandlerName] = window[scheduleName];
+  window[scrollHandlerName] = () => scheduleForPanels(["request"]);
   window.addEventListener("resize", window[resizeHandlerName]);
   window.addEventListener("scroll", window[scrollHandlerName], true);
-  window[mutationObserverName] = new MutationObserver(window[scheduleName]);
-  window[mutationObserverName].observe(document.documentElement, { childList: true, subtree: true });
+  window[mutationObserverName] = new MutationObserver((mutations) => {
+    if (mutations.some(mutationTouchesHeaderScope)) {
+      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
+      return;
+    }
+    scheduleForPanels(["request"]);
+  });
+  window[mutationObserverName].observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["aria-label", "title", "data-thread-title", "class"],
+  });
   const boot = () => {
     const state = window[stateName];
     if (state?.payload) {
@@ -2129,6 +2216,7 @@ class RendererHudPayload:
     settings: dict[str, object] = field(default_factory=dict)
     settings_path: str = ""
     settings_bridge_url: str = ""
+    settings_command_status: dict[str, object] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -2148,6 +2236,7 @@ class RendererHudPayload:
             "settings": dict(self.settings),
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
+            "settingsCommandStatus": dict(self.settings_command_status),
         }
 
 
@@ -2177,6 +2266,7 @@ class RendererHudClient:
         settings: UserConfig | None = None,
         settings_path: Path | str | None = None,
         settings_bridge_url: str = "",
+        settings_command_status: dict[str, object] | None = None,
     ) -> bool:
         return self.update_payload(
             payload_from_snapshot(
@@ -2184,6 +2274,7 @@ class RendererHudClient:
                 settings=settings,
                 settings_path=settings_path,
                 settings_bridge_url=settings_bridge_url,
+                settings_command_status=settings_command_status,
             ).to_json()
         )
 
@@ -2210,6 +2301,44 @@ class RendererHudClient:
         self.last_status = "ok"
         self.last_error = ""
         return True
+
+    def take_settings_command(self) -> dict[str, object] | None:
+        """Consume one pending settings command from the renderer page."""
+        if not self.enabled:
+            return None
+        expression = (
+            "(() => {"
+            f"const key = {json.dumps(SETTINGS_COMMAND_STORAGE_KEY)};"
+            "try {"
+            "const raw = localStorage.getItem(key);"
+            "if (!raw) return null;"
+            "localStorage.removeItem(key);"
+            "const value = JSON.parse(raw);"
+            "return value && typeof value === 'object' ? value : { action: 'invalid' };"
+            "} catch (error) {"
+            "return { action: 'invalid', message: String(error && error.message || error) };"
+            "}"
+            "})()"
+        )
+        try:
+            target = self._page_target()
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            if not websocket_url:
+                return None
+            result = send_cdp_command(
+                websocket_url,
+                "Runtime.evaluate",
+                _runtime_expression_params(expression),
+                self.timeout_seconds,
+            )
+            value = (
+                result.get("result", {})
+                .get("result", {})
+                .get("value")
+            )
+        except Exception:
+            return None
+        return value if isinstance(value, dict) else None
 
     def close(self) -> None:
         if not self.enabled:
@@ -2295,6 +2424,7 @@ def payload_from_snapshot(
     settings: UserConfig | None = None,
     settings_path: Path | str | None = None,
     settings_bridge_url: str = "",
+    settings_command_status: dict[str, object] | None = None,
 ) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
     top_line = (
@@ -2330,6 +2460,7 @@ def payload_from_snapshot(
         settings=(settings or UserConfig.defaults()).to_dict(),
         settings_path=str(settings_path or ""),
         settings_bridge_url=settings_bridge_url,
+        settings_command_status=settings_command_status or {},
     )
 
 
@@ -3108,6 +3239,7 @@ __all__ = [
     "RENDERER_HUD_SCRIPT",
     "RendererHudClient",
     "RendererHudPayload",
+    "SETTINGS_COMMAND_STORAGE_KEY",
     "payload_from_snapshot",
     "renderer_enabled_from_env",
     "set_cost_estimator",

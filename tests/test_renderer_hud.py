@@ -82,6 +82,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settings", payload)
         self.assertIn("settingsPath", payload)
         self.assertIn("settingsBridgeUrl", payload)
+        self.assertIn("settingsCommandStatus", payload)
         self.assertIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-settings-button", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-open"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -90,12 +91,23 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn('data-action="coffee-open"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("请作者喝咖啡", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-fetch-prices", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("settings-restart", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("settingsCommandKey", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("localStorage.setItem", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("fetch(`${bridge}", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settingsBridgeUrl", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("navigator.clipboard", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("requestRowDetails", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("header.app-header-tint", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("app-shell-header-context-menu-surface", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("topTitlebarSlot", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("headerLayoutSignature", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("characterData: true", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("topSlotCache = null", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('window[scrollHandlerName] = () => scheduleForPanels(["request"])', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("mutations.some(mutationTouchesHeaderScope)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function headerLeftControlEdge(headerNode, header", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function headerRightControlStart(headerNode, header", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("chat actions", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("open in", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-line-inner", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -265,6 +277,65 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertEqual(len(install_calls), 1)
         self.assertIn("__codexUsageHudUpdate", update_expressions[0])
         self.assertIn('"topLine": "C"', update_expressions[1])
+
+    def test_client_consumes_renderer_settings_command_over_cdp(self) -> None:
+        expressions: list[str] = []
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.send_cdp_command,
+        )
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            return [
+                {
+                    "id": "target-1",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://codex",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+                }
+            ]
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, timeout_seconds
+            self.assertEqual(method, "Runtime.evaluate")
+            expression = str(params["expression"])
+            expressions.append(expression)
+            self.assertIn(renderer_hud.SETTINGS_COMMAND_STORAGE_KEY, expression)
+            self.assertIn("localStorage.removeItem", expression)
+            return {
+                "result": {
+                    "result": {
+                        "value": {
+                            "action": "save",
+                            "settings": {"daily_reset_time": "09:30"},
+                        }
+                    }
+                }
+            }
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.send_cdp_command,
+        ) = (fake_list_targets, fake_send)
+        try:
+            client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+            command = client.take_settings_command()
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.send_cdp_command,
+            ) = originals
+
+        self.assertEqual(command["action"], "save")
+        self.assertEqual(command["settings"]["daily_reset_time"], "09:30")
+        self.assertEqual(len(expressions), 1)
 
 
 if __name__ == "__main__":

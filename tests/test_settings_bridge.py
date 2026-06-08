@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import threading
 import unittest
 from urllib.request import Request, urlopen
 
@@ -15,7 +16,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from codex_usage_hud.config import UserConfigStore
+from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.settings_bridge import SettingsBridgeServer
 
 
@@ -29,7 +30,10 @@ class SettingsBridgeServerTests(unittest.TestCase):
     def test_settings_endpoint_loads_and_saves_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
-            bridge = SettingsBridgeServer(store)
+            existing = UserConfig.defaults()
+            existing.daily_budget_usd = 12.34
+            store.save(existing)
+            bridge = SettingsBridgeServer(store, port=0)
             try:
                 url = bridge.start()
                 with urlopen(f"{url}/settings", timeout=2) as response:
@@ -52,13 +56,16 @@ class SettingsBridgeServerTests(unittest.TestCase):
                 )
                 with urlopen(request, timeout=2) as response:
                     saved = json.loads(response.read().decode("utf-8"))
-                persisted_adjustment = store.load().weekly_adjustment_usd
+                persisted = store.load()
+                persisted_adjustment = persisted.weekly_adjustment_usd
+                persisted_daily_budget = persisted.daily_budget_usd
             finally:
                 bridge.close()
 
         self.assertEqual(saved["status"], "ok")
         self.assertEqual(saved["settings"]["weekly_adjustment_usd"], 9.25)
         self.assertEqual(persisted_adjustment, 9.25)
+        self.assertEqual(persisted_daily_budget, 12.34)
 
     def test_configured_bridge_port_is_stable_when_available(self) -> None:
         port = _available_port()
@@ -74,6 +81,31 @@ class SettingsBridgeServerTests(unittest.TestCase):
             url.endswith(f":{port}"),
             msg=url,
         )
+
+    def test_restart_endpoint_invokes_restart_callback(self) -> None:
+        restart_requested = threading.Event()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            bridge = SettingsBridgeServer(
+                store,
+                port=0,
+                restart_callback=restart_requested.set,
+            )
+            try:
+                url = bridge.start()
+                request = Request(
+                    f"{url}/restart",
+                    data=json.dumps({"reason": "settings"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                bridge.close()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(restart_requested.is_set())
 
 
 if __name__ == "__main__":
