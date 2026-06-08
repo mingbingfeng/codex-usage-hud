@@ -1203,6 +1203,7 @@ def run_tk_hud_session(
                 def refresh() -> None:
                     if window.should_refresh_snapshot():
                         try:
+                            context.reload_user_config()
                             snapshot = build_snapshot(context)
                         except Exception as exc:
                             snapshot = ParsedSession(status="error", error=str(exc))

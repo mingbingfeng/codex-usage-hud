@@ -13,6 +13,7 @@ SUPPORT_QR_ASSETS: tuple[dict[str, str], ...] = (
         "label": "支付宝",
         "hint": "打开支付宝扫一扫",
         "filename": "sponsor_alipay.jpg",
+        "native_filename": "sponsor_alipay.png",
         "mime": "image/jpeg",
     },
     {
@@ -20,6 +21,7 @@ SUPPORT_QR_ASSETS: tuple[dict[str, str], ...] = (
         "label": "微信赞赏",
         "hint": "打开微信扫一扫",
         "filename": "sponsor_wechat.jpg",
+        "native_filename": "sponsor_wechat.png",
         "mime": "image/jpeg",
     },
 )
@@ -49,10 +51,11 @@ def support_qr_asset_paths() -> list[dict[str, str]]:
     asset_root = resources.files("codex_usage_hud.assets")
     paths: list[dict[str, str]] = []
     for item in SUPPORT_QR_ASSETS:
+        filename = item.get("native_filename") or item["filename"]
         try:
-            path = Path(str(asset_root.joinpath(item["filename"]))).resolve()
+            path = Path(str(asset_root.joinpath(filename))).resolve()
         except OSError:
-            path = Path(str(asset_root.joinpath(item["filename"])))
+            path = Path(str(asset_root.joinpath(filename)))
         paths.append(
             {
                 "key": item["key"],

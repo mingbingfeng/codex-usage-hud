@@ -56,3 +56,5 @@ packages = ["src/codex_usage_hud"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/codex_usage_hud/assets/sponsor_alipay.jpg" = "codex_usage_hud/assets/sponsor_alipay.jpg"
 "src/codex_usage_hud/assets/sponsor_wechat.jpg" = "codex_usage_hud/assets/sponsor_wechat.jpg"
+"src/codex_usage_hud/assets/sponsor_alipay.png" = "codex_usage_hud/assets/sponsor_alipay.png"
+"src/codex_usage_hud/assets/sponsor_wechat.png" = "codex_usage_hud/assets/sponsor_wechat.png"

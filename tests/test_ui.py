@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import subprocess
 import tkinter as tk
+from tkinter import ttk
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -31,6 +33,7 @@ from codex_usage_hud.cli import (
     snapshot_to_text,
     run_daemon,
     run_hud_session,
+    run_tk_hud_session,
     stop_running_hud,
     usage_before_today_in_week,
 )
@@ -51,6 +54,9 @@ from codex_usage_hud.ui.tk_hud import (
     REQUEST_DOCK_RIGHT,
     REQUEST_DOCK_WIDTH,
     NATIVE_ANCHOR_STABLE_FRAMES,
+    HUD_CDP_DOM_ENV,
+    SETTINGS_DIALOG_HEIGHT,
+    SETTINGS_DIALOG_WIDTH,
     TOP_DOCK_EXPANDED_HEIGHT,
     TOP_DOCK_HEIGHT,
     TOP_DOCK_LEFT,
@@ -182,6 +188,14 @@ def _walk_widgets(widget: tk.Misc) -> list[tk.Misc]:
     for child in widget.winfo_children():
         widgets.extend(_walk_widgets(child))
     return widgets
+
+
+def _parse_tk_geometry(value: str) -> tuple[int, int, int, int]:
+    match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", value)
+    if match is None:
+        raise AssertionError(f"unexpected Tk geometry: {value!r}")
+    width, height, x, y = match.groups()
+    return int(width), int(height), int(x), int(y)
 
 
 class AttachedHudGeometryTests(unittest.TestCase):
@@ -664,6 +678,88 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertEqual(window.request_root.winfo_exists(), 1)
         finally:
             window._close()
+
+    def test_settings_button_opens_settings_dialog_directly(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window._open_settings_dialog = MagicMock()
+            button = window._settings_button(window.root)
+
+            button.invoke()
+
+            window._open_settings_dialog.assert_called_once_with()
+        finally:
+            window._close()
+
+    def test_settings_dialog_matches_renderer_modal_structure(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window._open_settings_dialog()
+            dialog = window._settings_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+            widgets = _walk_widgets(dialog)
+            button_texts = {
+                str(widget.cget("text"))
+                for widget in widgets
+                if isinstance(widget, tk.Button)
+            }
+
+            self.assertFalse(any(isinstance(widget, ttk.Notebook) for widget in widgets))
+            self.assertTrue(dialog.overrideredirect())
+            width, height, x, y = _parse_tk_geometry(dialog.geometry())
+            self.assertEqual(width, SETTINGS_DIALOG_WIDTH)
+            self.assertEqual(height, SETTINGS_DIALOG_HEIGHT)
+            self.assertAlmostEqual(x, (dialog.winfo_screenwidth() - width) // 2, delta=2)
+            self.assertAlmostEqual(y, (dialog.winfo_screenheight() - height) // 2, delta=2)
+            self.assertIn("设置", button_texts)
+            self.assertIn("请作者喝咖啡", button_texts)
+            self.assertIn("拉取价格", button_texts)
+            self.assertIn("导出 JSON", button_texts)
+            self.assertIn("保存", button_texts)
+            self.assertIn("display_mode", window._settings_entries)
+            self.assertTrue(window._settings_price_rows)
+
+            window._select_settings_tab("support")
+            support_buttons = {
+                str(widget.cget("text"))
+                for widget in _walk_widgets(dialog)
+                if isinstance(widget, tk.Button)
+            }
+            support_images = [
+                widget
+                for widget in _walk_widgets(dialog)
+                if isinstance(widget, tk.Label) and str(widget.cget("image"))
+            ]
+            self.assertNotIn("打开图片", support_buttons)
+            self.assertIn("关闭", support_buttons)
+            self.assertGreaterEqual(len(support_images), 2)
+            self.assertEqual(len(window._settings_support_images), 2)
+            canvas = window._settings_canvas
+            self.assertIsNotNone(canvas)
+            assert canvas is not None
+            with patch.object(canvas, "yview_scroll") as scroll:
+                result = window._scroll_settings_body(SimpleNamespace(delta=-120, num=None))
+            self.assertEqual(result, "break")
+            scroll.assert_called_once_with(1, "units")
+        finally:
+            window._close()
+
+    def test_tk_dom_anchors_are_opt_in_for_smooth_fallback(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(HUD_CDP_DOM_ENV, None)
+            window = TokenHudWindow()
+            try:
+                self.assertFalse(window._use_dom_anchors)
+            finally:
+                window._close()
+
+        with patch.dict(os.environ, {HUD_CDP_DOM_ENV: "1"}, clear=False):
+            window = TokenHudWindow()
+            try:
+                self.assertTrue(window._use_dom_anchors)
+            finally:
+                window._close()
 
     def test_collapsed_top_bar_shows_session_cache_hit_rate(self) -> None:
         window = TokenHudWindow()
@@ -1277,6 +1373,38 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIsNone(context.settings_mtime)
         self.assertEqual(reload_calls, 1)
         restart_requested.set.assert_not_called()
+
+    def test_tk_refresh_reloads_user_config_before_snapshot(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            reload_user_config=MagicMock(),
+        )
+        fake_window = SimpleNamespace(
+            exit_reason="",
+            root=SimpleNamespace(after=lambda *args, **kwargs: None),
+            should_refresh_snapshot=lambda: True,
+            refresh_delay_ms=lambda normal_delay_ms: normal_delay_ms,
+            run=lambda: None,
+            update_display=MagicMock(),
+        )
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window),
+            patch(
+                "codex_usage_hud.cli.build_snapshot",
+                return_value=ParsedSession(status="parsed"),
+            ) as build_snapshot,
+        ):
+            exit_code = run_tk_hud_session(args, lock_already_held=True)
+
+        self.assertEqual(exit_code, 0)
+        fake_context.reload_user_config.assert_called_once()
+        build_snapshot.assert_called_once_with(fake_context)
+        fake_window.update_display.assert_called_once()
+        fake_context.close.assert_called_once()
 
     def test_main_defaults_to_renderer_first_from_auto_config(self) -> None:
         config = UserConfig.defaults()
