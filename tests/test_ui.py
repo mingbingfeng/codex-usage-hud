@@ -22,6 +22,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from codex_usage_hud.cli import (
     AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
+    DAEMON_STARTUP_RENDERER,
+    DAEMON_STARTUP_TK,
     DAEMON_RESTART_REQUESTED,
     DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
     HudAlreadyRunningError,
@@ -34,6 +36,7 @@ from codex_usage_hud.cli import (
     _renderer_update_failure_limit,
     _handle_renderer_settings_command,
     budget_warnings,
+    launch_codex_app,
     main,
     parse_thresholds,
     run_renderer_hud_session,
@@ -1841,9 +1844,145 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, DAEMON_RESTART_REQUESTED)
         fake_context.close.assert_called_once()
 
+    def test_run_daemon_renderer_choice_launches_codex_debugger_before_wait(self) -> None:
+        fake_manager = SimpleNamespace(
+            poll_ms=250,
+            wait_for_codex=MagicMock(side_effect=KeyboardInterrupt()),
+        )
+        args = SimpleNamespace(daemon_poll_ms=250)
+        lock_instance = MagicMock()
+        lock_instance.__enter__.return_value = lock_instance
+        lock_instance.__exit__.return_value = False
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging", return_value=None),
+            patch("codex_usage_hud.cli.hide_console_window", return_value=None),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=fake_manager),
+            patch("codex_usage_hud.cli.HudInstanceLock", return_value=lock_instance),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=SimpleNamespace(
+                    mode=DAEMON_STARTUP_RENDERER,
+                    launch_codex=True,
+                ),
+            ),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, 130)
+        launch.assert_called_once_with(debugger=True)
+        fake_manager.wait_for_codex.assert_called_once()
+
+    def test_run_daemon_renderer_choice_retries_instead_of_falling_back_to_tk(self) -> None:
+        fake_manager = SimpleNamespace(
+            poll_ms=250,
+            poll_seconds=0.25,
+            wait_for_codex=MagicMock(side_effect=[object(), KeyboardInterrupt()]),
+        )
+        args = SimpleNamespace(daemon_poll_ms=250)
+        lock_instance = MagicMock()
+        lock_instance.__enter__.return_value = lock_instance
+        lock_instance.__exit__.return_value = False
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging", return_value=None),
+            patch("codex_usage_hud.cli.hide_console_window", return_value=None),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=fake_manager),
+            patch("codex_usage_hud.cli.HudInstanceLock", return_value=lock_instance),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=SimpleNamespace(
+                    mode=DAEMON_STARTUP_RENDERER,
+                    launch_codex=True,
+                ),
+            ),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=True),
+            patch(
+                "codex_usage_hud.cli.run_renderer_hud_session",
+                return_value=RENDERER_HUD_UNAVAILABLE,
+            ) as renderer_session,
+            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as hud_session,
+            patch("codex_usage_hud.cli.time.sleep", return_value=None),
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(fake_manager.wait_for_codex.call_count, 2)
+        renderer_session.assert_called_once_with(
+            args,
+            lock_already_held=True,
+            daemon_manager=fake_manager,
+        )
+        hud_session.assert_not_called()
+
+    def test_run_daemon_tk_choice_launches_codex_normally_and_opens_tk(self) -> None:
+        fake_manager = SimpleNamespace(
+            poll_ms=250,
+            wait_for_codex=MagicMock(),
+        )
+        args = SimpleNamespace(daemon_poll_ms=250)
+        lock_instance = MagicMock()
+        lock_instance.__enter__.return_value = lock_instance
+        lock_instance.__exit__.return_value = False
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging", return_value=None),
+            patch("codex_usage_hud.cli.hide_console_window", return_value=None),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=fake_manager),
+            patch("codex_usage_hud.cli.HudInstanceLock", return_value=lock_instance),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=SimpleNamespace(
+                    mode=DAEMON_STARTUP_TK,
+                    launch_codex=True,
+                ),
+            ),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch,
+            patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, 0)
+        launch.assert_called_once_with(debugger=False)
+        fake_manager.wait_for_codex.assert_not_called()
+        tk_session.assert_called_once_with(
+            args,
+            lock_already_held=True,
+            hide_until_attached=False,
+        )
+
+    def test_launch_codex_app_debugger_uses_remote_debugging_with_uac_fallback(self) -> None:
+        executable = Path(r"C:\Program Files\WindowsApps\OpenAI.Codex\app\Codex.exe")
+
+        with (
+            patch("codex_usage_hud.cli._codex_app_executable_candidates", return_value=[executable]),
+            patch("codex_usage_hud.cli._codex_app_shell_targets", return_value=[]),
+            patch("codex_usage_hud.cli.cdp_port_from_env", return_value=9333),
+            patch(
+                "codex_usage_hud.cli._shell_execute_open",
+                side_effect=[False, True],
+            ) as shell_execute,
+        ):
+            launched = launch_codex_app(debugger=True)
+
+        self.assertTrue(launched)
+        self.assertEqual(shell_execute.call_count, 2)
+        first_call = shell_execute.call_args_list[0]
+        second_call = shell_execute.call_args_list[1]
+        expected_parameters = (
+            "--remote-debugging-port=9333 "
+            "--remote-allow-origins=http://127.0.0.1:9333"
+        )
+        self.assertEqual(first_call.args[0], executable)
+        self.assertEqual(first_call.kwargs["parameters"], expected_parameters)
+        self.assertEqual(second_call.kwargs["verb"], "runas")
+        self.assertEqual(second_call.kwargs["parameters"], expected_parameters)
+
     def test_run_daemon_waits_for_next_codex_start_after_session_exit(self) -> None:
         fake_manager = SimpleNamespace(
             poll_ms=250,
+            snapshot=MagicMock(return_value=SimpleNamespace(found=True)),
             wait_for_codex=MagicMock(side_effect=[object(), object(), KeyboardInterrupt()]),
         )
         args = SimpleNamespace(daemon_poll_ms=250)

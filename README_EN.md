@@ -17,7 +17,7 @@ Download the latest Windows installer from [GitHub Releases](https://github.com/
 
 After installation, Start Menu shortcuts are available:
 
-- `Codex Usage HUD`: daemon entry that waits for Codex App and attaches the HUD.
+- `Codex Usage HUD`: daemon entry; when Codex App is not running, it prompts for Renderer injection or Tk mode and starts Codex App accordingly. Login startup entries keep waiting silently.
 - `Stop Codex Usage HUD`: stops the running HUD.
 - `Check for Updates`: checks GitHub Releases for a newer installer.
 
@@ -112,7 +112,7 @@ No. `v0.1.0`, `v0.2.0`, and `v0.3.0` remain as historical alpha / preview tags. 
 
 ### The HUD does not appear inside Codex
 
-Start it from `Codex Usage HUD` or `codex-hud --daemon`. Renderer injection requires a local Codex CDP target. If unavailable, the HUD falls back to the Tk window.
+Start it from `Codex Usage HUD` or `codex-hud --daemon`. When launched manually and Codex App is not running, the HUD prompts for Renderer injection or Tk mode. Renderer mode tries to start Codex App with debugging/CDP enabled and keeps waiting/retrying Renderer injection; Tk mode starts Codex App normally and opens the standalone HUD window. Windows may show one elevation prompt if direct launch is blocked. Login startup uses `--no-startup-prompt`, so it does not show the mode prompt.
 
 ### Does it upload prompts or logs?
 

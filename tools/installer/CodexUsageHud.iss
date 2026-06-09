@@ -65,7 +65,7 @@ Name: "{autoprograms}\codex-usage-hud\Check for Updates"; Filename: "{app}\{#App
 Name: "{autodesktop}\Codex Usage HUD"; Filename: "{app}\{#AppExeName}"; Parameters: "--daemon"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "codex-usage-hud"; ValueData: """{app}\{#AppExeName}"" --daemon"; Tasks: startup
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "codex-usage-hud"; ValueData: """{app}\{#AppExeName}"" --daemon --no-startup-prompt"; Tasks: startup
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Parameters: "--daemon"; Description: "启动 Codex Usage HUD"; Flags: nowait postinstall skipifsilent

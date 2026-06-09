@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -52,6 +53,7 @@ from .platforms import (
     get_current_platform,
 )
 from .platforms.base import BasePlatform
+from .platforms.cdp_probe import cdp_port_from_env
 from .settings_bridge import SettingsBridgeServer
 from .ui import TokenHudWindow
 from .ui.renderer_hud import RendererHudClient, wait_for_renderer
@@ -85,11 +87,27 @@ DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
 RENDERER_UPDATE_FAILURE_LIMIT = 6
 AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT = 3
 RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
+CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
+CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
+CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
+DAEMON_STARTUP_WAIT = "wait"
+DAEMON_STARTUP_RENDERER = "renderer"
+DAEMON_STARTUP_TK = "tk"
+DAEMON_STARTUP_CANCEL = "cancel"
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
+_cli_daemon_logging_attached = False
 
 
 class HudAlreadyRunningError(RuntimeError):
     """Raised when another HUD instance owns the local runtime lock."""
+
+
+@dataclass(frozen=True)
+class DaemonStartupDecision:
+    """How daemon startup should continue when Codex is not already visible."""
+
+    mode: str
+    launch_codex: bool = False
 
 
 def configure_stdout() -> None:
@@ -109,6 +127,322 @@ def _eprint(message: str) -> None:
             print(message, file=stream)
     except Exception:
         pass
+
+
+def _attach_cli_logger_to_daemon_log() -> None:
+    """Mirror CLI daemon lifecycle logs into the daemon log file."""
+    global _cli_daemon_logging_attached
+    if _cli_daemon_logging_attached:
+        return
+    daemon_logger = logging.getLogger("codex_usage_hud.daemon")
+    handlers = [
+        item
+        for item in daemon_logger.handlers
+        if not isinstance(item, logging.NullHandler)
+    ]
+    if not handlers:
+        return
+    for handler in handlers:
+        if handler not in _LOGGER.handlers:
+            _LOGGER.addHandler(handler)
+    _LOGGER.setLevel(daemon_logger.level or logging.INFO)
+    _LOGGER.propagate = False
+    _cli_daemon_logging_attached = True
+
+
+def _unique_strings(items: Sequence[str]) -> list[str]:
+    """Return non-empty strings with original order preserved."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = str(item or "").strip()
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def _codex_app_shell_targets() -> list[str]:
+    """Return shell targets that can open the Codex desktop app normally."""
+    targets: list[str] = []
+    configured_id = os.environ.get(CODEX_APP_ID_ENV, "").strip()
+    if configured_id:
+        if configured_id.lower().startswith("shell:"):
+            targets.append(configured_id)
+        else:
+            targets.append(f"shell:AppsFolder\\{configured_id}")
+    targets.append(f"shell:AppsFolder\\{CODEX_APP_DEFAULT_ID}")
+
+    configured_path = os.environ.get(CODEX_APP_PATH_ENV, "").strip()
+    if configured_path:
+        targets.append(configured_path)
+
+    start_menu_roots = [
+        os.environ.get("APPDATA", ""),
+        os.environ.get("PROGRAMDATA", ""),
+    ]
+    for root in start_menu_roots:
+        if not root:
+            continue
+        base = Path(root) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+        targets.extend(
+            str(base / name)
+            for name in (
+                "Codex.lnk",
+                "OpenAI Codex.lnk",
+                Path("OpenAI") / "Codex.lnk",
+            )
+        )
+    return _unique_strings(targets)
+
+
+def _codex_app_executable_candidates() -> list[Path]:
+    """Return executable candidates that can accept Chromium/Electron flags."""
+    candidates: list[Path] = []
+    configured = os.environ.get(CODEX_APP_PATH_ENV, "").strip()
+    if configured and not configured.lower().startswith("shell:"):
+        path = Path(configured).expanduser()
+        if path.suffix.lower() == ".exe":
+            candidates.append(path)
+
+    for root_name in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(root_name)
+        if not root:
+            continue
+        base = Path(root)
+        candidates.extend(
+            [
+                base / "Programs" / "Codex" / "Codex.exe",
+                base / "Programs" / "codex" / "Codex.exe",
+                base / "Programs" / "OpenAI Codex" / "Codex.exe",
+                base / "Codex" / "Codex.exe",
+                base / "OpenAI Codex" / "Codex.exe",
+            ]
+        )
+
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        windows_apps = Path(program_files) / "WindowsApps"
+        try:
+            candidates.extend(
+                windows_apps.glob("OpenAI.Codex_*__2p2nqsd0c76g0/app/Codex.exe")
+            )
+        except OSError:
+            pass
+    for install_location in _codex_appx_install_locations():
+        candidates.append(install_location / "app" / "Codex.exe")
+
+    existing = [path for path in candidates if path.exists()]
+    return [Path(item) for item in _unique_strings(str(path) for path in existing)]
+
+
+def _codex_appx_install_locations() -> list[Path]:
+    """Return MSIX install locations for the Codex desktop app."""
+    if not sys.platform.startswith("win"):
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                (
+                    "Get-AppxPackage -Name OpenAI.Codex | "
+                    "Select-Object -ExpandProperty InstallLocation"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [
+        Path(line.strip())
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def _shell_execute_open(
+    target: str | Path,
+    *,
+    verb: str = "open",
+    parameters: str = "",
+    working_dir: str | Path | None = None,
+) -> bool:
+    """Open a Windows shell target without requiring a console."""
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        shell32 = ctypes.windll.shell32
+        shell32.ShellExecuteW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            ctypes.c_int,
+        ]
+        shell32.ShellExecuteW.restype = wintypes.HINSTANCE
+        result = shell32.ShellExecuteW(
+            None,
+            verb,
+            str(target),
+            parameters or None,
+            str(working_dir) if working_dir else None,
+            1,
+        )
+        return int(result or 0) > 32
+    except Exception as exc:
+        _LOGGER.info(
+            "codex_app_shell_execute_failed verb=%s target=%s error=%s",
+            verb,
+            target,
+            exc,
+        )
+        return False
+
+
+def _shell_execute_open_with_elevation_fallback(
+    target: str | Path,
+    *,
+    parameters: str = "",
+    working_dir: str | Path | None = None,
+) -> bool:
+    """Open a target normally, then ask Windows for elevation if needed."""
+    if _shell_execute_open(target, parameters=parameters, working_dir=working_dir):
+        return True
+    if _shell_execute_open(
+        target,
+        verb="runas",
+        parameters=parameters,
+        working_dir=working_dir,
+    ):
+        _LOGGER.info("codex_app_launch_elevated target=%s", target)
+        return True
+    return False
+
+
+def _codex_app_debugger_parameters(port: int) -> str:
+    """Return Chromium flags required for HUD CDP websocket access."""
+    port = int(port)
+    return (
+        f"--remote-debugging-port={port} "
+        f"--remote-allow-origins=http://127.0.0.1:{port}"
+    )
+
+
+def launch_codex_app(*, debugger: bool = False) -> bool:
+    """Best-effort launch of Codex App, optionally with local CDP enabled."""
+    if debugger:
+        port = cdp_port_from_env()
+        parameters = _codex_app_debugger_parameters(port)
+        for executable in _codex_app_executable_candidates():
+            if _shell_execute_open_with_elevation_fallback(
+                executable,
+                parameters=parameters,
+                working_dir=executable.parent,
+            ):
+                _LOGGER.info(
+                    "codex_app_launched mode=debugger target=%s port=%s",
+                    executable,
+                    port,
+                )
+                return True
+        for target in _codex_app_shell_targets():
+            if _shell_execute_open(target, parameters=parameters):
+                _LOGGER.info(
+                    "codex_app_launched mode=debugger target=%s port=%s",
+                    target,
+                    port,
+                )
+                return True
+        _LOGGER.info("codex_app_debugger_launch_unavailable port=%s", port)
+        return False
+
+    for target in _codex_app_shell_targets():
+        if _shell_execute_open(target):
+            _LOGGER.info("codex_app_launched mode=normal target=%s", target)
+            return True
+    for executable in _codex_app_executable_candidates():
+        if _shell_execute_open_with_elevation_fallback(
+            executable,
+            working_dir=executable.parent,
+        ):
+            _LOGGER.info("codex_app_launched mode=normal target=%s", executable)
+            return True
+    _LOGGER.info("codex_app_launch_unavailable")
+    return False
+
+
+def _prompt_missing_codex_startup() -> str:
+    """Ask the user how to continue when daemon startup finds no Codex app."""
+    if not sys.platform.startswith("win"):
+        return DAEMON_STARTUP_WAIT
+    message = (
+        "未检测到 Codex App。\n\n"
+        "请选择本次启动方式：\n\n"
+        "是：启动 Codex App（调试/CDP 模式），并将 HUD 注入到 Codex 界面里。\n"
+        "否：启动 Codex App（普通模式），同时打开独立 Tk HUD 窗口。\n"
+        "取消：退出 HUD。\n\n"
+        "Renderer 注入需要 Codex 暴露本地调试端口；Tk 模式可作为独立窗口使用。"
+        "\n\n如 Windows 阻止直接启动，HUD 会请求一次权限确认。"
+    )
+    title = "Codex App 未启动"
+    try:
+        import ctypes
+
+        MB_YESNOCANCEL = 0x00000003
+        MB_ICONINFORMATION = 0x00000040
+        MB_SETFOREGROUND = 0x00010000
+        MB_TOPMOST = 0x00040000
+        IDYES = 6
+        IDNO = 7
+        IDCANCEL = 2
+        result = ctypes.windll.user32.MessageBoxW(
+            None,
+            message,
+            title,
+            MB_YESNOCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+        if int(result or 0) == IDYES:
+            return DAEMON_STARTUP_RENDERER
+        if int(result or 0) == IDNO:
+            return DAEMON_STARTUP_TK
+        if int(result or 0) == IDCANCEL:
+            return DAEMON_STARTUP_CANCEL
+    except Exception as exc:
+        _LOGGER.info("daemon_startup_prompt_failed error=%s", exc)
+    return DAEMON_STARTUP_WAIT
+
+
+def _daemon_startup_decision(
+    args: argparse.Namespace,
+    manager: CodexDaemonManager,
+) -> DaemonStartupDecision:
+    """Resolve startup behavior before the daemon enters the invisible wait loop."""
+    if getattr(args, "no_startup_prompt", False):
+        return DaemonStartupDecision(DAEMON_STARTUP_WAIT)
+    snapshot = manager.snapshot()
+    if snapshot.found:
+        return DaemonStartupDecision(DAEMON_STARTUP_WAIT)
+    mode = _prompt_missing_codex_startup()
+    return DaemonStartupDecision(
+        mode,
+        launch_codex=mode in {DAEMON_STARTUP_RENDERER, DAEMON_STARTUP_TK},
+    )
 
 
 def hud_runtime_dir() -> Path:
@@ -1085,6 +1419,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-startup-prompt",
+        action="store_true",
+        help=(
+            "In daemon mode, skip the Codex-not-running prompt and wait silently. "
+            "Intended for login startup entries."
+        ),
+    )
+    parser.add_argument(
         "--compact",
         action="store_true",
         help="Use compact output mode for CLI snapshots and the Tkinter HUD.",
@@ -1533,10 +1875,40 @@ def run_tk_hud_session(
 def run_daemon(args: argparse.Namespace) -> int:
     """Run the hidden Windows daemon manager, falling back when unsupported."""
     configure_daemon_logging()
+    _attach_cli_logger_to_daemon_log()
     hide_console_window()
     manager = CodexDaemonManager(poll_ms=args.daemon_poll_ms)
     try:
         with HudInstanceLock():
+            try:
+                startup = _daemon_startup_decision(args, manager)
+            except KeyboardInterrupt:
+                return 130
+            except ProcessListenerError as exc:
+                _LOGGER.exception("daemon_listener_failed fallback=%s", exc)
+                return run_hud_session(
+                    args,
+                    lock_already_held=True,
+                    hide_until_attached=False,
+                )
+
+            if startup.mode == DAEMON_STARTUP_CANCEL:
+                _LOGGER.info("daemon_startup_cancelled")
+                return 0
+            if startup.mode == DAEMON_STARTUP_TK:
+                if startup.launch_codex:
+                    launch_codex_app(debugger=False)
+                _LOGGER.info("daemon_startup_tk_selected")
+                return run_tk_hud_session(
+                    args,
+                    lock_already_held=True,
+                    hide_until_attached=False,
+                )
+            if startup.mode == DAEMON_STARTUP_RENDERER and startup.launch_codex:
+                launch_codex_app(debugger=True)
+                _LOGGER.info("daemon_startup_renderer_selected")
+            force_renderer_retry = startup.mode == DAEMON_STARTUP_RENDERER
+
             while True:
                 try:
                     manager.wait_for_codex()
@@ -1549,14 +1921,25 @@ def run_daemon(args: argparse.Namespace) -> int:
                         lock_already_held=True,
                         hide_until_attached=False,
                     )
-                exit_code = run_hud_session(
-                    args,
-                    lock_already_held=True,
-                    hide_until_attached=True,
-                    daemon_manager=manager,
-                )
+                if force_renderer_retry:
+                    exit_code = run_renderer_hud_session(
+                        args,
+                        lock_already_held=True,
+                        daemon_manager=manager,
+                    )
+                else:
+                    exit_code = run_hud_session(
+                        args,
+                        lock_already_held=True,
+                        hide_until_attached=True,
+                        daemon_manager=manager,
+                    )
                 if exit_code == DAEMON_RESTART_REQUESTED:
                     _LOGGER.info("daemon_restarting_wait_for_codex")
+                    continue
+                if force_renderer_retry and exit_code == RENDERER_HUD_UNAVAILABLE:
+                    _LOGGER.info("daemon_renderer_unavailable_retrying")
+                    time.sleep(manager.poll_seconds)
                     continue
                 return exit_code
     except HudAlreadyRunningError as exc:

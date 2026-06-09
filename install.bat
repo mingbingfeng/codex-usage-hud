@@ -141,7 +141,7 @@ if errorlevel 1 (
 )
 set "CODEX_HUD_DAEMON_PYTHON=%DAEMON_PYTHON%"
 set "CODEX_HUD_STARTUP_SCRIPT=%STARTUP_SCRIPT%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[string][char]34; $cmd=$q + $env:CODEX_HUD_DAEMON_PYTHON + $q + ' -m codex_usage_hud --daemon'; $escaped=$cmd.Replace($q, $q + $q); $line='Set shell = CreateObject(' + $q + 'WScript.Shell' + $q + '): shell.Run ' + $q + $escaped + $q + ', 0, False'; Set-Content -LiteralPath $env:CODEX_HUD_STARTUP_SCRIPT -Encoding ASCII -Value $line"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[string][char]34; $cmd=$q + $env:CODEX_HUD_DAEMON_PYTHON + $q + ' -m codex_usage_hud --daemon --no-startup-prompt'; $escaped=$cmd.Replace($q, $q + $q); $line='Set shell = CreateObject(' + $q + 'WScript.Shell' + $q + '): shell.Run ' + $q + $escaped + $q + ', 0, False'; Set-Content -LiteralPath $env:CODEX_HUD_STARTUP_SCRIPT -Encoding ASCII -Value $line"
 if errorlevel 1 (
     echo [WARN] 写入启动脚本失败；已跳过自启动注册。
     exit /b 0
@@ -152,7 +152,7 @@ exit /b 0
 :register_run
 call :resolve_daemon_python
 set "CODEX_HUD_DAEMON_PYTHON=%DAEMON_PYTHON%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[string][char]34; $cmd=$q + $env:CODEX_HUD_DAEMON_PYTHON + $q + ' -m codex_usage_hud --daemon'; Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'codex-usage-hud' -Value $cmd"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[string][char]34; $cmd=$q + $env:CODEX_HUD_DAEMON_PYTHON + $q + ' -m codex_usage_hud --daemon --no-startup-prompt'; Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'codex-usage-hud' -Value $cmd"
 if errorlevel 1 (
     echo [WARN] 写入注册表 Run 失败；已跳过自启动注册。
     exit /b 0

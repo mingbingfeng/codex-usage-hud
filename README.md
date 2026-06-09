@@ -17,7 +17,7 @@
 
 安装后会有几个入口：
 
-- `Codex Usage HUD`：后台 daemon 入口，等待 Codex App 启动后自动挂上 HUD。
+- `Codex Usage HUD`：后台 daemon 入口；如果 Codex App 未启动，会提示选择 Renderer 注入或 Tk 模式，并按所选模式拉起 Codex App。开机自启动入口会保持静默等待。
 - `Stop Codex Usage HUD`：关闭正在运行的 HUD。
 - `Check for Updates`：检查 GitHub Release 是否有新安装包。
 
@@ -112,7 +112,7 @@ codex-hud --update
 
 ### HUD 没有出现在 Codex 里
 
-先确认是从 `Codex Usage HUD` 或 `codex-hud --daemon` 启动。Renderer 注入需要 Codex 暴露本地 CDP target；如果不可用，HUD 会自动回退到 Tk 窗口。
+先确认是从 `Codex Usage HUD` 或 `codex-hud --daemon` 启动。手动启动且未检测到 Codex App 时，HUD 会提示选择 Renderer 注入或 Tk 模式；Renderer 会尝试以调试/CDP 模式拉起 Codex App，并持续等待/重试 Renderer 注入；Tk 会普通拉起 Codex App 并打开独立窗口。如果 Windows 阻止直接启动，可能会出现一次权限确认。开机自启动使用 `--no-startup-prompt`，不会弹出选择框。
 
 ### 会上传我的提示词或日志吗？
 
