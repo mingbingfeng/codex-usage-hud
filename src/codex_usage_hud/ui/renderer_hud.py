@@ -57,9 +57,11 @@ RENDERER_HUD_SCRIPT = r"""
   const settleTimerName = "__codexUsageHudSettleTimers";
   const composerSettleTimerName = "__codexUsageHudComposerSettleTimer";
   const runningTimerName = "__codexUsageHudRunningTimer";
+  const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
   const settingsCommandKey = "codexUsageHudSettingsCommand:v1";
   const settingsModalId = "codex-usage-hud-settings-modal";
+  const staleUpdateMs = 10000;
   let topSlotCache = null;
   let pendingSyncPanels = null;
   const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
@@ -2608,6 +2610,30 @@ RENDERER_HUD_SCRIPT = r"""
     configureCopy(root, "topGap", copies.gap || "", "点击复制最长等待详情", "gap");
   }
 
+  function markHudStale() {
+    const root = document.getElementById(rootId);
+    const state = window[stateName] || {};
+    const payload = state.payload || {};
+    const updatedAt = Number(state.updatedAt || 0);
+    if (!root || !updatedAt || Date.now() - updatedAt < staleUpdateMs) return;
+    const title = String(payload?.topDetails?.title || payload?.session || "").trim();
+    const ageSeconds = Math.max(10, Math.floor((Date.now() - updatedAt) / 1000));
+    setText(root, "topLine", `HUD 更新暂停 | ${title ? `上次 ${title}` : "等待后端恢复"}`);
+    setText(root, "requestLine", "后端未继续刷新，正在显示旧数据");
+    setText(root, "requestLineExpanded", "后端未继续刷新，正在显示旧数据");
+    setText(root, "topTitle", "HUD 更新暂停");
+    setText(root, "topSession", title ? `上次显示 ${title}` : "");
+    setText(root, "topStatus", `后端 ${ageSeconds}s 未更新，当前内容可能不是所选会话`);
+    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+      node.classList.add(warningClass);
+    });
+  }
+
+  function scheduleStaleGuard() {
+    clearTimeout(window[staleTimerName] || 0);
+    window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250);
+  }
+
   window.__codexUsageHudUpdate = (payload) => {
     const previousPayload = window[stateName]?.payload || {};
     const nextPayload = { ...previousPayload, ...(payload || {}) };
@@ -2635,6 +2661,7 @@ RENDERER_HUD_SCRIPT = r"""
     applySettingsCommandStatus(nextPayload || {});
     syncPosition();
     syncPositionSettled();
+    scheduleStaleGuard();
     return true;
   };
 
@@ -2648,6 +2675,7 @@ RENDERER_HUD_SCRIPT = r"""
     window[mutationObserverName]?.disconnect?.();
     cancelAnimationFrame(window[rafName] || 0);
     clearInterval(window[runningTimerName] || 0);
+    clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
     for (const timer of (window[settleTimerName] || [])) clearTimeout(timer);
     delete window[mutationObserverName];
@@ -2656,6 +2684,7 @@ RENDERER_HUD_SCRIPT = r"""
     delete window[scheduleName];
     delete window[rafName];
     delete window[runningTimerName];
+    delete window[staleTimerName];
     delete window[composerSettleTimerName];
     delete window[settleTimerName];
     delete window.__codexUsageHudUpdate;

@@ -113,6 +113,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settings-fetch-prices", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("版本更新", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-check-update", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("__codexUsageHudStaleTimer", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("HUD 更新暂停", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-install-update", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-restart", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-apply-display-mode", renderer_hud.RENDERER_HUD_SCRIPT)
