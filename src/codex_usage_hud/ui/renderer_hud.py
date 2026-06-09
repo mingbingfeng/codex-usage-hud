@@ -24,7 +24,7 @@ from ..platforms.cdp_probe import (
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "6"
+RENDERER_HUD_VERSION = "7"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -42,7 +42,7 @@ def set_cost_estimator(estimator: CostEstimator) -> None:
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "6";
+  const version = "7";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -139,9 +139,9 @@ RENDERER_HUD_SCRIPT = r"""
         -webkit-app-region: no-drag;
       }
       #${rootId} .codex-usage-hud-handle,
-      #${rootId} .codex-usage-hud-resize,
       #${rootId} .codex-usage-hud-update-button,
       #${rootId} .codex-usage-hud-settings-button,
+      #${rootId} .codex-usage-hud-resize-zone,
       #${rootId} .codex-usage-hud-main,
       #${rootId} .codex-usage-hud-panel-header,
       #${rootId} .codex-usage-hud-top-body,
@@ -163,16 +163,17 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-collapsed {
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr) 14px;
+        grid-template-columns: auto minmax(0, 1fr);
         align-items: center;
         gap: 6px;
         padding: 4px 7px 4px 8px;
       }
       #${rootId} .codex-usage-hud-collapsed[data-has-settings="true"] {
-        grid-template-columns: auto minmax(0, 1fr) 22px 14px;
+        grid-template-columns: auto minmax(0, 1fr) 22px;
       }
       #${rootId} .codex-usage-hud-expanded-shell {
         display: none;
+        position: relative;
         grid-template-rows: auto minmax(0, 1fr);
         padding: 5px 8px 8px;
       }
@@ -195,7 +196,6 @@ RENDERER_HUD_SCRIPT = r"""
         gap: 4px;
       }
       #${rootId} .codex-usage-hud-handle,
-      #${rootId} .codex-usage-hud-resize,
       #${rootId} .codex-usage-hud-update-button,
       #${rootId} .codex-usage-hud-settings-button {
         display: inline-grid;
@@ -218,11 +218,47 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-handle:active {
         cursor: grabbing;
       }
-      #${rootId} .codex-usage-hud-resize {
-        width: 14px;
-        height: 18px;
+      #${rootId} .codex-usage-hud-resize-zone {
+        position: absolute;
+        z-index: 5;
         background: transparent;
-        color: #718095;
+      }
+      #${rootId} .codex-usage-hud-resize-edge-left {
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 6px;
+        cursor: ew-resize;
+      }
+      #${rootId} .codex-usage-hud-resize-edge-right {
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: 6px;
+        cursor: ew-resize;
+      }
+      #${rootId} .codex-usage-hud-resize-corner {
+        width: 12px;
+        height: 12px;
+      }
+      #${rootId} .codex-usage-hud-resize-corner-top-left {
+        top: 0;
+        left: 0;
+        cursor: nwse-resize;
+      }
+      #${rootId} .codex-usage-hud-resize-corner-top-right {
+        top: 0;
+        right: 0;
+        cursor: nesw-resize;
+      }
+      #${rootId} .codex-usage-hud-resize-corner-bottom-left {
+        left: 0;
+        bottom: 0;
+        cursor: nesw-resize;
+      }
+      #${rootId} .codex-usage-hud-resize-corner-bottom-right {
+        right: 0;
+        bottom: 0;
         cursor: nwse-resize;
       }
       #${rootId} .codex-usage-hud-update-button {
@@ -322,7 +358,7 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-panel-header {
         display: grid;
-        grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) 14px;
+        grid-template-columns: auto minmax(0, 1fr);
         align-items: center;
         gap: 6px;
         min-height: 27px;
@@ -335,7 +371,7 @@ RENDERER_HUD_SCRIPT = r"""
         cursor: pointer;
       }
       #${rootId} .${topClass} .codex-usage-hud-panel-header {
-        grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) 22px 14px;
+        grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) 22px;
       }
       #${rootId} .${requestClass} .codex-usage-hud-panel-header {
         background: #151d27;
@@ -780,6 +816,27 @@ RENDERER_HUD_SCRIPT = r"""
     document.documentElement.appendChild(style);
   }
 
+  function resizeEdgesMarkup() {
+    return `
+      <div class="codex-usage-hud-resize-zone codex-usage-hud-resize-edge-left" data-action="resize" data-edge="left" aria-hidden="true"></div>
+      <div class="codex-usage-hud-resize-zone codex-usage-hud-resize-edge-right" data-action="resize" data-edge="right" aria-hidden="true"></div>
+    `;
+  }
+
+  function topExpandedResizeMarkup() {
+    return `
+      <div class="codex-usage-hud-resize-zone codex-usage-hud-resize-corner codex-usage-hud-resize-corner-bottom-left" data-action="resize" data-edge="bottom-left" aria-hidden="true"></div>
+      <div class="codex-usage-hud-resize-zone codex-usage-hud-resize-corner codex-usage-hud-resize-corner-bottom-right" data-action="resize" data-edge="bottom-right" aria-hidden="true"></div>
+    `;
+  }
+
+  function requestExpandedResizeMarkup() {
+    return `
+      <div class="codex-usage-hud-resize-zone codex-usage-hud-resize-corner codex-usage-hud-resize-corner-top-left" data-action="resize" data-edge="top-left" aria-hidden="true"></div>
+      <div class="codex-usage-hud-resize-zone codex-usage-hud-resize-corner codex-usage-hud-resize-corner-top-right" data-action="resize" data-edge="top-right" aria-hidden="true"></div>
+    `;
+  }
+
   function panelMarkup(name, glyph, ariaLabel) {
     const glyphMarkup = glyph ? `<span class="codex-usage-hud-glyph">${glyph}</span>` : "";
     const settingsButtonMarkup = name === "top"
@@ -790,6 +847,7 @@ RENDERER_HUD_SCRIPT = r"""
       : "";
     return `
       <div class="codex-usage-hud-panel ${PANEL[name].className}" data-panel="${name}" data-expanded="false" role="status" aria-live="polite">
+        ${resizeEdgesMarkup()}
         <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}">
           <div class="codex-usage-hud-left-controls">
             <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
@@ -800,7 +858,6 @@ RENDERER_HUD_SCRIPT = r"""
             <span class="codex-usage-hud-line" data-field="${name}Line"></span>
           </button>
           ${settingsButtonMarkup}
-          <button class="codex-usage-hud-resize" data-action="resize" title="调整大小" aria-label="调整大小">◢</button>
         </div>
         ${name === "top" ? topExpandedMarkup() : requestExpandedMarkup()}
       </div>
@@ -818,7 +875,6 @@ RENDERER_HUD_SCRIPT = r"""
           <div class="codex-usage-hud-title" data-action="toggle" data-field="topTitle"></div>
           <div class="codex-usage-hud-session-meta" data-field="topSession"></div>
           <button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>
-          <button class="codex-usage-hud-resize" data-action="resize" title="调整大小" aria-label="调整大小">◢</button>
         </div>
         <div class="codex-usage-hud-top-body">
           <div class="codex-usage-hud-top-grid">
@@ -864,6 +920,7 @@ RENDERER_HUD_SCRIPT = r"""
             </div>
           </div>
         </div>
+        ${topExpandedResizeMarkup()}
       </div>
     `;
   }
@@ -874,11 +931,10 @@ RENDERER_HUD_SCRIPT = r"""
         <div class="codex-usage-hud-panel-header" data-action="toggle">
           <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
           <div class="codex-usage-hud-title codex-usage-hud-line" data-action="toggle" data-field="requestLineExpanded"></div>
-          <div></div>
-          <button class="codex-usage-hud-resize" data-action="resize" title="调整大小" aria-label="调整大小">◢</button>
         </div>
         <div class="codex-usage-hud-request-subhead"><span>轮次流水</span><span>最新在上</span></div>
         <div class="codex-usage-hud-request-list" data-field="requestRows"></div>
+        ${requestExpandedResizeMarkup()}
       </div>
     `;
   }
@@ -1599,11 +1655,11 @@ RENDERER_HUD_SCRIPT = r"""
       if (!name || !PANEL[name]) return;
       event.preventDefault();
       event.stopPropagation();
-      beginGesture(event, name, action.dataset.action);
+      beginGesture(event, name, action.dataset.action, action.dataset.edge || "");
     });
   }
 
-  function beginGesture(event, name, action) {
+  function beginGesture(event, name, action, edge = "") {
     const panel = document.querySelector(`#${rootId} [data-panel="${name}"]`);
     if (!panel) return;
     const rect = panel.getBoundingClientRect();
@@ -1615,6 +1671,7 @@ RENDERER_HUD_SCRIPT = r"""
       : requestAnchor(startHeight, startState.width);
     const gesture = {
       action,
+      edge: edge || "right",
       name,
       expanded,
       anchor: startAnchor,
@@ -1638,22 +1695,28 @@ RENDERER_HUD_SCRIPT = r"""
       } else {
         const minWidth = minWidthFor(name, gesture.expanded);
         const minHeight = minHeightFor(name, gesture.expanded);
-        const maxWidth = gesture.anchor.maxWidth || Math.max(minWidth, innerWidth - gesture.left - 8);
-        const width = clamp(gesture.width + dx, minWidth, Math.max(minWidth, maxWidth));
+        const resizeFromLeft = gesture.edge === "left" || gesture.edge.endsWith("-left");
+        const maxWidthFromViewport = resizeFromLeft
+          ? Math.max(minWidth, gesture.width + gesture.left - 8)
+          : Math.max(minWidth, innerWidth - gesture.left - 8);
+        const maxWidth = gesture.anchor.maxWidth || maxWidthFromViewport;
+        const widthBase = resizeFromLeft ? (gesture.width - dx) : (gesture.width + dx);
+        const width = clamp(widthBase, minWidth, Math.max(minWidth, maxWidth));
+        const left = resizeFromLeft ? (gesture.left + gesture.width - width) : gesture.left;
         let height = gesture.height;
         let top = gesture.top;
         if (gesture.expanded) {
-          if (name === "request") {
+          if (name === "request" && gesture.edge.startsWith("top")) {
             const bottom = gesture.top + gesture.height;
             height = clamp(gesture.height - dy, minHeight, Math.max(minHeight, bottom - 8));
             top = bottom - height;
-          } else {
+          } else if (name === "top" && gesture.edge.startsWith("bottom")) {
             height = clamp(gesture.height + dy, minHeight, Math.max(minHeight, innerHeight - gesture.top - 8));
           }
         }
-        applyRect(panel, gesture.left, top, width, height);
+        applyRect(panel, left, top, width, height);
         const current = getPanelState(name);
-        const patch = manualPatchFor(name, gesture.left, top, width, gesture.anchor, {
+        const patch = manualPatchFor(name, left, top, width, gesture.anchor, {
           manual: true,
           width: Math.round(width),
           [gesture.expanded ? "expandedHeight" : "collapsedHeight"]: Math.round(height),

@@ -121,6 +121,16 @@ class _FakeWindow:
     def winfo_height(self) -> int:
         return self._height
 
+    def geometry(self, value: str) -> None:
+        match = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", value)
+        if match is None:
+            raise AssertionError(f"unexpected geometry: {value!r}")
+        width, height, x, y = match.groups()
+        self._width = int(width)
+        self._height = int(height)
+        self._x = int(x)
+        self._y = int(y)
+
 
 class _RecordingGeometryWindow:
     def __init__(self) -> None:
@@ -1027,6 +1037,69 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertAlmostEqual(window.settings.top.width_ratio or 0.0, 0.5)
             self.assertAlmostEqual(window.settings.top.anchor_x_ratio or 0.0, 0.2)
             self.assertAlmostEqual(window.settings.top.anchor_y_ratio or 0.0, 12 / 46)
+        finally:
+            window._close()
+
+    def test_top_collapsed_left_edge_resize_moves_left_and_only_changes_width(self) -> None:
+        window = TokenHudWindow()
+        try:
+            fake = _FakeWindow(x=420, y=92, width=400, height=TOP_DOCK_HEIGHT)
+
+            window._start_resize(
+                SimpleNamespace(x_root=820, y_root=92),
+                "top",
+                fake,
+                "left",
+            )
+            window._resize_window_size(SimpleNamespace(x_root=780, y_root=40))
+
+            self.assertEqual(
+                (fake.winfo_x(), fake.winfo_y(), fake.winfo_width(), fake.winfo_height()),
+                (380, 92, 440, TOP_DOCK_HEIGHT),
+            )
+        finally:
+            window._close()
+
+    def test_top_expanded_bottom_corner_resize_keeps_top_fixed(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.top_expanded = True
+            fake = _FakeWindow(x=120, y=80, width=420, height=TOP_DOCK_EXPANDED_HEIGHT)
+
+            window._start_resize(
+                SimpleNamespace(x_root=540, y_root=470),
+                "top",
+                fake,
+                "bottom-right",
+            )
+            window._resize_window_size(SimpleNamespace(x_root=580, y_root=500))
+
+            self.assertEqual(
+                (fake.winfo_x(), fake.winfo_y(), fake.winfo_width(), fake.winfo_height()),
+                (120, 80, 460, TOP_DOCK_EXPANDED_HEIGHT + 30),
+            )
+        finally:
+            window._close()
+
+    def test_request_expanded_top_corner_resize_keeps_bottom_fixed(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.request_expanded = True
+            fake = _FakeWindow(x=220, y=600, width=320, height=REQUEST_DOCK_EXPANDED_HEIGHT)
+
+            window._start_resize(
+                SimpleNamespace(x_root=220, y_root=600),
+                "request",
+                fake,
+                "top-left",
+            )
+            window._resize_window_size(SimpleNamespace(x_root=180, y_root=570))
+
+            self.assertEqual(
+                (fake.winfo_x(), fake.winfo_y(), fake.winfo_width(), fake.winfo_height()),
+                (180, 570, 360, REQUEST_DOCK_EXPANDED_HEIGHT + 30),
+            )
+            self.assertEqual(fake.winfo_y() + fake.winfo_height(), 780)
         finally:
             window._close()
 

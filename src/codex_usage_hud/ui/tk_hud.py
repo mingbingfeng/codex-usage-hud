@@ -107,6 +107,8 @@ REQUEST_HEADER_BG = "#151D27"
 REQUEST_PANEL_BG = "#101821"
 REQUEST_TEXT = "#DCE7F2"
 REQUEST_MUTED = "#718095"
+RESIZE_EDGE_HIT_SIZE = 6
+RESIZE_CORNER_HIT_SIZE = 12
 HUD_GEOMETRY_LOG_FILENAME = "hud_geometry.log"
 HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
 HUD_CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
@@ -2336,8 +2338,11 @@ class TokenHudWindow:
         self._move_target = ""
         self._resize_target = ""
         self._resize_window: tk.Toplevel | tk.Tk | None = None
+        self._resize_edge = ""
         self._resize_start_x = 0
         self._resize_start_y = 0
+        self._resize_start_left = 0
+        self._resize_start_top = 0
         self._resize_start_width = 0
         self._resize_start_height = 0
         self._press_at: tuple[int, int] | None = None
@@ -2396,26 +2401,109 @@ class TokenHudWindow:
         label.bind("<ButtonRelease-1>", self._finish_move)
         return label
 
-    def _resize_handle(
-        self, parent: tk.Misc, target: str, window: tk.Tk | tk.Toplevel
-    ) -> tk.Label:
-        label = tk.Label(
-            parent,
-            text="⇲",
-            bg=str(parent.cget("bg")),
-            fg="#B8C7DE",
-            font=("Microsoft YaHei UI", 9, "bold"),
-            cursor="sb_h_double_arrow",
-            width=3,
+    def _resize_hit_zone(
+        self,
+        window: tk.Tk | tk.Toplevel,
+        target: str,
+        edge: str,
+        cursor: str,
+        **place_kwargs: object,
+    ) -> tk.Frame:
+        zone = tk.Frame(
+            window,
+            bg=str(window.cget("bg")),
+            cursor=cursor,
+            highlightthickness=0,
+            borderwidth=0,
         )
-        setattr(label, "_hud_handle", True)
-        label.bind(
+        setattr(zone, "_hud_handle", True)
+        zone.bind(
             "<ButtonPress-1>",
-            lambda event, t=target, w=window: self._start_resize(event, t, w),
+            lambda event, t=target, w=window, e=edge: self._start_resize(event, t, w, e),
         )
-        label.bind("<B1-Motion>", self._resize_window_size)
-        label.bind("<ButtonRelease-1>", self._finish_resize)
-        return label
+        zone.bind("<B1-Motion>", self._resize_window_size)
+        zone.bind("<ButtonRelease-1>", self._finish_resize)
+        zone.place(**place_kwargs)
+        zone.lift()
+        return zone
+
+    def _install_resize_hit_zones(
+        self,
+        window: tk.Tk | tk.Toplevel,
+        target: str,
+        expanded: bool,
+    ) -> None:
+        edge = RESIZE_EDGE_HIT_SIZE
+        corner = RESIZE_CORNER_HIT_SIZE
+        self._resize_hit_zone(
+            window,
+            target,
+            "left",
+            "sb_h_double_arrow",
+            x=0,
+            y=0,
+            relheight=1.0,
+            width=edge,
+        )
+        self._resize_hit_zone(
+            window,
+            target,
+            "right",
+            "sb_h_double_arrow",
+            relx=1.0,
+            x=-edge,
+            y=0,
+            relheight=1.0,
+            width=edge,
+        )
+        if not expanded:
+            return
+        if target == "top":
+            self._resize_hit_zone(
+                window,
+                target,
+                "bottom-left",
+                "size_ne_sw",
+                x=0,
+                rely=1.0,
+                y=-corner,
+                width=corner,
+                height=corner,
+            )
+            self._resize_hit_zone(
+                window,
+                target,
+                "bottom-right",
+                "size_nw_se",
+                relx=1.0,
+                rely=1.0,
+                x=-corner,
+                y=-corner,
+                width=corner,
+                height=corner,
+            )
+            return
+        self._resize_hit_zone(
+            window,
+            target,
+            "top-left",
+            "size_nw_se",
+            x=0,
+            y=0,
+            width=corner,
+            height=corner,
+        )
+        self._resize_hit_zone(
+            window,
+            target,
+            "top-right",
+            "size_ne_sw",
+            relx=1.0,
+            x=-corner,
+            y=0,
+            width=corner,
+            height=corner,
+        )
 
     def _settings_button(self, parent: tk.Misc) -> tk.Button:
         button = tk.Button(
@@ -3420,6 +3508,7 @@ class TokenHudWindow:
             self._build_top_expanded(frame)
         else:
             self._build_top_collapsed(frame)
+        self._install_resize_hit_zones(self.root, "top", self.top_expanded)
         self._bind_click_tree(frame, "top", self.root)
         self._render_top()
 
@@ -3428,7 +3517,6 @@ class TokenHudWindow:
         controls.pack(side="left", padx=(0, 4))
         self._move_handle(controls, "top", self.root).pack(side="left")
         self._update_button(controls).pack(side="left", padx=(4, 0))
-        self._resize_handle(frame, "top", self.root).pack(side="right", padx=(6, 0))
         self._settings_button(frame).pack(side="right", padx=(4, 0))
         self.top_labels["bar"] = AutoScrollLabel(
             frame,
@@ -3459,7 +3547,6 @@ class TokenHudWindow:
             font=("Microsoft YaHei UI", 8),
         )
         close.pack(side="right", padx=(4, 0))
-        self._resize_handle(header, "top", self.root).pack(side="right", padx=(6, 0))
         self._settings_button(header).pack(side="right", padx=(4, 0))
         self.top_labels["title"] = tk.Label(
             header,
@@ -3712,6 +3799,11 @@ class TokenHudWindow:
             self._build_request_expanded()
         else:
             self._build_request_collapsed()
+        self._install_resize_hit_zones(
+            self.request_root,
+            "request",
+            self.request_expanded,
+        )
         self._bind_click_tree(self.request_root, "request", self.request_root)
         self._render_request()
 
@@ -3719,10 +3811,6 @@ class TokenHudWindow:
         frame = tk.Frame(self.request_root, bg=REQUEST_BG, padx=8, pady=4)
         frame.pack(fill="both", expand=True)
         self._move_handle(frame, "request", self.request_root).pack(side="left", padx=(0, 4))
-        self._resize_handle(frame, "request", self.request_root).pack(
-            side="right",
-            padx=(6, 0),
-        )
         self.request_label = AutoScrollLabel(
             frame,
             text="↑- ↻- ↓- ◇- ∑- $0.0000",
@@ -3740,7 +3828,6 @@ class TokenHudWindow:
         header = tk.Frame(frame, bg=REQUEST_HEADER_BG, padx=5, pady=2)
         header.pack(fill="x", pady=(0, 4))
         self._move_handle(header, "request", self.request_root).pack(side="left", padx=(0, 4))
-        self._resize_handle(header, "request", self.request_root).pack(side="right", padx=(6, 0))
         self.request_label = AutoScrollLabel(
             header,
             text="最近模型请求轮次",
@@ -3888,11 +3975,20 @@ class TokenHudWindow:
             self._save_settings()
         return "break"
 
-    def _start_resize(self, event: Any, target: str, window: tk.Tk | tk.Toplevel) -> str:
+    def _start_resize(
+        self,
+        event: Any,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+        edge: str,
+    ) -> str:
         self._resize_target = target
         self._resize_window = window
+        self._resize_edge = edge
         self._resize_start_x = event.x_root
         self._resize_start_y = event.y_root
+        self._resize_start_left = window.winfo_x()
+        self._resize_start_top = window.winfo_y()
         self._resize_start_width = max(
             self._interactive_min_width(
                 target,
@@ -3908,8 +4004,9 @@ class TokenHudWindow:
             window.winfo_height(),
         )
         _HUD_GEOMETRY_LOGGER.info(
-            "resize_start target=%s x=%s y=%s width=%s height=%s",
+            "resize_start target=%s edge=%s x=%s y=%s width=%s height=%s",
             target,
+            edge,
             window.winfo_x(),
             window.winfo_y(),
             window.winfo_width(),
@@ -3932,12 +4029,23 @@ class TokenHudWindow:
             expanded,
         )
         min_height = self._interactive_min_height(self._resize_target, expanded)
-        width = max(min_width, self._resize_start_width + dx)
-        height = self._resize_window.winfo_height()
-        if expanded:
+        start_right = self._resize_start_left + self._resize_start_width
+        start_bottom = self._resize_start_top + self._resize_start_height
+        width = self._resize_start_width
+        height = self._resize_start_height
+        x = self._resize_start_left
+        y = self._resize_start_top
+        edge = self._resize_edge
+        if edge in {"left", "bottom-left", "top-left"}:
+            width = max(min_width, self._resize_start_width - dx)
+            x = start_right - width
+        elif edge in {"right", "bottom-right", "top-right"}:
+            width = max(min_width, self._resize_start_width + dx)
+        if expanded and edge in {"bottom-left", "bottom-right"}:
             height = max(min_height, self._resize_start_height + dy)
-        x = self._resize_window.winfo_x()
-        y = self._resize_window.winfo_y()
+        elif expanded and edge in {"top-left", "top-right"}:
+            height = max(min_height, self._resize_start_height - dy)
+            y = start_bottom - height
         self._resize_window.geometry(f"{width}x{height}+{x}+{y}")
         return "break"
 
@@ -3947,6 +4055,7 @@ class TokenHudWindow:
         window = self._resize_window
         self._resize_target = ""
         self._resize_window = None
+        self._resize_edge = ""
         if target and window is not None:
             self._remember_window_position(target, window, reason="resize")
             self._remember_window_width(target, window, reason="resize")

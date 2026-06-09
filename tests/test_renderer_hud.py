@@ -100,6 +100,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-action="update-action"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-settings-button", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-open"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-resize-edge-left", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-resize-corner-bottom-right", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-resize-corner-top-left", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-edge="left"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-edge="bottom-right"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-edge="top-left"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn('class="codex-usage-hud-resize"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("codex-usage-hud-settings-menu", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="settings-menu"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="coffee-open"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -277,6 +284,9 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_script_resizes_request_panel_from_fixed_bottom(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
+        self.assertIn('beginGesture(event, name, action.dataset.action, action.dataset.edge || "")', script)
+        self.assertIn('const resizeFromLeft = gesture.edge === "left" || gesture.edge.endsWith("-left")', script)
+        self.assertIn('const left = resizeFromLeft ? (gesture.left + gesture.width - width) : gesture.left', script)
         self.assertIn("height = clamp(gesture.height - dy", script)
         self.assertIn("top = bottom - height", script)
         self.assertIn("patch.bottomOffset", script)
