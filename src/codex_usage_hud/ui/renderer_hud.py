@@ -24,7 +24,7 @@ from ..platforms.cdp_probe import (
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "5"
+RENDERER_HUD_VERSION = "6"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -42,7 +42,7 @@ def set_cost_estimator(estimator: CostEstimator) -> None:
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "5";
+  const version = "6";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -138,6 +138,7 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-resize,
+      #${rootId} .codex-usage-hud-update-button,
       #${rootId} .codex-usage-hud-settings-button,
       #${rootId} .codex-usage-hud-main,
       #${rootId} .codex-usage-hud-panel-header,
@@ -160,13 +161,13 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-collapsed {
         display: grid;
-        grid-template-columns: 20px minmax(0, 1fr) 14px;
+        grid-template-columns: auto minmax(0, 1fr) 14px;
         align-items: center;
         gap: 6px;
         padding: 4px 7px 4px 8px;
       }
       #${rootId} .codex-usage-hud-collapsed[data-has-settings="true"] {
-        grid-template-columns: 20px minmax(0, 1fr) 22px 14px;
+        grid-template-columns: auto minmax(0, 1fr) 22px 14px;
       }
       #${rootId} .codex-usage-hud-expanded-shell {
         display: none;
@@ -185,8 +186,15 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} button {
         font: inherit;
       }
+      #${rootId} .codex-usage-hud-left-controls {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-resize,
+      #${rootId} .codex-usage-hud-update-button,
       #${rootId} .codex-usage-hud-settings-button {
         display: inline-grid;
         place-items: center;
@@ -215,6 +223,17 @@ RENDERER_HUD_SCRIPT = r"""
         color: #718095;
         cursor: nwse-resize;
       }
+      #${rootId} .codex-usage-hud-update-button {
+        background: rgba(46, 56, 70, .82);
+        color: #9ccbff;
+      }
+      #${rootId} .codex-usage-hud-update-button[data-state="paused"],
+      #${rootId} .codex-usage-hud-update-button[data-state="error"] {
+        color: #ffb86b;
+      }
+      #${rootId} .codex-usage-hud-update-button[data-icon="install"] {
+        color: #f3d27a;
+      }
       #${rootId} .codex-usage-hud-settings-button {
         width: 22px;
         height: 22px;
@@ -227,6 +246,7 @@ RENDERER_HUD_SCRIPT = r"""
         background: rgba(62, 74, 92, .92);
         color: #f3d27a;
       }
+      #${rootId} .codex-usage-hud-update-button:hover,
       #${rootId} .codex-usage-hud-settings-button:hover {
         background: rgba(62, 74, 92, .92);
         color: #f3d27a;
@@ -300,7 +320,7 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-panel-header {
         display: grid;
-        grid-template-columns: 20px minmax(0, auto) minmax(0, 1fr) 14px;
+        grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) 14px;
         align-items: center;
         gap: 6px;
         min-height: 27px;
@@ -313,7 +333,7 @@ RENDERER_HUD_SCRIPT = r"""
         cursor: pointer;
       }
       #${rootId} .${topClass} .codex-usage-hud-panel-header {
-        grid-template-columns: 20px minmax(0, auto) minmax(0, 1fr) 22px 14px;
+        grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) 22px 14px;
       }
       #${rootId} .${requestClass} .codex-usage-hud-panel-header {
         background: #151d27;
@@ -763,10 +783,16 @@ RENDERER_HUD_SCRIPT = r"""
     const settingsButtonMarkup = name === "top"
       ? `<button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>`
       : "";
+    const updateButtonMarkup = name === "top"
+      ? `<button class="codex-usage-hud-update-button" data-action="update-action" title="" aria-label="" hidden>↓</button>`
+      : "";
     return `
       <div class="codex-usage-hud-panel ${PANEL[name].className}" data-panel="${name}" data-expanded="false" role="status" aria-live="polite">
         <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}">
-          <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
+          <div class="codex-usage-hud-left-controls">
+            <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
+            ${updateButtonMarkup}
+          </div>
           <button class="codex-usage-hud-main" data-action="toggle" data-has-glyph="${glyph ? "true" : "false"}" aria-label="${ariaLabel}">
             ${glyphMarkup}
             <span class="codex-usage-hud-line" data-field="${name}Line"></span>
@@ -783,7 +809,10 @@ RENDERER_HUD_SCRIPT = r"""
     return `
       <div class="codex-usage-hud-expanded-shell">
         <div class="codex-usage-hud-panel-header" data-action="toggle">
-          <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
+          <div class="codex-usage-hud-left-controls">
+            <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
+            <button class="codex-usage-hud-update-button" data-action="update-action" title="" aria-label="" hidden>↓</button>
+          </div>
           <div class="codex-usage-hud-title" data-action="toggle" data-field="topTitle"></div>
           <div class="codex-usage-hud-session-meta" data-field="topSession"></div>
           <button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>
@@ -911,6 +940,42 @@ RENDERER_HUD_SCRIPT = r"""
 
   function appVersion() {
     return String(currentPayload()?.appVersion || "unknown");
+  }
+
+  function currentUpdateState() {
+    const raw = currentPayload()?.updateState || {};
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  function updateStateFromPayload(payload) {
+    const raw = payload?.updateState || {};
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  function updateActionGlyph(state) {
+    return String(state?.icon || "download") === "install" ? "⇪" : "↓";
+  }
+
+  function renderUpdateButtons(root, payload) {
+    const state = updateStateFromPayload(payload);
+    const visible = !!state?.visible;
+    root.querySelectorAll('[data-action="update-action"]').forEach((node) => {
+      if (!(node instanceof HTMLButtonElement)) return;
+      node.hidden = !visible;
+      if (!visible) {
+        node.removeAttribute("title");
+        node.removeAttribute("aria-label");
+        node.dataset.state = "";
+        node.dataset.icon = "";
+        return;
+      }
+      const title = String(state?.title || state?.message || "发现新版本");
+      node.textContent = updateActionGlyph(state);
+      node.title = title;
+      node.setAttribute("aria-label", title);
+      node.dataset.state = String(state?.phase || "");
+      node.dataset.icon = String(state?.icon || "download");
+    });
   }
 
   function thresholdText(settings) {
@@ -1297,6 +1362,22 @@ RENDERER_HUD_SCRIPT = r"""
     );
   }
 
+  function runUpdateAction() {
+    const state = currentUpdateState();
+    let pending = "更新操作请求已提交，等待 HUD daemon 处理...";
+    if (String(state?.phase || "") === "downloading") {
+      pending = "暂停下载请求已提交...";
+    } else if (String(state?.phase || "") === "paused") {
+      pending = "继续下载请求已提交...";
+    } else if (String(state?.phase || "") === "ready") {
+      pending = "正在打开已下载的安装程序...";
+    }
+    submitSettingsCommand(
+      { action: "updateAction" },
+      pending
+    );
+  }
+
   function exportSettingsFromModal() {
     const settings = collectSettingsForm();
     const data = JSON.stringify({ user: settings }, null, 2);
@@ -1482,6 +1563,12 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         void installUpdateFromModal();
+        return;
+      }
+      if (action.dataset.action === "update-action") {
+        event.preventDefault();
+        event.stopPropagation();
+        void runUpdateAction();
         return;
       }
       if (action.dataset.action === "settings-export") {
@@ -2544,6 +2631,7 @@ RENDERER_HUD_SCRIPT = r"""
     });
     renderTopDetails(root, nextPayload || {});
     renderRequestRows(root, nextPayload?.requestRows || [], nextPayload?.requestRowDetails || []);
+    renderUpdateButtons(root, nextPayload || {});
     applySettingsCommandStatus(nextPayload || {});
     syncPosition();
     syncPositionSettled();
@@ -2639,6 +2727,7 @@ class RendererHudPayload:
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
     support_images: list[dict[str, str]] = field(default_factory=list)
+    update_state: dict[str, object] = field(default_factory=dict)
     app_version: str = __version__
 
     def to_json(self) -> dict[str, object]:
@@ -2662,6 +2751,7 @@ class RendererHudPayload:
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
             "supportImages": [dict(item) for item in self.support_images],
+            "updateState": dict(self.update_state),
             "appVersion": self.app_version,
         }
 
@@ -2703,6 +2793,7 @@ class RendererHudClient:
         settings_path: Path | str | None = None,
         settings_bridge_url: str = "",
         settings_command_status: dict[str, object] | None = None,
+        update_state: dict[str, object] | None = None,
     ) -> bool:
         support_images = [] if self._support_images_sent else support_qr_payload()
         payload = payload_from_snapshot(
@@ -2713,6 +2804,7 @@ class RendererHudClient:
             settings_bridge_url=settings_bridge_url,
             settings_command_status=settings_command_status,
             support_images=support_images,
+            update_state=update_state,
         ).to_json()
         if self.update_payload(payload):
             if support_images:
@@ -2899,6 +2991,7 @@ def payload_from_snapshot(
     settings_bridge_url: str = "",
     settings_command_status: dict[str, object] | None = None,
     support_images: list[dict[str, str]] | None = None,
+    update_state: dict[str, object] | None = None,
 ) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
     top_line = (
@@ -2937,6 +3030,7 @@ def payload_from_snapshot(
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},
         support_images=support_images or [],
+        update_state=update_state or {},
         app_version=__version__,
     )
 

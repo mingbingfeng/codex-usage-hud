@@ -61,6 +61,7 @@ from .settings_bridge import SettingsBridgeServer
 from .ui import TokenHudWindow
 from .ui.renderer_hud import RendererHudClient, wait_for_renderer
 from .updater import (
+    AutoUpdateManager,
     check_for_update,
     download_update_asset,
     format_update_info,
@@ -1651,6 +1652,7 @@ def _handle_renderer_settings_command(
     command: Mapping[str, Any],
     context: RuntimeContext,
     restart_requested: Event,
+    update_manager: AutoUpdateManager | None = None,
 ) -> dict[str, object]:
     action = str(command.get("action") or "").strip()
     try:
@@ -1714,6 +1716,14 @@ def _handle_renderer_settings_command(
                 f"当前已是最新版本（{info.current_version}）。",
             )
         if action == "installUpdate":
+            if update_manager is not None:
+                state = update_manager.status()
+                if state.phase == "ready" and state.installer_path:
+                    state = update_manager.handle_click()
+                    return _renderer_settings_status(
+                        state.message or "已打开下载好的安装程序。",
+                        kind="error" if state.error else "",
+                    )
             info = check_for_update(current_version=__version__)
             if info.error:
                 return _renderer_settings_status(
@@ -1729,6 +1739,17 @@ def _handle_renderer_settings_command(
             restart_requested.set()
             return _renderer_settings_status(
                 f"已启动 {info.asset_name}，安装器会先关闭当前 HUD。",
+            )
+        if action == "updateAction":
+            if update_manager is None:
+                return _renderer_settings_status(
+                    "当前会话未启用自动更新控制器。",
+                    kind="error",
+                )
+            state = update_manager.handle_click()
+            return _renderer_settings_status(
+                state.message or state.title or "更新操作已提交。",
+                kind="error" if state.error else "",
             )
         return _renderer_settings_status(
             f"无法处理未知设置命令：{action or 'empty'}",
@@ -2311,6 +2332,7 @@ def run_renderer_hud_session(
                     else RENDERER_CDP_TIMEOUT_SECONDS
                 )
             )
+            update_manager = AutoUpdateManager(current_version=__version__)
             restart_requested = Event()
             bridge = SettingsBridgeServer(
                 context.settings_store,
@@ -2445,14 +2467,21 @@ def run_renderer_hud_session(
                         except ProcessListenerError as exc:
                             _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
                             return RENDERER_HUD_UNAVAILABLE
+                    update_state = update_manager.tick().to_dict()
                     command = client.take_settings_command()
-                    force_fast_refresh = bool(command or settings_command_status)
+                    force_fast_refresh = bool(
+                        command
+                        or settings_command_status
+                        or update_state.get("phase") == "downloading"
+                    )
                     if command:
                         settings_command_status = _handle_renderer_settings_command(
                             command,
                             context,
                             restart_requested,
+                            update_manager,
                         )
+                        update_state = update_manager.status().to_dict()
                     mode_switch = str(settings_command_status.get("switchMode") or "").strip()
                     if mode_switch == "tk":
                         local_loading.close()
@@ -2474,6 +2503,7 @@ def run_renderer_hud_session(
                         settings_path=context.settings_store.path,
                         settings_bridge_url=bridge_url,
                         settings_command_status=settings_command_status,
+                        update_state=update_state,
                     ):
                         settings_command_status = {}
                         failures = 0
@@ -2524,6 +2554,7 @@ def run_renderer_hud_session(
             finally:
                 client.close()
                 bridge.close()
+                update_manager.close()
                 context.close()
     except HudAlreadyRunningError as exc:
         _eprint(f"codex-usage-hud: {exc}")
@@ -2537,6 +2568,7 @@ def _run_tk_window_session(
     daemon_manager: CodexDaemonManager | None = None,
     existing_window: TokenHudWindow | None = None,
     close_context: bool = True,
+    update_manager: AutoUpdateManager | None = None,
 ) -> int:
     try:
         try:
@@ -2547,6 +2579,7 @@ def _run_tk_window_session(
                     100 if daemon_manager is not None else 500
                 ),
                 user_settings_store=getattr(context, "settings_store", None),
+                update_manager=update_manager,
             )
         except Exception as exc:
             _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
@@ -2559,7 +2592,10 @@ def _run_tk_window_session(
                     snapshot = build_snapshot(context)
                 except Exception as exc:
                     snapshot = ParsedSession(status="error", error=str(exc))
-                window.update_display(snapshot)
+                window.update_display(
+                    snapshot,
+                    update_state=update_manager.tick() if update_manager is not None else None,
+                )
             try:
                 window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
             except Exception:
@@ -2610,6 +2646,7 @@ def run_tk_hud_session(
     try:
         with lock_context:
             context = build_runtime_context(args)
+            update_manager = AutoUpdateManager(current_version=__version__)
             try:
                 _prepare_codex_window_for_tk(
                     timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
@@ -2622,6 +2659,7 @@ def run_tk_hud_session(
                         100 if daemon_manager is not None else 500
                     ),
                     user_settings_store=getattr(context, "settings_store", None),
+                    update_manager=update_manager,
                 )
                 try:
                     window.root.update_idletasks()
@@ -2636,10 +2674,12 @@ def run_tk_hud_session(
                     daemon_manager=daemon_manager,
                     existing_window=window,
                     close_context=False,
+                    update_manager=update_manager,
                 )
             finally:
                 if loading_feedback is not None:
                     loading_feedback.close()
+                update_manager.close()
                 context.close()
     except HudAlreadyRunningError as exc:
         _eprint(f"codex-usage-hud: {exc}")

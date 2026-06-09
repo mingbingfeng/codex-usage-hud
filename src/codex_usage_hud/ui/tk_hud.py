@@ -15,7 +15,7 @@ from tkinter import messagebox, ttk
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .. import __version__
 from ..config import (
@@ -33,6 +33,8 @@ from ..core.parser import CostEstimator, ParsedSession, RequestRound
 from ..platforms.cdp_probe import cdp_port_from_env, list_targets, pick_page_target
 from ..support_assets import support_qr_asset_paths
 from ..updater import (
+    AutoUpdateManager,
+    AutoUpdateState,
     check_for_update,
     download_update_asset,
     format_update_info,
@@ -109,6 +111,87 @@ HUD_GEOMETRY_LOG_FILENAME = "hud_geometry.log"
 HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
 HUD_CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
 HUD_NATIVE_GEOMETRY_ENV = "CODEX_USAGE_HUD_NATIVE_GEOMETRY"
+
+
+class _HoverTip:
+    """Small dynamic tooltip that polls text while the pointer stays hovered."""
+
+    def __init__(self, widget: tk.Misc, text_provider: Callable[[], str]) -> None:
+        self.widget = widget
+        self.text_provider = text_provider
+        self.tip: tk.Toplevel | None = None
+        self.label: tk.Label | None = None
+        self._after_id: str | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress-1>", self._hide, add="+")
+        widget.bind("<Destroy>", self._hide, add="+")
+
+    def _show(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        self._hide()
+        text = self.text_provider().strip()
+        if not text:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.withdraw()
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tip.configure(bg=HUD_DIVIDER)
+        label = tk.Label(
+            tip,
+            text=text,
+            justify="left",
+            anchor="w",
+            bg=HUD_BG,
+            fg=HUD_TEXT,
+            padx=8,
+            pady=5,
+            font=("Microsoft YaHei UI", 8),
+            wraplength=260,
+        )
+        label.pack()
+        self.tip = tip
+        self.label = label
+        self._position()
+        tip.deiconify()
+        self._schedule_refresh()
+
+    def _position(self) -> None:
+        if self.tip is None or self.label is None:
+            return
+        x = self.widget.winfo_rootx() + max(18, self.widget.winfo_width() + 6)
+        y = self.widget.winfo_rooty() + max(0, (self.widget.winfo_height() // 2) - 10)
+        self.tip.geometry(f"+{x}+{y}")
+
+    def _schedule_refresh(self) -> None:
+        self._after_id = self.widget.after(250, self._refresh)
+
+    def _refresh(self) -> None:
+        self._after_id = None
+        if self.tip is None or self.label is None or not self.tip.winfo_exists():
+            return
+        text = self.text_provider().strip()
+        if not text:
+            self._hide()
+            return
+        self.label.configure(text=text)
+        self._position()
+        self._schedule_refresh()
+
+    def _hide(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        tip, self.tip = self.tip, None
+        self.label = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
 HUD_AUTO_REANCHOR_ENV = "CODEX_USAGE_HUD_AUTO_REANCHOR"
 NATIVE_ANCHOR_STABLE_FRAMES = 3
 
@@ -2174,6 +2257,7 @@ class TokenHudWindow:
         hide_until_attached: bool = False,
         tombstone_follow_ms: int = FOLLOW_TOMBSTONE_MS,
         user_settings_store: UserConfigStore | None = None,
+        update_manager: AutoUpdateManager | None = None,
     ) -> None:
         self.compact = compact
         self.follow_ms = max(16, int(follow_ms))
@@ -2200,6 +2284,9 @@ class TokenHudWindow:
         self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
         self._use_top_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=True)
         self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
+        self.update_manager = update_manager
+        self._update_state = AutoUpdateState(current_version=__version__)
+        self._top_update_button: tk.Button | None = None
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
         _HUD_GEOMETRY_LOGGER.info(
@@ -2347,6 +2434,57 @@ class TokenHudWindow:
         )
         setattr(button, "_hud_handle", True)
         return button
+
+    def _update_button(self, parent: tk.Misc) -> tk.Button:
+        button = tk.Button(
+            parent,
+            text="↓",
+            command=self._handle_update_action,
+            bg=str(parent.cget("bg")),
+            fg=HUD_BLUE,
+            activebackground="#2E3846",
+            activeforeground=HUD_ACCENT,
+            relief="flat",
+            padx=5,
+            pady=1,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            cursor="hand2",
+        )
+        setattr(button, "_hud_handle", True)
+        _HoverTip(button, self._update_tooltip_text)
+        self._top_update_button = button
+        return button
+
+    def _update_tooltip_text(self) -> str:
+        return self._update_state.title or self._update_state.message
+
+    def _handle_update_action(self) -> None:
+        if self.update_manager is None:
+            return
+        self._update_state = self.update_manager.handle_click()
+        self._render_update_button()
+        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+            self._set_settings_status(
+                self._update_state.message or self._update_state.title,
+                kind="error" if self._update_state.error else "",
+            )
+
+    def _render_update_button(self) -> None:
+        button = self._top_update_button
+        if button is None or not button.winfo_exists():
+            return
+        state = self._update_state
+        if not state.visible:
+            if button.winfo_manager():
+                button.pack_forget()
+            return
+        glyph = "⇪" if state.icon == "install" else "↓"
+        color = HUD_ACCENT if state.icon == "install" else HUD_BLUE
+        if state.phase in {"paused", "error"}:
+            color = "#FFB86B"
+        button.configure(text=glyph, fg=color)
+        if not button.winfo_manager():
+            button.pack(side="left", padx=(4, 0))
 
     def _open_settings_dialog(self, tab: str = "settings") -> None:
         if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
@@ -3274,6 +3412,7 @@ class TokenHudWindow:
                 continue
             child.destroy()
         self.top_labels.clear()
+        self._top_update_button = None
         self.root.configure(bg=HUD_BG)
         frame = tk.Frame(self.root, bg=HUD_BG, padx=8, pady=4)
         frame.pack(fill="both", expand=True)
@@ -3285,7 +3424,10 @@ class TokenHudWindow:
         self._render_top()
 
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
-        self._move_handle(frame, "top", self.root).pack(side="left", padx=(0, 4))
+        controls = tk.Frame(frame, bg=HUD_BG)
+        controls.pack(side="left", padx=(0, 4))
+        self._move_handle(controls, "top", self.root).pack(side="left")
+        self._update_button(controls).pack(side="left", padx=(4, 0))
         self._resize_handle(frame, "top", self.root).pack(side="right", padx=(6, 0))
         self._settings_button(frame).pack(side="right", padx=(4, 0))
         self.top_labels["bar"] = AutoScrollLabel(
@@ -3301,7 +3443,10 @@ class TokenHudWindow:
     def _build_top_expanded(self, frame: tk.Frame) -> None:
         header = tk.Frame(frame, bg=HUD_HEADER_BG, padx=6, pady=3)
         header.pack(fill="x", pady=(0, 7))
-        self._move_handle(header, "top", self.root).pack(side="left", padx=(0, 4))
+        controls = tk.Frame(header, bg=HUD_HEADER_BG)
+        controls.pack(side="left", padx=(0, 4))
+        self._move_handle(controls, "top", self.root).pack(side="left")
+        self._update_button(controls).pack(side="left", padx=(4, 0))
         close = tk.Button(
             header,
             text="×",
@@ -4629,9 +4774,15 @@ class TokenHudWindow:
         except tk.TclError:
             pass
 
-    def update_display(self, parsed_session: ParsedSession) -> None:
+    def update_display(
+        self,
+        parsed_session: ParsedSession,
+        update_state: AutoUpdateState | None = None,
+    ) -> None:
         """Refresh both HUD windows with the latest parsed session snapshot."""
         self._snapshot = parsed_session
+        if update_state is not None:
+            self._update_state = update_state
         self._log_budget_snapshot(parsed_session)
         self._render_top()
         self._render_request()
@@ -4663,6 +4814,7 @@ class TokenHudWindow:
         snapshot = self._snapshot
         confirmed = snapshot.confirmed
         session_cost = _session_cost(snapshot)
+        self._render_update_button()
         title_label = self.top_labels.get("title")
         if title_label is not None:
             title_label.configure(text=_top_expanded_header_title(snapshot))

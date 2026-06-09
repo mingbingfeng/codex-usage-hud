@@ -59,7 +59,15 @@ class RendererHudPayloadTests(unittest.TestCase):
         snapshot.week_tokens = 200000
         snapshot.week_cost_usd = 1.5
 
-        payload = payload_from_snapshot(snapshot).to_json()
+        payload = payload_from_snapshot(
+            snapshot,
+            update_state={
+                "visible": True,
+                "phase": "downloading",
+                "icon": "download",
+                "title": "正在下载更新：50%",
+            },
+        ).to_json()
 
         top_line = str(payload["topLine"])
         self.assertNotIn("Live Renderer Thread", str(payload["topLine"]))
@@ -85,8 +93,11 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settingsPath", payload)
         self.assertIn("settingsBridgeUrl", payload)
         self.assertIn("settingsCommandStatus", payload)
+        self.assertIn("updateState", payload)
         self.assertEqual(payload["appVersion"], "1.0.0")
         self.assertIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-update-button", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-action="update-action"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-settings-button", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-open"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("codex-usage-hud-settings-menu", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -115,6 +126,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-support-qr-title", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("previousPayload.supportImages?.length", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settingsBridgeUrl", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("updateState", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("renderUpdateButtons", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("navigator.clipboard", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("requestRowDetails", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("header.app-header-tint", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -150,6 +163,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn('data-action="reset"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("↯", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('"main header"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertTrue(payload["updateState"]["visible"])
+        self.assertEqual(payload["updateState"]["phase"], "downloading")
         top_details = payload["topDetails"]
         self.assertIsInstance(top_details, dict)
         self.assertEqual(top_details["title"], "Live Renderer Thread")
