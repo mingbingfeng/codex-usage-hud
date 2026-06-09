@@ -46,7 +46,9 @@ from codex_usage_hud.cli import (
     snapshot_to_text,
     run_daemon,
     run_hud_session,
+    run_loading_feedback_helper,
     run_tk_hud_session,
+    cleanup_stale_loading_feedback_files,
     stop_running_hud,
     usage_before_today_in_week,
 )
@@ -2114,6 +2116,20 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 130)
         run_session.assert_called_once()
         self.assertTrue(run_session.call_args.args[0].renderer_hud)
+
+    def test_loading_feedback_helper_requires_state_file(self) -> None:
+        self.assertEqual(run_loading_feedback_helper(""), 1)
+
+    def test_cleanup_stale_loading_feedback_files_removes_orphaned_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Path(temp_dir)
+            stale = runtime / "loading-999999-123.json"
+            stale.write_text("{}", encoding="utf-8")
+
+            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=runtime):
+                cleanup_stale_loading_feedback_files()
+
+            self.assertFalse(stale.exists())
 
 
 if __name__ == "__main__":

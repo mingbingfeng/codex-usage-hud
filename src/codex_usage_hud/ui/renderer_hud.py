@@ -640,6 +640,40 @@ RENDERER_HUD_SCRIPT = r"""
         min-height: 34px;
         padding-inline: 12px;
       }
+      #${rootId} .codex-usage-hud-settings-loading-track {
+        position: relative;
+        overflow: hidden;
+        height: 10px;
+        border-radius: 999px;
+        background: #1A2430;
+      }
+      #${rootId} .codex-usage-hud-settings-loading-bar,
+      #${rootId} .codex-usage-hud-settings-loading-glow {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        border-radius: 999px;
+        animation: codex-usage-hud-loading-slide 1.2s ease-in-out infinite alternate;
+      }
+      #${rootId} .codex-usage-hud-settings-loading-bar {
+        left: 0;
+        width: 34%;
+        background: #F3D27A;
+      }
+      #${rootId} .codex-usage-hud-settings-loading-glow {
+        left: 8%;
+        width: 16%;
+        background: #FFE7A0;
+        animation-duration: 1.2s;
+      }
+      @keyframes codex-usage-hud-loading-slide {
+        from {
+          transform: translateX(0);
+        }
+        to {
+          transform: translateX(190%);
+        }
+      }
       #${rootId} .codex-usage-hud-settings-action[data-variant="subtle"] {
         background: #202833;
         color: #f3d27a;
@@ -1060,7 +1094,7 @@ RENDERER_HUD_SCRIPT = r"""
     setSettingsRestartVisible(!!status.restartVisible);
   }
 
-  function submitSettingsCommand(command, pendingMessage) {
+  function submitSettingsCommand(command, pendingMessage, { preserveOverlay = false } = {}) {
     const payload = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       createdAt: Date.now(),
@@ -1074,7 +1108,7 @@ RENDERER_HUD_SCRIPT = r"""
     }
     setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
     setSettingsRestartVisible(false);
-    closeSettingsConfirm();
+    if (!preserveOverlay) closeSettingsConfirm();
     return true;
   }
 
@@ -1103,6 +1137,27 @@ RENDERER_HUD_SCRIPT = r"""
           <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-cancel" data-variant="ghost">取消</button>
           <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-save" data-variant="subtle">仅保存为默认</button>
           <button type="button" class="codex-usage-hud-settings-action" data-action="settings-apply-display-mode" data-primary="true">立即切换</button>
+        </div>
+      </div>
+    `;
+    dialog.appendChild(layer);
+  }
+
+  function openSettingsLoading({ kicker = "正在处理", title = "", body = "" } = {}) {
+    const dialog = settingsDialogRoot();
+    if (!dialog) return;
+    closeSettingsConfirm();
+    const layer = document.createElement("div");
+    layer.className = "codex-usage-hud-settings-confirm-layer";
+    layer.dataset.settingsConfirm = "true";
+    layer.innerHTML = `
+      <div class="codex-usage-hud-settings-confirm-card" role="status" aria-live="polite" aria-label="${escapeHtml(title || "正在处理设置变更")}">
+        <div class="codex-usage-hud-settings-confirm-kicker">${escapeHtml(kicker)}</div>
+        <div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div>
+        <div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div>
+        <div class="codex-usage-hud-settings-loading-track" aria-hidden="true">
+          <div class="codex-usage-hud-settings-loading-bar"></div>
+          <div class="codex-usage-hud-settings-loading-glow"></div>
         </div>
       </div>
     `;
@@ -1166,9 +1221,18 @@ RENDERER_HUD_SCRIPT = r"""
 
   function applyDisplayModeFromModal() {
     const settings = collectSettingsForm();
+    const nextMode = effectiveRuntimeMode(settings.display_mode);
+    openSettingsLoading({
+      kicker: "正在切换",
+      title: nextMode === "tk" ? "正在切换到 Tk 独立窗口" : "正在切换到 Renderer 内嵌 HUD",
+      body: nextMode === "tk"
+        ? "HUD 正在关闭当前内嵌面板，并启动独立的 Tk 悬浮窗。通常只需 1 到 3 秒。"
+        : "HUD 正在切回 Codex 内嵌显示。通常只需 1 到 3 秒。",
+    });
     submitSettingsCommand(
       { action: "applyDisplayMode", settings },
-      "正在应用显示方案，等待 HUD 切换..."
+      "正在应用显示方案，等待 HUD 切换...",
+      { preserveOverlay: true }
     );
   }
 

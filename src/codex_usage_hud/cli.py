@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -99,6 +100,7 @@ DAEMON_STARTUP_WAIT = "wait"
 DAEMON_STARTUP_RENDERER = "renderer"
 DAEMON_STARTUP_TK = "tk"
 DAEMON_STARTUP_CANCEL = "cancel"
+LOADING_FEEDBACK_STALE_SECONDS = 20.0
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 
@@ -113,6 +115,323 @@ class DaemonStartupDecision:
 
     mode: str
     launch_codex: bool = False
+
+
+class HudLoadingFeedback:
+    """Small topmost startup/loading card for manual launches and mode switches."""
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        *,
+        enabled: bool,
+    ) -> None:
+        self.title = str(title or "")
+        self.message = str(message or "")
+        self.enabled = bool(enabled)
+        self._process: subprocess.Popen[str] | None = None
+        self._state_path: Path | None = None
+        self._closed = False
+
+    def start(self) -> "HudLoadingFeedback":
+        if not self.enabled or self._process is not None:
+            return self
+        state_path = hud_runtime_dir() / f"loading-{os.getpid()}-{int(time.time() * 1000)}.json"
+        self._state_path = state_path
+        self._write_state(close=False)
+        try:
+            self._process = subprocess.Popen(
+                _loading_helper_command(state_path),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self._process = None
+            try:
+                state_path.unlink()
+            except OSError:
+                pass
+        return self
+
+    def update(
+        self,
+        *,
+        title: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        if not self.enabled or self._closed:
+            return
+        self.title = self.title if title is None else str(title)
+        self.message = self.message if message is None else str(message)
+        self._write_state(close=False)
+
+    def close(self) -> None:
+        if not self.enabled or self._closed:
+            return
+        self._closed = True
+        self._write_state(close=True)
+        process = self._process
+        if process is not None:
+            try:
+                process.wait(timeout=1.5)
+            except Exception:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+        if self._state_path is not None:
+            try:
+                self._state_path.unlink()
+            except OSError:
+                pass
+
+    def _write_state(self, *, close: bool) -> None:
+        if self._state_path is None:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(
+                json.dumps(
+                    {
+                        "ownerPid": os.getpid(),
+                        "title": self.title,
+                        "message": self.message,
+                        "updatedAt": time.time(),
+                        "close": bool(close),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+
+def _loading_feedback_enabled(args: argparse.Namespace | None = None) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    if args is not None and getattr(args, "no_startup_prompt", False):
+        return False
+    return True
+
+
+def _create_loading_feedback(
+    args: argparse.Namespace | None,
+    *,
+    title: str,
+    message: str,
+) -> HudLoadingFeedback:
+    return HudLoadingFeedback(
+        title=title,
+        message=message,
+        enabled=_loading_feedback_enabled(args),
+    )
+
+
+def _loading_helper_command(state_path: Path) -> list[str]:
+    state_arg = str(state_path)
+    if getattr(sys, "frozen", False):
+        return [
+            str(Path(sys.executable)),
+            "--loading-feedback-helper",
+            "--loading-feedback-state-file",
+            state_arg,
+        ]
+
+    helper_python = Path(sys.executable)
+    if helper_python.name.lower() == "python.exe":
+        candidate = helper_python.with_name("pythonw.exe")
+        if candidate.exists():
+            helper_python = candidate
+    return [
+        str(helper_python),
+        "-m",
+        "codex_usage_hud",
+        "--loading-feedback-helper",
+        "--loading-feedback-state-file",
+        state_arg,
+    ]
+
+
+def _loading_feedback_owner_pid(path: Path) -> int | None:
+    match = re.match(r"loading-(\d+)-\d+\.json$", path.name, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        pid = int(match.group(1))
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def cleanup_stale_loading_feedback_files() -> None:
+    runtime = hud_runtime_dir()
+    try:
+        files = list(runtime.glob("loading-*.json"))
+    except OSError:
+        return
+    now = time.time()
+    for path in files:
+        owner_pid = _loading_feedback_owner_pid(path)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        stale = (now - float(mtime)) > LOADING_FEEDBACK_STALE_SECONDS
+        owner_alive = _process_exists(owner_pid) if owner_pid is not None else False
+        if owner_pid is not None and owner_alive and not stale:
+            continue
+        if owner_pid is None and not stale:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
+
+def run_loading_feedback_helper(state_file: str | Path) -> int:
+    state_arg = str(state_file or "").strip()
+    if not state_arg:
+        return 1
+    path = Path(state_arg).expanduser()
+    try:
+        import tkinter as tk
+    except Exception:
+        return 0
+
+    def read_state() -> dict[str, object] | None:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return raw if isinstance(raw, dict) else None
+
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.configure(bg="#081018")
+    root.withdraw()
+
+    shell = tk.Frame(
+        root,
+        bg="#10161D",
+        highlightthickness=1,
+        highlightbackground="#263241",
+        padx=18,
+        pady=16,
+    )
+    shell.pack(fill="both", expand=True)
+
+    title_var = tk.StringVar(value="")
+    message_var = tk.StringVar(value="")
+
+    tk.Label(
+        shell,
+        text="codex-usage-hud",
+        anchor="w",
+        bg="#10161D",
+        fg="#F3D27A",
+        font=("Microsoft YaHei UI", 9, "bold"),
+    ).pack(fill="x")
+    tk.Label(
+        shell,
+        textvariable=title_var,
+        anchor="w",
+        justify="left",
+        bg="#10161D",
+        fg="#F6F9FC",
+        font=("Microsoft YaHei UI", 15, "bold"),
+        pady=4,
+    ).pack(fill="x")
+    tk.Label(
+        shell,
+        textvariable=message_var,
+        anchor="w",
+        justify="left",
+        bg="#10161D",
+        fg="#B8C6D8",
+        font=("Microsoft YaHei UI", 10),
+        wraplength=324,
+    ).pack(fill="x")
+
+    track = tk.Canvas(
+        shell,
+        width=324,
+        height=8,
+        bg="#10161D",
+        highlightthickness=0,
+        bd=0,
+    )
+    track.pack(fill="x", pady=(14, 0))
+    track.create_rectangle(0, 1, 324, 7, fill="#1A2430", outline="")
+    indicator = track.create_rectangle(0, 1, 92, 7, fill="#F3D27A", outline="")
+    accent = track.create_rectangle(0, 1, 48, 7, fill="#FFE7A0", outline="")
+
+    root.update_idletasks()
+    width = max(360, int(root.winfo_reqwidth()))
+    height = max(132, int(root.winfo_reqheight()))
+    screen_width = max(1, int(root.winfo_screenwidth()))
+    screen_height = max(1, int(root.winfo_screenheight()))
+    x = max(0, (screen_width - width) // 2)
+    y = max(0, (screen_height - height) // 2)
+    root.geometry(f"{width}x{height}+{x}+{y}")
+    root.deiconify()
+
+    position = 0
+    direction = 1
+    last_signature = ("", "", False)
+    owner_pid = _loading_feedback_owner_pid(path)
+
+    def animate_bar() -> None:
+        nonlocal position, direction
+        if not root.winfo_exists():
+            return
+        position += 7 * direction
+        if position >= 232:
+            position = 232
+            direction = -1
+        elif position <= 0:
+            position = 0
+            direction = 1
+        track.coords(indicator, position, 1, position + 92, 7)
+        track.coords(accent, position + 20, 1, position + 60, 7)
+        root.after(34, animate_bar)
+
+    def poll_state() -> None:
+        nonlocal last_signature
+        if not root.winfo_exists():
+            return
+        state = read_state()
+        if state is None:
+            root.destroy()
+            return
+        title = str(state.get("title") or "")
+        message = str(state.get("message") or "")
+        should_close = bool(state.get("close"))
+        updated_at = float(state.get("updatedAt") or 0.0)
+        file_stale = updated_at > 0 and (time.time() - updated_at) > LOADING_FEEDBACK_STALE_SECONDS
+        if owner_pid is not None and not _process_exists(owner_pid):
+            root.destroy()
+            return
+        if file_stale:
+            root.destroy()
+            return
+        signature = (title, message, should_close)
+        if signature != last_signature:
+            last_signature = signature
+            title_var.set(title)
+            message_var.set(message)
+        if should_close:
+            root.destroy()
+            return
+        root.after(80, poll_state)
+
+    animate_bar()
+    poll_state()
+    root.mainloop()
+    return 0
 
 
 def configure_stdout() -> None:
@@ -1631,6 +1950,16 @@ def build_parser() -> argparse.ArgumentParser:
             f"Configured default: {DEFAULT_BUDGET_THRESHOLDS_TEXT}."
         ),
     )
+    parser.add_argument(
+        "--loading-feedback-helper",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--loading-feedback-state-file",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -1681,6 +2010,7 @@ def run_hud_session(
     lock_already_held: bool = False,
     hide_until_attached: bool = False,
     daemon_manager: CodexDaemonManager | None = None,
+    loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
     """Run one HUD session, preferring renderer injection with Tk fallback."""
     session_args = _clone_args_with_renderer_preference(
@@ -1695,9 +2025,16 @@ def run_hud_session(
                 lock_already_held=lock_already_held,
                 daemon_manager=daemon_manager,
                 launched_codex=launched_codex_for_renderer,
+                loading_feedback=loading_feedback,
             )
             launched_codex_for_renderer = False
+            loading_feedback = None
             if renderer_exit == HUD_SWITCH_TO_TK:
+                loading_feedback = _create_loading_feedback(
+                    session_args,
+                    title="正在切换到 Tk HUD",
+                    message="正在关闭内嵌 HUD 并打开独立的 Tk 悬浮窗...",
+                ).start()
                 session_args = _clone_args_with_renderer_preference(session_args, False)
                 continue
             if renderer_exit != RENDERER_HUD_UNAVAILABLE:
@@ -1711,12 +2048,26 @@ def run_hud_session(
             lock_already_held=lock_already_held,
             hide_until_attached=hide_until_attached,
             daemon_manager=daemon_manager,
+            loading_feedback=loading_feedback,
         )
+        loading_feedback = None
         if tk_exit == HUD_SWITCH_TO_RENDERER:
             session_args = _clone_args_with_renderer_preference(session_args, True)
             continue
         if tk_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
+            if loading_feedback is None:
+                loading_feedback = _create_loading_feedback(
+                    session_args,
+                    title="正在切换到 Renderer HUD",
+                    message="正在以调试模式重启 Codex App...",
+                ).start()
+            else:
+                loading_feedback.update(
+                    title="正在切换到 Renderer HUD",
+                    message="正在以调试模式重启 Codex App...",
+                )
             if not _restart_codex_for_renderer():
+                loading_feedback.close()
                 _eprint("codex-usage-hud: unable to restart Codex App in debugger mode.")
                 session_args = _clone_args_with_renderer_preference(session_args, False)
                 continue
@@ -1732,12 +2083,26 @@ def run_renderer_hud_session(
     lock_already_held: bool = False,
     daemon_manager: CodexDaemonManager | None = None,
     launched_codex: bool = False,
+    loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
     """Run the in-renderer HUD over CDP, or report that it is unavailable."""
     lock_context = nullcontext() if lock_already_held else HudInstanceLock()
     try:
         with lock_context:
             context = build_runtime_context(args)
+            local_loading = loading_feedback or _create_loading_feedback(
+                args,
+                title=(
+                    "正在切换到 Renderer HUD"
+                    if launched_codex
+                    else "正在启动 Renderer HUD"
+                ),
+                message=(
+                    "正在等待 Codex 界面就绪，并把 HUD 注入到窗口里..."
+                    if launched_codex or daemon_manager is not None
+                    else "正在连接 Codex 的本地调试目标..."
+                ),
+            ).start()
             display_mode = normalize_display_mode(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
@@ -1764,6 +2129,14 @@ def run_renderer_hud_session(
             try:
                 wait_for_window = daemon_manager is not None or launched_codex
                 if wait_for_window:
+                    local_loading.update(
+                        title=(
+                            "正在切换到 Renderer HUD"
+                            if launched_codex
+                            else "正在启动 Renderer HUD"
+                        ),
+                        message="正在等待 Codex 主窗口和调试端口准备完成...",
+                    )
                     (
                         window_ready,
                         window_status,
@@ -1773,6 +2146,7 @@ def run_renderer_hud_session(
                         timeout_seconds=DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS
                     )
                     if not window_ready:
+                        local_loading.close()
                         _LOGGER.info(
                             "renderer_hud_window_not_ready status=%s hwnd=%s reason=%s",
                             window_status,
@@ -1797,11 +2171,20 @@ def run_renderer_hud_session(
                     if wait_for_window
                     else RENDERER_INITIAL_TIMEOUT_SECONDS
                 )
+                local_loading.update(
+                    title=(
+                        "正在切换到 Renderer HUD"
+                        if launched_codex
+                        else "正在启动 Renderer HUD"
+                    ),
+                    message="正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...",
+                )
                 if not wait_for_renderer(
                     client,
                     snapshot_or_error,
                     timeout_seconds=initial_timeout,
                 ):
+                    local_loading.close()
                     _LOGGER.info(
                         "renderer_hud_initial_connect_failed status=%s error=%s",
                         client.last_status,
@@ -1815,9 +2198,10 @@ def run_renderer_hud_session(
                         daemon_mode=daemon_manager is not None,
                         initial_timeout_seconds=initial_timeout,
                         cdp_timeout_seconds=getattr(client, "timeout_seconds", None),
-                    )
+                        )
                     return RENDERER_HUD_UNAVAILABLE
 
+                local_loading.close()
                 failures = 0
                 runtime_failure_reported = False
                 settings_command_status: dict[str, object] = {}
@@ -1848,6 +2232,7 @@ def run_renderer_hud_session(
                         )
                     mode_switch = str(settings_command_status.get("switchMode") or "").strip()
                     if mode_switch == "tk":
+                        local_loading.close()
                         _LOGGER.info("renderer_hud_switch_requested mode=tk")
                         return HUD_SWITCH_TO_TK
                     if restart_requested.is_set():
@@ -1911,6 +2296,7 @@ def run_renderer_hud_session(
                         delay = max(delay, min(5.0, failures * 0.5))
                     time.sleep(delay)
             except KeyboardInterrupt:
+                local_loading.close()
                 return 130
             finally:
                 client.close()
@@ -1921,12 +2307,80 @@ def run_renderer_hud_session(
         return 2
 
 
+def _run_tk_window_session(
+    context: RuntimeContext,
+    args: argparse.Namespace,
+    *,
+    daemon_manager: CodexDaemonManager | None = None,
+    existing_window: TokenHudWindow | None = None,
+    close_context: bool = True,
+) -> int:
+    try:
+        try:
+            window = existing_window or TokenHudWindow(
+                compact=args.compact,
+                hide_until_attached=False,
+                tombstone_follow_ms=(
+                    100 if daemon_manager is not None else 500
+                ),
+                user_settings_store=getattr(context, "settings_store", None),
+            )
+        except Exception as exc:
+            _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
+            return 1
+
+        def refresh() -> None:
+            if window.should_refresh_snapshot():
+                try:
+                    context.reload_user_config()
+                    snapshot = build_snapshot(context)
+                except Exception as exc:
+                    snapshot = ParsedSession(status="error", error=str(exc))
+                window.update_display(snapshot)
+            try:
+                window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
+            except Exception:
+                return
+
+        def daemon_watchdog() -> None:
+            if daemon_manager is None:
+                return
+            try:
+                if not daemon_manager.codex_is_running():
+                    _LOGGER.info("daemon_codex_exited")
+                    window.close("daemon_codex_exited")
+                    return
+            except ProcessListenerError as exc:
+                _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
+                return
+            try:
+                window.root.after(daemon_manager.poll_ms, daemon_watchdog)
+            except Exception:
+                return
+
+        refresh()
+        if daemon_manager is not None:
+            window.root.after(daemon_manager.poll_ms, daemon_watchdog)
+        window.run()
+        if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
+            return DAEMON_RESTART_REQUESTED
+        if getattr(window, "mode_switch_request", "") == "renderer":
+            if getattr(window, "restart_codex_for_renderer", False):
+                return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
+            return HUD_SWITCH_TO_RENDERER
+        return 0
+    finally:
+        if close_context:
+            context.close()
+
+
 def run_tk_hud_session(
     args: argparse.Namespace,
     *,
     lock_already_held: bool = False,
     hide_until_attached: bool = False,
     daemon_manager: CodexDaemonManager | None = None,
+    loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
     """Run one Tk HUD session with optional daemon process supervision."""
     lock_context = nullcontext() if lock_already_held else HudInstanceLock()
@@ -1934,60 +2388,31 @@ def run_tk_hud_session(
         with lock_context:
             context = build_runtime_context(args)
             try:
+                window = TokenHudWindow(
+                    compact=args.compact,
+                    hide_until_attached=hide_until_attached,
+                    tombstone_follow_ms=(
+                        100 if daemon_manager is not None else 500
+                    ),
+                    user_settings_store=getattr(context, "settings_store", None),
+                )
                 try:
-                    window = TokenHudWindow(
-                        compact=args.compact,
-                        hide_until_attached=hide_until_attached,
-                        tombstone_follow_ms=(
-                            100 if daemon_manager is not None else 500
-                        ),
-                        user_settings_store=getattr(context, "settings_store", None),
-                    )
-                except Exception as exc:
-                    _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
-                    return 1
-
-                def refresh() -> None:
-                    if window.should_refresh_snapshot():
-                        try:
-                            context.reload_user_config()
-                            snapshot = build_snapshot(context)
-                        except Exception as exc:
-                            snapshot = ParsedSession(status="error", error=str(exc))
-                        window.update_display(snapshot)
-                    try:
-                        window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
-                    except Exception:
-                        return
-
-                def daemon_watchdog() -> None:
-                    if daemon_manager is None:
-                        return
-                    try:
-                        if not daemon_manager.codex_is_running():
-                            _LOGGER.info("daemon_codex_exited")
-                            window.close("daemon_codex_exited")
-                            return
-                    except ProcessListenerError as exc:
-                        _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
-                        return
-                    try:
-                        window.root.after(daemon_manager.poll_ms, daemon_watchdog)
-                    except Exception:
-                        return
-
-                refresh()
-                if daemon_manager is not None:
-                    window.root.after(daemon_manager.poll_ms, daemon_watchdog)
-                window.run()
-                if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
-                    return DAEMON_RESTART_REQUESTED
-                if getattr(window, "mode_switch_request", "") == "renderer":
-                    if getattr(window, "restart_codex_for_renderer", False):
-                        return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
-                    return HUD_SWITCH_TO_RENDERER
-                return 0
+                    window.root.update_idletasks()
+                    window.request_root.update_idletasks()
+                except Exception:
+                    pass
+                if loading_feedback is not None:
+                    loading_feedback.close()
+                return _run_tk_window_session(
+                    context,
+                    args,
+                    daemon_manager=daemon_manager,
+                    existing_window=window,
+                    close_context=False,
+                )
             finally:
+                if loading_feedback is not None:
+                    loading_feedback.close()
                 context.close()
     except HudAlreadyRunningError as exc:
         _eprint(f"codex-usage-hud: {exc}")
@@ -2029,7 +2454,13 @@ def run_daemon(args: argparse.Namespace) -> int:
                     hide_until_attached=False,
                     daemon_manager=manager,
                 )
+            startup_loading: HudLoadingFeedback | None = None
             if startup.mode == DAEMON_STARTUP_RENDERER and startup.launch_codex:
+                startup_loading = _create_loading_feedback(
+                    args,
+                    title="正在启动 Renderer HUD",
+                    message="正在以调试模式启动 Codex App...",
+                ).start()
                 launch_codex_app(debugger=True)
                 _LOGGER.info("daemon_startup_renderer_selected")
             if startup.mode == DAEMON_STARTUP_RENDERER:
@@ -2053,6 +2484,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                         _clone_args_with_renderer_preference(args, True),
                         lock_already_held=True,
                         daemon_manager=manager,
+                        loading_feedback=startup_loading,
                     )
                 else:
                     exit_code = run_hud_session(
@@ -2060,7 +2492,9 @@ def run_daemon(args: argparse.Namespace) -> int:
                         lock_already_held=True,
                         hide_until_attached=True,
                         daemon_manager=manager,
+                        loading_feedback=startup_loading,
                     )
+                startup_loading = None
                 if exit_code == HUD_SWITCH_TO_TK:
                     preferred_renderer = False
                     force_renderer_retry = False
@@ -2083,6 +2517,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_stdout()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "loading_feedback_helper", False):
+        return run_loading_feedback_helper(args.loading_feedback_state_file)
+    cleanup_stale_loading_feedback_files()
     if args.check_update:
         return run_update_check()
     if args.update:

@@ -105,6 +105,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settings-install-update", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-restart", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-apply-display-mode", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-settings-loading-track", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("openSettingsLoading", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settingsCommandKey", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("localStorage.setItem", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("window.confirm", renderer_hud.RENDERER_HUD_SCRIPT)
