@@ -463,6 +463,7 @@ RENDERER_HUD_SCRIPT = r"""
         pointer-events: auto;
       }
       #${rootId} .codex-usage-hud-settings-dialog {
+        position: relative;
         width: min(760px, calc(100vw - 32px));
         max-height: min(720px, calc(100vh - 32px));
         display: grid;
@@ -589,6 +590,65 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-settings-status[data-kind="error"] {
         color: #ffb86b;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-layer {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: rgba(4, 9, 14, .62);
+        backdrop-filter: blur(4px);
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-card {
+        width: min(520px, calc(100% - 12px));
+        display: grid;
+        gap: 12px;
+        padding: 18px 18px 16px;
+        border: 1px solid rgba(243, 210, 122, .34);
+        border-radius: 12px;
+        background: linear-gradient(180deg, rgba(30, 39, 49, .98), rgba(16, 22, 29, .98));
+        box-shadow: 0 22px 46px rgba(0, 0, 0, .45);
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-kicker {
+        color: #f3d27a;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-title {
+        color: #f6f9fc;
+        font-size: 18px;
+        font-weight: 800;
+        line-height: 1.25;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-body {
+        color: #c7d4e4;
+        font-size: 13px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action {
+        min-height: 34px;
+        padding-inline: 12px;
+      }
+      #${rootId} .codex-usage-hud-settings-action[data-variant="subtle"] {
+        background: #202833;
+        color: #f3d27a;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-settings-action[data-variant="ghost"] {
+        background: transparent;
+        border: 1px solid #2e3846;
+        color: #a9bcd2;
       }
       #${rootId} .codex-usage-hud-support {
         display: grid;
@@ -799,6 +859,14 @@ RENDERER_HUD_SCRIPT = r"""
     return { ...defaultHudSettings(), ...(raw && typeof raw === "object" ? raw : {}) };
   }
 
+  function activeDisplayMode() {
+    return String(currentPayload()?.activeDisplayMode || "renderer") === "tk" ? "tk" : "renderer";
+  }
+
+  function effectiveRuntimeMode(displayMode) {
+    return String(displayMode || "auto") === "tk" ? "tk" : "renderer";
+  }
+
   function settingsBridgeUrl() {
     return String(currentPayload()?.settingsBridgeUrl || "").replace(/\/+$/, "");
   }
@@ -868,6 +936,8 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function settingsPanelHtml(settings, bridge, path) {
+    const currentMode = activeDisplayMode();
+    const selectedDisplayMode = currentMode === "tk" ? "tk" : "renderer";
     const weekdayOptions = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
       .map((label, index) => `<option value="${index}" ${Number(settings.weekly_reset_weekday) === index ? "selected" : ""}>${label}</option>`)
       .join("");
@@ -894,10 +964,10 @@ RENDERER_HUD_SCRIPT = r"""
         </div>
         <div class="codex-usage-hud-settings-field">
           <label>HUD 显示方案</label>
-          <select data-setting-key="display_mode">
-            <option value="auto" ${settings.display_mode === "auto" ? "selected" : ""}>自动：优先 renderer 注入，失败回退 Tk</option>
-            <option value="renderer" ${settings.display_mode === "renderer" ? "selected" : ""}>优先 renderer 注入，失败回退 Tk</option>
-            <option value="tk" ${settings.display_mode === "tk" ? "selected" : ""}>Tk 窗口</option>
+          <select data-setting-key="display_mode" data-configured-display-mode="${escapeHtml(settings.display_mode)}" data-active-display-mode="${currentMode}" data-touched="false">
+            <option value="auto" ${selectedDisplayMode === "auto" ? "selected" : ""}>自动：优先 renderer 注入，失败回退 Tk</option>
+            <option value="renderer" ${selectedDisplayMode === "renderer" ? "selected" : ""}>优先 renderer 注入，失败回退 Tk</option>
+            <option value="tk" ${selectedDisplayMode === "tk" ? "selected" : ""}>Tk 窗口</option>
           </select>
         </div>
         <div class="codex-usage-hud-settings-field">
@@ -1004,13 +1074,46 @@ RENDERER_HUD_SCRIPT = r"""
     }
     setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
     setSettingsRestartVisible(false);
+    closeSettingsConfirm();
     return true;
+  }
+
+  function settingsDialogRoot() {
+    return document.querySelector(`#${settingsModalId} .codex-usage-hud-settings-dialog`);
+  }
+
+  function closeSettingsConfirm() {
+    const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
+    if (layer) layer.remove();
+  }
+
+  function openSettingsConfirm({ kicker = "立即应用", title = "", body = "" } = {}) {
+    const dialog = settingsDialogRoot();
+    if (!dialog) return;
+    closeSettingsConfirm();
+    const layer = document.createElement("div");
+    layer.className = "codex-usage-hud-settings-confirm-layer";
+    layer.dataset.settingsConfirm = "true";
+    layer.innerHTML = `
+      <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="${escapeHtml(title || "确认切换显示方案")}">
+        <div class="codex-usage-hud-settings-confirm-kicker">${escapeHtml(kicker)}</div>
+        <div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div>
+        <div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div>
+        <div class="codex-usage-hud-settings-confirm-actions">
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-cancel" data-variant="ghost">取消</button>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-save" data-variant="subtle">仅保存为默认</button>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-apply-display-mode" data-primary="true">立即切换</button>
+        </div>
+      </div>
+    `;
+    dialog.appendChild(layer);
   }
 
   function collectSettingsForm() {
     const modal = document.getElementById(settingsModalId);
     const settings = hudSettingsFromPayload();
     const read = (key) => modal?.querySelector(`[data-setting-key="${key}"]`)?.value;
+    const displayNode = modal?.querySelector(`[data-setting-key="display_mode"]`);
     const numberValue = (key, fallback) => {
       const value = Number(read(key));
       return Number.isFinite(value) && value >= 0 ? value : fallback;
@@ -1030,6 +1133,10 @@ RENDERER_HUD_SCRIPT = r"""
         reasoning: field("reasoning"),
       };
     });
+    const configuredDisplayMode = String(displayNode?.dataset.configuredDisplayMode || settings.display_mode);
+    const displayMode = displayNode?.dataset.touched === "true"
+      ? String(displayNode?.value || settings.display_mode)
+      : configuredDisplayMode;
     return {
       ...settings,
       daily_budget_usd: numberValue("daily_budget_usd", settings.daily_budget_usd),
@@ -1037,7 +1144,7 @@ RENDERER_HUD_SCRIPT = r"""
       daily_reset_time: String(read("daily_reset_time") || settings.daily_reset_time),
       weekly_reset_weekday: Number(read("weekly_reset_weekday") ?? settings.weekly_reset_weekday),
       weekly_reset_time: String(read("weekly_reset_time") || settings.weekly_reset_time),
-      display_mode: String(read("display_mode") || settings.display_mode),
+      display_mode: displayMode,
       pricing_url: String(read("pricing_url") || "").trim(),
       budget_thresholds: String(read("budget_thresholds") || "")
         .split(",")
@@ -1057,6 +1164,14 @@ RENDERER_HUD_SCRIPT = r"""
     );
   }
 
+  function applyDisplayModeFromModal() {
+    const settings = collectSettingsForm();
+    submitSettingsCommand(
+      { action: "applyDisplayMode", settings },
+      "正在应用显示方案，等待 HUD 切换..."
+    );
+  }
+
   function fetchPricesFromModal() {
     const settings = collectSettingsForm();
     submitSettingsCommand(
@@ -1070,6 +1185,38 @@ RENDERER_HUD_SCRIPT = r"""
       { action: "restart", reason: "settings" },
       "重启请求已提交，等待 HUD daemon 处理..."
     );
+  }
+
+  function promptForDisplayModeChange(select) {
+    if (!(select instanceof HTMLSelectElement)) return;
+    select.dataset.touched = "true";
+    const currentMode = String(select.dataset.activeDisplayMode || activeDisplayMode());
+    const selectedMode = String(select.value || "auto");
+    const nextMode = effectiveRuntimeMode(selectedMode);
+    if (nextMode === currentMode) {
+      if (selectedMode !== String(select.dataset.configuredDisplayMode || "")) {
+        setSettingsStatus(
+          selectedMode === "auto"
+            ? "已改为自动模式；当前 Renderer 已在运行，点击保存后会写入新的启动偏好。"
+            : "当前显示方案无需立即切换，点击保存后会写入新的启动偏好。"
+        );
+      }
+      setSettingsRestartVisible(false);
+      closeSettingsConfirm();
+      return;
+    }
+    if (nextMode === "tk") {
+      setSettingsRestartVisible(false);
+      setSettingsStatus("已选择 Tk 方案。请确认是现在切换，还是只把它保存为下次默认值。");
+      openSettingsConfirm({
+        kicker: "切换显示方案",
+        title: "立即切换到 Tk 独立窗口？",
+        body: "当前 HUD 正显示在 Codex 窗口里。\n\n立即切换后，会关闭当前内嵌 HUD，并打开独立的 Tk 悬浮窗。\n\n如果你只是想修改下次启动时的默认方案，可以点“仅保存为默认”。",
+      });
+      return;
+    }
+    setSettingsRestartVisible(false);
+    closeSettingsConfirm();
   }
 
   function checkUpdateFromModal() {
@@ -1176,6 +1323,11 @@ RENDERER_HUD_SCRIPT = r"""
   function bindRoot(root) {
     if (root.dataset.bound === "true") return;
     root.dataset.bound = "true";
+    root.addEventListener("change", (event) => {
+      const displaySelect = event.target?.closest?.(`[data-setting-key="display_mode"]`);
+      if (!displaySelect || !root.contains(displaySelect)) return;
+      promptForDisplayModeChange(displaySelect);
+    });
     root.addEventListener("click", (event) => {
       if (event.target?.id === settingsModalId) {
         event.preventDefault();
@@ -1222,6 +1374,26 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         void saveSettingsFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-apply-display-mode") {
+        event.preventDefault();
+        event.stopPropagation();
+        void applyDisplayModeFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-confirm-save") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        void saveSettingsFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-confirm-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        setSettingsStatus("已取消立即切换；如需只改默认值，也可以直接点保存。");
         return;
       }
       if (action.dataset.action === "settings-restart") {
@@ -2398,6 +2570,7 @@ class RendererHudPayload:
     request_rows: list[str] = field(default_factory=list)
     request_row_details: list[dict[str, object]] = field(default_factory=list)
     settings: dict[str, object] = field(default_factory=dict)
+    active_display_mode: str = "renderer"
     settings_path: str = ""
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
@@ -2420,6 +2593,7 @@ class RendererHudPayload:
             "requestRows": list(self.request_rows),
             "requestRowDetails": [dict(item) for item in self.request_row_details],
             "settings": dict(self.settings),
+            "activeDisplayMode": self.active_display_mode,
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
@@ -2461,6 +2635,7 @@ class RendererHudClient:
         snapshot: ParsedSession,
         *,
         settings: UserConfig | None = None,
+        active_display_mode: str = "renderer",
         settings_path: Path | str | None = None,
         settings_bridge_url: str = "",
         settings_command_status: dict[str, object] | None = None,
@@ -2469,6 +2644,7 @@ class RendererHudClient:
         payload = payload_from_snapshot(
             snapshot,
             settings=settings,
+            active_display_mode=active_display_mode,
             settings_path=settings_path,
             settings_bridge_url=settings_bridge_url,
             settings_command_status=settings_command_status,
@@ -2654,6 +2830,7 @@ def payload_from_snapshot(
     snapshot: ParsedSession,
     *,
     settings: UserConfig | None = None,
+    active_display_mode: str = "renderer",
     settings_path: Path | str | None = None,
     settings_bridge_url: str = "",
     settings_command_status: dict[str, object] | None = None,
@@ -2691,6 +2868,7 @@ def payload_from_snapshot(
         request_rows=_request_rows(snapshot),
         request_row_details=_request_row_details(snapshot),
         settings=(settings or UserConfig.defaults()).to_dict(),
+        active_display_mode=str(active_display_mode or "renderer"),
         settings_path=str(settings_path or ""),
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},

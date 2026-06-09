@@ -385,6 +385,11 @@ def normalize_display_mode(value: Any) -> str:
     return mode if mode in VALID_DISPLAY_MODES else DEFAULT_DISPLAY_MODE
 
 
+def effective_display_mode(value: Any) -> str:
+    """Collapse a configured display preference into the active HUD surface."""
+    return "tk" if normalize_display_mode(value) == "tk" else "renderer"
+
+
 def _extract_price_collection(value: Any) -> dict[str, ModelPrice]:
     prices: dict[str, ModelPrice] = {}
     if isinstance(value, Mapping):
@@ -452,6 +457,7 @@ __all__ = [
     "UserConfigStore",
     "default_model_prices",
     "default_settings_path",
+    "effective_display_mode",
     "extract_model_prices",
     "fetch_model_prices",
     "normalize_display_mode",

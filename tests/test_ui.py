@@ -28,6 +28,9 @@ from codex_usage_hud.cli import (
     DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
     HudAlreadyRunningError,
     HudInstanceLock,
+    HUD_SWITCH_TO_RENDERER,
+    HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
+    HUD_SWITCH_TO_TK,
     RENDERER_HUD_UNAVAILABLE,
     RENDERER_UPDATE_FAILURE_LIMIT,
     UsageSummaryCache,
@@ -1479,12 +1482,35 @@ class DaemonLifecycleTests(unittest.TestCase):
             saved = store.load()
 
         self.assertEqual(status["kind"], "")
-        self.assertEqual(status["restartVisible"], True)
+        self.assertEqual(status["restartVisible"], False)
         self.assertEqual(saved.daily_reset_time, "09:30")
         self.assertEqual(saved.daily_budget_usd, 12.34)
         self.assertEqual(saved.weekly_budget_usd, 56.78)
         self.assertIsNone(context.settings_mtime)
         self.assertEqual(reload_calls, 1)
+        restart_requested.set.assert_not_called()
+
+    def test_renderer_apply_display_mode_requests_tk_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            store.save(UserConfig.defaults())
+            context = SimpleNamespace(
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                reload_user_config=MagicMock(),
+            )
+            restart_requested = MagicMock()
+
+            status = _handle_renderer_settings_command(
+                {"action": "applyDisplayMode", "settings": {"display_mode": "tk"}},
+                context,
+                restart_requested,
+            )
+            saved = store.load()
+
+        self.assertEqual(saved.display_mode, "tk")
+        self.assertEqual(status["switchMode"], "tk")
+        self.assertFalse(status["restartVisible"])
         restart_requested.set.assert_not_called()
 
     def test_tk_refresh_reloads_user_config_before_snapshot(self) -> None:
@@ -1578,6 +1604,61 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         renderer_session.assert_called_once()
         tk_session.assert_called_once()
+
+    def test_run_hud_session_switches_from_renderer_to_tk(self) -> None:
+        args = SimpleNamespace(renderer_hud=True)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_renderer_hud_session",
+                return_value=HUD_SWITCH_TO_TK,
+            ) as renderer_session,
+            patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        renderer_session.assert_called_once()
+        tk_session.assert_called_once()
+        tk_args = tk_session.call_args.args[0]
+        self.assertFalse(tk_args.renderer_hud)
+
+    def test_run_hud_session_switches_from_tk_to_renderer(self) -> None:
+        args = SimpleNamespace(renderer_hud=False)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_tk_hud_session",
+                return_value=HUD_SWITCH_TO_RENDERER,
+            ) as tk_session,
+            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        tk_session.assert_called_once()
+        renderer_session.assert_called_once()
+        renderer_args = renderer_session.call_args.args[0]
+        self.assertTrue(renderer_args.renderer_hud)
+
+    def test_run_hud_session_restarts_codex_for_renderer_switch(self) -> None:
+        args = SimpleNamespace(renderer_hud=False)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_tk_hud_session",
+                return_value=HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
+            ) as tk_session,
+            patch("codex_usage_hud.cli._restart_codex_for_renderer", return_value=True) as restart_codex,
+            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        tk_session.assert_called_once()
+        restart_codex.assert_called_once()
+        renderer_session.assert_called_once()
+        self.assertTrue(renderer_session.call_args.kwargs["launched_codex"])
 
     def test_renderer_initial_connect_failure_writes_diagnostic_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1909,11 +1990,11 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 130)
         self.assertEqual(fake_manager.wait_for_codex.call_count, 2)
-        renderer_session.assert_called_once_with(
-            args,
-            lock_already_held=True,
-            daemon_manager=fake_manager,
-        )
+        renderer_session.assert_called_once()
+        renderer_args = renderer_session.call_args.args[0]
+        self.assertTrue(renderer_args.renderer_hud)
+        self.assertEqual(renderer_session.call_args.kwargs["lock_already_held"], True)
+        self.assertIs(renderer_session.call_args.kwargs["daemon_manager"], fake_manager)
         hud_session.assert_not_called()
 
     def test_run_daemon_tk_choice_launches_codex_normally_and_opens_tk(self) -> None:
@@ -1946,11 +2027,11 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         launch.assert_called_once_with(debugger=False)
         fake_manager.wait_for_codex.assert_not_called()
-        tk_session.assert_called_once_with(
-            args,
-            lock_already_held=True,
-            hide_until_attached=False,
-        )
+        tk_session.assert_called_once()
+        tk_args = tk_session.call_args.args[0]
+        self.assertFalse(tk_args.renderer_hud)
+        self.assertEqual(tk_session.call_args.kwargs["lock_already_held"], True)
+        self.assertEqual(tk_session.call_args.kwargs["hide_until_attached"], False)
 
     def test_launch_codex_app_debugger_uses_remote_debugging_with_uac_fallback(self) -> None:
         executable = Path(r"C:\Program Files\WindowsApps\OpenAI.Codex\app\Codex.exe")
@@ -2005,6 +2086,34 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(fake_manager.wait_for_codex.call_count, 2)
         self.assertEqual(run_session.call_count, 2)
+
+    def test_run_daemon_keeps_renderer_preference_for_normal_auto_start(self) -> None:
+        fake_manager = SimpleNamespace(
+            poll_ms=250,
+            snapshot=MagicMock(return_value=SimpleNamespace(found=True)),
+            wait_for_codex=MagicMock(return_value=object()),
+        )
+        args = SimpleNamespace(daemon_poll_ms=250, renderer_hud=True)
+        lock_instance = MagicMock()
+        lock_instance.__enter__.return_value = lock_instance
+        lock_instance.__exit__.return_value = False
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging", return_value=None),
+            patch("codex_usage_hud.cli.hide_console_window", return_value=None),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=fake_manager),
+            patch("codex_usage_hud.cli.HudInstanceLock", return_value=lock_instance),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=SimpleNamespace(mode="wait", launch_codex=False),
+            ),
+            patch("codex_usage_hud.cli.run_hud_session", return_value=130) as run_session,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, 130)
+        run_session.assert_called_once()
+        self.assertTrue(run_session.call_args.args[0].renderer_hud)
 
 
 if __name__ == "__main__":

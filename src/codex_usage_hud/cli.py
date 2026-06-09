@@ -25,6 +25,7 @@ from .config import (
     DEFAULT_WEEKLY_BUDGET_USD,
     UserConfig,
     UserConfigStore,
+    effective_display_mode,
     fetch_model_prices,
     normalize_display_mode,
     parse_thresholds as parse_config_thresholds,
@@ -43,6 +44,7 @@ from .daemon import (
     DEFAULT_DAEMON_POLL_MS,
     MAX_DAEMON_POLL_MS,
     ProcessListenerError,
+    WindowsProcessListener,
     configure_daemon_logging,
     hide_console_window,
 )
@@ -79,6 +81,9 @@ ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
 DAEMON_RESTART_REQUESTED = 10
 RENDERER_HUD_UNAVAILABLE = 20
+HUD_SWITCH_TO_TK = 30
+HUD_SWITCH_TO_RENDERER = 31
+HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
 RENDERER_CDP_TIMEOUT_SECONDS = 1.0
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
 RENDERER_INITIAL_TIMEOUT_SECONDS = 2.0
@@ -385,6 +390,62 @@ def launch_codex_app(*, debugger: bool = False) -> bool:
             return True
     _LOGGER.info("codex_app_launch_unavailable")
     return False
+
+
+def _clone_args_with_renderer_preference(
+    args: argparse.Namespace,
+    prefer_renderer: bool,
+) -> argparse.Namespace:
+    cloned = argparse.Namespace(**vars(args))
+    cloned.renderer_hud = bool(prefer_renderer)
+    return cloned
+
+
+def _runtime_display_mode(value: object) -> str:
+    return effective_display_mode(value)
+
+
+def _stop_codex_processes(*, timeout_seconds: float = 8.0) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        listener = WindowsProcessListener(exclude_pid=os.getpid())
+        snapshot = listener.snapshot()
+    except ProcessListenerError as exc:
+        _LOGGER.info("codex_app_stop_unavailable error=%s", exc)
+        return False
+    if not snapshot.found:
+        return True
+
+    pending = {int(pid) for pid in snapshot.pids if int(pid) > 0}
+    deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+    while pending and time.monotonic() < deadline:
+        for pid in list(pending):
+            if not _process_exists(pid):
+                pending.discard(pid)
+                continue
+            _terminate_process(pid)
+        time.sleep(0.1)
+        pending = {pid for pid in pending if _process_exists(pid)}
+        if not pending:
+            return True
+        try:
+            refreshed = listener.snapshot()
+        except ProcessListenerError:
+            refreshed = None
+        if refreshed is not None:
+            pending.update(int(pid) for pid in refreshed.pids if int(pid) > 0)
+    remaining = [pid for pid in sorted(pending) if _process_exists(pid)]
+    if remaining:
+        _LOGGER.info("codex_app_stop_incomplete pids=%s", ",".join(map(str, remaining)))
+        return False
+    return True
+
+
+def _restart_codex_for_renderer() -> bool:
+    if sys.platform.startswith("win") and not _stop_codex_processes():
+        return False
+    return launch_codex_app(debugger=True)
 
 
 def _prompt_missing_codex_startup() -> str:
@@ -1054,12 +1115,19 @@ def _renderer_settings_status(
     *,
     kind: str = "",
     restart_visible: bool = False,
+    switch_mode: str = "",
+    restart_codex: bool = False,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "message": message,
         "kind": kind,
         "restartVisible": restart_visible,
     }
+    if switch_mode:
+        payload["switchMode"] = switch_mode
+    if restart_codex:
+        payload["restartCodex"] = True
+    return payload
 
 
 def _handle_renderer_settings_command(
@@ -1075,9 +1143,28 @@ def _handle_renderer_settings_command(
                 command.get("settings"),
             )
             _save_renderer_user_config(context, config)
+            next_runtime_mode = _runtime_display_mode(config.display_mode)
             return _renderer_settings_status(
-                "已保存到本地配置；预算和价格会自动刷新，显示方案切换需重启 HUD 生效。",
-                restart_visible=True,
+                (
+                    "已保存到本地配置；预算和价格会自动刷新。"
+                    if next_runtime_mode == "renderer"
+                    else "已保存到本地配置；当前会话仍保持 Renderer，Tk 方案会在下次切换或重启后生效。"
+                ),
+            )
+        if action == "applyDisplayMode":
+            config = _config_from_settings_payload(
+                context.settings_store.load(),
+                command.get("settings"),
+            )
+            _save_renderer_user_config(context, config)
+            next_runtime_mode = _runtime_display_mode(config.display_mode)
+            if next_runtime_mode == "tk":
+                return _renderer_settings_status(
+                    "正在切换到 Tk 独立窗口。",
+                    switch_mode="tk",
+                )
+            return _renderer_settings_status(
+                "Renderer 方案已保存；当前会话已处于内嵌显示，无需重启。",
             )
         if action == "fetchPrices":
             config = _config_from_settings_payload(
@@ -1089,7 +1176,6 @@ def _handle_renderer_settings_command(
             _save_renderer_user_config(context, config)
             return _renderer_settings_status(
                 f"已拉取并保存 {len(prices)} 个模型价格。",
-                restart_visible=True,
             )
         if action == "restart":
             restart_requested.set()
@@ -1135,7 +1221,6 @@ def _handle_renderer_settings_command(
         return _renderer_settings_status(
             f"设置命令执行失败：{exc}",
             kind="error",
-            restart_visible=True,
         )
 
 
@@ -1598,21 +1683,47 @@ def run_hud_session(
     daemon_manager: CodexDaemonManager | None = None,
 ) -> int:
     """Run one HUD session, preferring renderer injection with Tk fallback."""
-    if getattr(args, "renderer_hud", False):
-        renderer_exit = run_renderer_hud_session(
-            args,
+    session_args = _clone_args_with_renderer_preference(
+        args,
+        getattr(args, "renderer_hud", False),
+    )
+    launched_codex_for_renderer = False
+    while True:
+        if getattr(session_args, "renderer_hud", False):
+            renderer_exit = run_renderer_hud_session(
+                session_args,
+                lock_already_held=lock_already_held,
+                daemon_manager=daemon_manager,
+                launched_codex=launched_codex_for_renderer,
+            )
+            launched_codex_for_renderer = False
+            if renderer_exit == HUD_SWITCH_TO_TK:
+                session_args = _clone_args_with_renderer_preference(session_args, False)
+                continue
+            if renderer_exit != RENDERER_HUD_UNAVAILABLE:
+                return renderer_exit
+            _LOGGER.info("renderer_hud_unavailable falling_back=tk")
+            session_args = _clone_args_with_renderer_preference(session_args, False)
+            continue
+
+        tk_exit = run_tk_hud_session(
+            session_args,
             lock_already_held=lock_already_held,
+            hide_until_attached=hide_until_attached,
             daemon_manager=daemon_manager,
         )
-        if renderer_exit != RENDERER_HUD_UNAVAILABLE:
-            return renderer_exit
-        _LOGGER.info("renderer_hud_unavailable falling_back=tk")
-    return run_tk_hud_session(
-        args,
-        lock_already_held=lock_already_held,
-        hide_until_attached=hide_until_attached,
-        daemon_manager=daemon_manager,
-    )
+        if tk_exit == HUD_SWITCH_TO_RENDERER:
+            session_args = _clone_args_with_renderer_preference(session_args, True)
+            continue
+        if tk_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
+            if not _restart_codex_for_renderer():
+                _eprint("codex-usage-hud: unable to restart Codex App in debugger mode.")
+                session_args = _clone_args_with_renderer_preference(session_args, False)
+                continue
+            session_args = _clone_args_with_renderer_preference(session_args, True)
+            launched_codex_for_renderer = True
+            continue
+        return tk_exit
 
 
 def run_renderer_hud_session(
@@ -1620,6 +1731,7 @@ def run_renderer_hud_session(
     *,
     lock_already_held: bool = False,
     daemon_manager: CodexDaemonManager | None = None,
+    launched_codex: bool = False,
 ) -> int:
     """Run the in-renderer HUD over CDP, or report that it is unavailable."""
     lock_context = nullcontext() if lock_already_held else HudInstanceLock()
@@ -1650,7 +1762,8 @@ def run_renderer_hud_session(
                     return ParsedSession(status="error", error=str(exc))
 
             try:
-                if daemon_manager is not None:
+                wait_for_window = daemon_manager is not None or launched_codex
+                if wait_for_window:
                     (
                         window_ready,
                         window_status,
@@ -1681,7 +1794,7 @@ def run_renderer_hud_session(
 
                 initial_timeout = (
                     DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS
-                    if daemon_manager is not None
+                    if wait_for_window
                     else RENDERER_INITIAL_TIMEOUT_SECONDS
                 )
                 if not wait_for_renderer(
@@ -1733,6 +1846,10 @@ def run_renderer_hud_session(
                             context,
                             restart_requested,
                         )
+                    mode_switch = str(settings_command_status.get("switchMode") or "").strip()
+                    if mode_switch == "tk":
+                        _LOGGER.info("renderer_hud_switch_requested mode=tk")
+                        return HUD_SWITCH_TO_TK
                     if restart_requested.is_set():
                         _LOGGER.info("renderer_hud_restart_requested")
                         return (
@@ -1745,6 +1862,7 @@ def run_renderer_hud_session(
                     if client.update(
                         snapshot,
                         settings=context.user_config,
+                        active_display_mode="renderer",
                         settings_path=context.settings_store.path,
                         settings_bridge_url=bridge_url,
                         settings_command_status=settings_command_status,
@@ -1864,6 +1982,10 @@ def run_tk_hud_session(
                 window.run()
                 if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
                     return DAEMON_RESTART_REQUESTED
+                if getattr(window, "mode_switch_request", "") == "renderer":
+                    if getattr(window, "restart_codex_for_renderer", False):
+                        return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
+                    return HUD_SWITCH_TO_RENDERER
                 return 0
             finally:
                 context.close()
@@ -1878,6 +2000,7 @@ def run_daemon(args: argparse.Namespace) -> int:
     _attach_cli_logger_to_daemon_log()
     hide_console_window()
     manager = CodexDaemonManager(poll_ms=args.daemon_poll_ms)
+    preferred_renderer = bool(getattr(args, "renderer_hud", False))
     try:
         with HudInstanceLock():
             try:
@@ -1899,14 +2022,18 @@ def run_daemon(args: argparse.Namespace) -> int:
                 if startup.launch_codex:
                     launch_codex_app(debugger=False)
                 _LOGGER.info("daemon_startup_tk_selected")
-                return run_tk_hud_session(
-                    args,
+                preferred_renderer = False
+                return run_hud_session(
+                    _clone_args_with_renderer_preference(args, False),
                     lock_already_held=True,
                     hide_until_attached=False,
+                    daemon_manager=manager,
                 )
             if startup.mode == DAEMON_STARTUP_RENDERER and startup.launch_codex:
                 launch_codex_app(debugger=True)
                 _LOGGER.info("daemon_startup_renderer_selected")
+            if startup.mode == DAEMON_STARTUP_RENDERER:
+                preferred_renderer = True
             force_renderer_retry = startup.mode == DAEMON_STARTUP_RENDERER
 
             while True:
@@ -1923,17 +2050,21 @@ def run_daemon(args: argparse.Namespace) -> int:
                     )
                 if force_renderer_retry:
                     exit_code = run_renderer_hud_session(
-                        args,
+                        _clone_args_with_renderer_preference(args, True),
                         lock_already_held=True,
                         daemon_manager=manager,
                     )
                 else:
                     exit_code = run_hud_session(
-                        args,
+                        _clone_args_with_renderer_preference(args, preferred_renderer),
                         lock_already_held=True,
                         hide_until_attached=True,
                         daemon_manager=manager,
                     )
+                if exit_code == HUD_SWITCH_TO_TK:
+                    preferred_renderer = False
+                    force_renderer_retry = False
+                    continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
                     _LOGGER.info("daemon_restarting_wait_for_codex")
                     continue

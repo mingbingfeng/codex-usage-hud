@@ -23,12 +23,14 @@ from ..config import (
     UserConfig,
     UserConfigStore,
     default_settings_path as shared_default_settings_path,
+    effective_display_mode,
     fetch_model_prices,
     parse_thresholds as parse_config_thresholds,
     read_json_object,
     write_json_object,
 )
 from ..core.parser import CostEstimator, ParsedSession, RequestRound
+from ..platforms.cdp_probe import cdp_port_from_env, list_targets, pick_page_target
 from ..support_assets import support_qr_asset_paths
 from ..updater import (
     check_for_update,
@@ -2190,6 +2192,10 @@ class TokenHudWindow:
         self._settings_tab_buttons: dict[str, tk.Button] = {}
         self._settings_canvas: tk.Canvas | None = None
         self._settings_support_images: list[tk.PhotoImage] = []
+        self._settings_display_mode_touched = False
+        self._settings_configured_display_mode = str(self.user_settings.display_mode)
+        self._mode_switch_request = ""
+        self._restart_codex_for_renderer = False
         self._geometry_log_path = configure_hud_geometry_logging()
         self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
         self._use_top_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=True)
@@ -2349,6 +2355,8 @@ class TokenHudWindow:
             return
         settings = self.user_settings_store.load()
         self.user_settings = settings
+        self._settings_configured_display_mode = str(settings.display_mode)
+        self._settings_display_mode_touched = False
         dialog = tk.Toplevel(self.root)
         self._settings_dialog = dialog
         dialog.withdraw()
@@ -2496,6 +2504,23 @@ class TokenHudWindow:
         self._settings_tab_buttons = {}
         self._settings_canvas = None
         self._settings_support_images = []
+        self._settings_display_mode_touched = False
+
+    @staticmethod
+    def _active_display_mode() -> str:
+        return "tk"
+
+    @staticmethod
+    def _effective_runtime_mode(display_mode: str) -> str:
+        return effective_display_mode(display_mode)
+
+    @staticmethod
+    def _renderer_debugger_available(timeout_seconds: float = 0.35) -> bool:
+        try:
+            target = pick_page_target(list_targets(cdp_port_from_env(), timeout_seconds))
+        except Exception:
+            return False
+        return bool(target.get("webSocketDebuggerUrl"))
 
     def _centered_settings_geometry(
         self,
@@ -2703,12 +2728,12 @@ class TokenHudWindow:
         )
         mode.set(
             {
-                "auto": "auto - 优先 renderer 注入，失败回退 Tk",
                 "renderer": "renderer - 优先 renderer 注入，失败回退 Tk",
                 "tk": "tk - 仅使用 Tk 窗口",
-            }.get(settings.display_mode, "auto - 优先 renderer 注入，失败回退 Tk")
+            }.get(self._active_display_mode(), "renderer - 优先 renderer 注入，失败回退 Tk")
         )
         mode.pack(fill="x")
+        mode.bind("<<ComboboxSelected>>", self._on_display_mode_selected, add="+")
         self._settings_entries["display_mode"] = mode
 
         self._settings_field(
@@ -3074,6 +3099,72 @@ class TokenHudWindow:
             fg="#FFB86B" if kind == "error" else "#A9BCD2",
         )
 
+    def _selected_display_mode(self, entries: dict[str, tk.Entry | ttk.Combobox]) -> str:
+        if not self._settings_display_mode_touched:
+            return str(self._settings_configured_display_mode or self.user_settings.display_mode)
+        return str(entries["display_mode"].get()).split(" ", 1)[0]
+
+    def _on_display_mode_selected(self, event: tk.Event[tk.Misc]) -> None:
+        widget = event.widget
+        if not isinstance(widget, ttk.Combobox):
+            return
+        self._settings_display_mode_touched = True
+        selected_mode = str(widget.get()).split(" ", 1)[0]
+        target_mode = self._effective_runtime_mode(selected_mode)
+        if target_mode == self._active_display_mode():
+            if selected_mode != self._settings_configured_display_mode:
+                self._set_settings_status(
+                    "当前显示方案无需立即切换；点击保存后会写入新的启动偏好。"
+                    if selected_mode != "auto"
+                    else "已改为自动模式；当前 Tk 方案会继续运行，点击保存后会写入新的启动偏好。"
+                )
+            return
+
+        if target_mode == "renderer":
+            debugger_available = self._renderer_debugger_available()
+            message = (
+                "当前 Codex 已开启本地调试端口，HUD 可以直接切换到 Renderer 内嵌模式，无需重启 Codex。"
+                "\n\n是否现在应用？"
+                if debugger_available
+                else "当前 Codex 还不是调试/CDP 启动。要立即切换到 Renderer 内嵌模式，需要先以调试模式重启 Codex App。"
+                "\n\n是否现在重启并应用？"
+            )
+            title = "立即切换到 Renderer"
+            if messagebox.askyesno(title, message, parent=self._settings_dialog):
+                self._apply_display_mode_selection(restart_codex=not debugger_available)
+                return
+        else:
+            message = (
+                "准备切换到 Tk 独立窗口。HUD 会立即从 Codex 内嵌显示切换为桌面悬浮窗，当前统计会继续保留。"
+                "\n\n是否现在应用？"
+            )
+            if messagebox.askyesno("立即切换到 Tk", message, parent=self._settings_dialog):
+                self._apply_display_mode_selection(restart_codex=False)
+                return
+
+        self._set_settings_status("已保留方案选择，点击保存后会在下次切换或下次启动时生效。")
+
+    def _apply_display_mode_selection(self, *, restart_codex: bool) -> None:
+        try:
+            config = self._config_from_settings_dialog(
+                self._settings_entries,
+                self._settings_price_rows,
+            )
+            self.user_settings_store.save(config)
+        except (OSError, ValueError) as exc:
+            self._set_settings_status(f"保存失败：{exc}", kind="error")
+            messagebox.showerror("保存失败", str(exc), parent=self._settings_dialog)
+            return
+        self.user_settings = config
+        self._mode_switch_request = self._effective_runtime_mode(config.display_mode)
+        self._restart_codex_for_renderer = bool(
+            restart_codex and self._mode_switch_request == "renderer"
+        )
+        self._set_settings_status("正在应用新的 HUD 显示方案...")
+        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+            self._settings_dialog.destroy()
+        self.close("display_mode_switch")
+
     def _config_from_settings_dialog(
         self,
         entries: dict[str, tk.Entry | ttk.Combobox],
@@ -3096,7 +3187,7 @@ class TokenHudWindow:
             "daily_reset_time": entries["daily_reset_time"].get(),
             "weekly_reset_time": entries["weekly_reset_time"].get(),
             "weekly_reset_weekday": str(entries["weekly_reset_weekday"].get()).split(" ", 1)[0],
-            "display_mode": entries["display_mode"].get().split(" ", 1)[0],
+            "display_mode": self._selected_display_mode(entries),
             "budget_thresholds": parse_config_thresholds(entries["budget_thresholds"].get()),
             "weekly_adjustment_usd": entries["weekly_adjustment_usd"].get(),
             "pricing_url": entries["pricing_url"].get(),
@@ -3118,8 +3209,11 @@ class TokenHudWindow:
             messagebox.showerror("保存失败", str(exc), parent=self._settings_dialog)
             return
         self.user_settings = config
+        next_runtime_mode = self._effective_runtime_mode(config.display_mode)
         self._set_settings_status(
-            "已保存到本地配置；预算和价格会自动刷新，显示方案切换需重启 HUD 生效。"
+            "已保存到本地配置；预算和价格会自动刷新。"
+            if next_runtime_mode == self._active_display_mode()
+            else "已保存到本地配置；当前会话仍保持 Tk，Renderer 方案会在下次切换或启动时生效。"
         )
 
     def _settings_fetch_prices(
@@ -4513,6 +4607,14 @@ class TokenHudWindow:
     @property
     def exit_reason(self) -> str:
         return self._exit_reason
+
+    @property
+    def mode_switch_request(self) -> str:
+        return self._mode_switch_request
+
+    @property
+    def restart_codex_for_renderer(self) -> bool:
+        return self._restart_codex_for_renderer
 
     def close(self, reason: str = "user") -> None:
         """Destroy both HUD windows and cancel Tk timers owned by the widgets."""
