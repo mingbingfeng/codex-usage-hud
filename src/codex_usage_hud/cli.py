@@ -1281,6 +1281,7 @@ def run_renderer_hud_session(
                     return RENDERER_HUD_UNAVAILABLE
 
                 failures = 0
+                runtime_failure_reported = False
                 settings_command_status: dict[str, object] = {}
                 next_daemon_check_at = 0.0
                 while True:
@@ -1325,6 +1326,7 @@ def run_renderer_hud_session(
                     ):
                         settings_command_status = {}
                         failures = 0
+                        runtime_failure_reported = False
                     else:
                         failures += 1
                         _LOGGER.info(
@@ -1338,19 +1340,20 @@ def run_renderer_hud_session(
                             client.last_error,
                         )
                         if failures >= failure_limit:
-                            _append_renderer_diagnostic(
-                                "update_failed",
-                                failures=failures,
-                                failure_limit=failure_limit,
-                                status=client.last_status,
-                                error=client.last_error,
-                                display_mode=display_mode,
-                                daemon_mode=daemon_manager is not None,
-                                cdp_timeout_seconds=getattr(
-                                    client, "timeout_seconds", None
-                                ),
-                            )
-                            return RENDERER_HUD_UNAVAILABLE
+                            if not runtime_failure_reported:
+                                _append_renderer_diagnostic(
+                                    "runtime_update_failed_retrying",
+                                    failures=failures,
+                                    failure_limit=failure_limit,
+                                    status=client.last_status,
+                                    error=client.last_error,
+                                    display_mode=display_mode,
+                                    daemon_mode=daemon_manager is not None,
+                                    cdp_timeout_seconds=getattr(
+                                        client, "timeout_seconds", None
+                                    ),
+                                )
+                                runtime_failure_reported = True
                     elapsed = time.monotonic() - started
                     delay = _renderer_refresh_delay_seconds(
                         context,
@@ -1358,6 +1361,11 @@ def run_renderer_hud_session(
                         elapsed,
                         force_fast=force_fast_refresh,
                     )
+                    if failures >= _renderer_update_failure_limit(
+                        display_mode,
+                        client.last_error,
+                    ):
+                        delay = max(delay, min(5.0, failures * 0.5))
                     time.sleep(delay)
             except KeyboardInterrupt:
                 return 130

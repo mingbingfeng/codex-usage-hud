@@ -1659,6 +1659,54 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(running_delay, 0.5)
         self.assertAlmostEqual(forced_delay, 0.5)
 
+    def test_renderer_runtime_failures_retry_without_tk_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(path=temp_root / "hud_settings.json"),
+                user_config=UserConfig.defaults(),
+                reload_user_config=MagicMock(),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="failed",
+                last_error="TimeoutError: renderer busy during paste",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=False),
+                close=MagicMock(),
+            )
+            fake_bridge = MagicMock()
+            fake_bridge.start.return_value = "http://127.0.0.1:8765"
+
+            with (
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
+                patch("codex_usage_hud.cli._renderer_update_failure_limit", return_value=1),
+                patch("codex_usage_hud.cli.time.sleep", side_effect=KeyboardInterrupt),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+            diagnostic = (temp_root / "renderer_fallback.log").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(exit_code, 130)
+        self.assertIn("runtime_update_failed_retrying", diagnostic)
+        self.assertNotEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        fake_client.update.assert_called_once()
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
     def test_wait_for_visible_codex_window_returns_when_tracker_becomes_visible(self) -> None:
         tracker = SimpleNamespace(
             enabled=True,

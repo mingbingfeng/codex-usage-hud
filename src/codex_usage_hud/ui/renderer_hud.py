@@ -54,6 +54,7 @@ RENDERER_HUD_SCRIPT = r"""
   const stateName = "__codexUsageHudState";
   const rafName = "__codexUsageHudRaf";
   const settleTimerName = "__codexUsageHudSettleTimers";
+  const composerSettleTimerName = "__codexUsageHudComposerSettleTimer";
   const runningTimerName = "__codexUsageHudRunningTimer";
   const storageKey = "codexUsageHudPanelState:v5";
   const settingsCommandKey = "codexUsageHudSettingsCommand:v1";
@@ -126,13 +127,23 @@ RENDERER_HUD_SCRIPT = r"""
         color: #e8eef7;
         box-shadow: 0 10px 28px rgba(0, 0, 0, .24);
         backdrop-filter: blur(12px);
-        pointer-events: auto;
+        pointer-events: none;
         overflow: hidden;
         letter-spacing: 0;
         -webkit-app-region: no-drag;
       }
       #${rootId} .codex-usage-hud-panel * {
         -webkit-app-region: no-drag;
+      }
+      #${rootId} .codex-usage-hud-handle,
+      #${rootId} .codex-usage-hud-resize,
+      #${rootId} .codex-usage-hud-settings-button,
+      #${rootId} .codex-usage-hud-main,
+      #${rootId} .codex-usage-hud-panel-header,
+      #${rootId} .codex-usage-hud-top-body,
+      #${rootId} .codex-usage-hud-request-list,
+      #${rootId} .codex-usage-hud-settings-modal {
+        pointer-events: auto;
       }
       #${rootId} .${topClass} {
         background: rgba(16, 22, 29, .94);
@@ -1812,6 +1823,14 @@ RENDERER_HUD_SCRIPT = r"""
     });
   }
 
+  function scheduleRequestAfterComposerSettles() {
+    clearTimeout(window[composerSettleTimerName] || 0);
+    window[composerSettleTimerName] = setTimeout(() => {
+      window[composerSettleTimerName] = 0;
+      scheduleForPanels(["request"]);
+    }, 180);
+  }
+
   function headerScopeSelector() {
     return [
       "header.app-header-tint",
@@ -1835,6 +1854,43 @@ RENDERER_HUD_SCRIPT = r"""
       || element.matches?.(selector)
       || element.querySelector?.(selector)
     );
+  }
+
+  function composerScopeSelector() {
+    return [
+      ".composer-footer",
+      "textarea",
+      "[contenteditable='true']",
+      "[role='textbox']",
+      ".bg-token-input-background\\/90",
+    ].join(", ");
+  }
+
+  function nodeTouchesComposerScope(node) {
+    const element = elementFromMutationNode(node);
+    if (!element || element.closest?.(`#${rootId}`)) return false;
+    const selector = composerScopeSelector();
+    return !!(
+      element.closest?.(selector)
+      || element.matches?.(selector)
+      || element.querySelector?.(selector)
+    );
+  }
+
+  function mutationTouchesComposerScope(mutation) {
+    if (nodeTouchesComposerScope(mutation.target)) return true;
+    for (const node of mutation.addedNodes || []) {
+      if (nodeTouchesComposerScope(node)) return true;
+    }
+    for (const node of mutation.removedNodes || []) {
+      if (nodeTouchesComposerScope(node)) return true;
+    }
+    return false;
+  }
+
+  function mutationTouchesTextInput(mutation) {
+    const element = elementFromMutationNode(mutation.target);
+    return !!element?.closest?.("textarea, [contenteditable='true'], [role='textbox']");
   }
 
   function mutationTouchesHeaderScope(mutation) {
@@ -2221,6 +2277,7 @@ RENDERER_HUD_SCRIPT = r"""
     window[mutationObserverName]?.disconnect?.();
     cancelAnimationFrame(window[rafName] || 0);
     clearInterval(window[runningTimerName] || 0);
+    clearTimeout(window[composerSettleTimerName] || 0);
     for (const timer of (window[settleTimerName] || [])) clearTimeout(timer);
     delete window[mutationObserverName];
     delete window[resizeHandlerName];
@@ -2228,6 +2285,7 @@ RENDERER_HUD_SCRIPT = r"""
     delete window[scheduleName];
     delete window[rafName];
     delete window[runningTimerName];
+    delete window[composerSettleTimerName];
     delete window[settleTimerName];
     delete window.__codexUsageHudUpdate;
     delete window.__codexUsageHudRemove;
@@ -2240,8 +2298,14 @@ RENDERER_HUD_SCRIPT = r"""
   window.addEventListener("resize", window[resizeHandlerName]);
   window.addEventListener("scroll", window[scrollHandlerName], true);
   window[mutationObserverName] = new MutationObserver((mutations) => {
-    if (mutations.some(mutationTouchesHeaderScope)) {
+    const touchesHeader = mutations.some(mutationTouchesHeaderScope);
+    if (touchesHeader) {
       scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
+      return;
+    }
+    if (!mutations.some(mutationTouchesComposerScope)) return;
+    if (mutations.some(mutationTouchesTextInput)) {
+      scheduleRequestAfterComposerSettles();
       return;
     }
     scheduleForPanels(["request"]);
