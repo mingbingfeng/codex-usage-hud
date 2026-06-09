@@ -70,9 +70,11 @@ Codex App 执行长任务时，等待过程很容易变成盲等。HUD 会显示
 
 不同用户的额度周期并不一样。你可以在设置里定制自己的日/周额度、刷新日期时间点、提醒阈值和本周补充额度，把第三方中转站、团队预算或个人限额统一映射到本地提醒里。
 
-![版本与更新设置](docs/images/codex-usage-hud-v1-update.png)
+![设置面板](docs/images/codex-usage-hud-v1-settings.png)
 
 旧版脚本启动和关闭不够顺手。v1.0.0 提供 Windows 安装器、开始菜单入口、停止入口和更新入口，日常使用不再需要记一串 Python 命令。
+
+![版本与更新设置](docs/images/codex-usage-hud-v1-update.png)
 
 原始日志分散在 JSONL、SQLite 和会话索引里，手动核对成本很费时间。HUD 会把这些本地数据合并成一个快照，并保留 CLI `--once` 入口，方便排查、截图前复核和自动化检查。
 

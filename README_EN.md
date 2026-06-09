@@ -70,9 +70,11 @@ Long Codex tasks can feel like blind waiting. The HUD shows whether the current 
 
 Budget windows differ between users and providers. You can customize daily/weekly limits, reset dates, reset times, thresholds, and manual weekly adjustments to mirror your own relay or team budget.
 
-![Version and update settings](docs/images/codex-usage-hud-v1-update.png)
+![Settings panel](docs/images/codex-usage-hud-v1-settings.png)
 
 Older script-based startup and shutdown flows were awkward. v1.0.0 adds a Windows installer, Start Menu daemon shortcut, stop shortcut, and update shortcut so daily use no longer depends on remembering Python commands.
+
+![Version and update settings](docs/images/codex-usage-hud-v1-update.png)
 
 Raw usage data is split across JSONL files, SQLite databases, and session indexes. The HUD merges those local sources into one snapshot and keeps `codex-hud --once` for quick checks and automation.
 
