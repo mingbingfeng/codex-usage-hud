@@ -19,14 +19,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-DEFAULT_DAEMON_POLL_MS = 250
-MAX_DAEMON_POLL_MS = 500
+DEFAULT_DAEMON_POLL_MS = 1000
+MAX_DAEMON_POLL_MS = 5000
 MIN_DAEMON_POLL_MS = 100
 
 _TH32CS_SNAPPROCESS = 0x00000002
 _MAX_PATH = 260
 _SW_HIDE = 0
 _HUD_PROCESS_MARKERS = ("hud", "usage-hud", "usage_hud")
+_NON_CLIENT_PROCESS_MARKERS = ("plus-plus", "++", "computer-use")
 _LOGGER_NAME = "codex_usage_hud.daemon"
 _logger = logging.getLogger(_LOGGER_NAME)
 _logger.addHandler(logging.NullHandler())
@@ -152,9 +153,13 @@ def is_codex_client_process(process_name: str) -> bool:
     normalized = stem.replace("_", "-")
     if any(marker in normalized for marker in _HUD_PROCESS_MARKERS):
         return False
+    if any(marker in normalized for marker in _NON_CLIENT_PROCESS_MARKERS):
+        return False
     if normalized == "codex":
         return True
     if normalized.startswith("codex-") or normalized.startswith("codex "):
+        return True
+    if normalized.endswith(" codex"):
         return True
     return "codex" in normalized and "python" not in normalized
 
@@ -290,6 +295,7 @@ __all__ = [
     "CodexDaemonManager",
     "DaemonState",
     "DEFAULT_DAEMON_POLL_MS",
+    "MAX_DAEMON_POLL_MS",
     "ProcessListenerError",
     "ProcessSnapshot",
     "WindowsProcessListener",

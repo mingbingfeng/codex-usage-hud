@@ -25,6 +25,8 @@ from ..support_assets import support_qr_payload
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
 RENDERER_HUD_VERSION = "5"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
+DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
+DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
 SETTINGS_COMMAND_STORAGE_KEY = "codexUsageHudSettingsCommand:v1"
@@ -294,6 +296,9 @@ RENDERER_HUD_SCRIPT = r"""
         padding: 2px 5px;
         border-radius: 5px;
         background: #202833;
+      }
+      #${rootId} .codex-usage-hud-panel-header[data-action="toggle"] {
+        cursor: pointer;
       }
       #${rootId} .${topClass} .codex-usage-hud-panel-header {
         grid-template-columns: 20px minmax(0, auto) minmax(0, 1fr) 22px 14px;
@@ -671,7 +676,7 @@ RENDERER_HUD_SCRIPT = r"""
   function topExpandedMarkup() {
     return `
       <div class="codex-usage-hud-expanded-shell">
-        <div class="codex-usage-hud-panel-header">
+        <div class="codex-usage-hud-panel-header" data-action="toggle">
           <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
           <div class="codex-usage-hud-title" data-action="toggle" data-field="topTitle"></div>
           <div class="codex-usage-hud-session-meta" data-field="topSession"></div>
@@ -729,7 +734,7 @@ RENDERER_HUD_SCRIPT = r"""
   function requestExpandedMarkup() {
     return `
       <div class="codex-usage-hud-expanded-shell">
-        <div class="codex-usage-hud-panel-header">
+        <div class="codex-usage-hud-panel-header" data-action="toggle">
           <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
           <div class="codex-usage-hud-title codex-usage-hud-line" data-action="toggle" data-field="requestLineExpanded"></div>
           <div></div>
@@ -2318,16 +2323,24 @@ class RendererHudClient:
         *,
         port: int | None = None,
         timeout_seconds: float = DEFAULT_RENDERER_TIMEOUT_SECONDS,
+        target_cache_seconds: float = DEFAULT_RENDERER_TARGET_CACHE_SECONDS,
+        settings_poll_seconds: float = DEFAULT_RENDERER_SETTINGS_POLL_SECONDS,
         enabled: bool | None = None,
     ) -> None:
         self.port = int(port or cdp_port_from_env())
         self.timeout_seconds = max(0.05, float(timeout_seconds))
+        self.target_cache_seconds = max(0.0, float(target_cache_seconds))
+        self.settings_poll_seconds = max(0.0, float(settings_poll_seconds))
         self.enabled = renderer_enabled_from_env() if enabled is None else bool(enabled)
         self.last_status = "idle" if self.enabled else "disabled"
         self.last_error = ""
         self._target_id = ""
         self._script_identifier = ""
         self._websocket_url = ""
+        self._cached_target_id = ""
+        self._cached_websocket_url = ""
+        self._target_cache_at = 0.0
+        self._next_settings_poll_at = 0.0
         self._support_images_sent = False
 
     def update(
@@ -2371,6 +2384,7 @@ class RendererHudClient:
                 if not self._send_update(websocket_url, payload):
                     raise RuntimeError("renderer update function did not acknowledge payload")
         except Exception as exc:
+            self._clear_target_cache(clear_script=True)
             self.last_status = "failed"
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
@@ -2382,6 +2396,10 @@ class RendererHudClient:
         """Consume one pending settings command from the renderer page."""
         if not self.enabled:
             return None
+        now = time.monotonic()
+        if now < self._next_settings_poll_at:
+            return None
+        self._next_settings_poll_at = now + self.settings_poll_seconds
         expression = (
             "(() => {"
             f"const key = {json.dumps(SETTINGS_COMMAND_STORAGE_KEY)};"
@@ -2413,6 +2431,7 @@ class RendererHudClient:
                 .get("value")
             )
         except Exception:
+            self._clear_target_cache(clear_script=False)
             return None
         return value if isinstance(value, dict) else None
 
@@ -2420,7 +2439,7 @@ class RendererHudClient:
         if not self.enabled:
             return
         try:
-            target = self._page_target()
+            target = self._page_target(force=True)
             websocket_url = str(target.get("webSocketDebuggerUrl") or "")
             if websocket_url:
                 send_cdp_command(
@@ -2440,13 +2459,36 @@ class RendererHudClient:
         except Exception:
             return
         finally:
-            self._target_id = ""
-            self._script_identifier = ""
-            self._websocket_url = ""
+            self._clear_target_cache(clear_script=True)
 
-    def _page_target(self) -> dict[str, Any]:
+    def _page_target(self, *, force: bool = False) -> dict[str, Any]:
+        if (
+            not force
+            and self._cached_websocket_url
+            and self._cached_target_id
+            and time.monotonic() - self._target_cache_at <= self.target_cache_seconds
+        ):
+            return {
+                "id": self._cached_target_id,
+                "webSocketDebuggerUrl": self._cached_websocket_url,
+            }
         targets = list_targets(self.port, self.timeout_seconds)
-        return pick_page_target(targets)
+        target = pick_page_target(targets)
+        self._cached_target_id = str(
+            target.get("id") or target.get("webSocketDebuggerUrl") or ""
+        )
+        self._cached_websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+        self._target_cache_at = time.monotonic()
+        return target
+
+    def _clear_target_cache(self, *, clear_script: bool) -> None:
+        self._cached_target_id = ""
+        self._cached_websocket_url = ""
+        self._target_cache_at = 0.0
+        if clear_script:
+            self._target_id = ""
+            self._websocket_url = ""
+            self._script_identifier = ""
 
     def _install(self, websocket_url: str, target_id: str, *, force: bool = False) -> None:
         if force and self._script_identifier:

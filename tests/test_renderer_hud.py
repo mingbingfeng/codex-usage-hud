@@ -90,6 +90,12 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("codex-usage-hud-settings-menu", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="settings-menu"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="coffee-open"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertGreaterEqual(
+            renderer_hud.RENDERER_HUD_SCRIPT.count(
+                'class="codex-usage-hud-panel-header" data-action="toggle"'
+            ),
+            2,
+        )
         self.assertIn("请作者喝咖啡", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-fetch-prices", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-restart", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -250,6 +256,7 @@ class RendererHudPayloadTests(unittest.TestCase):
 class RendererHudClientTests(unittest.TestCase):
     def test_client_installs_renderer_script_once_and_pushes_payloads(self) -> None:
         install_calls: list[tuple[str, str]] = []
+        list_calls = 0
         update_expressions: list[str] = []
         originals = (
             renderer_hud.list_targets,
@@ -258,7 +265,9 @@ class RendererHudClientTests(unittest.TestCase):
         )
 
         def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            nonlocal list_calls
             del port, timeout_seconds
+            list_calls += 1
             return [
                 {
                     "id": "target-1",
@@ -302,6 +311,7 @@ class RendererHudClientTests(unittest.TestCase):
             ) = originals
 
         self.assertEqual(len(install_calls), 1)
+        self.assertEqual(list_calls, 1)
         self.assertIn("__codexUsageHudUpdate", update_expressions[0])
         self.assertIn('"topLine": "C"', update_expressions[1])
 
@@ -354,6 +364,7 @@ class RendererHudClientTests(unittest.TestCase):
         try:
             client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
             command = client.take_settings_command()
+            second = client.take_settings_command()
         finally:
             (
                 renderer_hud.list_targets,
@@ -362,6 +373,7 @@ class RendererHudClientTests(unittest.TestCase):
 
         self.assertEqual(command["action"], "save")
         self.assertEqual(command["settings"]["daily_reset_time"], "09:30")
+        self.assertIsNone(second)
         self.assertEqual(len(expressions), 1)
 
 

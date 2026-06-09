@@ -41,6 +41,27 @@ class CdpProbeTests(unittest.TestCase):
 
         self.assertEqual(pick_page_target(targets)["webSocketDebuggerUrl"], "ws://127.0.0.1/codex")
 
+    def test_pick_page_target_prefers_main_index_over_hotkey_window(self) -> None:
+        targets = [
+            {
+                "type": "page",
+                "title": "Codex",
+                "url": "app://-/index.html?initialRoute=%2Fhotkey-window",
+                "webSocketDebuggerUrl": "ws://127.0.0.1/hotkey",
+            },
+            {
+                "type": "page",
+                "title": "Codex",
+                "url": "app://-/index.html",
+                "webSocketDebuggerUrl": "ws://127.0.0.1/main",
+            },
+        ]
+
+        self.assertEqual(
+            pick_page_target(targets)["webSocketDebuggerUrl"],
+            "ws://127.0.0.1/main",
+        )
+
     def test_pick_page_target_rejects_non_codex_pages(self) -> None:
         targets = [
             {

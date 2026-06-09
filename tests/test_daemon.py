@@ -48,6 +48,9 @@ class DaemonProcessMatchingTests(unittest.TestCase):
     def test_hud_and_python_processes_are_not_detected(self) -> None:
         self.assertFalse(is_codex_client_process("codex-hud.exe"))
         self.assertFalse(is_codex_client_process("codex_usage_hud.exe"))
+        self.assertFalse(is_codex_client_process("codex-plus-plus.exe"))
+        self.assertFalse(is_codex_client_process("codex-plus-plus-manager.exe"))
+        self.assertFalse(is_codex_client_process("codex-computer-use.exe"))
         self.assertFalse(is_codex_client_process("python.exe"))
         self.assertFalse(is_codex_client_process(""))
 

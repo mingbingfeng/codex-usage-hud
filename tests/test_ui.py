@@ -21,15 +21,22 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.cli import (
+    AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
     DAEMON_RESTART_REQUESTED,
+    DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
     HudAlreadyRunningError,
     HudInstanceLock,
     RENDERER_HUD_UNAVAILABLE,
+    RENDERER_UPDATE_FAILURE_LIMIT,
     UsageSummaryCache,
+    _renderer_refresh_delay_seconds,
+    _wait_for_visible_codex_window,
+    _renderer_update_failure_limit,
     _handle_renderer_settings_command,
     budget_warnings,
     main,
     parse_thresholds,
+    run_renderer_hud_session,
     snapshot_to_text,
     run_daemon,
     run_hud_session,
@@ -317,6 +324,26 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(first.tokens, 28)
         self.assertEqual(second.tokens, 29)
         self.assertEqual(parser.loads, 2)
+
+    def test_usage_summary_cache_throttles_repeated_directory_rescans(self) -> None:
+        parser = _FakeUsageParser()
+        cache = UsageSummaryCache(  # type: ignore[arg-type]
+            parser,
+            min_rescan_seconds=60.0,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            path.write_text("{}", encoding="utf-8")
+            day_start = datetime(2026, 5, 28, 10, 0)
+            week_start = datetime(2026, 5, 25, 10, 0)
+
+            first, _ = cache.summarize(Path(temp_dir), day_start, week_start)
+            path.write_text('{"later": true}', encoding="utf-8")
+            second, _ = cache.summarize(Path(temp_dir), day_start, week_start)
+
+        self.assertEqual(first.tokens, 28)
+        self.assertEqual(second.tokens, 28)
+        self.assertEqual(parser.loads, 1)
 
     def test_week_before_today_breakdown_subtracts_current_daily_window(self) -> None:
         week = UsageSummary(tokens=1190, input_tokens=800, cost_usd=119.142012)
@@ -1548,6 +1575,196 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         renderer_session.assert_called_once()
         tk_session.assert_called_once()
+
+    def test_renderer_initial_connect_failure_writes_diagnostic_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=temp_root / "hud_settings.json"),
+                user_config=UserConfig.defaults(),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="failed",
+                last_error="TimeoutError: Timed out waiting for CDP command response",
+                close=MagicMock(),
+                timeout_seconds=1.5,
+            )
+            fake_bridge = MagicMock()
+            fake_bridge.start.return_value = "http://127.0.0.1:8765"
+
+            with (
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=False),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+            diagnostic = (temp_root / "renderer_fallback.log").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        self.assertIn("initial_connect_failed", diagnostic)
+        self.assertIn("Timed out waiting for CDP command response", diagnostic)
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_auto_mode_uses_faster_timeout_failure_limit(self) -> None:
+        self.assertEqual(
+            _renderer_update_failure_limit(
+                "auto",
+                "URLError: <urlopen error timed out>",
+            ),
+            AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
+        )
+        self.assertEqual(
+            _renderer_update_failure_limit(
+                "renderer",
+                "URLError: <urlopen error timed out>",
+            ),
+            RENDERER_UPDATE_FAILURE_LIMIT,
+        )
+        self.assertEqual(
+            _renderer_update_failure_limit(
+                "auto",
+                "RuntimeError: renderer update function did not acknowledge payload",
+            ),
+            RENDERER_UPDATE_FAILURE_LIMIT,
+        )
+
+    def test_renderer_refresh_delay_slows_idle_snapshots_only(self) -> None:
+        context = SimpleNamespace(poll_ms=500)
+        idle_snapshot = ParsedSession(status="parsed")
+        idle_snapshot.request.status = "confirmed"
+        running_snapshot = ParsedSession(status="parsed")
+        running_snapshot.request.status = "running"
+
+        idle_delay = _renderer_refresh_delay_seconds(context, idle_snapshot, 0.0)
+        running_delay = _renderer_refresh_delay_seconds(context, running_snapshot, 0.0)
+        forced_delay = _renderer_refresh_delay_seconds(
+            context,
+            idle_snapshot,
+            0.0,
+            force_fast=True,
+        )
+
+        self.assertGreaterEqual(idle_delay, 1.5)
+        self.assertAlmostEqual(running_delay, 0.5)
+        self.assertAlmostEqual(forced_delay, 0.5)
+
+    def test_wait_for_visible_codex_window_returns_when_tracker_becomes_visible(self) -> None:
+        tracker = SimpleNamespace(
+            enabled=True,
+            get_window_snapshot=MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        visible=False,
+                        status="not_found",
+                        reason="Codex HWND not found",
+                        hwnd=0,
+                    ),
+                    SimpleNamespace(
+                        visible=True,
+                        status="visible",
+                        reason="",
+                        hwnd=123,
+                    ),
+                ]
+            ),
+        )
+
+        with (
+            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
+            patch("codex_usage_hud.cli.time.sleep", return_value=None),
+        ):
+            ready, status, reason, hwnd = _wait_for_visible_codex_window(
+                timeout_seconds=1.0,
+                poll_seconds=0.0,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(status, "visible")
+        self.assertEqual(reason, "")
+        self.assertEqual(hwnd, 123)
+
+    def test_wait_for_visible_codex_window_times_out_when_tracker_stays_hidden(self) -> None:
+        tracker = SimpleNamespace(
+            enabled=True,
+            get_window_snapshot=MagicMock(
+                return_value=SimpleNamespace(
+                    visible=False,
+                    status="hidden",
+                    reason="Codex is hidden",
+                    hwnd=456,
+                )
+            ),
+        )
+
+        with patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker):
+            ready, status, reason, hwnd = _wait_for_visible_codex_window(
+                timeout_seconds=0.0
+            )
+
+        self.assertFalse(ready)
+        self.assertEqual(status, "hidden")
+        self.assertEqual(reason, "Codex is hidden")
+        self.assertEqual(hwnd, 456)
+
+    def test_renderer_daemon_mode_waits_for_visible_window_before_connect(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=temp_root / "hud_settings.json"),
+                user_config=UserConfig.defaults(),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="failed",
+                last_error="TimeoutError: Timed out waiting for CDP command response",
+                close=MagicMock(),
+                timeout_seconds=1.5,
+            )
+            fake_bridge = MagicMock()
+            fake_bridge.start.return_value = "http://127.0.0.1:8765"
+
+            with (
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch(
+                    "codex_usage_hud.cli._wait_for_visible_codex_window",
+                    return_value=(False, "not_found", "Codex HWND not found", 0),
+                ) as wait_window,
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=False) as wait_renderer,
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                    daemon_manager=SimpleNamespace(),
+                )
+
+            diagnostic = (temp_root / "renderer_fallback.log").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        wait_window.assert_called_once_with(
+            timeout_seconds=DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS
+        )
+        wait_renderer.assert_not_called()
+        self.assertIn("window_not_ready", diagnostic)
+        self.assertIn("Codex HWND not found", diagnostic)
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
 
     def test_run_hud_session_returns_restart_code_when_codex_exits(self) -> None:
         fake_context = SimpleNamespace(poll_ms=250, close=MagicMock())

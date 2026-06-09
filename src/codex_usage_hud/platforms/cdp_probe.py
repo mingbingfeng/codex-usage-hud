@@ -329,11 +329,34 @@ def pick_page_target(targets: list[dict[str, Any]]) -> dict[str, Any]:
         for target in targets
         if target.get("type") == "page" and target.get("webSocketDebuggerUrl")
     ]
-    for target in pages:
+    ranked_pages = sorted(
+        pages,
+        key=_page_target_rank,
+        reverse=True,
+    )
+    for target in ranked_pages:
         haystack = f"{target.get('title') or ''} {target.get('url') or ''}".lower()
         if "codex" in haystack or str(target.get("url") or "").startswith("app://"):
             return target
     raise RuntimeError("No Codex CDP page target found")
+
+
+def _page_target_rank(target: dict[str, Any]) -> tuple[int, int]:
+    title = str(target.get("title") or "").strip().lower()
+    url = str(target.get("url") or "").strip().lower()
+    score = 0
+    if "codex" in title:
+        score += 80
+    if url.startswith("app://"):
+        score += 60
+    if url.startswith("app://-/index.html"):
+        score += 120
+    if "initialroute=%2fhotkey-window" in url or "initialroute=/hotkey-window" in url:
+        score -= 160
+    if "hotkey" in title:
+        score -= 80
+    # Prefer the main app surface over transient helper pages when scores tie.
+    return score, -len(url)
 
 
 def evaluate_script(websocket_url: str, script: str, timeout_seconds: float) -> dict[str, Any]:

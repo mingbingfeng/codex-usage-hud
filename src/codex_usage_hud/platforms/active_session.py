@@ -17,6 +17,7 @@ from .base import BasePlatform
 
 _LOGGER = logging.getLogger("codex_usage_hud.active_session")
 _LOGGER.addHandler(logging.NullHandler())
+_THREAD_PATH_NEGATIVE_CACHE_SECONDS = 2.0
 
 
 def compact_text(value: Any, limit: int = 28) -> str:
@@ -247,6 +248,7 @@ class ActiveSessionTracker:
         self._mapped_title = ""
         self._title_cache_key: tuple[str, str] | None = None
         self._title_cache_value = ""
+        self._thread_path_cache: dict[str, tuple[Path | None, float]] = {}
         self._proc: subprocess.Popen[str] | None = None
         self._thread: threading.Thread | None = None
         self._watcher: RealtimeSessionWatcher | None = None
@@ -464,10 +466,23 @@ class ActiveSessionTracker:
         """Resolve a known thread id to a local rollout JSONL path."""
         if not thread_id:
             return None
+        now = time.monotonic()
+        cached = self._thread_path_cache.get(thread_id)
+        if cached is not None:
+            cached_path, cached_at = cached
+            if cached_path is not None and cached_path.exists():
+                return cached_path
+            if (
+                cached_path is None
+                and now - cached_at <= _THREAD_PATH_NEGATIVE_CACHE_SECONDS
+            ):
+                return None
         path = find_session_file(thread_id, self.sessions_root)
         if path is not None:
+            self._thread_path_cache[thread_id] = (path, now)
             return path
         if not self.state_db.exists():
+            self._thread_path_cache[thread_id] = (None, now)
             return None
         try:
             con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
@@ -479,11 +494,15 @@ class ActiveSessionTracker:
             finally:
                 con.close()
         except sqlite3.Error:
+            self._thread_path_cache[thread_id] = (None, now)
             return None
 
         if row is None:
+            self._thread_path_cache[thread_id] = (None, now)
             return None
-        return self._normalize_rollout_path(str(row[0] or ""))
+        path = self._normalize_rollout_path(str(row[0] or ""))
+        self._thread_path_cache[thread_id] = (path, now)
+        return path
 
     def title_from_thread_id(self, thread_id: str) -> str:
         """Resolve a known thread id to its visible title via the state database."""

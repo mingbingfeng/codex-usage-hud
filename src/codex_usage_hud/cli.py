@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+import json
 import logging
 import os
 import signal
@@ -38,11 +39,17 @@ from .core import (
 from .daemon import (
     CodexDaemonManager,
     DEFAULT_DAEMON_POLL_MS,
+    MAX_DAEMON_POLL_MS,
     ProcessListenerError,
     configure_daemon_logging,
     hide_console_window,
 )
-from .platforms import ActiveSessionTracker, SessionPathResolver, get_current_platform
+from .platforms import (
+    ActiveSessionTracker,
+    CodexWindowTracker,
+    SessionPathResolver,
+    get_current_platform,
+)
 from .platforms.base import BasePlatform
 from .ui import TokenHudWindow
 from .ui.renderer_hud import RendererHudClient, wait_for_renderer
@@ -55,14 +62,22 @@ DEFAULT_SESSION_INDEX = "session_index.jsonl"
 DEFAULT_BUDGET_THRESHOLDS_TEXT = ",".join(f"{item:g}" for item in DEFAULT_BUDGET_THRESHOLDS)
 DEFAULT_ACTIVE_SESSION_POLL_MS = 500
 DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
+DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
+RENDERER_IDLE_POLL_MS = 1500
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
 HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
 DAEMON_RESTART_REQUESTED = 10
 RENDERER_HUD_UNAVAILABLE = 20
-RENDERER_INITIAL_TIMEOUT_SECONDS = 0.7
-DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 2.0
+RENDERER_CDP_TIMEOUT_SECONDS = 1.0
+DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
+RENDERER_INITIAL_TIMEOUT_SECONDS = 2.0
+DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 5.0
+DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
+RENDERER_UPDATE_FAILURE_LIMIT = 6
+AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT = 3
+RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 
 
@@ -108,6 +123,84 @@ def hud_runtime_dir() -> Path:
 def hud_lock_path() -> Path:
     """Return the pid-file lock path used by the interactive HUD."""
     return hud_runtime_dir() / HUD_LOCK_FILENAME
+
+
+def renderer_diagnostic_path() -> Path:
+    """Return the renderer fallback diagnostics path."""
+    return hud_runtime_dir() / RENDERER_DIAGNOSTIC_FILENAME
+
+
+def _append_renderer_diagnostic(stage: str, **fields: object) -> None:
+    """Persist one renderer fallback diagnostic record for postmortems."""
+    path = renderer_diagnostic_path()
+    record = {
+        "time": datetime.now().astimezone().isoformat(),
+        "stage": stage,
+    }
+    for key, value in fields.items():
+        if value not in {"", None}:
+            record[key] = value
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+
+
+def _renderer_update_failure_limit(display_mode: str, last_error: str) -> int:
+    """Return how many consecutive renderer update failures we tolerate."""
+    if (
+        normalize_display_mode(display_mode) == "auto"
+        and "timed out" in str(last_error or "").lower()
+    ):
+        return AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT
+    return RENDERER_UPDATE_FAILURE_LIMIT
+
+
+def _renderer_refresh_delay_seconds(
+    context: "RuntimeContext",
+    snapshot: ParsedSession,
+    elapsed_seconds: float,
+    *,
+    force_fast: bool = False,
+) -> float:
+    """Return the next renderer loop delay with slower idle refreshes."""
+    fast_seconds = max(0.1, context.poll_ms / 1000.0)
+    request_status = str(getattr(snapshot.request, "status", "") or "")
+    target_seconds = fast_seconds
+    if not force_fast and request_status != "running":
+        target_seconds = max(fast_seconds, RENDERER_IDLE_POLL_MS / 1000.0)
+    return max(0.1, target_seconds - max(0.0, elapsed_seconds))
+
+
+def _wait_for_visible_codex_window(
+    *,
+    timeout_seconds: float,
+    poll_seconds: float = 0.25,
+) -> tuple[bool, str, str, int]:
+    """Wait briefly for a visible Codex top-level window before renderer injection."""
+    if not sys.platform.startswith("win"):
+        return True, "unsupported", "", 0
+    try:
+        tracker = CodexWindowTracker(enable_uia=False)
+    except Exception:
+        return True, "tracker-error", "", 0
+    if not getattr(tracker, "enabled", False):
+        return True, "disabled", "", 0
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    while True:
+        snapshot = tracker.get_window_snapshot()
+        if str(getattr(snapshot, "status", "")) == "visible":
+            return True, str(snapshot.status), str(snapshot.reason or ""), int(
+                snapshot.hwnd or 0
+            )
+        if time.monotonic() >= deadline:
+            return False, str(snapshot.status), str(snapshot.reason or ""), int(
+                snapshot.hwnd or 0
+            )
+        time.sleep(max(0.01, float(poll_seconds)))
 
 
 def _read_pid(path: Path) -> int | None:
@@ -378,9 +471,19 @@ class _UsageCacheEntry:
 class UsageSummaryCache:
     """Cache rolling day/week usage summaries per JSONL session file."""
 
-    def __init__(self, parser: JsonlSessionParser) -> None:
+    def __init__(
+        self,
+        parser: JsonlSessionParser,
+        *,
+        min_rescan_seconds: float = DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS,
+    ) -> None:
         self._parser = parser
+        self._min_rescan_seconds = max(0.0, float(min_rescan_seconds))
         self._entries: dict[Path, _UsageCacheEntry] = {}
+        self._last_scan_key: tuple[Path, datetime, datetime] | None = None
+        self._last_scan_at = 0.0
+        self._last_day_total = UsageSummary()
+        self._last_week_total = UsageSummary()
 
     def summarize(
         self,
@@ -388,10 +491,22 @@ class UsageSummaryCache:
         day_start: datetime,
         week_start: datetime,
     ) -> tuple[UsageSummary, UsageSummary]:
+        now = time.monotonic()
+        scan_key = (sessions_root, day_start, week_start)
+        if (
+            self._last_scan_key == scan_key
+            and now - self._last_scan_at < self._min_rescan_seconds
+        ):
+            return replace(self._last_day_total), replace(self._last_week_total)
+
         day_total = UsageSummary()
         week_total = UsageSummary()
 
         if not sessions_root.exists():
+            self._last_scan_key = scan_key
+            self._last_scan_at = now
+            self._last_day_total = day_total
+            self._last_week_total = week_total
             return day_total, week_total
 
         seen_paths: set[Path] = set()
@@ -407,6 +522,10 @@ class UsageSummaryCache:
             if cached_path not in seen_paths:
                 del self._entries[cached_path]
 
+        self._last_scan_key = scan_key
+        self._last_scan_at = now
+        self._last_day_total = replace(day_total)
+        self._last_week_total = replace(week_total)
         return day_total, week_total
 
     def _summaries_for_file(
@@ -982,7 +1101,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DAEMON_POLL_MS,
         help=(
             "Windows daemon process polling interval in milliseconds. "
-            f"Default: {DEFAULT_DAEMON_POLL_MS}; values above 500 are clamped."
+            f"Default: {DEFAULT_DAEMON_POLL_MS}; values above {MAX_DAEMON_POLL_MS} are clamped."
         ),
     )
     parser.add_argument(
@@ -1082,7 +1201,16 @@ def run_renderer_hud_session(
     try:
         with lock_context:
             context = build_runtime_context(args)
-            client = RendererHudClient()
+            display_mode = normalize_display_mode(
+                getattr(args, "hud_mode", None) or context.user_config.display_mode
+            )
+            client = RendererHudClient(
+                timeout_seconds=(
+                    DAEMON_RENDERER_CDP_TIMEOUT_SECONDS
+                    if daemon_manager is not None
+                    else RENDERER_CDP_TIMEOUT_SECONDS
+                )
+            )
             restart_requested = Event()
             bridge = SettingsBridgeServer(
                 context.settings_store,
@@ -1097,6 +1225,35 @@ def run_renderer_hud_session(
                     return ParsedSession(status="error", error=str(exc))
 
             try:
+                if daemon_manager is not None:
+                    (
+                        window_ready,
+                        window_status,
+                        window_reason,
+                        window_hwnd,
+                    ) = _wait_for_visible_codex_window(
+                        timeout_seconds=DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS
+                    )
+                    if not window_ready:
+                        _LOGGER.info(
+                            "renderer_hud_window_not_ready status=%s hwnd=%s reason=%s",
+                            window_status,
+                            window_hwnd,
+                            window_reason,
+                        )
+                        _append_renderer_diagnostic(
+                            "window_not_ready",
+                            status=window_status,
+                            reason=window_reason,
+                            hwnd=window_hwnd,
+                            display_mode=display_mode,
+                            daemon_mode=True,
+                            window_ready_timeout_seconds=(
+                                DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS
+                            ),
+                        )
+                        return RENDERER_HUD_UNAVAILABLE
+
                 initial_timeout = (
                     DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS
                     if daemon_manager is not None
@@ -1112,21 +1269,38 @@ def run_renderer_hud_session(
                         client.last_status,
                         client.last_error,
                     )
+                    _append_renderer_diagnostic(
+                        "initial_connect_failed",
+                        status=client.last_status,
+                        error=client.last_error,
+                        display_mode=display_mode,
+                        daemon_mode=daemon_manager is not None,
+                        initial_timeout_seconds=initial_timeout,
+                        cdp_timeout_seconds=getattr(client, "timeout_seconds", None),
+                    )
                     return RENDERER_HUD_UNAVAILABLE
 
                 failures = 0
                 settings_command_status: dict[str, object] = {}
+                next_daemon_check_at = 0.0
                 while True:
                     started = time.monotonic()
-                    if daemon_manager is not None:
+                    if (
+                        daemon_manager is not None
+                        and started >= next_daemon_check_at
+                    ):
                         try:
                             if not daemon_manager.codex_is_running():
                                 _LOGGER.info("daemon_codex_exited")
                                 return DAEMON_RESTART_REQUESTED
+                            next_daemon_check_at = (
+                                started + daemon_manager.poll_seconds
+                            )
                         except ProcessListenerError as exc:
                             _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
                             return RENDERER_HUD_UNAVAILABLE
                     command = client.take_settings_command()
+                    force_fast_refresh = bool(command or settings_command_status)
                     if command:
                         settings_command_status = _handle_renderer_settings_command(
                             command,
@@ -1141,8 +1315,9 @@ def run_renderer_hud_session(
                             else 0
                         )
                     context.reload_user_config()
+                    snapshot = snapshot_or_error()
                     if client.update(
-                        snapshot_or_error(),
+                        snapshot,
                         settings=context.user_config,
                         settings_path=context.settings_store.path,
                         settings_bridge_url=bridge_url,
@@ -1158,10 +1333,31 @@ def run_renderer_hud_session(
                             client.last_status,
                             client.last_error,
                         )
-                        if failures >= 6:
+                        failure_limit = _renderer_update_failure_limit(
+                            display_mode,
+                            client.last_error,
+                        )
+                        if failures >= failure_limit:
+                            _append_renderer_diagnostic(
+                                "update_failed",
+                                failures=failures,
+                                failure_limit=failure_limit,
+                                status=client.last_status,
+                                error=client.last_error,
+                                display_mode=display_mode,
+                                daemon_mode=daemon_manager is not None,
+                                cdp_timeout_seconds=getattr(
+                                    client, "timeout_seconds", None
+                                ),
+                            )
                             return RENDERER_HUD_UNAVAILABLE
                     elapsed = time.monotonic() - started
-                    delay = max(0.1, (context.poll_ms / 1000.0) - elapsed)
+                    delay = _renderer_refresh_delay_seconds(
+                        context,
+                        snapshot,
+                        elapsed,
+                        force_fast=force_fast_refresh,
+                    )
                     time.sleep(delay)
             except KeyboardInterrupt:
                 return 130

@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -284,6 +285,29 @@ class ActiveSessionTrackerTests(unittest.TestCase):
 
             self.assertEqual(tracker.current_path(), session_path)
             self.assertEqual(tracker.latest_source, "cdp:Duplicate Title")
+
+    def test_path_from_thread_id_reuses_cached_rollout_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_path = root / "rollout-thread-123.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=root / "state_5.sqlite",
+                sessions_root=root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=500,
+                enabled=False,
+            )
+
+            with patch(
+                "codex_usage_hud.platforms.active_session.find_session_file",
+                return_value=session_path,
+            ) as finder:
+                self.assertEqual(tracker.path_from_thread_id("thread-123"), session_path)
+                self.assertEqual(tracker.path_from_thread_id("thread-123"), session_path)
+
+        finder.assert_called_once_with("thread-123", root)
 
     def test_start_uses_in_process_title_polling_without_command_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

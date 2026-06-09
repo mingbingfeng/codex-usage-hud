@@ -128,6 +128,7 @@ _TITLE_CONTAINER_CONTROL_TYPES = {
 }
 _SIDEBAR_MAX_WIDTH = 340
 _MAIN_TITLE_MIN_LEFT_OFFSET = 220
+MOUSE_HOOK_ENV = "CODEX_USAGE_HUD_MOUSE_HOOK"
 
 
 class _GUID(ctypes.Structure):
@@ -191,6 +192,13 @@ def _succeeded(hr: int) -> bool:
 def _clean_title(value: str | None) -> str:
     text = " ".join(str(value or "").split())
     return "" if text in _IGNORED_TITLES else text
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
 def _plausible_conversation_title(value: str) -> bool:
@@ -1311,6 +1319,7 @@ class _UiaTitleWatcher:
         self._click_points: deque[tuple[int, int]] = deque(maxlen=8)
         self._mouse_callback = None
         self._mouse_hook = 0
+        self._mouse_hook_enabled = _env_flag(MOUSE_HOOK_ENV, default=False)
         self._hwnd = 0
 
     def run(self, stop_event: threading.Event) -> bool:
@@ -1374,10 +1383,11 @@ class _UiaTitleWatcher:
         user32.TranslateMessage.restype = wintypes.BOOL
         user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
         user32.DispatchMessageW.restype = wintypes.LPARAM
-        self._mouse_callback = self._mouse_callback_type(self._handle_mouse_event)
-        self._mouse_hook = int(
-            user32.SetWindowsHookExW(_WH_MOUSE_LL, self._mouse_callback, 0, 0) or 0
-        )
+        if self._mouse_hook_enabled:
+            self._mouse_callback = self._mouse_callback_type(self._handle_mouse_event)
+            self._mouse_hook = int(
+                user32.SetWindowsHookExW(_WH_MOUSE_LL, self._mouse_callback, 0, 0) or 0
+            )
         if not self._registered_events and not self._mouse_hook:
             self._handler = None
             self.probe._release(root)

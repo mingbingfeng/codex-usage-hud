@@ -18,8 +18,10 @@ from codex_usage_hud.platforms.base import BasePlatform
 from codex_usage_hud.platforms.linux import LinuxPlatform
 from codex_usage_hud.platforms.macos import MacOSPlatform
 from codex_usage_hud.platforms.windows import (
+    MOUSE_HOOK_ENV,
     _UIA_LIST_ITEM_CONTROL_TYPE_ID,
     _UIA_TEXT_CONTROL_TYPE_ID,
+    _env_flag,
     _UiaTitleNode,
     _UiaTitleProbe,
     WindowsPlatform,
@@ -67,6 +69,12 @@ class PlatformFactoryTests(unittest.TestCase):
 
 
 class WindowsActiveTitleTests(unittest.TestCase):
+    def test_low_level_mouse_hook_is_opt_in(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_env_flag(MOUSE_HOOK_ENV, default=False))
+        with unittest.mock.patch.dict(os.environ, {MOUSE_HOOK_ENV: "1"}, clear=True):
+            self.assertTrue(_env_flag(MOUSE_HOOK_ENV, default=False))
+
     def test_uia_title_scoring_ignores_sidebar_rows_for_full_window_poll(self) -> None:
         window_rect = (570, 167, 1806, 905)
         main_title = _UiaTitleNode(
