@@ -633,7 +633,7 @@ class CodexWindowTracker:
         except Exception:
             return
 
-    def find_main_window(self) -> int | None:
+    def find_main_window(self, *, allow_inactive: bool = False) -> int | None:
         """Return the best live Codex top-level HWND, if one exists."""
         if not self.enabled:
             return None
@@ -671,6 +671,12 @@ class CodexWindowTracker:
             for candidate in candidates.values()
             if self._is_stable_candidate(candidate)
         ]
+        if not stable_candidates and allow_inactive:
+            stable_candidates = [
+                candidate
+                for candidate in candidates.values()
+                if self._is_restore_candidate(candidate)
+            ]
         if not stable_candidates:
             if cached is not None and self.user32.IsWindow(wintypes.HWND(cached.hwnd)):
                 self._last_hwnd_verified_at = now
@@ -702,12 +708,34 @@ class CodexWindowTracker:
         if not CodexWindowTracker._is_visible_candidate(candidate):
             return False
         title = candidate.title.strip().lower()
+        class_name = candidate.class_name.strip().lower()
         if title == "codex":
             return True
+        if not title:
+            return False
         rect = candidate.rect
         if rect is None:
             return False
-        return rect.width * rect.height >= 300_000
+        if rect.width * rect.height < 300_000:
+            return False
+        return class_name == "chrome_widgetwin_1" or "codex" in class_name
+
+    @staticmethod
+    def _is_restore_candidate(candidate: "_WindowCandidate") -> bool:
+        title = candidate.title.strip().lower()
+        class_name = candidate.class_name.strip().lower()
+        if title == "codex":
+            return True
+        if not title:
+            return False
+        rect = candidate.rect
+        if rect is None or rect.width * rect.height < 300_000:
+            return False
+        process = candidate.process.strip().lower()
+        return (
+            process.startswith("codex")
+            and (class_name == "chrome_widgetwin_1" or "codex" in class_name)
+        )
 
     def get_window_rect(self) -> tuple[int, int, int, int] | None:
         """Return the live Codex main window rectangle as ``left, top, right, bottom``."""
@@ -743,6 +771,18 @@ class CodexWindowTracker:
         self._window_snapshot_cache = snapshot
         self._window_snapshot_cache_at = now
         return snapshot
+
+    def activate_main_window(self) -> int | None:
+        """Restore and foreground the best Codex main window when possible."""
+        if not self.enabled:
+            return None
+        hwnd = self.find_main_window(allow_inactive=True)
+        if hwnd is None:
+            return None
+        self._activate_window(hwnd)
+        self._window_snapshot_cache = None
+        self._window_snapshot_cache_at = 0.0
+        return hwnd
 
     def get_dock_coordinates(
         self,
@@ -925,6 +965,22 @@ class CodexWindowTracker:
             wintypes.LPWSTR,
             ctypes.c_int,
         ]
+        self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        self.user32.ShowWindow.restype = wintypes.BOOL
+        self.user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        self.user32.BringWindowToTop.restype = wintypes.BOOL
+        self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        self.user32.SetForegroundWindow.restype = wintypes.BOOL
+        self.user32.SetActiveWindow.argtypes = [wintypes.HWND]
+        self.user32.SetActiveWindow.restype = wintypes.HWND
+        self.user32.SetFocus.argtypes = [wintypes.HWND]
+        self.user32.SetFocus.restype = wintypes.HWND
+        self.user32.AttachThreadInput.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.BOOL,
+        ]
+        self.user32.AttachThreadInput.restype = wintypes.BOOL
         self.user32.GetClassNameW.argtypes = [
             wintypes.HWND,
             wintypes.LPWSTR,
@@ -949,6 +1005,7 @@ class CodexWindowTracker:
         ]
         self.kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
         self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
         if self.dwmapi is not None:
             self.dwmapi.DwmGetWindowAttribute.argtypes = [
                 wintypes.HWND,
@@ -1060,6 +1117,16 @@ class CodexWindowTracker:
         if physical.width < _MIN_CODEX_WINDOW_WIDTH or physical.height < _MIN_CODEX_WINDOW_HEIGHT:
             return None
         return physical
+
+    def _activate_window(self, hwnd: int) -> None:
+        sw_restore = 9
+        hwnd_handle = wintypes.HWND(hwnd)
+        try:
+            self.user32.ShowWindow(hwnd_handle, sw_restore)
+            self.user32.BringWindowToTop(hwnd_handle)
+            self.user32.SetForegroundWindow(hwnd_handle)
+        except Exception:
+            return
 
     def _landmarks(self, hwnd: int, window_rect: PhysicalRect) -> _Landmarks:
         if not self.enable_uia:
@@ -1251,7 +1318,11 @@ class CodexWindowTracker:
         title_lower = title.strip().lower()
         class_lower = class_name.strip().lower()
         process_lower = process.strip().lower()
+        if not title_lower and class_lower == "chrome_widgetwin_0":
+            return False
         if process_lower == "codex.exe" or process_lower.startswith("codex"):
+            if class_lower == "chrome_widgetwin_1":
+                return bool(title_lower) or process_lower == "codex.exe"
             return True
         if title_lower == "codex" or class_lower == "codex":
             return True
@@ -1269,8 +1340,16 @@ class CodexWindowTracker:
             score += 70
         if title == "codex":
             score += 45
+        elif title:
+            score += 12
+        else:
+            score -= 35
         if "codex" in class_name:
             score += 20
+        elif class_name == "chrome_widgetwin_1":
+            score += 14
+        elif class_name == "chrome_widgetwin_0":
+            score -= 45
         if candidate.visible:
             score += 10
         if not candidate.minimized:

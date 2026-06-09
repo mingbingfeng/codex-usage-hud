@@ -178,6 +178,82 @@ class CodexWindowTrackerSelectionTests(unittest.TestCase):
         self.assertEqual(tracker._last_hwnd, minimized_main.hwnd)
         self.assertGreater(tracker._last_hwnd_verified_at, 0.0)
 
+    def test_allow_inactive_finds_minimized_main_window_without_cache(self) -> None:
+        tracker = CodexWindowTracker(enable_uia=False)
+        minimized_main = wt._WindowCandidate(
+            hwnd=101,
+            title="Codex",
+            class_name="Chrome_WidgetWin_1",
+            process="Codex.exe",
+            rect=None,
+            visible=True,
+            minimized=True,
+            cloaked=False,
+        )
+        popup = wt._WindowCandidate(
+            hwnd=202,
+            title="",
+            class_name="Chrome_WidgetWin_1",
+            process="Codex.exe",
+            rect=PhysicalRect(left=120, top=60, right=420, bottom=360),
+            visible=True,
+            minimized=False,
+            cloaked=False,
+        )
+
+        tracker.user32 = SimpleNamespace(IsWindow=lambda hwnd: True)
+        tracker._candidate_from_hwnd = (  # type: ignore[method-assign]
+            lambda hwnd, verify_codex=False: minimized_main
+            if hwnd == minimized_main.hwnd
+            else popup
+            if hwnd == popup.hwnd
+            else None
+        )
+        tracker._findwindow_candidates = lambda: [minimized_main.hwnd, popup.hwnd]  # type: ignore[method-assign]
+        tracker._enum_window_candidates = lambda: []  # type: ignore[method-assign]
+
+        hwnd = tracker.find_main_window(allow_inactive=True)
+
+        self.assertEqual(hwnd, minimized_main.hwnd)
+
+    def test_empty_title_chrome_widgetwin_zero_does_not_win_over_titled_main(self) -> None:
+        tracker = CodexWindowTracker(enable_uia=False)
+        wrong_surface = wt._WindowCandidate(
+            hwnd=101,
+            title="",
+            class_name="Chrome_WidgetWin_0",
+            process="Codex.exe",
+            rect=PhysicalRect(left=40, top=20, right=1320, bottom=840),
+            visible=True,
+            minimized=False,
+            cloaked=False,
+        )
+        main = wt._WindowCandidate(
+            hwnd=202,
+            title="Codex",
+            class_name="Chrome_WidgetWin_1",
+            process="Codex.exe",
+            rect=PhysicalRect(left=120, top=60, right=1360, bottom=860),
+            visible=True,
+            minimized=False,
+            cloaked=False,
+        )
+
+        tracker.user32 = SimpleNamespace(IsWindow=lambda hwnd: True)
+        tracker._candidate_from_hwnd = (  # type: ignore[method-assign]
+            lambda hwnd, verify_codex=False: wrong_surface
+            if hwnd == wrong_surface.hwnd
+            else main
+            if hwnd == main.hwnd
+            else None
+        )
+        tracker._findwindow_candidates = lambda: [wrong_surface.hwnd, main.hwnd]  # type: ignore[method-assign]
+        tracker._enum_window_candidates = lambda: []  # type: ignore[method-assign]
+
+        hwnd = tracker.find_main_window(allow_inactive=True)
+
+        self.assertEqual(hwnd, main.hwnd)
+
     def test_is_active_keeps_codex_owned_popup_active(self) -> None:
         tracker = CodexWindowTracker(enable_uia=False)
         tracker.enabled = True

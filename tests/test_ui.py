@@ -33,7 +33,10 @@ from codex_usage_hud.cli import (
     HUD_SWITCH_TO_TK,
     RENDERER_HUD_UNAVAILABLE,
     RENDERER_UPDATE_FAILURE_LIMIT,
+    RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
     UsageSummaryCache,
+    _prepare_codex_window_for_renderer,
+    _prepare_codex_window_for_tk,
     _renderer_refresh_delay_seconds,
     _wait_for_visible_codex_window,
     _renderer_update_failure_limit,
@@ -1533,6 +1536,10 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                return_value=(True, "visible", "", 123),
+            ),
             patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window),
             patch(
                 "codex_usage_hud.cli.build_snapshot",
@@ -1851,6 +1858,246 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(reason, "Codex is hidden")
         self.assertEqual(hwnd, 456)
 
+    def test_prepare_codex_window_focuses_visible_but_inactive_window(self) -> None:
+        tracker = SimpleNamespace(
+            enabled=True,
+            get_window_snapshot=MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=321,
+                    ),
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=321,
+                    ),
+                ]
+            ),
+            is_active=MagicMock(side_effect=[False, True]),
+            activate_main_window=MagicMock(return_value=321),
+        )
+
+        with (
+            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
+            patch("codex_usage_hud.cli._activate_running_codex_app", return_value=True) as activate_app,
+            patch("codex_usage_hud.cli.time.sleep", return_value=None),
+        ):
+            ready, status, reason, hwnd = _prepare_codex_window_for_renderer(
+                timeout_seconds=0.0,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(status, "visible")
+        self.assertEqual(reason, "")
+        self.assertEqual(hwnd, 321)
+        activate_app.assert_called_once()
+        tracker.activate_main_window.assert_not_called()
+
+    def test_prepare_codex_window_restarts_hidden_tray_process_for_renderer(self) -> None:
+        tracker = SimpleNamespace(
+            enabled=True,
+            get_window_snapshot=MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        status="not_found",
+                        reason="Codex HWND not found",
+                        hwnd=0,
+                    ),
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=654,
+                    ),
+                ]
+            ),
+            is_active=MagicMock(return_value=True),
+            activate_main_window=MagicMock(side_effect=[0, 654]),
+        )
+
+        with (
+            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
+            patch("codex_usage_hud.cli._activate_running_codex_app", return_value=False) as activate_app,
+            patch("codex_usage_hud.cli._restart_codex_for_renderer", return_value=True) as restart_codex,
+            patch("codex_usage_hud.cli.time.sleep", return_value=None),
+        ):
+            ready, status, reason, hwnd = _prepare_codex_window_for_renderer(
+                timeout_seconds=1.0,
+                poll_seconds=0.0,
+                launch_if_missing=True,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(status, "visible")
+        self.assertEqual(reason, "")
+        self.assertEqual(hwnd, 654)
+        activate_app.assert_called_once()
+        restart_codex.assert_called_once()
+
+    def test_prepare_codex_window_reactivates_existing_tray_instance_for_tk(self) -> None:
+        tracker = SimpleNamespace(
+            enabled=True,
+            get_window_snapshot=MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        status="not_found",
+                        reason="Codex HWND not found",
+                        hwnd=0,
+                    ),
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=777,
+                    ),
+                ]
+            ),
+            is_active=MagicMock(return_value=True),
+            activate_main_window=MagicMock(return_value=0),
+        )
+
+        with (
+            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
+            patch("codex_usage_hud.cli._activate_running_codex_app", return_value=True) as activate_app,
+            patch("codex_usage_hud.cli.time.sleep", return_value=None),
+        ):
+            ready, status, reason, hwnd = _prepare_codex_window_for_tk(
+                timeout_seconds=1.0,
+                poll_seconds=0.0,
+                launch_if_missing=True,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(status, "visible")
+        self.assertEqual(reason, "")
+        self.assertEqual(hwnd, 777)
+        activate_app.assert_called_once()
+
+    def test_prepare_codex_window_launches_tk_when_no_process_exists(self) -> None:
+        tracker = SimpleNamespace(
+            enabled=True,
+            get_window_snapshot=MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        status="not_found",
+                        reason="Codex HWND not found",
+                        hwnd=0,
+                    ),
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=777,
+                    ),
+                ]
+            ),
+            is_active=MagicMock(return_value=True),
+            activate_main_window=MagicMock(return_value=0),
+        )
+
+        with (
+            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch_app,
+            patch("codex_usage_hud.cli.time.sleep", return_value=None),
+        ):
+            ready, status, reason, hwnd = _prepare_codex_window_for_tk(
+                timeout_seconds=1.0,
+                poll_seconds=0.0,
+                launch_if_missing=True,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(status, "visible")
+        self.assertEqual(reason, "")
+        self.assertEqual(hwnd, 777)
+        launch_app.assert_called_once_with(debugger=False)
+
+    def test_run_renderer_hud_session_prepares_window_before_connect_in_manual_mode(self) -> None:
+        fake_context = SimpleNamespace(
+            settings_store=SimpleNamespace(path=Path("hud_settings.json")),
+            user_config=UserConfig.defaults(),
+            poll_ms=250,
+            close=MagicMock(),
+            reload_user_config=MagicMock(),
+        )
+        fake_client = SimpleNamespace(
+            last_status="ok",
+            last_error="",
+            close=MagicMock(),
+            timeout_seconds=1.0,
+            take_settings_command=MagicMock(return_value=None),
+            update=MagicMock(return_value=True),
+        )
+        fake_bridge = MagicMock()
+        fake_bridge.start.return_value = "http://127.0.0.1:8765"
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+            patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                return_value=(True, "visible", "", 123),
+            ) as prepare_window,
+            patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+            patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
+            patch("codex_usage_hud.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            exit_code = run_renderer_hud_session(
+                SimpleNamespace(),
+                lock_already_held=True,
+            )
+
+        self.assertEqual(exit_code, 130)
+        prepare_window.assert_called_once_with(
+            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            launch_if_missing=True,
+        )
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_run_tk_hud_session_prepares_window_before_opening_tk(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            reload_user_config=MagicMock(),
+        )
+        fake_window = SimpleNamespace(
+            exit_reason="",
+            root=SimpleNamespace(
+                after=lambda *args, **kwargs: None,
+                update_idletasks=lambda: None,
+            ),
+            request_root=SimpleNamespace(update_idletasks=lambda: None),
+            should_refresh_snapshot=lambda: False,
+            refresh_delay_ms=lambda normal_delay_ms: normal_delay_ms,
+            run=lambda: None,
+            update_display=MagicMock(),
+        )
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                return_value=(True, "visible", "", 456),
+            ) as prepare_window,
+            patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window),
+        ):
+            exit_code = run_tk_hud_session(args, lock_already_held=True)
+
+        self.assertEqual(exit_code, 0)
+        prepare_window.assert_called_once_with(
+            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            launch_if_missing=True,
+        )
+        fake_context.close.assert_called_once()
+
     def test_renderer_daemon_mode_waits_for_visible_window_before_connect(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -1872,6 +2119,10 @@ class DaemonLifecycleTests(unittest.TestCase):
                 patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
                 patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
                 patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
                 patch(
                     "codex_usage_hud.cli._wait_for_visible_codex_window",
                     return_value=(False, "not_found", "Codex HWND not found", 0),

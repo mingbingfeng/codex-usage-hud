@@ -62,6 +62,19 @@ class CdpProbeTests(unittest.TestCase):
             "ws://127.0.0.1/main",
         )
 
+    def test_pick_page_target_rejects_hotkey_only_surface(self) -> None:
+        targets = [
+            {
+                "type": "page",
+                "title": "Codex Hotkey",
+                "url": "app://-/index.html?initialRoute=%2Fhotkey-window",
+                "webSocketDebuggerUrl": "ws://127.0.0.1/hotkey",
+            },
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "No main Codex CDP page target found"):
+            pick_page_target(targets)
+
     def test_pick_page_target_rejects_non_codex_pages(self) -> None:
         targets = [
             {
@@ -157,6 +170,7 @@ class CdpProbeTests(unittest.TestCase):
         self.assertEqual(calls[1], ("Page.addScriptToEvaluateOnNewDocument", {"source": "window.x=1"}))
         self.assertEqual(calls[2][0], "Runtime.evaluate")
         self.assertEqual(calls[2][1]["expression"], "window.x=1")
+
 
 
 if __name__ == "__main__":

@@ -88,6 +88,7 @@ HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
 RENDERER_CDP_TIMEOUT_SECONDS = 1.0
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
 RENDERER_INITIAL_TIMEOUT_SECONDS = 2.0
+RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS = 2.0
 DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 5.0
 DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
 RENDERER_UPDATE_FAILURE_LIMIT = 6
@@ -921,6 +922,203 @@ def _wait_for_visible_codex_window(
             return False, str(snapshot.status), str(snapshot.reason or ""), int(
                 snapshot.hwnd or 0
             )
+        time.sleep(max(0.01, float(poll_seconds)))
+
+
+def _codex_processes_running() -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        listener = WindowsProcessListener(exclude_pid=os.getpid())
+        return bool(listener.snapshot().found)
+    except ProcessListenerError:
+        return False
+
+
+def _activate_running_codex_app() -> bool:
+    """Ask Codex to foreground its existing instance via normal app activation."""
+    if not _codex_processes_running():
+        return False
+    return launch_codex_app(debugger=False)
+
+
+def _prepare_codex_window_for_renderer(
+    *,
+    timeout_seconds: float,
+    poll_seconds: float = 0.25,
+    launch_if_missing: bool = False,
+) -> tuple[bool, str, str, int]:
+    """Best-effort restore/focus of Codex before attempting renderer injection."""
+    if not sys.platform.startswith("win"):
+        return True, "unsupported", "", 0
+    try:
+        tracker = CodexWindowTracker(enable_uia=False)
+    except Exception:
+        return True, "tracker-error", "", 0
+    if not getattr(tracker, "enabled", False):
+        return True, "disabled", "", 0
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    launch_attempted = False
+    activation_attempted = False
+    last_status = "not_found"
+    last_reason = ""
+    last_hwnd = 0
+    while True:
+        snapshot = tracker.get_window_snapshot()
+        last_status = str(getattr(snapshot, "status", "") or "")
+        last_reason = str(getattr(snapshot, "reason", "") or "")
+        last_hwnd = int(getattr(snapshot, "hwnd", 0) or 0)
+        is_active = False
+        if last_hwnd:
+            try:
+                is_active = bool(tracker.is_active(last_hwnd))
+            except Exception:
+                is_active = False
+
+        if last_status == "visible" and is_active:
+            return True, last_status, last_reason, last_hwnd
+
+        if (
+            not activation_attempted
+            and _codex_processes_running()
+            and (last_status != "visible" or not is_active)
+        ):
+            activation_attempted = True
+            activated = _activate_running_codex_app()
+            _LOGGER.info(
+                "renderer_codex_shell_activation_requested activated=%s status=%s hwnd=%s reason=%s",
+                activated,
+                last_status,
+                last_hwnd,
+                last_reason,
+            )
+            if activated:
+                time.sleep(max(0.05, float(poll_seconds)))
+                continue
+
+        try:
+            activated_hwnd = int(tracker.activate_main_window() or 0)
+        except Exception:
+            activated_hwnd = 0
+        if activated_hwnd:
+            snapshot = tracker.get_window_snapshot()
+            last_status = str(getattr(snapshot, "status", "") or "")
+            last_reason = str(getattr(snapshot, "reason", "") or "")
+            last_hwnd = int(getattr(snapshot, "hwnd", 0) or activated_hwnd)
+            if last_status == "visible":
+                return True, last_status, last_reason, last_hwnd
+
+        if (
+            launch_if_missing
+            and not launch_attempted
+            and last_status in {"not_found", "hidden", "cloaked"}
+        ):
+            launch_attempted = True
+            if _codex_processes_running() and last_status == "not_found":
+                launched = _restart_codex_for_renderer()
+                action = "restart_debugger"
+            else:
+                launched = launch_codex_app(debugger=True)
+                action = "launch_debugger"
+            _LOGGER.info(
+                "renderer_codex_window_restore_requested action=%s launched=%s status=%s hwnd=%s reason=%s",
+                action,
+                launched,
+                last_status,
+                last_hwnd,
+                last_reason,
+            )
+
+        if time.monotonic() >= deadline:
+            return False, last_status, last_reason, last_hwnd
+        time.sleep(max(0.01, float(poll_seconds)))
+
+
+def _prepare_codex_window_for_tk(
+    *,
+    timeout_seconds: float,
+    poll_seconds: float = 0.25,
+    launch_if_missing: bool = False,
+) -> tuple[bool, str, str, int]:
+    """Best-effort restore/focus of Codex before opening the standalone Tk HUD."""
+    if not sys.platform.startswith("win"):
+        return True, "unsupported", "", 0
+    try:
+        tracker = CodexWindowTracker(enable_uia=False)
+    except Exception:
+        return True, "tracker-error", "", 0
+    if not getattr(tracker, "enabled", False):
+        return True, "disabled", "", 0
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    launch_attempted = False
+    activation_attempted = False
+    last_status = "not_found"
+    last_reason = ""
+    last_hwnd = 0
+    while True:
+        snapshot = tracker.get_window_snapshot()
+        last_status = str(getattr(snapshot, "status", "") or "")
+        last_reason = str(getattr(snapshot, "reason", "") or "")
+        last_hwnd = int(getattr(snapshot, "hwnd", 0) or 0)
+        is_active = False
+        if last_hwnd:
+            try:
+                is_active = bool(tracker.is_active(last_hwnd))
+            except Exception:
+                is_active = False
+
+        if last_status == "visible" and is_active:
+            return True, last_status, last_reason, last_hwnd
+
+        if (
+            not activation_attempted
+            and _codex_processes_running()
+            and (last_status != "visible" or not is_active)
+        ):
+            activation_attempted = True
+            activated = _activate_running_codex_app()
+            _LOGGER.info(
+                "tk_codex_shell_activation_requested activated=%s status=%s hwnd=%s reason=%s",
+                activated,
+                last_status,
+                last_hwnd,
+                last_reason,
+            )
+            if activated:
+                time.sleep(max(0.05, float(poll_seconds)))
+                continue
+
+        try:
+            activated_hwnd = int(tracker.activate_main_window() or 0)
+        except Exception:
+            activated_hwnd = 0
+        if activated_hwnd:
+            snapshot = tracker.get_window_snapshot()
+            last_status = str(getattr(snapshot, "status", "") or "")
+            last_reason = str(getattr(snapshot, "reason", "") or "")
+            last_hwnd = int(getattr(snapshot, "hwnd", 0) or activated_hwnd)
+            if last_status == "visible":
+                return True, last_status, last_reason, last_hwnd
+
+        if (
+            launch_if_missing
+            and not launch_attempted
+            and last_status in {"not_found", "hidden", "cloaked"}
+        ):
+            launch_attempted = True
+            launched = launch_codex_app(debugger=False)
+            _LOGGER.info(
+                "tk_codex_window_restore_requested launched=%s status=%s hwnd=%s reason=%s",
+                launched,
+                last_status,
+                last_hwnd,
+                last_reason,
+            )
+
+        if time.monotonic() >= deadline:
+            return False, last_status, last_reason, last_hwnd
         time.sleep(max(0.01, float(poll_seconds)))
 
 
@@ -2128,6 +2326,31 @@ def run_renderer_hud_session(
 
             try:
                 wait_for_window = daemon_manager is not None or launched_codex
+                launch_if_missing = True
+                local_loading.update(
+                    title=(
+                        "正在切换到 Renderer HUD"
+                        if launched_codex
+                        else "正在启动 Renderer HUD"
+                    ),
+                    message="正在拉起 Codex 主窗口并切到前台，确保 Renderer 注入目标正确...",
+                )
+                (
+                    window_prepared,
+                    window_status,
+                    window_reason,
+                    window_hwnd,
+                ) = _prepare_codex_window_for_renderer(
+                    timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+                    launch_if_missing=launch_if_missing,
+                )
+                if not window_prepared:
+                    _LOGGER.info(
+                        "renderer_hud_window_prepare_best_effort_failed status=%s hwnd=%s reason=%s",
+                        window_status,
+                        window_hwnd,
+                        window_reason,
+                    )
                 if wait_for_window:
                     local_loading.update(
                         title=(
@@ -2388,6 +2611,10 @@ def run_tk_hud_session(
         with lock_context:
             context = build_runtime_context(args)
             try:
+                _prepare_codex_window_for_tk(
+                    timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+                    launch_if_missing=True,
+                )
                 window = TokenHudWindow(
                     compact=args.compact,
                     hide_until_attached=hide_until_attached,

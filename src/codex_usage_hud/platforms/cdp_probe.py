@@ -329,15 +329,28 @@ def pick_page_target(targets: list[dict[str, Any]]) -> dict[str, Any]:
         for target in targets
         if target.get("type") == "page" and target.get("webSocketDebuggerUrl")
     ]
+    codex_pages = [
+        target
+        for target in pages
+        if (
+            "codex" in f"{target.get('title') or ''} {target.get('url') or ''}".lower()
+            or str(target.get("url") or "").startswith("app://")
+        )
+    ]
+    main_pages = [
+        target
+        for target in codex_pages
+        if not _is_hotkey_window_target(target)
+    ]
     ranked_pages = sorted(
-        pages,
+        main_pages,
         key=_page_target_rank,
         reverse=True,
     )
-    for target in ranked_pages:
-        haystack = f"{target.get('title') or ''} {target.get('url') or ''}".lower()
-        if "codex" in haystack or str(target.get("url") or "").startswith("app://"):
-            return target
+    if ranked_pages:
+        return ranked_pages[0]
+    if codex_pages:
+        raise RuntimeError("No main Codex CDP page target found")
     raise RuntimeError("No Codex CDP page target found")
 
 
@@ -351,12 +364,22 @@ def _page_target_rank(target: dict[str, Any]) -> tuple[int, int]:
         score += 60
     if url.startswith("app://-/index.html"):
         score += 120
-    if "initialroute=%2fhotkey-window" in url or "initialroute=/hotkey-window" in url:
+    if _is_hotkey_window_target(target):
         score -= 160
     if "hotkey" in title:
         score -= 80
     # Prefer the main app surface over transient helper pages when scores tie.
     return score, -len(url)
+
+
+def _is_hotkey_window_target(target: dict[str, Any]) -> bool:
+    url = str(target.get("url") or "").strip().lower()
+    title = str(target.get("title") or "").strip().lower()
+    return (
+        "initialroute=%2fhotkey-window" in url
+        or "initialroute=/hotkey-window" in url
+        or "hotkey" in title
+    )
 
 
 def evaluate_script(websocket_url: str, script: str, timeout_seconds: float) -> dict[str, Any]:
