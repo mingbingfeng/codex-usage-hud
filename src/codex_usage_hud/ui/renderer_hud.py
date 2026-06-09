@@ -625,6 +625,16 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-price-row input:focus {
         border-color: #f3d27a;
       }
+      #${rootId} .codex-usage-hud-settings-inline {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+      #${rootId} .codex-usage-hud-settings-inline .codex-usage-hud-settings-action {
+        min-height: 30px;
+        padding-inline: 12px;
+      }
       #${rootId} .codex-usage-hud-price-table {
         grid-column: 1 / -1;
         margin-top: 4px;
@@ -645,6 +655,18 @@ RENDERER_HUD_SCRIPT = r"""
         min-width: 0;
         color: #a9bcd2;
         font-size: 11px;
+      }
+      #${rootId} .codex-usage-hud-settings-footnote {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 2px;
+      }
+      #${rootId} .codex-usage-hud-settings-footnote .codex-usage-hud-settings-status {
+        text-align: right;
       }
       #${rootId} .codex-usage-hud-settings-status[data-kind="error"] {
         color: #ffb86b;
@@ -1084,7 +1106,7 @@ RENDERER_HUD_SCRIPT = r"""
         <div class="codex-usage-hud-settings-actions">
           <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || defaultStatus)}</div>
           <div>
-            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取价格</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
           </div>
         </div>
       </div>
@@ -1135,13 +1157,12 @@ RENDERER_HUD_SCRIPT = r"""
           <label>本周补充已使用额度 USD</label>
           <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(settings.weekly_adjustment_usd)}">
         </div>
-        <div class="codex-usage-hud-settings-field">
-          <label>请作者喝咖啡链接</label>
-          <input data-setting-key="support_url" value="${escapeHtml(settings.support_url)}">
-        </div>
         <div class="codex-usage-hud-settings-field" style="grid-column:1/-1">
           <label>计费单价获取地址</label>
-          <input data-setting-key="pricing_url" value="${escapeHtml(settings.pricing_url)}" placeholder="https://example.com/model-prices.json">
+          <div class="codex-usage-hud-settings-inline">
+            <input data-setting-key="pricing_url" value="${escapeHtml(settings.pricing_url)}" placeholder="https://example.com/model-prices.json">
+            <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取</button>
+          </div>
         </div>
         <div class="codex-usage-hud-price-table">
           <div class="codex-usage-hud-price-title">模型单价（USD / 1M tokens）</div>
@@ -1151,7 +1172,10 @@ RENDERER_HUD_SCRIPT = r"""
           <div data-price-rows="true">${priceRowsHtml(settings)}</div>
           <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model" style="justify-self:start;margin-top:6px">添加模型</button>
         </div>
-        <div class="codex-usage-hud-settings-status" style="grid-column:1/-1">配置文件：${escapeHtml(path || "未提供")} ${bridge ? "" : "（桥接未连接）"}</div>
+        <div class="codex-usage-hud-settings-footnote">
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-exit" data-variant="ghost">退出 HUD</button>
+          <div class="codex-usage-hud-settings-status">配置文件：${escapeHtml(path || "未提供")} ${bridge ? "" : "（桥接未连接）"}</div>
+        </div>
       </div>
     `;
   }
@@ -1329,7 +1353,7 @@ RENDERER_HUD_SCRIPT = r"""
         .map((item) => Number(item.trim()))
         .filter((item) => Number.isFinite(item) && item > 0),
       weekly_adjustment_usd: numberValue("weekly_adjustment_usd", settings.weekly_adjustment_usd),
-      support_url: String(read("support_url") || "").trim(),
+      support_url: String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud").trim(),
       model_prices: modelPrices,
     };
   }
@@ -1371,6 +1395,19 @@ RENDERER_HUD_SCRIPT = r"""
     submitSettingsCommand(
       { action: "restart", reason: "settings" },
       "重启请求已提交，等待 HUD daemon 处理..."
+    );
+  }
+
+  function exitHudFromModal() {
+    openSettingsLoading({
+      kicker: "正在退出",
+      title: "正在停止 HUD",
+      body: "HUD 正在退出当前界面，并停止后台守护进程（如果正在运行）。",
+    });
+    submitSettingsCommand(
+      { action: "exit", reason: "settings" },
+      "退出请求已提交，正在停止 HUD...",
+      { preserveOverlay: true }
     );
   }
 
@@ -1418,6 +1455,27 @@ RENDERER_HUD_SCRIPT = r"""
       { action: "installUpdate" },
       "安装更新请求已提交，等待 HUD daemon 下载并启动安装器..."
     );
+  }
+
+  function openSettingsExitConfirm() {
+    const dialog = settingsDialogRoot();
+    if (!dialog) return;
+    closeSettingsConfirm();
+    const layer = document.createElement("div");
+    layer.className = "codex-usage-hud-settings-confirm-layer";
+    layer.dataset.settingsConfirm = "true";
+    layer.innerHTML = `
+      <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认退出 HUD">
+        <div class="codex-usage-hud-settings-confirm-kicker">退出 HUD</div>
+        <div class="codex-usage-hud-settings-confirm-title">完全退出并停止守护进程？</div>
+        <div class="codex-usage-hud-settings-confirm-body">这会完全退出 HUD，并停止后台守护进程（如果当前正在运行）。\n\n是否继续？</div>
+        <div class="codex-usage-hud-settings-confirm-actions">
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-exit-cancel" data-variant="ghost">取消</button>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-exit-confirm" data-primary="true">退出 HUD</button>
+        </div>
+      </div>
+    `;
+    dialog.appendChild(layer);
   }
 
   function runUpdateAction() {
@@ -1597,6 +1655,25 @@ RENDERER_HUD_SCRIPT = r"""
         event.stopPropagation();
         closeSettingsConfirm();
         setSettingsStatus("已取消立即切换；如需只改默认值，也可以直接点保存。");
+        return;
+      }
+      if (action.dataset.action === "settings-exit") {
+        event.preventDefault();
+        event.stopPropagation();
+        openSettingsExitConfirm();
+        return;
+      }
+      if (action.dataset.action === "settings-exit-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        setSettingsStatus("已取消退出。");
+        return;
+      }
+      if (action.dataset.action === "settings-exit-confirm") {
+        event.preventDefault();
+        event.stopPropagation();
+        void exitHudFromModal();
         return;
       }
       if (action.dataset.action === "settings-restart") {

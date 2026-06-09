@@ -1652,6 +1652,7 @@ def _handle_renderer_settings_command(
     command: Mapping[str, Any],
     context: RuntimeContext,
     restart_requested: Event,
+    exit_requested: Event,
     update_manager: AutoUpdateManager | None = None,
 ) -> dict[str, object]:
     action = str(command.get("action") or "").strip()
@@ -1700,6 +1701,11 @@ def _handle_renderer_settings_command(
             restart_requested.set()
             return _renderer_settings_status(
                 "已请求重启 HUD；daemon 模式会自动恢复。",
+            )
+        if action == "exit":
+            exit_requested.set()
+            return _renderer_settings_status(
+                "已请求退出 HUD；后台守护进程也会一并停止。",
             )
         if action == "checkUpdate":
             info = check_for_update(current_version=__version__)
@@ -2334,6 +2340,7 @@ def run_renderer_hud_session(
             )
             update_manager = AutoUpdateManager(current_version=__version__)
             restart_requested = Event()
+            exit_requested = Event()
             bridge = SettingsBridgeServer(
                 context.settings_store,
                 restart_callback=restart_requested.set,
@@ -2479,6 +2486,7 @@ def run_renderer_hud_session(
                             command,
                             context,
                             restart_requested,
+                            exit_requested,
                             update_manager,
                         )
                         update_state = update_manager.status().to_dict()
@@ -2487,6 +2495,9 @@ def run_renderer_hud_session(
                         local_loading.close()
                         _LOGGER.info("renderer_hud_switch_requested mode=tk")
                         return HUD_SWITCH_TO_TK
+                    if exit_requested.is_set():
+                        _LOGGER.info("renderer_hud_exit_requested")
+                        return 0
                     if restart_requested.is_set():
                         _LOGGER.info("renderer_hud_restart_requested")
                         return (

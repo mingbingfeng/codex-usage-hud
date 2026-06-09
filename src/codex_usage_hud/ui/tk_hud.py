@@ -2978,16 +2978,45 @@ class TokenHudWindow:
             "本周补充已使用额度 USD",
             settings.weekly_adjustment_usd,
         )
-        self._settings_field(grid, 3, 1, "support_url", "请作者喝咖啡链接", settings.support_url)
-        self._settings_field(
-            grid,
-            4,
-            0,
-            "pricing_url",
-            "计费单价获取地址",
-            settings.pricing_url,
-            columnspan=2,
+        pricing_frame = tk.Frame(grid, bg=HUD_BG)
+        pricing_frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        tk.Label(
+            pricing_frame,
+            text="计费单价获取地址",
+            anchor="w",
+            bg=HUD_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill="x")
+        pricing_controls = tk.Frame(pricing_frame, bg=HUD_BG)
+        pricing_controls.pack(fill="x")
+        pricing_entry = tk.Entry(
+            pricing_controls,
+            bg=HUD_PANEL_BG,
+            fg=HUD_TEXT,
+            insertbackground=HUD_TEXT,
+            relief="flat",
         )
+        pricing_entry.insert(0, str(settings.pricing_url))
+        pricing_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self._settings_entries["pricing_url"] = pricing_entry
+        tk.Button(
+            pricing_controls,
+            text="拉取",
+            command=lambda: self._settings_fetch_prices(
+                self._settings_entries,
+                self._settings_price_rows,
+                prices_body,
+            ),
+            bg="#2E3846",
+            fg=HUD_TEXT,
+            activebackground=HUD_DIVIDER,
+            activeforeground=HUD_TEXT,
+            relief="flat",
+            padx=10,
+            pady=4,
+            cursor="hand2",
+        ).pack(side="left", padx=(8, 0))
 
         price_table = tk.Frame(grid, bg=HUD_BG)
         price_table.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=5, pady=(8, 0))
@@ -3028,31 +3057,31 @@ class TokenHudWindow:
             cursor="hand2",
         ).pack(anchor="w", pady=(6, 0))
 
+        footer = tk.Frame(grid, bg=HUD_BG)
+        footer.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=(10, 0))
+        tk.Button(
+            footer,
+            text="退出 HUD",
+            command=self._confirm_full_exit,
+            bg=HUD_BG,
+            fg="#A9BCD2",
+            activebackground=HUD_HEADER_BG,
+            activeforeground=HUD_TEXT,
+            relief="flat",
+            padx=4,
+            pady=2,
+            cursor="hand2",
+        ).pack(side="left")
         tk.Label(
-            grid,
+            footer,
             text=f"配置文件：{self.user_settings_store.path}",
-            anchor="w",
+            anchor="e",
+            justify="right",
             bg=HUD_BG,
             fg="#A9BCD2",
             font=("Microsoft YaHei UI", 8),
-        ).grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=(10, 0))
+        ).pack(side="right")
 
-        tk.Button(
-            actions,
-            text="拉取价格",
-            command=lambda: self._settings_fetch_prices(
-                self._settings_entries,
-                self._settings_price_rows,
-                prices_body,
-            ),
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            activebackground=HUD_DIVIDER,
-            activeforeground=HUD_TEXT,
-            relief="flat",
-            padx=9,
-            pady=4,
-        ).pack(side="left", padx=(0, 6))
         tk.Button(
             actions,
             text="导出 JSON",
@@ -3417,7 +3446,7 @@ class TokenHudWindow:
             "budget_thresholds": parse_config_thresholds(entries["budget_thresholds"].get()),
             "weekly_adjustment_usd": entries["weekly_adjustment_usd"].get(),
             "pricing_url": entries["pricing_url"].get(),
-            "support_url": entries["support_url"].get(),
+            "support_url": self.user_settings.support_url,
             "model_prices": price_payload,
         }
         return UserConfig.from_dict(raw)
@@ -3479,6 +3508,19 @@ class TokenHudWindow:
             self._set_settings_status(f"导出失败：{exc}", kind="error")
             return
         self._set_settings_status("设置 JSON 已复制到剪贴板。")
+
+    def _confirm_full_exit(self) -> None:
+        message = (
+            "这会完全退出 HUD，并停止后台守护进程（如果当前正在运行）。"
+            "\n\n是否继续？"
+        )
+        if not messagebox.askyesno("退出 HUD", message, parent=self._settings_dialog):
+            self._set_settings_status("已取消退出。")
+            return
+        self._set_settings_status("正在退出 HUD...")
+        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+            self._settings_dialog.destroy()
+        self.close("settings_exit")
 
     def _open_support_dialog(self) -> None:
         self._open_settings_dialog("support")

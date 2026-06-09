@@ -762,10 +762,12 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertAlmostEqual(y, (dialog.winfo_screenheight() - height) // 2, delta=2)
             self.assertIn("设置", button_texts)
             self.assertIn("请作者喝咖啡", button_texts)
-            self.assertIn("拉取价格", button_texts)
+            self.assertIn("拉取", button_texts)
             self.assertIn("导出 JSON", button_texts)
             self.assertIn("保存", button_texts)
+            self.assertIn("退出 HUD", button_texts)
             self.assertIn("display_mode", window._settings_entries)
+            self.assertNotIn("support_url", window._settings_entries)
             self.assertTrue(window._settings_price_rows)
 
             window._select_settings_tab("support")
@@ -790,6 +792,22 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 result = window._scroll_settings_body(SimpleNamespace(delta=-120, num=None))
             self.assertEqual(result, "break")
             scroll.assert_called_once_with(1, "units")
+        finally:
+            window._close()
+
+    def test_settings_exit_confirms_before_closing_hud(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window._open_settings_dialog()
+
+            with (
+                patch("codex_usage_hud.ui.tk_hud.messagebox.askyesno", return_value=True) as askyesno,
+                patch.object(window, "close") as close,
+            ):
+                window._confirm_full_exit()
+
+            askyesno.assert_called_once()
+            close.assert_called_once_with("settings_exit")
         finally:
             window._close()
 
@@ -1551,11 +1569,13 @@ class DaemonLifecycleTests(unittest.TestCase):
                 reload_user_config=reload_user_config,
             )
             restart_requested = MagicMock()
+            exit_requested = MagicMock()
 
             status = _handle_renderer_settings_command(
                 {"action": "save", "settings": {"daily_reset_time": "09:30"}},
                 context,
                 restart_requested,
+                exit_requested,
             )
             saved = store.load()
 
@@ -1567,6 +1587,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIsNone(context.settings_mtime)
         self.assertEqual(reload_calls, 1)
         restart_requested.set.assert_not_called()
+        exit_requested.set.assert_not_called()
 
     def test_renderer_apply_display_mode_requests_tk_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1578,11 +1599,13 @@ class DaemonLifecycleTests(unittest.TestCase):
                 reload_user_config=MagicMock(),
             )
             restart_requested = MagicMock()
+            exit_requested = MagicMock()
 
             status = _handle_renderer_settings_command(
                 {"action": "applyDisplayMode", "settings": {"display_mode": "tk"}},
                 context,
                 restart_requested,
+                exit_requested,
             )
             saved = store.load()
 
@@ -1590,6 +1613,31 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(status["switchMode"], "tk")
         self.assertFalse(status["restartVisible"])
         restart_requested.set.assert_not_called()
+        exit_requested.set.assert_not_called()
+
+    def test_renderer_exit_command_requests_full_shutdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            store.save(UserConfig.defaults())
+            context = SimpleNamespace(
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                reload_user_config=MagicMock(),
+            )
+            restart_requested = MagicMock()
+            exit_requested = MagicMock()
+
+            status = _handle_renderer_settings_command(
+                {"action": "exit"},
+                context,
+                restart_requested,
+                exit_requested,
+            )
+
+        self.assertEqual(status["kind"], "")
+        self.assertIn("后台守护进程", status["message"])
+        restart_requested.set.assert_not_called()
+        exit_requested.set.assert_called_once_with()
 
     def test_tk_refresh_reloads_user_config_before_snapshot(self) -> None:
         fake_context = SimpleNamespace(
@@ -1850,6 +1898,10 @@ class DaemonLifecycleTests(unittest.TestCase):
                 patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
                 patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
                 patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
                 patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
                 patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
                 patch("codex_usage_hud.cli._renderer_update_failure_limit", return_value=1),
