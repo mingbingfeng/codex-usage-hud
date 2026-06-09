@@ -27,9 +27,28 @@ DEFAULT_LOG_LEVEL = "WARN"
 
 # The package is tiny, but we still keep the graph tight and explicit:
 # - collect our own package submodules for reliability across conditional imports
+# - explicitly include package data files used by bundled support QR codes
 # - exclude Linux/macOS platform branches from the Windows build
 # - exclude dev/test helper module names so they cannot be pulled in accidentally
 DEFAULT_COLLECT_PACKAGES = ("codex_usage_hud",)
+DEFAULT_DATA_FILES = (
+    (
+        PROJECT_ROOT / "src" / "codex_usage_hud" / "assets" / "sponsor_alipay.jpg",
+        "codex_usage_hud/assets",
+    ),
+    (
+        PROJECT_ROOT / "src" / "codex_usage_hud" / "assets" / "sponsor_wechat.jpg",
+        "codex_usage_hud/assets",
+    ),
+    (
+        PROJECT_ROOT / "src" / "codex_usage_hud" / "assets" / "sponsor_alipay.png",
+        "codex_usage_hud/assets",
+    ),
+    (
+        PROJECT_ROOT / "src" / "codex_usage_hud" / "assets" / "sponsor_wechat.png",
+        "codex_usage_hud/assets",
+    ),
+)
 DEFAULT_EXCLUDED_MODULES = (
     "tests",
     "docs",
@@ -74,6 +93,7 @@ def build_pyinstaller_command(
     name: str = DEFAULT_EXE_NAME,
     log_level: str = DEFAULT_LOG_LEVEL,
     collect_packages: Sequence[str] = DEFAULT_COLLECT_PACKAGES,
+    data_files: Sequence[tuple[Path, str]] = DEFAULT_DATA_FILES,
     excluded_modules: Sequence[str] = DEFAULT_EXCLUDED_MODULES,
 ) -> list[str]:
     """Return the exact PyInstaller command used for the Windows exe build."""
@@ -102,10 +122,18 @@ def build_pyinstaller_command(
     ]
     for package in collect_packages:
         command.extend(["--collect-submodules", package])
+    for source, destination in data_files:
+        command.extend(["--add-data", pyinstaller_data_spec(source, destination)])
     for module in excluded_modules:
         command.extend(["--exclude-module", module])
     command.append(str(entry_script))
     return command
+
+
+def pyinstaller_data_spec(source: Path, destination: str) -> str:
+    """Return a platform-correct PyInstaller --add-data value."""
+    separator = ";" if os.name == "nt" else ":"
+    return f"{source}{separator}{destination}"
 
 
 def format_command(command: Sequence[str]) -> str:

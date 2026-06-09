@@ -1,195 +1,146 @@
 # codex-usage-hud
 
-[Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?include_prereleases&label=release)
-[Release Notes](https://github.com/mingbingfeng/codex-usage-hud/releases/tag/v0.3.0)
-[Changelog](CHANGELOG.md)
-[Privacy](docs/PRIVACY.md)
+中文 | [English](README_EN.md)
 
-> `v0.3.0` is the current release in this repository. `codex-usage-hud` is a local-first, 100% offline HUD for Codex App with renderer injection, Tk fallback, real-time token and cost tracking, exact cached-token discounting, and zero external dependencies.
->
-> `v0.3.0` 是当前发布版本。`codex-usage-hud` 是一个面向 Codex App 的 local-first HUD，100% 离线运行，支持 renderer 注入、Tk 回退、实时 token 与成本追踪、精确 cached token 折扣计算，并保持 0 外部依赖。
+[![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?label=release)](https://github.com/mingbingfeng/codex-usage-hud/releases)
+[![License](https://img.shields.io/github/license/mingbingfeng/codex-usage-hud)](LICENSE)
+[![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
 
-`codex-usage-hud` is a local-first monitoring tool for Codex App. It reads local JSONL and SQLite logs, tracks token usage and cost, and keeps the current session visible without sending data to external services.
+`codex-usage-hud` 是面向 Codex App 的本地实时用量 HUD。它读取本机 Codex JSONL / SQLite 日志，在 Codex 界面或 Tk fallback 窗口里显示当前会话 token、缓存命中率、实时金额、日/周预算和等待状态，不上传任何会话内容。
 
-`codex-usage-hud` 是一个面向 Codex App 的本地监控工具：只读取本地 JSONL / SQLite 数据，跟踪 token 与成本变化，并把当前会话状态保留在本地 HUD 里，不向外部服务发送任何内容。
+## 快速使用
 
-## What this repo is / 这是什么
+从 [GitHub Releases](https://github.com/mingbingfeng/codex-usage-hud/releases) 下载最新版 Windows 安装包：
 
-- An installable Python package with a standard `src/` layout.
-- A one-shot CLI snapshot and a live HUD for local usage review, with renderer injection when Codex exposes local CDP and Tk fallback otherwise.
-- A Windows-first daemon mode that can attach the HUD when Codex starts.
-- A repo that keeps tags, changelog, release notes, and docs in one maintenance loop.
+- Windows：`codex-usage-hud-v*-windows-x64-setup.exe`
 
-- 一个可安装的 Python 包，使用标准 `src/` 布局。
-- 一个可一次性查看的 CLI 快照，以及一个本地运行的实时 HUD：Codex 暴露本地 CDP 时优先注入 renderer，否则回退到 Tk HUD。
-- 一个 Windows 优先的守护进程模式，可在 Codex 启动时自动挂上 HUD。
-- 一个把 tag、changelog、release notes 和文档放在同一维护闭环里的仓库。
+安装后会有几个入口：
 
-## Start here / 快速开始
+- `Codex Usage HUD`：后台 daemon 入口，等待 Codex App 启动后自动挂上 HUD。
+- `Stop Codex Usage HUD`：关闭正在运行的 HUD。
+- `Check for Updates`：检查 GitHub Release 是否有新安装包。
 
-### Requirements / 环境要求
-
-- Python 3.10 or newer.
-- A local Codex App data directory with session logs.
-- Windows is required for daemon mode; snapshot and HUD usage still stay local.
-
-- Python 3.10 或更高版本。
-- 本地可访问的 Codex App 数据目录和会话日志。
-- 守护模式仅限 Windows；但快照和 HUD 读取仍然是本地完成的。
-
-### Install / 安装
-
-#### Windows
-
-Run the bundled installer from the repository root:
+也可以在命令行使用：
 
 ```powershell
-.\install.bat
-```
-
-The script creates a local `.venv`, installs the package in editable mode, offers optional PATH registration, and can register startup persistence if you choose it.
-
-从仓库根目录运行这个脚本：
-
-```powershell
-.\install.bat
-```
-
-脚本会创建本地 `.venv`、以 editable 模式安装当前项目、可选注册 PATH，并按需提供开机自启动注册。
-
-#### Manual install / 手动安装
-
-```bash
-python -m pip install -e .
-```
-
-### First run / 首次运行
-
-```bash
 codex-hud --once
+codex-hud --daemon
+codex-hud --stop
+codex-hud --check-update
+codex-hud --update
 ```
 
-or / 或：
+## 赞助商
 
-```bash
-python -m codex_usage_hud --once
+[想显示在下方？](mailto:512145547@qq.com?subject=codex-usage-hud%20Sponsor)
+
+| 赞助商 | 介绍 |
+| --- | --- |
+
+## 交流与支持
+
+交流与支持：敬请期待。
+
+如果这个 HUD 帮你节省了排查 token 和费用的时间，可以请作者喝杯咖啡，或者随手赞赏支持一下继续维护。
+
+<p>
+  <img src="src/codex_usage_hud/assets/sponsor_alipay.jpg" alt="支付宝收款码" width="210">
+  <img src="src/codex_usage_hud/assets/sponsor_wechat.jpg" alt="微信赞赏码" width="210">
+</p>
+
+## 主要功能
+
+- Renderer 注入优先：Codex 暴露本地 CDP target 时，HUD 直接显示在 Codex App 内部。
+- Tk fallback：CDP 不可用时自动回退到本地 Tk HUD。
+- 实时 token 与金额：输入、缓存输入、输出、推理、合计、缓存率和实时 USD 估算同屏展示。
+- 日/周预算：自定义日额度、周额度、刷新时间、周起始日和提醒阈值。
+- 工作状态观察：显示当前活动、最长等待、最慢工具和请求轮次流水。
+- 本地配置：设置保存在当前用户 `hud_settings.json`，不需要云端账号。
+- 自动更新：设置页和 CLI 都能检查 GitHub Release 并启动 Windows 安装器。
+- Windows 安装包：v1.0.0 起提供 Inno Setup 安装器，创建开始菜单和可选桌面快捷方式。
+
+## 痛点与解决
+
+中转站 tokens 用量和计费不透明，最怕后台请求“偷跑”到很久才发现。`codex-usage-hud` 把当前会话、今日、本周用量和金额直接挂在 Codex 旁边，缓存命中率和估算金额也会同步显示，方便及时判断费用是否异常。
+
+![实时用量 HUD](docs/images/codex-usage-hud-v1-dashboard.png)
+
+Codex App 执行长任务时，等待过程很容易变成盲等。HUD 会显示当前请求是否还在运行、最新刷新时间、最慢工具和最长响应等待，让你知道它是在工作、等待工具，还是已经需要介入。
+
+不同用户的额度周期并不一样。你可以在设置里定制自己的日/周额度、刷新日期时间点、提醒阈值和本周补充额度，把第三方中转站、团队预算或个人限额统一映射到本地提醒里。
+
+![版本与更新设置](docs/images/codex-usage-hud-v1-update.png)
+
+旧版脚本启动和关闭不够顺手。v1.0.0 提供 Windows 安装器、开始菜单入口、停止入口和更新入口，日常使用不再需要记一串 Python 命令。
+
+原始日志分散在 JSONL、SQLite 和会话索引里，手动核对成本很费时间。HUD 会把这些本地数据合并成一个快照，并保留 CLI `--once` 入口，方便排查、截图前复核和自动化检查。
+
+## 自动更新与安装包
+
+v1.0.0 起，`codex-usage-hud` 通过 GitHub Release 发布 Windows 安装包：
+
+- 安装包命名：`codex-usage-hud-vX.Y.Z-windows-x64-setup.exe`
+- 构建脚本：`python tools/build_installer.py`
+- 安装器：Inno Setup 6
+- 默认安装位置：`%LOCALAPPDATA%\Programs\codex-usage-hud`
+
+HUD 设置页的“版本更新”标签可以检查最新版并启动安装器；CLI 也提供：
+
+```powershell
+codex-hud --check-update
+codex-hud --update
 ```
 
-### Common commands / 常用命令
+安装器会在替换文件前先运行 `codex-hud --stop`，避免旧 HUD 进程占用可执行文件。
 
-| Surface | Command | When to use |
-| --- | --- | --- |
-| Snapshot | `codex-hud --once` | Print the current local usage summary and exit. |
-| Live HUD | `codex-hud` | Prefer the renderer-injected HUD and keep it refreshing; falls back to Tk when CDP is unavailable. |
-| Windows daemon | `codex-hud --daemon` | Wait for Codex, then attach the HUD automatically. |
-| Stop | `codex-hud --stop` | Clear the local PID lock and stop the running HUD. |
+## 数据位置
 
-### Settings / 设置
+- Codex 会话日志：`~/.codex/sessions/`
+- Codex SSE / 状态数据库：`~/.codex/logs_2.sqlite`、`~/.codex/state_5.sqlite`
+- HUD 配置：`%LOCALAPPDATA%\codex-usage-hud\hud_settings.json`
+- HUD daemon 日志：`%LOCALAPPDATA%\codex-usage-hud\daemon.log`
+- 默认安装目录：`%LOCALAPPDATA%\Programs\codex-usage-hud`
 
-The top HUD has a gear button on the right. It opens the settings panel directly; the panel also includes a **Buy the author coffee** tab. Settings are stored in the per-user `hud_settings.json` file together with HUD placement data.
+## 常见问题
 
-The settings panel covers:
+### 以前的 v0.x tag 还能用吗？
 
-- daily / weekly USD budgets and their reset time;
-- HUD display mode: renderer-first injection with Tk fallback, or Tk-only;
-- warning thresholds;
-- model prices per 1M tokens: input, cached input, output, and reasoning;
-- optional pricing JSON URL for pulling model prices;
-- manual weekly USD adjustment for usage that should count toward this week.
-- a support tab with bundled Alipay and WeChat QR codes.
+`v0.1.0`、`v0.2.0`、`v0.3.0` 保留为历史 alpha / preview tag，不再作为推荐安装入口。`v1.0.0` 是第一个受支持的 Windows 安装包版本。
 
-顶部 HUD 右侧有齿轮按钮，点击后会直接打开设置界面；设置界面里保留 **请作者喝咖啡** 标签页。设置会和 HUD 位置一起保存在当前用户的 `hud_settings.json`。
+### HUD 没有出现在 Codex 里
 
-设置面板包括：
+先确认是从 `Codex Usage HUD` 或 `codex-hud --daemon` 启动。Renderer 注入需要 Codex 暴露本地 CDP target；如果不可用，HUD 会自动回退到 Tk 窗口。
 
-- 日 / 周 USD 额度和重置时间；
-- HUD 显示方案：renderer 注入优先并在失败时回退 Tk，或仅使用 Tk；
-- 超额提醒阈值；
-- 模型每 100 万 token 单价：输入、缓存输入、输出、推理；
-- 可选的计费单价 JSON 拉取地址；
-- 本周人工补充已使用 USD 额度。
-- 内置支付宝和微信赞赏码的支持页。
+### 会上传我的提示词或日志吗？
 
-The default display path mirrors Codex++'s external CDP enhancement style: inject into the Codex renderer first, then keep the Tk HUD as the local fallback when CDP is unavailable. Switching between renderer-first and Tk-only takes effect on the next HUD restart. Budget and pricing edits are reloaded while the HUD is running.
+不会。项目只读取本机日志和数据库，不做遥测、不上传 prompt/response，也不要求云端账号。提交 issue 前请阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
 
-默认显示路径参考 Codex++ 的外部 CDP 增强方式：优先注入到 Codex renderer，CDP 不可用时保留 Tk HUD 作为本地回退。renderer 优先和仅 Tk 的切换会在下次 HUD 重启后生效；预算和计费设置会在 HUD 运行中自动重新读取。
+## 开发
 
-## Mental model / 心智模型
+```powershell
+python -m compileall -q src tools tests
+python -m unittest discover -s tests
+python tools/build_exe.py
+python tools/build_installer.py
+```
 
-- The app resolves a session from explicit file path, session id, active conversation, or activity-based fallback.
-- It parses local JSONL and SQLite logs into a single usage snapshot.
-- It keeps privacy boundaries local by design: no network, no telemetry, no upload.
-- It renders either a CLI snapshot, a renderer-injected HUD, or a Tk fallback from the same local data model.
+主要结构：
 
-- 它会从显式文件、会话 id、当前活动会话或活动回退路径里定位一个会话。
-- 它把本地 JSONL 和 SQLite 日志解析成同一份用量快照。
-- 它的隐私边界默认只在本地：不联网、不遥测、不上传。
-- 它会基于同一份本地数据模型渲染 CLI 快照、renderer 注入 HUD 或 Tk 回退 HUD。
+```text
+src/codex_usage_hud/
+  cli.py                 CLI、daemon、更新命令入口
+  daemon.py              Windows Codex 进程监听
+  ui/renderer_hud.py     Codex renderer 注入 HUD
+  ui/tk_hud.py           Tk fallback HUD
+  updater.py             GitHub Release 更新检测与安装器启动
+tools/
+  build_exe.py           PyInstaller 单文件 exe 构建
+  build_installer.py     Inno Setup 安装包构建
+  installer/             Inno Setup 脚本
+tests/                   解析、UI、daemon、打包和更新回归测试
+```
 
-## Project structure / 仓库结构
+## 说明
 
-- `src/codex_usage_hud/` runtime code and entry points.
-- `tests/` regression coverage for parser, pricing, platforms, daemon, and UI behavior.
-- `docs/` contributor and privacy notes.
-- `.github/ISSUE_TEMPLATE/` issue guardrails.
-- `CHANGELOG.md` canonical history.
-- `RELEASE_NOTES_v*.md` version-specific release body drafts.
-
-- `src/codex_usage_hud/` 运行时代码和入口。
-- `tests/` 覆盖解析、计费、平台、守护进程和 UI 行为的回归测试。
-- `docs/` 贡献与隐私说明。
-- `.github/ISSUE_TEMPLATE/` 问题反馈约束。
-- `CHANGELOG.md` 长期维护的正式历史。
-- `RELEASE_NOTES_v*.md` 按版本组织的 release 正文草稿。
-
-## Releases and maintenance / 发布与维护
-
-- Tags follow semantic versioning: `vX.Y.Z`.
-- Current latest tag: `v0.3.0`.
-- `v0.1.0` was the first alpha release; `v0.2.0` is the Smart Daemon Edition; `v0.3.0` is the Renderer Timeline Edition.
-- `CHANGELOG.md` is the long-form history that should stay aligned with tags.
-- The release-note files are maintained as ready-to-paste GitHub release bodies.
-- When a release lands, update the version string, changelog, README release section, and release note file together.
-
-- 标签遵循语义化版本：`vX.Y.Z`。
-- 当前最新 tag：`v0.3.0`。
-- `v0.1.0` 是首个 alpha 版本；`v0.2.0` 是 Smart Daemon Edition；`v0.3.0` 是 Renderer Timeline Edition。
-- `CHANGELOG.md` 是长期历史记录，应该和 tag 保持一致。
-- release note 文件用于维护可直接贴到 GitHub Release 的正文。
-- 每次发布时，建议同步更新版本号、changelog、README 发布区和 release note 文件。
-
-## Development / 开发
-
-- Read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the contributor flow.
-- The standard validation path is `python -m unittest discover -s tests`.
-- A fast syntax check is `python -m compileall src tests`.
-- Keep diffs small and reviewable, and update tests when behavior changes.
-
-- 贡献者流程请看 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
-- 标准验证命令是 `python -m unittest discover -s tests`。
-- 快速语法检查命令是 `python -m compileall src tests`。
-- 请保持 diff 小而清晰，并在行为变化时同步更新测试。
-
-## Privacy / 隐私
-
-- Read [docs/PRIVACY.md](docs/PRIVACY.md) before sharing logs or screenshots.
-- Never attach raw JSONL logs, raw SQLite databases, or unredacted prompts/responses in issues.
-- Use the bug template when reporting problems so sensitive fields stay redacted.
-
-- 在分享日志或截图前，请先阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
-- 提交 issue 时不要附上原始 JSONL、原始 SQLite，或未脱敏的 prompt / response。
-- 报 bug 时请使用 issue 模板，保持敏感字段脱敏。
-
-## Contributing / 贡献
-
-- Start with [CONTRIBUTING.md](CONTRIBUTING.md).
-- If a change affects behavior, update tests and docs together.
-- If a change affects release messaging, update the release note draft and changelog together.
-
-- 请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
-- 任何会改变行为的修改都应同步更新测试与文档。
-- 任何会影响发布叙述的修改都应同步更新 release note 和 changelog。
-
-## License / 许可证
-
-- MIT License.
+`codex-usage-hud` 是外部本地监控工具，不修改 Codex App 原始安装文件。Codex App 或日志格式变化后，可能需要更新解析和 renderer 注入逻辑。

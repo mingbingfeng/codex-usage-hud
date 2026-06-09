@@ -55,6 +55,15 @@ class PyInstallerCommandTests(unittest.TestCase):
             self.assertIn("--noconsole", command)
             self.assertIn("--collect-submodules", command)
             self.assertIn("codex_usage_hud", command)
+            self.assertIn("--add-data", command)
+            self.assertTrue(
+                any("sponsor_alipay.jpg" in item for item in command),
+                msg=command,
+            )
+            self.assertTrue(
+                any("codex_usage_hud/assets" in item for item in command),
+                msg=command,
+            )
             self.assertIn("--paths", command)
             self.assertIn(str(PROJECT_ROOT / "src"), command)
             self.assertIn("--distpath", command)

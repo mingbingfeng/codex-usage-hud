@@ -17,6 +17,7 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Mapping
 
+from . import __version__
 from .config import (
     DEFAULT_BUDGET_THRESHOLDS,
     DEFAULT_DAILY_BUDGET_USD,
@@ -51,9 +52,15 @@ from .platforms import (
     get_current_platform,
 )
 from .platforms.base import BasePlatform
+from .settings_bridge import SettingsBridgeServer
 from .ui import TokenHudWindow
 from .ui.renderer_hud import RendererHudClient, wait_for_renderer
-from .settings_bridge import SettingsBridgeServer
+from .updater import (
+    check_for_update,
+    download_update_asset,
+    format_update_info,
+    launch_installer,
+)
 
 DEFAULT_POLL_MS = 500
 DEFAULT_SQLITE_LOG = "logs_2.sqlite"
@@ -755,6 +762,37 @@ def _handle_renderer_settings_command(
             return _renderer_settings_status(
                 "已请求重启 HUD；daemon 模式会自动恢复。",
             )
+        if action == "checkUpdate":
+            info = check_for_update(current_version=__version__)
+            if info.error:
+                return _renderer_settings_status(
+                    f"检查更新失败：{info.error}",
+                    kind="error",
+                )
+            if info.available:
+                return _renderer_settings_status(
+                    f"发现新版本 {info.latest_version}，安装包：{info.asset_name}",
+                )
+            return _renderer_settings_status(
+                f"当前已是最新版本（{info.current_version}）。",
+            )
+        if action == "installUpdate":
+            info = check_for_update(current_version=__version__)
+            if info.error:
+                return _renderer_settings_status(
+                    f"检查更新失败：{info.error}",
+                    kind="error",
+                )
+            if not info.available:
+                return _renderer_settings_status(
+                    f"当前已是最新版本（{info.current_version}）。",
+                )
+            installer = download_update_asset(info)
+            launch_installer(installer)
+            restart_requested.set()
+            return _renderer_settings_status(
+                f"已启动 {info.asset_name}，安装器会先关闭当前 HUD。",
+            )
         return _renderer_settings_status(
             f"无法处理未知设置命令：{action or 'empty'}",
             kind="error",
@@ -1013,6 +1051,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Local-first Codex usage HUD from local JSONL and SQLite logs.",
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Print the installed codex-usage-hud version and exit.",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Print the current local snapshot and exit without opening the HUD.",
@@ -1021,6 +1065,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--stop",
         action="store_true",
         help="Stop the currently running HUD instance recorded by the local pid lock.",
+    )
+    parser.add_argument(
+        "--check-update",
+        action="store_true",
+        help="Check GitHub Releases for a newer Windows installer and exit.",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Download and launch the latest Windows installer when one is available.",
     )
     parser.add_argument(
         "--daemon",
@@ -1151,6 +1205,35 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def run_update_check() -> int:
+    """Print update status from GitHub Releases."""
+    info = check_for_update(current_version=__version__)
+    print(format_update_info(info))
+    return 1 if info.error else 0
+
+
+def run_update_install() -> int:
+    """Download and launch the latest Windows installer when available."""
+    info = check_for_update(current_version=__version__)
+    if info.error:
+        print(format_update_info(info), file=sys.stderr)
+        return 1
+    if not info.available:
+        print(format_update_info(info))
+        return 0
+    try:
+        installer = download_update_asset(info)
+        launch_installer(installer)
+    except Exception as exc:
+        print(f"Update install failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Launched {info.asset_name}. "
+        "The installer will stop the running HUD before replacing files."
+    )
+    return 0
 
 
 def run_once_snapshot(args: argparse.Namespace) -> int:
@@ -1486,6 +1569,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_stdout()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.check_update:
+        return run_update_check()
+    if args.update:
+        return run_update_install()
     if args.renderer_hud is None:
         configured_mode = normalize_display_mode(
             args.hud_mode or UserConfigStore().load().display_mode

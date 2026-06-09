@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .. import __version__
 from ..config import (
     USER_CONFIG_KEY,
     UserConfig,
@@ -29,6 +30,12 @@ from ..config import (
 )
 from ..core.parser import CostEstimator, ParsedSession, RequestRound
 from ..support_assets import support_qr_asset_paths
+from ..updater import (
+    check_for_update,
+    download_update_asset,
+    format_update_info,
+    launch_installer,
+)
 
 TOP_DOCK_TOP = 42
 TOP_DOCK_LEFT = 456
@@ -2345,7 +2352,7 @@ class TokenHudWindow:
         dialog = tk.Toplevel(self.root)
         self._settings_dialog = dialog
         dialog.withdraw()
-        dialog.title("codex-usage-hud 设置")
+        dialog.title(f"codex-usage-hud v{__version__} 设置")
         dialog.configure(bg=HUD_BG)
         dialog.attributes("-topmost", True)
         dialog.overrideredirect(True)
@@ -2364,7 +2371,7 @@ class TokenHudWindow:
         head.pack(fill="x")
         title = tk.Label(
             head,
-            text="codex-usage-hud",
+            text=f"codex-usage-hud v{__version__}",
             anchor="w",
             bg=REQUEST_HEADER_BG,
             fg=HUD_TEXT,
@@ -2391,9 +2398,11 @@ class TokenHudWindow:
         self._settings_tab_buttons = {
             "settings": self._settings_tab_button(tabs, "设置", "settings"),
             "support": self._settings_tab_button(tabs, "请作者喝咖啡", "support"),
+            "about": self._settings_tab_button(tabs, "版本更新", "about"),
         }
         self._settings_tab_buttons["settings"].pack(side="left", padx=(0, 6))
-        self._settings_tab_buttons["support"].pack(side="left")
+        self._settings_tab_buttons["support"].pack(side="left", padx=(0, 6))
+        self._settings_tab_buttons["about"].pack(side="left")
 
         body_shell = tk.Frame(dialog, bg=HUD_BG)
         body_shell.pack(fill="both", expand=True)
@@ -2554,7 +2563,7 @@ class TokenHudWindow:
     def _select_settings_tab(self, tab: str = "settings") -> None:
         if self._settings_body_frame is None or self._settings_actions_frame is None:
             return
-        active_tab = "support" if tab == "support" else "settings"
+        active_tab = tab if tab in {"settings", "support", "about"} else "settings"
         for name, button in self._settings_tab_buttons.items():
             selected = name == active_tab
             button.configure(
@@ -2569,6 +2578,11 @@ class TokenHudWindow:
         self._settings_support_images = []
         if active_tab == "support":
             self._build_support_panel(
+                self._settings_body_frame,
+                self._settings_actions_frame,
+            )
+        elif active_tab == "about":
+            self._build_about_panel(
                 self._settings_body_frame,
                 self._settings_actions_frame,
             )
@@ -2887,6 +2901,90 @@ class TokenHudWindow:
             pady=4,
         ).pack(side="left")
         self._set_settings_status("赞赏码资源来自本地打包文件")
+
+    def _build_about_panel(self, body: tk.Frame, actions: tk.Frame) -> None:
+        about = tk.Frame(body, bg=HUD_BG)
+        about.pack(fill="both", expand=True)
+        lines = [
+            f"当前版本：v{__version__}",
+            "更新源：GitHub Releases / mingbingfeng/codex-usage-hud",
+            "Windows 安装包：codex-usage-hud-v*-windows-x64-setup.exe",
+            "自动更新会下载最新版安装包并启动安装器；安装器会先关闭正在运行的 HUD，再替换本地文件。",
+            f"配置文件：{self.user_settings_store.path}",
+        ]
+        tk.Label(
+            about,
+            text="\n".join(lines),
+            justify="left",
+            anchor="nw",
+            bg=HUD_BG,
+            fg=HUD_TEXT,
+            wraplength=680,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="x")
+        tk.Button(
+            actions,
+            text="检查更新",
+            command=self._settings_check_update,
+            bg="#2E3846",
+            fg=HUD_TEXT,
+            activebackground=HUD_DIVIDER,
+            activeforeground=HUD_TEXT,
+            relief="flat",
+            padx=9,
+            pady=4,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            actions,
+            text="安装更新",
+            command=self._settings_install_update,
+            bg=HUD_ACCENT,
+            fg=HUD_BG,
+            activebackground="#FFE59A",
+            activeforeground=HUD_BG,
+            relief="flat",
+            padx=11,
+            pady=4,
+        ).pack(side="left", padx=(0, 6))
+        tk.Button(
+            actions,
+            text="关闭",
+            command=lambda: self._settings_dialog.destroy() if self._settings_dialog else None,
+            bg="#2E3846",
+            fg=HUD_TEXT,
+            activebackground=HUD_DIVIDER,
+            activeforeground=HUD_TEXT,
+            relief="flat",
+            padx=9,
+            pady=4,
+        ).pack(side="left")
+        self._set_settings_status("可检查 GitHub Release 并启动 Windows 安装器")
+
+    def _settings_check_update(self) -> None:
+        info = check_for_update(current_version=__version__)
+        message = format_update_info(info)
+        self._set_settings_status(message, kind="error" if info.error else "")
+        if info.error:
+            messagebox.showerror("检查更新失败", message, parent=self._settings_dialog)
+
+    def _settings_install_update(self) -> None:
+        info = check_for_update(current_version=__version__)
+        if info.error:
+            message = format_update_info(info)
+            self._set_settings_status(message, kind="error")
+            messagebox.showerror("安装更新失败", message, parent=self._settings_dialog)
+            return
+        if not info.available:
+            self._set_settings_status(format_update_info(info))
+            return
+        try:
+            installer = download_update_asset(info)
+            launch_installer(installer)
+        except Exception as exc:
+            self._set_settings_status(f"安装更新失败：{exc}", kind="error")
+            messagebox.showerror("安装更新失败", str(exc), parent=self._settings_dialog)
+            return
+        self._set_settings_status(f"已启动 {info.asset_name}，安装器会先关闭当前 HUD。")
 
     def _pack_support_qr_image(self, parent: tk.Misc, path: str) -> None:
         try:

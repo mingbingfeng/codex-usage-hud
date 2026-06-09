@@ -11,7 +11,9 @@ REQUIRED_PATHS = (
     Path("pyproject.toml"),
     Path("LICENSE"),
     Path("README.md"),
+    Path("README_EN.md"),
     Path("docs/PRIVACY.md"),
+    Path("tools/installer/CodexUsageHud.iss"),
 )
 
 

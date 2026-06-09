@@ -1,0 +1,49 @@
+"""Unit tests for the Inno Setup installer build helper."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TOOLS_ROOT = PROJECT_ROOT / "tools"
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
+import build_installer  # noqa: E402
+
+
+class InstallerBuildHelperTests(unittest.TestCase):
+    def test_setup_base_filename_uses_versioned_windows_setup_convention(self) -> None:
+        self.assertEqual(
+            build_installer.setup_base_filename("1.0.0"),
+            "codex-usage-hud-v1.0.0-windows-x64-setup",
+        )
+
+    def test_inno_define_quotes_string_values(self) -> None:
+        self.assertEqual(
+            build_installer.inno_define("AppVersion", "1.0.0"),
+            "/DAppVersion=1.0.0",
+        )
+
+    def test_build_inno_command_passes_expected_defines(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            command = build_installer.build_inno_command(
+                iscc=temp / "ISCC.exe",
+                script=temp / "CodexUsageHud.iss",
+                version="1.0.0",
+                source_exe=temp / "codex-hud.exe",
+                output_dir=temp / "dist",
+            )
+
+        self.assertEqual(command[0].endswith("ISCC.exe"), True)
+        self.assertIn("/DAppVersion=1.0.0", command)
+        self.assertTrue(any(item.startswith("/DSourceExe=") for item in command))
+        self.assertTrue(command[-1].endswith("CodexUsageHud.iss"))
+
+
+if __name__ == "__main__":
+    unittest.main()

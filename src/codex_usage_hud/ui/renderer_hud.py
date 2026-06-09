@@ -10,6 +10,7 @@ from pathlib import Path
 import time
 from typing import Any
 
+from .. import __version__
 from ..config import UserConfig
 from ..core.parser import CostEstimator, ParsedSession, RequestRound
 from ..platforms.cdp_probe import (
@@ -806,6 +807,10 @@ RENDERER_HUD_SCRIPT = r"""
     return String(currentPayload()?.settingsPath || "");
   }
 
+  function appVersion() {
+    return String(currentPayload()?.appVersion || "unknown");
+  }
+
   function thresholdText(settings) {
     const items = Array.isArray(settings.budget_thresholds) ? settings.budget_thresholds : [];
     return items.map((value) => Number(value || 0)).filter((value) => value > 0).join(",");
@@ -831,26 +836,30 @@ RENDERER_HUD_SCRIPT = r"""
     const modal = document.getElementById(settingsModalId);
     if (!root || !modal) return;
     const settings = hudSettingsFromPayload();
-    const activeTab = tab === "support" ? "support" : "settings";
+    const activeTab = ["support", "about"].includes(tab) ? tab : "settings";
     const path = settingsPathLabel();
     const bridge = settingsBridgeUrl();
+    const defaultStatus = activeTab === "about"
+      ? "可检查 GitHub Release 并启动 Windows 安装器。"
+      : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件");
     modal.innerHTML = `
       <div class="codex-usage-hud-settings-dialog" role="dialog" aria-modal="true" aria-label="codex-usage-hud 设置">
         <div class="codex-usage-hud-settings-head">
-          <div class="codex-usage-hud-settings-title">codex-usage-hud</div>
+          <div class="codex-usage-hud-settings-title">codex-usage-hud v${escapeHtml(appVersion())}</div>
           <button type="button" class="codex-usage-hud-settings-close" data-action="settings-close" aria-label="关闭">×</button>
         </div>
         <div class="codex-usage-hud-settings-tabs" role="tablist">
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="settings" data-active="${activeTab === "settings"}">设置</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="support" data-active="${activeTab === "support"}">请作者喝咖啡</button>
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="about" data-active="${activeTab === "about"}">版本更新</button>
         </div>
         <div class="codex-usage-hud-settings-body">
-          ${activeTab === "support" ? supportPanelHtml(settings, path) : settingsPanelHtml(settings, bridge, path)}
+          ${activeTab === "support" ? supportPanelHtml(settings, path) : activeTab === "about" ? aboutPanelHtml(path) : settingsPanelHtml(settings, bridge, path)}
         </div>
         <div class="codex-usage-hud-settings-actions">
-          <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件"))}</div>
+          <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || defaultStatus)}</div>
           <div>
-            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取价格</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取价格</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
           </div>
         </div>
       </div>
@@ -939,6 +948,18 @@ RENDERER_HUD_SCRIPT = r"""
           ${qrItems || '<div class="codex-usage-hud-support-note">赞赏码资源未加载，请等待 HUD 刷新。</div>'}
         </div>
         <div class="codex-usage-hud-support-note">项目链接：<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a></div>
+        <div class="codex-usage-hud-support-note">当前配置文件：${escapeHtml(path || "未提供")}</div>
+      </div>
+    `;
+  }
+
+  function aboutPanelHtml(path) {
+    return `
+      <div class="codex-usage-hud-support">
+        <div class="codex-usage-hud-support-note">当前版本：<strong>v${escapeHtml(appVersion())}</strong></div>
+        <div class="codex-usage-hud-support-note">更新源：GitHub Releases / mingbingfeng/codex-usage-hud</div>
+        <div class="codex-usage-hud-support-note">Windows 安装包：codex-usage-hud-v*-windows-x64-setup.exe</div>
+        <div class="codex-usage-hud-support-note">自动更新会下载最新版安装包并启动安装器；安装器会先关闭正在运行的 HUD，再替换本地文件。</div>
         <div class="codex-usage-hud-support-note">当前配置文件：${escapeHtml(path || "未提供")}</div>
       </div>
     `;
@@ -1048,6 +1069,20 @@ RENDERER_HUD_SCRIPT = r"""
     submitSettingsCommand(
       { action: "restart", reason: "settings" },
       "重启请求已提交，等待 HUD daemon 处理..."
+    );
+  }
+
+  function checkUpdateFromModal() {
+    submitSettingsCommand(
+      { action: "checkUpdate" },
+      "检查更新请求已提交，等待 HUD daemon 查询 GitHub Release..."
+    );
+  }
+
+  function installUpdateFromModal() {
+    submitSettingsCommand(
+      { action: "installUpdate" },
+      "安装更新请求已提交，等待 HUD daemon 下载并启动安装器..."
     );
   }
 
@@ -1199,6 +1234,18 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         void fetchPricesFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-check-update") {
+        event.preventDefault();
+        event.stopPropagation();
+        void checkUpdateFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-install-update") {
+        event.preventDefault();
+        event.stopPropagation();
+        void installUpdateFromModal();
         return;
       }
       if (action.dataset.action === "settings-export") {
@@ -2355,6 +2402,7 @@ class RendererHudPayload:
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
     support_images: list[dict[str, str]] = field(default_factory=list)
+    app_version: str = __version__
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -2376,6 +2424,7 @@ class RendererHudPayload:
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
             "supportImages": [dict(item) for item in self.support_images],
+            "appVersion": self.app_version,
         }
 
 
@@ -2646,6 +2695,7 @@ def payload_from_snapshot(
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},
         support_images=support_images or [],
+        app_version=__version__,
     )
 
 

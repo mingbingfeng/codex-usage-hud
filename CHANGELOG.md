@@ -7,6 +7,41 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-06-09
+
+Windows Installer Edition, the first supported installer-based release line.
+
+### Added
+
+- Added GitHub Release update helpers for checking the latest release, selecting
+  the Windows setup asset, downloading it, and launching the installer.
+- Added CLI update surfaces: `--version`, `--check-update`, and `--update`.
+- Added a renderer HUD "版本更新" settings tab with current version display,
+  update checking, and installer launch commands.
+- Added a Tk settings "版本更新" tab so the fallback UI exposes the same version
+  and update flow.
+- Added an Inno Setup 6 installer script and `tools/build_installer.py` to
+  produce `codex-usage-hud-vX.Y.Z-windows-x64-setup.exe`.
+- Added README screenshots for the v1.0.0 HUD and update settings surfaces.
+- Added `README_EN.md`; `README.md` now defaults to Chinese with an English
+  companion file.
+
+### Changed
+
+- Promoted the package version to `1.0.0` and metadata to stable release status.
+- Updated the PyInstaller build helper to collect bundled QR-code image assets
+  into the single-file executable.
+- Reworked the GitHub homepage README around the reference module structure:
+  quick start, sponsors, support, features, pain points, auto update and
+  installer, data locations, FAQ, development, and notes.
+- Marked `v0.1.0`, `v0.2.0`, and `v0.3.0` as historical alpha / preview tags
+  rather than recommended install entry points.
+
+### Fixed
+
+- Made the packaged Windows flow stop an existing HUD before replacing the
+  installed executable, reducing update failures from locked files.
+
 ## [0.3.0] - 2026-06-05
 
 Renderer Timeline Edition, focused on keeping the HUD in the Codex renderer
