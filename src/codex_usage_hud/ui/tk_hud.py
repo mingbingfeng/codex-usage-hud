@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -84,7 +85,8 @@ REQUEST_ANCHOR_MIN_WIDTH = 260
 SETTINGS_DIALOG_WIDTH = 760
 SETTINGS_DIALOG_HEIGHT = 620
 HUD_SETTINGS_FILENAME = "hud_settings.json"
-FOLLOW_ACTIVE_MS = 16
+FOLLOW_ACTIVE_MS = 33
+FOLLOW_INACTIVE_MS = 120
 FOLLOW_TOMBSTONE_MS = 500
 MARQUEE_START_PAUSE_MS = 1500
 MARQUEE_END_PAUSE_MS = 1500
@@ -113,6 +115,7 @@ HUD_GEOMETRY_LOG_FILENAME = "hud_geometry.log"
 HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
 HUD_CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
 HUD_NATIVE_GEOMETRY_ENV = "CODEX_USAGE_HUD_NATIVE_GEOMETRY"
+HUD_INTERACTION_SETTLE_MS = 120
 
 
 class _HoverTip:
@@ -2263,6 +2266,7 @@ class TokenHudWindow:
     ) -> None:
         self.compact = compact
         self.follow_ms = max(16, int(follow_ms))
+        self.inactive_follow_ms = max(self.follow_ms, FOLLOW_INACTIVE_MS)
         self.tombstone_follow_ms = max(50, int(tombstone_follow_ms))
         self.hide_until_attached = bool(hide_until_attached)
         self.settings_store = HudSettingsStore()
@@ -2277,9 +2281,14 @@ class TokenHudWindow:
         self._settings_status_label: tk.Label | None = None
         self._settings_tab_buttons: dict[str, tk.Button] = {}
         self._settings_canvas: tk.Canvas | None = None
+        self._settings_prices_body: tk.Frame | None = None
         self._settings_support_images: list[tk.PhotoImage] = []
         self._settings_display_mode_touched = False
         self._settings_configured_display_mode = str(self.user_settings.display_mode)
+        self._settings_active_tab = "settings"
+        self._settings_pending_tab = ""
+        self._settings_build_job: str | None = None
+        self._settings_prewarm_job: str | None = None
         self._mode_switch_request = ""
         self._restart_codex_for_renderer = False
         self._geometry_log_path = configure_hud_geometry_logging()
@@ -2332,6 +2341,7 @@ class TokenHudWindow:
         self._hidden_for_minimized = False
         self._hidden_reason = ""
         self._tombstoned = False
+        self._focus_state_active: bool | None = None
         self._last_rect: WindowRect | None = None
         self._drag_origin: tuple[int, int] | None = None
         self._drag_window: tk.Toplevel | tk.Tk | None = None
@@ -2360,6 +2370,10 @@ class TokenHudWindow:
         self._last_anchor_decisions: dict[str, tuple[str, str, str, str]] = {}
         self._last_budget_log_signature: tuple[int, int, int, str, str] | None = None
         self._snapshot = ParsedSession(status="waiting")
+        self._ui_interaction_hold_until = 0.0
+        self._top_rebuild_job: str | None = None
+        self._request_rebuild_job: str | None = None
+        self._follow_job: str | None = None
 
         self.top_labels: dict[str, tk.Misc] = {}
         self.request_label: tk.Misc | None = None
@@ -2377,10 +2391,11 @@ class TokenHudWindow:
         self._set_alpha(self.root, 0.94)
         self._set_alpha(self.request_root, 0.74)
         self._apply_free_defaults()
+        self._schedule_settings_dialog_prewarm()
         if self.hide_until_attached:
             self._enter_tombstone("waiting")
             self.sync_codex_window()
-        self.root.after(self.follow_ms, self._follow_codex_window)
+        self._follow_job = self.root.after(self.follow_ms, self._follow_codex_window)
 
     def _move_handle(self, parent: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> tk.Label:
         label = tk.Label(
@@ -2574,11 +2589,50 @@ class TokenHudWindow:
         if not button.winfo_manager():
             button.pack(side="left", padx=(4, 0))
 
-    def _open_settings_dialog(self, tab: str = "settings") -> None:
-        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
-            self._raise_settings_dialog()
-            self._select_settings_tab(tab)
+    def _cancel_settings_dialog_prewarm(self) -> None:
+        if self._settings_prewarm_job is None:
             return
+        try:
+            self.root.after_cancel(self._settings_prewarm_job)
+        except tk.TclError:
+            pass
+        self._settings_prewarm_job = None
+
+    def _schedule_settings_dialog_prewarm(self) -> None:
+        if self._settings_prewarm_job is not None:
+            return
+        if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
+            return
+        try:
+            self._settings_prewarm_job = self.root.after_idle(self._prewarm_settings_dialog)
+        except tk.TclError:
+            self._settings_prewarm_job = None
+
+    def _prewarm_settings_dialog(self) -> None:
+        self._settings_prewarm_job = None
+        dialog = self._ensure_settings_dialog_shell()
+        if dialog is None:
+            return
+        if not self._settings_dialog_populated():
+            self._select_settings_tab("settings")
+        try:
+            dialog.withdraw()
+        except tk.TclError:
+            return
+
+    def _settings_dialog_populated(self) -> bool:
+        return bool(
+            self._settings_body_frame is not None
+            and self._settings_actions_frame is not None
+            and self._settings_body_frame.winfo_children()
+            and self._settings_actions_frame.winfo_children()
+        )
+
+    def _ensure_settings_dialog_shell(self) -> tk.Toplevel | None:
+        dialog = self._settings_dialog
+        if dialog is not None and dialog.winfo_exists():
+            return dialog
+        self._cancel_settings_dialog_prewarm()
         settings = self.user_settings_store.load()
         self.user_settings = settings
         self._settings_configured_display_mode = str(settings.display_mode)
@@ -2598,7 +2652,7 @@ class TokenHudWindow:
             )
         )
         dialog.minsize(620, 480)
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.protocol("WM_DELETE_WINDOW", self._hide_settings_dialog)
         dialog.bind("<Destroy>", self._settings_dialog_destroyed, add="+")
 
         head = tk.Frame(dialog, bg=REQUEST_HEADER_BG, padx=12, pady=10)
@@ -2615,7 +2669,7 @@ class TokenHudWindow:
         tk.Button(
             head,
             text="×",
-            command=dialog.destroy,
+            command=self._hide_settings_dialog,
             bg="#2E3846",
             fg=HUD_TEXT,
             activebackground=HUD_DIVIDER,
@@ -2691,11 +2745,108 @@ class TokenHudWindow:
         action_buttons = tk.Frame(actions, bg=REQUEST_HEADER_BG)
         action_buttons.pack(side="right")
         self._settings_actions_frame = action_buttons
+        return dialog
 
-        self._select_settings_tab(tab)
-        dialog.update_idletasks()
-        dialog.deiconify()
+    def _open_settings_dialog(self, tab: str = "settings") -> None:
+        dialog = self._ensure_settings_dialog_shell()
+        if dialog is None:
+            return
+        try:
+            is_hidden = dialog.state() == "withdrawn"
+        except tk.TclError:
+            return
+        if is_hidden:
+            self.user_settings = self.user_settings_store.load()
+            self._settings_configured_display_mode = str(self.user_settings.display_mode)
+            self._settings_display_mode_touched = False
+            try:
+                dialog.deiconify()
+            except tk.TclError:
+                return
+            if self._settings_active_tab == tab == "settings" and self._settings_dialog_populated():
+                self._refresh_settings_dialog_values()
+            elif self._settings_dialog_populated():
+                self._select_settings_tab(tab)
+            else:
+                self._set_settings_status("正在加载设置...")
+                self._schedule_settings_tab(tab)
+        elif self._settings_active_tab != tab:
+            self._select_settings_tab(tab)
         self._raise_settings_dialog()
+
+    def _mark_ui_interaction(self, duration_ms: int = HUD_INTERACTION_SETTLE_MS) -> None:
+        grace_seconds = max(0, int(duration_ms)) / 1000.0
+        self._ui_interaction_hold_until = max(
+            self._ui_interaction_hold_until,
+            time.monotonic() + grace_seconds,
+        )
+
+    def _ui_interaction_active(self, now: float | None = None) -> bool:
+        return self._ui_interaction_hold_until > (time.monotonic() if now is None else now)
+
+    def _settings_dialog_visible(self) -> bool:
+        dialog = self._settings_dialog
+        if dialog is None or not dialog.winfo_exists():
+            return False
+        try:
+            return dialog.state() != "withdrawn"
+        except tk.TclError:
+            return False
+
+    def _hide_settings_dialog(self) -> None:
+        dialog = self._settings_dialog
+        if dialog is None or not dialog.winfo_exists():
+            return
+        try:
+            dialog.withdraw()
+        except tk.TclError:
+            return
+
+    def _refresh_settings_dialog_values(self) -> None:
+        if self._settings_active_tab != "settings":
+            return
+        settings = self.user_settings
+        self._settings_configured_display_mode = str(settings.display_mode)
+        self._settings_display_mode_touched = False
+        values: dict[str, object] = {
+            "daily_budget_usd": settings.daily_budget_usd,
+            "weekly_budget_usd": settings.weekly_budget_usd,
+            "daily_reset_time": settings.daily_reset_time,
+            "weekly_reset_time": settings.weekly_reset_time,
+            "budget_thresholds": ",".join(str(item) for item in settings.budget_thresholds),
+            "weekly_adjustment_usd": settings.weekly_adjustment_usd,
+            "pricing_url": settings.pricing_url,
+        }
+        for key, value in values.items():
+            widget = self._settings_entries.get(key)
+            if widget is None:
+                continue
+            if isinstance(widget, ttk.Combobox):
+                widget.set(str(value))
+            else:
+                widget.delete(0, "end")
+                widget.insert(0, str(value))
+        weekday = self._settings_entries.get("weekly_reset_weekday")
+        if isinstance(weekday, ttk.Combobox):
+            weekday.set(
+                f"{settings.weekly_reset_weekday} "
+                + ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][settings.weekly_reset_weekday]
+            )
+        mode = self._settings_entries.get("display_mode")
+        if isinstance(mode, ttk.Combobox):
+            mode.set(
+                {
+                    "renderer": "renderer - 优先 renderer 注入，失败回退 Tk",
+                    "tk": "tk - 仅使用 Tk 窗口",
+                }.get(settings.display_mode, "auto - 优先 renderer 注入，失败回退 Tk")
+            )
+        if self._settings_prices_body is not None:
+            self._replace_price_rows(
+                self._settings_prices_body,
+                self._settings_price_rows,
+                settings.model_prices,
+            )
+        self._set_settings_status("设置将保存到本地配置文件")
 
     def _raise_settings_dialog(self) -> None:
         dialog = self._settings_dialog
@@ -2704,8 +2855,6 @@ class TokenHudWindow:
         try:
             if not dialog.winfo_exists():
                 return
-            # The HUD follow loop keeps the top/request windows topmost, so re-raise the
-            # settings dialog after every HUD refresh while it is open.
             dialog.lift()
             dialog.attributes("-topmost", True)
         except tk.TclError:
@@ -2735,6 +2884,14 @@ class TokenHudWindow:
     def _settings_dialog_destroyed(self, event: tk.Event[tk.Misc]) -> None:
         if event.widget is not self._settings_dialog:
             return
+        if self._settings_build_job is not None:
+            try:
+                self.root.after_cancel(self._settings_build_job)
+            except tk.TclError:
+                pass
+            self._settings_build_job = None
+        self._settings_prewarm_job = None
+        self._settings_pending_tab = ""
         self._settings_dialog = None
         self._settings_entries = {}
         self._settings_price_rows = []
@@ -2743,8 +2900,10 @@ class TokenHudWindow:
         self._settings_status_label = None
         self._settings_tab_buttons = {}
         self._settings_canvas = None
+        self._settings_prices_body = None
         self._settings_support_images = []
         self._settings_display_mode_touched = False
+        self._settings_active_tab = "settings"
 
     @staticmethod
     def _active_display_mode() -> str:
@@ -2768,9 +2927,9 @@ class TokenHudWindow:
         width: int,
         height: int,
     ) -> str:
-        dialog.update_idletasks()
-        screen_width = max(1, int(dialog.winfo_screenwidth()))
-        screen_height = max(1, int(dialog.winfo_screenheight()))
+        del dialog
+        screen_width = max(1, int(self.root.winfo_screenwidth()))
+        screen_height = max(1, int(self.root.winfo_screenheight()))
         x = max(0, (screen_width - width) // 2)
         y = max(0, (screen_height - height) // 2)
         return f"{width}x{height}+{x}+{y}"
@@ -2783,10 +2942,12 @@ class TokenHudWindow:
         drag_offset = {"x": 0, "y": 0}
 
         def start_drag(event: tk.Event[tk.Misc]) -> None:
+            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
             drag_offset["x"] = int(event.x_root) - dialog.winfo_x()
             drag_offset["y"] = int(event.y_root) - dialog.winfo_y()
 
         def move_drag(event: tk.Event[tk.Misc]) -> str:
+            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
             x = int(event.x_root) - drag_offset["x"]
             y = int(event.y_root) - drag_offset["y"]
             dialog.geometry(f"+{x}+{y}")
@@ -2825,10 +2986,35 @@ class TokenHudWindow:
         for child in widget.winfo_children():
             self._bind_settings_scroll_tree(child)
 
+    def _schedule_settings_tab(self, tab: str = "settings") -> None:
+        self._settings_pending_tab = tab if tab in {"settings", "support", "about"} else "settings"
+        if self._settings_build_job is not None:
+            return
+        try:
+            self._settings_build_job = self.root.after_idle(self._flush_settings_tab)
+        except tk.TclError:
+            self._settings_build_job = None
+
+    def _flush_settings_tab(self) -> None:
+        self._settings_build_job = None
+        tab = self._settings_pending_tab or "settings"
+        self._settings_pending_tab = ""
+        if not self._settings_dialog_visible():
+            return
+        self._select_settings_tab(tab)
+
     def _select_settings_tab(self, tab: str = "settings") -> None:
         if self._settings_body_frame is None or self._settings_actions_frame is None:
             return
         active_tab = tab if tab in {"settings", "support", "about"} else "settings"
+        if (
+            active_tab == self._settings_active_tab
+            and self._settings_body_frame.winfo_children()
+            and self._settings_actions_frame.winfo_children()
+        ):
+            self._raise_settings_dialog()
+            return
+        self._settings_active_tab = active_tab
         for name, button in self._settings_tab_buttons.items():
             selected = name == active_tab
             button.configure(
@@ -3056,6 +3242,7 @@ class TokenHudWindow:
             ).grid(row=0, column=index, sticky="ew", padx=(0, 6))
         prices_body = tk.Frame(price_table, bg=HUD_BG)
         prices_body.pack(fill="x")
+        self._settings_prices_body = prices_body
         self._replace_price_rows(prices_body, self._settings_price_rows, settings.model_prices)
         tk.Button(
             price_table,
@@ -3185,7 +3372,7 @@ class TokenHudWindow:
         tk.Button(
             actions,
             text="关闭",
-            command=lambda: self._settings_dialog.destroy() if self._settings_dialog else None,
+            command=self._hide_settings_dialog,
             bg=HUD_ACCENT,
             fg=HUD_BG,
             activebackground="#FFE59A",
@@ -3243,7 +3430,7 @@ class TokenHudWindow:
         tk.Button(
             actions,
             text="关闭",
-            command=lambda: self._settings_dialog.destroy() if self._settings_dialog else None,
+            command=self._hide_settings_dialog,
             bg="#2E3846",
             fg=HUD_TEXT,
             activebackground=HUD_DIVIDER,
@@ -4006,6 +4193,7 @@ class TokenHudWindow:
     def _move_window(self, event: Any) -> str:
         if self._drag_origin is None or self._drag_window is None:
             return "break"
+        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
         old_x, old_y = self._drag_origin
         dx = event.x_root - old_x
         dy = event.y_root - old_y
@@ -4027,6 +4215,7 @@ class TokenHudWindow:
         self._drag_window = None
         self._drag_origin = None
         if target and window is not None:
+            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
             self._remember_window_position(target, window, reason="move")
             self._save_settings()
         return "break"
@@ -4038,6 +4227,7 @@ class TokenHudWindow:
         window: tk.Tk | tk.Toplevel,
         edge: str,
     ) -> str:
+        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
         self._resize_target = target
         self._resize_window = window
         self._resize_edge = edge
@@ -4073,6 +4263,7 @@ class TokenHudWindow:
     def _resize_window_size(self, event: Any) -> str:
         if self._resize_window is None:
             return "break"
+        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
         dx = event.x_root - self._resize_start_x
         dy = event.y_root - self._resize_start_y
         expanded = (
@@ -4113,6 +4304,7 @@ class TokenHudWindow:
         self._resize_window = None
         self._resize_edge = ""
         if target and window is not None:
+            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
             self._remember_window_position(target, window, reason="resize")
             self._remember_window_width(target, window, reason="resize")
             self._remember_window_height(target, window, reason="resize")
@@ -4121,22 +4313,62 @@ class TokenHudWindow:
         return "break"
 
     def toggle_top_expanded(self) -> None:
+        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
         self.top_expanded = not self.top_expanded
+        self._apply_geometry()
+        self._schedule_top_rebuild()
+
+    def toggle_request_expanded(self) -> None:
+        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+        self.request_expanded = not self.request_expanded
+        self._apply_geometry()
+        self._schedule_request_rebuild()
+
+    def _schedule_top_rebuild(self) -> None:
+        if self._top_rebuild_job is not None:
+            return
+        try:
+            self._top_rebuild_job = self.root.after_idle(self._flush_top_rebuild)
+        except tk.TclError:
+            self._top_rebuild_job = None
+
+    def _flush_top_rebuild(self) -> None:
+        self._top_rebuild_job = None
         self._rebuild_top_ui()
         self._apply_geometry()
 
-    def toggle_request_expanded(self) -> None:
-        self.request_expanded = not self.request_expanded
+    def _schedule_request_rebuild(self) -> None:
+        if self._request_rebuild_job is not None:
+            return
+        try:
+            self._request_rebuild_job = self.root.after_idle(self._flush_request_rebuild)
+        except tk.TclError:
+            self._request_rebuild_job = None
+
+    def _flush_request_rebuild(self) -> None:
+        self._request_rebuild_job = None
         self._rebuild_request_ui()
         self._apply_geometry()
 
     def _follow_codex_window(self) -> None:
+        self._follow_job = None
         self.sync_codex_window()
-        self.root.after(self._next_follow_delay(), self._follow_codex_window)
+        try:
+            self._follow_job = self.root.after(
+                self._next_follow_delay(),
+                self._follow_codex_window,
+            )
+        except tk.TclError:
+            self._follow_job = None
 
     def sync_codex_window(self) -> None:
         """Synchronize HUD visibility and geometry with the current Codex window."""
         if self._move_target or self._resize_target:
+            return
+        now = time.monotonic()
+        if self._ui_interaction_active(now):
+            if self._attached and self._last_rect is not None:
+                self._apply_geometry()
             return
         rect = self.locator.find()
         if rect is None:
@@ -4153,10 +4385,8 @@ class TokenHudWindow:
         self._attached = True
         self._last_rect = rect
         active = self.locator.is_active(rect, self._hud_hwnds())
-        if not active:
-            self._enter_tombstone("inactive")
-            return
-        self._exit_tombstone("active")
+        self._exit_tombstone("attached")
+        self._apply_focus_state(active)
         self._set_alpha(self.root, 0.94 if active else 0.55)
         self._set_alpha(self.request_root, (0.94 if self.request_expanded else 0.74) if active else 0.45)
         self._apply_geometry()
@@ -4165,6 +4395,7 @@ class TokenHudWindow:
         self._exit_tombstone("free-mode")
         self._attached = False
         self._last_rect = None
+        self._apply_focus_state(True)
         self._set_alpha(self.root, 0.90)
         self._set_alpha(self.request_root, 0.76 if not self.request_expanded else 0.90)
         if self._top_manual_position is None or self._request_manual_position is None:
@@ -4178,6 +4409,7 @@ class TokenHudWindow:
         """Hide HUD chrome while Codex is not foreground and pause expensive refreshes."""
         if self._tombstoned and self._hidden_reason == reason:
             return
+        self._focus_state_active = None
         try:
             self.root.withdraw()
             self.request_root.withdraw()
@@ -4189,7 +4421,8 @@ class TokenHudWindow:
 
     def _exit_tombstone(self, reason: str = "visible") -> None:
         if not self._tombstoned and not self._hidden_for_minimized:
-            self._ensure_hud_visible(reason)
+            if self._hud_windows_withdrawn():
+                self._ensure_hud_visible(reason)
             return
         previous_reason = self._hidden_reason
         if not self._ensure_hud_visible(reason):
@@ -4207,22 +4440,58 @@ class TokenHudWindow:
         try:
             self.root.deiconify()
             self.request_root.deiconify()
-            self.root.lift()
-            self.request_root.lift()
-            self.root.attributes("-topmost", True)
-            self.request_root.attributes("-topmost", True)
-            self._raise_settings_dialog()
         except tk.TclError:
             return False
         try:
-            if self.root.state() == "withdrawn" or self.request_root.state() == "withdrawn":
+            if self.root.state() != "withdrawn" and self.request_root.state() != "withdrawn":
                 _HUD_GEOMETRY_LOGGER.info("hud_visibility_recovered reason=%s", reason)
         except tk.TclError:
             return False
         return True
 
+    def _hud_windows_withdrawn(self) -> bool:
+        try:
+            return self.root.state() == "withdrawn" or self.request_root.state() == "withdrawn"
+        except tk.TclError:
+            return False
+
+    def _set_window_topmost(self, window: tk.Tk | tk.Toplevel, enabled: bool) -> None:
+        try:
+            window.attributes("-topmost", bool(enabled))
+        except tk.TclError:
+            pass
+
+    def _apply_focus_state(self, active: bool) -> None:
+        if self._focus_state_active is active:
+            return
+        self._focus_state_active = active
+        windows: list[tk.Tk | tk.Toplevel] = [self.root, self.request_root]
+        for window in windows:
+            self._set_window_topmost(window, active)
+            try:
+                if active:
+                    window.lift()
+                else:
+                    window.lower()
+            except tk.TclError:
+                continue
+        dialog = self._settings_dialog
+        if dialog is not None and dialog.winfo_exists():
+            try:
+                if active:
+                    self._raise_settings_dialog()
+                else:
+                    self._set_window_topmost(dialog, False)
+                    dialog.lower()
+            except tk.TclError:
+                return
+
     def _next_follow_delay(self) -> int:
-        return self.tombstone_follow_ms if self._tombstoned else self.follow_ms
+        if self._tombstoned:
+            return self.tombstone_follow_ms
+        if self._focus_state_active is False:
+            return self.inactive_follow_ms
+        return self.follow_ms
 
     def should_refresh_snapshot(self) -> bool:
         """Return whether parser refresh work should run for the visible HUD."""
@@ -4522,6 +4791,18 @@ class TokenHudWindow:
             or self._use_native_anchors
             or (target == "top" and self._use_top_dom_anchors)
         ):
+            if self._ui_interaction_active():
+                projected = self._projected_stable_native_anchor(target, rect)
+                if projected is not None:
+                    return projected
+                return _fallback_hud_anchor(
+                    target,
+                    rect,
+                    legacy_x,
+                    legacy_y,
+                    legacy_width,
+                    height,
+                )
             native = self._stable_native_anchor(target, rect, height)
             if native is not None:
                 return native
@@ -4873,7 +5154,11 @@ class TokenHudWindow:
 
     def _hud_hwnds(self) -> set[int]:
         hwnds: set[int] = set()
-        for window in [self.root, self.request_root]:
+        windows: list[tk.Tk | tk.Toplevel] = [self.root, self.request_root]
+        dialog = self._settings_dialog
+        if dialog is not None and dialog.winfo_exists():
+            windows.append(dialog)
+        for window in windows:
             try:
                 hwnds.add(int(window.winfo_id()))
             except Exception:
@@ -4931,6 +5216,24 @@ class TokenHudWindow:
         """Destroy both HUD windows and cancel Tk timers owned by the widgets."""
         if not self._exit_reason:
             self._exit_reason = reason
+        for job in (
+            self._top_rebuild_job,
+            self._request_rebuild_job,
+            self._settings_build_job,
+            self._settings_prewarm_job,
+            self._follow_job,
+        ):
+            if job is None:
+                continue
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._top_rebuild_job = None
+        self._request_rebuild_job = None
+        self._settings_build_job = None
+        self._settings_prewarm_job = None
+        self._follow_job = None
         try:
             self.request_root.destroy()
         except tk.TclError:

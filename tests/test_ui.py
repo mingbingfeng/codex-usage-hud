@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import ttk
 import unittest
@@ -35,6 +36,7 @@ from codex_usage_hud.cli import (
     RENDERER_UPDATE_FAILURE_LIMIT,
     RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
     UsageSummaryCache,
+    _TkSnapshotPump,
     _prepare_codex_window_for_renderer,
     _prepare_codex_window_for_tk,
     _renderer_refresh_delay_seconds,
@@ -216,6 +218,12 @@ def _walk_widgets(widget: tk.Misc) -> list[tk.Misc]:
     for child in widget.winfo_children():
         widgets.extend(_walk_widgets(child))
     return widgets
+
+
+def _flush_tk(window: TokenHudWindow, iterations: int = 3) -> None:
+    for _ in range(iterations):
+        window.root.update_idletasks()
+        window.root.update()
 
 
 def _parse_tk_geometry(value: str) -> tuple[int, int, int, int]:
@@ -746,6 +754,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             dialog = window._settings_dialog
             self.assertIsNotNone(dialog)
             assert dialog is not None
+            _flush_tk(window)
             widgets = _walk_widgets(dialog)
             button_texts = {
                 str(widget.cget("text"))
@@ -795,6 +804,76 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
+    def test_settings_dialog_hides_and_reopens_without_rebuilding_shell(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window._open_settings_dialog()
+            _flush_tk(window)
+            dialog = window._settings_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+
+            with patch.object(dialog, "withdraw", wraps=dialog.withdraw) as withdraw:
+                window._hide_settings_dialog()
+                withdraw.assert_called_once_with()
+
+            self.assertEqual(window._settings_dialog, dialog)
+
+            with (
+                patch.object(dialog, "deiconify", wraps=dialog.deiconify) as deiconify,
+                patch.object(window, "_select_settings_tab", wraps=window._select_settings_tab) as select_tab,
+            ):
+                window._open_settings_dialog()
+
+            deiconify.assert_called_once_with()
+            select_tab.assert_not_called()
+        finally:
+            window._close()
+
+    def test_settings_dialog_reopen_while_visible_only_raises_window(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window._open_settings_dialog()
+            _flush_tk(window)
+
+            with patch.object(window, "_select_settings_tab", wraps=window._select_settings_tab) as select_tab:
+                window._open_settings_dialog()
+
+            select_tab.assert_not_called()
+        finally:
+            window._close()
+
+    def test_settings_dialog_shell_is_prewarmed_while_hidden(self) -> None:
+        window = TokenHudWindow()
+        try:
+            self.assertIsNone(window._settings_dialog)
+
+            _flush_tk(window)
+
+            dialog = window._settings_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+            self.assertEqual(dialog.state(), "withdrawn")
+            self.assertIn("daily_budget_usd", window._settings_entries)
+        finally:
+            window._close()
+
+    def test_settings_dialog_opens_shell_before_idle_tab_build(self) -> None:
+        window = TokenHudWindow()
+        try:
+            with patch.object(window, "_select_settings_tab", wraps=window._select_settings_tab) as select_tab:
+                window._open_settings_dialog()
+                select_tab.assert_not_called()
+                self.assertIsNotNone(window._settings_dialog)
+                self.assertIsNotNone(window._settings_build_job)
+
+                _flush_tk(window)
+
+            select_tab.assert_called_once_with("settings")
+            self.assertIn("daily_budget_usd", window._settings_entries)
+        finally:
+            window._close()
+
     def test_settings_dialog_is_raised_when_hud_refreshes(self) -> None:
         window = TokenHudWindow()
         try:
@@ -802,13 +881,76 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 winfo_exists=lambda: True,
                 lift=MagicMock(),
                 attributes=MagicMock(),
+                lower=MagicMock(),
             )
             window._settings_dialog = dialog
 
-            self.assertTrue(window._ensure_hud_visible("visible"))
+            window._apply_focus_state(True)
 
             dialog.lift.assert_called_once_with()
             dialog.attributes.assert_called_once_with("-topmost", True)
+        finally:
+            window._close()
+
+    def test_ui_interaction_settle_window_skips_tombstone_polling(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            locator = SimpleNamespace(
+                find=MagicMock(return_value=rect),
+                is_active=MagicMock(return_value=False),
+            )
+            window.locator = locator
+            window._attached = True
+            window._last_rect = rect
+            window._mark_ui_interaction(duration_ms=120)
+            window._apply_geometry = MagicMock()
+
+            window.sync_codex_window()
+
+            locator.find.assert_not_called()
+            locator.is_active.assert_not_called()
+            window._apply_geometry.assert_called_once_with()
+        finally:
+            window._close()
+
+    def test_toggle_applies_geometry_before_idle_rebuild(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window._apply_geometry = MagicMock()
+            window._rebuild_top_ui = MagicMock()
+
+            window.toggle_top_expanded()
+
+            window._apply_geometry.assert_called_once_with()
+            window._rebuild_top_ui.assert_not_called()
+            self.assertIsNotNone(window._top_rebuild_job)
+
+            _flush_tk(window)
+
+            window._rebuild_top_ui.assert_called_once_with()
+            self.assertGreaterEqual(window._apply_geometry.call_count, 2)
+        finally:
+            window._close()
+
+    def test_attached_toggle_skips_slow_anchor_probe_during_interaction(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            locator = SimpleNamespace(
+                anchor_geometry=MagicMock(
+                    side_effect=AssertionError("slow anchor probe should not run in click path")
+                )
+            )
+            window.locator = locator
+            window._attached = True
+            window._last_rect = rect
+            window._apply_window_geometry = MagicMock()
+
+            window.toggle_top_expanded()
+
+            locator.anchor_geometry.assert_not_called()
+            self.assertTrue(window._ui_interaction_active())
         finally:
             window._close()
 
@@ -1389,6 +1531,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             window.toggle_top_expanded()
+            _flush_tk(window)
             window.root.geometry(f"360x{TOP_DOCK_EXPANDED_HEIGHT}+20+20")
             now = datetime(2026, 5, 29, 12, 56, 25).astimezone()
             snapshot = ParsedSession(
@@ -1478,6 +1621,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             window.toggle_top_expanded()
+            _flush_tk(window)
             snapshot = ParsedSession(session_title="Ship the live session switch check")
 
             window.update_display(snapshot)
@@ -1552,8 +1696,13 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.locator = locator
 
             window._attach_to_rect(rect)
-            self.assertFalse(window.should_refresh_snapshot())
-            self.assertEqual(window._hidden_reason, "inactive")
+            self.assertTrue(window.should_refresh_snapshot())
+            self.assertEqual(window.root.state(), "normal")
+            self.assertEqual(window.request_root.state(), "normal")
+            self.assertFalse(window._tombstoned)
+            self.assertEqual(window._hidden_reason, "")
+            self.assertFalse(bool(window.root.attributes("-topmost")))
+            self.assertFalse(bool(window.request_root.attributes("-topmost")))
 
             locator.active = True
             window._attach_to_rect(rect)
@@ -1561,8 +1710,94 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertTrue(window.should_refresh_snapshot())
             self.assertEqual(window._hidden_reason, "")
             self.assertFalse(window._tombstoned)
+            self.assertTrue(bool(window.root.attributes("-topmost")))
+            self.assertTrue(bool(window.request_root.attributes("-topmost")))
         finally:
             window._close()
+
+    def test_hud_hwnds_include_settings_dialog(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _flush_tk(window)
+            dialog = window._settings_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+
+            self.assertIn(int(dialog.winfo_id()), window._hud_hwnds())
+        finally:
+            window._close()
+
+
+class TkSnapshotPumpTests(unittest.TestCase):
+    def test_snapshot_pump_is_single_flight_while_worker_is_busy(self) -> None:
+        context = SimpleNamespace(reload_user_config=MagicMock())
+        started = threading.Event()
+        release = threading.Event()
+        call_count = 0
+
+        def slow_build(_context: object) -> ParsedSession:
+            nonlocal call_count
+            call_count += 1
+            started.set()
+            release.wait(1.0)
+            return ParsedSession(status="parsed")
+
+        with patch("codex_usage_hud.cli.build_snapshot", side_effect=slow_build):
+            pump = _TkSnapshotPump(context)
+            try:
+                self.assertTrue(pump.request_refresh())
+                self.assertTrue(started.wait(1.0))
+                self.assertFalse(pump.request_refresh())
+            finally:
+                release.set()
+                pump.close()
+
+        self.assertEqual(call_count, 1)
+
+    def test_snapshot_pump_returns_error_snapshot_when_worker_fails(self) -> None:
+        context = SimpleNamespace(reload_user_config=MagicMock())
+
+        with patch(
+            "codex_usage_hud.cli.build_snapshot",
+            side_effect=RuntimeError("boom"),
+        ):
+            pump = _TkSnapshotPump(context)
+            try:
+                self.assertTrue(pump.request_refresh())
+                snapshot = None
+                for _ in range(50):
+                    snapshot = pump.take_latest()
+                    if snapshot is not None:
+                        break
+                    threading.Event().wait(0.02)
+            finally:
+                pump.close()
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.status, "error")
+        self.assertIn("boom", snapshot.error)
+
+    def test_snapshot_pump_discards_worker_result_after_close(self) -> None:
+        context = SimpleNamespace(reload_user_config=MagicMock())
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_build(_context: object) -> ParsedSession:
+            started.set()
+            release.wait(1.0)
+            return ParsedSession(status="parsed")
+
+        with patch("codex_usage_hud.cli.build_snapshot", side_effect=slow_build):
+            pump = _TkSnapshotPump(context)
+            self.assertTrue(pump.request_refresh())
+            self.assertTrue(started.wait(1.0))
+            pump.close()
+            release.set()
+            threading.Event().wait(0.05)
+
+        self.assertIsNone(pump.take_latest())
+        self.assertFalse(pump.request_refresh())
 
 
 class DaemonLifecycleTests(unittest.TestCase):

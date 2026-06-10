@@ -11,6 +11,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -1535,6 +1536,57 @@ class RuntimeContext:
             _configure_ui_cost_estimators(estimator)
 
 
+class _TkSnapshotPump:
+    """Keep Tk responsive by building snapshots off the Tk main thread."""
+
+    def __init__(self, context: RuntimeContext) -> None:
+        self._context = context
+        self._lock = threading.Lock()
+        self._stop_event = Event()
+        self._worker: threading.Thread | None = None
+        self._latest_snapshot: ParsedSession | None = None
+
+    def request_refresh(self) -> bool:
+        with self._lock:
+            if self._stop_event.is_set():
+                return False
+            if self._worker is not None and self._worker.is_alive():
+                return False
+            worker = threading.Thread(
+                target=self._refresh_worker,
+                name="codex-usage-hud-tk-refresh",
+                daemon=True,
+            )
+            self._worker = worker
+            worker.start()
+            return True
+
+    def take_latest(self) -> ParsedSession | None:
+        with self._lock:
+            snapshot = self._latest_snapshot
+            self._latest_snapshot = None
+            return snapshot
+
+    def close(self, timeout_seconds: float = 0.5) -> None:
+        self._stop_event.set()
+        with self._lock:
+            worker = self._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=max(0.0, float(timeout_seconds)))
+
+    def _refresh_worker(self) -> None:
+        try:
+            self._context.reload_user_config()
+            snapshot = build_snapshot(self._context)
+        except Exception as exc:
+            snapshot = ParsedSession(status="error", error=str(exc))
+        with self._lock:
+            self._worker = None
+            if self._stop_event.is_set():
+                return
+            self._latest_snapshot = snapshot
+
+
 def _candidate_data_dirs(platform: BasePlatform | None = None) -> list[Path]:
     platform = platform or get_current_platform()
     candidates = [platform.get_codex_data_dir(), Path.home() / ".codex"]
@@ -2581,6 +2633,7 @@ def _run_tk_window_session(
     close_context: bool = True,
     update_manager: AutoUpdateManager | None = None,
 ) -> int:
+    snapshot_pump = _TkSnapshotPump(context)
     try:
         try:
             window = existing_window or TokenHudWindow(
@@ -2595,16 +2648,17 @@ def _run_tk_window_session(
         except Exception as exc:
             _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
             return 1
+        latest_snapshot = ParsedSession(status="waiting")
 
         def refresh() -> None:
+            nonlocal latest_snapshot
             if window.should_refresh_snapshot():
-                try:
-                    context.reload_user_config()
-                    snapshot = build_snapshot(context)
-                except Exception as exc:
-                    snapshot = ParsedSession(status="error", error=str(exc))
+                snapshot = snapshot_pump.take_latest()
+                if snapshot is not None:
+                    latest_snapshot = snapshot
+                snapshot_pump.request_refresh()
                 window.update_display(
-                    snapshot,
+                    latest_snapshot,
                     update_state=update_manager.tick() if update_manager is not None else None,
                 )
             try:
@@ -2640,6 +2694,7 @@ def _run_tk_window_session(
             return HUD_SWITCH_TO_RENDERER
         return 0
     finally:
+        snapshot_pump.close()
         if close_context:
             context.close()
 
