@@ -2576,7 +2576,7 @@ class TokenHudWindow:
 
     def _open_settings_dialog(self, tab: str = "settings") -> None:
         if self._settings_dialog is not None and self._settings_dialog.winfo_exists():
-            self._settings_dialog.lift()
+            self._raise_settings_dialog()
             self._select_settings_tab(tab)
             return
         settings = self.user_settings_store.load()
@@ -2695,7 +2695,21 @@ class TokenHudWindow:
         self._select_settings_tab(tab)
         dialog.update_idletasks()
         dialog.deiconify()
-        dialog.lift()
+        self._raise_settings_dialog()
+
+    def _raise_settings_dialog(self) -> None:
+        dialog = self._settings_dialog
+        if dialog is None:
+            return
+        try:
+            if not dialog.winfo_exists():
+                return
+            # The HUD follow loop keeps the top/request windows topmost, so re-raise the
+            # settings dialog after every HUD refresh while it is open.
+            dialog.lift()
+            dialog.attributes("-topmost", True)
+        except tk.TclError:
+            return
 
     def _settings_tab_button(
         self,
@@ -4197,6 +4211,7 @@ class TokenHudWindow:
             self.request_root.lift()
             self.root.attributes("-topmost", True)
             self.request_root.attributes("-topmost", True)
+            self._raise_settings_dialog()
         except tk.TclError:
             return False
         try:

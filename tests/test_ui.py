@@ -795,6 +795,23 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
+    def test_settings_dialog_is_raised_when_hud_refreshes(self) -> None:
+        window = TokenHudWindow()
+        try:
+            dialog = SimpleNamespace(
+                winfo_exists=lambda: True,
+                lift=MagicMock(),
+                attributes=MagicMock(),
+            )
+            window._settings_dialog = dialog
+
+            self.assertTrue(window._ensure_hud_visible("visible"))
+
+            dialog.lift.assert_called_once_with()
+            dialog.attributes.assert_called_once_with("-topmost", True)
+        finally:
+            window._close()
+
     def test_settings_exit_confirms_before_closing_hud(self) -> None:
         window = TokenHudWindow()
         try:
