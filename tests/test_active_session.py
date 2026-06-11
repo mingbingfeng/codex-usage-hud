@@ -175,12 +175,42 @@ class ActiveSessionTrackerTests(unittest.TestCase):
 
         try:
             self.assertTrue(watcher.start())
-            time.sleep(1.2)
+            time.sleep(0.6)
         finally:
             watcher.close()
 
         self.assertEqual([item[0] for item in received], ["Event Selected Thread"])
         self.assertEqual(received[0][1], "event")
+
+    def test_realtime_watcher_backstop_polls_after_event_gap(self) -> None:
+        platform = FakeEventTitlePlatform(
+            ["Event Selected Thread"],
+            poll_titles=["Polled New Thread"],
+        )
+        received: list[tuple[str, str, float]] = []
+        watcher = RealtimeSessionWatcher(
+            platform,
+            250,
+            lambda title, source, detected_at: received.append(
+                (title, source, detected_at)
+            ),
+        )
+
+        try:
+            self.assertTrue(watcher.start())
+            deadline = time.time() + 2.0
+            while time.time() < deadline and len(received) < 2:
+                time.sleep(0.02)
+        finally:
+            watcher.close()
+
+        self.assertEqual(
+            [item[:2] for item in received[:2]],
+            [
+                ("Event Selected Thread", "event"),
+                ("Polled New Thread", "poll-backstop"),
+            ],
+        )
 
     def test_path_from_session_index_resolves_thread_name(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -444,6 +474,28 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 "Live Selected Thread",
             )
 
+    def test_current_path_resolves_archived_session_from_cdp_thread_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            archived_root = root / "archived_sessions" / "2026" / "06"
+            sessions_root.mkdir()
+            archived_root.mkdir(parents=True)
+            archived_session = archived_root / "session-archived-123.jsonl"
+            archived_session.write_text("{}\n", encoding="utf-8")
+
+            tracker = ActiveSessionTracker(
+                platform=FakeCdpRefPlatform("archived-123", "Archived Thread"),
+                state_db=root / "missing.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+            )
+
+            self.assertEqual(tracker.current_path(), archived_session)
+            self.assertEqual(tracker.latest_source, "cdp:Archived Thread")
+
 
 class SessionPathResolverTests(unittest.TestCase):
     def test_resolver_prefers_tracker_selected_path_over_latest_mtime(self) -> None:
@@ -510,6 +562,79 @@ class SessionPathResolverTests(unittest.TestCase):
             self.assertEqual(first_source, "ui:selected")
             self.assertEqual(second_path, second)
             self.assertEqual(second_source, "ui:selected")
+
+    def test_resolver_bypasses_idle_gate_for_unresolved_tracker_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "current.jsonl"
+            latest = root / "latest.jsonl"
+            current.write_text("{}\n", encoding="utf-8")
+            latest.write_text("{}\n", encoding="utf-8")
+
+            now = time.time()
+            os.utime(current, (now, now))
+            os.utime(latest, (now + 5, now + 5))
+
+            resolver = SessionPathResolver(
+                platform=FakePlatform(latest_session=latest),
+                sessions_root=root,
+                active_session_tracker=_TrackerStub(None, source="ui-unmatched"),
+                auto_switch_idle_seconds=30.0,
+            )
+            resolver.auto_session_file = current
+
+            path, source = resolver.resolve()
+
+            self.assertEqual(path, latest)
+            self.assertEqual(source, "ui-unmatched+activity")
+
+    def test_resolver_switches_to_archived_latest_when_tracker_is_unmatched(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            archived_root = root / "archived_sessions" / "2026" / "06"
+            sessions_root.mkdir()
+            archived_root.mkdir(parents=True)
+
+            current = sessions_root / "current.jsonl"
+            archived_latest = archived_root / "archived-latest.jsonl"
+            current.write_text("{}\n", encoding="utf-8")
+            archived_latest.write_text("{}\n", encoding="utf-8")
+
+            now = time.time()
+            os.utime(current, (now, now))
+            os.utime(archived_latest, (now + 5, now + 5))
+
+            resolver = SessionPathResolver(
+                platform=FakePlatform(latest_session=archived_latest),
+                sessions_root=sessions_root,
+                active_session_tracker=_TrackerStub(None, source="ui-unmatched"),
+                auto_switch_idle_seconds=30.0,
+            )
+            resolver.auto_session_file = current
+
+            path, source = resolver.resolve()
+
+            self.assertEqual(path, archived_latest)
+            self.assertEqual(source, "ui-unmatched+activity")
+
+    def test_resolver_clears_stale_missing_auto_session_when_no_latest_found(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            missing = root / "missing.jsonl"
+
+            resolver = SessionPathResolver(
+                platform=FakePlatform(latest_session=None),
+                sessions_root=root,
+                active_session_tracker=_TrackerStub(None, source="ui-unmatched"),
+            )
+            resolver.auto_session_file = missing
+
+            path, source = resolver.resolve()
+
+            self.assertIsNone(path)
+            self.assertIsNone(resolver.auto_session_file)
+            self.assertEqual(source, "ui-unmatched")
 
 
 if __name__ == "__main__":

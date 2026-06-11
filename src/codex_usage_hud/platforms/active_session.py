@@ -20,6 +20,20 @@ _LOGGER.addHandler(logging.NullHandler())
 _THREAD_PATH_NEGATIVE_CACHE_SECONDS = 2.0
 
 
+def _session_search_roots(sessions_root: Path) -> tuple[Path, ...]:
+    roots = [sessions_root]
+    if sessions_root.name == "sessions":
+        roots.append(sessions_root.parent / "archived_sessions")
+    ordered: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        ordered.append(root)
+    return tuple(ordered)
+
+
 def compact_text(value: Any, limit: int = 28) -> str:
     """Collapse whitespace and trim text for short status labels."""
     if value is None:
@@ -35,17 +49,23 @@ def find_session_file(session_id: str, sessions_root: Path) -> Path | None:
     direct = Path(session_id)
     if direct.exists():
         return direct
-    if not sessions_root.exists():
+    search_roots = [root for root in _session_search_roots(sessions_root) if root.exists()]
+    if not search_roots:
         return None
 
+    matches: list[Path] = []
+    for root in search_roots:
+        try:
+            matches.extend(root.rglob(f"*{session_id}*.jsonl"))
+        except OSError:
+            continue
     try:
+        matches.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    except OSError:
         matches = sorted(
-            sessions_root.rglob(f"*{session_id}*.jsonl"),
-            key=lambda item: item.stat().st_mtime,
+            [item for item in matches if item.exists()],
             reverse=True,
         )
-    except OSError:
-        return None
     return matches[0] if matches else None
 
 
@@ -69,7 +89,6 @@ class RealtimeSessionWatcher:
         self._threads: list[threading.Thread] = []
         self._last_emitted = ""
         self._last_event_at = 0.0
-        self._has_realtime_signal = False
         self._emit_lock = threading.Lock()
 
     def start(self) -> bool:
@@ -175,11 +194,12 @@ class RealtimeSessionWatcher:
         if self.stop_event.wait(backstop_seconds):
             return
         delay = max(0.5, self.poll_ms / 1000.0)
+        last_probe_at = 0.0
         while not self.stop_event.is_set():
-            if not self._has_realtime_signal and (
-                time.monotonic() - self._last_event_at >= backstop_seconds
-            ):
+            now = time.monotonic()
+            if now - max(self._last_event_at, last_probe_at) >= backstop_seconds:
                 self._poll_once("poll-backstop")
+                last_probe_at = time.monotonic()
             self.stop_event.wait(delay)
 
     def _poll_loop(self) -> None:
@@ -220,7 +240,6 @@ class RealtimeSessionWatcher:
             self._last_emitted = text
             if source == "event":
                 self._last_event_at = detected_at
-                self._has_realtime_signal = True
         self.on_title(text, source, detected_at)
 
 
@@ -645,6 +664,10 @@ class SessionPathResolver:
             "pinned" if (self.session_id or self.session_file) else "activity"
         )
 
+    @staticmethod
+    def _has_unresolved_tracker_selection(source: str) -> bool:
+        return source.startswith("ui-unmatched") or source.startswith("cdp-unmatched")
+
     def resolve(self) -> tuple[Path | None, str]:
         """Resolve the current session path plus a short source label."""
         if self.session_file is not None:
@@ -655,21 +678,24 @@ class SessionPathResolver:
             self.selection_source = "pinned:id"
             return find_session_file(self.session_id, self.sessions_root), self.selection_source
 
-        active_path = (
-            self.active_session_tracker.current_path()
-            if self.active_session_tracker is not None
-            else None
-        )
+        tracker_source = ""
+        active_path = None
+        if self.active_session_tracker is not None:
+            active_path = self.active_session_tracker.current_path()
+            tracker_source = self.active_session_tracker.latest_source
         if active_path is not None:
             self.auto_session_file = active_path
-            self.selection_source = self.active_session_tracker.latest_source
+            self.selection_source = tracker_source
             return active_path, self.selection_source
 
         if self.active_session_tracker is not None and self.active_session_tracker.enabled:
-            self.selection_source = self.active_session_tracker.latest_source
+            self.selection_source = tracker_source
 
         latest = self.platform.detect_active_session(self.sessions_root)
         if latest is None:
+            if self.auto_session_file is not None and not self.auto_session_file.exists():
+                self.auto_session_file = None
+                self.selection_source = tracker_source or "activity"
             return self.auto_session_file, self.selection_source
 
         if self.auto_session_file is None or not self.auto_session_file.exists():
@@ -690,10 +716,18 @@ class SessionPathResolver:
             return self.auto_session_file, self.selection_source
 
         current_idle = time.time() - current_mtime
+        tracker_requested_switch = self._has_unresolved_tracker_selection(tracker_source)
         if (
             latest_mtime > current_mtime
-            and current_idle >= self.auto_switch_idle_seconds
+            and (
+                tracker_requested_switch
+                or current_idle >= self.auto_switch_idle_seconds
+            )
         ):
             self.auto_session_file = latest
-            self.selection_source = "activity"
+            self.selection_source = (
+                f"{tracker_source}+activity"
+                if tracker_requested_switch
+                else "activity"
+            )
         return self.auto_session_file, self.selection_source

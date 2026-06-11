@@ -50,6 +50,29 @@ class ActiveSessionDetectionTests(unittest.TestCase):
 
             self.assertEqual(active_session, newer_session)
 
+    def test_detect_active_session_considers_archived_sessions_sibling(self) -> None:
+        platform = get_current_platform()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            archived_root = root / "archived_sessions" / "2026"
+            sessions_root.mkdir()
+            archived_root.mkdir(parents=True)
+
+            current_session = sessions_root / "current-session.jsonl"
+            archived_session = archived_root / "archived-session.jsonl"
+
+            current_session.write_text('{"id": "current"}\n', encoding="utf-8")
+            archived_session.write_text('{"id": "archived"}\n', encoding="utf-8")
+
+            os.utime(current_session, (1_000, 1_000))
+            os.utime(archived_session, (2_000, 2_000))
+
+            active_session = platform.detect_active_session(sessions_root)
+
+            self.assertEqual(active_session, archived_session)
+
 
 class PlatformFactoryTests(unittest.TestCase):
     def test_get_current_platform_returns_platform_instance(self) -> None:

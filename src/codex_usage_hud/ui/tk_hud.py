@@ -3778,18 +3778,6 @@ class TokenHudWindow:
         controls.pack(side="left", padx=(0, 4))
         self._move_handle(controls, "top", self.root).pack(side="left")
         self._update_button(controls).pack(side="left", padx=(4, 0))
-        close = tk.Button(
-            header,
-            text="×",
-            command=self._close,
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            relief="flat",
-            padx=6,
-            pady=1,
-            font=("Microsoft YaHei UI", 8),
-        )
-        close.pack(side="right", padx=(4, 0))
         self._settings_button(header).pack(side="right", padx=(4, 0))
         self.top_labels["title"] = tk.Label(
             header,

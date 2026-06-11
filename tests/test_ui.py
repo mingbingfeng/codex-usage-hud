@@ -374,6 +374,25 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(second.tokens, 28)
         self.assertEqual(parser.loads, 1)
 
+    def test_usage_summary_cache_includes_archived_sessions_sibling(self) -> None:
+        parser = _FakeUsageParser()
+        cache = UsageSummaryCache(parser)  # type: ignore[arg-type]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            archived_root = Path(temp_dir) / "archived_sessions"
+            sessions_root.mkdir()
+            archived_root.mkdir()
+            (sessions_root / "session.jsonl").write_text("{}", encoding="utf-8")
+            (archived_root / "archived.jsonl").write_text("{}", encoding="utf-8")
+            day_start = datetime(2026, 5, 28, 10, 0)
+            week_start = datetime(2026, 5, 25, 10, 0)
+
+            day_total, week_total = cache.summarize(sessions_root, day_start, week_start)
+
+        self.assertEqual(day_total.tokens, 56)
+        self.assertEqual(week_total.tokens, 50)
+        self.assertEqual(parser.loads, 2)
+
     def test_week_before_today_breakdown_subtracts_current_daily_window(self) -> None:
         week = UsageSummary(tokens=1190, input_tokens=800, cost_usd=119.142012)
         today = UsageSummary(tokens=202, input_tokens=150, cost_usd=20.226427)
@@ -1636,6 +1655,22 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 window.top_labels["title"].cget("text"),
                 "Codex 会话 / 预算",
             )
+        finally:
+            window._close()
+
+    def test_top_expanded_header_does_not_show_close_button(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            _flush_tk(window)
+
+            button_texts = {
+                str(widget.cget("text"))
+                for widget in _walk_widgets(window.root)
+                if isinstance(widget, tk.Button)
+            }
+
+            self.assertNotIn("×", button_texts)
         finally:
             window._close()
 

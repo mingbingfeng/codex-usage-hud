@@ -7,6 +7,24 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-11
+
+Archived Sessions Summary Patch.
+
+### Fixed
+
+- Taught usage summary scans to include the sibling `archived_sessions`
+  directory when the live `sessions` tree is summarized, so day/week totals
+  stay correct after archived logs move out of the active folder.
+- Extended active-session discovery and path resolution so archived session
+  trees are considered alongside the live `sessions` tree, and unmatched
+  tracker states can still fall back to the newest viable session.
+- Kept the realtime watcher polling after event gaps, which helps the HUD
+  recover when title events pause before the next backstop poll.
+- Removed the redundant close button from the Tk expanded header so the top
+  controls match the current layout and the close action stays in the window
+  controls.
+
 ## [1.0.0] - 2026-06-09
 
 Windows Installer Edition, the first supported installer-based release line.

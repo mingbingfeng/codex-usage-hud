@@ -1401,10 +1401,24 @@ class UsageSummaryCache:
         self._parser = parser
         self._min_rescan_seconds = max(0.0, float(min_rescan_seconds))
         self._entries: dict[Path, _UsageCacheEntry] = {}
-        self._last_scan_key: tuple[Path, datetime, datetime] | None = None
+        self._last_scan_key: tuple[tuple[Path, ...], datetime, datetime] | None = None
         self._last_scan_at = 0.0
         self._last_day_total = UsageSummary()
         self._last_week_total = UsageSummary()
+
+    @staticmethod
+    def _scan_roots(sessions_root: Path) -> tuple[Path, ...]:
+        roots = [sessions_root]
+        if sessions_root.name == "sessions":
+            roots.append(sessions_root.parent / "archived_sessions")
+        ordered: list[Path] = []
+        seen: set[Path] = set()
+        for root in roots:
+            if root in seen:
+                continue
+            seen.add(root)
+            ordered.append(root)
+        return tuple(ordered)
 
     def summarize(
         self,
@@ -1413,7 +1427,8 @@ class UsageSummaryCache:
         week_start: datetime,
     ) -> tuple[UsageSummary, UsageSummary]:
         now = time.monotonic()
-        scan_key = (sessions_root, day_start, week_start)
+        scan_roots = self._scan_roots(sessions_root)
+        scan_key = (scan_roots, day_start, week_start)
         if (
             self._last_scan_key == scan_key
             and now - self._last_scan_at < self._min_rescan_seconds
@@ -1423,7 +1438,8 @@ class UsageSummaryCache:
         day_total = UsageSummary()
         week_total = UsageSummary()
 
-        if not sessions_root.exists():
+        existing_roots = [root for root in scan_roots if root.exists()]
+        if not existing_roots:
             self._last_scan_key = scan_key
             self._last_scan_at = now
             self._last_day_total = day_total
@@ -1431,13 +1447,14 @@ class UsageSummaryCache:
             return day_total, week_total
 
         seen_paths: set[Path] = set()
-        for path in sessions_root.rglob("*.jsonl"):
-            seen_paths.add(path)
-            summary_day, summary_week = self._summaries_for_file(
-                path, day_start, week_start
-            )
-            _merge_usage(day_total, summary_day)
-            _merge_usage(week_total, summary_week)
+        for root in existing_roots:
+            for path in root.rglob("*.jsonl"):
+                seen_paths.add(path)
+                summary_day, summary_week = self._summaries_for_file(
+                    path, day_start, week_start
+                )
+                _merge_usage(day_total, summary_day)
+                _merge_usage(week_total, summary_week)
 
         for cached_path in list(self._entries):
             if cached_path not in seen_paths:

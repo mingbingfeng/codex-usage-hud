@@ -25,7 +25,8 @@ reports, or screenshots.
 
 ## Release hygiene
 
+- Follow [docs/RELEASE_PLAYBOOK.md](docs/RELEASE_PLAYBOOK.md) for the release
+  checklist before tagging a patch or minor release.
 - Keep version tags, `CHANGELOG.md`, and release-note drafts in sync.
 - If the release message changes, update the README release section too.
 - Prefer one release narrative per version, not multiple competing summaries.
-

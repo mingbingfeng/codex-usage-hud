@@ -53,15 +53,20 @@ class BasePlatform(ABC):
     @staticmethod
     def _detect_latest_jsonl_by_mtime(sessions_root: Path) -> Path | None:
         """Find the most recently modified JSONL file under ``sessions_root``."""
-        if not sessions_root.exists():
+        roots = [sessions_root]
+        if sessions_root.name == "sessions":
+            roots.append(sessions_root.parent / "archived_sessions")
+        search_roots = [root for root in roots if root.exists()]
+        if not search_roots:
             return None
 
         candidates: list[tuple[float, Path]] = []
-        for path in sessions_root.rglob("*.jsonl"):
-            try:
-                candidates.append((path.stat().st_mtime, path))
-            except OSError:
-                continue
+        for root in search_roots:
+            for path in root.rglob("*.jsonl"):
+                try:
+                    candidates.append((path.stat().st_mtime, path))
+                except OSError:
+                    continue
 
         if not candidates:
             return None

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-release sanity check for the first public codex-usage-hud release."""
+"""Pre-release sanity check for codex-usage-hud releases."""
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ from pathlib import Path
 REQUIRED_PATHS = (
     Path("pyproject.toml"),
     Path("LICENSE"),
+    Path("CHANGELOG.md"),
     Path("README.md"),
     Path("README_EN.md"),
     Path("docs/PRIVACY.md"),
+    Path("docs/RELEASE_PLAYBOOK.md"),
     Path("tools/installer/CodexUsageHud.iss"),
 )
 
