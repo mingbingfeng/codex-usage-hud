@@ -95,6 +95,7 @@ from codex_usage_hud.ui.tk_hud import (
     HudSettingsStore,
     HudAnchor,
     AutoScrollLabel,
+    ShimmerTextLabel,
     TOKEN_LEGEND_TEXT,
     TokenHudWindow,
     WindowPlacement,
@@ -1916,6 +1917,25 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             label.set_text("↑10 ↻2 ↓3 ◇1 ∑13 $0.5000")
             label.set_text("↑20 ↻4 ↓9 ◇3 ∑29 $0.9000")
             root.root.update_idletasks()
+        finally:
+            root._close()
+
+    def test_shimmer_text_label_updates_text_without_crashing(self) -> None:
+        root = TokenHudWindow()
+        try:
+            label = ShimmerTextLabel(
+                root.root,
+                text="正在思考",
+                fg="#8492A6",
+                bg="#10161D",
+            )
+            label.pack(fill="x")
+            label.set_text("正在思考...")
+            root.root.update_idletasks()
+            root.root.update()
+
+            self.assertEqual(label.cget("text"), "正在思考...")
+            self.assertTrue(label._char_ids)
         finally:
             root._close()
 

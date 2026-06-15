@@ -92,6 +92,10 @@ MARQUEE_START_PAUSE_MS = 1500
 MARQUEE_END_PAUSE_MS = 1500
 MARQUEE_STEP_PX = 1
 MARQUEE_INTERVAL_MS = 30
+SHIMMER_INTERVAL_MS = 30
+SHIMMER_STEP_PX = 3
+SHIMMER_BAND_WIDTH_PX = 58
+SHIMMER_HIGHLIGHT = "#FFFFFF"
 COUNTER_ANIMATION_MS = 360
 COUNTER_STEP_MS = 30
 NUMERIC_TOKEN_RE = re.compile(r"\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?")
@@ -836,6 +840,205 @@ class AutoScrollLabel(tk.Frame):
             self._canvas_center_y(),
         )
         self._scroll_job = self.after(MARQUEE_INTERVAL_MS, self._scroll_step)
+
+
+class ShimmerTextLabel(tk.Frame):
+    """Canvas text shimmer that keeps the highlight clipped to glyphs.
+
+    Tk does not expose a text-mask brush like Qt, so this redraws each glyph with
+    a moving color ramp. The canvas background remains untouched outside text.
+    """
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        text: str = "",
+        font: Any = ("Microsoft YaHei UI", 8, "bold"),
+        fg: str = "#8492A6",
+        bg: str = "#10161D",
+        highlight: str = SHIMMER_HIGHLIGHT,
+        band_width_px: int = SHIMMER_BAND_WIDTH_PX,
+        step_px: int = SHIMMER_STEP_PX,
+        timer_ms: int = SHIMMER_INTERVAL_MS,
+        padding_x: int = 0,
+        static_align: str = "left",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(master, bg=bg, **kwargs)
+        self._text = str(text or "")
+        self._fg = str(fg)
+        self._bg = str(bg)
+        self._highlight = str(highlight)
+        self._band_width_px = max(1, int(band_width_px))
+        self._step_px = max(1, int(step_px))
+        self._timer_ms = max(10, int(timer_ms))
+        self._padding_x = max(0, int(padding_x))
+        self._static_align = static_align
+        self._font = tkfont.Font(font=font)
+        self._canvas = tk.Canvas(
+            self,
+            bg=self._bg,
+            highlightthickness=0,
+            borderwidth=0,
+            relief="flat",
+        )
+        self._canvas.pack(fill="both", expand=True)
+        self._char_ids: list[int] = []
+        self._char_centers: list[float] = []
+        self._phase_x = float(-self._band_width_px)
+        self._shimmer_job: str | None = None
+        self.bind("<Configure>", self._handle_configure)
+        self.bind("<Map>", self._handle_map)
+        self.bind("<Unmap>", self._handle_unmap)
+        self.bind("<Destroy>", self._handle_destroy)
+        self._canvas.bind("<Configure>", self._handle_configure)
+        self._layout_text()
+        self._schedule_shimmer()
+
+    def cget(self, key: str) -> Any:
+        if key == "text":
+            return self._text
+        if key == "fg":
+            return self._fg
+        if key == "bg":
+            return self._bg
+        if key == "font":
+            return self._font
+        if key == "highlight":
+            return self._highlight
+        return super().cget(key)
+
+    def config(self, cnf: Any = None, **kwargs: Any) -> Any:
+        return self.configure(cnf, **kwargs)
+
+    def configure(self, cnf: Any = None, **kwargs: Any) -> Any:
+        if cnf:
+            kwargs.update(cnf)
+        text = kwargs.pop("text", None)
+        fg = kwargs.pop("fg", None)
+        bg = kwargs.pop("bg", None)
+        font = kwargs.pop("font", None)
+        highlight = kwargs.pop("highlight", None)
+        if fg is not None:
+            self._fg = str(fg)
+        if bg is not None:
+            self._bg = str(bg)
+            super().configure(bg=self._bg)
+            self._canvas.configure(bg=self._bg)
+        if font is not None:
+            self._font = tkfont.Font(font=font)
+        if highlight is not None:
+            self._highlight = str(highlight)
+        result = super().configure(**kwargs)
+        if text is not None:
+            self.set_text(str(text))
+        else:
+            self._layout_text()
+            self._apply_shimmer_colors()
+        return result
+
+    def set_text(self, text: str) -> None:
+        next_text = str(text or "")
+        if next_text == self._text:
+            return
+        self._text = next_text
+        self._phase_x = float(-self._band_width_px)
+        self._layout_text()
+        self._apply_shimmer_colors()
+
+    def destroy(self) -> None:
+        self._cancel_shimmer()
+        super().destroy()
+
+    def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._layout_text()
+        self._apply_shimmer_colors()
+
+    def _handle_map(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._schedule_shimmer()
+
+    def _handle_unmap(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._cancel_shimmer()
+
+    def _handle_destroy(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._cancel_shimmer()
+
+    def _cancel_shimmer(self) -> None:
+        if self._shimmer_job is None:
+            return
+        try:
+            self.after_cancel(self._shimmer_job)
+        except tk.TclError:
+            pass
+        self._shimmer_job = None
+
+    def _schedule_shimmer(self) -> None:
+        if self._shimmer_job is not None or not self.winfo_exists():
+            return
+        self._shimmer_job = self.after(self._timer_ms, self._run_shimmer_step)
+
+    def _run_shimmer_step(self) -> None:
+        self._shimmer_job = None
+        if not self.winfo_exists() or not self.winfo_ismapped():
+            return
+        text_width = self._font.measure(self._text)
+        limit = max(text_width, self.winfo_width()) + self._band_width_px
+        self._phase_x += self._step_px
+        if self._phase_x > limit:
+            self._phase_x = float(-self._band_width_px)
+        self._apply_shimmer_colors()
+        self._schedule_shimmer()
+
+    def _layout_text(self) -> None:
+        self._canvas.delete("all")
+        self._char_ids.clear()
+        self._char_centers.clear()
+        line_height = max(1, self._font.metrics("linespace"))
+        self._canvas.configure(height=line_height + 2)
+        y = max(1.0, (self._canvas.winfo_height() or (line_height + 2)) / 2)
+        text_width = self._font.measure(self._text)
+        available_width = max(
+            1,
+            (self._canvas.winfo_width() or self.winfo_width()) - (self._padding_x * 2),
+        )
+        x = float(self._padding_x)
+        if text_width <= available_width and self._static_align == "center":
+            x += max(0.0, (available_width - text_width) / 2)
+        for char in self._text:
+            char_width = self._font.measure(char)
+            item_id = self._canvas.create_text(
+                x,
+                y,
+                anchor="w",
+                text=char,
+                fill=self._fg,
+                font=self._font,
+            )
+            self._char_ids.append(item_id)
+            self._char_centers.append(x + (char_width / 2))
+            x += char_width
+
+    def _apply_shimmer_colors(self) -> None:
+        for item_id, center_x in zip(self._char_ids, self._char_centers):
+            distance = abs(center_x - self._phase_x)
+            intensity = max(0.0, 1.0 - (distance / self._band_width_px))
+            color = self._blend_color(self._fg, self._highlight, intensity * intensity)
+            self._canvas.itemconfigure(item_id, fill=color)
+
+    def _blend_color(self, start: str, end: str, progress: float) -> str:
+        progress = max(0.0, min(1.0, progress))
+        start_rgb = self.winfo_rgb(start)
+        end_rgb = self.winfo_rgb(end)
+        channels = []
+        for start_value, end_value in zip(start_rgb, end_rgb):
+            value = start_value + ((end_value - start_value) * progress)
+            channels.append(max(0, min(255, int(round(value / 257)))))
+        return f"#{channels[0]:02x}{channels[1]:02x}{channels[2]:02x}"
 
 
 @dataclass(frozen=True)

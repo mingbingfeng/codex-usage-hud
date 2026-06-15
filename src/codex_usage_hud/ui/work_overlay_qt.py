@@ -22,6 +22,11 @@ WORK_OVERLAY_TEXT_WRAP_WIDTH = WORK_OVERLAY_WIDTH - 28
 WORK_OVERLAY_CARD_X_PADDING = 10
 WORK_OVERLAY_CARD_Y_PADDING = 8
 WORK_OVERLAY_CARD_SPACING = 7
+WORK_OVERLAY_SHIMMER_TIMER_MS = 30
+WORK_OVERLAY_SHIMMER_STEP_PX = 3.5
+WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX = 58
+WORK_OVERLAY_SHIMMER_HIGHLIGHT = "#FFFFFF"
+WORK_OVERLAY_SHIMMER_PEAK_ALPHA = 245
 
 
 def _compact_work_text(value: object, limit: int) -> str:
@@ -113,8 +118,17 @@ def run_work_overlay_helper_qt(
     header_title_limit: int,
 ) -> int:
     try:
-        from PySide6.QtCore import QPoint, Qt, QTimer
-        from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
+        from PySide6.QtCore import QPoint, QPointF, QSize, Qt, QTimer
+        from PySide6.QtGui import (
+            QColor,
+            QCursor,
+            QFont,
+            QLinearGradient,
+            QPainter,
+            QPainterPath,
+            QTextLayout,
+            QTextOption,
+        )
         from PySide6.QtWidgets import (
             QApplication,
             QFrame,
@@ -146,6 +160,178 @@ def run_work_overlay_helper_qt(
     alignment = Qt.AlignmentFlag
     text_format = Qt.TextFormat
     window_type = Qt.WindowType
+
+    class ShimmerTextLabel(QWidget):
+        """QPainter text-mask shimmer for active work status text."""
+
+        def __init__(
+            self,
+            text: str = "",
+            parent: QWidget | None = None,
+            *,
+            base_color: str = "#8492A6",
+            highlight_color: str = WORK_OVERLAY_SHIMMER_HIGHLIGHT,
+            band_width_px: float = WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX,
+            step_px: float = WORK_OVERLAY_SHIMMER_STEP_PX,
+            timer_ms: int = WORK_OVERLAY_SHIMMER_TIMER_MS,
+        ) -> None:
+            super().__init__(parent)
+            self._text = str(text or "")
+            self._base_color = QColor(base_color)
+            self._highlight_color = QColor(highlight_color)
+            self._band_width_px = max(1.0, float(band_width_px))
+            self._step_px = max(0.25, float(step_px))
+            self._timer_ms = max(10, int(timer_ms))
+            self._phase_x = -self._band_width_px
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._advance_shimmer)
+            self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+            self._timer.start(self._timer_ms)
+
+        def text(self) -> str:
+            return self._text
+
+        def setText(self, text: str) -> None:
+            next_text = str(text or "")
+            if next_text == self._text:
+                return
+            self._text = next_text
+            self._phase_x = -self._band_width_px
+            self.updateGeometry()
+            self.update()
+
+        def setBaseColor(self, color: str) -> None:
+            self._base_color = QColor(color)
+            self.update()
+
+        def setHighlightColor(self, color: str) -> None:
+            self._highlight_color = QColor(color)
+            self.update()
+
+        def hasHeightForWidth(self) -> bool:
+            return True
+
+        def heightForWidth(self, width: int) -> int:
+            return self._layout_height(max(1, int(width)))
+
+        def sizeHint(self) -> QSize:
+            width = self.width() or WORK_OVERLAY_TEXT_WRAP_WIDTH
+            return QSize(width, self.heightForWidth(width))
+
+        def minimumSizeHint(self) -> QSize:
+            width = self.width() or WORK_OVERLAY_TEXT_WRAP_WIDTH
+            return QSize(1, self.heightForWidth(width))
+
+        def showEvent(self, event: object) -> None:
+            if not self._timer.isActive():
+                self._timer.start(self._timer_ms)
+            super().showEvent(event)
+
+        def hideEvent(self, event: object) -> None:
+            self._timer.stop()
+            super().hideEvent(event)
+
+        def paintEvent(self, event: object) -> None:
+            del event
+            path = self._text_path(max(1, self.width()))
+            if path.isEmpty():
+                return
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+
+            painter.setBrush(self._base_color)
+            painter.drawPath(path)
+
+            transparent = QColor(self._highlight_color)
+            transparent.setAlpha(0)
+            peak = QColor(self._highlight_color)
+            peak.setAlpha(WORK_OVERLAY_SHIMMER_PEAK_ALPHA)
+            shoulder = QColor(self._highlight_color)
+            shoulder.setAlpha(90)
+            gradient = QLinearGradient(
+                QPointF(self._phase_x - self._band_width_px, 0.0),
+                QPointF(self._phase_x + self._band_width_px, 0.0),
+            )
+            gradient.setColorAt(0.0, transparent)
+            gradient.setColorAt(0.36, shoulder)
+            gradient.setColorAt(0.5, peak)
+            gradient.setColorAt(0.64, shoulder)
+            gradient.setColorAt(1.0, transparent)
+            painter.setBrush(gradient)
+            painter.drawPath(path)
+
+        def _advance_shimmer(self) -> None:
+            if not self.isVisible():
+                return
+            limit = max(self.width(), self._text_width()) + self._band_width_px
+            self._phase_x += self._step_px
+            if self._phase_x > limit:
+                self._phase_x = -self._band_width_px
+            self.update()
+
+        def _text_width(self) -> float:
+            width = 0.0
+            for _, _, _, _, line_width in self._layout_lines(max(1, self.width())):
+                width = max(width, line_width)
+            return width
+
+        def _layout_height(self, width: int) -> int:
+            lines = self._layout_lines(width)
+            if not lines:
+                return max(1, int(self.fontMetrics().height() + 2))
+            bottom = max(y + line_height for y, _, _, line_height, _ in lines)
+            return max(1, int(bottom + 2.999))
+
+        def _layout_lines(self, width: int) -> list[tuple[float, str, float, float, float]]:
+            text = self._text
+            if not text:
+                return []
+            option = QTextOption()
+            option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            layout = QTextLayout(text, self.font())
+            layout.setTextOption(option)
+            lines: list[tuple[float, str, float, float, float]] = []
+            y = 0.0
+            layout.beginLayout()
+            try:
+                while True:
+                    line = layout.createLine()
+                    if not line.isValid():
+                        break
+                    line.setLineWidth(max(1, width))
+                    line.setPosition(QPointF(0.0, y))
+                    start = line.textStart()
+                    length = line.textLength()
+                    segment = text[start : start + length]
+                    lines.append(
+                        (
+                            y,
+                            segment,
+                            float(line.ascent()),
+                            float(line.height()),
+                            float(line.naturalTextWidth()),
+                        )
+                    )
+                    y += float(line.height())
+            finally:
+                layout.endLayout()
+            return lines
+
+        def _text_path(self, width: int) -> QPainterPath:
+            path = QPainterPath()
+            text = self._text
+            if not text:
+                return path
+            for y, segment, line_ascent, _, _ in self._layout_lines(width):
+                if not segment:
+                    continue
+                baseline = y + line_ascent
+                path.addText(QPointF(0.0, baseline), self.font(), segment)
+            return path
 
     class CloseButtonWindow(QWidget):
         def __init__(self, dismiss_callback: Callable[[Mapping[str, object]], None]) -> None:
@@ -408,24 +594,34 @@ def run_work_overlay_helper_qt(
 
                 status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
                 if status_text:
-                    status_label = QLabel(status_text, card)
+                    shimmer_active = status != "recent"
+                    status_label = (
+                        ShimmerTextLabel(
+                            status_text,
+                            card,
+                            base_color=accent if status == "recent" else "#8492A6",
+                        )
+                        if shimmer_active
+                        else QLabel(status_text, card)
+                    )
                     status_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                    status_label.setWordWrap(True)
-                    status_label.setTextFormat(text_format.PlainText)
-                    status_label.setAlignment(alignment.AlignTop | alignment.AlignLeft)
                     status_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
                     status_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
                     status_label.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
                     status_label.setMinimumHeight(
                         self._wrapped_label_height(status_label, WORK_OVERLAY_TEXT_WRAP_WIDTH)
                     )
-                    status_label.setStyleSheet(
-                        "QLabel {"
-                        f"color: {accent if status == 'recent' else '#8492A6'};"
-                        "border: none;"
-                        "background: transparent;"
-                        "}"
-                    )
+                    if isinstance(status_label, QLabel):
+                        status_label.setWordWrap(True)
+                        status_label.setTextFormat(text_format.PlainText)
+                        status_label.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+                        status_label.setStyleSheet(
+                            "QLabel {"
+                            f"color: {accent if status == 'recent' else '#8492A6'};"
+                            "border: none;"
+                            "background: transparent;"
+                            "}"
+                        )
                     card_layout.addWidget(status_label)
 
                 shell_layout.addWidget(card)
