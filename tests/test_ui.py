@@ -60,8 +60,6 @@ from codex_usage_hud.cli import (
     work_item_to_overlay_dict,
     stop_running_hud,
     usage_before_today_in_week,
-    _is_work_overlay_close_hit,
-    _set_bit_flag,
     _work_overlay_header_text,
 )
 from codex_usage_hud.config import UserConfig, UserConfigStore
@@ -149,38 +147,6 @@ class _RecordingGeometryWindow:
 
     def geometry(self, value: str) -> None:
         self.calls.append(value)
-
-
-class _FakeScreenWidget:
-    def __init__(
-        self,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-        *,
-        mapped: bool = True,
-    ) -> None:
-        self._x = x
-        self._y = y
-        self._width = width
-        self._height = height
-        self._mapped = mapped
-
-    def winfo_ismapped(self) -> bool:
-        return self._mapped
-
-    def winfo_rootx(self) -> int:
-        return self._x
-
-    def winfo_rooty(self) -> int:
-        return self._y
-
-    def winfo_width(self) -> int:
-        return self._width
-
-    def winfo_height(self) -> int:
-        return self._height
 
 
 class _FakeAnchorLocator:
@@ -660,20 +626,6 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].status_label, "处理中")
         self.assertNotEqual(items[0].status_text, "已完成")
 
-    def test_work_overlay_close_hit_uses_mapped_widget_bounds(self) -> None:
-        visible = _FakeScreenWidget(100, 200, 24, 24)
-        hidden = _FakeScreenWidget(300, 300, 24, 24, mapped=False)
-
-        self.assertTrue(_is_work_overlay_close_hit([visible, hidden], 110, 210))
-        self.assertFalse(_is_work_overlay_close_hit([visible], 99, 210))
-        self.assertFalse(_is_work_overlay_close_hit([hidden], 310, 310))
-
-    def test_set_bit_flag_toggles_transparent_style(self) -> None:
-        transparent = 0x20
-
-        self.assertEqual(_set_bit_flag(0x80, transparent, True), 0xA0)
-        self.assertEqual(_set_bit_flag(0xA0, transparent, False), 0x80)
-
     def test_work_overlay_header_text_formats_time_elapsed_and_title(self) -> None:
         started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()
         text = _work_overlay_header_text(
@@ -684,6 +636,14 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertTrue(text.startswith("09:08:07 | 已处理 42s | "))
         self.assertIn("...", text)
+
+    def test_work_overlay_helper_delegates_to_qt_runner(self) -> None:
+        with patch("codex_usage_hud.cli.run_work_overlay_helper_qt", return_value=7) as runner:
+            exit_code = run_work_overlay_helper("overlay-state.json")
+
+        self.assertEqual(exit_code, 7)
+        runner.assert_called_once()
+        self.assertEqual(runner.call_args.args[0], "overlay-state.json")
 
     def test_snapshot_text_includes_week_breakdown(self) -> None:
         snapshot = ParsedSession(

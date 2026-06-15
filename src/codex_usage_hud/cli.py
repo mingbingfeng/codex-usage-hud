@@ -41,7 +41,6 @@ from .core import (
     UsageCalculator,
     UsageSummary,
     WorkStatusItem,
-    parse_timestamp,
 )
 from .daemon import (
     CodexDaemonManager,
@@ -67,6 +66,7 @@ from .ui.renderer_hud import (
     remove_renderer_hud_from_pages,
     wait_for_renderer,
 )
+from .ui.work_overlay_qt import _work_overlay_header_text, run_work_overlay_helper_qt
 from .updater import (
     AutoUpdateManager,
     check_for_update,
@@ -116,9 +116,7 @@ ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
 WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_ALPHA = 0.88
 WORK_OVERLAY_HOVER_ALPHA = 0.52
-WORK_OVERLAY_POINTER_SYNC_MS = 60
 WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
-_WIN32_WS_EX_TRANSPARENT = 0x00000020
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 
@@ -535,60 +533,6 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
     }
 
 
-def _set_bit_flag(value: int, flag: int, enabled: bool) -> int:
-    return (value | flag) if enabled else (value & ~flag)
-
-
-def _widget_screen_rect(widget: object) -> tuple[int, int, int, int] | None:
-    try:
-        if not bool(getattr(widget, "winfo_ismapped")()):
-            return None
-        left = int(getattr(widget, "winfo_rootx")())
-        top = int(getattr(widget, "winfo_rooty")())
-        width = int(getattr(widget, "winfo_width")())
-        height = int(getattr(widget, "winfo_height")())
-    except Exception:
-        return None
-    if width <= 0 or height <= 0:
-        return None
-    return left, top, left + width, top + height
-
-
-def _is_work_overlay_close_hit(
-    close_button_refs: Sequence[object],
-    screen_x: int,
-    screen_y: int,
-) -> bool:
-    for widget in close_button_refs:
-        rect = _widget_screen_rect(widget)
-        if rect is None:
-            continue
-        left, top, right, bottom = rect
-        if left <= screen_x < right and top <= screen_y < bottom:
-            return True
-    return False
-
-
-def _work_overlay_header_text(
-    started_at: datetime | str | None,
-    elapsed_text: str,
-    title: str,
-) -> str:
-    timestamp = started_at
-    if isinstance(started_at, str):
-        timestamp = parse_timestamp(started_at)
-    start_text = ""
-    if isinstance(timestamp, datetime):
-        start_text = (
-            timestamp.astimezone().strftime("%H:%M:%S")
-            if timestamp.tzinfo is not None
-            else timestamp.strftime("%H:%M:%S")
-        )
-    title_text = _compact_work_text(title, WORK_OVERLAY_HEADER_TITLE_LIMIT)
-    parts = [part for part in (start_text, elapsed_text.strip(), title_text) if part]
-    return " | ".join(parts) if parts else "Codex 工作"
-
-
 class DesktopWorkOverlay:
     """Primary-screen Tk overlay that stays visible when Codex is minimized."""
 
@@ -671,320 +615,20 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
     state_arg = str(state_file or "").strip()
     if not state_arg:
         return 1
-    path = Path(state_arg).expanduser()
     try:
-        import tkinter as tk
-    except Exception:
-        return 0
-
-    def read_state() -> dict[str, object] | None:
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        return raw if isinstance(raw, dict) else None
-
-    root = tk.Tk()
-    root.overrideredirect(True)
-    root.attributes("-topmost", True)
-    try:
-        root.attributes("-alpha", WORK_OVERLAY_ALPHA)
-    except tk.TclError:
-        pass
-    try:
-        root.attributes("-toolwindow", True)
-    except tk.TclError:
-        pass
-    root.configure(bg="#0A0F14")
-    root.withdraw()
-
-    shell = tk.Frame(root, bg="#0A0F14", padx=0, pady=0)
-    shell.pack(fill="both", expand=True)
-
-    owner_pid = _work_overlay_owner_pid(path)
-    last_signature = ""
-    dismissed_signatures: dict[str, str] = {}
-    close_button_refs: list[object] = []
-    overlay_alpha = WORK_OVERLAY_ALPHA
-
-    def set_overlay_alpha(value: float) -> None:
-        nonlocal overlay_alpha
-        if abs(overlay_alpha - value) < 0.01:
-            return
-        overlay_alpha = value
-        try:
-            root.attributes("-alpha", value)
-        except tk.TclError:
-            pass
-
-    def item_signature(item: Mapping[str, object]) -> str:
-        return json.dumps(
-            {
-                "id": item.get("id"),
-                "status": item.get("status"),
-                "statusText": item.get("statusText"),
-                "lastText": item.get("lastText"),
-                "current": item.get("current"),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
+        return run_work_overlay_helper_qt(
+            state_arg,
+            process_exists=_process_exists,
+            owner_pid_from_path=_work_overlay_owner_pid,
+            item_limit=ACTIVE_WORK_ITEM_LIMIT,
+            stale_seconds=WORK_OVERLAY_STALE_SECONDS,
+            overlay_alpha=WORK_OVERLAY_ALPHA,
+            hover_alpha=WORK_OVERLAY_HOVER_ALPHA,
+            header_title_limit=WORK_OVERLAY_HEADER_TITLE_LIMIT,
         )
-
-    def visible_overlay_items(
-        items: Sequence[Mapping[str, object]],
-    ) -> list[Mapping[str, object]]:
-        visible: list[Mapping[str, object]] = []
-        live_ids: set[str] = set()
-        for item in items[:ACTIVE_WORK_ITEM_LIMIT]:
-            item_id = str(item.get("id") or "")
-            if item_id:
-                live_ids.add(item_id)
-            signature = item_signature(item)
-            if item_id and dismissed_signatures.get(item_id) == signature:
-                continue
-            if item_id and item_id in dismissed_signatures:
-                dismissed_signatures.pop(item_id, None)
-            visible.append(item)
-        for item_id in list(dismissed_signatures):
-            if item_id not in live_ids:
-                dismissed_signatures.pop(item_id, None)
-        return visible
-
-    def dismiss_item(item: Mapping[str, object]) -> None:
-        item_id = str(item.get("id") or "")
-        if item_id:
-            dismissed_signatures[item_id] = item_signature(item)
-        root.withdraw()
-
-    def install_click_through() -> Any:
-        if not sys.platform.startswith("win"):
-            return lambda enabled: None
-        try:
-            import ctypes
-            from ctypes import wintypes
-        except Exception:
-            return lambda enabled: None
-
-        try:
-            hwnd = wintypes.HWND(int(root.winfo_id()))
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            GWL_EXSTYLE = -20
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
-            SWP_NOZORDER = 0x0004
-            SWP_NOACTIVATE = 0x0010
-            SWP_FRAMECHANGED = 0x0020
-
-            LONG_PTR = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
-            get_window_long = (
-                user32.GetWindowLongPtrW
-                if ctypes.sizeof(ctypes.c_void_p) == 8
-                else user32.GetWindowLongW
-            )
-            set_window_long = (
-                user32.SetWindowLongPtrW
-                if ctypes.sizeof(ctypes.c_void_p) == 8
-                else user32.SetWindowLongW
-            )
-            get_window_long.argtypes = [wintypes.HWND, ctypes.c_int]
-            get_window_long.restype = LONG_PTR
-            set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
-            set_window_long.restype = LONG_PTR
-            user32.SetWindowPos.argtypes = [
-                wintypes.HWND,
-                wintypes.HWND,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                wintypes.UINT,
-            ]
-            user32.SetWindowPos.restype = wintypes.BOOL
-            click_through_enabled: bool | None = None
-
-            def set_click_through(enabled: bool) -> None:
-                nonlocal click_through_enabled
-                if click_through_enabled == enabled:
-                    return
-                current_style = int(get_window_long(hwnd, GWL_EXSTYLE))
-                desired_style = _set_bit_flag(current_style, _WIN32_WS_EX_TRANSPARENT, enabled)
-                if desired_style != current_style:
-                    set_window_long(hwnd, GWL_EXSTYLE, desired_style)
-                    user32.SetWindowPos(
-                        hwnd,
-                        wintypes.HWND(0),
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                    )
-                click_through_enabled = enabled
-
-            set_click_through(True)
-            return set_click_through
-        except Exception:
-            return lambda enabled: None
-
-    set_click_through = install_click_through()
-
-    def sync_pointer_state() -> None:
-        if not root.winfo_exists():
-            return
-        if root.state() == "withdrawn":
-            set_overlay_alpha(WORK_OVERLAY_ALPHA)
-            set_click_through(True)
-            root.after(WORK_OVERLAY_POINTER_SYNC_MS, sync_pointer_state)
-            return
-        try:
-            px = int(root.winfo_pointerx())
-            py = int(root.winfo_pointery())
-            x = int(root.winfo_rootx())
-            y = int(root.winfo_rooty())
-            width = int(root.winfo_width())
-            height = int(root.winfo_height())
-        except tk.TclError:
-            root.after(WORK_OVERLAY_POINTER_SYNC_MS, sync_pointer_state)
-            return
-        inside = x <= px < x + width and y <= py < y + height
-        set_overlay_alpha(WORK_OVERLAY_HOVER_ALPHA if inside else WORK_OVERLAY_ALPHA)
-        set_click_through(not _is_work_overlay_close_hit(close_button_refs, px, py))
-        root.after(WORK_OVERLAY_POINTER_SYNC_MS, sync_pointer_state)
-
-    def color_for(status: str) -> tuple[str, str, str, str]:
-        if status == "waiting_user":
-            return "#FFB86B", "#1D1610", "#10161D", "#263241"
-        if status == "tool":
-            return "#9CCBFF", "#0D1722", "#10161D", "#263241"
-        if status == "recent":
-            return "#8FE3A1", "#0E1B14", "#0E1B14", "#2F9F55"
-        return "#F3D27A", "#1C190F", "#10161D", "#263241"
-
-    def render_items(items: Sequence[Mapping[str, object]]) -> None:
-        nonlocal last_signature
-        visible_items = visible_overlay_items(items)
-        signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
-        if signature == last_signature:
-            return
-        last_signature = signature
-        for child in shell.winfo_children():
-            child.destroy()
-        close_button_refs.clear()
-        if not visible_items:
-            root.withdraw()
-            return
-
-        width = 430
-        for item in visible_items:
-            status = str(item.get("status") or "")
-            accent, pill_bg, card_bg, border_color = color_for(status)
-            card = tk.Frame(
-                shell,
-                bg=card_bg,
-                highlightthickness=1,
-                highlightbackground=border_color,
-                padx=10,
-                pady=8,
-            )
-            card.pack(fill="x", pady=(0, 8))
-            head = tk.Frame(card, bg=card_bg)
-            head.pack(fill="x")
-            elapsed_text = str(item.get("elapsedText") or "").strip() or "已处理 --"
-            header_text = _work_overlay_header_text(
-                str(item.get("startedAt") or ""),
-                elapsed_text,
-                str(item.get("title") or "Codex 工作"),
-            )
-            tk.Label(
-                head,
-                anchor="w",
-                text=header_text,
-                bg=card_bg,
-                fg=accent if status == "recent" else "#A9B6C6",
-                font=("Microsoft YaHei UI", 9, "bold"),
-            ).pack(side="left", fill="x", expand=True)
-            close_button = tk.Button(
-                head,
-                text="×",
-                command=lambda current_item=dict(item): dismiss_item(current_item),
-                anchor="center",
-                bg=card_bg,
-                activebackground=pill_bg,
-                fg="#A9B6C6",
-                activeforeground=accent,
-                bd=0,
-                highlightthickness=0,
-                font=("Microsoft YaHei UI", 10, "bold"),
-                padx=4,
-                pady=0,
-                cursor="hand2",
-                takefocus=False,
-            )
-            close_button.pack(side="right", padx=(8, 0))
-            close_button_refs.append(close_button)
-
-            body_text = str(item.get("lastText") or item.get("detail") or "").strip()
-            detail = tk.Label(
-                card,
-                text=body_text,
-                anchor="w",
-                justify="left",
-                bg=card_bg,
-                fg="#B8C6D8",
-                font=("Microsoft YaHei UI", 8),
-                wraplength=width - 28,
-            )
-            detail.pack(fill="x", pady=(7, 0))
-            status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
-            if status_text:
-                tk.Label(
-                    card,
-                    text=status_text,
-                    anchor="w",
-                    justify="left",
-                    bg=card_bg,
-                    fg=accent if status == "recent" else "#8492A6",
-                    font=("Microsoft YaHei UI", 8, "bold"),
-                    wraplength=width - 28,
-                ).pack(fill="x", pady=(7, 0))
-
-        root.update_idletasks()
-        height = max(1, int(root.winfo_reqheight()))
-        screen_width = max(1, int(root.winfo_screenwidth()))
-        screen_height = max(1, int(root.winfo_screenheight()))
-        x = max(0, screen_width - width - 16)
-        y = min(max(0, 56), max(0, screen_height - height - 16))
-        root.geometry(f"{width}x{height}+{x}+{y}")
-        root.deiconify()
-        root.lift()
-
-    def poll_state() -> None:
-        if not root.winfo_exists():
-            return
-        state = read_state()
-        if state is None:
-            root.destroy()
-            return
-        should_close = bool(state.get("close"))
-        updated_at = float(state.get("updatedAt") or 0.0)
-        file_stale = (
-            updated_at > 0 and (time.time() - updated_at) > WORK_OVERLAY_STALE_SECONDS
-        )
-        if owner_pid is not None and not _process_exists(owner_pid):
-            root.destroy()
-            return
-        if should_close or file_stale:
-            root.destroy()
-            return
-        raw_items = state.get("items") or []
-        items = [item for item in raw_items if isinstance(item, Mapping)]
-        render_items(items)
-        root.after(160, poll_state)
-
-    sync_pointer_state()
-    poll_state()
-    root.mainloop()
-    return 0
+    except RuntimeError as exc:
+        _eprint(str(exc))
+        return 1
 
 
 def configure_stdout() -> None:

@@ -77,10 +77,14 @@ class PyInstallerCommandTests(unittest.TestCase):
             self.assertIn("docs", command)
             self.assertIn("tools", command)
             self.assertIn("pytest", command)
+            self.assertIn("PyQt5", command)
+            self.assertIn("PyQt6", command)
+            self.assertIn("PySide2", command)
             self.assertIn("codex_usage_hud.platforms.linux", command)
             self.assertIn("codex_usage_hud.platforms.macos", command)
             self.assertIn("--hidden-import", command)
             self.assertIn("tkinter.font", command)
+            self.assertIn("PySide6", command)
             self.assertEqual(command[-1], str(entry_script))
 
     def test_format_command_returns_copy_pasteable_string(self) -> None:

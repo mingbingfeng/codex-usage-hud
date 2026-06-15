@@ -54,6 +54,9 @@ DEFAULT_EXCLUDED_MODULES = (
     "docs",
     "tools",
     "pytest",
+    "PyQt5",
+    "PyQt6",
+    "PySide2",
     "codex_usage_hud.platforms.linux",
     "codex_usage_hud.platforms.macos",
 )
@@ -117,6 +120,8 @@ def build_pyinstaller_command(
         str(src_root),
         "--hidden-import",
         "tkinter.font",
+        "--hidden-import",
+        "PySide6",
         "--log-level",
         log_level.upper(),
     ]

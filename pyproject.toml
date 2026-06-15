@@ -12,7 +12,9 @@ license = { text = "MIT" }
 authors = [
   { name = "codex-usage-hud contributors" },
 ]
-dependencies = []
+dependencies = [
+  "PySide6>=6.8",
+]
 keywords = [
   "Codex App token usage",
   "Codex usage tracker",

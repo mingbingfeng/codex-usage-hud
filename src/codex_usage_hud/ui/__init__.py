@@ -1,4 +1,4 @@
-"""Tkinter HUD user interface helpers."""
+"""HUD user interface helpers."""
 
 from .tk_hud import TokenHudWindow
 
