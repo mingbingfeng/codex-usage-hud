@@ -51,6 +51,7 @@ class CdpDomSnapshot:
     header_rect: CdpRect | None = None
     title_rect: CdpRect | None = None
     composer_rect: CdpRect | None = None
+    app_error: str = ""
 
 
 DOM_PROBE_SCRIPT = r"""
@@ -114,6 +115,53 @@ DOM_PROBE_SCRIPT = r"""
   };
   const activeRow = threadRows.find(currentRow) || null;
   const activeRef = activeRow ? refFromRow(activeRow) : { sessionId: locationThreadId(), title: "" };
+  const compact = (value, limit = 220) => {
+    const text = normalize(value);
+    return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 3))}...`;
+  };
+  const appErrorText = () => {
+    const selectors = [
+      "[role='alert']",
+      "[role='status']",
+      "[aria-live]",
+      "[data-testid*='toast' i]",
+      "[data-testid*='notification' i]",
+      "[data-testid*='error' i]",
+      "[class*='toast' i]",
+      "[class*='notification' i]",
+      "[class*='error' i]",
+      "[class*='danger' i]",
+      "[class*='destructive' i]",
+      "[class*='alert' i]",
+    ].join(", ");
+    const errorPattern = /(exceeded retry limit|too many requests|\b429\b|\brate limit(?:ed)?\b|\b5\d\d\b|network error|request failed|failed to fetch|server error|internal server error|service unavailable|temporarily unavailable|something went wrong|unexpected error|error occurred)/i;
+    const candidates = Array.from(document.querySelectorAll(selectors))
+      .filter((node) => visible(node) && !node.closest("#codex-usage-hud-root"))
+      .map((node, index) => {
+        const text = normalize([
+          node.getAttribute("aria-label"),
+          node.getAttribute("title"),
+          node.textContent,
+        ].filter(Boolean).join(" "));
+        if (!text || !errorPattern.test(text)) return null;
+        const rect = node.getBoundingClientRect();
+        const className = String(node.className || "");
+        const role = String(node.getAttribute("role") || "");
+        let score = 1000 - index;
+        if (role === "alert") score += 160;
+        if (role === "status") score += 90;
+        if (node.hasAttribute("aria-live")) score += 90;
+        if (/toast|notification|snackbar|alert/i.test(className)) score += 80;
+        if (/error|danger|destructive/i.test(className)) score += 70;
+        if (rect.top <= 160 || rect.bottom >= innerHeight - 220) score += 30;
+        if (text.length <= 180) score += 20;
+        if (/\b429\b|too many requests|exceeded retry limit|rate limit/i.test(text)) score += 180;
+        return { text: compact(text), score };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score);
+    return candidates[0]?.text || "";
+  };
 
   const scoreHeader = (node) => {
     const rect = node.getBoundingClientRect();
@@ -220,6 +268,7 @@ DOM_PROBE_SCRIPT = r"""
     headerRect,
     titleRect,
     composerRect: rectFor(composer),
+    appError: appErrorText(),
   };
 })()
 """
@@ -508,6 +557,7 @@ def snapshot_from_evaluate_result(result: dict[str, Any]) -> CdpDomSnapshot | No
         header_rect=_rect_from_value(value.get("headerRect")),
         title_rect=_rect_from_value(value.get("titleRect")),
         composer_rect=_rect_from_value(value.get("composerRect")),
+        app_error=str(value.get("appError") or "").strip(),
     )
 
 

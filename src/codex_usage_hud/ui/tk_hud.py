@@ -41,6 +41,9 @@ from ..updater import (
     format_update_info,
     launch_installer,
 )
+from .work_overlay_qt import work_overlay_max_items_for_screen_height
+
+SettingsEntry = tk.Entry | ttk.Combobox
 
 TOP_DOCK_TOP = 42
 TOP_DOCK_LEFT = 456
@@ -108,6 +111,7 @@ HUD_TEXT = "#E8EEF7"
 HUD_MUTED = "#8492A6"
 HUD_ACCENT = "#F3D27A"
 HUD_BLUE = "#9CCBFF"
+HUD_ERROR = "#FF6B6B"
 REQUEST_BG = "#0B1016"
 REQUEST_HEADER_BG = "#151D27"
 REQUEST_PANEL_BG = "#101821"
@@ -2477,7 +2481,7 @@ class TokenHudWindow:
         self.user_settings_store = user_settings_store or UserConfigStore()
         self.user_settings = self.user_settings_store.load()
         self._settings_dialog: tk.Toplevel | None = None
-        self._settings_entries: dict[str, tk.Entry | ttk.Combobox] = {}
+        self._settings_entries: dict[str, SettingsEntry] = {}
         self._settings_price_rows: list[dict[str, tk.Entry]] = []
         self._settings_body_frame: tk.Frame | None = None
         self._settings_actions_frame: tk.Frame | None = None
@@ -3019,6 +3023,20 @@ class TokenHudWindow:
         except tk.TclError:
             return
 
+    def _work_overlay_selectable_max(self) -> int:
+        return work_overlay_max_items_for_screen_height(self.root.winfo_screenheight())
+
+    def _work_overlay_setting_text(self, count: int) -> str:
+        return str(
+            min(
+                self._work_overlay_selectable_max(),
+                max(0, int(count)),
+            )
+        )
+
+    def _work_overlay_setting_values(self) -> list[str]:
+        return [str(item) for item in range(0, self._work_overlay_selectable_max() + 1)]
+
     def _refresh_settings_dialog_values(self) -> None:
         if self._settings_active_tab != "settings":
             return
@@ -3030,6 +3048,7 @@ class TokenHudWindow:
             "weekly_budget_usd": settings.weekly_budget_usd,
             "daily_reset_time": settings.daily_reset_time,
             "weekly_reset_time": settings.weekly_reset_time,
+            "work_overlay_max_items": settings.work_overlay_max_items,
             "budget_thresholds": ",".join(str(item) for item in settings.budget_thresholds),
             "weekly_adjustment_usd": settings.weekly_adjustment_usd,
             "pricing_url": settings.pricing_url,
@@ -3039,6 +3058,10 @@ class TokenHudWindow:
             if widget is None:
                 continue
             if isinstance(widget, ttk.Combobox):
+                if key == "work_overlay_max_items":
+                    widget.configure(values=self._work_overlay_setting_values())
+                    widget.set(self._work_overlay_setting_text(int(value)))
+                    continue
                 widget.set(str(value))
             else:
                 widget.delete(0, "end")
@@ -3402,10 +3425,29 @@ class TokenHudWindow:
         mode.bind("<<ComboboxSelected>>", self._on_display_mode_selected, add="+")
         self._settings_entries["display_mode"] = mode
 
+        bubble_frame = tk.Frame(grid, bg=HUD_BG)
+        bubble_frame.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        tk.Label(
+            bubble_frame,
+            text="会话气泡最大显示数（0 表示不启用）",
+            anchor="w",
+            bg=HUD_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill="x")
+        bubble_limit = ttk.Combobox(
+            bubble_frame,
+            values=self._work_overlay_setting_values(),
+            state="readonly",
+        )
+        bubble_limit.set(self._work_overlay_setting_text(settings.work_overlay_max_items))
+        bubble_limit.pack(fill="x")
+        self._settings_entries["work_overlay_max_items"] = bubble_limit
+
         self._settings_field(
             grid,
-            2,
-            1,
+            3,
+            0,
             "budget_thresholds",
             "超额提醒阈值",
             ",".join(str(item) for item in settings.budget_thresholds),
@@ -3413,7 +3455,7 @@ class TokenHudWindow:
         self._settings_field(
             grid,
             3,
-            0,
+            1,
             "weekly_adjustment_usd",
             "本周补充已使用额度 USD",
             settings.weekly_adjustment_usd,
@@ -4057,7 +4099,7 @@ class TokenHudWindow:
             fg="#FFB86B" if kind == "error" else "#A9BCD2",
         )
 
-    def _selected_display_mode(self, entries: dict[str, tk.Entry | ttk.Combobox]) -> str:
+    def _selected_display_mode(self, entries: dict[str, SettingsEntry]) -> str:
         if not self._settings_display_mode_touched:
             return str(self._settings_configured_display_mode or self.user_settings.display_mode)
         return str(entries["display_mode"].get()).split(" ", 1)[0]
@@ -4125,7 +4167,7 @@ class TokenHudWindow:
 
     def _config_from_settings_dialog(
         self,
-        entries: dict[str, tk.Entry | ttk.Combobox],
+        entries: dict[str, SettingsEntry],
         price_rows: list[dict[str, tk.Entry]],
     ) -> UserConfig:
         price_payload: dict[str, dict[str, object]] = {}
@@ -4146,6 +4188,7 @@ class TokenHudWindow:
             "weekly_reset_time": entries["weekly_reset_time"].get(),
             "weekly_reset_weekday": str(entries["weekly_reset_weekday"].get()).split(" ", 1)[0],
             "display_mode": self._selected_display_mode(entries),
+            "work_overlay_max_items": entries["work_overlay_max_items"].get(),
             "budget_thresholds": parse_config_thresholds(entries["budget_thresholds"].get()),
             "weekly_adjustment_usd": entries["weekly_adjustment_usd"].get(),
             "pricing_url": entries["pricing_url"].get(),
@@ -4156,7 +4199,7 @@ class TokenHudWindow:
 
     def _settings_save(
         self,
-        entries: dict[str, tk.Entry | ttk.Combobox],
+        entries: dict[str, SettingsEntry],
         price_rows: list[dict[str, tk.Entry]],
     ) -> None:
         try:
@@ -4176,7 +4219,7 @@ class TokenHudWindow:
 
     def _settings_fetch_prices(
         self,
-        entries: dict[str, tk.Entry | ttk.Combobox],
+        entries: dict[str, SettingsEntry],
         price_rows: list[dict[str, tk.Entry]],
         prices_parent: tk.Misc,
     ) -> None:
@@ -4198,7 +4241,7 @@ class TokenHudWindow:
 
     def _settings_export(
         self,
-        entries: dict[str, tk.Entry | ttk.Combobox],
+        entries: dict[str, SettingsEntry],
         price_rows: list[dict[str, tk.Entry]],
     ) -> None:
         try:
@@ -5848,20 +5891,23 @@ class TokenHudWindow:
                     )
                 if key == "warnings":
                     has_warning = bool(
-                        snapshot.error or snapshot.budget_error or snapshot.budget_warnings
+                        snapshot.error
+                        or snapshot.request.error
+                        or snapshot.budget_error
+                        or snapshot.budget_warnings
                     )
                     label.configure(fg="#FFB86B" if has_warning else HUD_MUTED)
 
     def _render_request(self) -> None:
         snapshot = self._snapshot
         if self.request_label is not None:
-            if self.request_expanded:
-                self.request_label.configure(text=_request_total_line(snapshot))
-            else:
-                text = _request_total_line(snapshot)
-                if snapshot.request.error:
-                    text = f"本次 Token 出错 | {snapshot.request.error}"
-                self.request_label.configure(text=text)
+            text = _request_total_line(snapshot)
+            if snapshot.request.error:
+                text = f"本次 Token 出错 | {snapshot.request.error}"
+            self.request_label.configure(
+                text=text,
+                fg=HUD_ERROR if snapshot.request.error else HUD_ACCENT,
+            )
 
         if self.request_text is None:
             return

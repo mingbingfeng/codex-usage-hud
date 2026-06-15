@@ -327,6 +327,7 @@ class WorkStatusItem:
     elapsed_text: str = ""
     progress: str = ""
     source: str = ""
+    workdir: str = ""
     session_started_at: datetime | None = None
     started_at: datetime | None = None
     updated_at: datetime | None = None
@@ -392,6 +393,7 @@ class ParsedSession:
     session_path: Path | None = None
     session_id: str = "n/a"
     session_title: str = ""
+    cwd: str = ""
     status: str = "starting"
     error: str = ""
     refreshed_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
@@ -510,6 +512,7 @@ class JsonlSessionParser:
 
         parsed.session_id = session_id or self.session_id_from_records(records, path)
         parsed.session_started_at = self.session_started_at(records)
+        parsed.cwd = self.session_cwd(records)
         parsed.last_event_time = records[-1].get("_dt")
         parsed.activity = self.latest_activity(records)
         parsed.last_output = self.latest_output(records)
@@ -576,6 +579,15 @@ class JsonlSessionParser:
                 return timestamp
         first_timestamp = records[0].get("_dt") if records else None
         return first_timestamp if isinstance(first_timestamp, datetime) else None
+
+    def session_cwd(self, records: Sequence[Mapping[str, Any]]) -> str:
+        for record in records:
+            if record.get("type") != "session_meta":
+                continue
+            payload = record.get("payload") or {}
+            if isinstance(payload, Mapping) and payload.get("cwd"):
+                return str(payload.get("cwd") or "").strip()
+        return ""
 
     def latest_task_started(
         self, records: Sequence[Mapping[str, Any]]

@@ -38,6 +38,7 @@ from codex_usage_hud.cli import (
     RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
     UsageSummaryCache,
     _TkSnapshotPump,
+    _apply_visible_app_error,
     active_work_items_for_snapshot,
     _prepare_codex_window_for_renderer,
     _prepare_codex_window_for_tk,
@@ -68,6 +69,7 @@ from codex_usage_hud.core.parser import (
     JsonlSessionParser,
     ParsedSession,
     RequestRound,
+    RequestTokens,
     SlowSummary,
     ToolCallTiming,
     UsageSummary,
@@ -433,7 +435,7 @@ class BudgetHelperTests(unittest.TestCase):
                 {
                     "timestamp": timestamp,
                     "type": "session_meta",
-                    "payload": {"id": session_id},
+                    "payload": {"id": session_id, "cwd": f"E:\\Project\\{session_id}"},
                 },
                 {
                     "timestamp": timestamp,
@@ -477,6 +479,73 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual([item.id for item in items[:2]], ["session-worker", "session-current"])
         self.assertTrue(any(item.current for item in items))
         self.assertIn("Background thread work", " ".join(item.detail for item in items))
+        self.assertEqual(items[0].workdir, "E:\\Project\\session-worker")
+
+    def test_active_work_items_respect_configured_overlay_limit(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def write_session(path: Path, session_id: str, prompt: str, offset: int) -> None:
+            timestamp = (now + timedelta(seconds=offset)).isoformat()
+            rows = [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {"id": session_id, "cwd": f"E:\\Project\\{session_id}"},
+                },
+                {"timestamp": timestamp, "type": "event_msg", "payload": {"type": "task_started"}},
+                {"timestamp": timestamp, "type": "turn_context", "payload": {"model": "gpt-5.5"}},
+                {"timestamp": timestamp, "type": "event_msg", "payload": {"type": "user_message", "message": prompt}},
+            ]
+            path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "session-current.jsonl"
+            worker_a = root / "session-worker-a.jsonl"
+            worker_b = root / "session-worker-b.jsonl"
+            write_session(current, "session-current", "Current visible work", -3)
+            write_session(worker_a, "session-worker-a", "Background thread A", -2)
+            write_session(worker_b, "session-worker-b", "Background thread B", -1)
+            snapshot = parser.parse_file(current)
+            config = UserConfig.defaults()
+            config.work_overlay_max_items = 2
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+                user_config=config,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, current)
+
+        self.assertEqual(len(items), 2)
+        self.assertEqual([item.id for item in items], ["session-worker-b", "session-worker-a"])
+
+    def test_active_work_items_are_empty_when_overlay_disabled(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+        snapshot = ParsedSession(
+            session_id="session-current",
+            session_title="Current task",
+            status="parsed",
+        )
+        snapshot.session_started_at = now
+        config = UserConfig.defaults()
+        config.work_overlay_max_items = 0
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=parser,
+            active_session_tracker=None,
+            user_config=config,
+        )
+
+        items = active_work_items_for_snapshot(context, snapshot, None)
+
+        self.assertEqual(items, [])
 
     def test_work_overlay_payload_uses_primary_screen_status_fields(self) -> None:
         item = WorkStatusItem(
@@ -490,6 +559,7 @@ class BudgetHelperTests(unittest.TestCase):
             elapsed_text="已处理 12s",
             progress="1.2k tokens | 12s",
             source="activity",
+            workdir="E:\\Project\\codex-usage-hud",
             current=True,
         )
 
@@ -500,8 +570,43 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["statusText"], "正在思考")
         self.assertEqual(payload["lastText"], "上一轮输出保留在气泡里")
         self.assertEqual(payload["elapsedText"], "已处理 12s")
+        self.assertEqual(payload["workdir"], "E:\\Project\\codex-usage-hud")
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
+
+    def test_work_overlay_marks_visible_codex_error(self) -> None:
+        snapshot = ParsedSession(
+            session_id="session-error",
+            session_title="Rate limited thread",
+            request=RequestTokens(
+                status="error",
+                error="exceeded retry limit, last status: 429 Too Many Requests",
+            ),
+        )
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+        )
+
+        items = active_work_items_for_snapshot(context, snapshot, None)
+        payload = work_item_to_overlay_dict(items[0])
+
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["statusLabel"], "出错")
+        self.assertIn("429 Too Many Requests", str(payload["statusText"]))
+
+    def test_visible_app_error_overrides_request_status(self) -> None:
+        snapshot = ParsedSession(request=RequestTokens(status="running", source="sse"))
+
+        _apply_visible_app_error(
+            snapshot,
+            "exceeded retry limit, last status: 429 Too Many Requests",
+        )
+
+        self.assertEqual(snapshot.request.status, "error")
+        self.assertEqual(snapshot.request.source, "app")
+        self.assertIn("429 Too Many Requests", snapshot.request.error)
 
     def test_work_overlay_recent_item_keeps_last_output_text(self) -> None:
         parser = JsonlSessionParser()
@@ -1026,6 +1131,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertIn("保存", button_texts)
             self.assertIn("退出 HUD", button_texts)
             self.assertIn("display_mode", window._settings_entries)
+            self.assertIn("work_overlay_max_items", window._settings_entries)
             self.assertNotIn("support_url", window._settings_entries)
             self.assertTrue(window._settings_price_rows)
 

@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..config import normalize_work_overlay_max_items
 from ..core import parse_timestamp
 
 WORK_OVERLAY_POINTER_SYNC_MS = 60
@@ -22,6 +23,7 @@ WORK_OVERLAY_TEXT_WRAP_WIDTH = WORK_OVERLAY_WIDTH - 28
 WORK_OVERLAY_CARD_X_PADDING = 10
 WORK_OVERLAY_CARD_Y_PADDING = 8
 WORK_OVERLAY_CARD_SPACING = 7
+WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT = 160
 WORK_OVERLAY_SHIMMER_TIMER_MS = 30
 WORK_OVERLAY_SHIMMER_STEP_PX = 3.5
 WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX = 58
@@ -29,11 +31,26 @@ WORK_OVERLAY_SHIMMER_HIGHLIGHT = "#FFFFFF"
 WORK_OVERLAY_SHIMMER_PEAK_ALPHA = 245
 
 
+def work_overlay_max_items_for_screen_height(screen_height: int) -> int:
+    available_height = max(
+        1,
+        int(screen_height) - WORK_OVERLAY_TOP_OFFSET - (WORK_OVERLAY_MARGIN * 2),
+    )
+    return max(1, available_height // WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT)
+
+
 def _compact_work_text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)] + "..."
+
+
+def _compact_workdir_text(value: object, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return "..." + text[-max(0, limit - 3) :]
 
 
 def _work_overlay_header_text(
@@ -97,6 +114,8 @@ def _visible_overlay_items(
 
 
 def _color_for(status: str) -> tuple[str, str, str, str]:
+    if status == "error":
+        return "#FF6B6B", "#2A1013", "#1A1012", "#A63A3A"
     if status == "waiting_user":
         return "#FFB86B", "#1D1610", "#10161D", "#263241"
     if status == "tool":
@@ -415,6 +434,7 @@ def run_work_overlay_helper_qt(
             self._dismissed_signatures: dict[str, str] = {}
             self._last_signature = ""
             self._raw_items: list[Mapping[str, object]] = []
+            self._item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
             self._close_windows: list[CloseButtonWindow] = []
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
@@ -473,6 +493,17 @@ def run_work_overlay_helper_qt(
                 return
             raw_items = state.get("items") or []
             items = [item for item in raw_items if isinstance(item, Mapping)]
+            screen = app.primaryScreen()
+            screen_height = (
+                screen.availableGeometry().height()
+                if screen is not None
+                else self.geometry().height()
+            )
+            self._item_limit = normalize_work_overlay_max_items(
+                state.get("itemLimit"),
+                item_limit,
+                max_items=work_overlay_max_items_for_screen_height(screen_height),
+            )
             self.render_items(items)
 
         def sync_pointer_state(self) -> None:
@@ -497,7 +528,7 @@ def run_work_overlay_helper_qt(
             visible_items = _visible_overlay_items(
                 self._raw_items,
                 self._dismissed_signatures,
-                item_limit=item_limit,
+                item_limit=self._item_limit,
             )
             signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
             if signature == self._last_signature:
@@ -592,37 +623,69 @@ def run_work_overlay_helper_qt(
                 )
                 card_layout.addWidget(detail)
 
+                workdir_text = str(item.get("workdir") or "").strip()
                 status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
+                if status_text or workdir_text:
+                    footer_layout = QHBoxLayout()
+                    footer_layout.setContentsMargins(0, 0, 0, 0)
+                    footer_layout.setSpacing(8)
+
                 if status_text:
                     shimmer_active = status != "recent"
+                    status_text_color = accent if status in {"recent", "error"} else "#8492A6"
+                    footer_status_text = _compact_work_text(
+                        status_text,
+                        48 if workdir_text else 80,
+                    )
                     status_label = (
                         ShimmerTextLabel(
-                            status_text,
+                            footer_status_text,
                             card,
-                            base_color=accent if status == "recent" else "#8492A6",
+                            base_color=status_text_color,
                         )
                         if shimmer_active
-                        else QLabel(status_text, card)
+                        else QLabel(footer_status_text, card)
                     )
                     status_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                    status_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
                     status_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
-                    status_label.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
-                    status_label.setMinimumHeight(
-                        self._wrapped_label_height(status_label, WORK_OVERLAY_TEXT_WRAP_WIDTH)
-                    )
+                    status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                    status_label.setMinimumWidth(1)
+                    status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
                     if isinstance(status_label, QLabel):
-                        status_label.setWordWrap(True)
+                        status_label.setWordWrap(False)
                         status_label.setTextFormat(text_format.PlainText)
-                        status_label.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+                        status_label.setAlignment(alignment.AlignVCenter | alignment.AlignLeft)
                         status_label.setStyleSheet(
                             "QLabel {"
-                            f"color: {accent if status == 'recent' else '#8492A6'};"
+                            f"color: {status_text_color};"
                             "border: none;"
                             "background: transparent;"
                             "}"
                         )
-                    card_layout.addWidget(status_label)
+                    footer_layout.addWidget(status_label, 1)
+
+                if workdir_text:
+                    workdir_label = QLabel(_compact_workdir_text(workdir_text, 40), card)
+                    workdir_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+                    workdir_label.setWordWrap(False)
+                    workdir_label.setTextFormat(text_format.PlainText)
+                    workdir_label.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
+                    workdir_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+                    workdir_label.setFont(QFont("Microsoft YaHei UI", 7))
+                    workdir_label.setMaximumWidth(170)
+                    workdir_label.setFixedHeight(workdir_label.fontMetrics().height() + 4)
+                    workdir_label.setStyleSheet(
+                        "QLabel {"
+                        "color: #5E6A78;"
+                        "border: none;"
+                        "background: transparent;"
+                        "}"
+                    )
+                    workdir_label.setToolTip(workdir_text)
+                    footer_layout.addWidget(workdir_label, 0)
+
+                if status_text or workdir_text:
+                    card_layout.addLayout(footer_layout)
 
                 shell_layout.addWidget(card)
 

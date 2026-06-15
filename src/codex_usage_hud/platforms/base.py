@@ -50,6 +50,10 @@ class BasePlatform(ABC):
         """Return ``(session_id, title)`` for the selected Codex conversation."""
         return None
 
+    def get_active_app_error(self) -> str:
+        """Return the visible Codex App error text, if one is currently shown."""
+        return ""
+
     @staticmethod
     def _detect_latest_jsonl_by_mtime(sessions_root: Path) -> Path | None:
         """Find the most recently modified JSONL file under ``sessions_root``."""

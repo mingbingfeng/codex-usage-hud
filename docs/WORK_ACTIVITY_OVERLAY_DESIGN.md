@@ -12,7 +12,7 @@ Figma MCP is not available in this session, so this is the Figma-ready source sp
 
 - Name: Work activity bubble stack.
 - Width: 430 px.
-- Max visible items: 6.
+- Max visible items: default 6, user-configurable in settings.
 - Stack direction: top to bottom, current session first, then most recently updated active sessions.
 - Background: `#0A0F14` around the stack, card `#10161D`.
 - Border: 1 px `#263241`.

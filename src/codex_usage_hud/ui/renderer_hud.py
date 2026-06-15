@@ -24,7 +24,7 @@ from ..platforms.cdp_probe import (
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "7"
+RENDERER_HUD_VERSION = "9"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -67,6 +67,7 @@ RENDERER_HUD_SCRIPT = r"""
   const topClass = "codex-usage-hud-top";
   const requestClass = "codex-usage-hud-request";
   const warningClass = "codex-usage-hud-warning";
+  const errorClass = "codex-usage-hud-error";
   const resizeHandlerName = "__codexUsageHudResize";
   const scrollHandlerName = "__codexUsageHudScroll";
   const mutationObserverName = "__codexUsageHudObserver";
@@ -525,6 +526,9 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .${warningClass} {
         color: #ffb86b !important;
+      }
+      #${rootId} .${errorClass} {
+        color: #ff6b6b !important;
       }
       #${rootId} .codex-usage-hud-settings-modal[hidden] {
         display: none !important;
@@ -1008,6 +1012,7 @@ RENDERER_HUD_SCRIPT = r"""
       weekly_reset_weekday: 3,
       weekly_reset_time: "10:00",
       display_mode: "auto",
+      work_overlay_max_items: 6,
       pricing_url: "",
       budget_thresholds: [0.5, 0.8, 0.9, 1.0],
       weekly_adjustment_usd: 0,
@@ -1044,6 +1049,11 @@ RENDERER_HUD_SCRIPT = r"""
   function currentUpdateState() {
     const raw = currentPayload()?.updateState || {};
     return raw && typeof raw === "object" ? raw : {};
+  }
+
+  function workOverlaySelectableMax() {
+    const value = Number(currentPayload()?.workOverlaySelectableMax ?? 6);
+    return Number.isFinite(value) && value >= 1 ? Math.round(value) : 6;
   }
 
   function updateStateFromPayload(payload) {
@@ -1137,6 +1147,14 @@ RENDERER_HUD_SCRIPT = r"""
   function settingsPanelHtml(settings, bridge, path) {
     const currentMode = activeDisplayMode();
     const selectedDisplayMode = currentMode === "tk" ? "tk" : "renderer";
+    const overlaySelectableMax = workOverlaySelectableMax();
+    const overlayValue = Math.min(
+      overlaySelectableMax,
+      Math.max(0, Math.round(Number(settings.work_overlay_max_items) || 0)),
+    );
+    const overlayOptions = Array.from({ length: overlaySelectableMax + 1 }, (_, index) => `
+      <option value="${index}" ${overlayValue === index ? "selected" : ""}>${index}${index === 0 ? " - 不启用" : ""}</option>
+    `).join("");
     const weekdayOptions = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
       .map((label, index) => `<option value="${index}" ${Number(settings.weekly_reset_weekday) === index ? "selected" : ""}>${label}</option>`)
       .join("");
@@ -1168,6 +1186,10 @@ RENDERER_HUD_SCRIPT = r"""
             <option value="renderer" ${selectedDisplayMode === "renderer" ? "selected" : ""}>优先 renderer 注入，失败回退 Tk</option>
             <option value="tk" ${selectedDisplayMode === "tk" ? "selected" : ""}>Tk 窗口</option>
           </select>
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>会话气泡最大显示数（0 表示不启用）</label>
+          <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
         </div>
         <div class="codex-usage-hud-settings-field">
           <label>超额提醒阈值</label>
@@ -1427,11 +1449,17 @@ RENDERER_HUD_SCRIPT = r"""
   function collectSettingsForm() {
     const modal = document.getElementById(settingsModalId);
     const settings = hudSettingsFromPayload();
-    const read = (key) => modal?.querySelector(`[data-setting-key="${key}"]`)?.value;
-    const displayNode = modal?.querySelector(`[data-setting-key="display_mode"]`);
+    const settingNode = (key) => modal?.querySelector(`[data-setting-key="${key}"]`);
+    const read = (key) => settingNode(key)?.value;
+    const displayNode = settingNode("display_mode");
     const numberValue = (key, fallback) => {
       const value = Number(read(key));
       return Number.isFinite(value) && value >= 0 ? value : fallback;
+    };
+    const integerValue = (key, fallback, min, max) => {
+      const value = Number(read(key));
+      if (!Number.isFinite(value)) return fallback;
+      return Math.min(max, Math.max(min, Math.round(value)));
     };
     const modelPrices = {};
     modal?.querySelectorAll("[data-price-row='true']").forEach((row) => {
@@ -1460,6 +1488,12 @@ RENDERER_HUD_SCRIPT = r"""
       weekly_reset_weekday: Number(read("weekly_reset_weekday") ?? settings.weekly_reset_weekday),
       weekly_reset_time: String(read("weekly_reset_time") || settings.weekly_reset_time),
       display_mode: displayMode,
+      work_overlay_max_items: integerValue(
+        "work_overlay_max_items",
+        Number(settings.work_overlay_max_items) || 0,
+        0,
+        workOverlaySelectableMax(),
+      ),
       pricing_url: String(read("pricing_url") || "").trim(),
       budget_thresholds: String(read("budget_thresholds") || "")
         .split(",")
@@ -2932,7 +2966,7 @@ RENDERER_HUD_SCRIPT = r"""
       node.classList.toggle(warningClass, !!nextPayload?.warning);
     });
     root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
-      node.classList.toggle(warningClass, nextPayload?.requestStatus === "error");
+      node.classList.toggle(errorClass, nextPayload?.requestStatus === "error");
     });
     renderTopDetails(root, nextPayload || {});
     renderRequestRows(root, nextPayload?.requestRows || [], nextPayload?.requestRowDetails || []);
@@ -3034,6 +3068,7 @@ class RendererHudPayload:
     settings_path: str = ""
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
+    work_overlay_selectable_max: int = 6
     support_images: list[dict[str, str]] = field(default_factory=list)
     update_state: dict[str, object] = field(default_factory=dict)
     app_version: str = __version__
@@ -3058,6 +3093,7 @@ class RendererHudPayload:
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
+            "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
             "supportImages": [dict(item) for item in self.support_images],
             "updateState": dict(self.update_state),
             "appVersion": self.app_version,
@@ -3102,6 +3138,7 @@ class RendererHudClient:
         settings_bridge_url: str = "",
         settings_command_status: dict[str, object] | None = None,
         update_state: dict[str, object] | None = None,
+        work_overlay_selectable_max: int = 6,
     ) -> bool:
         support_images = [] if self._support_images_sent else support_qr_payload()
         payload = payload_from_snapshot(
@@ -3113,6 +3150,7 @@ class RendererHudClient:
             settings_command_status=settings_command_status,
             support_images=support_images,
             update_state=update_state,
+            work_overlay_selectable_max=work_overlay_selectable_max,
         ).to_json()
         if self.update_payload(payload):
             if support_images:
@@ -3356,6 +3394,7 @@ def payload_from_snapshot(
     settings_command_status: dict[str, object] | None = None,
     support_images: list[dict[str, str]] | None = None,
     update_state: dict[str, object] | None = None,
+    work_overlay_selectable_max: int = 6,
 ) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
     top_line = (
@@ -3393,6 +3432,7 @@ def payload_from_snapshot(
         settings_path=str(settings_path or ""),
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},
+        work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),
         support_images=support_images or [],
         update_state=update_state or {},
         app_version=__version__,

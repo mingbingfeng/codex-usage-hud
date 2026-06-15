@@ -93,6 +93,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settingsPath", payload)
         self.assertIn("settingsBridgeUrl", payload)
         self.assertIn("settingsCommandStatus", payload)
+        self.assertIn("workOverlaySelectableMax", payload)
         self.assertIn("updateState", payload)
         self.assertEqual(payload["appVersion"], "1.0.1")
         self.assertIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -134,6 +135,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("localStorage.setItem", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("请作者喝咖啡链接", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-setting-key="support_url"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-setting-key="work_overlay_max_items"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("0 - 不启用", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("workOverlaySelectableMax", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("拉取价格", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("window.confirm", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("fetch(`${bridge}", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -218,6 +222,22 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(payload["supportImages"][0]["label"], "支付宝")
         self.assertEqual(payload["supportImages"][1]["label"], "微信赞赏")
         self.assertTrue(payload["supportImages"][0]["src"].startswith("data:image/jpeg;base64,"))
+
+    def test_payload_marks_request_errors_for_red_renderer_bubble(self) -> None:
+        snapshot = ParsedSession(
+            request=RequestTokens(
+                status="error",
+                error="exceeded retry limit, last status: 429 Too Many Requests",
+            )
+        )
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        self.assertEqual(payload["requestStatus"], "error")
+        self.assertIn("429 Too Many Requests", str(payload["requestLine"]))
+        self.assertTrue(payload["warning"])
+        self.assertIn("codex-usage-hud-error", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("node.classList.toggle(errorClass", renderer_hud.RENDERER_HUD_SCRIPT)
 
     def test_payload_exposes_top_copy_targets_and_live_request_row_details(self) -> None:
         started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()

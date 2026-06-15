@@ -24,6 +24,7 @@ DEFAULT_WEEKLY_RESET_TIME = "10:00"
 DEFAULT_DISPLAY_MODE = "auto"
 VALID_DISPLAY_MODES = {"auto", "renderer", "tk"}
 DEFAULT_SUPPORT_URL = "https://github.com/mingbingfeng/codex-usage-hud"
+DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
 
 _PRICE_ALIASES = {
     "input": ("input", "prompt", "input_price", "input_per_million"),
@@ -106,6 +107,7 @@ class UserConfig:
     weekly_reset_weekday: int = DEFAULT_WEEKLY_RESET_WEEKDAY
     weekly_reset_time: str = DEFAULT_WEEKLY_RESET_TIME
     display_mode: str = DEFAULT_DISPLAY_MODE
+    work_overlay_max_items: int = DEFAULT_WORK_OVERLAY_MAX_ITEMS
     model_prices: dict[str, ModelPrice] = field(default_factory=default_model_prices)
     pricing_url: str = ""
     budget_thresholds: list[float] = field(
@@ -126,6 +128,13 @@ class UserConfig:
         prices = normalize_model_prices(value.get("model_prices"))
         if not prices:
             prices = defaults.model_prices
+        legacy_overlay_enabled = _optional_bool(value.get("work_overlay_enabled"))
+        work_overlay_max_items = normalize_work_overlay_max_items(
+            value.get("work_overlay_max_items"),
+            defaults.work_overlay_max_items,
+        )
+        if legacy_overlay_enabled is False:
+            work_overlay_max_items = 0
         return cls(
             daily_budget_usd=max(
                 0.0,
@@ -149,6 +158,7 @@ class UserConfig:
                 value.get("weekly_reset_time"), defaults.weekly_reset_time
             ),
             display_mode=normalize_display_mode(value.get("display_mode")),
+            work_overlay_max_items=work_overlay_max_items,
             model_prices=prices,
             pricing_url=_optional_str(value.get("pricing_url")) or "",
             budget_thresholds=parse_thresholds(
@@ -171,6 +181,7 @@ class UserConfig:
             "weekly_reset_weekday": int(self.weekly_reset_weekday),
             "weekly_reset_time": self.weekly_reset_time,
             "display_mode": self.display_mode,
+            "work_overlay_max_items": int(self.work_overlay_max_items),
             "pricing_url": self.pricing_url,
             "budget_thresholds": list(self.budget_thresholds),
             "weekly_adjustment_usd": float(self.weekly_adjustment_usd),
@@ -390,6 +401,21 @@ def effective_display_mode(value: Any) -> str:
     return "tk" if normalize_display_mode(value) == "tk" else "renderer"
 
 
+def normalize_work_overlay_max_items(
+    value: Any,
+    default: int = DEFAULT_WORK_OVERLAY_MAX_ITEMS,
+    *,
+    max_items: int | None = None,
+) -> int:
+    amount = _optional_int(value)
+    if amount is None:
+        amount = int(default)
+    amount = max(0, int(amount))
+    if max_items is None:
+        return amount
+    return min(amount, max(0, int(max_items)))
+
+
 def _extract_price_collection(value: Any) -> dict[str, ModelPrice]:
     prices: dict[str, ModelPrice] = {}
     if isinstance(value, Mapping):
@@ -434,6 +460,23 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return None
+
+
 def _optional_int(value: Any) -> int | None:
     try:
         return None if value is None or value == "" else int(value)
@@ -450,6 +493,7 @@ __all__ = [
     "DEFAULT_WEEKLY_BUDGET_USD",
     "DEFAULT_WEEKLY_RESET_TIME",
     "DEFAULT_WEEKLY_RESET_WEEKDAY",
+    "DEFAULT_WORK_OVERLAY_MAX_ITEMS",
     "HUD_SETTINGS_FILENAME",
     "ModelPrice",
     "USER_CONFIG_KEY",
@@ -462,6 +506,7 @@ __all__ = [
     "fetch_model_prices",
     "normalize_display_mode",
     "normalize_model_prices",
+    "normalize_work_overlay_max_items",
     "parse_thresholds",
     "read_json_object",
     "time_parts",

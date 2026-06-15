@@ -1,0 +1,125 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1781515760689,
+  "projectRoot": "E:\\Project\\codex-usage-hud",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "build": {
+      "path": "build",
+      "purpose": "Build output",
+      "fileCount": 0,
+      "lastAccessed": 1781515760672,
+      "keyFiles": []
+    },
+    "codex_usage_hud": {
+      "path": "codex_usage_hud",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1781515760672,
+      "keyFiles": [
+        "__init__.py",
+        "__main__.py"
+      ]
+    },
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 5,
+      "lastAccessed": 1781515760673,
+      "keyFiles": [
+        "codex-hud.exe",
+        "codex-usage-hud-v1.0.0-windows-x64-setup.exe",
+        "codex-usage-hud-v1.0.0-windows-x64-setup.exe.sha256",
+        "codex-usage-hud-v1.0.1-windows-x64-setup.exe",
+        "codex-usage-hud-v1.0.1-windows-x64-setup.exe.sha256"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 4,
+      "lastAccessed": 1781515760673,
+      "keyFiles": [
+        "DEVELOPMENT.md",
+        "PRIVACY.md",
+        "RELEASE_PLAYBOOK.md",
+        "WORK_ACTIVITY_OVERLAY_DESIGN.md"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1781515760673,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 15,
+      "lastAccessed": 1781515760674,
+      "keyFiles": [
+        "test_active_session.py",
+        "test_build_exe.py",
+        "test_build_installer.py",
+        "test_calculator.py",
+        "test_cdp_probe.py"
+      ]
+    },
+    "tools": {
+      "path": "tools",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1781515760674,
+      "keyFiles": [
+        "build_exe.py",
+        "build_installer.py",
+        "pre_release_check.py",
+        "probe_codex_window.py"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

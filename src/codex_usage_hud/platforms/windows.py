@@ -1144,6 +1144,14 @@ class WindowsPlatform(BasePlatform):
             self._last_observed_session_id = session_id
         return session_id, title
 
+    def get_active_app_error(self) -> str:
+        if self._cdp_probe is None:
+            return ""
+        snapshot = self._cdp_probe.snapshot()
+        if snapshot is None:
+            return ""
+        return str(getattr(snapshot, "app_error", "") or "").strip()
+
     def get_active_conversation_title(self) -> str | None:
         ref = self.get_active_conversation_ref()
         if ref is not None and ref[1]:

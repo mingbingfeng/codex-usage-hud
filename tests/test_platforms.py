@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
 
@@ -203,6 +204,21 @@ class WindowsActiveTitleTests(unittest.TestCase):
         platform._find_codex_window = lambda: 123  # type: ignore[method-assign]
 
         self.assertEqual(platform.get_active_conversation_title(), "UIA 降级标题")
+
+    def test_windows_platform_exposes_visible_cdp_app_error(self) -> None:
+        class _FakeCdpProbe:
+            def snapshot(self) -> object | None:
+                return SimpleNamespace(
+                    app_error="exceeded retry limit, last status: 429 Too Many Requests"
+                )
+
+        platform = object.__new__(WindowsPlatform)
+        platform._cdp_probe = _FakeCdpProbe()
+
+        self.assertEqual(
+            platform.get_active_app_error(),
+            "exceeded retry limit, last status: 429 Too Many Requests",
+        )
 
 
 if __name__ == "__main__":

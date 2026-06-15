@@ -70,6 +70,18 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(prices["custom-model"].output, 7.5)
         self.assertEqual(prices["custom-model"].reasoning, 8.0)
 
+    def test_user_config_normalizes_work_overlay_settings(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "work_overlay_enabled": "off",
+                "work_overlay_max_items": 99,
+            }
+        )
+
+        self.assertEqual(config.work_overlay_max_items, 0)
+        self.assertNotIn("work_overlay_enabled", config.to_dict())
+        self.assertEqual(config.to_dict()["work_overlay_max_items"], 0)
+
     def test_budget_windows_use_user_reset_day_and_time(self) -> None:
         config = UserConfig.defaults()
         config.daily_reset_time = "03:30"

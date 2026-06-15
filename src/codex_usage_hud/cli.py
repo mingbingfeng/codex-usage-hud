@@ -24,12 +24,14 @@ from . import __version__
 from .config import (
     DEFAULT_BUDGET_THRESHOLDS,
     DEFAULT_DAILY_BUDGET_USD,
+    DEFAULT_WORK_OVERLAY_MAX_ITEMS,
     DEFAULT_WEEKLY_BUDGET_USD,
     UserConfig,
     UserConfigStore,
     effective_display_mode,
     fetch_model_prices,
     normalize_display_mode,
+    normalize_work_overlay_max_items,
     parse_thresholds as parse_config_thresholds,
     time_parts,
 )
@@ -66,7 +68,11 @@ from .ui.renderer_hud import (
     remove_renderer_hud_from_pages,
     wait_for_renderer,
 )
-from .ui.work_overlay_qt import _work_overlay_header_text, run_work_overlay_helper_qt
+from .ui.work_overlay_qt import (
+    _work_overlay_header_text,
+    run_work_overlay_helper_qt,
+    work_overlay_max_items_for_screen_height,
+)
 from .updater import (
     AutoUpdateManager,
     check_for_update,
@@ -110,7 +116,7 @@ DAEMON_STARTUP_RENDERER = "renderer"
 DAEMON_STARTUP_TK = "tk"
 DAEMON_STARTUP_CANCEL = "cancel"
 LOADING_FEEDBACK_STALE_SECONDS = 20.0
-ACTIVE_WORK_ITEM_LIMIT = 6
+ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
 WORK_OVERLAY_STALE_SECONDS = 20.0
@@ -527,6 +533,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "elapsedText": item.elapsed_text,
         "progress": item.progress,
         "source": item.source,
+        "workdir": item.workdir,
         "startedAt": _iso_or_empty(item.started_at),
         "updatedAt": _iso_or_empty(item.updated_at),
         "current": item.current,
@@ -536,16 +543,38 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
 class DesktopWorkOverlay:
     """Primary-screen Tk overlay that stays visible when Codex is minimized."""
 
-    def __init__(self, *, enabled: bool = True) -> None:
-        self.enabled = bool(enabled)
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        item_limit: int = DEFAULT_WORK_OVERLAY_MAX_ITEMS,
+    ) -> None:
+        self.item_limit = normalize_work_overlay_max_items(item_limit)
+        self.enabled = bool(enabled) and self.item_limit > 0
         self._state_path = (
             hud_runtime_dir() / f"work-overlay-{os.getpid()}-{int(time.time() * 1000)}.json"
         )
         self._process: subprocess.Popen[str] | None = None
         self._closed = False
 
+    def configure(
+        self,
+        *,
+        enabled: bool | None = None,
+        item_limit: int | None = None,
+    ) -> None:
+        next_enabled = self.enabled if enabled is None else bool(enabled)
+        if item_limit is not None:
+            self.item_limit = normalize_work_overlay_max_items(item_limit)
+        self.enabled = next_enabled and self.item_limit > 0
+        if not self.enabled and not self._closed:
+            self._stop_runtime(permanent=False)
+
     def update(self, items: Sequence[WorkStatusItem]) -> None:
-        if not self.enabled or self._closed:
+        if self._closed:
+            return
+        if not self.enabled:
+            self._stop_runtime(permanent=False)
             return
         payload_items = [work_item_to_overlay_dict(item) for item in items]
         if not payload_items and self._process is None:
@@ -559,10 +588,19 @@ class DesktopWorkOverlay:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
-        self._write_state([], close=True)
+        self._stop_runtime(permanent=True)
+
+    def _stop_runtime(self, *, permanent: bool) -> None:
+        if permanent:
+            self._closed = True
         process = self._process
         self._process = None
+        try:
+            state_exists = self._state_path.exists()
+        except OSError:
+            state_exists = False
+        if process is not None or state_exists:
+            self._write_state([], close=True)
         if process is not None:
             try:
                 process.wait(timeout=1.0)
@@ -599,6 +637,7 @@ class DesktopWorkOverlay:
                 json.dumps(
                     {
                         "ownerPid": os.getpid(),
+                        "itemLimit": int(self.item_limit),
                         "items": list(items),
                         "updatedAt": time.time(),
                         "close": bool(close),
@@ -1830,6 +1869,11 @@ def _work_status_text(
     activity = snapshot.activity
     if status_value == "recent":
         return "已完成"
+    if status_value == "error":
+        return _compact_work_text(
+            snapshot.request.error or snapshot.error or status_label,
+            80,
+        )
     if status_value == "waiting_user":
         return "等待用户输入"
     if activity.kind == "tool call":
@@ -1873,6 +1917,8 @@ def _work_status_from_snapshot(
 ) -> tuple[str, str] | None:
     activity_detail = snapshot.activity.detail.lower()
     request_status = snapshot.request.status
+    if request_status == "error" or snapshot.request.error:
+        return "error", "出错"
     if request_status == "running":
         return "running", "运行中"
     if snapshot.activity.kind == "tool call" and activity_detail.startswith(
@@ -1927,7 +1973,12 @@ def _work_item_from_snapshot(
         or str(snapshot.session_id or "").strip()
         or "Codex 工作"
     )
-    detail = snapshot.activity.detail or snapshot.error or "等待更多活动日志"
+    detail = (
+        snapshot.request.error
+        or snapshot.activity.detail
+        or snapshot.error
+        or "等待更多活动日志"
+    )
     if snapshot.activity.kind:
         detail = f"{_work_activity_label(snapshot.activity.kind)}：{detail}"
     status_text = _work_status_text(snapshot, status_value, status_label)
@@ -1954,6 +2005,7 @@ def _work_item_from_snapshot(
         elapsed_text=elapsed_text,
         progress=progress,
         source=source or snapshot.selection_source,
+        workdir=str(snapshot.cwd or "").strip(),
         session_started_at=snapshot.session_started_at,
         started_at=started_at,
         updated_at=updated_at,
@@ -1968,12 +2020,43 @@ def _compact_work_text(value: object, limit: int) -> str:
     return text[: max(0, limit - 3)] + "..."
 
 
+def _primary_screen_height() -> int:
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            return max(1, int(user32.GetSystemMetrics(1)))
+        except Exception:
+            pass
+    return 1080
+
+
+def _work_overlay_screen_max_items(screen_height: int | None = None) -> int:
+    height = _primary_screen_height() if screen_height is None else int(screen_height)
+    return work_overlay_max_items_for_screen_height(height)
+
+
+def _work_overlay_item_limit_for_context(context: object) -> int:
+    config = getattr(context, "user_config", None)
+    configured = normalize_work_overlay_max_items(
+        getattr(config, "work_overlay_max_items", ACTIVE_WORK_ITEM_LIMIT),
+        ACTIVE_WORK_ITEM_LIMIT,
+    )
+    if configured <= 0:
+        return 0
+    return min(configured, _work_overlay_screen_max_items())
+
+
 def active_work_items_for_snapshot(
     context: "RuntimeContext",
     snapshot: ParsedSession,
     session_path: Path | None,
 ) -> list[WorkStatusItem]:
     """Build primary-screen work bubble items from recently active Codex sessions."""
+    item_limit = _work_overlay_item_limit_for_context(context)
+    if item_limit <= 0:
+        return []
     now = datetime.now().astimezone()
     items: dict[str, WorkStatusItem] = {}
     current_key = _session_path_key(session_path)
@@ -2022,7 +2105,7 @@ def active_work_items_for_snapshot(
         return (session_seconds, task_seconds)
 
     ordered = sorted(items.values(), key=sort_key, reverse=True)
-    return ordered[:ACTIVE_WORK_ITEM_LIMIT]
+    return ordered[:item_limit]
 
 
 @dataclass
@@ -2471,6 +2554,25 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
     )
 
 
+def _visible_app_error(platform: BasePlatform) -> str:
+    try:
+        text = platform.get_active_app_error()
+    except Exception:
+        return ""
+    return " ".join(str(text or "").split())
+
+
+def _apply_visible_app_error(snapshot: ParsedSession, message: str) -> None:
+    if not message:
+        return
+    snapshot.request.status = "error"
+    snapshot.request.error = message
+    snapshot.request.source = "app"
+    snapshot.request.updated_at = snapshot.refreshed_at
+    if snapshot.request.started_at is None:
+        snapshot.request.started_at = snapshot.task_started_at
+
+
 def build_snapshot(context: RuntimeContext) -> ParsedSession:
     context.reload_user_config()
     session_path, selection_source = context.session_resolver.resolve()
@@ -2510,6 +2612,7 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
             session_path,
             snapshot.session_id,
         )
+    _apply_visible_app_error(snapshot, _visible_app_error(context.platform))
 
     day_start, week_start = current_budget_windows(context.user_config)
     today_total, week_total = context.usage_cache.summarize(
@@ -2948,7 +3051,9 @@ def run_renderer_hud_session(
             update_manager = AutoUpdateManager(current_version=__version__)
             restart_requested = Event()
             exit_requested = Event()
-            work_overlay = DesktopWorkOverlay()
+            work_overlay = DesktopWorkOverlay(
+                item_limit=_work_overlay_item_limit_for_context(context),
+            )
             bridge = SettingsBridgeServer(
                 context.settings_store,
                 restart_callback=restart_requested.set,
@@ -3115,6 +3220,9 @@ def run_renderer_hud_session(
                         )
                     context.reload_user_config()
                     snapshot = snapshot_or_error()
+                    work_overlay.configure(
+                        item_limit=_work_overlay_item_limit_for_context(context),
+                    )
                     work_overlay.update(snapshot.active_work_items)
                     if client.update(
                         snapshot,
@@ -3124,6 +3232,7 @@ def run_renderer_hud_session(
                         settings_bridge_url=bridge_url,
                         settings_command_status=settings_command_status,
                         update_state=update_state,
+                        work_overlay_selectable_max=_work_overlay_screen_max_items(),
                     ):
                         settings_command_status = {}
                         failures = 0
@@ -3192,7 +3301,9 @@ def _run_tk_window_session(
     update_manager: AutoUpdateManager | None = None,
 ) -> int:
     snapshot_pump = _TkSnapshotPump(context)
-    work_overlay = DesktopWorkOverlay()
+    work_overlay = DesktopWorkOverlay(
+        item_limit=_work_overlay_item_limit_for_context(context),
+    )
     try:
         try:
             window = existing_window or TokenHudWindow(
@@ -3219,6 +3330,9 @@ def _run_tk_window_session(
                 window.update_display(
                     latest_snapshot,
                     update_state=update_manager.tick() if update_manager is not None else None,
+                )
+                work_overlay.configure(
+                    item_limit=_work_overlay_item_limit_for_context(context),
                 )
                 work_overlay.update(latest_snapshot.active_work_items)
             try:

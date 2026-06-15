@@ -124,6 +124,7 @@ class CdpProbeTests(unittest.TestCase):
                         "devicePixelRatio": 1.25,
                         "headerRect": {"left": 10, "top": 20, "width": 900, "height": 44},
                         "composerRect": {"left": 260, "top": 700, "right": 1000, "bottom": 760},
+                        "appError": "exceeded retry limit, last status: 429 Too Many Requests",
                     }
                 }
             }
@@ -135,6 +136,10 @@ class CdpProbeTests(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(snapshot.session_id, "thread-123")
         self.assertEqual(snapshot.title, "Selected Thread")
+        self.assertEqual(
+            snapshot.app_error,
+            "exceeded retry limit, last status: 429 Too Many Requests",
+        )
         self.assertEqual(snapshot.device_pixel_ratio, 1.25)
         self.assertEqual(snapshot.header_rect, CdpRect(10.0, 20.0, 910.0, 64.0))
         self.assertEqual(snapshot.composer_rect, CdpRect(260.0, 700.0, 1000.0, 760.0))
@@ -144,6 +149,8 @@ class CdpProbeTests(unittest.TestCase):
         self.assertIn("app-shell-header-context-menu-surface", DOM_PROBE_SCRIPT)
         self.assertIn("FileEditViewWindowHelp", DOM_PROBE_SCRIPT)
         self.assertIn("rect.top > 20", DOM_PROBE_SCRIPT)
+        self.assertIn("appError: appErrorText()", DOM_PROBE_SCRIPT)
+        self.assertIn("exceeded retry limit", DOM_PROBE_SCRIPT)
         self.assertNotIn('"main header"', DOM_PROBE_SCRIPT)
 
     def test_install_new_document_script_registers_and_evaluates_script(self) -> None:
