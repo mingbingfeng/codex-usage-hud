@@ -113,6 +113,8 @@ ACTIVE_WORK_ITEM_LIMIT = 6
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
 WORK_OVERLAY_STALE_SECONDS = 20.0
+WORK_OVERLAY_ALPHA = 0.88
+WORK_OVERLAY_HOVER_ALPHA = 0.66
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 
@@ -518,6 +520,9 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "status": item.status,
         "statusLabel": item.status_label,
         "detail": item.detail,
+        "statusText": item.status_text,
+        "lastText": item.last_text,
+        "elapsedText": item.elapsed_text,
         "progress": item.progress,
         "source": item.source,
         "startedAt": _iso_or_empty(item.started_at),
@@ -625,7 +630,7 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     try:
-        root.attributes("-alpha", 0.96)
+        root.attributes("-alpha", WORK_OVERLAY_ALPHA)
     except tk.TclError:
         pass
     try:
@@ -640,82 +645,253 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
 
     owner_pid = _work_overlay_owner_pid(path)
     last_signature = ""
+    dismissed_signatures: dict[str, str] = {}
+    close_button_refs: list[object] = []
+    overlay_alpha = WORK_OVERLAY_ALPHA
 
-    def color_for(status: str) -> tuple[str, str]:
+    def set_overlay_alpha(value: float) -> None:
+        nonlocal overlay_alpha
+        if abs(overlay_alpha - value) < 0.01:
+            return
+        overlay_alpha = value
+        try:
+            root.attributes("-alpha", value)
+        except tk.TclError:
+            pass
+
+    def item_signature(item: Mapping[str, object]) -> str:
+        return json.dumps(
+            {
+                "id": item.get("id"),
+                "status": item.get("status"),
+                "statusText": item.get("statusText"),
+                "lastText": item.get("lastText"),
+                "current": item.get("current"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    def visible_overlay_items(
+        items: Sequence[Mapping[str, object]],
+    ) -> list[Mapping[str, object]]:
+        visible: list[Mapping[str, object]] = []
+        live_ids: set[str] = set()
+        for item in items[:ACTIVE_WORK_ITEM_LIMIT]:
+            item_id = str(item.get("id") or "")
+            if item_id:
+                live_ids.add(item_id)
+            signature = item_signature(item)
+            if item_id and dismissed_signatures.get(item_id) == signature:
+                continue
+            if item_id and item_id in dismissed_signatures:
+                dismissed_signatures.pop(item_id, None)
+            visible.append(item)
+        for item_id in list(dismissed_signatures):
+            if item_id not in live_ids:
+                dismissed_signatures.pop(item_id, None)
+        return visible
+
+    def dismiss_item(item: Mapping[str, object]) -> None:
+        item_id = str(item.get("id") or "")
+        if item_id:
+            dismissed_signatures[item_id] = item_signature(item)
+        root.withdraw()
+
+    def update_hover_alpha() -> None:
+        if not root.winfo_exists():
+            return
+        if root.state() == "withdrawn":
+            set_overlay_alpha(WORK_OVERLAY_ALPHA)
+            root.after(180, update_hover_alpha)
+            return
+        try:
+            px = int(root.winfo_pointerx())
+            py = int(root.winfo_pointery())
+            x = int(root.winfo_rootx())
+            y = int(root.winfo_rooty())
+            width = int(root.winfo_width())
+            height = int(root.winfo_height())
+        except tk.TclError:
+            root.after(180, update_hover_alpha)
+            return
+        inside = x <= px < x + width and y <= py < y + height
+        set_overlay_alpha(WORK_OVERLAY_HOVER_ALPHA if inside else WORK_OVERLAY_ALPHA)
+        root.after(180, update_hover_alpha)
+
+    def install_click_through() -> None:
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return
+
+        try:
+            hwnd = wintypes.HWND(int(root.winfo_id()))
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            WM_NCHITTEST = 0x0084
+            HTCLIENT = 1
+            HTTRANSPARENT = -1
+            GWL_WNDPROC = -4
+
+            LONG_PTR = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
+            WNDPROC = ctypes.WINFUNCTYPE(
+                LONG_PTR,
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            )
+            get_window_long = (
+                user32.GetWindowLongPtrW
+                if ctypes.sizeof(ctypes.c_void_p) == 8
+                else user32.GetWindowLongW
+            )
+            set_window_long = (
+                user32.SetWindowLongPtrW
+                if ctypes.sizeof(ctypes.c_void_p) == 8
+                else user32.SetWindowLongW
+            )
+            get_window_long.argtypes = [wintypes.HWND, ctypes.c_int]
+            get_window_long.restype = LONG_PTR
+            set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
+            set_window_long.restype = LONG_PTR
+            user32.CallWindowProcW.argtypes = [
+                LONG_PTR,
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            ]
+            user32.CallWindowProcW.restype = LONG_PTR
+
+            original_proc = get_window_long(hwnd, GWL_WNDPROC)
+
+            def signed_short(value: int) -> int:
+                value &= 0xFFFF
+                return value - 0x10000 if value & 0x8000 else value
+
+            def is_close_hit(screen_x: int, screen_y: int) -> bool:
+                for widget in close_button_refs:
+                    try:
+                        if not widget.winfo_ismapped():
+                            continue
+                        left = int(widget.winfo_rootx())
+                        top = int(widget.winfo_rooty())
+                        right = left + int(widget.winfo_width())
+                        bottom = top + int(widget.winfo_height())
+                    except tk.TclError:
+                        continue
+                    if left <= screen_x < right and top <= screen_y < bottom:
+                        return True
+                return False
+
+            @WNDPROC
+            def window_proc(hwnd_arg, msg, wparam, lparam):
+                if msg == WM_NCHITTEST:
+                    screen_x = signed_short(int(lparam))
+                    screen_y = signed_short(int(lparam) >> 16)
+                    return HTCLIENT if is_close_hit(screen_x, screen_y) else HTTRANSPARENT
+                return user32.CallWindowProcW(original_proc, hwnd_arg, msg, wparam, lparam)
+
+            set_window_long(hwnd, GWL_WNDPROC, ctypes.cast(window_proc, ctypes.c_void_p).value)
+            root._codex_work_overlay_wndproc = window_proc  # type: ignore[attr-defined]
+        except Exception:
+            return
+
+    def color_for(status: str) -> tuple[str, str, str, str]:
         if status == "waiting_user":
-            return "#FFB86B", "#1D1610"
+            return "#FFB86B", "#1D1610", "#10161D", "#263241"
         if status == "tool":
-            return "#9CCBFF", "#0D1722"
+            return "#9CCBFF", "#0D1722", "#10161D", "#263241"
         if status == "recent":
-            return "#8FE3A1", "#0E1B14"
-        return "#F3D27A", "#1C190F"
+            return "#8FE3A1", "#0E1B14", "#0E1B14", "#2F9F55"
+        return "#F3D27A", "#1C190F", "#10161D", "#263241"
 
     def render_items(items: Sequence[Mapping[str, object]]) -> None:
         nonlocal last_signature
-        signature = json.dumps(list(items), ensure_ascii=False, sort_keys=True)
+        visible_items = visible_overlay_items(items)
+        signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
         if signature == last_signature:
             return
         last_signature = signature
         for child in shell.winfo_children():
             child.destroy()
-        if not items:
+        close_button_refs.clear()
+        if not visible_items:
             root.withdraw()
             return
 
-        width = 360
-        for item in items[:ACTIVE_WORK_ITEM_LIMIT]:
+        width = 430
+        for item in visible_items:
             status = str(item.get("status") or "")
-            accent, pill_bg = color_for(status)
+            accent, pill_bg, card_bg, border_color = color_for(status)
             card = tk.Frame(
                 shell,
-                bg="#10161D",
+                bg=card_bg,
                 highlightthickness=1,
-                highlightbackground="#263241",
+                highlightbackground=border_color,
                 padx=10,
                 pady=8,
             )
             card.pack(fill="x", pady=(0, 8))
-            head = tk.Frame(card, bg="#10161D")
+            head = tk.Frame(card, bg=card_bg)
             head.pack(fill="x")
+            elapsed_text = str(item.get("elapsedText") or "").strip() or "已处理 --"
             tk.Label(
                 head,
-                text=str(item.get("statusLabel") or "运行中"),
-                anchor="center",
-                bg=pill_bg,
-                fg=accent,
-                font=("Microsoft YaHei UI", 8, "bold"),
-                padx=7,
-                pady=2,
-            ).pack(side="left", padx=(0, 7))
-            tk.Label(
-                head,
-                text=str(item.get("title") or "Codex 工作"),
                 anchor="w",
-                bg="#10161D",
-                fg="#E8EEF7",
+                text=elapsed_text,
+                bg=card_bg,
+                fg=accent if status == "recent" else "#A9B6C6",
                 font=("Microsoft YaHei UI", 9, "bold"),
             ).pack(side="left", fill="x", expand=True)
+            close_button = tk.Button(
+                head,
+                text="×",
+                command=lambda current_item=dict(item): dismiss_item(current_item),
+                anchor="center",
+                bg=card_bg,
+                activebackground=pill_bg,
+                fg="#A9B6C6",
+                activeforeground=accent,
+                bd=0,
+                highlightthickness=0,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=4,
+                pady=0,
+                cursor="hand2",
+                takefocus=False,
+            )
+            close_button.pack(side="right", padx=(8, 0))
+            close_button_refs.append(close_button)
+
+            body_text = str(item.get("lastText") or item.get("detail") or "").strip()
             detail = tk.Label(
                 card,
-                text=str(item.get("detail") or ""),
+                text=body_text,
                 anchor="w",
                 justify="left",
-                bg="#10161D",
+                bg=card_bg,
                 fg="#B8C6D8",
                 font=("Microsoft YaHei UI", 8),
                 wraplength=width - 28,
             )
-            detail.pack(fill="x", pady=(5, 0))
-            progress = str(item.get("progress") or item.get("source") or "")
-            if progress:
+            detail.pack(fill="x", pady=(7, 0))
+            status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
+            if status_text:
                 tk.Label(
                     card,
-                    text=progress,
+                    text=status_text,
                     anchor="w",
-                    bg="#10161D",
-                    fg="#8492A6",
-                    font=("Consolas", 8),
-                ).pack(fill="x", pady=(5, 0))
+                    justify="left",
+                    bg=card_bg,
+                    fg=accent if status == "recent" else "#8492A6",
+                    font=("Microsoft YaHei UI", 8, "bold"),
+                    wraplength=width - 28,
+                ).pack(fill="x", pady=(7, 0))
 
         root.update_idletasks()
         height = max(1, int(root.winfo_reqheight()))
@@ -750,6 +926,8 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
         render_items(items)
         root.after(160, poll_state)
 
+    install_click_through()
+    update_hover_alpha()
     poll_state()
     root.mainloop()
     return 0
@@ -1882,6 +2060,93 @@ def _work_activity_label(value: str) -> str:
     return labels.get(value, value)
 
 
+def _tool_invocation_parts(detail: str) -> tuple[str, str]:
+    text = " ".join(str(detail or "").split())
+    name, _space, args = text.partition(" ")
+    return name, args
+
+
+def _tool_display_name(name: str) -> str:
+    value = str(name or "").strip()
+    if not value:
+        return "工具"
+    value = value.rsplit(".", 1)[-1]
+    return value.replace("_", " ")
+
+
+def _extract_tool_file_target(text: str) -> str:
+    patterns = [
+        r"(?:Update|Add|Delete) File:\s*([^\r\n]+)",
+        r'"(?:file|path)"\s*:\s*"([^"]+)"',
+        r"'(?:file|path)'\s*:\s*'([^']+)'",
+        r"([A-Za-z]:\\[^\s\"']+\.[A-Za-z0-9_]+)",
+        r"([\w./\\-]+\.(?:py|ts|tsx|js|jsx|json|md|css|html|yaml|yml|toml|txt))",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        target = match.group(1).strip().strip("`'\".,")
+        if target:
+            normalized = target.replace("/", "\\")
+            return _compact_work_text(normalized, 48)
+    return ""
+
+
+def _tool_status_text(detail: str) -> str:
+    name, args = _tool_invocation_parts(detail)
+    lower_name = name.lower()
+    target = _extract_tool_file_target(args)
+    if "apply_patch" in lower_name or "edit" in lower_name:
+        return f"正在编辑 {target}" if target else "正在编辑文件"
+    if "shell" in lower_name:
+        command = ""
+        try:
+            parsed_args = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            parsed_args = {}
+        if isinstance(parsed_args, Mapping):
+            command = str(parsed_args.get("command") or "").strip()
+        if command:
+            file_target = _extract_tool_file_target(command)
+            if file_target and re.search(r"\b(apply_patch|Set-Content|Add-Content)\b", command):
+                return f"正在编辑 {file_target}"
+            return f"正在运行 {_compact_work_text(command, 52)}"
+        return "正在运行命令"
+    if "view_image" in lower_name or "screenshot" in lower_name:
+        return "正在查看界面"
+    if "puppeteer" in lower_name:
+        return "正在操作浏览器"
+    if "read" in lower_name or "open" in lower_name:
+        return f"正在读取 {target}" if target else "正在读取内容"
+    if target:
+        return f"正在处理 {target}"
+    return f"正在调用 {_tool_display_name(name)}"
+
+
+def _work_status_text(
+    snapshot: ParsedSession,
+    status_value: str,
+    status_label: str,
+) -> str:
+    activity = snapshot.activity
+    if status_value == "recent":
+        return "已完成"
+    if status_value == "waiting_user":
+        return "等待用户输入"
+    if activity.kind == "tool call":
+        return _tool_status_text(activity.detail)
+    if activity.kind == "tool output":
+        return "正在读取工具结果"
+    if status_value == "tool":
+        return _tool_status_text(activity.detail)
+    if status_value in {"running", "active"}:
+        if activity.kind in {"agent", "assistant"}:
+            return "正在输出"
+        return "正在思考"
+    return status_label
+
+
 def _elapsed_compact(
     started_at: datetime | None,
     *,
@@ -1918,13 +2183,13 @@ def _work_status_from_snapshot(
         return "waiting_user", "等待用户"
     if snapshot.activity.kind == "tool call":
         return "tool", "工具执行"
+    if snapshot.task_completed_at is not None:
+        completed = snapshot.task_completed_at
+        current = now.astimezone(completed.tzinfo) if completed.tzinfo is not None else now
+        if (current - completed).total_seconds() <= 12:
+            return "recent", "刚完成"
     if snapshot.slow.current_gap_active:
         return "active", "处理中"
-    if snapshot.last_event_time is not None:
-        last = snapshot.last_event_time
-        current = now.astimezone(last.tzinfo) if last.tzinfo is not None else now
-        if (current - last).total_seconds() <= 12 and request_status == "confirmed":
-            return "recent", "刚完成"
     return None
 
 
@@ -1967,13 +2232,17 @@ def _work_item_from_snapshot(
     detail = snapshot.activity.detail or snapshot.error or "等待更多活动日志"
     if snapshot.activity.kind:
         detail = f"{_work_activity_label(snapshot.activity.kind)}：{detail}"
+    status_text = _work_status_text(snapshot, status_value, status_label)
+    last_text = snapshot.last_output.detail.strip()
+    started_at = snapshot.task_started_at or snapshot.request.started_at
+    elapsed = _elapsed_compact(started_at, now=current_time)
+    elapsed_text = f"已处理 {elapsed}" if elapsed else ""
     tokens = _current_task_tokens(snapshot)
-    elapsed = _elapsed_compact(snapshot.request.started_at, now=current_time)
     progress_parts = []
     if tokens:
         progress_parts.append(f"{_format_tokens(tokens)} tokens")
-    if elapsed:
-        progress_parts.append(elapsed)
+    if source or snapshot.selection_source:
+        progress_parts.append(source or snapshot.selection_source)
     progress = " | ".join(progress_parts)
     item_id = snapshot.session_id or _session_path_key(snapshot.session_path) or display_title
     return WorkStatusItem(
@@ -1982,9 +2251,12 @@ def _work_item_from_snapshot(
         status=status_value,
         status_label=status_label,
         detail=_compact_work_text(detail, 120),
+        status_text=_compact_work_text(status_text, 80),
+        last_text=_compact_work_text(last_text, 180),
+        elapsed_text=elapsed_text,
         progress=progress,
         source=source or snapshot.selection_source,
-        started_at=snapshot.request.started_at or snapshot.task_started_at,
+        started_at=started_at,
         updated_at=updated_at,
         current=current,
     )
@@ -2045,10 +2317,7 @@ def active_work_items_for_snapshot(
 
     def sort_key(item: WorkStatusItem) -> tuple[int, float]:
         timestamp = item.updated_at or item.started_at
-        if timestamp is None:
-            seconds = 0.0
-        else:
-            seconds = timestamp.timestamp()
+        seconds = timestamp.timestamp() if timestamp is not None else 0.0
         return (1 if item.current else 0, seconds)
 
     ordered = sorted(items.values(), key=sort_key, reverse=True)

@@ -421,7 +421,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(prior.tokens, 0)
         self.assertEqual(prior.cost_usd, 0.0)
 
-    def test_active_work_items_include_current_and_recent_running_sessions(self) -> None:
+    def test_active_work_items_include_current_and_background_sessions(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
 
@@ -484,6 +484,9 @@ class BudgetHelperTests(unittest.TestCase):
             status="running",
             status_label="运行中",
             detail="用户输入：实现桌面气泡",
+            status_text="正在思考",
+            last_text="上一轮输出保留在气泡里",
+            elapsed_text="已处理 12s",
             progress="1.2k tokens | 12s",
             source="activity",
             current=True,
@@ -493,8 +496,135 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(payload["statusLabel"], "运行中")
         self.assertEqual(payload["title"], "Ship primary screen bubbles")
+        self.assertEqual(payload["statusText"], "正在思考")
+        self.assertEqual(payload["lastText"], "上一轮输出保留在气泡里")
+        self.assertEqual(payload["elapsedText"], "已处理 12s")
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
+
+    def test_work_overlay_recent_item_keeps_last_output_text(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def row(offset: int, row_type: str, payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "timestamp": (now + timedelta(seconds=offset)).isoformat(),
+                "type": row_type,
+                "payload": payload,
+            }
+
+        token_payload = {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 3,
+                    "total_tokens": 120,
+                },
+                "total_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 3,
+                    "total_tokens": 120,
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-current.jsonl"
+            rows = [
+                row(-6, "session_meta", {"id": "session-current"}),
+                row(-5, "event_msg", {"type": "task_started"}),
+                row(-3, "event_msg", {"type": "agent_message", "message": "最后一轮输出文本"}),
+                row(-1, "event_msg", token_payload),
+                row(0, "event_msg", {"type": "task_complete"}),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                encoding="utf-8",
+            )
+            snapshot = parser.parse_file(path)
+            snapshot.session_title = "Current task"
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, path)
+
+        self.assertEqual(items[0].status_label, "刚完成")
+        self.assertEqual(items[0].status_text, "已完成")
+        self.assertIn("已处理", items[0].elapsed_text)
+        self.assertEqual(items[0].last_text, "最后一轮输出文本")
+
+    def test_work_overlay_confirmed_tokens_do_not_mark_session_complete(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+        token_payload = {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 3,
+                    "total_tokens": 120,
+                },
+                "total_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 3,
+                    "total_tokens": 120,
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-current.jsonl"
+            rows = [
+                {
+                    "timestamp": (now + timedelta(seconds=-4)).isoformat(),
+                    "type": "session_meta",
+                    "payload": {"id": "session-current"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-3)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-2)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "输出后仍可能继续处理"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-1)).isoformat(),
+                    "type": "event_msg",
+                    "payload": token_payload,
+                },
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                encoding="utf-8",
+            )
+            snapshot = parser.parse_file(path)
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, path)
+
+        self.assertEqual(items[0].status_label, "处理中")
+        self.assertNotEqual(items[0].status_text, "已完成")
 
     def test_snapshot_text_includes_week_breakdown(self) -> None:
         snapshot = ParsedSession(

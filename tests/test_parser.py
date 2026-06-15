@@ -141,6 +141,28 @@ class JsonlSessionParserTests(unittest.TestCase):
             parse_timestamp("2026-05-28T00:00:03Z"),
         )
 
+    def test_latest_output_ignores_later_token_count_events(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "session_meta", {"id": "session-a"}),
+            record("2026-05-28T00:00:01Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:02Z",
+                "event_msg",
+                {"type": "agent_message", "message": "最后一轮输出会保留"},
+            ),
+            token_count("2026-05-28T00:00:03Z", 100, 20, 5, 1, 105, 105),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        snapshot = parser.parse_records(records)
+
+        self.assertEqual(snapshot.activity.kind, "confirmed")
+        self.assertEqual(snapshot.last_output.kind, "agent")
+        self.assertEqual(snapshot.last_output.detail, "最后一轮输出会保留")
+
     def test_usage_events_can_be_summarized_for_time_windows(self) -> None:
         parser = JsonlSessionParser()
         records = [
@@ -262,6 +284,10 @@ class JsonlSessionParserTests(unittest.TestCase):
 
         self.assertEqual(snapshot.slow.current_gap, "任务已结束")
         self.assertFalse(snapshot.slow.current_gap_active)
+        self.assertEqual(
+            snapshot.task_completed_at,
+            parse_timestamp("2026-05-28T00:00:02Z"),
+        )
 
 
 class SseRequestStateMachineTests(unittest.TestCase):

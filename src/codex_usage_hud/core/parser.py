@@ -322,6 +322,9 @@ class WorkStatusItem:
     status: str
     status_label: str
     detail: str
+    status_text: str = ""
+    last_text: str = ""
+    elapsed_text: str = ""
     progress: str = ""
     source: str = ""
     started_at: datetime | None = None
@@ -398,10 +401,12 @@ class ParsedSession:
     request: RequestTokens = field(default_factory=RequestTokens)
     request_history: list[RequestRound] = field(default_factory=list)
     activity: Activity = field(default_factory=Activity)
+    last_output: Activity = field(default_factory=Activity)
     slow: SlowSummary = field(default_factory=SlowSummary)
     line_count: int = 0
     token_events: int = 0
     task_started_at: datetime | None = None
+    task_completed_at: datetime | None = None
     selection_source: str = "activity"
     today_tokens: int = 0
     today_cost_usd: float = 0.0
@@ -504,6 +509,7 @@ class JsonlSessionParser:
         parsed.session_id = session_id or self.session_id_from_records(records, path)
         parsed.last_event_time = records[-1].get("_dt")
         parsed.activity = self.latest_activity(records)
+        parsed.last_output = self.latest_output(records)
         parsed.slow = self.slow_summary(records, parsed.last_event_time)
         token_index = self.apply_confirmed_tokens(parsed, records)
         if self.estimate_enabled:
@@ -511,6 +517,10 @@ class JsonlSessionParser:
 
         task_started_index, task_started_at = self.latest_task_started(records)
         parsed.task_started_at = task_started_at
+        parsed.task_completed_at = self.latest_task_completed_after(
+            records,
+            task_started_index,
+        )
         jsonl_rounds = self.token_rounds_since_task(records, task_started_index)
         parsed.request = self.build_request_tokens(
             parsed,
@@ -565,6 +575,22 @@ class JsonlSessionParser:
             ):
                 return index, record.get("_dt")
         return None, None
+
+    def latest_task_completed_after(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+    ) -> datetime | None:
+        start_index = 0 if task_started_index is None else task_started_index + 1
+        for record in reversed(records[start_index:]):
+            payload = record.get("payload") or {}
+            if (
+                record.get("type") == "event_msg"
+                and isinstance(payload, Mapping)
+                and payload.get("type") == "task_complete"
+            ):
+                return record.get("_dt")
+        return None
 
     def latest_model(self, records: Sequence[Mapping[str, Any]]) -> str:
         for record in reversed(records):
@@ -948,6 +974,26 @@ class JsonlSessionParser:
             if record_type == "event_msg" and payload_type == "token_count":
                 return Activity("confirmed", "received token_count", timestamp)
         return Activity("idle", "no activity", None)
+
+    def latest_output(self, records: Sequence[Mapping[str, Any]]) -> Activity:
+        """Return the latest assistant-visible text, ignoring bookkeeping events."""
+        for record in reversed(records):
+            payload = record.get("payload") or {}
+            if not isinstance(payload, Mapping):
+                continue
+            record_type = record.get("type")
+            payload_type = payload.get("type")
+            timestamp = record.get("_dt")
+
+            if record_type == "event_msg" and payload_type == "agent_message":
+                text = compact_text(payload.get("message"), 220)
+                if text:
+                    return Activity("agent", text, timestamp)
+            if record_type == "response_item" and payload_type == "message":
+                text = compact_text(message_text(payload), 220)
+                if text:
+                    return Activity("assistant", text, timestamp)
+        return Activity("idle", "", None)
 
     def slow_summary(
         self,
