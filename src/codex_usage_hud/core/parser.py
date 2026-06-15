@@ -327,6 +327,7 @@ class WorkStatusItem:
     elapsed_text: str = ""
     progress: str = ""
     source: str = ""
+    session_started_at: datetime | None = None
     started_at: datetime | None = None
     updated_at: datetime | None = None
     current: bool = False
@@ -394,6 +395,7 @@ class ParsedSession:
     status: str = "starting"
     error: str = ""
     refreshed_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
+    session_started_at: datetime | None = None
     last_event_time: datetime | None = None
     last_file_mtime: float | None = None
     confirmed: ConfirmedTokens = field(default_factory=ConfirmedTokens)
@@ -507,6 +509,7 @@ class JsonlSessionParser:
             return parsed
 
         parsed.session_id = session_id or self.session_id_from_records(records, path)
+        parsed.session_started_at = self.session_started_at(records)
         parsed.last_event_time = records[-1].get("_dt")
         parsed.activity = self.latest_activity(records)
         parsed.last_output = self.latest_output(records)
@@ -561,6 +564,18 @@ class JsonlSessionParser:
             if isinstance(payload, Mapping) and payload.get("id"):
                 return str(payload["id"])
         return short_session_id(path) if path is not None else "n/a"
+
+    def session_started_at(
+        self, records: Sequence[Mapping[str, Any]]
+    ) -> datetime | None:
+        for record in records:
+            if record.get("type") != "session_meta":
+                continue
+            timestamp = record.get("_dt")
+            if isinstance(timestamp, datetime):
+                return timestamp
+        first_timestamp = records[0].get("_dt") if records else None
+        return first_timestamp if isinstance(first_timestamp, datetime) else None
 
     def latest_task_started(
         self, records: Sequence[Mapping[str, Any]]

@@ -41,6 +41,7 @@ from .core import (
     UsageCalculator,
     UsageSummary,
     WorkStatusItem,
+    parse_timestamp,
 )
 from .daemon import (
     CodexDaemonManager,
@@ -114,7 +115,10 @@ ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
 WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_ALPHA = 0.88
-WORK_OVERLAY_HOVER_ALPHA = 0.66
+WORK_OVERLAY_HOVER_ALPHA = 0.52
+WORK_OVERLAY_POINTER_SYNC_MS = 60
+WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
+_WIN32_WS_EX_TRANSPARENT = 0x00000020
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 
@@ -531,6 +535,60 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
     }
 
 
+def _set_bit_flag(value: int, flag: int, enabled: bool) -> int:
+    return (value | flag) if enabled else (value & ~flag)
+
+
+def _widget_screen_rect(widget: object) -> tuple[int, int, int, int] | None:
+    try:
+        if not bool(getattr(widget, "winfo_ismapped")()):
+            return None
+        left = int(getattr(widget, "winfo_rootx")())
+        top = int(getattr(widget, "winfo_rooty")())
+        width = int(getattr(widget, "winfo_width")())
+        height = int(getattr(widget, "winfo_height")())
+    except Exception:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return left, top, left + width, top + height
+
+
+def _is_work_overlay_close_hit(
+    close_button_refs: Sequence[object],
+    screen_x: int,
+    screen_y: int,
+) -> bool:
+    for widget in close_button_refs:
+        rect = _widget_screen_rect(widget)
+        if rect is None:
+            continue
+        left, top, right, bottom = rect
+        if left <= screen_x < right and top <= screen_y < bottom:
+            return True
+    return False
+
+
+def _work_overlay_header_text(
+    started_at: datetime | str | None,
+    elapsed_text: str,
+    title: str,
+) -> str:
+    timestamp = started_at
+    if isinstance(started_at, str):
+        timestamp = parse_timestamp(started_at)
+    start_text = ""
+    if isinstance(timestamp, datetime):
+        start_text = (
+            timestamp.astimezone().strftime("%H:%M:%S")
+            if timestamp.tzinfo is not None
+            else timestamp.strftime("%H:%M:%S")
+        )
+    title_text = _compact_work_text(title, WORK_OVERLAY_HEADER_TITLE_LIMIT)
+    parts = [part for part in (start_text, elapsed_text.strip(), title_text) if part]
+    return " | ".join(parts) if parts else "Codex 工作"
+
+
 class DesktopWorkOverlay:
     """Primary-screen Tk overlay that stays visible when Codex is minimized."""
 
@@ -698,52 +756,26 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
             dismissed_signatures[item_id] = item_signature(item)
         root.withdraw()
 
-    def update_hover_alpha() -> None:
-        if not root.winfo_exists():
-            return
-        if root.state() == "withdrawn":
-            set_overlay_alpha(WORK_OVERLAY_ALPHA)
-            root.after(180, update_hover_alpha)
-            return
-        try:
-            px = int(root.winfo_pointerx())
-            py = int(root.winfo_pointery())
-            x = int(root.winfo_rootx())
-            y = int(root.winfo_rooty())
-            width = int(root.winfo_width())
-            height = int(root.winfo_height())
-        except tk.TclError:
-            root.after(180, update_hover_alpha)
-            return
-        inside = x <= px < x + width and y <= py < y + height
-        set_overlay_alpha(WORK_OVERLAY_HOVER_ALPHA if inside else WORK_OVERLAY_ALPHA)
-        root.after(180, update_hover_alpha)
-
-    def install_click_through() -> None:
+    def install_click_through() -> Any:
         if not sys.platform.startswith("win"):
-            return
+            return lambda enabled: None
         try:
             import ctypes
             from ctypes import wintypes
         except Exception:
-            return
+            return lambda enabled: None
 
         try:
             hwnd = wintypes.HWND(int(root.winfo_id()))
             user32 = ctypes.WinDLL("user32", use_last_error=True)
-            WM_NCHITTEST = 0x0084
-            HTCLIENT = 1
-            HTTRANSPARENT = -1
-            GWL_WNDPROC = -4
+            GWL_EXSTYLE = -20
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
 
             LONG_PTR = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
-            WNDPROC = ctypes.WINFUNCTYPE(
-                LONG_PTR,
-                wintypes.HWND,
-                wintypes.UINT,
-                wintypes.WPARAM,
-                wintypes.LPARAM,
-            )
             get_window_long = (
                 user32.GetWindowLongPtrW
                 if ctypes.sizeof(ctypes.c_void_p) == 8
@@ -758,48 +790,66 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
             get_window_long.restype = LONG_PTR
             set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
             set_window_long.restype = LONG_PTR
-            user32.CallWindowProcW.argtypes = [
-                LONG_PTR,
+            user32.SetWindowPos.argtypes = [
                 wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
                 wintypes.UINT,
-                wintypes.WPARAM,
-                wintypes.LPARAM,
             ]
-            user32.CallWindowProcW.restype = LONG_PTR
+            user32.SetWindowPos.restype = wintypes.BOOL
+            click_through_enabled: bool | None = None
 
-            original_proc = get_window_long(hwnd, GWL_WNDPROC)
+            def set_click_through(enabled: bool) -> None:
+                nonlocal click_through_enabled
+                if click_through_enabled == enabled:
+                    return
+                current_style = int(get_window_long(hwnd, GWL_EXSTYLE))
+                desired_style = _set_bit_flag(current_style, _WIN32_WS_EX_TRANSPARENT, enabled)
+                if desired_style != current_style:
+                    set_window_long(hwnd, GWL_EXSTYLE, desired_style)
+                    user32.SetWindowPos(
+                        hwnd,
+                        wintypes.HWND(0),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    )
+                click_through_enabled = enabled
 
-            def signed_short(value: int) -> int:
-                value &= 0xFFFF
-                return value - 0x10000 if value & 0x8000 else value
-
-            def is_close_hit(screen_x: int, screen_y: int) -> bool:
-                for widget in close_button_refs:
-                    try:
-                        if not widget.winfo_ismapped():
-                            continue
-                        left = int(widget.winfo_rootx())
-                        top = int(widget.winfo_rooty())
-                        right = left + int(widget.winfo_width())
-                        bottom = top + int(widget.winfo_height())
-                    except tk.TclError:
-                        continue
-                    if left <= screen_x < right and top <= screen_y < bottom:
-                        return True
-                return False
-
-            @WNDPROC
-            def window_proc(hwnd_arg, msg, wparam, lparam):
-                if msg == WM_NCHITTEST:
-                    screen_x = signed_short(int(lparam))
-                    screen_y = signed_short(int(lparam) >> 16)
-                    return HTCLIENT if is_close_hit(screen_x, screen_y) else HTTRANSPARENT
-                return user32.CallWindowProcW(original_proc, hwnd_arg, msg, wparam, lparam)
-
-            set_window_long(hwnd, GWL_WNDPROC, ctypes.cast(window_proc, ctypes.c_void_p).value)
-            root._codex_work_overlay_wndproc = window_proc  # type: ignore[attr-defined]
+            set_click_through(True)
+            return set_click_through
         except Exception:
+            return lambda enabled: None
+
+    set_click_through = install_click_through()
+
+    def sync_pointer_state() -> None:
+        if not root.winfo_exists():
             return
+        if root.state() == "withdrawn":
+            set_overlay_alpha(WORK_OVERLAY_ALPHA)
+            set_click_through(True)
+            root.after(WORK_OVERLAY_POINTER_SYNC_MS, sync_pointer_state)
+            return
+        try:
+            px = int(root.winfo_pointerx())
+            py = int(root.winfo_pointery())
+            x = int(root.winfo_rootx())
+            y = int(root.winfo_rooty())
+            width = int(root.winfo_width())
+            height = int(root.winfo_height())
+        except tk.TclError:
+            root.after(WORK_OVERLAY_POINTER_SYNC_MS, sync_pointer_state)
+            return
+        inside = x <= px < x + width and y <= py < y + height
+        set_overlay_alpha(WORK_OVERLAY_HOVER_ALPHA if inside else WORK_OVERLAY_ALPHA)
+        set_click_through(not _is_work_overlay_close_hit(close_button_refs, px, py))
+        root.after(WORK_OVERLAY_POINTER_SYNC_MS, sync_pointer_state)
 
     def color_for(status: str) -> tuple[str, str, str, str]:
         if status == "waiting_user":
@@ -840,10 +890,15 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
             head = tk.Frame(card, bg=card_bg)
             head.pack(fill="x")
             elapsed_text = str(item.get("elapsedText") or "").strip() or "已处理 --"
+            header_text = _work_overlay_header_text(
+                str(item.get("startedAt") or ""),
+                elapsed_text,
+                str(item.get("title") or "Codex 工作"),
+            )
             tk.Label(
                 head,
                 anchor="w",
-                text=elapsed_text,
+                text=header_text,
                 bg=card_bg,
                 fg=accent if status == "recent" else "#A9B6C6",
                 font=("Microsoft YaHei UI", 9, "bold"),
@@ -926,8 +981,7 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
         render_items(items)
         root.after(160, poll_state)
 
-    install_click_through()
-    update_hover_alpha()
+    sync_pointer_state()
     poll_state()
     root.mainloop()
     return 0
@@ -2256,6 +2310,7 @@ def _work_item_from_snapshot(
         elapsed_text=elapsed_text,
         progress=progress,
         source=source or snapshot.selection_source,
+        session_started_at=snapshot.session_started_at,
         started_at=started_at,
         updated_at=updated_at,
         current=current,
@@ -2316,9 +2371,11 @@ def active_work_items_for_snapshot(
             items[str(item.id)] = item
 
     def sort_key(item: WorkStatusItem) -> tuple[int, float]:
-        timestamp = item.updated_at or item.started_at
-        seconds = timestamp.timestamp() if timestamp is not None else 0.0
-        return (1 if item.current else 0, seconds)
+        session_timestamp = item.session_started_at or item.started_at or item.updated_at
+        task_timestamp = item.started_at or item.updated_at or item.session_started_at
+        session_seconds = session_timestamp.timestamp() if session_timestamp is not None else 0.0
+        task_seconds = task_timestamp.timestamp() if task_timestamp is not None else 0.0
+        return (session_seconds, task_seconds)
 
     ordered = sorted(items.values(), key=sort_key, reverse=True)
     return ordered[:ACTIVE_WORK_ITEM_LIMIT]

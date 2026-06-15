@@ -60,6 +60,9 @@ from codex_usage_hud.cli import (
     work_item_to_overlay_dict,
     stop_running_hud,
     usage_before_today_in_week,
+    _is_work_overlay_close_hit,
+    _set_bit_flag,
+    _work_overlay_header_text,
 )
 from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.core.parser import (
@@ -146,6 +149,38 @@ class _RecordingGeometryWindow:
 
     def geometry(self, value: str) -> None:
         self.calls.append(value)
+
+
+class _FakeScreenWidget:
+    def __init__(
+        self,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        *,
+        mapped: bool = True,
+    ) -> None:
+        self._x = x
+        self._y = y
+        self._width = width
+        self._height = height
+        self._mapped = mapped
+
+    def winfo_ismapped(self) -> bool:
+        return self._mapped
+
+    def winfo_rootx(self) -> int:
+        return self._x
+
+    def winfo_rooty(self) -> int:
+        return self._y
+
+    def winfo_width(self) -> int:
+        return self._width
+
+    def winfo_height(self) -> int:
+        return self._height
 
 
 class _FakeAnchorLocator:
@@ -421,7 +456,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(prior.tokens, 0)
         self.assertEqual(prior.cost_usd, 0.0)
 
-    def test_active_work_items_include_current_and_background_sessions(self) -> None:
+    def test_active_work_items_follow_session_creation_order_desc(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
 
@@ -472,9 +507,8 @@ class BudgetHelperTests(unittest.TestCase):
             items = active_work_items_for_snapshot(context, snapshot, current)
 
         self.assertGreaterEqual(len(items), 2)
-        self.assertEqual(items[0].title, "Current task")
-        self.assertTrue(items[0].current)
-        self.assertEqual(items[0].status_label, "运行中")
+        self.assertEqual([item.id for item in items[:2]], ["session-worker", "session-current"])
+        self.assertTrue(any(item.current for item in items))
         self.assertIn("Background thread work", " ".join(item.detail for item in items))
 
     def test_work_overlay_payload_uses_primary_screen_status_fields(self) -> None:
@@ -625,6 +659,31 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(items[0].status_label, "处理中")
         self.assertNotEqual(items[0].status_text, "已完成")
+
+    def test_work_overlay_close_hit_uses_mapped_widget_bounds(self) -> None:
+        visible = _FakeScreenWidget(100, 200, 24, 24)
+        hidden = _FakeScreenWidget(300, 300, 24, 24, mapped=False)
+
+        self.assertTrue(_is_work_overlay_close_hit([visible, hidden], 110, 210))
+        self.assertFalse(_is_work_overlay_close_hit([visible], 99, 210))
+        self.assertFalse(_is_work_overlay_close_hit([hidden], 310, 310))
+
+    def test_set_bit_flag_toggles_transparent_style(self) -> None:
+        transparent = 0x20
+
+        self.assertEqual(_set_bit_flag(0x80, transparent, True), 0xA0)
+        self.assertEqual(_set_bit_flag(0xA0, transparent, False), 0x80)
+
+    def test_work_overlay_header_text_formats_time_elapsed_and_title(self) -> None:
+        started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()
+        text = _work_overlay_header_text(
+            started_at,
+            "已处理 42s",
+            "这是一个很长很长很长很长很长很长很长很长很长很长的会话标题",
+        )
+
+        self.assertTrue(text.startswith("09:08:07 | 已处理 42s | "))
+        self.assertIn("...", text)
 
     def test_snapshot_text_includes_week_breakdown(self) -> None:
         snapshot = ParsedSession(
