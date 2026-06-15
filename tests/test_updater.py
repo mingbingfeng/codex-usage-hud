@@ -233,6 +233,101 @@ class AutoUpdateManagerTests(unittest.TestCase):
             finally:
                 manager.close()
 
+    def test_manual_check_reports_available_without_starting_download(self) -> None:
+        requests: list[dict[str, str]] = []
+
+        def fake_check(**_kwargs: object) -> UpdateInfo:
+            return UpdateInfo(
+                current_version="1.0.0",
+                latest_version="v1.0.1",
+                available=True,
+                asset=UpdateAsset(
+                    name="codex-usage-hud-v1.0.1-windows-x64-setup.exe",
+                    url="https://example.test/setup.exe",
+                    size=10,
+                ),
+                release_url="https://example.test/release",
+            )
+
+        def fake_open(request, timeout: float):
+            del timeout
+            requests.append({str(key).lower(): value for key, value in request.header_items()})
+            return _FakeResponse([b"123"])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = AutoUpdateManager(
+                current_version="1.0.0",
+                check_interval_seconds=3600,
+                retry_interval_seconds=60,
+                download_dir=Path(tmp_dir),
+                check_func=fake_check,
+                download_opener=fake_open,
+            )
+            try:
+                state = manager.request_check(auto_download=False)
+                self.assertEqual(state.phase, "checking")
+                self._wait_for_phase(manager, "available")
+                available = manager.status()
+                self.assertEqual(available.asset_name, "codex-usage-hud-v1.0.1-windows-x64-setup.exe")
+                self.assertTrue(available.visible)
+                self.assertEqual(requests, [])
+            finally:
+                manager.close()
+
+    def test_request_install_downloads_and_launches_installer_async(self) -> None:
+        launched: list[Path] = []
+        payload = b"installer-payload"
+
+        def fake_check(**_kwargs: object) -> UpdateInfo:
+            return UpdateInfo(
+                current_version="1.0.0",
+                latest_version="v1.0.1",
+                available=True,
+                asset=UpdateAsset(
+                    name="codex-usage-hud-v1.0.1-windows-x64-setup.exe",
+                    url="https://example.test/setup.exe",
+                    size=len(payload),
+                ),
+                release_url="https://example.test/release",
+            )
+
+        def fake_open(request, timeout: float):
+            del request, timeout
+            return _FakeResponse(
+                [payload],
+                headers={"Content-Length": str(len(payload))},
+            )
+
+        def fake_launch(path: Path) -> None:
+            launched.append(path)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = AutoUpdateManager(
+                current_version="1.0.0",
+                check_interval_seconds=3600,
+                retry_interval_seconds=60,
+                download_dir=Path(tmp_dir),
+                check_func=fake_check,
+                download_opener=fake_open,
+                launch_func=fake_launch,
+            )
+            try:
+                state = manager.request_install()
+                self.assertEqual(state.phase, "checking")
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    manager.tick()
+                    if launched:
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(launched)
+                ready = manager.status()
+                self.assertEqual(ready.phase, "ready")
+                self.assertIn("已启动", ready.message)
+                self.assertEqual(Path(ready.installer_path).read_bytes(), payload)
+            finally:
+                manager.close()
+
 
 if __name__ == "__main__":
     unittest.main()

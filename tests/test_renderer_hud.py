@@ -143,6 +143,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settingsBridgeUrl", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("updateState", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("renderUpdateButtons", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const submitted = submitSettingsCommand", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("window.__codexUsageHudRemove()", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("expiresAt: Date.now() + 10000", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("navigator.clipboard", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("requestRowDetails", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("header.app-header-tint", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -393,6 +396,7 @@ class RendererHudClientTests(unittest.TestCase):
             expressions.append(expression)
             self.assertIn(renderer_hud.SETTINGS_COMMAND_STORAGE_KEY, expression)
             self.assertIn("localStorage.removeItem", expression)
+            self.assertIn("expiresAt", expression)
             return {
                 "result": {
                     "result": {
@@ -422,6 +426,107 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertEqual(command["settings"]["daily_reset_time"], "09:30")
         self.assertIsNone(second)
         self.assertEqual(len(expressions), 1)
+
+    def test_client_close_uses_cached_target_when_force_lookup_fails(self) -> None:
+        calls: list[tuple[str, str]] = []
+        removed_scripts: list[tuple[str, str]] = []
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.send_cdp_command,
+            renderer_hud.remove_new_document_script,
+        )
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            raise RuntimeError("target list unavailable")
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del method, timeout_seconds
+            calls.append((websocket_url, str(params["expression"])))
+            return {"result": {"result": {"value": True}}}
+
+        def fake_remove(websocket_url: str, identifier: str, timeout_seconds: float) -> None:
+            del timeout_seconds
+            removed_scripts.append((websocket_url, identifier))
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.send_cdp_command,
+            renderer_hud.remove_new_document_script,
+        ) = (fake_list_targets, fake_send, fake_remove)
+        try:
+            client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+            client._websocket_url = "ws://cached"
+            client._script_identifier = "script-1"
+            client.close()
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.send_cdp_command,
+                renderer_hud.remove_new_document_script,
+            ) = originals
+
+        self.assertEqual(calls[0][0], "ws://cached")
+        self.assertIn("codex-usage-hud-root", calls[0][1])
+        self.assertEqual(removed_scripts, [("ws://cached", "script-1")])
+
+    def test_remove_renderer_hud_from_pages_sweeps_page_targets(self) -> None:
+        calls: list[str] = []
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.send_cdp_command,
+        )
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            self.assertEqual(port, 9229)
+            del timeout_seconds
+            return [
+                {
+                    "type": "page",
+                    "title": "Codex",
+                    "webSocketDebuggerUrl": "ws://page-1",
+                },
+                {
+                    "type": "worker",
+                    "title": "ignored",
+                    "webSocketDebuggerUrl": "ws://worker",
+                },
+            ]
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del method, timeout_seconds
+            calls.append(f"{websocket_url}:{params['expression']}")
+            return {"result": {"result": {"value": True}}}
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.send_cdp_command,
+        ) = (fake_list_targets, fake_send)
+        try:
+            removed = renderer_hud.remove_renderer_hud_from_pages(
+                port=9229,
+                timeout_seconds=0.05,
+            )
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.send_cdp_command,
+            ) = originals
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("ws://page-1", calls[0])
+        self.assertIn("__codexUsageHudRemove", calls[0])
 
 
 if __name__ == "__main__":

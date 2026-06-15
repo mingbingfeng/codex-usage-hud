@@ -2283,6 +2283,20 @@ class TokenHudWindow:
         self._settings_canvas: tk.Canvas | None = None
         self._settings_prices_body: tk.Frame | None = None
         self._settings_support_images: list[tk.PhotoImage] = []
+        self._settings_update_check_button: tk.Button | None = None
+        self._settings_update_install_button: tk.Button | None = None
+        self._settings_loading_layer: tk.Frame | None = None
+        self._settings_loading_kicker_label: tk.Label | None = None
+        self._settings_loading_title_label: tk.Label | None = None
+        self._settings_loading_body_label: tk.Label | None = None
+        self._settings_loading_track: tk.Canvas | None = None
+        self._settings_loading_indicator: int | None = None
+        self._settings_loading_glow: int | None = None
+        self._settings_loading_anim_job: str | None = None
+        self._settings_update_poll_job: str | None = None
+        self._settings_update_flow = ""
+        self._settings_loading_position = 0
+        self._settings_loading_direction = 1
         self._settings_display_mode_touched = False
         self._settings_configured_display_mode = str(self.user_settings.display_mode)
         self._settings_active_tab = "settings"
@@ -2890,6 +2904,15 @@ class TokenHudWindow:
             except tk.TclError:
                 pass
             self._settings_build_job = None
+        for job_name in ("_settings_loading_anim_job", "_settings_update_poll_job"):
+            job = getattr(self, job_name, None)
+            if job is None:
+                continue
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+            setattr(self, job_name, None)
         self._settings_prewarm_job = None
         self._settings_pending_tab = ""
         self._settings_dialog = None
@@ -2902,6 +2925,20 @@ class TokenHudWindow:
         self._settings_canvas = None
         self._settings_prices_body = None
         self._settings_support_images = []
+        self._settings_update_check_button = None
+        self._settings_update_install_button = None
+        self._settings_loading_layer = None
+        self._settings_loading_kicker_label = None
+        self._settings_loading_title_label = None
+        self._settings_loading_body_label = None
+        self._settings_loading_track = None
+        self._settings_loading_indicator = None
+        self._settings_loading_glow = None
+        self._settings_loading_anim_job = None
+        self._settings_update_poll_job = None
+        self._settings_update_flow = ""
+        self._settings_loading_position = 0
+        self._settings_loading_direction = 1
         self._settings_display_mode_touched = False
         self._settings_active_tab = "settings"
 
@@ -3414,8 +3451,9 @@ class TokenHudWindow:
             relief="flat",
             padx=9,
             pady=4,
-        ).pack(side="left", padx=(0, 6))
-        tk.Button(
+        )
+        self._settings_update_check_button.pack(side="left", padx=(0, 6))
+        self._settings_update_install_button = tk.Button(
             actions,
             text="安装更新",
             command=self._settings_install_update,
@@ -3426,7 +3464,8 @@ class TokenHudWindow:
             relief="flat",
             padx=11,
             pady=4,
-        ).pack(side="left", padx=(0, 6))
+        )
+        self._settings_update_install_button.pack(side="left", padx=(0, 6))
         tk.Button(
             actions,
             text="关闭",
@@ -3439,33 +3478,293 @@ class TokenHudWindow:
             padx=9,
             pady=4,
         ).pack(side="left")
+        self._sync_about_update_controls()
         self._set_settings_status("可检查 GitHub Release 并启动 Windows 安装器")
 
     def _settings_check_update(self) -> None:
-        info = check_for_update(current_version=__version__)
-        message = format_update_info(info)
-        self._set_settings_status(message, kind="error" if info.error else "")
-        if info.error:
-            messagebox.showerror("检查更新失败", message, parent=self._settings_dialog)
+        if self.update_manager is None:
+            info = check_for_update(current_version=__version__)
+            message = format_update_info(info)
+            self._set_settings_status(message, kind="error" if info.error else "")
+            if info.error:
+                messagebox.showerror("检查更新失败", message, parent=self._settings_dialog)
+            return
+        self._update_state = self.update_manager.request_check(auto_download=False)
+        self._set_settings_status(self._update_state.message or "正在检查更新...")
+        self._sync_about_update_controls()
+        self._start_settings_update_feedback(
+            flow="check",
+            kicker="正在检查",
+            title="正在检查更新",
+            body="HUD 正在查询 GitHub Release。通常只需 1 到 3 秒。",
+        )
 
     def _settings_install_update(self) -> None:
-        info = check_for_update(current_version=__version__)
-        if info.error:
-            message = format_update_info(info)
-            self._set_settings_status(message, kind="error")
-            messagebox.showerror("安装更新失败", message, parent=self._settings_dialog)
+        if self.update_manager is None:
+            info = check_for_update(current_version=__version__)
+            if info.error:
+                message = format_update_info(info)
+                self._set_settings_status(message, kind="error")
+                messagebox.showerror("安装更新失败", message, parent=self._settings_dialog)
+                return
+            if not info.available:
+                self._set_settings_status(format_update_info(info))
+                return
+            try:
+                installer = download_update_asset(info)
+                launch_installer(installer)
+            except Exception as exc:
+                self._set_settings_status(f"安装更新失败：{exc}", kind="error")
+                messagebox.showerror("安装更新失败", str(exc), parent=self._settings_dialog)
+                return
+            self._set_settings_status(f"已启动 {info.asset_name}，安装器会先关闭当前 HUD。")
             return
-        if not info.available:
-            self._set_settings_status(format_update_info(info))
+        self._update_state = self.update_manager.request_install()
+        self._set_settings_status(self._update_state.message or "正在准备安装更新...")
+        self._sync_about_update_controls()
+        self._start_settings_update_feedback(
+            flow="install",
+            kicker="正在准备",
+            title="正在检查并准备安装更新",
+            body="HUD 会先检查 GitHub Release，再后台下载 Windows 安装包。",
+        )
+
+    def _sync_about_update_controls(self) -> None:
+        check_button = self._settings_update_check_button
+        install_button = self._settings_update_install_button
+        if check_button is None or install_button is None:
             return
-        try:
-            installer = download_update_asset(info)
-            launch_installer(installer)
-        except Exception as exc:
-            self._set_settings_status(f"安装更新失败：{exc}", kind="error")
-            messagebox.showerror("安装更新失败", str(exc), parent=self._settings_dialog)
+        state = self._update_state
+        phase = str(state.phase or "")
+        check_text = "检查更新"
+        install_text = "安装更新"
+        check_state = "normal"
+        install_state = "normal"
+        if phase == "checking":
+            check_text = "检查中..."
+            install_text = "请稍候"
+            check_state = "disabled"
+            install_state = "disabled"
+        elif phase == "downloading":
+            install_text = (
+                f"下载中 {state.progress_text}"
+                if state.progress_text
+                else "下载中..."
+            )
+            check_state = "disabled"
+            install_state = "disabled"
+        elif phase == "ready":
+            install_text = "打开安装器"
+        check_button.configure(text=check_text, state=check_state)
+        install_button.configure(text=install_text, state=install_state)
+
+    def _start_settings_update_feedback(
+        self,
+        *,
+        flow: str,
+        kicker: str,
+        title: str,
+        body: str,
+    ) -> None:
+        self._settings_update_flow = flow
+        self._show_settings_loading_overlay(kicker=kicker, title=title, body=body)
+        self._poll_settings_update_feedback()
+
+    def _poll_settings_update_feedback(self) -> None:
+        self._settings_update_poll_job = None
+        flow = self._settings_update_flow
+        manager = self.update_manager
+        if not flow or manager is None:
+            self._hide_settings_loading_overlay()
             return
-        self._set_settings_status(f"已启动 {info.asset_name}，安装器会先关闭当前 HUD。")
+        self._update_state = manager.status()
+        self._render_update_button()
+        self._sync_about_update_controls()
+        state = self._update_state
+        if flow == "check" and state.phase == "checking":
+            self._show_settings_loading_overlay(
+                kicker="正在检查",
+                title="正在检查更新",
+                body="HUD 正在查询 GitHub Release。通常只需 1 到 3 秒。",
+            )
+            self._settings_update_poll_job = self.root.after(
+                120, self._poll_settings_update_feedback
+            )
+            return
+        if flow == "install" and state.phase in {"checking", "downloading"}:
+            if state.phase == "checking":
+                body = "HUD 正在查询 GitHub Release，并准备下载安装包。"
+            else:
+                body = (
+                    f"当前进度：{state.progress_text}\n\n下载完成后会自动启动安装器。"
+                    if state.progress_text
+                    else "正在下载 Windows 安装包。\n\n下载完成后会自动启动安装器。"
+                )
+            self._show_settings_loading_overlay(
+                kicker="正在下载" if state.phase == "downloading" else "正在准备",
+                title="正在下载安装更新"
+                if state.phase == "downloading"
+                else "正在检查并准备安装更新",
+                body=body,
+            )
+            self._settings_update_poll_job = self.root.after(
+                120, self._poll_settings_update_feedback
+            )
+            return
+        self._settings_update_flow = ""
+        self._hide_settings_loading_overlay()
+        message = state.message or state.title or "更新操作已完成。"
+        self._set_settings_status(message, kind="error" if state.error else "")
+        if state.error:
+            title = "检查更新失败" if flow == "check" else "安装更新失败"
+            messagebox.showerror(title, message, parent=self._settings_dialog)
+
+    def _show_settings_loading_overlay(
+        self,
+        *,
+        kicker: str,
+        title: str,
+        body: str,
+    ) -> None:
+        dialog = self._settings_dialog
+        if dialog is None or not dialog.winfo_exists():
+            return
+        layer = self._settings_loading_layer
+        if layer is None or not layer.winfo_exists():
+            layer = tk.Frame(dialog, bg=HUD_BG, highlightthickness=0, bd=0)
+            layer.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._settings_loading_layer = layer
+
+            shell = tk.Frame(
+                layer,
+                bg=HUD_PANEL_BG,
+                highlightthickness=1,
+                highlightbackground=HUD_DIVIDER,
+                padx=18,
+                pady=16,
+            )
+            shell.place(relx=0.5, rely=0.5, anchor="center")
+            tk.Label(
+                shell,
+                text="codex-usage-hud",
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=HUD_ACCENT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            ).pack(fill="x")
+            kicker_label = tk.Label(
+                shell,
+                text=kicker,
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=HUD_MUTED,
+                font=("Microsoft YaHei UI", 9),
+            )
+            kicker_label.pack(fill="x", pady=(6, 0))
+            self._settings_loading_kicker_label = kicker_label
+            title_label = tk.Label(
+                shell,
+                text=title,
+                anchor="w",
+                justify="left",
+                bg=HUD_PANEL_BG,
+                fg=HUD_TEXT,
+                font=("Microsoft YaHei UI", 14, "bold"),
+                pady=3,
+            )
+            title_label.pack(fill="x")
+            self._settings_loading_title_label = title_label
+            body_label = tk.Label(
+                shell,
+                text=body,
+                anchor="w",
+                justify="left",
+                bg=HUD_PANEL_BG,
+                fg="#B8C6D8",
+                font=("Microsoft YaHei UI", 10),
+                wraplength=324,
+            )
+            body_label.pack(fill="x")
+            self._settings_loading_body_label = body_label
+            track = tk.Canvas(
+                shell,
+                width=324,
+                height=8,
+                bg=HUD_PANEL_BG,
+                highlightthickness=0,
+                bd=0,
+            )
+            track.pack(fill="x", pady=(14, 0))
+            track.create_rectangle(0, 1, 324, 7, fill="#1A2430", outline="")
+            self._settings_loading_indicator = track.create_rectangle(
+                0, 1, 92, 7, fill=HUD_ACCENT, outline=""
+            )
+            self._settings_loading_glow = track.create_rectangle(
+                0, 1, 48, 7, fill="#FFE7A0", outline=""
+            )
+            self._settings_loading_track = track
+            self._settings_loading_position = 0
+            self._settings_loading_direction = 1
+        if self._settings_loading_kicker_label is not None:
+            self._settings_loading_kicker_label.configure(text=kicker)
+        if self._settings_loading_title_label is not None:
+            self._settings_loading_title_label.configure(text=title)
+        if self._settings_loading_body_label is not None:
+            self._settings_loading_body_label.configure(text=body)
+        self._animate_settings_loading_overlay()
+
+    def _animate_settings_loading_overlay(self) -> None:
+        if self._settings_loading_anim_job is not None:
+            return
+
+        def step() -> None:
+            self._settings_loading_anim_job = None
+            track = self._settings_loading_track
+            indicator = self._settings_loading_indicator
+            glow = self._settings_loading_glow
+            if (
+                track is None
+                or indicator is None
+                or glow is None
+                or not track.winfo_exists()
+            ):
+                return
+            self._settings_loading_position += 7 * self._settings_loading_direction
+            if self._settings_loading_position >= 232:
+                self._settings_loading_position = 232
+                self._settings_loading_direction = -1
+            elif self._settings_loading_position <= 0:
+                self._settings_loading_position = 0
+                self._settings_loading_direction = 1
+            position = self._settings_loading_position
+            track.coords(indicator, position, 1, position + 92, 7)
+            track.coords(glow, position + 20, 1, position + 60, 7)
+            self._settings_loading_anim_job = self.root.after(34, step)
+
+        self._settings_loading_anim_job = self.root.after(34, step)
+
+    def _hide_settings_loading_overlay(self) -> None:
+        if self._settings_loading_anim_job is not None:
+            try:
+                self.root.after_cancel(self._settings_loading_anim_job)
+            except tk.TclError:
+                pass
+            self._settings_loading_anim_job = None
+        layer = self._settings_loading_layer
+        self._settings_loading_layer = None
+        self._settings_loading_kicker_label = None
+        self._settings_loading_title_label = None
+        self._settings_loading_body_label = None
+        self._settings_loading_track = None
+        self._settings_loading_indicator = None
+        self._settings_loading_glow = None
+        self._settings_loading_position = 0
+        self._settings_loading_direction = 1
+        if layer is not None and layer.winfo_exists():
+            try:
+                layer.destroy()
+            except tk.TclError:
+                pass
 
     def _pack_support_qr_image(self, parent: tk.Misc, path: str) -> None:
         try:
@@ -5209,6 +5508,8 @@ class TokenHudWindow:
             self._request_rebuild_job,
             self._settings_build_job,
             self._settings_prewarm_job,
+            self._settings_loading_anim_job,
+            self._settings_update_poll_job,
             self._follow_job,
         ):
             if job is None:
@@ -5221,6 +5522,8 @@ class TokenHudWindow:
         self._request_rebuild_job = None
         self._settings_build_job = None
         self._settings_prewarm_job = None
+        self._settings_loading_anim_job = None
+        self._settings_update_poll_job = None
         self._follow_job = None
         try:
             self.request_root.destroy()
@@ -5240,6 +5543,8 @@ class TokenHudWindow:
         self._snapshot = parsed_session
         if update_state is not None:
             self._update_state = update_state
+            if self._settings_dialog_visible() and self._settings_active_tab == "about":
+                self._sync_about_update_controls()
         self._log_budget_snapshot(parsed_session)
         self._render_top()
         self._render_request()

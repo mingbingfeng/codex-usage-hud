@@ -868,12 +868,15 @@ class _MsaaTitleProbe:
             return None
 
         accessible = ctypes.c_void_p()
-        hr = self._oleacc.AccessibleObjectFromWindow(
-            ctypes.c_void_p(hwnd),
-            _OBJID_CLIENT,
-            ctypes.byref(self._iid_iaccessible),
-            ctypes.byref(accessible),
-        )
+        try:
+            hr = self._oleacc.AccessibleObjectFromWindow(
+                ctypes.c_void_p(hwnd),
+                _OBJID_CLIENT,
+                ctypes.byref(self._iid_iaccessible),
+                ctypes.byref(accessible),
+            )
+        except OSError:
+            return None
         if not _succeeded(hr) or not accessible.value:
             return None
 
@@ -888,13 +891,16 @@ class _MsaaTitleProbe:
 
         accessible = ctypes.c_void_p()
         child = _Variant()
-        hr = self._oleacc.AccessibleObjectFromEvent(
-            ctypes.c_void_p(hwnd),
-            int(object_id),
-            int(child_id),
-            ctypes.byref(accessible),
-            ctypes.byref(child),
-        )
+        try:
+            hr = self._oleacc.AccessibleObjectFromEvent(
+                ctypes.c_void_p(hwnd),
+                int(object_id),
+                int(child_id),
+                ctypes.byref(accessible),
+                ctypes.byref(child),
+            )
+        except OSError:
+            return None
         if not _succeeded(hr) or not accessible.value:
             return None
 

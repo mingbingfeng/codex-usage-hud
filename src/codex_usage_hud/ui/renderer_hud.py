@@ -31,6 +31,25 @@ DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
 SETTINGS_COMMAND_STORAGE_KEY = "codexUsageHudSettingsCommand:v1"
+REMOVE_RENDERER_HUD_SCRIPT = (
+    "(() => {"
+    "let existed = false;"
+    "try {"
+    "const remove = window.__codexUsageHudRemove;"
+    "existed = typeof remove === 'function' || !!document.getElementById('codex-usage-hud-root');"
+    "if (typeof remove === 'function') remove();"
+    "else {"
+    "document.getElementById('codex-usage-hud-root')?.remove();"
+    "document.getElementById('codex-usage-hud-style')?.remove();"
+    "}"
+    "} catch (_) {"
+    "document.getElementById('codex-usage-hud-root')?.remove();"
+    "document.getElementById('codex-usage-hud-style')?.remove();"
+    "existed = true;"
+    "}"
+    "return existed;"
+    "})()"
+)
 
 _COST_ESTIMATOR = CostEstimator()
 
@@ -1112,6 +1131,7 @@ RENDERER_HUD_SCRIPT = r"""
       </div>
     `;
     modal.hidden = false;
+    updateAboutActionButtons(currentUpdateState());
   }
 
   function settingsPanelHtml(settings, bridge, path) {
@@ -1228,15 +1248,107 @@ RENDERER_HUD_SCRIPT = r"""
     if (node) node.hidden = !visible;
   }
 
+  function setSettingsActionState(actionName, { label = "", disabled = false } = {}) {
+    const node = document.querySelector(`#${settingsModalId} [data-action="${actionName}"]`);
+    if (!(node instanceof HTMLButtonElement)) return;
+    if (label) node.textContent = label;
+    node.disabled = !!disabled;
+  }
+
+  function updateAboutActionButtons(state) {
+    const phase = String(state?.phase || "");
+    const progressText = String(state?.progressText || "").trim();
+    let checkLabel = "检查更新";
+    let installLabel = "安装更新";
+    let disableCheck = false;
+    let disableInstall = false;
+    if (phase === "checking") {
+      checkLabel = "检查中...";
+      installLabel = "请稍候";
+      disableCheck = true;
+      disableInstall = true;
+    } else if (phase === "downloading") {
+      installLabel = progressText ? `下载中 ${progressText}` : "下载中...";
+      disableCheck = true;
+      disableInstall = true;
+    } else if (phase === "ready") {
+      installLabel = "打开安装器";
+    }
+    setSettingsActionState("settings-check-update", {
+      label: checkLabel,
+      disabled: disableCheck,
+    });
+    setSettingsActionState("settings-install-update", {
+      label: installLabel,
+      disabled: disableInstall,
+    });
+  }
+
   function showSettingsRestartPrompt(message, kind = "error") {
     setSettingsStatus(`${message} 是否立即重启 HUD？`, kind);
     setSettingsRestartVisible(true);
   }
 
+  function setSettingsLoadingText({ kicker = "", title = "", body = "" } = {}) {
+    const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"][data-loading-mode]`);
+    if (!layer) return;
+    const kickerNode = layer.querySelector(".codex-usage-hud-settings-confirm-kicker");
+    const titleNode = layer.querySelector(".codex-usage-hud-settings-confirm-title");
+    const bodyNode = layer.querySelector(".codex-usage-hud-settings-confirm-body");
+    if (kickerNode) kickerNode.textContent = String(kicker || "");
+    if (titleNode) titleNode.textContent = String(title || "");
+    if (bodyNode) bodyNode.textContent = String(body || "");
+  }
+
+  function syncSettingsUpdateLoading(payload) {
+    const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"][data-loading-mode]`);
+    if (!layer) return;
+    const mode = String(layer.dataset.loadingMode || "");
+    const state = updateStateFromPayload(payload);
+    const phase = String(state?.phase || "");
+    const progressText = String(state?.progressText || "").trim();
+    if (mode === "check-update") {
+      if (phase === "checking") {
+        setSettingsLoadingText({
+          kicker: "正在检查",
+          title: "正在检查更新",
+          body: "HUD daemon 正在查询 GitHub Release。通常只需 1 到 3 秒。",
+        });
+        return;
+      }
+      closeSettingsConfirm();
+      return;
+    }
+    if (mode === "install-update") {
+      if (phase === "checking") {
+        setSettingsLoadingText({
+          kicker: "正在准备",
+          title: "正在检查并准备安装更新",
+          body: "HUD daemon 正在查询 GitHub Release，并准备下载安装包。",
+        });
+        return;
+      }
+      if (phase === "downloading") {
+        setSettingsLoadingText({
+          kicker: "正在下载",
+          title: "正在下载安装更新",
+          body: progressText
+            ? `当前进度：${progressText}\n\n下载完成后会自动启动安装器。`
+            : "正在下载 Windows 安装包。\n\n下载完成后会自动启动安装器。",
+        });
+        return;
+      }
+      closeSettingsConfirm();
+    }
+  }
+
   function applySettingsCommandStatus(payload) {
     const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden) return;
+    updateAboutActionButtons(updateStateFromPayload(payload));
+    syncSettingsUpdateLoading(payload);
     const status = payload?.settingsCommandStatus;
-    if (!modal || modal.hidden || !status || typeof status !== "object") return;
+    if (!status || typeof status !== "object") return;
     setSettingsStatus(status.message || "", status.kind || "");
     setSettingsRestartVisible(!!status.restartVisible);
   }
@@ -1290,13 +1402,14 @@ RENDERER_HUD_SCRIPT = r"""
     dialog.appendChild(layer);
   }
 
-  function openSettingsLoading({ kicker = "正在处理", title = "", body = "" } = {}) {
+  function openSettingsLoading({ kicker = "正在处理", title = "", body = "", mode = "" } = {}) {
     const dialog = settingsDialogRoot();
     if (!dialog) return;
     closeSettingsConfirm();
     const layer = document.createElement("div");
     layer.className = "codex-usage-hud-settings-confirm-layer";
     layer.dataset.settingsConfirm = "true";
+    if (mode) layer.dataset.loadingMode = mode;
     layer.innerHTML = `
       <div class="codex-usage-hud-settings-confirm-card" role="status" aria-live="polite" aria-label="${escapeHtml(title || "正在处理设置变更")}">
         <div class="codex-usage-hud-settings-confirm-kicker">${escapeHtml(kicker)}</div>
@@ -1404,11 +1517,23 @@ RENDERER_HUD_SCRIPT = r"""
       title: "正在停止 HUD",
       body: "HUD 正在退出当前界面，并停止后台守护进程（如果正在运行）。",
     });
-    submitSettingsCommand(
-      { action: "exit", reason: "settings" },
+    const submitted = submitSettingsCommand(
+      { action: "exit", reason: "settings", expiresAt: Date.now() + 10000 },
       "退出请求已提交，正在停止 HUD...",
       { preserveOverlay: true }
     );
+    if (submitted) {
+      setTimeout(() => {
+        try {
+          if (typeof window.__codexUsageHudRemove === "function") {
+            window.__codexUsageHudRemove();
+            return;
+          }
+        } catch (_) {}
+        document.getElementById(rootId)?.remove();
+        document.getElementById(styleId)?.remove();
+      }, 120);
+    }
   }
 
   function promptForDisplayModeChange(select) {
@@ -1444,16 +1569,30 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function checkUpdateFromModal() {
+    openSettingsLoading({
+      kicker: "正在检查",
+      title: "正在检查更新",
+      body: "HUD daemon 正在查询 GitHub Release。通常只需 1 到 3 秒。",
+      mode: "check-update",
+    });
     submitSettingsCommand(
       { action: "checkUpdate" },
-      "检查更新请求已提交，等待 HUD daemon 查询 GitHub Release..."
+      "检查更新请求已提交，等待 HUD daemon 查询 GitHub Release...",
+      { preserveOverlay: true }
     );
   }
 
   function installUpdateFromModal() {
+    openSettingsLoading({
+      kicker: "正在准备",
+      title: "正在检查并准备安装更新",
+      body: "HUD daemon 会先检查 GitHub Release，再后台下载 Windows 安装包。",
+      mode: "install-update",
+    });
     submitSettingsCommand(
       { action: "installUpdate" },
-      "安装更新请求已提交，等待 HUD daemon 下载并启动安装器..."
+      "安装更新请求已提交，等待 HUD daemon 下载并启动安装器...",
+      { preserveOverlay: true }
     );
   }
 
@@ -3022,6 +3161,10 @@ class RendererHudClient:
             "if (!raw) return null;"
             "localStorage.removeItem(key);"
             "const value = JSON.parse(raw);"
+            "if (value && typeof value === 'object') {"
+            "const expiresAt = Number(value.expiresAt || 0);"
+            "if (expiresAt && Date.now() > expiresAt) return null;"
+            "}"
             "return value && typeof value === 'object' ? value : { action: 'invalid' };"
             "} catch (error) {"
             "return { action: 'invalid', message: String(error && error.message || error) };"
@@ -3053,27 +3196,44 @@ class RendererHudClient:
         if not self.enabled:
             return
         try:
-            target = self._page_target(force=True)
-            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
-            if websocket_url:
-                send_cdp_command(
-                    websocket_url,
-                    "Runtime.evaluate",
-                    _runtime_expression_params(
-                        "typeof window.__codexUsageHudRemove === 'function' && "
-                        "window.__codexUsageHudRemove()"
-                    ),
-                    self.timeout_seconds,
-                )
-                remove_new_document_script(
-                    websocket_url,
-                    self._script_identifier,
-                    self.timeout_seconds,
-                )
+            for websocket_url in self._close_websocket_candidates():
+                try:
+                    send_cdp_command(
+                        websocket_url,
+                        "Runtime.evaluate",
+                        _runtime_expression_params(REMOVE_RENDERER_HUD_SCRIPT),
+                        self.timeout_seconds,
+                    )
+                except Exception:
+                    pass
+                if not self._script_identifier:
+                    continue
+                try:
+                    remove_new_document_script(
+                        websocket_url,
+                        self._script_identifier,
+                        self.timeout_seconds,
+                    )
+                except Exception:
+                    pass
         except Exception:
             return
         finally:
             self._clear_target_cache(clear_script=True)
+
+    def _close_websocket_candidates(self) -> list[str]:
+        urls: list[str] = []
+        for websocket_url in (self._websocket_url, self._cached_websocket_url):
+            if websocket_url and websocket_url not in urls:
+                urls.append(websocket_url)
+        try:
+            target = self._page_target(force=True)
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            if websocket_url and websocket_url not in urls:
+                urls.append(websocket_url)
+        except Exception:
+            pass
+        return urls
 
     def _page_target(self, *, force: bool = False) -> dict[str, Any]:
         if (
@@ -3139,6 +3299,41 @@ class RendererHudClient:
             .get("result", {})
             .get("value", False)
         )
+
+
+def remove_renderer_hud_from_pages(
+    *,
+    port: int | None = None,
+    timeout_seconds: float = DEFAULT_RENDERER_TIMEOUT_SECONDS,
+) -> int:
+    """Best-effort cleanup for renderer HUD DOM left in any Codex page target."""
+    removed = 0
+    try:
+        targets = list_targets(int(port or cdp_port_from_env()), timeout_seconds)
+    except Exception:
+        return 0
+    for target in targets:
+        if target.get("type") != "page":
+            continue
+        websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+        if not websocket_url:
+            continue
+        try:
+            result = send_cdp_command(
+                websocket_url,
+                "Runtime.evaluate",
+                _runtime_expression_params(REMOVE_RENDERER_HUD_SCRIPT),
+                timeout_seconds,
+            )
+        except Exception:
+            continue
+        if bool(
+            result.get("result", {})
+            .get("result", {})
+            .get("value", False)
+        ):
+            removed += 1
+    return removed
 
 
 def renderer_enabled_from_env(default: bool = True) -> bool:
@@ -3981,6 +4176,7 @@ __all__ = [
     "RendererHudPayload",
     "SETTINGS_COMMAND_STORAGE_KEY",
     "payload_from_snapshot",
+    "remove_renderer_hud_from_pages",
     "renderer_enabled_from_env",
     "set_cost_estimator",
     "wait_for_renderer",

@@ -314,6 +314,22 @@ class Activity:
 
 
 @dataclass
+class WorkStatusItem:
+    """One active Codex work item shown in the HUD activity stack."""
+
+    id: str
+    title: str
+    status: str
+    status_label: str
+    detail: str
+    progress: str = ""
+    source: str = ""
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
+    current: bool = False
+
+
+@dataclass
 class ToolCallTiming:
     """One completed tool or user-wait round-trip."""
 
@@ -400,6 +416,7 @@ class ParsedSession:
     week_start: datetime | None = None
     budget_warnings: list[str] = field(default_factory=list)
     budget_error: str = ""
+    active_work_items: list[WorkStatusItem] = field(default_factory=list)
 
 
 class CostEstimator:

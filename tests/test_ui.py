@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import json
 import tempfile
 import subprocess
 import threading
@@ -37,6 +38,7 @@ from codex_usage_hud.cli import (
     RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
     UsageSummaryCache,
     _TkSnapshotPump,
+    active_work_items_for_snapshot,
     _prepare_codex_window_for_renderer,
     _prepare_codex_window_for_tk,
     _renderer_refresh_delay_seconds,
@@ -52,19 +54,23 @@ from codex_usage_hud.cli import (
     run_daemon,
     run_hud_session,
     run_loading_feedback_helper,
+    run_work_overlay_helper,
     run_tk_hud_session,
     cleanup_stale_loading_feedback_files,
+    work_item_to_overlay_dict,
     stop_running_hud,
     usage_before_today_in_week,
 )
 from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.core.parser import (
     GapTiming,
+    JsonlSessionParser,
     ParsedSession,
     RequestRound,
     SlowSummary,
     ToolCallTiming,
     UsageSummary,
+    WorkStatusItem,
 )
 from codex_usage_hud.ui.tk_hud import (
     REQUEST_DOCK_BOTTOM,
@@ -414,6 +420,81 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(prior.tokens, 0)
         self.assertEqual(prior.cost_usd, 0.0)
+
+    def test_active_work_items_include_current_and_recent_running_sessions(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def write_session(path: Path, session_id: str, prompt: str, offset: int) -> None:
+            timestamp = (now + timedelta(seconds=offset)).isoformat()
+            rows = [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {"id": session_id},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.5"},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": prompt},
+                },
+            ]
+            path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "session-current.jsonl"
+            worker = root / "session-worker.jsonl"
+            write_session(current, "session-current", "Current visible work", -2)
+            write_session(worker, "session-worker", "Background thread work", -1)
+            snapshot = parser.parse_file(current)
+            snapshot.session_title = "Current task"
+            snapshot.selection_source = "cdp:Current task"
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, current)
+
+        self.assertGreaterEqual(len(items), 2)
+        self.assertEqual(items[0].title, "Current task")
+        self.assertTrue(items[0].current)
+        self.assertEqual(items[0].status_label, "运行中")
+        self.assertIn("Background thread work", " ".join(item.detail for item in items))
+
+    def test_work_overlay_payload_uses_primary_screen_status_fields(self) -> None:
+        item = WorkStatusItem(
+            id="session-a",
+            title="Ship primary screen bubbles",
+            status="running",
+            status_label="运行中",
+            detail="用户输入：实现桌面气泡",
+            progress="1.2k tokens | 12s",
+            source="activity",
+            current=True,
+        )
+
+        payload = work_item_to_overlay_dict(item)
+
+        self.assertEqual(payload["statusLabel"], "运行中")
+        self.assertEqual(payload["title"], "Ship primary screen bubbles")
+        self.assertTrue(payload["current"])
+        self.assertIn("tokens", str(payload["progress"]))
 
     def test_snapshot_text_includes_week_breakdown(self) -> None:
         snapshot = ParsedSession(
@@ -1926,6 +2007,50 @@ class DaemonLifecycleTests(unittest.TestCase):
         restart_requested.set.assert_not_called()
         exit_requested.set.assert_called_once_with()
 
+    def test_renderer_check_update_uses_async_update_manager(self) -> None:
+        context = SimpleNamespace(settings_store=None, settings_mtime=None, reload_user_config=None)
+        restart_requested = MagicMock()
+        exit_requested = MagicMock()
+        update_manager = SimpleNamespace(
+            request_check=MagicMock(
+                return_value=SimpleNamespace(message="正在检查更新...", error="")
+            )
+        )
+
+        status = _handle_renderer_settings_command(
+            {"action": "checkUpdate"},
+            context,
+            restart_requested,
+            exit_requested,
+            update_manager,
+        )
+
+        update_manager.request_check.assert_called_once_with(auto_download=False)
+        self.assertEqual(status["kind"], "")
+        self.assertIn("正在检查更新", status["message"])
+
+    def test_renderer_install_update_uses_async_update_manager(self) -> None:
+        context = SimpleNamespace(settings_store=None, settings_mtime=None, reload_user_config=None)
+        restart_requested = MagicMock()
+        exit_requested = MagicMock()
+        update_manager = SimpleNamespace(
+            request_install=MagicMock(
+                return_value=SimpleNamespace(message="正在下载安装更新...", title="", error="")
+            )
+        )
+
+        status = _handle_renderer_settings_command(
+            {"action": "installUpdate"},
+            context,
+            restart_requested,
+            exit_requested,
+            update_manager,
+        )
+
+        update_manager.request_install.assert_called_once_with()
+        self.assertEqual(status["kind"], "")
+        self.assertIn("正在下载安装更新", status["message"])
+
     def test_tk_refresh_reloads_user_config_before_snapshot(self) -> None:
         fake_context = SimpleNamespace(
             poll_ms=250,
@@ -2782,6 +2907,9 @@ class DaemonLifecycleTests(unittest.TestCase):
 
     def test_loading_feedback_helper_requires_state_file(self) -> None:
         self.assertEqual(run_loading_feedback_helper(""), 1)
+
+    def test_work_overlay_helper_requires_state_file(self) -> None:
+        self.assertEqual(run_work_overlay_helper(""), 1)
 
     def test_cleanup_stale_loading_feedback_files_removes_orphaned_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

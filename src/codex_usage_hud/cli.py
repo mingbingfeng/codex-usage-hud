@@ -40,6 +40,7 @@ from .core import (
     SseRequestStateMachine,
     UsageCalculator,
     UsageSummary,
+    WorkStatusItem,
 )
 from .daemon import (
     CodexDaemonManager,
@@ -60,7 +61,11 @@ from .platforms.base import BasePlatform
 from .platforms.cdp_probe import cdp_port_from_env
 from .settings_bridge import SettingsBridgeServer
 from .ui import TokenHudWindow
-from .ui.renderer_hud import RendererHudClient, wait_for_renderer
+from .ui.renderer_hud import (
+    RendererHudClient,
+    remove_renderer_hud_from_pages,
+    wait_for_renderer,
+)
 from .updater import (
     AutoUpdateManager,
     check_for_update,
@@ -104,6 +109,10 @@ DAEMON_STARTUP_RENDERER = "renderer"
 DAEMON_STARTUP_TK = "tk"
 DAEMON_STARTUP_CANCEL = "cancel"
 LOADING_FEEDBACK_STALE_SECONDS = 20.0
+ACTIVE_WORK_ITEM_LIMIT = 6
+ACTIVE_WORK_CANDIDATE_LIMIT = 16
+ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
+WORK_OVERLAY_STALE_SECONDS = 20.0
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 
@@ -432,6 +441,315 @@ def run_loading_feedback_helper(state_file: str | Path) -> int:
         root.after(80, poll_state)
 
     animate_bar()
+    poll_state()
+    root.mainloop()
+    return 0
+
+
+def _work_overlay_command(state_path: Path) -> list[str]:
+    state_arg = str(state_path)
+    if getattr(sys, "frozen", False):
+        return [
+            str(Path(sys.executable)),
+            "--work-overlay-helper",
+            "--work-overlay-state-file",
+            state_arg,
+        ]
+
+    helper_python = Path(sys.executable)
+    if sys.platform.startswith("win") and helper_python.name.lower() == "python.exe":
+        candidate = helper_python.with_name("pythonw.exe")
+        if candidate.exists():
+            helper_python = candidate
+    return [
+        str(helper_python),
+        "-m",
+        "codex_usage_hud",
+        "--work-overlay-helper",
+        "--work-overlay-state-file",
+        state_arg,
+    ]
+
+
+def _work_overlay_owner_pid(path: Path) -> int | None:
+    match = re.match(r"work-overlay-(\d+)-\d+\.json$", path.name, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        pid = int(match.group(1))
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def cleanup_stale_work_overlay_files() -> None:
+    runtime = hud_runtime_dir()
+    try:
+        files = list(runtime.glob("work-overlay-*.json"))
+    except OSError:
+        return
+    now = time.time()
+    for path in files:
+        owner_pid = _work_overlay_owner_pid(path)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        stale = (now - float(mtime)) > WORK_OVERLAY_STALE_SECONDS
+        owner_alive = _process_exists(owner_pid) if owner_pid is not None else False
+        if owner_pid is not None and owner_alive and not stale:
+            continue
+        if owner_pid is None and not stale:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
+
+def _iso_or_empty(value: datetime | None) -> str:
+    return value.isoformat() if value is not None else ""
+
+
+def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "title": item.title,
+        "status": item.status,
+        "statusLabel": item.status_label,
+        "detail": item.detail,
+        "progress": item.progress,
+        "source": item.source,
+        "startedAt": _iso_or_empty(item.started_at),
+        "updatedAt": _iso_or_empty(item.updated_at),
+        "current": item.current,
+    }
+
+
+class DesktopWorkOverlay:
+    """Primary-screen Tk overlay that stays visible when Codex is minimized."""
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = bool(enabled)
+        self._state_path = (
+            hud_runtime_dir() / f"work-overlay-{os.getpid()}-{int(time.time() * 1000)}.json"
+        )
+        self._process: subprocess.Popen[str] | None = None
+        self._closed = False
+
+    def update(self, items: Sequence[WorkStatusItem]) -> None:
+        if not self.enabled or self._closed:
+            return
+        payload_items = [work_item_to_overlay_dict(item) for item in items]
+        if not payload_items and self._process is None:
+            return
+        if self._process is not None and self._process.poll() is not None:
+            self._process = None
+        self._write_state(payload_items, close=False)
+        if self._process is None:
+            self._start()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._write_state([], close=True)
+        process = self._process
+        self._process = None
+        if process is not None:
+            try:
+                process.wait(timeout=1.0)
+            except Exception:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+        try:
+            self._state_path.unlink()
+        except OSError:
+            pass
+
+    def _start(self) -> None:
+        try:
+            self._process = subprocess.Popen(
+                _work_overlay_command(self._state_path),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            self._process = None
+
+    def _write_state(
+        self,
+        items: Sequence[Mapping[str, object]],
+        *,
+        close: bool,
+    ) -> None:
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(
+                json.dumps(
+                    {
+                        "ownerPid": os.getpid(),
+                        "items": list(items),
+                        "updatedAt": time.time(),
+                        "close": bool(close),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            return
+
+
+def run_work_overlay_helper(state_file: str | Path) -> int:
+    state_arg = str(state_file or "").strip()
+    if not state_arg:
+        return 1
+    path = Path(state_arg).expanduser()
+    try:
+        import tkinter as tk
+    except Exception:
+        return 0
+
+    def read_state() -> dict[str, object] | None:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return raw if isinstance(raw, dict) else None
+
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    try:
+        root.attributes("-alpha", 0.96)
+    except tk.TclError:
+        pass
+    try:
+        root.attributes("-toolwindow", True)
+    except tk.TclError:
+        pass
+    root.configure(bg="#0A0F14")
+    root.withdraw()
+
+    shell = tk.Frame(root, bg="#0A0F14", padx=0, pady=0)
+    shell.pack(fill="both", expand=True)
+
+    owner_pid = _work_overlay_owner_pid(path)
+    last_signature = ""
+
+    def color_for(status: str) -> tuple[str, str]:
+        if status == "waiting_user":
+            return "#FFB86B", "#1D1610"
+        if status == "tool":
+            return "#9CCBFF", "#0D1722"
+        if status == "recent":
+            return "#8FE3A1", "#0E1B14"
+        return "#F3D27A", "#1C190F"
+
+    def render_items(items: Sequence[Mapping[str, object]]) -> None:
+        nonlocal last_signature
+        signature = json.dumps(list(items), ensure_ascii=False, sort_keys=True)
+        if signature == last_signature:
+            return
+        last_signature = signature
+        for child in shell.winfo_children():
+            child.destroy()
+        if not items:
+            root.withdraw()
+            return
+
+        width = 360
+        for item in items[:ACTIVE_WORK_ITEM_LIMIT]:
+            status = str(item.get("status") or "")
+            accent, pill_bg = color_for(status)
+            card = tk.Frame(
+                shell,
+                bg="#10161D",
+                highlightthickness=1,
+                highlightbackground="#263241",
+                padx=10,
+                pady=8,
+            )
+            card.pack(fill="x", pady=(0, 8))
+            head = tk.Frame(card, bg="#10161D")
+            head.pack(fill="x")
+            tk.Label(
+                head,
+                text=str(item.get("statusLabel") or "运行中"),
+                anchor="center",
+                bg=pill_bg,
+                fg=accent,
+                font=("Microsoft YaHei UI", 8, "bold"),
+                padx=7,
+                pady=2,
+            ).pack(side="left", padx=(0, 7))
+            tk.Label(
+                head,
+                text=str(item.get("title") or "Codex 工作"),
+                anchor="w",
+                bg="#10161D",
+                fg="#E8EEF7",
+                font=("Microsoft YaHei UI", 9, "bold"),
+            ).pack(side="left", fill="x", expand=True)
+            detail = tk.Label(
+                card,
+                text=str(item.get("detail") or ""),
+                anchor="w",
+                justify="left",
+                bg="#10161D",
+                fg="#B8C6D8",
+                font=("Microsoft YaHei UI", 8),
+                wraplength=width - 28,
+            )
+            detail.pack(fill="x", pady=(5, 0))
+            progress = str(item.get("progress") or item.get("source") or "")
+            if progress:
+                tk.Label(
+                    card,
+                    text=progress,
+                    anchor="w",
+                    bg="#10161D",
+                    fg="#8492A6",
+                    font=("Consolas", 8),
+                ).pack(fill="x", pady=(5, 0))
+
+        root.update_idletasks()
+        height = max(1, int(root.winfo_reqheight()))
+        screen_width = max(1, int(root.winfo_screenwidth()))
+        screen_height = max(1, int(root.winfo_screenheight()))
+        x = max(0, screen_width - width - 16)
+        y = min(max(0, 56), max(0, screen_height - height - 16))
+        root.geometry(f"{width}x{height}+{x}+{y}")
+        root.deiconify()
+        root.lift()
+
+    def poll_state() -> None:
+        if not root.winfo_exists():
+            return
+        state = read_state()
+        if state is None:
+            root.destroy()
+            return
+        should_close = bool(state.get("close"))
+        updated_at = float(state.get("updatedAt") or 0.0)
+        file_stale = (
+            updated_at > 0 and (time.time() - updated_at) > WORK_OVERLAY_STALE_SECONDS
+        )
+        if owner_pid is not None and not _process_exists(owner_pid):
+            root.destroy()
+            return
+        if should_close or file_stale:
+            root.destroy()
+            return
+        raw_items = state.get("items") or []
+        items = [item for item in raw_items if isinstance(item, Mapping)]
+        render_items(items)
+        root.after(160, poll_state)
+
     poll_state()
     root.mainloop()
     return 0
@@ -1506,6 +1824,237 @@ class UsageSummaryCache:
         return summary_day, summary_week
 
 
+def _session_path_key(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def _active_work_scan_roots(sessions_root: Path) -> tuple[Path, ...]:
+    return UsageSummaryCache._scan_roots(sessions_root)
+
+
+def _recent_session_files(
+    sessions_root: Path,
+    *,
+    current_path: Path | None = None,
+    limit: int = ACTIVE_WORK_CANDIDATE_LIMIT,
+) -> list[Path]:
+    paths: dict[str, tuple[Path, float]] = {}
+    if current_path is not None:
+        try:
+            paths[_session_path_key(current_path)] = (
+                current_path,
+                current_path.stat().st_mtime,
+            )
+        except OSError:
+            paths[_session_path_key(current_path)] = (current_path, 0.0)
+    for root in _active_work_scan_roots(sessions_root):
+        if not root.exists():
+            continue
+        try:
+            iterator = root.rglob("*.jsonl")
+            for path in iterator:
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                paths[_session_path_key(path)] = (path, mtime)
+        except OSError:
+            continue
+    ordered = sorted(paths.values(), key=lambda item: item[1], reverse=True)
+    return [path for path, _mtime in ordered[: max(1, int(limit))]]
+
+
+def _work_activity_label(value: str) -> str:
+    labels = {
+        "idle": "空闲",
+        "user": "用户输入",
+        "agent": "助手消息",
+        "tool call": "调用工具",
+        "tool output": "工具返回",
+        "assistant": "助手输出",
+        "confirmed": "Token确认",
+    }
+    return labels.get(value, value)
+
+
+def _elapsed_compact(
+    started_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    if started_at is None:
+        return ""
+    if started_at.tzinfo is None:
+        current = now.replace(tzinfo=None) if now is not None else datetime.now()
+    else:
+        current = (now or datetime.now().astimezone()).astimezone(started_at.tzinfo)
+    seconds = max(0, int((current - started_at).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _work_status_from_snapshot(
+    snapshot: ParsedSession,
+    *,
+    now: datetime,
+) -> tuple[str, str] | None:
+    activity_detail = snapshot.activity.detail.lower()
+    request_status = snapshot.request.status
+    if request_status == "running":
+        return "running", "运行中"
+    if snapshot.activity.kind == "tool call" and activity_detail.startswith(
+        "request_user_input"
+    ):
+        return "waiting_user", "等待用户"
+    if snapshot.activity.kind == "tool call":
+        return "tool", "工具执行"
+    if snapshot.slow.current_gap_active:
+        return "active", "处理中"
+    if snapshot.last_event_time is not None:
+        last = snapshot.last_event_time
+        current = now.astimezone(last.tzinfo) if last.tzinfo is not None else now
+        if (current - last).total_seconds() <= 12 and request_status == "confirmed":
+            return "recent", "刚完成"
+    return None
+
+
+def _work_item_from_snapshot(
+    snapshot: ParsedSession,
+    *,
+    current: bool,
+    title: str = "",
+    source: str = "",
+    now: datetime | None = None,
+) -> WorkStatusItem | None:
+    current_time = now or datetime.now().astimezone()
+    status = _work_status_from_snapshot(snapshot, now=current_time)
+    if status is None:
+        return None
+
+    updated_at = (
+        snapshot.request.updated_at
+        or snapshot.activity.timestamp
+        or snapshot.last_event_time
+        or snapshot.refreshed_at
+    )
+    if updated_at is not None:
+        current_for_age = (
+            current_time.astimezone(updated_at.tzinfo)
+            if updated_at.tzinfo is not None
+            else current_time.replace(tzinfo=None)
+        )
+        age_seconds = (current_for_age - updated_at).total_seconds()
+        if age_seconds > ACTIVE_WORK_STALE_SECONDS:
+            return None
+
+    status_value, status_label = status
+    display_title = (
+        title.strip()
+        or snapshot.session_title.strip()
+        or str(snapshot.session_id or "").strip()
+        or "Codex 工作"
+    )
+    detail = snapshot.activity.detail or snapshot.error or "等待更多活动日志"
+    if snapshot.activity.kind:
+        detail = f"{_work_activity_label(snapshot.activity.kind)}：{detail}"
+    tokens = _current_task_tokens(snapshot)
+    elapsed = _elapsed_compact(snapshot.request.started_at, now=current_time)
+    progress_parts = []
+    if tokens:
+        progress_parts.append(f"{_format_tokens(tokens)} tokens")
+    if elapsed:
+        progress_parts.append(elapsed)
+    progress = " | ".join(progress_parts)
+    item_id = snapshot.session_id or _session_path_key(snapshot.session_path) or display_title
+    return WorkStatusItem(
+        id=str(item_id),
+        title=_compact_work_text(display_title, 56),
+        status=status_value,
+        status_label=status_label,
+        detail=_compact_work_text(detail, 120),
+        progress=progress,
+        source=source or snapshot.selection_source,
+        started_at=snapshot.request.started_at or snapshot.task_started_at,
+        updated_at=updated_at,
+        current=current,
+    )
+
+
+def _compact_work_text(value: object, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def active_work_items_for_snapshot(
+    context: "RuntimeContext",
+    snapshot: ParsedSession,
+    session_path: Path | None,
+) -> list[WorkStatusItem]:
+    """Build primary-screen work bubble items from recently active Codex sessions."""
+    now = datetime.now().astimezone()
+    items: dict[str, WorkStatusItem] = {}
+    current_key = _session_path_key(session_path)
+    current_item = _work_item_from_snapshot(
+        snapshot,
+        current=True,
+        title=snapshot.session_title,
+        source=snapshot.selection_source,
+        now=now,
+    )
+    if current_item is not None:
+        items[str(current_item.id)] = current_item
+
+    for path in _recent_session_files(
+        context.sessions_root,
+        current_path=session_path,
+        limit=ACTIVE_WORK_CANDIDATE_LIMIT,
+    ):
+        if _session_path_key(path) == current_key:
+            continue
+        try:
+            parsed = context.parser.parse_file(path)
+        except Exception:
+            continue
+        title = ""
+        if context.active_session_tracker is not None:
+            title = context.active_session_tracker.title_for_session(
+                path,
+                parsed.session_id,
+            )
+        item = _work_item_from_snapshot(
+            parsed,
+            current=False,
+            title=title,
+            source="activity",
+            now=now,
+        )
+        if item is not None:
+            items[str(item.id)] = item
+
+    def sort_key(item: WorkStatusItem) -> tuple[int, float]:
+        timestamp = item.updated_at or item.started_at
+        if timestamp is None:
+            seconds = 0.0
+        else:
+            seconds = timestamp.timestamp()
+        return (1 if item.current else 0, seconds)
+
+    ordered = sorted(items.values(), key=sort_key, reverse=True)
+    return ordered[:ACTIVE_WORK_ITEM_LIMIT]
+
+
 @dataclass
 class RuntimeContext:
     platform: BasePlatform
@@ -1777,6 +2326,12 @@ def _handle_renderer_settings_command(
                 "已请求退出 HUD；后台守护进程也会一并停止。",
             )
         if action == "checkUpdate":
+            if update_manager is not None:
+                state = update_manager.request_check(auto_download=False)
+                return _renderer_settings_status(
+                    state.message or "正在检查更新...",
+                    kind="error" if state.error else "",
+                )
             info = check_for_update(current_version=__version__)
             if info.error:
                 return _renderer_settings_status(
@@ -1792,13 +2347,11 @@ def _handle_renderer_settings_command(
             )
         if action == "installUpdate":
             if update_manager is not None:
-                state = update_manager.status()
-                if state.phase == "ready" and state.installer_path:
-                    state = update_manager.handle_click()
-                    return _renderer_settings_status(
-                        state.message or "已打开下载好的安装程序。",
-                        kind="error" if state.error else "",
-                    )
+                state = update_manager.request_install()
+                return _renderer_settings_status(
+                    state.message or state.title or "正在准备安装更新...",
+                    kind="error" if state.error else "",
+                )
             info = check_for_update(current_version=__version__)
             if info.error:
                 return _renderer_settings_status(
@@ -2020,6 +2573,11 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
         context.budget_thresholds,
     )
     snapshot.budget_error = "" if context.sessions_root.exists() else snapshot.error
+    snapshot.active_work_items = active_work_items_for_snapshot(
+        context,
+        snapshot,
+        session_path,
+    )
     return snapshot
 
 
@@ -2254,6 +2812,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--work-overlay-helper",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--work-overlay-state-file",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -2410,6 +2978,7 @@ def run_renderer_hud_session(
             update_manager = AutoUpdateManager(current_version=__version__)
             restart_requested = Event()
             exit_requested = Event()
+            work_overlay = DesktopWorkOverlay()
             bridge = SettingsBridgeServer(
                 context.settings_store,
                 restart_callback=restart_requested.set,
@@ -2576,6 +3145,7 @@ def run_renderer_hud_session(
                         )
                     context.reload_user_config()
                     snapshot = snapshot_or_error()
+                    work_overlay.update(snapshot.active_work_items)
                     if client.update(
                         snapshot,
                         settings=context.user_config,
@@ -2634,6 +3204,7 @@ def run_renderer_hud_session(
             finally:
                 client.close()
                 bridge.close()
+                work_overlay.close()
                 update_manager.close()
                 context.close()
     except HudAlreadyRunningError as exc:
@@ -2651,6 +3222,7 @@ def _run_tk_window_session(
     update_manager: AutoUpdateManager | None = None,
 ) -> int:
     snapshot_pump = _TkSnapshotPump(context)
+    work_overlay = DesktopWorkOverlay()
     try:
         try:
             window = existing_window or TokenHudWindow(
@@ -2678,6 +3250,7 @@ def _run_tk_window_session(
                     latest_snapshot,
                     update_state=update_manager.tick() if update_manager is not None else None,
                 )
+                work_overlay.update(latest_snapshot.active_work_items)
             try:
                 window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
             except Exception:
@@ -2711,6 +3284,7 @@ def _run_tk_window_session(
             return HUD_SWITCH_TO_RENDERER
         return 0
     finally:
+        work_overlay.close()
         snapshot_pump.close()
         if close_context:
             context.close()
@@ -2731,6 +3305,9 @@ def run_tk_hud_session(
             context = build_runtime_context(args)
             update_manager = AutoUpdateManager(current_version=__version__)
             try:
+                remove_renderer_hud_from_pages(
+                    timeout_seconds=min(RENDERER_CDP_TIMEOUT_SECONDS, 0.5),
+                )
                 _prepare_codex_window_for_tk(
                     timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
                     launch_if_missing=True,
@@ -2869,7 +3446,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "loading_feedback_helper", False):
         return run_loading_feedback_helper(args.loading_feedback_state_file)
+    if getattr(args, "work_overlay_helper", False):
+        return run_work_overlay_helper(args.work_overlay_state_file)
     cleanup_stale_loading_feedback_files()
+    cleanup_stale_work_overlay_files()
     if args.check_update:
         return run_update_check()
     if args.update:

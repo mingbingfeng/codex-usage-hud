@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ from codex_usage_hud.platforms.windows import (
     MOUSE_HOOK_ENV,
     _UIA_LIST_ITEM_CONTROL_TYPE_ID,
     _UIA_TEXT_CONTROL_TYPE_ID,
+    _MsaaTitleProbe,
     _env_flag,
     _UiaTitleNode,
     _UiaTitleProbe,
@@ -92,11 +94,36 @@ class PlatformFactoryTests(unittest.TestCase):
 
 
 class WindowsActiveTitleTests(unittest.TestCase):
+    class _FailingOleacc:
+        def AccessibleObjectFromWindow(self, *args: object) -> int:
+            del args
+            raise OSError(-2147467259, "Unspecified error")
+
+        def AccessibleObjectFromEvent(self, *args: object) -> int:
+            del args
+            raise OSError(-2147467259, "Unspecified error")
+
+    def _msaa_probe_with_failing_oleacc(self) -> _MsaaTitleProbe:
+        probe = object.__new__(_MsaaTitleProbe)
+        probe._oleacc = self._FailingOleacc()
+        probe._init_com_for_thread = lambda: True  # type: ignore[method-assign]
+        return probe
+
     def test_low_level_mouse_hook_is_opt_in(self) -> None:
-        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(_env_flag(MOUSE_HOOK_ENV, default=False))
-        with unittest.mock.patch.dict(os.environ, {MOUSE_HOOK_ENV: "1"}, clear=True):
+        with mock.patch.dict(os.environ, {MOUSE_HOOK_ENV: "1"}, clear=True):
             self.assertTrue(_env_flag(MOUSE_HOOK_ENV, default=False))
+
+    def test_msaa_conversation_title_ignores_oleacc_hresult_errors(self) -> None:
+        probe = self._msaa_probe_with_failing_oleacc()
+
+        self.assertIsNone(probe.conversation_title(123))
+
+    def test_msaa_event_title_ignores_oleacc_hresult_errors(self) -> None:
+        probe = self._msaa_probe_with_failing_oleacc()
+
+        self.assertIsNone(probe.title_from_event(123, -4, 0))
 
     def test_uia_title_scoring_ignores_sidebar_rows_for_full_window_poll(self) -> None:
         window_rect = (570, 167, 1806, 905)

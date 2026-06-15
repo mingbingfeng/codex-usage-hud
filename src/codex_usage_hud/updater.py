@@ -410,6 +410,8 @@ class AutoUpdateManager:
         self._download_thread: threading.Thread | None = None
         self._next_check_at = 0.0
         self._latest_info: UpdateInfo | None = None
+        self._check_download_on_available = False
+        self._launch_after_download = False
         self._status = AutoUpdateState(current_version=self.current_version)
 
     def status(self) -> AutoUpdateState:
@@ -421,7 +423,103 @@ class AutoUpdateManager:
             if self._stop_event.is_set():
                 return self._status
             if self._should_start_check_locked():
-                self._start_check_locked()
+                self._start_check_locked(auto_download=True)
+            return self._status
+
+    def request_check(self, *, auto_download: bool = False) -> AutoUpdateState:
+        with self._lock:
+            if self._stop_event.is_set():
+                return self._status
+            if not auto_download:
+                self._launch_after_download = False
+            if self._check_thread is not None and self._check_thread.is_alive():
+                self._check_download_on_available = (
+                    self._check_download_on_available or auto_download
+                )
+                message = (
+                    "正在检查更新并准备下载安装包..."
+                    if self._check_download_on_available
+                    else "正在检查更新..."
+                )
+                self._status = replace(
+                    self._status,
+                    phase="checking",
+                    message=message,
+                    error="",
+                )
+                return self._status
+            self._start_check_locked(
+                auto_download=auto_download,
+                message=(
+                    "正在检查更新并准备下载安装包..."
+                    if auto_download
+                    else "正在检查更新..."
+                ),
+            )
+            return self._status
+
+    def request_install(self) -> AutoUpdateState:
+        installer_to_open: Path | None = None
+        with self._lock:
+            if self._stop_event.is_set():
+                return self._status
+            self._launch_after_download = True
+            phase = self._status.phase
+            if phase == "ready" and self._status.installer_path:
+                installer_to_open = Path(self._status.installer_path)
+            elif phase == "downloading":
+                self._status = replace(
+                    self._status,
+                    message="正在下载安装更新，完成后会自动启动安装器。",
+                    error="",
+                )
+                return self._status
+            elif phase == "checking":
+                self._check_download_on_available = True
+                self._status = replace(
+                    self._status,
+                    message="正在检查更新并准备下载安装包...",
+                    error="",
+                )
+                return self._status
+            elif (
+                phase in {"available", "paused", "error"}
+                and self._latest_info is not None
+                and self._latest_info.available
+            ):
+                self._pause_event.clear()
+                self._start_download_locked(self._latest_info)
+                return self._status
+            elif self._latest_info is not None and self._latest_info.available:
+                self._pause_event.clear()
+                self._start_download_locked(self._latest_info)
+                return self._status
+            else:
+                self._start_check_locked(
+                    auto_download=True,
+                    message="正在检查更新并准备下载安装包...",
+                )
+                return self._status
+        try:
+            self._launch_func(installer_to_open)
+        except Exception as exc:
+            with self._lock:
+                self._status = replace(
+                    self._status,
+                    phase="error",
+                    visible=True,
+                    icon="download",
+                    message=f"打开安装程序失败：{exc}",
+                    error=str(exc),
+                )
+                return self._status
+        with self._lock:
+            self._launch_after_download = False
+            self._status = replace(
+                self._status,
+                message=f"已启动 {installer_to_open.name}。",
+                error="",
+            )
             return self._status
 
     def handle_click(self) -> AutoUpdateState:
@@ -429,6 +527,7 @@ class AutoUpdateManager:
         with self._lock:
             phase = self._status.phase
             if phase == "ready" and self._status.installer_path:
+                self._launch_after_download = False
                 installer_to_open = Path(self._status.installer_path)
             elif phase == "downloading":
                 self._pause_event.set()
@@ -438,8 +537,14 @@ class AutoUpdateManager:
                     message="已暂停更新下载。",
                 )
                 return self._status
+            elif phase == "available" and self._latest_info and self._latest_info.available:
+                self._pause_event.clear()
+                self._launch_after_download = False
+                self._start_download_locked(self._latest_info)
+                return self._status
             elif phase in {"paused", "error"} and self._latest_info and self._latest_info.available:
                 self._pause_event.clear()
+                self._launch_after_download = False
                 self._start_download_locked(self._latest_info)
                 return self._status
             elif installer_to_open is None:
@@ -479,11 +584,17 @@ class AutoUpdateManager:
             return False
         return self._monotonic() >= self._next_check_at
 
-    def _start_check_locked(self) -> None:
+    def _start_check_locked(
+        self,
+        *,
+        auto_download: bool,
+        message: str = "正在检查更新...",
+    ) -> None:
+        self._check_download_on_available = bool(auto_download)
         self._status = AutoUpdateState(
             phase="checking",
             current_version=self.current_version,
-            message="正在检查更新...",
+            message=message,
         )
         self._check_thread = threading.Thread(
             target=self._check_worker,
@@ -504,6 +615,8 @@ class AutoUpdateManager:
             if self._stop_event.is_set():
                 return
             self._latest_info = info
+            download_on_available = self._check_download_on_available
+            self._check_download_on_available = False
             if info.error:
                 self._next_check_at = now + self.retry_interval_seconds
                 self._status = AutoUpdateState(
@@ -523,6 +636,20 @@ class AutoUpdateManager:
                     latest_version=info.latest_version,
                     release_url=info.release_url,
                     message=format_update_info(info),
+                )
+                return
+            if not download_on_available:
+                self._launch_after_download = False
+                self._status = AutoUpdateState(
+                    phase="available",
+                    current_version=self.current_version,
+                    latest_version=info.latest_version,
+                    release_url=info.release_url,
+                    asset_name=info.asset_name,
+                    asset_size=info.asset.size if info.asset else 0,
+                    visible=True,
+                    icon="download",
+                    message=f"发现新版本 {info.latest_version}，点击安装更新开始下载。",
                 )
                 return
             self._pause_event.clear()
@@ -578,7 +705,11 @@ class AutoUpdateManager:
             installer_path=str(target),
             visible=True,
             icon="download",
-            message="正在后台下载更新安装包。",
+            message=(
+                "正在下载安装更新，完成后会自动启动安装器。"
+                if self._launch_after_download
+                else "正在后台下载更新安装包。"
+            ),
         )
         self._download_thread = threading.Thread(
             target=self._download_worker,
@@ -660,7 +791,11 @@ class AutoUpdateManager:
                                 installer_path=str(target),
                                 visible=True,
                                 icon="download",
-                                message="正在后台下载更新安装包。",
+                                message=(
+                                    "正在下载安装更新，完成后会自动启动安装器。"
+                                    if self._launch_after_download
+                                    else "正在后台下载更新安装包。"
+                                ),
                             )
                 if total_bytes > 0 and downloaded < total_bytes:
                     raise IOError("download ended before the installer was fully written")
@@ -699,6 +834,28 @@ class AutoUpdateManager:
                 visible=True,
                 icon="install",
                 message="更新安装包已下载完成。",
+            )
+            auto_launch = self._launch_after_download
+            self._launch_after_download = False
+        if not auto_launch:
+            return
+        try:
+            self._launch_func(target)
+        except Exception as exc:
+            with self._lock:
+                self._status = replace(
+                    self._status,
+                    phase="error",
+                    icon="download",
+                    message=f"打开安装程序失败：{exc}",
+                    error=str(exc),
+                )
+            return
+        with self._lock:
+            self._status = replace(
+                self._status,
+                message=f"已启动 {target.name}。",
+                error="",
             )
 
     @staticmethod
