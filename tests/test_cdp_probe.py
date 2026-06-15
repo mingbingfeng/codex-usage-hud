@@ -151,6 +151,10 @@ class CdpProbeTests(unittest.TestCase):
         self.assertIn("rect.top > 20", DOM_PROBE_SCRIPT)
         self.assertIn("appError: appErrorText()", DOM_PROBE_SCRIPT)
         self.assertIn("exceeded retry limit", DOM_PROBE_SCRIPT)
+        self.assertIn("[class*='text-token-error-foreground']", DOM_PROBE_SCRIPT)
+        self.assertIn('node.closest("aside")', DOM_PROBE_SCRIPT)
+        self.assertIn(".wrap-anywhere", DOM_PROBE_SCRIPT)
+        self.assertIn(".text-pretty", DOM_PROBE_SCRIPT)
         self.assertNotIn('"main header"', DOM_PROBE_SCRIPT)
 
     def test_install_new_document_script_registers_and_evaluates_script(self) -> None:

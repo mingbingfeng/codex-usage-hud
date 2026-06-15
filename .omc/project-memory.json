@@ -120,6 +120,67 @@
       ]
     }
   },
-  "hotPaths": [],
+  "hotPaths": [
+    {
+      "path": "src\\codex_usage_hud\\platforms\\cdp_probe.py",
+      "accessCount": 6,
+      "lastAccessed": 1781516970804,
+      "type": "directory"
+    },
+    {
+      "path": "src\\codex_usage_hud\\cli.py",
+      "accessCount": 4,
+      "lastAccessed": 1781515948880,
+      "type": "file"
+    },
+    {
+      "path": "src\\codex_usage_hud",
+      "accessCount": 4,
+      "lastAccessed": 1781516302457,
+      "type": "directory"
+    },
+    {
+      "path": "src\\codex_usage_hud\\core\\parser.py",
+      "accessCount": 3,
+      "lastAccessed": 1781515940865,
+      "type": "directory"
+    },
+    {
+      "path": "tmp_probe_banner.py",
+      "accessCount": 2,
+      "lastAccessed": 1781517018525,
+      "type": "file"
+    },
+    {
+      "path": "src\\codex_usage_hud\\ui\\work_overlay_qt.py",
+      "accessCount": 1,
+      "lastAccessed": 1781515888986,
+      "type": "file"
+    },
+    {
+      "path": "src\\codex_usage_hud\\platforms",
+      "accessCount": 1,
+      "lastAccessed": 1781515913999,
+      "type": "directory"
+    },
+    {
+      "path": "src\\codex_usage_hud\\platforms\\windows.py",
+      "accessCount": 1,
+      "lastAccessed": 1781515979920,
+      "type": "file"
+    },
+    {
+      "path": "src\\codex_usage_hud\\platforms\\base.py",
+      "accessCount": 1,
+      "lastAccessed": 1781516302512,
+      "type": "directory"
+    },
+    {
+      "path": "tests\\test_cdp_probe.py",
+      "accessCount": 1,
+      "lastAccessed": 1781517088879,
+      "type": "file"
+    }
+  ],
   "userDirectives": []
 }

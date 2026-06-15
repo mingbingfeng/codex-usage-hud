@@ -120,7 +120,7 @@ DOM_PROBE_SCRIPT = r"""
     return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 3))}...`;
   };
   const appErrorText = () => {
-    const selectors = [
+    const errorSelectors = [
       "[role='alert']",
       "[role='status']",
       "[aria-live]",
@@ -133,31 +133,87 @@ DOM_PROBE_SCRIPT = r"""
       "[class*='danger' i]",
       "[class*='destructive' i]",
       "[class*='alert' i]",
-    ].join(", ");
+    ];
+    const selectors = errorSelectors.join(", ");
     const errorPattern = /(exceeded retry limit|too many requests|\b429\b|\brate limit(?:ed)?\b|\b5\d\d\b|network error|request failed|failed to fetch|server error|internal server error|service unavailable|temporarily unavailable|something went wrong|unexpected error|error occurred)/i;
-    const candidates = Array.from(document.querySelectorAll(selectors))
-      .filter((node) => visible(node) && !node.closest("#codex-usage-hud-root"))
-      .map((node, index) => {
-        const text = normalize([
-          node.getAttribute("aria-label"),
-          node.getAttribute("title"),
-          node.textContent,
-        ].filter(Boolean).join(" "));
-        if (!text || !errorPattern.test(text)) return null;
-        const rect = node.getBoundingClientRect();
-        const className = String(node.className || "");
-        const role = String(node.getAttribute("role") || "");
-        let score = 1000 - index;
-        if (role === "alert") score += 160;
-        if (role === "status") score += 90;
-        if (node.hasAttribute("aria-live")) score += 90;
-        if (/toast|notification|snackbar|alert/i.test(className)) score += 80;
-        if (/error|danger|destructive/i.test(className)) score += 70;
-        if (rect.top <= 160 || rect.bottom >= innerHeight - 220) score += 30;
-        if (text.length <= 180) score += 20;
-        if (/\b429\b|too many requests|exceeded retry limit|rate limit/i.test(text)) score += 180;
-        return { text: compact(text), score };
-      })
+    const readableText = (node) => {
+      if (!node) return "";
+      const label = normalize([
+        node.getAttribute?.("aria-label"),
+        node.getAttribute?.("title"),
+      ].filter(Boolean).join(" "));
+      for (const selector of [".wrap-anywhere", ".text-pretty"]) {
+        const text = normalize(Array.from(node.querySelectorAll?.(selector) || [])
+          .filter(visible)
+          .map((child) => child.textContent || "")
+          .filter(Boolean)
+          .join(" "));
+        if (text) return normalize([label, text].filter(Boolean).join(" "));
+      }
+      return normalize([
+        label,
+        node.textContent,
+      ].filter(Boolean).join(" "));
+    };
+    const boundedText = (node, limit = 520) => {
+      const text = readableText(node);
+      return text && text.length <= limit ? text : "";
+    };
+    const usableContainer = (node) => (
+      visible(node) && !node.closest("#codex-usage-hud-root")
+    );
+    const bannerLike = (node) => {
+      const className = String(node?.className || "");
+      return node?.matches?.("aside, [role='alert'], [role='status'], [aria-live]")
+        || /toast|notification|snackbar|alert|error|danger|destructive|rounded|border/i.test(className);
+    };
+    const readableContainerFor = (node, allowGenericAncestor) => {
+      if (!(node instanceof Element)) return null;
+      const aside = node.closest("aside");
+      if (aside && usableContainer(aside) && boundedText(aside)) return aside;
+      const explicit = node.closest(selectors);
+      if (explicit && usableContainer(explicit) && boundedText(explicit)) return explicit;
+      let current = node.parentElement;
+      for (let depth = 0; current instanceof Element && depth < 8; depth += 1, current = current.parentElement) {
+        if (
+          usableContainer(current)
+          && boundedText(current)
+          && (allowGenericAncestor || bannerLike(current))
+        ) {
+          return current;
+        }
+      }
+      return usableContainer(node) && boundedText(node) ? node : null;
+    };
+    const candidateFor = (node, index, baseScore, requirePattern) => {
+      const container = readableContainerFor(node, requirePattern);
+      if (!container) return null;
+      const text = readableText(container);
+      const matchesErrorText = errorPattern.test(text);
+      if (!text || (requirePattern && !matchesErrorText)) return null;
+      const rect = container.getBoundingClientRect();
+      const className = String(container.className || "");
+      const role = String(container.getAttribute("role") || "");
+      let score = baseScore + 1000 - index;
+      if (role === "alert") score += 160;
+      if (role === "status") score += 90;
+      if (container.hasAttribute("aria-live")) score += 90;
+      if (/toast|notification|snackbar|alert/i.test(className)) score += 80;
+      if (/error|danger|destructive/i.test(className)) score += 70;
+      if (container.tagName === "ASIDE") score += 90;
+      if (node !== container) score += 80;
+      if (rect.top <= 160 || rect.bottom >= innerHeight - 220) score += 30;
+      if (text.length <= 180) score += 20;
+      if (matchesErrorText) score += 100;
+      if (/\b429\b|too many requests|exceeded retry limit|rate limit/i.test(text)) score += 180;
+      return { text: compact(text), score };
+    };
+    const iconCandidates = Array.from(
+      document.querySelectorAll("[class*='text-token-error-foreground']")
+    ).map((node, index) => candidateFor(node, index, 420, false));
+    const selectorCandidates = Array.from(document.querySelectorAll(selectors))
+      .map((node, index) => candidateFor(node, index, 0, true));
+    const candidates = iconCandidates.concat(selectorCandidates)
       .filter(Boolean)
       .sort((left, right) => right.score - left.score);
     return candidates[0]?.text || "";
