@@ -18,6 +18,10 @@ WORK_OVERLAY_WIDTH = 430
 WORK_OVERLAY_MARGIN = 16
 WORK_OVERLAY_TOP_OFFSET = 56
 WORK_OVERLAY_CLOSE_SIZE = 22
+WORK_OVERLAY_TEXT_WRAP_WIDTH = WORK_OVERLAY_WIDTH - 28
+WORK_OVERLAY_CARD_X_PADDING = 10
+WORK_OVERLAY_CARD_Y_PADDING = 8
+WORK_OVERLAY_CARD_SPACING = 7
 
 
 def _compact_work_text(value: object, limit: int) -> str:
@@ -111,7 +115,15 @@ def run_work_overlay_helper_qt(
     try:
         from PySide6.QtCore import QPoint, Qt, QTimer
         from PySide6.QtGui import QColor, QCursor, QFont, QPainter, QPen
-        from PySide6.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget, QHBoxLayout
+        from PySide6.QtWidgets import (
+            QApplication,
+            QFrame,
+            QHBoxLayout,
+            QLabel,
+            QSizePolicy,
+            QVBoxLayout,
+            QWidget,
+        )
     except Exception as exc:  # pragma: no cover - depends on local runtime
         raise RuntimeError("PySide6 is required for the desktop work overlay helper.") from exc
 
@@ -132,6 +144,7 @@ def run_work_overlay_helper_qt(
     focus_policy = Qt.FocusPolicy
     mouse_buttons = Qt.MouseButton
     alignment = Qt.AlignmentFlag
+    text_format = Qt.TextFormat
     window_type = Qt.WindowType
 
     class CloseButtonWindow(QWidget):
@@ -235,6 +248,9 @@ def run_work_overlay_helper_qt(
             shell_layout.setSpacing(8)
             root_layout.addWidget(self._shell)
 
+        def _wrapped_label_height(self, label: QLabel, width: int) -> int:
+            return max(label.sizeHint().height(), label.heightForWidth(width), label.minimumSizeHint().height())
+
         def dismiss_item(self, item: Mapping[str, object]) -> None:
             item_id = str(item.get("id") or "")
             if item_id:
@@ -336,8 +352,13 @@ def run_work_overlay_helper_qt(
                     "}"
                 )
                 card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(10, 8, 10, 8)
-                card_layout.setSpacing(7)
+                card_layout.setContentsMargins(
+                    WORK_OVERLAY_CARD_X_PADDING,
+                    WORK_OVERLAY_CARD_Y_PADDING,
+                    WORK_OVERLAY_CARD_X_PADDING,
+                    WORK_OVERLAY_CARD_Y_PADDING,
+                )
+                card_layout.setSpacing(WORK_OVERLAY_CARD_SPACING)
 
                 head_layout = QHBoxLayout()
                 head_layout.setContentsMargins(0, 0, 0, 0)
@@ -346,13 +367,13 @@ def run_work_overlay_helper_qt(
                 header = QLabel(header_text, card)
                 header.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
                 header.setWordWrap(False)
+                header.setTextFormat(text_format.PlainText)
                 header.setAlignment(alignment.AlignVCenter | alignment.AlignLeft)
+                header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                header.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
                 header.setStyleSheet(
                     "QLabel {"
                     f"color: {accent if status == 'recent' else '#A9B6C6'};"
-                    "font-family: 'Microsoft YaHei UI';"
-                    "font-size: 13px;"
-                    "font-weight: 600;"
                     "border: none;"
                     "background: transparent;"
                     "}"
@@ -370,12 +391,15 @@ def run_work_overlay_helper_qt(
                 detail = QLabel(body_text, card)
                 detail.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
                 detail.setWordWrap(True)
+                detail.setTextFormat(text_format.PlainText)
                 detail.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+                detail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+                detail.setFont(QFont("Microsoft YaHei UI", 8))
+                detail.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
+                detail.setMinimumHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
                 detail.setStyleSheet(
                     "QLabel {"
                     "color: #B8C6D8;"
-                    "font-family: 'Microsoft YaHei UI';"
-                    "font-size: 12px;"
                     "border: none;"
                     "background: transparent;"
                     "}"
@@ -387,13 +411,17 @@ def run_work_overlay_helper_qt(
                     status_label = QLabel(status_text, card)
                     status_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
                     status_label.setWordWrap(True)
+                    status_label.setTextFormat(text_format.PlainText)
                     status_label.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+                    status_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+                    status_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
+                    status_label.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
+                    status_label.setMinimumHeight(
+                        self._wrapped_label_height(status_label, WORK_OVERLAY_TEXT_WRAP_WIDTH)
+                    )
                     status_label.setStyleSheet(
                         "QLabel {"
                         f"color: {accent if status == 'recent' else '#8492A6'};"
-                        "font-family: 'Microsoft YaHei UI';"
-                        "font-size: 12px;"
-                        "font-weight: 600;"
                         "border: none;"
                         "background: transparent;"
                         "}"
@@ -402,9 +430,13 @@ def run_work_overlay_helper_qt(
 
                 shell_layout.addWidget(card)
 
-            self.adjustSize()
-            self._shell.adjustSize()
-            content_height = max(1, self.sizeHint().height())
+            self._shell.layout().activate()
+            self.layout().activate()
+            content_height = max(
+                1,
+                self.layout().totalHeightForWidth(WORK_OVERLAY_WIDTH),
+                self.sizeHint().height(),
+            )
             screen = app.primaryScreen()
             geometry = screen.availableGeometry() if screen is not None else self.geometry()
             x = max(geometry.left(), geometry.right() - WORK_OVERLAY_WIDTH - WORK_OVERLAY_MARGIN)
@@ -413,6 +445,18 @@ def run_work_overlay_helper_qt(
             self.setGeometry(x, y, WORK_OVERLAY_WIDTH, content_height)
             self.show()
             self.raise_()
+            app.processEvents()
+            self._shell.layout().activate()
+            self.layout().activate()
+            final_height = max(
+                content_height,
+                self.layout().totalHeightForWidth(WORK_OVERLAY_WIDTH),
+                self.sizeHint().height(),
+            )
+            if final_height != content_height:
+                max_y = max(geometry.top(), geometry.bottom() - final_height - WORK_OVERLAY_MARGIN)
+                y = min(geometry.top() + WORK_OVERLAY_TOP_OFFSET, max_y)
+                self.setGeometry(x, y, WORK_OVERLAY_WIDTH, final_height)
             QTimer.singleShot(0, self.reposition_close_windows)
 
         def reposition_close_windows(self) -> None:
