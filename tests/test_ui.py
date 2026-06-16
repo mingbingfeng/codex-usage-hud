@@ -37,6 +37,7 @@ from codex_usage_hud.cli import (
     RENDERER_UPDATE_FAILURE_LIMIT,
     RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
     UsageSummaryCache,
+    _VisibleAppErrorCache,
     _TkSnapshotPump,
     _apply_visible_app_error,
     active_work_items_for_snapshot,
@@ -96,6 +97,7 @@ from codex_usage_hud.ui.tk_hud import (
     HudSettings,
     HudSettingsStore,
     HudAnchor,
+    HudScrollbar,
     AutoScrollLabel,
     ShimmerTextLabel,
     TOKEN_LEGEND_TEXT,
@@ -105,6 +107,7 @@ from codex_usage_hud.ui.tk_hud import (
     _can_animate_numeric_text,
     _copyable_gap_detail,
     _copyable_tool_command,
+    _budget_warning_summary,
     _fixed_token_total,
     _interpolate_numeric_text,
     _request_total_line,
@@ -350,6 +353,22 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("超过 80% 阈值", warnings[0])
         self.assertIn("周额度已用 210.00/400 USD", warnings[1])
         self.assertIn("超过 50% 阈值", warnings[1])
+
+    def test_tk_budget_warning_summary_only_mentions_ratio_and_threshold(self) -> None:
+        snapshot = ParsedSession()
+        snapshot.today_cost_usd = 59.12
+        snapshot.week_cost_usd = 210.0
+        snapshot.daily_limit_usd = 85.0
+        snapshot.weekly_limit_usd = 400.0
+        snapshot.budget_warnings = [
+            "日额度已用 59.12/85 USD (70%)，超过 50% 阈值",
+            "周额度已用 210.00/400 USD (52%)，超过 50% 阈值",
+        ]
+
+        self.assertEqual(
+            _budget_warning_summary(snapshot),
+            "提醒  日已用 70%，超过 50% 阈值；周已用 52%，超过 50% 阈值",
+        )
 
     def test_usage_summary_cache_invalidates_when_budget_window_changes(self) -> None:
         parser = _FakeUsageParser()
@@ -618,6 +637,29 @@ class BudgetHelperTests(unittest.TestCase):
         )
         self.assertEqual(dismissed, {})
 
+    def test_work_overlay_error_does_not_inherit_running_dismissal(self) -> None:
+        running = {
+            "id": "session-a",
+            "taskStartedAt": "2026-06-16T10:00:00+08:00",
+            "startedAt": "2026-06-16T10:00:00+08:00",
+            "status": "running",
+            "statusText": "正在思考",
+            "current": True,
+        }
+        dismissed = {"session-a": _item_dismiss_key(running)}
+        error = {
+            **running,
+            "status": "error",
+            "statusText": "exceeded retry limit, last status: 429 Too Many Requests",
+            "detail": "exceeded retry limit, last status: 429 Too Many Requests",
+        }
+
+        self.assertEqual(
+            _visible_overlay_items([error], dismissed, item_limit=4),
+            [error],
+        )
+        self.assertEqual(dismissed, {})
+
     def test_work_overlay_marks_visible_codex_error(self) -> None:
         snapshot = ParsedSession(
             session_id="session-error",
@@ -639,6 +681,67 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["statusLabel"], "出错")
         self.assertIn("429 Too Many Requests", str(payload["statusText"]))
+
+    def test_work_overlay_visible_app_error_overrides_completed_task(self) -> None:
+        now = datetime.now().astimezone()
+        snapshot = ParsedSession(
+            session_id="session-error",
+            session_title="Rate limited thread",
+            task_started_at=now - timedelta(seconds=20),
+            task_completed_at=now,
+            request=RequestTokens(status="confirmed"),
+        )
+        _apply_visible_app_error(
+            snapshot,
+            "exceeded retry limit, last status: 429 Too Many Requests",
+        )
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+        )
+
+        items = active_work_items_for_snapshot(context, snapshot, None)
+
+        self.assertEqual(items[0].status, "error")
+        self.assertIn("429 Too Many Requests", items[0].status_text)
+
+    def test_visible_app_error_cache_holds_transient_cdp_miss(self) -> None:
+        now = datetime.now().astimezone()
+        cache = _VisibleAppErrorCache()
+        snapshot = ParsedSession(
+            session_id="session-error",
+            refreshed_at=now,
+            task_started_at=now - timedelta(seconds=10),
+        )
+
+        self.assertIn(
+            "429 Too Many Requests",
+            cache.resolve(
+                snapshot,
+                "exceeded retry limit, last status: 429 Too Many Requests",
+            ),
+        )
+
+        snapshot.refreshed_at = now + timedelta(seconds=30)
+        self.assertIn("429 Too Many Requests", cache.resolve(snapshot, ""))
+
+        snapshot.refreshed_at = now + timedelta(seconds=61)
+        self.assertEqual(cache.resolve(snapshot, ""), "")
+
+    def test_visible_app_error_cache_resets_for_next_task(self) -> None:
+        now = datetime.now().astimezone()
+        cache = _VisibleAppErrorCache()
+        snapshot = ParsedSession(
+            session_id="session-error",
+            refreshed_at=now,
+            task_started_at=now - timedelta(seconds=10),
+        )
+        cache.resolve(snapshot, "exceeded retry limit, last status: 429 Too Many Requests")
+        snapshot.task_started_at = now + timedelta(seconds=5)
+        snapshot.refreshed_at = now + timedelta(seconds=6)
+
+        self.assertEqual(cache.resolve(snapshot, ""), "")
 
     def test_visible_app_error_overrides_request_status(self) -> None:
         snapshot = ParsedSession(request=RequestTokens(status="running", source="sse"))
@@ -1231,6 +1334,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             }
 
             self.assertFalse(any(isinstance(widget, ttk.Notebook) for widget in widgets))
+            self.assertFalse(any(isinstance(widget, tk.Scrollbar) for widget in widgets))
+            self.assertTrue(any(isinstance(widget, HudScrollbar) for widget in widgets))
             self.assertTrue(dialog.overrideredirect())
             width, height, x, y = _parse_tk_geometry(dialog.geometry())
             self.assertEqual(width, SETTINGS_DIALOG_WIDTH)
@@ -1270,6 +1375,32 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 result = window._scroll_settings_body(SimpleNamespace(delta=-120, num=None))
             self.assertEqual(result, "break")
             scroll.assert_called_once_with(1, "units")
+        finally:
+            window._close()
+
+    def test_top_expanded_uses_hud_scrollbar(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            _flush_tk(window)
+
+            widgets = _walk_widgets(window.root)
+
+            self.assertFalse(any(isinstance(widget, tk.Scrollbar) for widget in widgets))
+            self.assertTrue(any(isinstance(widget, HudScrollbar) for widget in widgets))
+        finally:
+            window._close()
+
+    def test_request_expanded_uses_hud_scrollbar(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_request_expanded()
+            _flush_tk(window)
+
+            widgets = _walk_widgets(window.request_root)
+
+            self.assertFalse(any(isinstance(widget, tk.Scrollbar) for widget in widgets))
+            self.assertTrue(any(isinstance(widget, HudScrollbar) for widget in widgets))
         finally:
             window._close()
 
@@ -1556,6 +1687,45 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertIn("/◎87%", window.top_labels["bar"].cget("text"))
             self.assertIn("今日 41.1M/$39.31", window.top_labels["bar"].cget("text"))
             self.assertIn("本周 159.5M/$138.23", window.top_labels["bar"].cget("text"))
+        finally:
+            window._close()
+
+    def test_collapsed_top_auto_width_expands_past_saved_width(self) -> None:
+        window = TokenHudWindow()
+        try:
+            snapshot = ParsedSession()
+            snapshot.confirmed.cumulative_total = 6_900_000
+            snapshot.confirmed.cumulative_input = 6_690_000
+            snapshot.confirmed.cumulative_cached = 5_970_000
+            snapshot.today_tokens = 41_100_000
+            snapshot.today_cost_usd = 39.31
+            snapshot.daily_limit_usd = 100.0
+            snapshot.week_tokens = 159_500_000
+            snapshot.week_cost_usd = 138.23
+            snapshot.weekly_limit_usd = 300.0
+            window.settings.top.width = 120
+            window.root.geometry("120x36+20+20")
+
+            window.update_display(snapshot)
+            _flush_tk(window)
+
+            requested = window.root.winfo_reqwidth()
+            self.assertGreater(requested, 120)
+            self.assertEqual(window.root.winfo_width(), requested)
+            strip = window.top_labels["bar"]
+            for bar in strip._bars:
+                available = bar._canvas.winfo_width() - 22
+                if bar._metric.right_text:
+                    available -= bar._font.measure(bar._metric.right_text) + 8
+                self.assertEqual(bar._fit_text(bar._metric.label, max(0, available)), bar._metric.label)
+            window.root.geometry(f"{requested + 160}x{window.root.winfo_height()}+20+20")
+            _flush_tk(window)
+            widths = [bar.winfo_width() for bar in strip._bars]
+            self.assertEqual(widths[1], widths[2])
+            self.assertEqual(sum(widths) + 14, strip.winfo_width())
+            window.settings.top.width = 900
+            self.assertLess(window._top_size()[0], 900)
+            self.assertEqual(window._top_size()[0], window.root.winfo_reqwidth())
         finally:
             window._close()
 
@@ -2022,7 +2192,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 day_start=now,
                 week_start=now,
                 budget_warnings=[
-                    "日额度已用 39.31/100 USD，接近本次高峰后仍需完整显示这条很长的提醒内容"
+                    "日额度已用 39.31/100 USD (39%)，超过 50% 阈值，这条额外说明应该被 HUD 摘要省略"
                 ],
             )
             snapshot.confirmed.cumulative_total = 451_844
@@ -2070,6 +2240,10 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertIn("命中 ◎87%", window.top_labels["cumulative"].cget("text"))
             self.assertIn("缓存命中 87%", window.top_labels["cache_progress"].cget("text"))
             self.assertIn("◎87%", window.request_label.cget("text"))
+            self.assertEqual(
+                window.top_labels["warnings"].cget("text"),
+                "提醒  日已用 39%，超过 50% 阈值",
+            )
             for key in ("budget", "activity", "warnings", "legend", "slow", "gap", "status"):
                 label = window.top_labels[key]
                 wraplength = int(float(str(label.cget("wraplength"))))

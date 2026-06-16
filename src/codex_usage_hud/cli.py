@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 from threading import Event
@@ -119,6 +119,7 @@ LOADING_FEEDBACK_STALE_SECONDS = 20.0
 ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
+VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_ALPHA = 0.88
 WORK_OVERLAY_HOVER_ALPHA = 0.52
@@ -2111,6 +2112,57 @@ def active_work_items_for_snapshot(
     return ordered[:item_limit]
 
 
+def _visible_app_error_task_key(snapshot: ParsedSession) -> str:
+    started_at = snapshot.task_started_at or snapshot.request.started_at
+    return json.dumps(
+        {
+            "session": snapshot.session_id,
+            "path": str(snapshot.session_path or ""),
+            "startedAt": _iso_or_empty(started_at),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _datetime_age_seconds(value: datetime, now: datetime) -> float:
+    try:
+        return (now - value).total_seconds()
+    except TypeError:
+        return (now.replace(tzinfo=None) - value.replace(tzinfo=None)).total_seconds()
+
+
+@dataclass
+class _VisibleAppErrorCache:
+    message: str = ""
+    task_key: str = ""
+    updated_at: datetime | None = None
+
+    def clear(self) -> None:
+        self.message = ""
+        self.task_key = ""
+        self.updated_at = None
+
+    def resolve(self, snapshot: ParsedSession, visible_message: str) -> str:
+        message = " ".join(str(visible_message or "").split())
+        now = snapshot.refreshed_at or datetime.now().astimezone()
+        task_key = _visible_app_error_task_key(snapshot)
+        if message:
+            self.message = message
+            self.task_key = task_key
+            self.updated_at = now
+            return message
+        if not self.message or not self.updated_at:
+            return ""
+        if self.task_key != task_key:
+            self.clear()
+            return ""
+        if _datetime_age_seconds(self.updated_at, now) <= VISIBLE_APP_ERROR_HOLD_SECONDS:
+            return self.message
+        self.clear()
+        return ""
+
+
 @dataclass
 class RuntimeContext:
     platform: BasePlatform
@@ -2131,6 +2183,9 @@ class RuntimeContext:
     active_session_tracker: ActiveSessionTracker | None
     session_resolver: SessionPathResolver
     usage_cache: UsageSummaryCache
+    visible_app_error_cache: _VisibleAppErrorCache = field(
+        default_factory=_VisibleAppErrorCache
+    )
 
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
@@ -2615,7 +2670,11 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
             session_path,
             snapshot.session_id,
         )
-    _apply_visible_app_error(snapshot, _visible_app_error(context.platform))
+    app_error = context.visible_app_error_cache.resolve(
+        snapshot,
+        _visible_app_error(context.platform),
+    )
+    _apply_visible_app_error(snapshot, app_error)
 
     day_start, week_start = current_budget_windows(context.user_config)
     today_total, week_total = context.usage_cache.summarize(

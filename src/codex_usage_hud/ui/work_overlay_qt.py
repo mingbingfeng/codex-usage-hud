@@ -76,9 +76,13 @@ def _work_overlay_header_text(
 
 
 def _item_dismiss_key(item: Mapping[str, object]) -> str:
+    status = str(item.get("status") or "")
+    error_text = str(item.get("statusText") or item.get("detail") or "") if status == "error" else ""
     return json.dumps(
         {
             "id": item.get("id"),
+            "errorText": error_text,
+            "status": "error" if status == "error" else "work",
             "taskStartedAt": item.get("taskStartedAt") or item.get("startedAt") or "",
         },
         ensure_ascii=False,

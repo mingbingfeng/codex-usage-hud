@@ -81,9 +81,14 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual([item["tone"] for item in collapsed_progress], ["session", "day", "week"])
         self.assertTrue(collapsed_progress[0]["label"].startswith("本会话 14k/"))
         self.assertIn("/◎~61%", collapsed_progress[0]["label"])
+        self.assertNotIn("rightText", collapsed_progress[0])
+        self.assertEqual(collapsed_progress[1]["rightText"], "总 $100.00")
+        self.assertEqual(collapsed_progress[2]["rightText"], "总 $400.00")
         self.assertEqual(top_progress["cache"]["label"], "缓存命中 ~61%")
         self.assertEqual(top_progress["budget"][0]["label"], "本日累计 50k/$0.500")
+        self.assertEqual(top_progress["budget"][0]["rightText"], "总 $100.00")
         self.assertEqual(top_progress["budget"][1]["label"], "本周累计 200k/$1.50")
+        self.assertEqual(top_progress["budget"][1]["rightText"], "总 $400.00")
         request_line = str(payload["requestLine"])
         self.assertIn("↑~1,200", request_line)
         self.assertIn("◎~61%", request_line)
@@ -182,6 +187,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-line-inner", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-marquee", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-strip", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-progress-size-probe", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-progress-total", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-budget-rails", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("interpolateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("canAnimateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -211,6 +218,26 @@ class RendererHudPayloadTests(unittest.TestCase):
         request_row_details = payload["requestRowDetails"]
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
+
+    def test_payload_warning_summary_uses_ratio_and_threshold_only(self) -> None:
+        now = datetime(2026, 6, 5, 13, 10, 11).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-abcdef123456",
+            refreshed_at=now,
+            last_event_time=now,
+        )
+        snapshot.today_cost_usd = 59.12
+        snapshot.week_cost_usd = 210.0
+        snapshot.daily_limit_usd = 85.0
+        snapshot.weekly_limit_usd = 400.0
+        snapshot.budget_warnings = [
+            "日额度已用 59.12/85 USD (70%)，超过 50% 阈值",
+            "周额度已用 210.00/400 USD (52%)，超过 50% 阈值",
+        ]
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        self.assertEqual(payload["topDetails"]["warnings"], "提醒  日已用 70%，超过 50% 阈值；周已用 52%，超过 50% 阈值")
 
     def test_error_snapshot_uses_single_collapsed_top_progress_rail(self) -> None:
         snapshot = ParsedSession(status="missing", error="session file unavailable")

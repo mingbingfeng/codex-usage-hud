@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import math
 import os
 import re
 import subprocess
@@ -105,6 +107,8 @@ NUMERIC_TOKEN_RE = re.compile(r"\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?")
 LONG_DISPLAY_TOKEN_RE = re.compile(r"[^\s\u4e00-\u9fff，。；、：！？（）]+")
 HUD_BG = "#10161D"
 HUD_PANEL_BG = "#141B24"
+HUD_PANEL_BORDER = "#3A485A"
+HUD_WINDOW_OUTSIDE = "#010203"
 HUD_HEADER_BG = "#202833"
 HUD_DIVIDER = "#273241"
 HUD_TEXT = "#E8EEF7"
@@ -113,6 +117,7 @@ HUD_ACCENT = "#F3D27A"
 HUD_BLUE = "#9CCBFF"
 HUD_ERROR = "#FF6B6B"
 HUD_PROGRESS_TRACK = "#111822"
+HUD_PROGRESS_TRACK_BORDER = "#314052"
 HUD_PROGRESS_TRACK_TEXT = "#657589"
 HUD_PROGRESS_CACHE = "#78B8FF"
 HUD_PROGRESS_CACHE_END = "#5EA7FF"
@@ -216,6 +221,446 @@ class _HoverTip:
                 tip.destroy()
             except Exception:
                 pass
+
+
+def _hex_to_rgb(value: str, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
+    text = str(value or "").strip()
+    if text.startswith("#") and len(text) == 7:
+        try:
+            return int(text[1:3], 16), int(text[3:5], 16), int(text[5:7], 16)
+        except ValueError:
+            return fallback
+    if text.startswith("#") and len(text) == 4:
+        try:
+            return (
+                int(text[1] * 2, 16),
+                int(text[2] * 2, 16),
+                int(text[3] * 2, 16),
+            )
+        except ValueError:
+            return fallback
+    return fallback
+
+
+@lru_cache(maxsize=4096)
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+
+def _mix_rgb(
+    base: tuple[int, int, int],
+    overlay: tuple[int, int, int],
+    alpha: float,
+) -> tuple[int, int, int]:
+    alpha = max(0.0, min(1.0, alpha))
+    inverse = 1.0 - alpha
+    return (
+        max(0, min(255, int(round((base[0] * inverse) + (overlay[0] * alpha))))),
+        max(0, min(255, int(round((base[1] * inverse) + (overlay[1] * alpha))))),
+        max(0, min(255, int(round((base[2] * inverse) + (overlay[2] * alpha))))),
+    )
+
+
+def _lerp_rgb(
+    start: tuple[int, int, int],
+    end: tuple[int, int, int],
+    progress: float,
+) -> tuple[int, int, int]:
+    return _mix_rgb(start, end, max(0.0, min(1.0, progress)))
+
+
+def _rounded_rect_alpha(
+    x: float,
+    y: float,
+    left: float,
+    top: float,
+    right: float,
+    bottom: float,
+    radius: float,
+) -> float:
+    if right <= left or bottom <= top:
+        return 0.0
+    radius = max(0.0, min(radius, (right - left) / 2.0, (bottom - top) / 2.0))
+    if left + radius <= x <= right - radius:
+        signed_distance = max(top - y, y - bottom)
+    elif top + radius <= y <= bottom - radius:
+        signed_distance = max(left - x, x - right)
+    else:
+        center_x = left + radius if x < left + radius else right - radius
+        center_y = top + radius if y < top + radius else bottom - radius
+        signed_distance = math.hypot(x - center_x, y - center_y) - radius
+    return max(0.0, min(1.0, 0.5 - signed_distance))
+
+
+def _progress_track_rgb(
+    y: float,
+    top: float,
+    bottom: float,
+    track: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    if bottom <= top:
+        return track
+    position = max(0.0, min(1.0, (y - top) / (bottom - top)))
+    color = _lerp_rgb(_mix_rgb(track, (255, 255, 255), 0.045), track, min(1.0, position * 1.35))
+    if position > 0.62:
+        color = _mix_rgb(color, (0, 0, 0), ((position - 0.62) / 0.38) * 0.16)
+    return color
+
+
+def _progress_fill_rgb(
+    x: float,
+    y: float,
+    left: float,
+    top: float,
+    right: float,
+    bottom: float,
+    fill: tuple[int, int, int],
+    fill_end: tuple[int, int, int],
+    *,
+    gloss: bool,
+) -> tuple[int, int, int]:
+    width = max(1.0, right - left)
+    color = _lerp_rgb(fill, fill_end, (x - left) / width)
+    if bottom > top:
+        y_position = max(0.0, min(1.0, (y - top) / (bottom - top)))
+        if y_position <= 0.52:
+            if y_position <= 0.28:
+                alpha = 0.24 - (y_position / 0.28 * 0.16)
+            else:
+                alpha = 0.08 * (1.0 - ((y_position - 0.28) / 0.24))
+            color = _mix_rgb(color, (255, 255, 255), max(0.0, alpha))
+    if gloss and width > 18:
+        shine_left = max(left, right - min(64.0, width * 0.42))
+        if x >= shine_left and top + 3 <= y <= bottom - 3:
+            shine_progress = (x - shine_left) / max(1.0, right - shine_left)
+            color = _mix_rgb(color, (255, 255, 255), 0.14 * shine_progress)
+    return color
+
+
+@lru_cache(maxsize=64)
+def _scrollbar_active_thumb_color() -> str:
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(HUD_PANEL_BORDER, (58, 72, 90)),
+            _hex_to_rgb(HUD_TEXT, (232, 238, 247)),
+            0.16,
+        )
+    )
+
+
+class HudScrollbar(tk.Canvas):
+    """Canvas scrollbar used to mirror the renderer HUD's slim dark rail."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        command: Callable[..., Any] | None = None,
+        track: str = HUD_BG,
+        thumb: str = HUD_DIVIDER,
+        thumb_hover: str = HUD_PANEL_BORDER,
+        thumb_active: str | None = None,
+        width: int = 8,
+        min_thumb_px: int = 24,
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("width", max(6, int(width)))
+        kwargs.setdefault("highlightthickness", 0)
+        kwargs.setdefault("bd", 0)
+        kwargs.setdefault("relief", "flat")
+        kwargs.setdefault("bg", track)
+        kwargs.setdefault("takefocus", 0)
+        super().__init__(master, **kwargs)
+        self._command = command
+        self._thumb_color = str(thumb)
+        self._thumb_hover_color = str(thumb_hover)
+        self._thumb_active_color = str(thumb_active or _scrollbar_active_thumb_color())
+        self._min_thumb_px = max(18, int(min_thumb_px))
+        self._first = 0.0
+        self._last = 1.0
+        self._thumb_visible = False
+        self._hover = False
+        self._dragging = False
+        self._drag_anchor_y = 0
+        self._drag_anchor_first = 0.0
+        self.configure(cursor="arrow")
+        self._thumb_id = self.create_rectangle(0, 0, 0, 0, width=0, outline="")
+        self.bind("<Configure>", self._redraw, add="+")
+        self.bind("<Motion>", self._on_motion, add="+")
+        self.bind("<Leave>", self._on_leave, add="+")
+        self.bind("<ButtonPress-1>", self._on_press, add="+")
+        self.bind("<B1-Motion>", self._on_drag, add="+")
+        self.bind("<ButtonRelease-1>", self._on_release, add="+")
+        self._redraw()
+
+    def set_command(self, command: Callable[..., Any] | None) -> None:
+        self._command = command
+
+    def set(self, first: float | str, last: float | str) -> None:
+        try:
+            start = float(first)
+            end = float(last)
+        except (TypeError, ValueError):
+            return
+        start = max(0.0, min(1.0, start))
+        end = max(start, min(1.0, end))
+        self._first = start
+        self._last = end
+        self._redraw()
+
+    def _track_bounds(self) -> tuple[float, float, float, float]:
+        width = max(2.0, float(self.winfo_width()))
+        height = max(2.0, float(self.winfo_height()))
+        return 1.0, 1.0, max(2.0, width - 1.0), max(2.0, height - 1.0)
+
+    def _thumb_bounds(self) -> tuple[float, float, float, float] | None:
+        left, top, right, bottom = self._track_bounds()
+        visible_fraction = max(0.0, min(1.0, self._last - self._first))
+        track_length = max(0.0, bottom - top)
+        if track_length <= 0.0 or visible_fraction >= 0.999:
+            return None
+        thumb_length = min(track_length, max(float(self._min_thumb_px), track_length * visible_fraction))
+        travel = max(0.0, track_length - thumb_length)
+        max_first = max(0.0, 1.0 - visible_fraction)
+        thumb_top = top
+        if travel > 0.0 and max_first > 0.0:
+            thumb_top += travel * (self._first / max_first)
+        thumb_bottom = min(bottom, thumb_top + thumb_length)
+        return left, thumb_top, right, thumb_bottom
+
+    def _thumb_contains(self, y: float) -> bool:
+        thumb = self._thumb_bounds()
+        return bool(thumb and thumb[1] <= y <= thumb[3])
+
+    def _thumb_fill(self) -> str:
+        if self._dragging:
+            return self._thumb_active_color
+        if self._hover:
+            return self._thumb_hover_color
+        return self._thumb_color
+
+    def _redraw(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        thumb = self._thumb_bounds()
+        if thumb is None:
+            self._thumb_visible = False
+            self.itemconfigure(self._thumb_id, state="hidden")
+            return
+        self._thumb_visible = True
+        self.coords(self._thumb_id, *thumb)
+        self.itemconfigure(self._thumb_id, fill=self._thumb_fill(), state="normal")
+
+    def _on_motion(self, event: tk.Event[tk.Misc]) -> str:
+        hovering = self._thumb_contains(float(event.y))
+        if hovering != self._hover and not self._dragging:
+            self._hover = hovering
+            self._redraw()
+        return "break"
+
+    def _on_leave(self, _event: tk.Event[tk.Misc]) -> str:
+        if self._hover and not self._dragging:
+            self._hover = False
+            self._redraw()
+        return "break"
+
+    def _on_press(self, event: tk.Event[tk.Misc]) -> str:
+        if self._command is None or not self._thumb_visible:
+            return "break"
+        if self._thumb_contains(float(event.y)):
+            self._dragging = True
+            self._hover = True
+            self._drag_anchor_y = int(event.y)
+            self._drag_anchor_first = self._first
+            self._redraw()
+            return "break"
+        thumb = self._thumb_bounds()
+        if thumb is None:
+            return "break"
+        direction = -1 if float(event.y) < thumb[1] else 1
+        self._command("scroll", direction, "pages")
+        return "break"
+
+    def _on_drag(self, event: tk.Event[tk.Misc]) -> str:
+        if not self._dragging or self._command is None:
+            return "break"
+        thumb = self._thumb_bounds()
+        if thumb is None:
+            return "break"
+        visible_fraction = max(0.0, min(1.0, self._last - self._first))
+        max_first = max(0.0, 1.0 - visible_fraction)
+        thumb_length = max(0.0, thumb[3] - thumb[1])
+        track_travel = max(1.0, (self.winfo_height() - 2.0) - thumb_length)
+        delta = float(event.y - self._drag_anchor_y)
+        target = self._drag_anchor_first + ((delta / track_travel) * max_first)
+        self._command("moveto", max(0.0, min(max_first, target)))
+        return "break"
+
+    def _on_release(self, _event: tk.Event[tk.Misc]) -> str:
+        if self._dragging:
+            self._dragging = False
+            self._redraw()
+        return "break"
+
+
+@lru_cache(maxsize=64)
+def _progress_track_surface_rows(
+    *,
+    width: int,
+    height: int,
+    bg: str,
+    track: str,
+    border: str,
+) -> tuple[str, ...]:
+    bg_rgb = _hex_to_rgb(bg, (16, 22, 29))
+    track_rgb = _hex_to_rgb(track, (17, 24, 34))
+    border_rgb = _hex_to_rgb(border, (49, 64, 82))
+    left = 1.0
+    top = 1.0
+    right = max(left + 1.0, float(width) - 1.0)
+    bottom = max(top + 1.0, float(height) - 1.0)
+    radius = max(0.0, (bottom - top) / 2.0)
+    border_width = 1.0
+    inner_left = left + border_width
+    inner_top = top + border_width
+    inner_right = max(inner_left, right - border_width)
+    inner_bottom = max(inner_top, bottom - border_width)
+    inner_radius = max(0.0, radius - border_width)
+    rows: list[str] = []
+    for y in range(height):
+        colors = []
+        point_y = y + 0.5
+        track_color = _progress_track_rgb(point_y, inner_top, inner_bottom, track_rgb)
+        for x in range(width):
+            point_x = x + 0.5
+            outer_alpha = _rounded_rect_alpha(point_x, point_y, left, top, right, bottom, radius)
+            if outer_alpha <= 0.0:
+                colors.append(_rgb_to_hex(bg_rgb))
+                continue
+            inner_alpha = _rounded_rect_alpha(
+                point_x,
+                point_y,
+                inner_left,
+                inner_top,
+                inner_right,
+                inner_bottom,
+                inner_radius,
+            )
+            color = _mix_rgb(bg_rgb, border_rgb, max(0.0, outer_alpha - inner_alpha))
+            track_alpha = min(1.0, inner_alpha)
+            if track_alpha > 0.0:
+                color = _mix_rgb(color, track_color, track_alpha)
+            colors.append(_rgb_to_hex(color))
+        rows.append("{" + " ".join(colors) + "}")
+    return tuple(rows)
+
+
+@lru_cache(maxsize=96)
+def _progress_fill_surface_rows(
+    *,
+    width: int,
+    height: int,
+    track: str,
+    fill: str,
+    fill_end: str,
+    gloss: bool,
+) -> tuple[str, ...]:
+    track_rgb = _hex_to_rgb(track, (17, 24, 34))
+    fill_rgb = _hex_to_rgb(fill, _hex_to_rgb(HUD_PROGRESS_DAY, (243, 210, 122)))
+    fill_end_rgb = _hex_to_rgb(fill_end, fill_rgb)
+    left = 0.0
+    top = 0.0
+    right = max(left + 1.0, float(width))
+    bottom = max(top + 1.0, float(height))
+    radius = max(0.0, (bottom - top) / 2.0)
+    rows: list[str] = []
+    for y in range(height):
+        colors = []
+        point_y = y + 0.5
+        track_color = _progress_track_rgb(point_y, top, bottom, track_rgb)
+        for x in range(width):
+            point_x = x + 0.5
+            fill_alpha = _rounded_rect_alpha(point_x, point_y, left, top, right, bottom, radius)
+            color = track_color
+            if fill_alpha > 0.0:
+                color = _mix_rgb(
+                    color,
+                    _progress_fill_rgb(
+                        point_x,
+                        point_y,
+                        left,
+                        top,
+                        right,
+                        bottom,
+                        fill_rgb,
+                        fill_end_rgb,
+                        gloss=gloss,
+                    ),
+                    fill_alpha,
+                )
+            colors.append(_rgb_to_hex(color))
+        rows.append("{" + " ".join(colors) + "}")
+    return tuple(rows)
+
+
+@lru_cache(maxsize=32)
+def _rounded_shell_surface_rows(
+    *,
+    width: int,
+    height: int,
+    radius: int,
+    bg: str,
+    border: str,
+    outside: str,
+) -> tuple[str, ...]:
+    bg_rgb = _hex_to_rgb(bg, (16, 22, 29))
+    border_rgb = _hex_to_rgb(border, (46, 56, 70))
+    outside_rgb = _hex_to_rgb(outside, (14, 18, 23))
+    left = 0.0
+    top = 0.0
+    right = max(left + 1.0, float(width))
+    bottom = max(top + 1.0, float(height))
+    outer_radius = max(1.0, min(float(radius), right / 2.0, bottom / 2.0))
+    border_width = 1.0
+    inner_left = left + border_width
+    inner_top = top + border_width
+    inner_right = max(inner_left, right - border_width)
+    inner_bottom = max(inner_top, bottom - border_width)
+    inner_radius = max(1.0, outer_radius - border_width)
+    rows: list[str] = []
+    outside_hex = _rgb_to_hex(outside_rgb)
+    bg_hex = _rgb_to_hex(bg_rgb)
+    border_hex = _rgb_to_hex(border_rgb)
+    middle_row = (
+        "{" + " ".join([border_hex, *([bg_hex] * max(0, width - 2)), border_hex][:width]) + "}"
+        if width > 1
+        else "{" + border_hex + "}"
+    )
+    for y in range(height):
+        point_y = y + 0.5
+        if outer_radius <= point_y <= bottom - outer_radius:
+            rows.append(middle_row)
+            continue
+        colors = []
+        for x in range(width):
+            point_x = x + 0.5
+            outer_alpha = _rounded_rect_alpha(point_x, point_y, left, top, right, bottom, outer_radius)
+            if outer_alpha <= 0.0:
+                colors.append(outside_hex)
+                continue
+            inner_alpha = _rounded_rect_alpha(
+                point_x,
+                point_y,
+                inner_left,
+                inner_top,
+                inner_right,
+                inner_bottom,
+                inner_radius,
+            )
+            color = _mix_rgb(outside_rgb, border_rgb, outer_alpha)
+            if inner_alpha > 0.0:
+                color = _mix_rgb(color, bg_rgb, min(1.0, inner_alpha))
+            colors.append(_rgb_to_hex(color))
+        rows.append("{" + " ".join(colors) + "}")
+    return tuple(rows)
 HUD_AUTO_REANCHOR_ENV = "CODEX_USAGE_HUD_AUTO_REANCHOR"
 NATIVE_ANCHOR_STABLE_FRAMES = 3
 
@@ -1064,6 +1509,7 @@ class TopHudProgressMetric:
     fill_end: str
     fill_text: str
     track_text: str = HUD_PROGRESS_TRACK_TEXT
+    right_text: str = ""
 
 
 def _clamp_progress_ratio(value: float | int | None) -> float:
@@ -1096,6 +1542,10 @@ class TopHudProgressBar(tk.Frame):
         self._font = tkfont.Font(font=font)
         self._padding_x = max(4, int(padding_x))
         self._gloss = bool(gloss)
+        self._track_surface_key: tuple[int, int, str, str, str] | None = None
+        self._track_surface_image: tk.PhotoImage | None = None
+        self._fill_surface_key: tuple[int, int, str, str, str, bool] | None = None
+        self._fill_surface_image: tk.PhotoImage | None = None
         self._metric = TopHudProgressMetric(
             label="",
             ratio=0.0,
@@ -1117,6 +1567,7 @@ class TopHudProgressBar(tk.Frame):
         )
         setattr(self._canvas, "_hud_progress_canvas", True)
         self._canvas.pack(fill="both", expand=True)
+        _HoverTip(self._canvas, self._tooltip_text)
         self.bind("<Configure>", self._handle_configure)
         self._canvas.bind("<Configure>", self._handle_configure)
         self._draw()
@@ -1158,6 +1609,7 @@ class TopHudProgressBar(tk.Frame):
                     fill_end=HUD_PROGRESS_DAY_END,
                     fill_text=HUD_PROGRESS_DAY_TEXT,
                     track_text=HUD_TEXT,
+                    right_text="",
                 )
             )
         else:
@@ -1172,8 +1624,27 @@ class TopHudProgressBar(tk.Frame):
             fill_end=str(metric.fill_end or metric.fill or HUD_PROGRESS_DAY),
             fill_text=str(metric.fill_text or HUD_PROGRESS_DAY_TEXT),
             track_text=str(metric.track_text or HUD_PROGRESS_TRACK_TEXT),
+            right_text=str(metric.right_text or ""),
         )
         self._draw()
+
+    def preferred_width(self) -> int:
+        label_width = self._font.measure(self._metric.label)
+        right_width = self._font.measure(self._metric.right_text) if self._metric.right_text else 0
+        gap = 8 if right_width else 0
+        # Match the real drawable width in _draw(): 1px inset on both sides plus text padding.
+        return label_width + right_width + gap + (self._padding_x * 2) + 2
+
+    def set_requested_width(self, width: int) -> None:
+        self._width = max(1, int(width))
+        self._canvas.configure(width=self._width)
+
+    def _tooltip_text(self) -> str:
+        label = self._metric.label.strip()
+        right_text = self._metric.right_text.strip()
+        if label and right_text:
+            return f"{label} / {right_text}"
+        return label or right_text
 
     def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
         del event
@@ -1185,43 +1656,38 @@ class TopHudProgressBar(tk.Frame):
         width = max(1, canvas.winfo_width() or self.winfo_width())
         height = max(1, canvas.winfo_height() or self._height)
         x1, y1, x2, y2 = 1, 1, max(2, width - 1), max(2, height - 1)
-        self._draw_pill(x1, y1, x2, y2, fill=HUD_PROGRESS_TRACK, outline="#253142")
 
         fill_width = max(0, int((x2 - x1) * self._metric.ratio))
-        if fill_width > 0:
-            fill_x2 = min(x2, x1 + fill_width)
-            self._draw_pill(
-                x1,
-                y1,
-                fill_x2,
-                y2,
-                fill=self._metric.fill,
-                outline=self._metric.fill_end,
-            )
-            if self._gloss and fill_width > 18:
-                shine_left = max(x1, fill_x2 - min(70, fill_width))
-                canvas.create_rectangle(
-                    shine_left,
-                    y1 + 3,
-                    fill_x2 - 5,
-                    y2 - 3,
-                    fill=self._metric.fill_end,
-                    outline="",
-                    stipple="gray50",
-                )
+        self._draw_progress_surface(width, height, fill_width)
 
         label = self._metric.label
+        right_text = self._metric.right_text
         text_x = x1 + self._padding_x
+        right_x = x2 - self._padding_x
+        right_width = self._font.measure(right_text) if right_text else 0
+        text_gap = 8 if right_width else 0
+        label_max_width = max(0, right_x - right_width - text_gap - text_x)
+        label = self._fit_text(label, label_max_width)
         text_y = height / 2
-        canvas.create_text(
-            text_x,
-            text_y,
-            anchor="w",
-            text=label,
-            fill=self._metric.track_text,
-            font=self._font,
-        )
-        if fill_width >= self._font.measure(label) + (self._padding_x * 2):
+        if label:
+            canvas.create_text(
+                text_x,
+                text_y,
+                anchor="w",
+                text=label,
+                fill=self._metric.track_text,
+                font=self._font,
+            )
+        if right_text:
+            canvas.create_text(
+                right_x,
+                text_y,
+                anchor="e",
+                text=right_text,
+                fill=self._metric.track_text,
+                font=self._font,
+            )
+        if label and fill_width >= self._font.measure(label) + (self._padding_x * 2):
             canvas.create_text(
                 text_x,
                 text_y,
@@ -1230,34 +1696,89 @@ class TopHudProgressBar(tk.Frame):
                 fill=self._metric.fill_text,
                 font=self._font,
             )
+        if right_text and (x1 + fill_width) >= right_x:
+            canvas.create_text(
+                right_x,
+                text_y,
+                anchor="e",
+                text=right_text,
+                fill=self._metric.fill_text,
+                font=self._font,
+            )
 
-    def _draw_pill(
-        self,
-        x1: int,
-        y1: int,
-        x2: int,
-        y2: int,
-        *,
-        fill: str,
-        outline: str = "",
-    ) -> None:
-        if x2 <= x1 or y2 <= y1:
+    def _draw_progress_surface(self, width: int, height: int, fill_width: int) -> None:
+        if width <= 1 or height <= 1:
             return
-        if (x2 - x1) <= (y2 - y1):
-            canvas = self._canvas
-            canvas.create_oval(x1, y1, x2, y2, fill=fill, outline=outline or "")
-            return
-        radius = max(1, min((y2 - y1) // 2, (x2 - x1) // 2))
-        canvas = self._canvas
-        canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline="")
-        canvas.create_oval(x1, y1, x1 + (radius * 2), y2, fill=fill, outline="")
-        canvas.create_oval(x2 - (radius * 2), y1, x2, y2, fill=fill, outline="")
-        if outline:
-            canvas.create_arc(x1, y1, x1 + (radius * 2), y2, start=90, extent=180, style="arc", outline=outline)
-            canvas.create_arc(x2 - (radius * 2), y1, x2, y2, start=-90, extent=180, style="arc", outline=outline)
-            canvas.create_line(x1 + radius, y1, x2 - radius, y1, fill=outline)
-            canvas.create_line(x1 + radius, y2, x2 - radius, y2, fill=outline)
+        track_key = (
+            width,
+            height,
+            self._bg,
+            HUD_PROGRESS_TRACK,
+            HUD_PROGRESS_TRACK_BORDER,
+        )
+        track_image = self._track_surface_image
+        if track_image is None or self._track_surface_key != track_key:
+            track_image = tk.PhotoImage(width=width, height=height)
+            rows = _progress_track_surface_rows(
+                width=width,
+                height=height,
+                bg=self._bg,
+                track=HUD_PROGRESS_TRACK,
+                border=HUD_PROGRESS_TRACK_BORDER,
+            )
+            track_image.put(" ".join(rows), to=(0, 0))
+            self._track_surface_key = track_key
+            self._track_surface_image = track_image
+        self._canvas.create_image(0, 0, anchor="nw", image=track_image)
 
+        inner_width = max(1, width - 4)
+        inner_height = max(1, height - 4)
+        fill_inner_width = min(inner_width, max(0, fill_width - 1))
+        if fill_inner_width <= 0:
+            return
+        fill_key = (
+            fill_inner_width,
+            inner_height,
+            HUD_PROGRESS_TRACK,
+            self._metric.fill,
+            self._metric.fill_end,
+            self._gloss,
+        )
+        fill_image = self._fill_surface_image
+        if fill_image is None or self._fill_surface_key != fill_key:
+            fill_image = tk.PhotoImage(width=fill_inner_width, height=inner_height)
+            rows = _progress_fill_surface_rows(
+                width=fill_inner_width,
+                height=inner_height,
+                track=HUD_PROGRESS_TRACK,
+                fill=self._metric.fill,
+                fill_end=self._metric.fill_end,
+                gloss=self._gloss,
+            )
+            fill_image.put(" ".join(rows), to=(0, 0))
+            self._fill_surface_key = fill_key
+            self._fill_surface_image = fill_image
+        self._canvas.create_image(2, 2, anchor="nw", image=fill_image)
+
+    def _fit_text(self, text: str, max_width: int) -> str:
+        if not text or max_width <= 0:
+            return ""
+        if self._font.measure(text) <= max_width:
+            return text
+        suffix = "..."
+        suffix_width = self._font.measure(suffix)
+        if max_width <= suffix_width:
+            return ""
+        low = 0
+        high = len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            candidate = text[:mid] + suffix
+            if self._font.measure(candidate) <= max_width:
+                low = mid
+            else:
+                high = mid - 1
+        return text[:low] + suffix
 
 class TopHudProgressStrip(tk.Frame):
     """Collapsed top HUD strip with session/day/week rails."""
@@ -1266,10 +1787,25 @@ class TopHudProgressStrip(tk.Frame):
         super().__init__(master, bg=HUD_BG, **kwargs)
         self._text = ""
         self._bars: list[TopHudProgressBar] = []
+        self._base_widths = (72, 68, 76)
+        self._column_gap = 7
         for index in range(3):
-            bar = TopHudProgressBar(self, height=28, bg=HUD_BG, gloss=False)
-            bar.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 7, 0))
-            self.columnconfigure(index, weight=(16, 12, 14)[index], minsize=(130, 86, 96)[index])
+            bar = TopHudProgressBar(
+                self,
+                height=28,
+                width=self._base_widths[index],
+                bg=HUD_BG,
+                font=("Microsoft YaHei UI", 7, "bold"),
+                padding_x=10,
+                gloss=False,
+            )
+            bar.grid(
+                row=0,
+                column=index,
+                sticky="nsew",
+                padx=(0 if index == 0 else self._column_gap, 0),
+            )
+            self.columnconfigure(index, weight=0, minsize=self._base_widths[index])
             self._bars.append(bar)
         self.rowconfigure(0, weight=1)
 
@@ -1294,11 +1830,6 @@ class TopHudProgressStrip(tk.Frame):
         return result
 
     def set_metrics(self, metrics: list[TopHudProgressMetric]) -> None:
-        single_metric = len(metrics) == 1 and bool(metrics[0].label)
-        if single_metric:
-            self._layout_single_metric()
-        else:
-            self._layout_multi_metric()
         labels = []
         for index, bar in enumerate(self._bars):
             metric = metrics[index] if index < len(metrics) else TopHudProgressMetric(
@@ -1310,12 +1841,32 @@ class TopHudProgressStrip(tk.Frame):
             )
             bar.set_metric(metric)
             labels.append(metric.label)
+        single_metric = len(metrics) == 1 and bool(metrics[0].label)
+        if single_metric:
+            self._layout_single_metric()
+        else:
+            self._layout_multi_metric()
         self._text = " | ".join(label for label in labels if label)
 
     def _layout_multi_metric(self) -> None:
+        widths = [max(self._base_widths[index], bar.preferred_width()) for index, bar in enumerate(self._bars)]
+        tail_width = max(widths[1], widths[2])
         for index, bar in enumerate(self._bars):
-            bar.grid(row=0, column=index, columnspan=1, sticky="nsew", padx=(0 if index == 0 else 7, 0))
-            self.columnconfigure(index, weight=(16, 12, 14)[index], minsize=(130, 86, 96)[index])
+            width = widths[0] if index == 0 else tail_width
+            bar.grid(
+                row=0,
+                column=index,
+                columnspan=1,
+                sticky="nsew",
+                padx=(0 if index == 0 else self._column_gap, 0),
+            )
+            bar.set_requested_width(width)
+            self.columnconfigure(
+                index,
+                weight=0 if index == 0 else 1,
+                minsize=width,
+                uniform=None if index == 0 else "top-collapsed-tail",
+            )
 
     def _layout_single_metric(self) -> None:
         for index, bar in enumerate(self._bars):
@@ -1323,7 +1874,12 @@ class TopHudProgressStrip(tk.Frame):
                 bar.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=0)
             else:
                 bar.grid_remove()
-            self.columnconfigure(index, weight=1 if index == 0 else 0, minsize=0)
+            if index == 0:
+                width = max(self._base_widths[0], bar.preferred_width())
+                bar.set_requested_width(width)
+                self.columnconfigure(index, weight=1, minsize=width, uniform=None)
+            else:
+                self.columnconfigure(index, weight=0, minsize=0, uniform=None)
 
 
 class TopHudBudgetProgress(tk.Frame):
@@ -1398,6 +1954,99 @@ class TopHudBudgetProgress(tk.Frame):
     def _sync_meta_wrap(self, event: tk.Event[tk.Misc]) -> None:
         width = max(120, int(getattr(event, "width", 360) or 360) - 4)
         self._meta.configure(wraplength=width)
+
+
+class RoundedHudShell(tk.Frame):
+    """Antialiased rounded HUD shell with a continuous 1px border."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        bg: str = HUD_BG,
+        border: str = HUD_PANEL_BORDER,
+        outside: str = HUD_WINDOW_OUTSIDE,
+        radius: int = 8,
+        padx: int = 5,
+        pady: int = 1,
+    ) -> None:
+        super().__init__(
+            master,
+            bg=outside,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self._bg = bg
+        self._border = border
+        self._outside = outside
+        self._radius = max(4, int(radius))
+        self._image: tk.PhotoImage | None = None
+        self._image_key: tuple[int, int, int, str, str, str] | None = None
+        self._region_key: tuple[int, int, int] | None = None
+        self._background = tk.Label(
+            self,
+            bg=outside,
+            borderwidth=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+        )
+        self._background.place(x=0, y=0, relwidth=1, relheight=1)
+        self.content = tk.Frame(
+            self,
+            bg=bg,
+            padx=max(0, int(padx)),
+            pady=max(0, int(pady)),
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.content.pack(fill="both", expand=True, padx=2, pady=2)
+        self.bind("<Configure>", self._handle_configure, add="+")
+
+    def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
+        width = max(1, int(getattr(event, "width", 0) or self.winfo_width()))
+        height = max(1, int(getattr(event, "height", 0) or self.winfo_height()))
+        self._draw_shell(width, height)
+        self._apply_window_region(width, height)
+
+    def _draw_shell(self, width: int, height: int) -> None:
+        key = (width, height, self._radius, self._bg, self._border, self._outside)
+        if self._image is not None and self._image_key == key:
+            return
+        image = tk.PhotoImage(width=width, height=height)
+        rows = _rounded_shell_surface_rows(
+            width=width,
+            height=height,
+            radius=self._radius,
+            bg=self._bg,
+            border=self._border,
+            outside=self._outside,
+        )
+        image.put(" ".join(rows), to=(0, 0))
+        self._image = image
+        self._image_key = key
+        self._background.configure(image=image)
+
+    def _apply_window_region(self, width: int, height: int) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        key = (width, height, self._radius)
+        if self._region_key == key:
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winfo_toplevel().winfo_id())
+            diameter = max(2, self._radius * 2)
+            region = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter)
+            if not region:
+                return
+            if ctypes.windll.user32.SetWindowRgn(hwnd, region, True):
+                self._region_key = key
+                return
+            ctypes.windll.gdi32.DeleteObject(region)
+        except Exception:
+            return
 
 
 @dataclass(frozen=True)
@@ -2574,6 +3223,10 @@ def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
     return _clamp_progress_ratio(amount / budget)
 
 
+def _budget_limit_text(limit: float | None) -> str:
+    return f"总 {_format_money(limit)}"
+
+
 def _top_collapsed_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgressMetric]:
     return [
         TopHudProgressMetric(
@@ -2590,6 +3243,7 @@ def _top_collapsed_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgr
             fill=HUD_PROGRESS_DAY,
             fill_end=HUD_PROGRESS_DAY_END,
             fill_text=HUD_PROGRESS_DAY_TEXT,
+            right_text=_budget_limit_text(snapshot.daily_limit_usd),
         ),
         TopHudProgressMetric(
             label=f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
@@ -2597,6 +3251,7 @@ def _top_collapsed_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgr
             fill=HUD_PROGRESS_WEEK,
             fill_end=HUD_PROGRESS_WEEK_END,
             fill_text=HUD_PROGRESS_WEEK_TEXT,
+            right_text=_budget_limit_text(snapshot.weekly_limit_usd),
         ),
     ]
 
@@ -2620,6 +3275,7 @@ def _top_budget_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgress
             fill=HUD_PROGRESS_DAY,
             fill_end=HUD_PROGRESS_DAY_END,
             fill_text=HUD_PROGRESS_DAY_TEXT,
+            right_text=_budget_limit_text(snapshot.daily_limit_usd),
         ),
         TopHudProgressMetric(
             label=f"本周累计 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
@@ -2627,6 +3283,7 @@ def _top_budget_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgress
             fill=HUD_PROGRESS_WEEK,
             fill_end=HUD_PROGRESS_WEEK_END,
             fill_text=HUD_PROGRESS_WEEK_TEXT,
+            right_text=_budget_limit_text(snapshot.weekly_limit_usd),
         ),
     ]
 
@@ -2645,6 +3302,29 @@ def _top_budget_progress_meta(snapshot: ParsedSession) -> str:
     if snapshot.week_adjustment_usd > 0:
         parts.append(f"人工补充 {_format_money(snapshot.week_adjustment_usd)}")
     return "  |  ".join(parts)
+
+
+def _budget_warning_summary(snapshot: ParsedSession) -> str:
+    if snapshot.budget_error:
+        return snapshot.budget_error
+    if not snapshot.budget_warnings:
+        return "提醒  暂无额度提醒"
+    messages: list[str] = []
+    for warning in snapshot.budget_warnings:
+        if warning.startswith("日额度已用") and "超过 " in warning and snapshot.daily_limit_usd > 0:
+            threshold = warning.split("超过 ", 1)[1].split("%", 1)[0].strip()
+            messages.append(
+                f"日已用 {snapshot.today_cost_usd / snapshot.daily_limit_usd:.0%}，超过 {threshold}% 阈值"
+            )
+            continue
+        if warning.startswith("周额度已用") and "超过 " in warning and snapshot.weekly_limit_usd > 0:
+            threshold = warning.split("超过 ", 1)[1].split("%", 1)[0].strip()
+            messages.append(
+                f"周已用 {snapshot.week_cost_usd / snapshot.weekly_limit_usd:.0%}，超过 {threshold}% 阈值"
+            )
+            continue
+        messages.append(warning)
+    return "提醒  " + "；".join(messages)
 
 
 def _round_cache_hit_rate_label(item: RequestRound) -> str:
@@ -3055,6 +3735,7 @@ class TokenHudWindow:
         self._last_anchor_decisions: dict[str, tuple[str, str, str, str]] = {}
         self._last_budget_log_signature: tuple[int, int, int, str, str] | None = None
         self._snapshot = ParsedSession(status="waiting")
+        self._top_collapsed_width_override: int | None = None
         self._ui_interaction_hold_until = 0.0
         self._top_rebuild_job: str | None = None
         self._request_rebuild_job: str | None = None
@@ -3111,7 +3792,7 @@ class TokenHudWindow:
     ) -> tk.Frame:
         zone = tk.Frame(
             window,
-            bg=str(window.cget("bg")),
+            bg=HUD_BG if target == "top" else str(window.cget("bg")),
             cursor=cursor,
             highlightthickness=0,
             borderwidth=0,
@@ -3135,15 +3816,17 @@ class TokenHudWindow:
     ) -> None:
         edge = RESIZE_EDGE_HIT_SIZE
         corner = RESIZE_CORNER_HIT_SIZE
+        edge_hit = max(1, edge - 2)
         self._resize_hit_zone(
             window,
             target,
             "left",
             "sb_h_double_arrow",
-            x=0,
-            y=0,
+            x=2,
+            y=2,
             relheight=1.0,
-            width=edge,
+            height=-4,
+            width=edge_hit,
         )
         self._resize_hit_zone(
             window,
@@ -3152,23 +3835,25 @@ class TokenHudWindow:
             "sb_h_double_arrow",
             relx=1.0,
             x=-edge,
-            y=0,
+            y=2,
             relheight=1.0,
-            width=edge,
+            height=-4,
+            width=edge_hit,
         )
         if not expanded:
             return
+        corner_hit = max(1, corner - 2)
         if target == "top":
             self._resize_hit_zone(
                 window,
                 target,
                 "bottom-left",
                 "size_ne_sw",
-                x=0,
+                x=2,
                 rely=1.0,
                 y=-corner,
-                width=corner,
-                height=corner,
+                width=corner_hit,
+                height=corner_hit,
             )
             self._resize_hit_zone(
                 window,
@@ -3179,8 +3864,8 @@ class TokenHudWindow:
                 rely=1.0,
                 x=-corner,
                 y=-corner,
-                width=corner,
-                height=corner,
+                width=corner_hit,
+                height=corner_hit,
             )
             return
         self._resize_hit_zone(
@@ -3188,10 +3873,10 @@ class TokenHudWindow:
             target,
             "top-left",
             "size_nw_se",
-            x=0,
-            y=0,
-            width=corner,
-            height=corner,
+            x=2,
+            y=2,
+            width=corner_hit,
+            height=corner_hit,
         )
         self._resize_hit_zone(
             window,
@@ -3200,9 +3885,9 @@ class TokenHudWindow:
             "size_ne_sw",
             relx=1.0,
             x=-corner,
-            y=0,
-            width=corner,
-            height=corner,
+            y=2,
+            width=corner_hit,
+            height=corner_hit,
         )
 
     def _settings_button(self, parent: tk.Misc) -> tk.Button:
@@ -3386,17 +4071,13 @@ class TokenHudWindow:
             bd=0,
             relief="flat",
         )
-        scrollbar = tk.Scrollbar(
+        scrollbar = HudScrollbar(
             body_shell,
-            orient="vertical",
             command=canvas.yview,
-            bg=HUD_HEADER_BG,
-            troughcolor=HUD_BG,
-            activebackground=HUD_DIVIDER,
-            width=10,
-            relief="flat",
-            borderwidth=0,
-            elementborderwidth=0,
+            track=HUD_BG,
+            thumb=HUD_DIVIDER,
+            thumb_hover=HUD_PANEL_BORDER,
+            width=8,
         )
         body = tk.Frame(canvas, bg=HUD_BG, padx=12, pady=12)
         body_window = canvas.create_window((0, 0), window=body, anchor="nw")
@@ -4753,9 +5434,18 @@ class TokenHudWindow:
             child.destroy()
         self.top_labels.clear()
         self._top_update_button = None
-        self.root.configure(bg=HUD_BG)
-        frame = tk.Frame(self.root, bg=HUD_BG, padx=8, pady=4)
-        frame.pack(fill="both", expand=True)
+        self.root.configure(bg=HUD_WINDOW_OUTSIDE)
+        shell = RoundedHudShell(
+            self.root,
+            bg=HUD_BG,
+            border=HUD_PANEL_BORDER,
+            outside=HUD_WINDOW_OUTSIDE,
+            radius=8,
+            padx=5,
+            pady=1,
+        )
+        shell.pack(fill="both", expand=True)
+        frame = shell.content
         if self.top_expanded:
             self._build_top_expanded(frame)
         else:
@@ -4813,26 +5503,21 @@ class TokenHudWindow:
 
         body = tk.Frame(frame, bg=HUD_BG)
         body.pack(fill="both", expand=True)
-        scrollbar = tk.Scrollbar(
-            body,
-            orient="vertical",
-            bg=HUD_HEADER_BG,
-            troughcolor=HUD_BG,
-            activebackground=HUD_DIVIDER,
-            width=9,
-            relief="flat",
-            borderwidth=0,
-            elementborderwidth=0,
-            highlightthickness=0,
-        )
         canvas = tk.Canvas(
             body,
             bg=HUD_BG,
             highlightthickness=0,
             borderwidth=0,
-            yscrollcommand=scrollbar.set,
         )
-        scrollbar.configure(command=canvas.yview)
+        scrollbar = HudScrollbar(
+            body,
+            command=canvas.yview,
+            track=HUD_BG,
+            thumb=HUD_DIVIDER,
+            thumb_hover=HUD_PANEL_BORDER,
+            width=8,
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
         content = tk.Frame(canvas, bg=HUD_BG)
@@ -4873,8 +5558,13 @@ class TokenHudWindow:
                 wraplength=300,
             )
 
-            def sync_label_wrap(event: tk.Event[tk.Misc], widget: tk.Label = label) -> None:
-                wraplength = max(96, int(event.width) - 4)
+            def sync_label_wrap(_event: tk.Event[tk.Misc], widget: tk.Label = label) -> None:
+                widget.update_idletasks()
+                parent_width = widget.master.winfo_width() if widget.master is not None else 0
+                label_width = widget.winfo_width()
+                widths = [value for value in (label_width, parent_width) if int(value) > 0]
+                available_width = min(widths) if widths else max(label_width, parent_width, 0)
+                wraplength = max(96, int(available_width) - 4)
                 try:
                     current = int(float(str(widget.cget("wraplength"))))
                 except (tk.TclError, TypeError, ValueError):
@@ -4883,6 +5573,8 @@ class TokenHudWindow:
                     widget.configure(wraplength=wraplength)
 
             label.bind("<Configure>", sync_label_wrap, add="+")
+            if parent is not None:
+                parent.bind("<Configure>", sync_label_wrap, add="+")
             if key == "slow":
                 setattr(label, "_hud_handle", True)
                 label.bind("<Button-1>", self._copy_slowest_tool_command)
@@ -4902,6 +5594,8 @@ class TokenHudWindow:
             content.rowconfigure(0, weight=0)
             content.rowconfigure(1, weight=0)
             if width < TOP_EXPANDED_STACK_WIDTH:
+                right.configure(width=1)
+                right.grid_propagate(True)
                 left.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
                 right.grid(row=1, column=0, sticky="ew", padx=0, pady=(7, 0))
                 content.columnconfigure(0, weight=1, minsize=max(1, width))
@@ -4913,6 +5607,8 @@ class TokenHudWindow:
             content.columnconfigure(0, weight=1, minsize=left_width)
             content.columnconfigure(1, weight=0, minsize=side_width)
             content.rowconfigure(0, weight=1)
+            right.configure(width=side_width)
+            right.grid_propagate(False)
 
         def sync_top_scroll_region(event: tk.Event[tk.Misc]) -> None:
             del event
@@ -5099,17 +5795,12 @@ class TokenHudWindow:
 
         body = tk.Frame(frame, bg=REQUEST_PANEL_BG, padx=0, pady=0)
         body.pack(fill="x", expand=False)
-        scrollbar = tk.Scrollbar(
+        scrollbar = HudScrollbar(
             body,
-            orient="vertical",
-            bg=REQUEST_HEADER_BG,
-            troughcolor=REQUEST_PANEL_BG,
-            activebackground=HUD_DIVIDER,
-            width=9,
-            relief="flat",
-            borderwidth=0,
-            elementborderwidth=0,
-            highlightthickness=0,
+            track=REQUEST_PANEL_BG,
+            thumb=HUD_DIVIDER,
+            thumb_hover=HUD_PANEL_BORDER,
+            width=8,
         )
         self.request_text = tk.Text(
             body,
@@ -5132,7 +5823,7 @@ class TokenHudWindow:
         self.request_text.tag_configure("recent", foreground=HUD_ACCENT)
         self.request_text.tag_configure("normal", foreground=REQUEST_TEXT)
         self.request_text.tag_configure("muted", foreground=REQUEST_MUTED)
-        scrollbar.configure(command=self.request_text.yview)
+        scrollbar.set_command(self.request_text.yview)
         scrollbar.pack(side="right", fill="y")
         self.request_text.pack(side="left", fill="x", expand=True)
         self.request_text.configure(state="disabled")
@@ -5140,7 +5831,7 @@ class TokenHudWindow:
     def _bind_click_tree(self, widget: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> None:
         if getattr(widget, "_hud_handle", False):
             return
-        if isinstance(widget, (tk.Button, tk.Text, tk.Scrollbar)):
+        if isinstance(widget, (tk.Button, tk.Text, HudScrollbar, tk.Scrollbar)):
             return
         widget.bind("<ButtonPress-1>", lambda event, t=target, w=window: self._start_pointer(event, t, w), add="+")
         widget.bind("<B1-Motion>", self._drag_if_free, add="+")
@@ -5570,8 +6261,12 @@ class TokenHudWindow:
             if has_width_ratio and placement.anchor_source == anchor.source
             else legacy_width
         )
+        auto_width = self._top_collapsed_auto_width() if target == "top" and not expanded else None
 
-        if has_width_ratio:
+        if auto_width is not None:
+            width = auto_width
+            width_mode = "content-auto"
+        elif has_width_ratio:
             width = int(round(width_base * placement.width_ratio))
             width_mode = (
                 "anchor-ratio"
@@ -5987,13 +6682,35 @@ class TokenHudWindow:
 
     def _top_size(self) -> tuple[int, int]:
         expanded = self.top_expanded
-        width = max(
-            self._interactive_min_width("top", expanded),
-            self.settings.top.width or (480 if not self.compact else 360),
-        )
+        auto_width = self._top_collapsed_auto_width() if not expanded else None
+        if auto_width is not None:
+            width = auto_width
+        else:
+            width = max(
+                self._interactive_min_width("top", expanded),
+                self.settings.top.width or (480 if not self.compact else 360),
+            )
         return (
             width,
             self._window_height("top", expanded, self.settings.top),
+        )
+
+    def _top_collapsed_auto_width(self) -> int | None:
+        return self._top_collapsed_width_override
+
+    def _measure_top_collapsed_auto_width(self) -> int | None:
+        if self.top_expanded:
+            return None
+        bar = self.top_labels.get("bar")
+        if not isinstance(bar, TopHudProgressStrip) or not self.root.winfo_exists():
+            return None
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            return None
+        return max(
+            self._interactive_min_width("top", False),
+            int(self.root.winfo_reqwidth()),
         )
 
     def _request_size(self) -> tuple[int, int]:
@@ -6310,6 +7027,18 @@ class TokenHudWindow:
                     )
                 ]
             bar.configure(text=text, metrics=metrics)
+            self._top_collapsed_width_override = (
+                self._measure_top_collapsed_auto_width()
+                if snapshot.status != "waiting"
+                else None
+            )
+            if (
+                not self.top_expanded
+                and not self._move_target
+                and not self._resize_target
+                and hasattr(self, "request_root")
+            ):
+                self._apply_geometry()
             return
 
         cache_progress = self.top_labels.get("cache_progress")
@@ -6432,11 +7161,7 @@ class TokenHudWindow:
         self.request_text.yview_moveto(0.0 if should_follow_head else previous_top)
 
     def _format_warnings(self, snapshot: ParsedSession) -> str:
-        if snapshot.budget_error:
-            return snapshot.budget_error
-        if snapshot.budget_warnings:
-            return "提醒  " + "；".join(snapshot.budget_warnings)
-        return "提醒  暂无额度提醒"
+        return _budget_warning_summary(snapshot)
 
     def _format_notice(self, snapshot: ParsedSession) -> str:
         notice = self._format_warnings(snapshot)

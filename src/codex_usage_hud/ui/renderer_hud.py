@@ -61,7 +61,7 @@ def set_cost_estimator(estimator: CostEstimator) -> None:
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "8";
+  const version = "11";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -339,7 +339,7 @@ RENDERER_HUD_SCRIPT = r"""
         width: 100%;
         height: 26px;
         display: none;
-        grid-template-columns: minmax(130px, 1.6fr) minmax(86px, 1.2fr) minmax(96px, 1.4fr);
+        grid-template-columns: max-content minmax(68px, 1fr) minmax(76px, 1fr);
         gap: 7px;
         align-items: center;
       }
@@ -348,6 +348,11 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-progress-strip[data-count="1"] {
         grid-template-columns: minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-progress-strip:not([data-count="1"]) .codex-usage-hud-progress-rail:first-child {
+        justify-self: start;
+        width: max-content;
+        max-width: 100%;
       }
       #${rootId} .codex-usage-hud-progress-rail {
         position: relative;
@@ -367,6 +372,7 @@ RENDERER_HUD_SCRIPT = r"""
         inset: 0;
         display: flex;
         align-items: center;
+        gap: 6px;
         min-width: 0;
         padding: 0 11px;
         overflow: hidden;
@@ -376,16 +382,61 @@ RENDERER_HUD_SCRIPT = r"""
         font-weight: 800;
         letter-spacing: 0;
       }
+      #${rootId} .codex-usage-hud-progress-label {
+        min-width: 0;
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-progress-total {
+        flex: 0 0 auto;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-progress-size-probe {
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 0;
+        overflow: hidden;
+        padding: 0 11px;
+        visibility: hidden;
+        white-space: nowrap;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0;
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-size-probe .codex-usage-hud-progress-label {
+        flex: 0 0 auto;
+        overflow: visible;
+        text-overflow: clip;
+      }
+      #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-track-text,
+      #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-fill-text {
+        padding: 0 10px;
+        font-size: 11px;
+      }
+      #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-size-probe {
+        padding: 0 10px;
+        font-size: 11px;
+      }
       #${rootId} .codex-usage-hud-progress-track-text {
-        color: rgba(218,228,241,.32);
+        z-index: 2;
+        color: #eef4fb;
+        text-shadow: 0 1px 2px rgba(0,0,0,.58), 0 0 4px rgba(0,0,0,.28);
+        pointer-events: none;
       }
       #${rootId} .codex-usage-hud-progress-fill {
         position: absolute;
         inset: 0 auto 0 0;
         min-width: 0;
         max-width: 100%;
+        z-index: 1;
         border-radius: inherit;
         overflow: hidden;
+        pointer-events: none;
       }
       #${rootId} .codex-usage-hud-progress-fill::before {
         content: "";
@@ -3061,21 +3112,37 @@ RENDERER_HUD_SCRIPT = r"""
     rail.className = "codex-usage-hud-progress-rail";
     rail.dataset.tone = String(metric?.tone || "day");
     const label = String(metric?.label || "");
+    const rightText = String(metric?.rightText || "");
     const ratio = normalizeProgressRatio(metric?.ratio);
-    rail.title = label;
+    const fullText = rightText ? `${label} / ${rightText}` : label;
+    rail.title = fullText;
+    rail.setAttribute("aria-label", fullText);
 
-    const trackText = document.createElement("span");
-    trackText.className = "codex-usage-hud-progress-track-text";
-    trackText.textContent = label;
-    rail.appendChild(trackText);
+    function progressTextLayer(className, includeRightText = true) {
+      const layer = document.createElement("span");
+      layer.className = className;
+      layer.title = fullText;
+      const labelNode = document.createElement("span");
+      labelNode.className = "codex-usage-hud-progress-label";
+      labelNode.textContent = label;
+      labelNode.title = fullText;
+      layer.appendChild(labelNode);
+      if (includeRightText && rightText) {
+        const totalNode = document.createElement("span");
+        totalNode.className = "codex-usage-hud-progress-total";
+        totalNode.textContent = rightText;
+        totalNode.title = fullText;
+        layer.appendChild(totalNode);
+      }
+      return layer;
+    }
+
+    rail.appendChild(progressTextLayer("codex-usage-hud-progress-size-probe"));
+    rail.appendChild(progressTextLayer("codex-usage-hud-progress-track-text"));
 
     const fill = document.createElement("span");
     fill.className = "codex-usage-hud-progress-fill";
     fill.style.width = `${Math.round(ratio * 1000) / 10}%`;
-    const fillText = document.createElement("span");
-    fillText.className = "codex-usage-hud-progress-fill-text";
-    fillText.textContent = label;
-    fill.appendChild(fillText);
     rail.appendChild(fill);
     return rail;
   }
@@ -3970,12 +4037,25 @@ def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
     return max(0.0, min(1.0, amount / budget))
 
 
-def _top_progress_metric(label: str, ratio: float | None, tone: str) -> dict[str, object]:
-    return {
+def _budget_limit_text(limit: float | None) -> str:
+    return f"总 {_format_money(limit)}"
+
+
+def _top_progress_metric(
+    label: str,
+    ratio: float | None,
+    tone: str,
+    *,
+    right_text: str = "",
+) -> dict[str, object]:
+    metric: dict[str, object] = {
         "label": label,
         "ratio": max(0.0, min(1.0, float(ratio or 0.0))),
         "tone": tone,
     }
+    if right_text:
+        metric["rightText"] = right_text
+    return metric
 
 
 def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
@@ -3994,21 +4074,25 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
+        right_text=_budget_limit_text(snapshot.daily_limit_usd),
     )
     week = _top_progress_metric(
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
+        right_text=_budget_limit_text(snapshot.weekly_limit_usd),
     )
     budget_day = _top_progress_metric(
         f"本日累计 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
+        right_text=_budget_limit_text(snapshot.daily_limit_usd),
     )
     budget_week = _top_progress_metric(
         f"本周累计 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
+        right_text=_budget_limit_text(snapshot.weekly_limit_usd),
     )
     return {
         "collapsed": [session, day, week],
@@ -4392,12 +4476,31 @@ def _format_budget_progress_meta(snapshot: ParsedSession) -> str:
     return "\n".join(parts)
 
 
-def _format_warnings(snapshot: ParsedSession) -> str:
+def _budget_warning_summary(snapshot: ParsedSession) -> str:
     if snapshot.budget_error:
         return snapshot.budget_error
-    if snapshot.budget_warnings:
-        return "提醒  " + "；".join(snapshot.budget_warnings)
-    return "提醒  暂无额度提醒"
+    if not snapshot.budget_warnings:
+        return "提醒  暂无额度提醒"
+    messages: list[str] = []
+    for warning in snapshot.budget_warnings:
+        if warning.startswith("日额度已用") and "超过 " in warning and snapshot.daily_limit_usd > 0:
+            threshold = warning.split("超过 ", 1)[1].split("%", 1)[0].strip()
+            messages.append(
+                f"日已用 {snapshot.today_cost_usd / snapshot.daily_limit_usd:.0%}，超过 {threshold}% 阈值"
+            )
+            continue
+        if warning.startswith("周额度已用") and "超过 " in warning and snapshot.weekly_limit_usd > 0:
+            threshold = warning.split("超过 ", 1)[1].split("%", 1)[0].strip()
+            messages.append(
+                f"周已用 {snapshot.week_cost_usd / snapshot.weekly_limit_usd:.0%}，超过 {threshold}% 阈值"
+            )
+            continue
+        messages.append(warning)
+    return "提醒  " + "；".join(messages)
+
+
+def _format_warnings(snapshot: ParsedSession) -> str:
+    return _budget_warning_summary(snapshot)
 
 
 def _format_notice(snapshot: ParsedSession) -> str:
