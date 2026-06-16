@@ -1917,6 +1917,8 @@ def _work_status_from_snapshot(
     *,
     now: datetime,
 ) -> tuple[str, str] | None:
+    if snapshot.task_aborted_at is not None:
+        return None
     activity_detail = snapshot.activity.detail.lower()
     request_status = snapshot.request.status
     if request_status == "error" or snapshot.request.error:

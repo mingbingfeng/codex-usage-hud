@@ -19,6 +19,7 @@ if str(SRC_ROOT) not in sys.path:
 from codex_usage_hud.core.calculator import estimate_tokens
 from codex_usage_hud.core.parser import (
     JsonlSessionParser,
+    RequestTokens,
     SseRequestStateMachine,
     extract_log_field,
     parse_timestamp,
@@ -288,6 +289,112 @@ class JsonlSessionParserTests(unittest.TestCase):
             snapshot.task_completed_at,
             parse_timestamp("2026-05-28T00:00:02Z"),
         )
+
+    def test_parse_records_ignores_turn_aborted_marker_and_ends_task(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "session_meta", {"id": "session-a"}),
+            record("2026-05-28T00:00:01Z", "turn_context", {"model": "gpt-5.5"}),
+            record("2026-05-28T00:00:02Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:03Z",
+                "response_item",
+                {"type": "message", "role": "assistant", "content": [{"text": "继续处理"}]},
+            ),
+            token_count("2026-05-28T00:00:04Z", 80, 20, 12, 2, 92, 92),
+            record(
+                "2026-05-28T00:00:05Z",
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": (
+                                "<turn_aborted>\n"
+                                "The user interrupted the previous turn on purpose.\n"
+                                "</turn_aborted>"
+                            )
+                        }
+                    ],
+                },
+            ),
+            record(
+                "2026-05-28T00:00:06Z",
+                "event_msg",
+                {"type": "turn_aborted", "reason": "interrupted"},
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        snapshot = parser.parse_records(records)
+
+        self.assertEqual(snapshot.request.status, "confirmed")
+        self.assertEqual(snapshot.estimate.total_tokens, 0)
+        self.assertFalse(snapshot.slow.current_gap_active)
+        self.assertEqual(snapshot.last_output.detail, "继续处理")
+        self.assertEqual(
+            snapshot.task_aborted_at,
+            parse_timestamp("2026-05-28T00:00:06Z"),
+        )
+
+    def test_parse_records_clears_running_sse_request_after_turn_aborted(self) -> None:
+        parser = JsonlSessionParser()
+        tracker = SseRequestStateMachine(db_path=None)
+        tracker.current = RequestTokens(
+            status="running",
+            round_index=1,
+            model="gpt-5.5",
+            source="sse",
+            started_at=parse_timestamp("2026-05-28T00:00:05Z"),
+            updated_at=parse_timestamp("2026-05-28T00:00:05Z"),
+            total_tokens=0,
+            output_tokens=0,
+            estimated=True,
+        )
+        records = [
+            record("2026-05-28T00:00:00Z", "session_meta", {"id": "session-a"}),
+            record("2026-05-28T00:00:01Z", "turn_context", {"model": "gpt-5.5"}),
+            record("2026-05-28T00:00:02Z", "event_msg", {"type": "task_started"}),
+            token_count("2026-05-28T00:00:04Z", 40, 10, 8, 1, 48, 48),
+            record(
+                "2026-05-28T00:00:05Z",
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "text": (
+                                "<turn_aborted>\n"
+                                "The user interrupted the previous turn on purpose.\n"
+                                "</turn_aborted>"
+                            )
+                        }
+                    ],
+                },
+            ),
+            record(
+                "2026-05-28T00:00:06Z",
+                "event_msg",
+                {"type": "turn_aborted", "reason": "interrupted"},
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        snapshot = parser.parse_records(records, sse_tracker=tracker)
+
+        self.assertEqual(snapshot.request.status, "confirmed")
+        self.assertEqual(
+            snapshot.request.completed_at,
+            parse_timestamp("2026-05-28T00:00:06Z"),
+        )
+        self.assertTrue(snapshot.request_history)
+        self.assertNotIn("running", [item.status for item in snapshot.request_history])
 
 
 class SseRequestStateMachineTests(unittest.TestCase):

@@ -100,6 +100,10 @@ from codex_usage_hud.ui.tk_hud import (
     HudScrollbar,
     AutoScrollLabel,
     ShimmerTextLabel,
+    HUD_BG,
+    HUD_PANEL_BORDER,
+    HUD_WINDOW_OUTSIDE,
+    HUD_WINDOW_TRANSPARENT,
     TOKEN_LEGEND_TEXT,
     TokenHudWindow,
     WindowPlacement,
@@ -113,6 +117,7 @@ from codex_usage_hud.ui.tk_hud import (
     _request_total_line,
     _round_entry,
     _round_entry_widths,
+    _rounded_shell_surface_rows,
     _visual_anchor_geometry,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
@@ -139,6 +144,12 @@ class _FakeWindow:
 
     def winfo_height(self) -> int:
         return self._height
+
+    def winfo_rootx(self) -> int:
+        return self._x
+
+    def winfo_rooty(self) -> int:
+        return self._y
 
     def geometry(self, value: str) -> None:
         match = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", value)
@@ -947,6 +958,112 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(snapshot.request.status, "confirmed")
         self.assertEqual(items, [])
+
+    def test_aborted_task_does_not_stay_active(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+        token_payload = {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 80,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 15,
+                    "reasoning_output_tokens": 2,
+                    "total_tokens": 95,
+                },
+                "total_token_usage": {
+                    "input_tokens": 80,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 15,
+                    "reasoning_output_tokens": 2,
+                    "total_tokens": 95,
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-current.jsonl"
+            rows = [
+                {
+                    "timestamp": (now + timedelta(seconds=-15)).isoformat(),
+                    "type": "session_meta",
+                    "payload": {"id": "session-current"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-14)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-13)).isoformat(),
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "上一轮正常输出"}],
+                    },
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-12)).isoformat(),
+                    "type": "event_msg",
+                    "payload": token_payload,
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-11)).isoformat(),
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": (
+                                    "<turn_aborted>\n"
+                                    "The user interrupted the previous turn on purpose.\n"
+                                    "</turn_aborted>"
+                                )
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-10)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "turn_aborted", "reason": "interrupted"},
+                },
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                encoding="utf-8",
+            )
+            snapshot = parser.parse_file(path)
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, path)
+
+        self.assertEqual(snapshot.request.status, "confirmed")
+        self.assertFalse(snapshot.slow.current_gap_active)
+        self.assertEqual(items, [])
+
+    def test_windows_rounded_shell_rows_do_not_paint_black_corner_base(self) -> None:
+        if not sys.platform.startswith("win"):
+            self.skipTest("Windows-specific rounded shell behavior")
+        rows = _rounded_shell_surface_rows(
+            width=40,
+            height=20,
+            radius=9,
+            bg=HUD_BG,
+            border=HUD_PANEL_BORDER,
+            outside=HUD_WINDOW_TRANSPARENT,
+        )
+
+        self.assertIn(HUD_WINDOW_TRANSPARENT.lower(), rows[0].lower())
+        self.assertNotIn(HUD_WINDOW_OUTSIDE.lower(), rows[0].lower())
 
     def test_work_overlay_header_text_formats_time_elapsed_and_title(self) -> None:
         started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()
@@ -1879,6 +1996,16 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
+    def test_top_collapsed_pointer_hit_test_matches_legacy_left_edge_zone(self) -> None:
+        window = object.__new__(TokenHudWindow)
+        window.top_expanded = False
+        window.request_expanded = False
+        fake = _FakeWindow(x=420, y=92, width=400, height=TOP_DOCK_HEIGHT)
+
+        self.assertEqual(window._resize_edge_from_pointer(fake, "top", 422, 100), "left")
+        self.assertEqual(window._resize_edge_from_pointer(fake, "top", 420, 100), "")
+        self.assertEqual(window._resize_edge_from_pointer(fake, "top", 426, 100), "")
+
     def test_top_expanded_bottom_corner_resize_keeps_top_fixed(self) -> None:
         window = TokenHudWindow()
         try:
@@ -1899,6 +2026,16 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             )
         finally:
             window._close()
+
+    def test_request_expanded_pointer_hit_test_matches_legacy_top_right_corner(self) -> None:
+        window = object.__new__(TokenHudWindow)
+        window.top_expanded = False
+        window.request_expanded = True
+        fake = _FakeWindow(x=220, y=600, width=320, height=REQUEST_DOCK_EXPANDED_HEIGHT)
+
+        self.assertEqual(window._resize_edge_from_pointer(fake, "request", 529, 604), "top-right")
+        self.assertEqual(window._resize_edge_from_pointer(fake, "request", 528, 611), "top-right")
+        self.assertEqual(window._resize_edge_from_pointer(fake, "request", 527, 613), "")
 
     def test_request_expanded_top_corner_resize_keeps_bottom_fixed(self) -> None:
         window = TokenHudWindow()
@@ -2229,6 +2366,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 for widget in _walk_widgets(window.root)
                 if isinstance(widget, tk.Canvas) and widget.winfo_toplevel() == window.root
                 and not getattr(widget, "_hud_progress_canvas", False)
+                and not getattr(widget, "_hud_scrollbar", False)
             ]
             self.assertEqual(len(canvases), 1)
             canvas = canvases[0]

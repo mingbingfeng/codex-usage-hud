@@ -94,6 +94,21 @@ def reasoning_text(payload: Mapping[str, Any]) -> str:
     return " ".join(part for part in parts if part)
 
 
+def response_message_role(payload: Mapping[str, Any]) -> str:
+    """Return a normalized role for response_item message payloads."""
+    return str(payload.get("role") or "").strip().lower()
+
+
+def is_turn_aborted_message(payload: Mapping[str, Any]) -> bool:
+    """Return whether a response_item message is Codex's synthetic turn_aborted marker."""
+    if payload.get("type") != "message":
+        return False
+    if response_message_role(payload) != "user":
+        return False
+    text = " ".join(message_text(payload).split()).lower()
+    return text.startswith("<turn_aborted>") or "<turn_aborted>" in text
+
+
 def extract_log_field(body: str, name: str) -> str:
     """Extract a key=value field from an OTel feedback log line."""
     match = re.search(rf"\b{re.escape(name)}=(\"[^\"]*\"|[^\s]+)", body)
@@ -136,6 +151,8 @@ def event_label(record: Mapping[str, Any]) -> str:
         if payload_type == "function_call_output":
             return "output:" + str(payload.get("call_id") or "?")
         if payload_type == "message":
+            if is_turn_aborted_message(payload):
+                return "turn_aborted"
             return "assistant:" + compact_text(message_text(payload), 70)
         if payload_type == "reasoning":
             detail = compact_text(reasoning_text(payload), 70)
@@ -412,6 +429,7 @@ class ParsedSession:
     token_events: int = 0
     task_started_at: datetime | None = None
     task_completed_at: datetime | None = None
+    task_aborted_at: datetime | None = None
     selection_source: str = "activity"
     today_tokens: int = 0
     today_cost_usd: float = 0.0
@@ -528,6 +546,10 @@ class JsonlSessionParser:
             records,
             task_started_index,
         )
+        parsed.task_aborted_at = self.latest_task_aborted_after(
+            records,
+            task_started_index,
+        )
         jsonl_rounds = self.token_rounds_since_task(records, task_started_index)
         parsed.request = self.build_request_tokens(
             parsed,
@@ -616,6 +638,22 @@ class JsonlSessionParser:
                 record.get("type") == "event_msg"
                 and isinstance(payload, Mapping)
                 and payload.get("type") == "task_complete"
+            ):
+                return record.get("_dt")
+        return None
+
+    def latest_task_aborted_after(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+    ) -> datetime | None:
+        start_index = 0 if task_started_index is None else task_started_index + 1
+        for record in reversed(records[start_index:]):
+            payload = record.get("payload") or {}
+            if (
+                record.get("type") == "event_msg"
+                and isinstance(payload, Mapping)
+                and payload.get("type") == "turn_aborted"
             ):
                 return record.get("_dt")
         return None
@@ -842,6 +880,11 @@ class JsonlSessionParser:
                     sources.append(f"user~{value}")
                     contributed = True
             elif record_type == "response_item" and payload_type == "message":
+                if is_turn_aborted_message(payload):
+                    continue
+                role = response_message_role(payload)
+                if role and role != "assistant":
+                    continue
                 value = estimate_tokens(message_text(payload))
                 estimate.output_tokens += value
                 if value:
@@ -998,6 +1041,11 @@ class JsonlSessionParser:
                     timestamp,
                 )
             if record_type == "response_item" and payload_type == "message":
+                if is_turn_aborted_message(payload):
+                    continue
+                role = response_message_role(payload)
+                if role and role != "assistant":
+                    continue
                 return Activity("assistant", compact_text(message_text(payload), 160), timestamp)
             if record_type == "event_msg" and payload_type == "token_count":
                 return Activity("confirmed", "received token_count", timestamp)
@@ -1018,6 +1066,11 @@ class JsonlSessionParser:
                 if text:
                     return Activity("agent", text, timestamp)
             if record_type == "response_item" and payload_type == "message":
+                if is_turn_aborted_message(payload):
+                    continue
+                role = response_message_role(payload)
+                if role and role != "assistant":
+                    continue
                 text = compact_text(message_text(payload), 220)
                 if text:
                     return Activity("assistant", text, timestamp)
@@ -1045,19 +1098,16 @@ class JsonlSessionParser:
             ):
                 task_active = True
                 latest_task_start_index = len(active_after_record)
-            active_after_record.append(
-                task_active
-                and not (
-                    record.get("type") == "event_msg"
-                    and isinstance(payload, Mapping)
-                    and payload.get("type") == "task_complete"
-                )
-            )
-            if (
+            is_task_terminal = (
                 record.get("type") == "event_msg"
                 and isinstance(payload, Mapping)
-                and payload.get("type") == "task_complete"
-            ):
+                and payload.get("type") in {"task_complete", "turn_aborted"}
+            )
+            active_after_record.append(
+                task_active
+                and not is_task_terminal
+            )
+            if is_task_terminal:
                 task_active = False
 
         active_gap_categories = {
@@ -1203,7 +1253,9 @@ class JsonlSessionParser:
                 )
                 if not same_as_latest:
                     history.append(self.round_from_request(request, snapshot, latest_model))
+            history = self._history_after_task_abort(history, snapshot.task_aborted_at)
             snapshot.request_history = self.reindex_rounds(history)
+            request = self.request_after_task_abort(snapshot, request, latest_model)
             if request.error:
                 if not snapshot.error:
                     snapshot.error = request.error
@@ -1214,6 +1266,7 @@ class JsonlSessionParser:
         if history:
             if request.status == "running":
                 history.append(self.round_from_request(request, snapshot, latest_model))
+            history = self._history_after_task_abort(history, snapshot.task_aborted_at)
             snapshot.request_history = self.reindex_rounds(history)
         elif request.status != "waiting":
             snapshot.request_history = self.reindex_rounds(
@@ -1235,7 +1288,11 @@ class JsonlSessionParser:
     def fallback_request_tokens(
         self, snapshot: ParsedSession, latest_model: str
     ) -> RequestTokens:
-        if snapshot.task_completed_at is None and snapshot.estimate.total_tokens > 0:
+        if (
+            snapshot.task_completed_at is None
+            and snapshot.task_aborted_at is None
+            and snapshot.estimate.total_tokens > 0
+        ):
             return RequestTokens(
                 status="running",
                 model=latest_model,
@@ -1267,9 +1324,40 @@ class JsonlSessionParser:
             total_tokens=confirmed.last_total,
             estimated=False,
             source="jsonl",
-            updated_at=confirmed.timestamp,
+            updated_at=snapshot.task_aborted_at or confirmed.timestamp,
+            completed_at=snapshot.task_aborted_at,
             cost_usd=cost,
         )
+
+    def _history_after_task_abort(
+        self,
+        history: Sequence[RequestRound],
+        task_aborted_at: datetime | None,
+    ) -> list[RequestRound]:
+        items = list(history)
+        if task_aborted_at is None:
+            return items
+        while items and items[-1].status == "running":
+            items.pop()
+        return items
+
+    def request_after_task_abort(
+        self,
+        snapshot: ParsedSession,
+        request: RequestTokens,
+        latest_model: str,
+    ) -> RequestTokens:
+        if snapshot.task_aborted_at is None or request.status != "running":
+            return request
+        next_request = self.fallback_request_tokens(snapshot, request.model or latest_model)
+        next_request.source = request.source or next_request.source
+        if next_request.started_at is None:
+            next_request.started_at = snapshot.task_started_at or request.started_at
+        if next_request.updated_at is None:
+            next_request.updated_at = snapshot.task_aborted_at
+        if next_request.completed_at is None:
+            next_request.completed_at = snapshot.task_aborted_at
+        return next_request
 
     def round_from_request(
         self,

@@ -109,6 +109,7 @@ HUD_BG = "#10161D"
 HUD_PANEL_BG = "#141B24"
 HUD_PANEL_BORDER = "#3A485A"
 HUD_WINDOW_OUTSIDE = "#010203"
+HUD_WINDOW_TRANSPARENT = "#01FE02"
 HUD_HEADER_BG = "#202833"
 HUD_DIVIDER = "#273241"
 HUD_TEXT = "#E8EEF7"
@@ -371,6 +372,7 @@ class HudScrollbar(tk.Canvas):
         kwargs.setdefault("bg", track)
         kwargs.setdefault("takefocus", 0)
         super().__init__(master, **kwargs)
+        setattr(self, "_hud_scrollbar", True)
         self._command = command
         self._thumb_color = str(thumb)
         self._thumb_hover_color = str(thumb_hover)
@@ -614,6 +616,12 @@ def _rounded_shell_surface_rows(
     bg_rgb = _hex_to_rgb(bg, (16, 22, 29))
     border_rgb = _hex_to_rgb(border, (46, 56, 70))
     outside_rgb = _hex_to_rgb(outside, (14, 18, 23))
+    blend_base_rgb = outside_rgb
+    if sys.platform.startswith("win"):
+        # When a Win32 color-key transparent window is available, keep the true
+        # outside pixels on the transparent key and blend edge antialiasing
+        # against the panel background instead of the transparent key.
+        blend_base_rgb = bg_rgb
     left = 0.0
     top = 0.0
     right = max(left + 1.0, float(width))
@@ -655,12 +663,18 @@ def _rounded_shell_surface_rows(
                 inner_bottom,
                 inner_radius,
             )
-            color = _mix_rgb(outside_rgb, border_rgb, outer_alpha)
+            color = _mix_rgb(blend_base_rgb, border_rgb, outer_alpha)
             if inner_alpha > 0.0:
                 color = _mix_rgb(color, bg_rgb, min(1.0, inner_alpha))
             colors.append(_rgb_to_hex(color))
         rows.append("{" + " ".join(colors) + "}")
     return tuple(rows)
+
+
+def _window_outside_color() -> str:
+    if sys.platform.startswith("win"):
+        return HUD_WINDOW_TRANSPARENT
+    return HUD_WINDOW_OUTSIDE
 HUD_AUTO_REANCHOR_ENV = "CODEX_USAGE_HUD_AUTO_REANCHOR"
 NATIVE_ANCHOR_STABLE_FRAMES = 3
 
@@ -1983,6 +1997,7 @@ class RoundedHudShell(tk.Frame):
         self._image: tk.PhotoImage | None = None
         self._image_key: tuple[int, int, int, str, str, str] | None = None
         self._region_key: tuple[int, int, int] | None = None
+        self._region_retry_job: str | None = None
         self._background = tk.Label(
             self,
             bg=outside,
@@ -2002,10 +2017,51 @@ class RoundedHudShell(tk.Frame):
         )
         self.content.pack(fill="both", expand=True, padx=2, pady=2)
         self.bind("<Configure>", self._handle_configure, add="+")
+        self.bind("<Map>", self._handle_map, add="+")
+        self.bind("<Destroy>", self._handle_destroy, add="+")
 
     def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
         width = max(1, int(getattr(event, "width", 0) or self.winfo_width()))
         height = max(1, int(getattr(event, "height", 0) or self.winfo_height()))
+        self._draw_shell(width, height)
+        self._apply_window_region(width, height)
+        self._schedule_region_retry()
+
+    def _handle_map(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        width = max(1, int(self.winfo_width() or 1))
+        height = max(1, int(self.winfo_height() or 1))
+        self._draw_shell(width, height)
+        self._apply_window_region(width, height)
+        self._schedule_region_retry()
+
+    def _handle_destroy(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        if self._region_retry_job is None:
+            return
+        try:
+            self.after_cancel(self._region_retry_job)
+        except Exception:
+            pass
+        self._region_retry_job = None
+
+    def _schedule_region_retry(self) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        if self._region_retry_job is not None:
+            try:
+                self.after_cancel(self._region_retry_job)
+            except Exception:
+                pass
+        self._region_retry_job = self.after_idle(self._retry_region_after_idle)
+
+    def _retry_region_after_idle(self) -> None:
+        self._region_retry_job = None
+        try:
+            width = max(1, int(self.winfo_width() or 1))
+            height = max(1, int(self.winfo_height() or 1))
+        except Exception:
+            return
         self._draw_shell(width, height)
         self._apply_window_region(width, height)
 
@@ -3692,12 +3748,15 @@ class TokenHudWindow:
             fixed_width=REQUEST_DOCK_WIDTH,
         )
 
+        outside_color = _window_outside_color()
         self.root = tk.Tk()
         self.root.title("codex-usage-hud")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
-        self.root.configure(bg="#0E1217")
+        self.root.configure(bg=outside_color)
+        self._configure_transparent_window(self.root, outside_color)
         self.root.bind("<Escape>", self._close)
+        self._bind_window_interactions(self.root, "top")
         self._exit_reason = ""
 
         self.top_expanded = False
@@ -3751,8 +3810,10 @@ class TokenHudWindow:
         self.request_root.title("codex-usage-hud request")
         self.request_root.overrideredirect(True)
         self.request_root.attributes("-topmost", True)
-        self.request_root.configure(bg="#0E1217")
+        self.request_root.configure(bg=outside_color)
+        self._configure_transparent_window(self.request_root, outside_color)
         self.request_root.bind("<Escape>", self._close)
+        self._bind_window_interactions(self.request_root, "request")
         self._rebuild_request_ui()
         self._set_alpha(self.root, 0.94)
         self._set_alpha(self.request_root, 0.74)
@@ -3782,113 +3843,228 @@ class TokenHudWindow:
         label.bind("<ButtonRelease-1>", self._finish_move)
         return label
 
-    def _resize_hit_zone(
-        self,
+    @staticmethod
+    def _configure_transparent_window(
         window: tk.Tk | tk.Toplevel,
-        target: str,
-        edge: str,
-        cursor: str,
-        **place_kwargs: object,
-    ) -> tk.Frame:
-        zone = tk.Frame(
-            window,
-            bg=HUD_BG if target == "top" else str(window.cget("bg")),
-            cursor=cursor,
-            highlightthickness=0,
-            borderwidth=0,
-        )
-        setattr(zone, "_hud_handle", True)
-        zone.bind(
-            "<ButtonPress-1>",
-            lambda event, t=target, w=window, e=edge: self._start_resize(event, t, w, e),
-        )
-        zone.bind("<B1-Motion>", self._resize_window_size)
-        zone.bind("<ButtonRelease-1>", self._finish_resize)
-        zone.place(**place_kwargs)
-        zone.lift()
-        return zone
-
-    def _install_resize_hit_zones(
-        self,
-        window: tk.Tk | tk.Toplevel,
-        target: str,
-        expanded: bool,
+        outside_color: str,
     ) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            window.wm_attributes("-transparentcolor", outside_color)
+        except tk.TclError:
+            return
+
+    def _bind_window_interactions(
+        self,
+        window: tk.Tk | tk.Toplevel,
+        target: str,
+    ) -> None:
+        window.bind(
+            "<Motion>",
+            lambda event, t=target, w=window: self._handle_window_motion(event, t, w),
+            add="+",
+        )
+        window.bind(
+            "<Leave>",
+            lambda event, w=window: self._handle_window_leave(event, w),
+            add="+",
+        )
+        window.bind(
+            "<ButtonPress-1>",
+            lambda event, t=target, w=window: self._handle_window_press(event, t, w),
+            add="+",
+        )
+        window.bind(
+            "<B1-Motion>",
+            lambda event, t=target, w=window: self._handle_window_drag(event, t, w),
+            add="+",
+        )
+        window.bind(
+            "<ButtonRelease-1>",
+            lambda event, t=target, w=window: self._handle_window_release(event, t, w),
+            add="+",
+        )
+
+    @staticmethod
+    def _point_in_hit_rect(
+        x: int,
+        y: int,
+        *,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+    ) -> bool:
+        return left <= x < right and top <= y < bottom
+
+    def _resize_edge_from_pointer(
+        self,
+        window: tk.Tk | tk.Toplevel,
+        target: str,
+        x_root: int,
+        y_root: int,
+    ) -> str:
+        try:
+            local_x = int(x_root) - int(window.winfo_rootx())
+            local_y = int(y_root) - int(window.winfo_rooty())
+        except Exception:
+            return ""
+        width = max(1, int(window.winfo_width()))
+        height = max(1, int(window.winfo_height()))
         edge = RESIZE_EDGE_HIT_SIZE
         corner = RESIZE_CORNER_HIT_SIZE
         edge_hit = max(1, edge - 2)
-        self._resize_hit_zone(
-            window,
-            target,
-            "left",
-            "sb_h_double_arrow",
-            x=2,
-            y=2,
-            relheight=1.0,
-            height=-4,
-            width=edge_hit,
-        )
-        self._resize_hit_zone(
-            window,
-            target,
-            "right",
-            "sb_h_double_arrow",
-            relx=1.0,
-            x=-edge,
-            y=2,
-            relheight=1.0,
-            height=-4,
-            width=edge_hit,
-        )
-        if not expanded:
-            return
         corner_hit = max(1, corner - 2)
-        if target == "top":
-            self._resize_hit_zone(
-                window,
-                target,
-                "bottom-left",
-                "size_ne_sw",
-                x=2,
-                rely=1.0,
-                y=-corner,
-                width=corner_hit,
-                height=corner_hit,
-            )
-            self._resize_hit_zone(
-                window,
-                target,
-                "bottom-right",
-                "size_nw_se",
-                relx=1.0,
-                rely=1.0,
-                x=-corner,
-                y=-corner,
-                width=corner_hit,
-                height=corner_hit,
-            )
+        if (
+            self.top_expanded if target == "top" else self.request_expanded
+        ):
+            if target == "top":
+                if self._point_in_hit_rect(
+                    local_x,
+                    local_y,
+                    left=2,
+                    top=max(2, height - corner),
+                    right=2 + corner_hit,
+                    bottom=max(2, height - 2),
+                ):
+                    return "bottom-left"
+                if self._point_in_hit_rect(
+                    local_x,
+                    local_y,
+                    left=max(2, width - corner),
+                    top=max(2, height - corner),
+                    right=max(2, width - 2),
+                    bottom=max(2, height - 2),
+                ):
+                    return "bottom-right"
+            else:
+                if self._point_in_hit_rect(
+                    local_x,
+                    local_y,
+                    left=2,
+                    top=2,
+                    right=2 + corner_hit,
+                    bottom=2 + corner_hit,
+                ):
+                    return "top-left"
+                if self._point_in_hit_rect(
+                    local_x,
+                    local_y,
+                    left=max(2, width - corner),
+                    top=2,
+                    right=max(2, width - 2),
+                    bottom=2 + corner_hit,
+                ):
+                    return "top-right"
+        if self._point_in_hit_rect(
+            local_x,
+            local_y,
+            left=2,
+            top=2,
+            right=2 + edge_hit,
+            bottom=max(2, height - 2),
+        ):
+            return "left"
+        if self._point_in_hit_rect(
+            local_x,
+            local_y,
+            left=max(2, width - edge),
+            top=2,
+            right=max(2, width - 2),
+            bottom=max(2, height - 2),
+        ):
+            return "right"
+        return ""
+
+    @staticmethod
+    def _resize_cursor(edge: str) -> str:
+        if edge == "left" or edge == "right":
+            return "sb_h_double_arrow"
+        if edge == "top-left" or edge == "bottom-right":
+            return "size_nw_se"
+        if edge == "top-right" or edge == "bottom-left":
+            return "size_ne_sw"
+        return ""
+
+    @staticmethod
+    def _blocks_window_interaction(widget: object) -> bool:
+        return bool(
+            getattr(widget, "_hud_handle", False)
+            or isinstance(widget, (tk.Button, tk.Text, HudScrollbar, tk.Scrollbar))
+        )
+
+    def _set_window_cursor(self, window: tk.Tk | tk.Toplevel, cursor: str) -> None:
+        try:
+            window.configure(cursor=cursor)
+        except tk.TclError:
+            pass
+
+    def _handle_window_motion(
+        self,
+        event: Any,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+    ) -> None:
+        if self._resize_window is window:
             return
-        self._resize_hit_zone(
-            window,
-            target,
-            "top-left",
-            "size_nw_se",
-            x=2,
-            y=2,
-            width=corner_hit,
-            height=corner_hit,
-        )
-        self._resize_hit_zone(
-            window,
-            target,
-            "top-right",
-            "size_ne_sw",
-            relx=1.0,
-            x=-corner,
-            y=2,
-            width=corner_hit,
-            height=corner_hit,
-        )
+        if self._blocks_window_interaction(getattr(event, "widget", None)):
+            self._set_window_cursor(window, "")
+            return
+        edge = self._resize_edge_from_pointer(window, target, event.x_root, event.y_root)
+        self._set_window_cursor(window, self._resize_cursor(edge))
+
+    def _handle_window_leave(
+        self,
+        event: Any,
+        window: tk.Tk | tk.Toplevel,
+    ) -> None:
+        del event
+        if self._resize_window is window:
+            return
+        self._set_window_cursor(window, "")
+
+    def _handle_window_press(
+        self,
+        event: Any,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+    ) -> str | None:
+        if self._blocks_window_interaction(getattr(event, "widget", None)):
+            self._set_window_cursor(window, "")
+            return None
+        edge = self._resize_edge_from_pointer(window, target, event.x_root, event.y_root)
+        if edge:
+            self._set_window_cursor(window, self._resize_cursor(edge))
+            return self._start_resize(event, target, window, edge)
+        self._press_at = (event.x_root, event.y_root)
+        self._press_target = target
+        self._set_window_cursor(window, "")
+        return None
+
+    def _handle_window_drag(
+        self,
+        event: Any,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+    ) -> str | None:
+        del target
+        if self._resize_window is window:
+            return self._resize_window_size(event)
+        return None
+
+    def _handle_window_release(
+        self,
+        event: Any,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+    ) -> str | None:
+        del target
+        if self._resize_window is window:
+            result = self._finish_resize(event)
+            self._set_window_cursor(window, "")
+            return result
+        return self._release_pointer(event)
 
     def _settings_button(self, parent: tk.Misc) -> tk.Button:
         button = tk.Button(
@@ -5434,13 +5610,15 @@ class TokenHudWindow:
             child.destroy()
         self.top_labels.clear()
         self._top_update_button = None
-        self.root.configure(bg=HUD_WINDOW_OUTSIDE)
+        outside_color = _window_outside_color()
+        self.root.configure(bg=outside_color)
+        self._configure_transparent_window(self.root, outside_color)
         shell = RoundedHudShell(
             self.root,
             bg=HUD_BG,
             border=HUD_PANEL_BORDER,
-            outside=HUD_WINDOW_OUTSIDE,
-            radius=8,
+            outside=outside_color,
+            radius=9,
             padx=5,
             pady=1,
         )
@@ -5450,8 +5628,6 @@ class TokenHudWindow:
             self._build_top_expanded(frame)
         else:
             self._build_top_collapsed(frame)
-        self._install_resize_hit_zones(self.root, "top", self.top_expanded)
-        self._bind_click_tree(frame, "top", self.root)
         self._render_top()
 
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
@@ -5728,23 +5904,29 @@ class TokenHudWindow:
     def _rebuild_request_ui(self) -> None:
         for child in self.request_root.winfo_children():
             child.destroy()
-        self.request_root.configure(bg=REQUEST_BG)
+        outside_color = _window_outside_color()
+        self.request_root.configure(bg=outside_color)
+        self._configure_transparent_window(self.request_root, outside_color)
         self.request_text = None
-        if self.request_expanded:
-            self._build_request_expanded()
-        else:
-            self._build_request_collapsed()
-        self._install_resize_hit_zones(
+        shell = RoundedHudShell(
             self.request_root,
-            "request",
-            self.request_expanded,
+            bg=REQUEST_BG,
+            border=HUD_PANEL_BORDER,
+            outside=outside_color,
+            radius=8,
+            padx=6,
+            pady=2,
         )
-        self._bind_click_tree(self.request_root, "request", self.request_root)
+        shell.pack(fill="both", expand=True)
+        frame = shell.content
+        if self.request_expanded:
+            self._build_request_expanded(frame)
+        else:
+            self._build_request_collapsed(frame)
         self._render_request()
 
-    def _build_request_collapsed(self) -> None:
-        frame = tk.Frame(self.request_root, bg=REQUEST_BG, padx=8, pady=4)
-        frame.pack(fill="both", expand=True)
+    def _build_request_collapsed(self, frame: tk.Frame) -> None:
+        frame.configure(bg=REQUEST_BG, padx=8, pady=4)
         self._move_handle(frame, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             frame,
@@ -5757,9 +5939,8 @@ class TokenHudWindow:
         )
         self.request_label.pack(side="left", fill="both", expand=True)
 
-    def _build_request_expanded(self) -> None:
-        frame = tk.Frame(self.request_root, bg=REQUEST_BG, padx=8, pady=5)
-        frame.pack(fill="both", expand=True)
+    def _build_request_expanded(self, frame: tk.Frame) -> None:
+        frame.configure(bg=REQUEST_BG, padx=8, pady=5)
         header = tk.Frame(frame, bg=REQUEST_HEADER_BG, padx=5, pady=2)
         header.pack(fill="x", pady=(0, 4))
         self._move_handle(header, "request", self.request_root).pack(side="left", padx=(0, 4))
@@ -5827,25 +6008,6 @@ class TokenHudWindow:
         scrollbar.pack(side="right", fill="y")
         self.request_text.pack(side="left", fill="x", expand=True)
         self.request_text.configure(state="disabled")
-
-    def _bind_click_tree(self, widget: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> None:
-        if getattr(widget, "_hud_handle", False):
-            return
-        if isinstance(widget, (tk.Button, tk.Text, HudScrollbar, tk.Scrollbar)):
-            return
-        widget.bind("<ButtonPress-1>", lambda event, t=target, w=window: self._start_pointer(event, t, w), add="+")
-        widget.bind("<B1-Motion>", self._drag_if_free, add="+")
-        widget.bind("<ButtonRelease-1>", self._release_pointer, add="+")
-        for child in widget.winfo_children():
-            self._bind_click_tree(child, target, window)
-
-    def _start_pointer(self, event: Any, target: str, window: tk.Tk | tk.Toplevel) -> None:
-        self._press_at = (event.x_root, event.y_root)
-        self._press_target = target
-        del window
-
-    def _drag_if_free(self, event: Any) -> None:
-        del event
 
     def _release_pointer(self, event: Any) -> str:
         if self._press_at is None:
