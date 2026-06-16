@@ -1920,6 +1920,12 @@ def _work_status_from_snapshot(
     request_status = snapshot.request.status
     if request_status == "error" or snapshot.request.error:
         return "error", "出错"
+    if snapshot.task_completed_at is not None:
+        completed = snapshot.task_completed_at
+        current = now.astimezone(completed.tzinfo) if completed.tzinfo is not None else now
+        if (current - completed).total_seconds() <= 12:
+            return "recent", "刚完成"
+        return None
     if request_status == "running":
         return "running", "运行中"
     if snapshot.activity.kind == "tool call" and activity_detail.startswith(
@@ -1928,11 +1934,6 @@ def _work_status_from_snapshot(
         return "waiting_user", "等待用户"
     if snapshot.activity.kind == "tool call":
         return "tool", "工具执行"
-    if snapshot.task_completed_at is not None:
-        completed = snapshot.task_completed_at
-        current = now.astimezone(completed.tzinfo) if completed.tzinfo is not None else now
-        if (current - completed).total_seconds() <= 12:
-            return "recent", "刚完成"
     if snapshot.slow.current_gap_active:
         return "active", "处理中"
     return None

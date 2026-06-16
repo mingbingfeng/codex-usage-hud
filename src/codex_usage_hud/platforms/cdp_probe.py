@@ -135,7 +135,7 @@ DOM_PROBE_SCRIPT = r"""
       "[class*='alert' i]",
     ];
     const selectors = errorSelectors.join(", ");
-    const errorPattern = /(exceeded retry limit|too many requests|\b429\b|\brate limit(?:ed)?\b|\b5\d\d\b|network error|request failed|failed to fetch|server error|internal server error|service unavailable|temporarily unavailable|something went wrong|unexpected error|error occurred)/i;
+    const errorPattern = /(exceeded retry limit|too many requests|\b429\b|\brate limit(?:ed)?\b|\b5\d\d\b|network error|request failed|failed to fetch|server error|internal server error|service unavailable|temporarily unavailable|something went wrong|unexpected error|error occurred|请求失败|网络错误|服务不可用|重试上限|操作超时)/i;
     const readableText = (node) => {
       if (!node) return "";
       const label = normalize([
@@ -162,35 +162,86 @@ DOM_PROBE_SCRIPT = r"""
     const usableContainer = (node) => (
       visible(node) && !node.closest("#codex-usage-hud-root")
     );
-    const bannerLike = (node) => {
-      const className = String(node?.className || "");
-      return node?.matches?.("aside, [role='alert'], [role='status'], [aria-live]")
-        || /toast|notification|snackbar|alert|error|danger|destructive|rounded|border/i.test(className);
+    const hasErrorClass = (node) => (
+      /toast|notification|snackbar|alert|error|danger|destructive/i.test(
+        String(node?.className || "")
+      )
+    );
+    const hasErrorTestId = (node) => (
+      /toast|notification|error/i.test(
+        String(node?.getAttribute?.("data-testid") || "")
+      )
+    );
+    const hasErrorIcon = (node) => (
+      !!node?.matches?.("[class*='text-token-error-foreground']")
+      || !!node?.querySelector?.("[class*='text-token-error-foreground']")
+    );
+    const hasStructuredErrorText = (node) => (
+      !!node?.querySelector?.(".wrap-anywhere, .text-pretty")
+    );
+    const errorSemantic = (node) => {
+      if (!(node instanceof Element)) return false;
+      const role = String(node.getAttribute("role") || "");
+      return role === "alert"
+        || hasErrorClass(node)
+        || hasErrorTestId(node)
+        || hasErrorIcon(node);
     };
-    const readableContainerFor = (node, allowGenericAncestor) => {
+    const errorBannerLike = (node) => {
+      if (!(node instanceof Element)) return false;
+      return errorSemantic(node) && (
+        hasStructuredErrorText(node)
+        || node.matches?.("[role='alert']")
+      );
+    };
+    const readableContainerFor = (node, allowAncestorBanner) => {
       if (!(node instanceof Element)) return null;
       const aside = node.closest("aside");
-      if (aside && usableContainer(aside) && boundedText(aside)) return aside;
+      if (
+        allowAncestorBanner
+        && aside
+        && usableContainer(aside)
+        && boundedText(aside)
+        && errorBannerLike(aside)
+      ) {
+        return aside;
+      }
       const explicit = node.closest(selectors);
-      if (explicit && usableContainer(explicit) && boundedText(explicit)) return explicit;
-      let current = node.parentElement;
-      for (let depth = 0; current instanceof Element && depth < 8; depth += 1, current = current.parentElement) {
-        if (
-          usableContainer(current)
-          && boundedText(current)
-          && (allowGenericAncestor || bannerLike(current))
-        ) {
-          return current;
+      if (
+        explicit
+        && usableContainer(explicit)
+        && boundedText(explicit)
+        && errorSemantic(explicit)
+      ) {
+        return explicit;
+      }
+      if (allowAncestorBanner) {
+        let current = node.parentElement;
+        for (let depth = 0; current instanceof Element && depth < 8; depth += 1, current = current.parentElement) {
+          if (
+            usableContainer(current)
+            && boundedText(current)
+            && errorBannerLike(current)
+          ) {
+            return current;
+          }
         }
       }
-      return usableContainer(node) && boundedText(node) ? node : null;
+      return usableContainer(node) && boundedText(node) && errorSemantic(node) ? node : null;
     };
-    const candidateFor = (node, index, baseScore, requirePattern) => {
-      const container = readableContainerFor(node, requirePattern);
+    const candidateFor = (node, index, baseScore, requirePattern, allowAncestorBanner) => {
+      const container = readableContainerFor(node, allowAncestorBanner);
       if (!container) return null;
       const text = readableText(container);
       const matchesErrorText = errorPattern.test(text);
-      if (!text || (requirePattern && !matchesErrorText)) return null;
+      const strongMarker = errorSemantic(container);
+      if (
+        !text
+        || (requirePattern && !matchesErrorText)
+        || (!requirePattern && !matchesErrorText && !strongMarker)
+      ) {
+        return null;
+      }
       const rect = container.getBoundingClientRect();
       const className = String(container.className || "");
       const role = String(container.getAttribute("role") || "");
@@ -200,6 +251,7 @@ DOM_PROBE_SCRIPT = r"""
       if (container.hasAttribute("aria-live")) score += 90;
       if (/toast|notification|snackbar|alert/i.test(className)) score += 80;
       if (/error|danger|destructive/i.test(className)) score += 70;
+      if (hasErrorIcon(container)) score += 140;
       if (container.tagName === "ASIDE") score += 90;
       if (node !== container) score += 80;
       if (rect.top <= 160 || rect.bottom >= innerHeight - 220) score += 30;
@@ -210,9 +262,9 @@ DOM_PROBE_SCRIPT = r"""
     };
     const iconCandidates = Array.from(
       document.querySelectorAll("[class*='text-token-error-foreground']")
-    ).map((node, index) => candidateFor(node, index, 420, false));
+    ).map((node, index) => candidateFor(node, index, 420, false, true));
     const selectorCandidates = Array.from(document.querySelectorAll(selectors))
-      .map((node, index) => candidateFor(node, index, 0, true));
+      .map((node, index) => candidateFor(node, index, 0, true, false));
     const candidates = iconCandidates.concat(selectorCandidates)
       .filter(Boolean)
       .sort((left, right) => right.score - left.score);

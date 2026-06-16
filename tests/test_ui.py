@@ -776,6 +776,75 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].status_label, "处理中")
         self.assertNotEqual(items[0].status_text, "已完成")
 
+    def test_completed_task_with_post_token_output_does_not_stay_active(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+        token_payload = {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 30,
+                    "reasoning_output_tokens": 4,
+                    "total_tokens": 130,
+                },
+                "total_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 30,
+                    "reasoning_output_tokens": 4,
+                    "total_tokens": 130,
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-current.jsonl"
+            rows = [
+                {
+                    "timestamp": (now + timedelta(seconds=-40)).isoformat(),
+                    "type": "session_meta",
+                    "payload": {"id": "session-current"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-35)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-30)).isoformat(),
+                    "type": "event_msg",
+                    "payload": token_payload,
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-25)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "收尾说明文本"},
+                },
+                {
+                    "timestamp": (now + timedelta(seconds=-20)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete"},
+                },
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                encoding="utf-8",
+            )
+            snapshot = parser.parse_file(path)
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, path)
+
+        self.assertEqual(snapshot.request.status, "confirmed")
+        self.assertEqual(items, [])
+
     def test_work_overlay_header_text_formats_time_elapsed_and_title(self) -> None:
         started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()
         text = _work_overlay_header_text(
@@ -1483,7 +1552,10 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
             window.update_display(snapshot)
 
-            self.assertIn("命中 ◎87%", window.top_labels["bar"].cget("text"))
+            self.assertIn("本会话 452k/", window.top_labels["bar"].cget("text"))
+            self.assertIn("/◎87%", window.top_labels["bar"].cget("text"))
+            self.assertIn("今日 41.1M/$39.31", window.top_labels["bar"].cget("text"))
+            self.assertIn("本周 159.5M/$138.23", window.top_labels["bar"].cget("text"))
         finally:
             window._close()
 
@@ -1986,6 +2058,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 widget
                 for widget in _walk_widgets(window.root)
                 if isinstance(widget, tk.Canvas) and widget.winfo_toplevel() == window.root
+                and not getattr(widget, "_hud_progress_canvas", False)
             ]
             self.assertEqual(len(canvases), 1)
             canvas = canvases[0]
@@ -1995,6 +2068,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertGreater(scroll_region[3], canvas.winfo_height())
             self.assertEqual(window.top_labels["legend"].cget("text"), TOKEN_LEGEND_TEXT)
             self.assertIn("命中 ◎87%", window.top_labels["cumulative"].cget("text"))
+            self.assertIn("缓存命中 87%", window.top_labels["cache_progress"].cget("text"))
             self.assertIn("◎87%", window.request_label.cget("text"))
             for key in ("budget", "activity", "warnings", "legend", "slow", "gap", "status"):
                 label = window.top_labels[key]

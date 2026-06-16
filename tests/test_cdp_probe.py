@@ -155,6 +155,9 @@ class CdpProbeTests(unittest.TestCase):
         self.assertIn('node.closest("aside")', DOM_PROBE_SCRIPT)
         self.assertIn(".wrap-anywhere", DOM_PROBE_SCRIPT)
         self.assertIn(".text-pretty", DOM_PROBE_SCRIPT)
+        self.assertIn("const strongMarker = errorSemantic(container)", DOM_PROBE_SCRIPT)
+        self.assertIn("errorBannerLike(aside)", DOM_PROBE_SCRIPT)
+        self.assertNotIn("rounded|border", DOM_PROBE_SCRIPT)
         self.assertNotIn('"main header"', DOM_PROBE_SCRIPT)
 
     def test_install_new_document_script_registers_and_evaluates_script(self) -> None:

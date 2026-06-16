@@ -1235,7 +1235,7 @@ class JsonlSessionParser:
     def fallback_request_tokens(
         self, snapshot: ParsedSession, latest_model: str
     ) -> RequestTokens:
-        if snapshot.estimate.total_tokens > 0:
+        if snapshot.task_completed_at is None and snapshot.estimate.total_tokens > 0:
             return RequestTokens(
                 status="running",
                 model=latest_model,

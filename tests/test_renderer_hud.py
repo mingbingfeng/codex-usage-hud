@@ -71,9 +71,19 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         top_line = str(payload["topLine"])
         self.assertNotIn("Live Renderer Thread", str(payload["topLine"]))
-        self.assertTrue(top_line.startswith("本会话 14k/$0.132/◎~61% | 今日"))
+        self.assertTrue(top_line.startswith("本会话 14k/"))
+        self.assertIn("/◎~61% | 今日", top_line)
         self.assertIn("今日 50k/$0.500", top_line)
-        self.assertNotIn("命中", top_line)
+        self.assertIn("本周 200k/$1.50", top_line)
+        top_progress = payload["topProgress"]
+        self.assertIsInstance(top_progress, dict)
+        collapsed_progress = top_progress["collapsed"]
+        self.assertEqual([item["tone"] for item in collapsed_progress], ["session", "day", "week"])
+        self.assertTrue(collapsed_progress[0]["label"].startswith("本会话 14k/"))
+        self.assertIn("/◎~61%", collapsed_progress[0]["label"])
+        self.assertEqual(top_progress["cache"]["label"], "缓存命中 ~61%")
+        self.assertEqual(top_progress["budget"][0]["label"], "本日累计 50k/$0.500")
+        self.assertEqual(top_progress["budget"][1]["label"], "本周累计 200k/$1.50")
         request_line = str(payload["requestLine"])
         self.assertIn("↑~1,200", request_line)
         self.assertIn("◎~61%", request_line)
@@ -136,7 +146,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("请作者喝咖啡链接", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-setting-key="support_url"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-setting-key="work_overlay_max_items"', renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("0 - 不启用", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("0 表示不启用", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("workOverlaySelectableMax", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("拉取价格", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("window.confirm", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -171,6 +181,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("open in", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-line-inner", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-marquee", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-progress-strip", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-budget-rails", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("interpolateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("canAnimateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("FileEditViewWindowHelp", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -191,7 +203,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIsInstance(top_details, dict)
         self.assertEqual(top_details["title"], "Live Renderer Thread")
         self.assertIn("本次请求", str(top_details["confirmed"]))
-        self.assertNotIn("命中", str(top_details))
+        self.assertIn("日窗起点", str(top_details["budget"]))
         self.assertTrue(payload["requestRows"])
         request_row = str(payload["requestRows"][0])
         self.assertLess(request_row.index("↑1,200"), request_row.index("◎~67%"))
@@ -199,6 +211,18 @@ class RendererHudPayloadTests(unittest.TestCase):
         request_row_details = payload["requestRowDetails"]
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
+
+    def test_error_snapshot_uses_single_collapsed_top_progress_rail(self) -> None:
+        snapshot = ParsedSession(status="missing", error="session file unavailable")
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        self.assertIn("未找到", payload["topLine"])
+        top_progress = payload["topProgress"]
+        self.assertEqual(top_progress["budget"], [])
+        self.assertEqual(len(top_progress["collapsed"]), 1)
+        self.assertEqual(top_progress["collapsed"][0]["tone"], "error")
+        self.assertEqual(top_progress["collapsed"][0]["ratio"], 1.0)
 
     def test_support_qr_assets_are_available_for_renderer_payload(self) -> None:
         images = support_qr_payload()

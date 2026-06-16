@@ -24,7 +24,7 @@ from ..platforms.cdp_probe import (
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "9"
+RENDERER_HUD_VERSION = "10"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -61,7 +61,7 @@ def set_cost_estimator(estimator: CostEstimator) -> None:
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "7";
+  const version = "8";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -327,6 +327,118 @@ RENDERER_HUD_SCRIPT = r"""
         grid-template-columns: minmax(0, 1fr);
         gap: 0;
       }
+      #${rootId} .${topClass} .codex-usage-hud-main[data-progress="true"] {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      #${rootId} .${topClass} .codex-usage-hud-main[data-progress="true"] .codex-usage-hud-glyph,
+      #${rootId} .${topClass} .codex-usage-hud-main[data-progress="true"] .codex-usage-hud-line {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-progress-strip {
+        min-width: 0;
+        width: 100%;
+        height: 26px;
+        display: none;
+        grid-template-columns: minmax(130px, 1.6fr) minmax(86px, 1.2fr) minmax(96px, 1.4fr);
+        gap: 7px;
+        align-items: center;
+      }
+      #${rootId} .codex-usage-hud-main[data-progress="true"] .codex-usage-hud-progress-strip {
+        display: grid;
+      }
+      #${rootId} .codex-usage-hud-progress-strip[data-count="1"] {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-progress-rail {
+        position: relative;
+        display: block;
+        width: 100%;
+        min-width: 0;
+        height: 100%;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,.06);
+        background: linear-gradient(180deg, rgba(255,255,255,.032), rgba(255,255,255,0)), #111822;
+        overflow: hidden;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.04), inset 0 -8px 16px rgba(0,0,0,.16);
+      }
+      #${rootId} .codex-usage-hud-progress-track-text,
+      #${rootId} .codex-usage-hud-progress-fill-text {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        min-width: 0;
+        padding: 0 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0;
+      }
+      #${rootId} .codex-usage-hud-progress-track-text {
+        color: rgba(218,228,241,.32);
+      }
+      #${rootId} .codex-usage-hud-progress-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        min-width: 0;
+        max-width: 100%;
+        border-radius: inherit;
+        overflow: hidden;
+      }
+      #${rootId} .codex-usage-hud-progress-fill::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(255,255,255,.26), rgba(255,255,255,.07) 28%, rgba(255,255,255,0) 52%);
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-fill::after {
+        content: "";
+        position: absolute;
+        top: 4px;
+        right: 7px;
+        width: min(64px, 42%);
+        height: calc(100% - 8px);
+        border-radius: inherit;
+        background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.18));
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, #9ccbff, #5ea7ff);
+        box-shadow: 0 10px 22px rgba(94,167,255,.18);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill-text {
+        color: #07131f;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] {
+        border-color: rgba(156,203,255,.14);
+        background: linear-gradient(180deg, rgba(156,203,255,.07), rgba(255,255,255,0)), #111822;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] .codex-usage-hud-progress-track-text {
+        color: #dde7f2;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, #f3d27a, #ffb86b);
+        box-shadow: 0 10px 22px rgba(243,210,122,.18);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill-text {
+        color: #1a1305;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, #ffc68d, #ff8d5a);
+        box-shadow: 0 10px 22px rgba(255,141,90,.18);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill-text {
+        color: #1f1106;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, #ff8a8a, #ff6b6b);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill-text {
+        color: #1a1012;
+      }
       #${rootId} .codex-usage-hud-glyph {
         display: inline-grid;
         place-items: center;
@@ -391,7 +503,7 @@ RENDERER_HUD_SCRIPT = r"""
         cursor: pointer;
       }
       #${rootId} .${topClass} .codex-usage-hud-panel-header {
-        grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) 22px;
+        grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) minmax(90px, 150px) 22px;
       }
       #${rootId} .${requestClass} .codex-usage-hud-panel-header {
         background: #151d27;
@@ -431,6 +543,33 @@ RENDERER_HUD_SCRIPT = r"""
         border-radius: 5px;
         background: #141b24;
         padding: 5px 8px;
+      }
+      #${rootId} .codex-usage-hud-cache-pill {
+        min-width: 0;
+        height: 24px;
+      }
+      #${rootId} .codex-usage-hud-cache-pill:empty {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-budget-rails {
+        display: grid;
+        gap: 7px;
+        margin-bottom: 5px;
+      }
+      #${rootId} .codex-usage-hud-budget-rails:empty {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-budget-rails:not(:empty) + .codex-usage-hud-value {
+        color: #8492a6;
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-rail {
+        height: 34px;
+      }
+      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-track-text,
+      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-fill-text {
+        padding: 0 13px;
+        font-size: 12.5px;
       }
       #${rootId} .codex-usage-hud-section {
         margin: 0 0 6px;
@@ -846,6 +985,12 @@ RENDERER_HUD_SCRIPT = r"""
         #${rootId} .codex-usage-hud-session-meta {
           display: none;
         }
+        #${rootId} .codex-usage-hud-cache-pill {
+          display: none;
+        }
+        #${rootId} .${topClass} .codex-usage-hud-panel-header {
+          grid-template-columns: auto minmax(0, 1fr) 22px;
+        }
         #${rootId} .codex-usage-hud-settings-grid {
           grid-template-columns: minmax(0, 1fr);
         }
@@ -900,6 +1045,7 @@ RENDERER_HUD_SCRIPT = r"""
           </div>
           <button class="codex-usage-hud-main" data-action="toggle" data-has-glyph="${glyph ? "true" : "false"}" aria-label="${ariaLabel}">
             ${glyphMarkup}
+            ${name === "top" ? `<span class="codex-usage-hud-progress-strip" data-field="topCollapsedProgress"></span>` : ""}
             <span class="codex-usage-hud-line" data-field="${name}Line"></span>
           </button>
           ${settingsButtonMarkup}
@@ -919,6 +1065,7 @@ RENDERER_HUD_SCRIPT = r"""
           </div>
           <div class="codex-usage-hud-title" data-action="toggle" data-field="topTitle"></div>
           <div class="codex-usage-hud-session-meta" data-field="topSession"></div>
+          <div class="codex-usage-hud-cache-pill" data-field="topCacheProgress"></div>
           <button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>
         </div>
         <div class="codex-usage-hud-top-body">
@@ -934,6 +1081,7 @@ RENDERER_HUD_SCRIPT = r"""
               <div class="codex-usage-hud-divider"></div>
               <section class="codex-usage-hud-section">
                 <div class="codex-usage-hud-section-title">额度</div>
+                <div class="codex-usage-hud-budget-rails" data-field="topBudgetProgress"></div>
                 <div class="codex-usage-hud-value warn" data-field="topBudget"></div>
               </section>
               <section class="codex-usage-hud-section">
@@ -2902,6 +3050,56 @@ RENDERER_HUD_SCRIPT = r"""
     syncRunningRowsTimer(root);
   }
 
+  function normalizeProgressRatio(value) {
+    const number = Number(value || 0);
+    if (!Number.isFinite(number)) return 0;
+    return clamp(number, 0, 1);
+  }
+
+  function progressRail(metric) {
+    const rail = document.createElement("span");
+    rail.className = "codex-usage-hud-progress-rail";
+    rail.dataset.tone = String(metric?.tone || "day");
+    const label = String(metric?.label || "");
+    const ratio = normalizeProgressRatio(metric?.ratio);
+    rail.title = label;
+
+    const trackText = document.createElement("span");
+    trackText.className = "codex-usage-hud-progress-track-text";
+    trackText.textContent = label;
+    rail.appendChild(trackText);
+
+    const fill = document.createElement("span");
+    fill.className = "codex-usage-hud-progress-fill";
+    fill.style.width = `${Math.round(ratio * 1000) / 10}%`;
+    const fillText = document.createElement("span");
+    fillText.className = "codex-usage-hud-progress-fill-text";
+    fillText.textContent = label;
+    fill.appendChild(fillText);
+    rail.appendChild(fill);
+    return rail;
+  }
+
+  function renderProgressList(container, metrics) {
+    if (!container) return false;
+    const items = Array.isArray(metrics) ? metrics.filter((item) => item && item.label) : [];
+    container.replaceChildren();
+    if (items.length > 0) container.dataset.count = String(items.length);
+    else delete container.dataset.count;
+    for (const item of items) container.appendChild(progressRail(item));
+    return items.length > 0;
+  }
+
+  function renderTopProgress(root, payload) {
+    const progress = payload?.topProgress || {};
+    const main = root.querySelector(`.${topClass} .codex-usage-hud-main`);
+    const collapsed = root.querySelector('[data-field="topCollapsedProgress"]');
+    const hasCollapsed = renderProgressList(collapsed, progress.collapsed || []);
+    if (main) main.dataset.progress = hasCollapsed ? "true" : "false";
+    renderProgressList(root.querySelector('[data-field="topCacheProgress"]'), progress.cache ? [progress.cache] : []);
+    renderProgressList(root.querySelector('[data-field="topBudgetProgress"]'), progress.budget || []);
+  }
+
   function renderTopDetails(root, payload) {
     const details = payload?.topDetails || {};
     const copies = payload?.topCopies || {};
@@ -2919,6 +3117,7 @@ RENDERER_HUD_SCRIPT = r"""
       topLegend: details.legend || "",
     };
     for (const [field, value] of Object.entries(mapping)) setText(root, field, value);
+    renderTopProgress(root, payload || {});
     configureCopy(root, "topSlow", copies.slow || "", "点击复制最慢工具命令", "slow");
     configureCopy(root, "topGap", copies.gap || "", "点击复制最长等待详情", "gap");
   }
@@ -2937,6 +3136,7 @@ RENDERER_HUD_SCRIPT = r"""
     setText(root, "topTitle", "HUD 更新暂停");
     setText(root, "topSession", title ? `上次显示 ${title}` : "");
     setText(root, "topStatus", `后端 ${ageSeconds}s 未更新，当前内容可能不是所选会话`);
+    renderTopProgress(root, { topProgress: {} });
     root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
       node.classList.add(warningClass);
     });
@@ -3060,6 +3260,7 @@ class RendererHudPayload:
     refreshed_at: str
     warning: bool = False
     top_details: dict[str, str] = field(default_factory=dict)
+    top_progress: dict[str, object] = field(default_factory=dict)
     top_copies: dict[str, str] = field(default_factory=dict)
     request_rows: list[str] = field(default_factory=list)
     request_row_details: list[dict[str, object]] = field(default_factory=list)
@@ -3085,6 +3286,7 @@ class RendererHudPayload:
             "refreshedAt": self.refreshed_at,
             "warning": self.warning,
             "topDetails": dict(self.top_details),
+            "topProgress": dict(self.top_progress),
             "topCopies": dict(self.top_copies),
             "requestRows": list(self.request_rows),
             "requestRowDetails": [dict(item) for item in self.request_row_details],
@@ -3405,6 +3607,12 @@ def payload_from_snapshot(
     )
     if snapshot.error and snapshot.status in {"missing", "error"}:
         top_line = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
+    top_progress = _top_progress(snapshot)
+    if snapshot.error and snapshot.status in {"missing", "error"}:
+        top_progress = {
+            "collapsed": [_top_progress_metric(top_line, 1.0, "error")],
+            "budget": [],
+        }
     request_line = _request_total_line(snapshot)
     if snapshot.request.error:
         request_line = f"本次 Token 出错 | {_compact(snapshot.request.error, 120)}"
@@ -3424,6 +3632,7 @@ def payload_from_snapshot(
             or snapshot.budget_warnings
         ),
         top_details=_top_details(snapshot, session_cost),
+        top_progress=top_progress,
         top_copies=_top_copy_texts(snapshot),
         request_rows=_request_rows(snapshot),
         request_row_details=_request_row_details(snapshot),
@@ -3548,27 +3757,6 @@ def _fixed_token_total(value: int | None) -> str:
 
 def _format_usage_money(tokens: int | None, cost: float | None) -> str:
     return f"{_short_num(tokens)}/{_format_money(cost)}"
-
-
-def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | None) -> str:
-    total_tokens = int(snapshot.confirmed.cumulative_total or 0)
-    total_cost = session_cost
-    if snapshot.request.status == "running":
-        (
-            _input_tokens,
-            _input_estimated,
-            _output_tokens,
-            _output_estimated,
-            _reasoning_tokens,
-            _reasoning_estimated,
-            request_total_tokens,
-            _total_estimated,
-        ) = _display_tokens(snapshot)
-        total_tokens += int(request_total_tokens or 0)
-        request_cost, _request_cost_estimated = _request_cost(snapshot)
-        if request_cost is not None:
-            total_cost = float(total_cost or 0.0) + float(request_cost)
-    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_session_cache_hit_rate_label(snapshot)}"
 
 
 def _format_time(value: datetime | None) -> str:
@@ -3744,6 +3932,89 @@ def _session_cache_hit_rate(snapshot: ParsedSession) -> tuple[float | None, bool
 def _session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
     ratio, estimated = _session_cache_hit_rate(snapshot)
     return _format_rate_marker(ratio, estimated)
+
+
+def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | None = None) -> str:
+    total_tokens = int(snapshot.confirmed.cumulative_total or 0)
+    total_cost = _session_cost(snapshot) if session_cost is None else session_cost
+    if snapshot.request.status == "running":
+        (
+            _input_tokens,
+            _input_estimated,
+            _output_tokens,
+            _output_estimated,
+            _reasoning_tokens,
+            _reasoning_estimated,
+            request_total_tokens,
+            _total_estimated,
+        ) = _display_tokens(snapshot)
+        total_tokens += int(request_total_tokens or 0)
+        request_cost, _request_cost_estimated = _request_cost(snapshot)
+        if request_cost is not None:
+            total_cost = float(total_cost or 0.0) + float(request_cost)
+    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_session_cache_hit_rate_label(snapshot)}"
+
+
+def _top_cache_progress_label(snapshot: ParsedSession) -> str:
+    label = _session_cache_hit_rate_label(snapshot)
+    if label.startswith("◎"):
+        label = label[1:]
+    return f"缓存命中 {label}"
+
+
+def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
+    amount = max(0.0, float(cost or 0.0))
+    budget = max(0.0, float(limit or 0.0))
+    if budget <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, amount / budget))
+
+
+def _top_progress_metric(label: str, ratio: float | None, tone: str) -> dict[str, object]:
+    return {
+        "label": label,
+        "ratio": max(0.0, min(1.0, float(ratio or 0.0))),
+        "tone": tone,
+    }
+
+
+def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
+    cache_ratio, _cache_estimated = _session_cache_hit_rate(snapshot)
+    session = _top_progress_metric(
+        _top_session_usage_summary(snapshot),
+        0.0,
+        "session",
+    )
+    cache = _top_progress_metric(
+        _top_cache_progress_label(snapshot),
+        cache_ratio if cache_ratio is not None else 0.0,
+        "cache",
+    )
+    day = _top_progress_metric(
+        f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
+        _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
+        "day",
+    )
+    week = _top_progress_metric(
+        f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
+        _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
+        "week",
+    )
+    budget_day = _top_progress_metric(
+        f"本日累计 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
+        _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
+        "day",
+    )
+    budget_week = _top_progress_metric(
+        f"本周累计 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
+        _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
+        "week",
+    )
+    return {
+        "collapsed": [session, day, week],
+        "cache": cache,
+        "budget": [budget_day, budget_week],
+    }
 
 
 def _round_cache_hit_rate_label(item: RequestRound) -> str:
@@ -4105,34 +4376,20 @@ def _request_row_details(snapshot: ParsedSession) -> list[dict[str, object]]:
     return details
 
 
-def _format_budget(snapshot: ParsedSession) -> str:
-    day_ratio = (
-        snapshot.today_cost_usd / snapshot.daily_limit_usd
-        if snapshot.daily_limit_usd > 0
-        else 0.0
-    )
-    week_ratio = (
-        snapshot.week_cost_usd / snapshot.weekly_limit_usd
-        if snapshot.weekly_limit_usd > 0
-        else 0.0
-    )
-    text = (
-        f"今日累计  {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}  "
-        f"额度 {snapshot.today_cost_usd:.2f}/{snapshot.daily_limit_usd:.0f} USD "
-        f"({day_ratio:.0%})  起点 {_format_start(snapshot.day_start)}\n"
-        f"本周累计  {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}  "
-        f"额度 {snapshot.week_cost_usd:.2f}/{snapshot.weekly_limit_usd:.0f} USD "
-        f"({week_ratio:.0%})  起点 {_format_start(snapshot.week_start)}"
-    )
+def _format_budget_progress_meta(snapshot: ParsedSession) -> str:
+    parts = [
+        f"日窗起点 {_format_start(snapshot.day_start)}",
+        f"周窗起点 {_format_start(snapshot.week_start)}",
+    ]
     if snapshot.week_before_today_cost_usd > 0:
-        text += (
-            "\n本周拆分  "
+        parts.append(
+            "本周拆分  "
             f"今日前 {_format_usage_money(snapshot.week_before_today_tokens, snapshot.week_before_today_cost_usd)}"
             f" + 当前日窗 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
         )
     if snapshot.week_adjustment_usd > 0:
-        text += f" + 人工补充 {_format_money(snapshot.week_adjustment_usd)}"
-    return text
+        parts.append(f"人工补充 {_format_money(snapshot.week_adjustment_usd)}")
+    return "\n".join(parts)
 
 
 def _format_warnings(snapshot: ParsedSession) -> str:
@@ -4192,7 +4449,7 @@ def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[st
             f"推理 {confirmed.cumulative_reasoning:,}   "
             f"金额 {_format_money(session_cost)}"
         ),
-        "budget": _format_budget(snapshot),
+        "budget": _format_budget_progress_meta(snapshot),
         "warnings": _format_notice(snapshot),
         "activity": (
             f"{_activity_label(snapshot.activity.kind)}："

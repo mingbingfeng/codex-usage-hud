@@ -112,6 +112,17 @@ HUD_MUTED = "#8492A6"
 HUD_ACCENT = "#F3D27A"
 HUD_BLUE = "#9CCBFF"
 HUD_ERROR = "#FF6B6B"
+HUD_PROGRESS_TRACK = "#111822"
+HUD_PROGRESS_TRACK_TEXT = "#657589"
+HUD_PROGRESS_CACHE = "#78B8FF"
+HUD_PROGRESS_CACHE_END = "#5EA7FF"
+HUD_PROGRESS_CACHE_TEXT = "#07131F"
+HUD_PROGRESS_DAY = "#F3D27A"
+HUD_PROGRESS_DAY_END = "#FFB86B"
+HUD_PROGRESS_DAY_TEXT = "#1A1305"
+HUD_PROGRESS_WEEK = "#FFC68D"
+HUD_PROGRESS_WEEK_END = "#FF8D5A"
+HUD_PROGRESS_WEEK_TEXT = "#1F1106"
 REQUEST_BG = "#0B1016"
 REQUEST_HEADER_BG = "#151D27"
 REQUEST_PANEL_BG = "#101821"
@@ -1043,6 +1054,350 @@ class ShimmerTextLabel(tk.Frame):
             value = start_value + ((end_value - start_value) * progress)
             channels.append(max(0, min(255, int(round(value / 257)))))
         return f"#{channels[0]:02x}{channels[1]:02x}{channels[2]:02x}"
+
+
+@dataclass(frozen=True)
+class TopHudProgressMetric:
+    label: str
+    ratio: float
+    fill: str
+    fill_end: str
+    fill_text: str
+    track_text: str = HUD_PROGRESS_TRACK_TEXT
+
+
+def _clamp_progress_ratio(value: float | int | None) -> float:
+    try:
+        ratio = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, ratio))
+
+
+class TopHudProgressBar(tk.Frame):
+    """Rounded text-in-bar progress rail used by both top HUD states."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        height: int = 26,
+        width: int | None = None,
+        bg: str = HUD_BG,
+        font: Any = ("Microsoft YaHei UI", 8, "bold"),
+        padding_x: int = 12,
+        gloss: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(master, bg=bg, **kwargs)
+        self._height = max(16, int(height))
+        self._width = max(1, int(width)) if width is not None else None
+        self._bg = bg
+        self._font = tkfont.Font(font=font)
+        self._padding_x = max(4, int(padding_x))
+        self._gloss = bool(gloss)
+        self._metric = TopHudProgressMetric(
+            label="",
+            ratio=0.0,
+            fill=HUD_PROGRESS_DAY,
+            fill_end=HUD_PROGRESS_DAY_END,
+            fill_text=HUD_PROGRESS_DAY_TEXT,
+        )
+        canvas_kwargs: dict[str, Any] = {}
+        if self._width is not None:
+            canvas_kwargs["width"] = self._width
+        self._canvas = tk.Canvas(
+            self,
+            bg=self._bg,
+            height=self._height,
+            highlightthickness=0,
+            borderwidth=0,
+            relief="flat",
+            **canvas_kwargs,
+        )
+        setattr(self._canvas, "_hud_progress_canvas", True)
+        self._canvas.pack(fill="both", expand=True)
+        self.bind("<Configure>", self._handle_configure)
+        self._canvas.bind("<Configure>", self._handle_configure)
+        self._draw()
+
+    def cget(self, key: str) -> Any:
+        if key == "text":
+            return self._metric.label
+        if key == "bg":
+            return self._bg
+        if key == "font":
+            return self._font
+        return super().cget(key)
+
+    def config(self, cnf: Any = None, **kwargs: Any) -> Any:
+        return self.configure(cnf, **kwargs)
+
+    def configure(self, cnf: Any = None, **kwargs: Any) -> Any:
+        if cnf:
+            kwargs.update(cnf)
+        metric = kwargs.pop("metric", None)
+        text = kwargs.pop("text", None)
+        bg = kwargs.pop("bg", None)
+        font = kwargs.pop("font", None)
+        if bg is not None:
+            self._bg = str(bg)
+            super().configure(bg=self._bg)
+            self._canvas.configure(bg=self._bg)
+        if font is not None:
+            self._font = tkfont.Font(font=font)
+        result = super().configure(**kwargs)
+        if metric is not None:
+            self.set_metric(metric)
+        elif text is not None:
+            self.set_metric(
+                TopHudProgressMetric(
+                    label=str(text or ""),
+                    ratio=0.0,
+                    fill=HUD_PROGRESS_DAY,
+                    fill_end=HUD_PROGRESS_DAY_END,
+                    fill_text=HUD_PROGRESS_DAY_TEXT,
+                    track_text=HUD_TEXT,
+                )
+            )
+        else:
+            self._draw()
+        return result
+
+    def set_metric(self, metric: TopHudProgressMetric) -> None:
+        self._metric = TopHudProgressMetric(
+            label=str(metric.label or ""),
+            ratio=_clamp_progress_ratio(metric.ratio),
+            fill=str(metric.fill or HUD_PROGRESS_DAY),
+            fill_end=str(metric.fill_end or metric.fill or HUD_PROGRESS_DAY),
+            fill_text=str(metric.fill_text or HUD_PROGRESS_DAY_TEXT),
+            track_text=str(metric.track_text or HUD_PROGRESS_TRACK_TEXT),
+        )
+        self._draw()
+
+    def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._draw()
+
+    def _draw(self) -> None:
+        canvas = self._canvas
+        canvas.delete("all")
+        width = max(1, canvas.winfo_width() or self.winfo_width())
+        height = max(1, canvas.winfo_height() or self._height)
+        x1, y1, x2, y2 = 1, 1, max(2, width - 1), max(2, height - 1)
+        self._draw_pill(x1, y1, x2, y2, fill=HUD_PROGRESS_TRACK, outline="#253142")
+
+        fill_width = max(0, int((x2 - x1) * self._metric.ratio))
+        if fill_width > 0:
+            fill_x2 = min(x2, x1 + fill_width)
+            self._draw_pill(
+                x1,
+                y1,
+                fill_x2,
+                y2,
+                fill=self._metric.fill,
+                outline=self._metric.fill_end,
+            )
+            if self._gloss and fill_width > 18:
+                shine_left = max(x1, fill_x2 - min(70, fill_width))
+                canvas.create_rectangle(
+                    shine_left,
+                    y1 + 3,
+                    fill_x2 - 5,
+                    y2 - 3,
+                    fill=self._metric.fill_end,
+                    outline="",
+                    stipple="gray50",
+                )
+
+        label = self._metric.label
+        text_x = x1 + self._padding_x
+        text_y = height / 2
+        canvas.create_text(
+            text_x,
+            text_y,
+            anchor="w",
+            text=label,
+            fill=self._metric.track_text,
+            font=self._font,
+        )
+        if fill_width >= self._font.measure(label) + (self._padding_x * 2):
+            canvas.create_text(
+                text_x,
+                text_y,
+                anchor="w",
+                text=label,
+                fill=self._metric.fill_text,
+                font=self._font,
+            )
+
+    def _draw_pill(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        fill: str,
+        outline: str = "",
+    ) -> None:
+        if x2 <= x1 or y2 <= y1:
+            return
+        if (x2 - x1) <= (y2 - y1):
+            canvas = self._canvas
+            canvas.create_oval(x1, y1, x2, y2, fill=fill, outline=outline or "")
+            return
+        radius = max(1, min((y2 - y1) // 2, (x2 - x1) // 2))
+        canvas = self._canvas
+        canvas.create_rectangle(x1 + radius, y1, x2 - radius, y2, fill=fill, outline="")
+        canvas.create_oval(x1, y1, x1 + (radius * 2), y2, fill=fill, outline="")
+        canvas.create_oval(x2 - (radius * 2), y1, x2, y2, fill=fill, outline="")
+        if outline:
+            canvas.create_arc(x1, y1, x1 + (radius * 2), y2, start=90, extent=180, style="arc", outline=outline)
+            canvas.create_arc(x2 - (radius * 2), y1, x2, y2, start=-90, extent=180, style="arc", outline=outline)
+            canvas.create_line(x1 + radius, y1, x2 - radius, y1, fill=outline)
+            canvas.create_line(x1 + radius, y2, x2 - radius, y2, fill=outline)
+
+
+class TopHudProgressStrip(tk.Frame):
+    """Collapsed top HUD strip with session/day/week rails."""
+
+    def __init__(self, master: tk.Misc, **kwargs: Any) -> None:
+        super().__init__(master, bg=HUD_BG, **kwargs)
+        self._text = ""
+        self._bars: list[TopHudProgressBar] = []
+        for index in range(3):
+            bar = TopHudProgressBar(self, height=28, bg=HUD_BG, gloss=False)
+            bar.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 7, 0))
+            self.columnconfigure(index, weight=(16, 12, 14)[index], minsize=(130, 86, 96)[index])
+            self._bars.append(bar)
+        self.rowconfigure(0, weight=1)
+
+    def cget(self, key: str) -> Any:
+        if key == "text":
+            return self._text
+        return super().cget(key)
+
+    def config(self, cnf: Any = None, **kwargs: Any) -> Any:
+        return self.configure(cnf, **kwargs)
+
+    def configure(self, cnf: Any = None, **kwargs: Any) -> Any:
+        if cnf:
+            kwargs.update(cnf)
+        text = kwargs.pop("text", None)
+        metrics = kwargs.pop("metrics", None)
+        result = super().configure(**kwargs)
+        if metrics is not None:
+            self.set_metrics(list(metrics))
+        if text is not None:
+            self._text = str(text or "")
+        return result
+
+    def set_metrics(self, metrics: list[TopHudProgressMetric]) -> None:
+        single_metric = len(metrics) == 1 and bool(metrics[0].label)
+        if single_metric:
+            self._layout_single_metric()
+        else:
+            self._layout_multi_metric()
+        labels = []
+        for index, bar in enumerate(self._bars):
+            metric = metrics[index] if index < len(metrics) else TopHudProgressMetric(
+                label="",
+                ratio=0.0,
+                fill=HUD_PROGRESS_DAY,
+                fill_end=HUD_PROGRESS_DAY_END,
+                fill_text=HUD_PROGRESS_DAY_TEXT,
+            )
+            bar.set_metric(metric)
+            labels.append(metric.label)
+        self._text = " | ".join(label for label in labels if label)
+
+    def _layout_multi_metric(self) -> None:
+        for index, bar in enumerate(self._bars):
+            bar.grid(row=0, column=index, columnspan=1, sticky="nsew", padx=(0 if index == 0 else 7, 0))
+            self.columnconfigure(index, weight=(16, 12, 14)[index], minsize=(130, 86, 96)[index])
+
+    def _layout_single_metric(self) -> None:
+        for index, bar in enumerate(self._bars):
+            if index == 0:
+                bar.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=0)
+            else:
+                bar.grid_remove()
+            self.columnconfigure(index, weight=1 if index == 0 else 0, minsize=0)
+
+
+class TopHudBudgetProgress(tk.Frame):
+    """Expanded budget area rendered as day/week text-in-progress rails."""
+
+    def __init__(self, master: tk.Misc, **kwargs: Any) -> None:
+        super().__init__(master, bg=HUD_BG, **kwargs)
+        self._text = ""
+        self._day = TopHudProgressBar(
+            self,
+            height=36,
+            bg=HUD_BG,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padding_x=14,
+        )
+        self._week = TopHudProgressBar(
+            self,
+            height=36,
+            bg=HUD_BG,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padding_x=14,
+        )
+        self._meta = tk.Label(
+            self,
+            text="",
+            anchor="w",
+            justify="left",
+            bg=HUD_BG,
+            fg=HUD_MUTED,
+            font=("Microsoft YaHei UI", 7),
+            wraplength=360,
+        )
+        self._day.pack(fill="x", pady=(0, 6))
+        self._week.pack(fill="x", pady=(0, 5))
+        self._meta.pack(fill="x")
+        self.bind("<Configure>", self._sync_meta_wrap, add="+")
+
+    def cget(self, key: str) -> Any:
+        if key == "text":
+            return self._text
+        if key == "wraplength":
+            return self._meta.cget("wraplength")
+        return super().cget(key)
+
+    def config(self, cnf: Any = None, **kwargs: Any) -> Any:
+        return self.configure(cnf, **kwargs)
+
+    def configure(self, cnf: Any = None, **kwargs: Any) -> Any:
+        if cnf:
+            kwargs.update(cnf)
+        text = kwargs.pop("text", None)
+        metrics = kwargs.pop("metrics", None)
+        meta = kwargs.pop("meta", None)
+        result = super().configure(**kwargs)
+        if metrics is not None:
+            self.set_metrics(list(metrics), meta=str(meta or ""))
+        elif text is not None:
+            self._text = str(text or "")
+            self._meta.configure(text=self._text)
+        return result
+
+    def set_metrics(self, metrics: list[TopHudProgressMetric], *, meta: str = "") -> None:
+        if metrics:
+            self._day.set_metric(metrics[0])
+        if len(metrics) > 1:
+            self._week.set_metric(metrics[1])
+        self._text = "\n".join(metric.label for metric in metrics if metric.label)
+        if meta:
+            self._text = f"{self._text}\n{meta}" if self._text else meta
+        self._meta.configure(text=meta)
+
+    def _sync_meta_wrap(self, event: tk.Event[tk.Misc]) -> None:
+        width = max(120, int(getattr(event, "width", 360) or 360) - 4)
+        self._meta.configure(wraplength=width)
 
 
 @dataclass(frozen=True)
@@ -2181,6 +2536,115 @@ def _session_cache_hit_rate(snapshot: ParsedSession) -> tuple[float | None, bool
 def _session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
     ratio, estimated = _session_cache_hit_rate(snapshot)
     return _format_rate_marker(ratio, estimated)
+
+
+def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | None = None) -> str:
+    total_tokens = int(snapshot.confirmed.cumulative_total or 0)
+    total_cost = _session_cost(snapshot) if session_cost is None else session_cost
+    if snapshot.request.status == "running":
+        (
+            _input_tokens,
+            _input_estimated,
+            _output_tokens,
+            _output_estimated,
+            _reasoning_tokens,
+            _reasoning_estimated,
+            request_total_tokens,
+            _total_estimated,
+        ) = _display_tokens(snapshot)
+        total_tokens += int(request_total_tokens or 0)
+        request_cost, _request_cost_estimated = _request_cost(snapshot)
+        if request_cost is not None:
+            total_cost = float(total_cost or 0.0) + float(request_cost)
+    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_session_cache_hit_rate_label(snapshot)}"
+
+
+def _top_cache_progress_label(snapshot: ParsedSession) -> str:
+    label = _session_cache_hit_rate_label(snapshot)
+    if label.startswith(CACHE_HIT_RATE_SYMBOL):
+        label = label[len(CACHE_HIT_RATE_SYMBOL) :]
+    return f"缓存命中 {label}"
+
+
+def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
+    amount = max(0.0, float(cost or 0.0))
+    budget = max(0.0, float(limit or 0.0))
+    if budget <= 0.0:
+        return 0.0
+    return _clamp_progress_ratio(amount / budget)
+
+
+def _top_collapsed_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgressMetric]:
+    return [
+        TopHudProgressMetric(
+            label=_top_session_usage_summary(snapshot),
+            ratio=0.0,
+            fill=HUD_PROGRESS_TRACK,
+            fill_end=HUD_PROGRESS_TRACK,
+            fill_text=HUD_TEXT,
+            track_text=HUD_TEXT,
+        ),
+        TopHudProgressMetric(
+            label=f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
+            ratio=_budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
+            fill=HUD_PROGRESS_DAY,
+            fill_end=HUD_PROGRESS_DAY_END,
+            fill_text=HUD_PROGRESS_DAY_TEXT,
+        ),
+        TopHudProgressMetric(
+            label=f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
+            ratio=_budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
+            fill=HUD_PROGRESS_WEEK,
+            fill_end=HUD_PROGRESS_WEEK_END,
+            fill_text=HUD_PROGRESS_WEEK_TEXT,
+        ),
+    ]
+
+
+def _top_cache_progress_metric(snapshot: ParsedSession) -> TopHudProgressMetric:
+    cache_ratio, _cache_estimated = _session_cache_hit_rate(snapshot)
+    return TopHudProgressMetric(
+        label=_top_cache_progress_label(snapshot),
+        ratio=cache_ratio if cache_ratio is not None else 0.0,
+        fill=HUD_PROGRESS_CACHE,
+        fill_end=HUD_PROGRESS_CACHE_END,
+        fill_text=HUD_PROGRESS_CACHE_TEXT,
+    )
+
+
+def _top_budget_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgressMetric]:
+    return [
+        TopHudProgressMetric(
+            label=f"本日累计 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
+            ratio=_budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
+            fill=HUD_PROGRESS_DAY,
+            fill_end=HUD_PROGRESS_DAY_END,
+            fill_text=HUD_PROGRESS_DAY_TEXT,
+        ),
+        TopHudProgressMetric(
+            label=f"本周累计 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
+            ratio=_budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
+            fill=HUD_PROGRESS_WEEK,
+            fill_end=HUD_PROGRESS_WEEK_END,
+            fill_text=HUD_PROGRESS_WEEK_TEXT,
+        ),
+    ]
+
+
+def _top_budget_progress_meta(snapshot: ParsedSession) -> str:
+    parts = [
+        f"日窗起点 {_format_start(snapshot.day_start)}",
+        f"周窗起点 {_format_start(snapshot.week_start)}",
+    ]
+    if snapshot.week_before_today_cost_usd > 0:
+        parts.append(
+            "本周拆分 "
+            f"今日前 {_format_usage_money(snapshot.week_before_today_tokens, snapshot.week_before_today_cost_usd)}"
+            f" + 当前日窗 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
+        )
+    if snapshot.week_adjustment_usd > 0:
+        parts.append(f"人工补充 {_format_money(snapshot.week_adjustment_usd)}")
+    return "  |  ".join(parts)
 
 
 def _round_cache_hit_rate_label(item: RequestRound) -> str:
@@ -4306,14 +4770,7 @@ class TokenHudWindow:
         self._move_handle(controls, "top", self.root).pack(side="left")
         self._update_button(controls).pack(side="left", padx=(4, 0))
         self._settings_button(frame).pack(side="right", padx=(4, 0))
-        self.top_labels["bar"] = AutoScrollLabel(
-            frame,
-            text="读取 token...",
-            bg=HUD_BG,
-            fg=HUD_TEXT,
-            font=("Microsoft YaHei UI", 9, "bold"),
-            static_align="left",
-        )
+        self.top_labels["bar"] = TopHudProgressStrip(frame)
         self.top_labels["bar"].pack(side="left", fill="both", expand=True)
 
     def _build_top_expanded(self, frame: tk.Frame) -> None:
@@ -4324,6 +4781,16 @@ class TokenHudWindow:
         self._move_handle(controls, "top", self.root).pack(side="left")
         self._update_button(controls).pack(side="left", padx=(4, 0))
         self._settings_button(header).pack(side="right", padx=(4, 0))
+        cache_progress = TopHudProgressBar(
+            header,
+            height=24,
+            width=148,
+            bg=HUD_HEADER_BG,
+            font=("Microsoft YaHei UI", 8, "bold"),
+            padding_x=10,
+        )
+        cache_progress.pack(side="right", fill="y", padx=(8, 4))
+        self.top_labels["cache_progress"] = cache_progress
         self.top_labels["title"] = tk.Label(
             header,
             text=TOP_EXPANDED_HEADER_FALLBACK,
@@ -4501,13 +4968,9 @@ class TokenHudWindow:
         )
         divider(left)
         section(left, "额度")
-        dynamic_label(
-            "budget",
-            left,
-            fg="#FFD879",
-            font=("Microsoft YaHei UI", 8),
-            pady=(0, 5),
-        )
+        budget_progress = TopHudBudgetProgress(left)
+        budget_progress.pack(fill="x", pady=(0, 5))
+        self.top_labels["budget"] = budget_progress
         section(left, "当前活动")
         dynamic_label(
             "activity",
@@ -5829,16 +6292,29 @@ class TokenHudWindow:
         bar = self.top_labels.get("bar")
         if bar is not None:
             text = (
-                f"会话 {_format_usage_money(confirmed.cumulative_total, session_cost)} | "
-                f"命中 {_session_cache_hit_rate_label(snapshot)} | "
+                f"{_top_session_usage_summary(snapshot, session_cost)} | "
                 f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)} | "
                 f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)} | "
                 f"状态 {_budget_status(snapshot)}"
             )
+            metrics = _top_collapsed_progress_metrics(snapshot)
             if snapshot.error and snapshot.status in {"missing", "error"}:
                 text = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
-            bar.configure(text=text, fg="#FFB86B" if snapshot.budget_warnings else HUD_TEXT)
+                metrics = [
+                    TopHudProgressMetric(
+                        label=text,
+                        ratio=1.0,
+                        fill=HUD_ERROR,
+                        fill_end=HUD_ERROR,
+                        fill_text="#1A1012",
+                    )
+                ]
+            bar.configure(text=text, metrics=metrics)
             return
+
+        cache_progress = self.top_labels.get("cache_progress")
+        if isinstance(cache_progress, TopHudProgressBar):
+            cache_progress.configure(metric=_top_cache_progress_metric(snapshot))
 
         values = {
             "session": (
@@ -5859,7 +6335,7 @@ class TokenHudWindow:
                 f"推理 {confirmed.cumulative_reasoning:,}   "
                 f"金额 {_format_money(session_cost)}"
             ),
-            "budget": self._format_budget(snapshot),
+            "budget": _top_budget_progress_meta(snapshot),
             "warnings": self._format_notice(snapshot),
             "activity": (
                 f"{_activity_label(snapshot.activity.kind)}："
@@ -5876,7 +6352,14 @@ class TokenHudWindow:
         for key, text in values.items():
             label = self.top_labels.get(key)
             if label is not None:
-                label.configure(text=_wrap_long_display_tokens(text))
+                if key == "budget" and isinstance(label, TopHudBudgetProgress):
+                    label.configure(
+                        text=_wrap_long_display_tokens(text),
+                        metrics=_top_budget_progress_metrics(snapshot),
+                        meta=_top_budget_progress_meta(snapshot),
+                    )
+                else:
+                    label.configure(text=_wrap_long_display_tokens(text))
                 if key == "slow":
                     copyable = _copyable_tool_command(snapshot) is not None
                     label.configure(
@@ -5947,35 +6430,6 @@ class TokenHudWindow:
             )
         self.request_text.configure(state="disabled")
         self.request_text.yview_moveto(0.0 if should_follow_head else previous_top)
-
-    def _format_budget(self, snapshot: ParsedSession) -> str:
-        day_ratio = (
-            snapshot.today_cost_usd / snapshot.daily_limit_usd
-            if snapshot.daily_limit_usd > 0
-            else 0.0
-        )
-        week_ratio = (
-            snapshot.week_cost_usd / snapshot.weekly_limit_usd
-            if snapshot.weekly_limit_usd > 0
-            else 0.0
-        )
-        text = (
-            f"今日累计  {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}  "
-            f"额度 {snapshot.today_cost_usd:.2f}/{snapshot.daily_limit_usd:.0f} USD "
-            f"({day_ratio:.0%})  起点 {_format_start(snapshot.day_start)}\n"
-            f"本周累计  {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}  "
-            f"额度 {snapshot.week_cost_usd:.2f}/{snapshot.weekly_limit_usd:.0f} USD "
-            f"({week_ratio:.0%})  起点 {_format_start(snapshot.week_start)}"
-        )
-        if snapshot.week_before_today_cost_usd > 0:
-            text += (
-                "\n本周拆分  "
-                f"今日前 {_format_usage_money(snapshot.week_before_today_tokens, snapshot.week_before_today_cost_usd)}"
-                f" + 当前日窗 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
-            )
-        if snapshot.week_adjustment_usd > 0:
-            text += f" + 人工补充 {_format_money(snapshot.week_adjustment_usd)}"
-        return text
 
     def _format_warnings(self, snapshot: ParsedSession) -> str:
         if snapshot.budget_error:
