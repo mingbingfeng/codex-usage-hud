@@ -112,6 +112,10 @@ from codex_usage_hud.ui.tk_hud import (
     _round_entry_widths,
     _visual_anchor_geometry,
 )
+from codex_usage_hud.ui.work_overlay_qt import (
+    _item_dismiss_key,
+    _visible_overlay_items,
+)
 
 
 class _FakeWindow:
@@ -560,6 +564,7 @@ class BudgetHelperTests(unittest.TestCase):
             progress="1.2k tokens | 12s",
             source="activity",
             workdir="E:\\Project\\codex-usage-hud",
+            task_started_at=datetime(2026, 6, 16, 10, 0, 0).astimezone(),
             current=True,
         )
 
@@ -571,8 +576,47 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["lastText"], "上一轮输出保留在气泡里")
         self.assertEqual(payload["elapsedText"], "已处理 12s")
         self.assertEqual(payload["workdir"], "E:\\Project\\codex-usage-hud")
+        self.assertTrue(str(payload["taskStartedAt"]).startswith("2026-06-16T10:00:00"))
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
+
+    def test_work_overlay_dismissal_stays_hidden_until_next_task(self) -> None:
+        original = {
+            "id": "session-a",
+            "taskStartedAt": "2026-06-16T10:00:00+08:00",
+            "startedAt": "2026-06-16T10:00:00+08:00",
+            "status": "running",
+            "statusText": "正在思考",
+            "lastText": "先分析一下",
+            "current": True,
+        }
+        dismissed = {"session-a": _item_dismiss_key(original)}
+
+        completed_same_task = {
+            **original,
+            "status": "recent",
+            "statusText": "已完成",
+            "lastText": "这轮做完了",
+        }
+        self.assertEqual(
+            _visible_overlay_items([completed_same_task], dismissed, item_limit=4),
+            [],
+        )
+        self.assertEqual(dismissed, {"session-a": _item_dismiss_key(original)})
+
+        next_task = {
+            **original,
+            "taskStartedAt": "2026-06-16T10:05:00+08:00",
+            "startedAt": "2026-06-16T10:05:00+08:00",
+            "status": "running",
+            "statusText": "正在思考",
+            "lastText": "下一轮重新开始",
+        }
+        self.assertEqual(
+            _visible_overlay_items([next_task], dismissed, item_limit=4),
+            [next_task],
+        )
+        self.assertEqual(dismissed, {})
 
     def test_work_overlay_marks_visible_codex_error(self) -> None:
         snapshot = ParsedSession(

@@ -75,14 +75,11 @@ def _work_overlay_header_text(
     return " | ".join(parts) if parts else "Codex 工作"
 
 
-def _item_signature(item: Mapping[str, object]) -> str:
+def _item_dismiss_key(item: Mapping[str, object]) -> str:
     return json.dumps(
         {
             "id": item.get("id"),
-            "status": item.get("status"),
-            "statusText": item.get("statusText"),
-            "lastText": item.get("lastText"),
-            "current": item.get("current"),
+            "taskStartedAt": item.get("taskStartedAt") or item.get("startedAt") or "",
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -91,7 +88,7 @@ def _item_signature(item: Mapping[str, object]) -> str:
 
 def _visible_overlay_items(
     items: Sequence[Mapping[str, object]],
-    dismissed_signatures: dict[str, str],
+    dismissed_instances: dict[str, str],
     *,
     item_limit: int,
 ) -> list[Mapping[str, object]]:
@@ -101,15 +98,15 @@ def _visible_overlay_items(
         item_id = str(item.get("id") or "")
         if item_id:
             live_ids.add(item_id)
-        signature = _item_signature(item)
-        if item_id and dismissed_signatures.get(item_id) == signature:
+        dismiss_key = _item_dismiss_key(item)
+        if item_id and dismissed_instances.get(item_id) == dismiss_key:
             continue
-        if item_id and item_id in dismissed_signatures:
-            dismissed_signatures.pop(item_id, None)
+        if item_id and item_id in dismissed_instances:
+            dismissed_instances.pop(item_id, None)
         visible.append(item)
-    for item_id in list(dismissed_signatures):
+    for item_id in list(dismissed_instances):
         if item_id not in live_ids:
-            dismissed_signatures.pop(item_id, None)
+            dismissed_instances.pop(item_id, None)
     return visible
 
 
@@ -431,7 +428,7 @@ def run_work_overlay_helper_qt(
             if transparent_input:
                 flags |= transparent_input
             super().__init__(None, flags)
-            self._dismissed_signatures: dict[str, str] = {}
+            self._dismissed_instances: dict[str, str] = {}
             self._last_signature = ""
             self._raw_items: list[Mapping[str, object]] = []
             self._item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
@@ -460,7 +457,7 @@ def run_work_overlay_helper_qt(
         def dismiss_item(self, item: Mapping[str, object]) -> None:
             item_id = str(item.get("id") or "")
             if item_id:
-                self._dismissed_signatures[item_id] = _item_signature(item)
+                self._dismissed_instances[item_id] = _item_dismiss_key(item)
             self._last_signature = ""
             self.render_items(self._raw_items)
 
@@ -527,7 +524,7 @@ def run_work_overlay_helper_qt(
             self._raw_items = list(items)
             visible_items = _visible_overlay_items(
                 self._raw_items,
-                self._dismissed_signatures,
+                self._dismissed_instances,
                 item_limit=self._item_limit,
             )
             signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)

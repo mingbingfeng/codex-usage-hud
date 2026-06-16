@@ -329,6 +329,7 @@ class WorkStatusItem:
     source: str = ""
     workdir: str = ""
     session_started_at: datetime | None = None
+    task_started_at: datetime | None = None
     started_at: datetime | None = None
     updated_at: datetime | None = None
     current: bool = False
