@@ -40,4 +40,11 @@ Thumbs.db
 
 # Agent runtime state
 .omx/
+.omc/
+.codex_delegate/
 
+# Local debug and mockup artifacts
+/.tmp-*.png
+/[0-9].png
+/docs/mockups/
+/tmp_probe_out.json

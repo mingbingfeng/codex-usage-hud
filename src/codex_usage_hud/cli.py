@@ -3386,19 +3386,22 @@ def _run_tk_window_session(
 
         def refresh() -> None:
             nonlocal latest_snapshot
-            if window.should_refresh_snapshot():
+            overlay_item_limit = _work_overlay_item_limit_for_context(context)
+            refresh_snapshot = window.should_refresh_snapshot()
+            if refresh_snapshot or overlay_item_limit > 0:
                 snapshot = snapshot_pump.take_latest()
                 if snapshot is not None:
                     latest_snapshot = snapshot
                 snapshot_pump.request_refresh()
+            if refresh_snapshot:
                 window.update_display(
                     latest_snapshot,
                     update_state=update_manager.tick() if update_manager is not None else None,
                 )
-                work_overlay.configure(
-                    item_limit=_work_overlay_item_limit_for_context(context),
-                )
-                work_overlay.update(latest_snapshot.active_work_items)
+            work_overlay.configure(
+                item_limit=overlay_item_limit,
+            )
+            work_overlay.update(latest_snapshot.active_work_items)
             try:
                 window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
             except Exception:

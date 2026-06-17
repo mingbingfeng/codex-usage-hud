@@ -29,6 +29,7 @@ WORK_OVERLAY_SHIMMER_STEP_PX = 3.5
 WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX = 58
 WORK_OVERLAY_SHIMMER_HIGHLIGHT = "#FFFFFF"
 WORK_OVERLAY_SHIMMER_PEAK_ALPHA = 245
+WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
 
 
 def work_overlay_max_items_for_screen_height(screen_height: int) -> int:
@@ -203,6 +204,7 @@ def run_work_overlay_helper_qt(
             self._step_px = max(0.25, float(step_px))
             self._timer_ms = max(10, int(timer_ms))
             self._phase_x = -self._band_width_px
+            self._shimmer_enabled = True
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._advance_shimmer)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -230,6 +232,18 @@ def run_work_overlay_helper_qt(
             self._highlight_color = QColor(color)
             self.update()
 
+        def setShimmerEnabled(self, enabled: bool) -> None:
+            next_enabled = bool(enabled)
+            if next_enabled == self._shimmer_enabled:
+                return
+            self._shimmer_enabled = next_enabled
+            self._phase_x = -self._band_width_px
+            if self._shimmer_enabled and self.isVisible():
+                self._timer.start(self._timer_ms)
+            else:
+                self._timer.stop()
+            self.update()
+
         def hasHeightForWidth(self) -> bool:
             return True
 
@@ -245,7 +259,7 @@ def run_work_overlay_helper_qt(
             return QSize(1, self.heightForWidth(width))
 
         def showEvent(self, event: object) -> None:
-            if not self._timer.isActive():
+            if self._shimmer_enabled and not self._timer.isActive():
                 self._timer.start(self._timer_ms)
             super().showEvent(event)
 
@@ -265,6 +279,9 @@ def run_work_overlay_helper_qt(
 
             painter.setBrush(self._base_color)
             painter.drawPath(path)
+
+            if not self._shimmer_enabled:
+                return
 
             transparent = QColor(self._highlight_color)
             transparent.setAlpha(0)
@@ -433,11 +450,14 @@ def run_work_overlay_helper_qt(
                 flags |= transparent_input
             super().__init__(None, flags)
             self._dismissed_instances: dict[str, str] = {}
-            self._last_signature = ""
+            self._last_payload_signature = ""
+            self._last_structure_signature = ""
             self._raw_items: list[Mapping[str, object]] = []
             self._item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
             self._close_windows: list[CloseButtonWindow] = []
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
+            self._item_widgets: list[dict[str, Any]] = []
+            self._empty_since = 0.0
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -462,7 +482,8 @@ def run_work_overlay_helper_qt(
             item_id = str(item.get("id") or "")
             if item_id:
                 self._dismissed_instances[item_id] = _item_dismiss_key(item)
-            self._last_signature = ""
+            self._last_payload_signature = ""
+            self._last_structure_signature = ""
             self.render_items(self._raw_items)
 
         def hide_overlay(self) -> None:
@@ -524,19 +545,14 @@ def run_work_overlay_helper_qt(
             for close_window in self._close_windows:
                 close_window.setWindowOpacity(target)
 
-        def render_items(self, items: Sequence[Mapping[str, object]]) -> None:
-            self._raw_items = list(items)
-            visible_items = _visible_overlay_items(
-                self._raw_items,
-                self._dismissed_instances,
-                item_limit=self._item_limit,
-            )
-            signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
-            if signature == self._last_signature:
-                return
-            self._last_signature = signature
-            self._close_anchors.clear()
+        @staticmethod
+        def _item_identity(item: Mapping[str, object], index: int) -> str:
+            item_id = str(item.get("id") or "").strip()
+            return item_id or f"overlay-index-{index}"
 
+        def _clear_shell(self) -> None:
+            self._close_anchors.clear()
+            self._item_widgets.clear()
             shell_layout = self._shell.layout()
             while shell_layout.count():
                 item = shell_layout.takeAt(0)
@@ -544,152 +560,173 @@ def run_work_overlay_helper_qt(
                 if widget is not None:
                     widget.deleteLater()
 
-            if not visible_items:
-                self.hide_overlay()
-                return
+        def _build_item_card(self, item: Mapping[str, object]) -> None:
+            card = QFrame(self._shell)
+            card.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(
+                WORK_OVERLAY_CARD_X_PADDING,
+                WORK_OVERLAY_CARD_Y_PADDING,
+                WORK_OVERLAY_CARD_X_PADDING,
+                WORK_OVERLAY_CARD_Y_PADDING,
+            )
+            card_layout.setSpacing(WORK_OVERLAY_CARD_SPACING)
 
+            head_layout = QHBoxLayout()
+            head_layout.setContentsMargins(0, 0, 0, 0)
+            head_layout.setSpacing(8)
+
+            header = QLabel("", card)
+            header.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            header.setWordWrap(False)
+            header.setTextFormat(text_format.PlainText)
+            header.setAlignment(alignment.AlignVCenter | alignment.AlignLeft)
+            header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            header.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
+            head_layout.addWidget(header, 1)
+
+            close_anchor = QWidget(card)
+            close_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            close_anchor.setFixedSize(WORK_OVERLAY_CLOSE_SIZE, WORK_OVERLAY_CLOSE_SIZE)
+            head_layout.addWidget(close_anchor, 0)
+            card_layout.addLayout(head_layout)
+
+            detail = QLabel("", card)
+            detail.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            detail.setWordWrap(True)
+            detail.setTextFormat(text_format.PlainText)
+            detail.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+            detail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
+            detail.setFont(QFont("Microsoft YaHei UI", 8))
+            detail.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
+            card_layout.addWidget(detail)
+
+            footer_container = QWidget(card)
+            footer_container.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            footer_layout = QHBoxLayout(footer_container)
+            footer_layout.setContentsMargins(0, 0, 0, 0)
+            footer_layout.setSpacing(8)
+
+            status_label = ShimmerTextLabel("", footer_container, base_color="#8492A6")
+            status_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            status_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
+            status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            status_label.setMinimumWidth(1)
+            status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
+            footer_layout.addWidget(status_label, 1)
+
+            workdir_label = QLabel("", footer_container)
+            workdir_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            workdir_label.setWordWrap(False)
+            workdir_label.setTextFormat(text_format.PlainText)
+            workdir_label.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
+            workdir_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            workdir_label.setFont(QFont("Microsoft YaHei UI", 7))
+            workdir_label.setMaximumWidth(170)
+            workdir_label.setFixedHeight(workdir_label.fontMetrics().height() + 4)
+            workdir_label.setStyleSheet(
+                "QLabel {"
+                "color: #5E6A78;"
+                "border: none;"
+                "background: transparent;"
+                "}"
+            )
+            footer_layout.addWidget(workdir_label, 0)
+
+            card_layout.addWidget(footer_container)
+            self._shell.layout().addWidget(card)
+
+            record = {
+                "card": card,
+                "header": header,
+                "detail": detail,
+                "footer_container": footer_container,
+                "status_label": status_label,
+                "workdir_label": workdir_label,
+                "close_anchor": close_anchor,
+            }
+            self._item_widgets.append(record)
+            self._update_item_card(record, item)
+
+        def _update_item_card(self, record: dict[str, Any], item: Mapping[str, object]) -> None:
+            status = str(item.get("status") or "")
+            accent, pill_bg, card_bg, border_color = _color_for(status)
+            elapsed_text = str(item.get("elapsedText") or "").strip() or "已处理 --"
+            header_text = _work_overlay_header_text(
+                str(item.get("startedAt") or ""),
+                elapsed_text,
+                str(item.get("title") or "Codex 工作"),
+                title_limit=header_title_limit,
+            )
+
+            card = record["card"]
+            card.setStyleSheet(
+                "QFrame {"
+                f"background-color: {card_bg};"
+                f"border: 1px solid {border_color};"
+                "border-radius: 10px;"
+                "}"
+            )
+
+            header = record["header"]
+            header.setText(header_text)
+            header.setStyleSheet(
+                "QLabel {"
+                f"color: {accent if status == 'recent' else '#A9B6C6'};"
+                "border: none;"
+                "background: transparent;"
+                "}"
+            )
+
+            body_text = str(item.get("lastText") or item.get("detail") or "").strip()
+            detail = record["detail"]
+            detail.setText(body_text)
+            detail.setMinimumHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
+            detail.setStyleSheet(
+                "QLabel {"
+                "color: #B8C6D8;"
+                "border: none;"
+                "background: transparent;"
+                "}"
+            )
+
+            workdir_text = str(item.get("workdir") or "").strip()
+            status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
+            footer_container = record["footer_container"]
+            footer_container.setVisible(bool(status_text or workdir_text))
+
+            status_label = record["status_label"]
+            if status_text:
+                status_text_color = accent if status in {"recent", "error"} else "#8492A6"
+                footer_status_text = _compact_work_text(
+                    status_text,
+                    48 if workdir_text else 80,
+                )
+                status_label.setText(footer_status_text)
+                status_label.setBaseColor(status_text_color)
+                status_label.setShimmerEnabled(status != "recent")
+                status_label.setVisible(True)
+            else:
+                status_label.setText("")
+                status_label.setShimmerEnabled(False)
+                status_label.setVisible(False)
+
+            workdir_label = record["workdir_label"]
+            if workdir_text:
+                workdir_label.setText(_compact_workdir_text(workdir_text, 40))
+                workdir_label.setToolTip(workdir_text)
+                workdir_label.setVisible(True)
+            else:
+                workdir_label.setText("")
+                workdir_label.setToolTip("")
+                workdir_label.setVisible(False)
+
+            self._close_anchors.append(
+                (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
+            )
+
+        def _sync_overlay_geometry(self) -> None:
             self._shell.setFixedWidth(WORK_OVERLAY_WIDTH)
-            for item in visible_items:
-                status = str(item.get("status") or "")
-                accent, pill_bg, card_bg, border_color = _color_for(status)
-                elapsed_text = str(item.get("elapsedText") or "").strip() or "已处理 --"
-                header_text = _work_overlay_header_text(
-                    str(item.get("startedAt") or ""),
-                    elapsed_text,
-                    str(item.get("title") or "Codex 工作"),
-                    title_limit=header_title_limit,
-                )
-
-                card = QFrame(self._shell)
-                card.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                card.setStyleSheet(
-                    "QFrame {"
-                    f"background-color: {card_bg};"
-                    f"border: 1px solid {border_color};"
-                    "border-radius: 10px;"
-                    "}"
-                )
-                card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(
-                    WORK_OVERLAY_CARD_X_PADDING,
-                    WORK_OVERLAY_CARD_Y_PADDING,
-                    WORK_OVERLAY_CARD_X_PADDING,
-                    WORK_OVERLAY_CARD_Y_PADDING,
-                )
-                card_layout.setSpacing(WORK_OVERLAY_CARD_SPACING)
-
-                head_layout = QHBoxLayout()
-                head_layout.setContentsMargins(0, 0, 0, 0)
-                head_layout.setSpacing(8)
-
-                header = QLabel(header_text, card)
-                header.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                header.setWordWrap(False)
-                header.setTextFormat(text_format.PlainText)
-                header.setAlignment(alignment.AlignVCenter | alignment.AlignLeft)
-                header.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-                header.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
-                header.setStyleSheet(
-                    "QLabel {"
-                    f"color: {accent if status == 'recent' else '#A9B6C6'};"
-                    "border: none;"
-                    "background: transparent;"
-                    "}"
-                )
-                head_layout.addWidget(header, 1)
-
-                close_anchor = QWidget(card)
-                close_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                close_anchor.setFixedSize(WORK_OVERLAY_CLOSE_SIZE, WORK_OVERLAY_CLOSE_SIZE)
-                head_layout.addWidget(close_anchor, 0)
-                self._close_anchors.append((close_anchor, dict(item), card_bg, pill_bg, accent))
-                card_layout.addLayout(head_layout)
-
-                body_text = str(item.get("lastText") or item.get("detail") or "").strip()
-                detail = QLabel(body_text, card)
-                detail.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                detail.setWordWrap(True)
-                detail.setTextFormat(text_format.PlainText)
-                detail.setAlignment(alignment.AlignTop | alignment.AlignLeft)
-                detail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
-                detail.setFont(QFont("Microsoft YaHei UI", 8))
-                detail.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
-                detail.setMinimumHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
-                detail.setStyleSheet(
-                    "QLabel {"
-                    "color: #B8C6D8;"
-                    "border: none;"
-                    "background: transparent;"
-                    "}"
-                )
-                card_layout.addWidget(detail)
-
-                workdir_text = str(item.get("workdir") or "").strip()
-                status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
-                if status_text or workdir_text:
-                    footer_layout = QHBoxLayout()
-                    footer_layout.setContentsMargins(0, 0, 0, 0)
-                    footer_layout.setSpacing(8)
-
-                if status_text:
-                    shimmer_active = status != "recent"
-                    status_text_color = accent if status in {"recent", "error"} else "#8492A6"
-                    footer_status_text = _compact_work_text(
-                        status_text,
-                        48 if workdir_text else 80,
-                    )
-                    status_label = (
-                        ShimmerTextLabel(
-                            footer_status_text,
-                            card,
-                            base_color=status_text_color,
-                        )
-                        if shimmer_active
-                        else QLabel(footer_status_text, card)
-                    )
-                    status_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                    status_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
-                    status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-                    status_label.setMinimumWidth(1)
-                    status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
-                    if isinstance(status_label, QLabel):
-                        status_label.setWordWrap(False)
-                        status_label.setTextFormat(text_format.PlainText)
-                        status_label.setAlignment(alignment.AlignVCenter | alignment.AlignLeft)
-                        status_label.setStyleSheet(
-                            "QLabel {"
-                            f"color: {status_text_color};"
-                            "border: none;"
-                            "background: transparent;"
-                            "}"
-                        )
-                    footer_layout.addWidget(status_label, 1)
-
-                if workdir_text:
-                    workdir_label = QLabel(_compact_workdir_text(workdir_text, 40), card)
-                    workdir_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-                    workdir_label.setWordWrap(False)
-                    workdir_label.setTextFormat(text_format.PlainText)
-                    workdir_label.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
-                    workdir_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-                    workdir_label.setFont(QFont("Microsoft YaHei UI", 7))
-                    workdir_label.setMaximumWidth(170)
-                    workdir_label.setFixedHeight(workdir_label.fontMetrics().height() + 4)
-                    workdir_label.setStyleSheet(
-                        "QLabel {"
-                        "color: #5E6A78;"
-                        "border: none;"
-                        "background: transparent;"
-                        "}"
-                    )
-                    workdir_label.setToolTip(workdir_text)
-                    footer_layout.addWidget(workdir_label, 0)
-
-                if status_text or workdir_text:
-                    card_layout.addLayout(footer_layout)
-
-                shell_layout.addWidget(card)
-
             self._shell.layout().activate()
             self.layout().activate()
             content_height = max(
@@ -703,9 +740,9 @@ def run_work_overlay_helper_qt(
             max_y = max(geometry.top(), geometry.bottom() - content_height - WORK_OVERLAY_MARGIN)
             y = min(geometry.top() + WORK_OVERLAY_TOP_OFFSET, max_y)
             self.setGeometry(x, y, WORK_OVERLAY_WIDTH, content_height)
-            self.show()
+            if not self.isVisible():
+                self.show()
             self.raise_()
-            app.processEvents()
             self._shell.layout().activate()
             self.layout().activate()
             final_height = max(
@@ -718,6 +755,49 @@ def run_work_overlay_helper_qt(
                 y = min(geometry.top() + WORK_OVERLAY_TOP_OFFSET, max_y)
                 self.setGeometry(x, y, WORK_OVERLAY_WIDTH, final_height)
             QTimer.singleShot(0, self.reposition_close_windows)
+
+        def render_items(self, items: Sequence[Mapping[str, object]]) -> None:
+            self._raw_items = list(items)
+            visible_items = _visible_overlay_items(
+                self._raw_items,
+                self._dismissed_instances,
+                item_limit=self._item_limit,
+            )
+            if not visible_items:
+                if self.isVisible():
+                    now = time.time()
+                    if self._empty_since <= 0.0:
+                        self._empty_since = now
+                        return
+                    if (now - self._empty_since) < WORK_OVERLAY_EMPTY_GRACE_SECONDS:
+                        return
+                self._empty_since = 0.0
+                self._last_payload_signature = "[]"
+                self._last_structure_signature = ""
+                self._clear_shell()
+                self.hide_overlay()
+                return
+            self._empty_since = 0.0
+            payload_signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
+            if payload_signature == self._last_payload_signature:
+                return
+            self._last_payload_signature = payload_signature
+
+            structure_signature = json.dumps(
+                [self._item_identity(item, index) for index, item in enumerate(visible_items)],
+                ensure_ascii=False,
+            )
+            rebuild = structure_signature != self._last_structure_signature
+            self._close_anchors.clear()
+            if rebuild:
+                self._last_structure_signature = structure_signature
+                self._clear_shell()
+                for item in visible_items:
+                    self._build_item_card(item)
+            else:
+                for record, item in zip(self._item_widgets, visible_items):
+                    self._update_item_card(record, item)
+            self._sync_overlay_geometry()
 
         def reposition_close_windows(self) -> None:
             while len(self._close_windows) < len(self._close_anchors):

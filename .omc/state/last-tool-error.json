@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"python tmp_probe_banner.py > tmp_probe_out.json 2>&1; python -c \\\"\\nimport json\\nraw = open('tmp_probe_out.json','r',encoding='utf-8').read()\\n# strip the comment line\\nlines = raw.splitli...",
-  "error": "Exit code 1\nTraceback (most recent call last):\r\n  File \"<string>\", line 3, in <module>\r\n    raw = open('tmp_probe_out.json','r',encoding='utf-8').read()\r\n  File \"<frozen codecs>\", line 325, in decode\r\nUnicodeDecodeError: 'utf-8' codec can't decode byte 0xcd in position 3969: invalid continuation byte",
-  "timestamp": "2026-06-15T09:50:38.959Z",
-  "retry_count": 1
-}

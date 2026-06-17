@@ -101,9 +101,18 @@ from codex_usage_hud.ui.tk_hud import (
     AutoScrollLabel,
     ShimmerTextLabel,
     HUD_BG,
+    HUD_HEADER_BG,
+    HUD_PANEL_BG,
     HUD_PANEL_BORDER,
+    HUD_PROGRESS_DAY,
+    HUD_PROGRESS_DAY_END,
+    HUD_PROGRESS_RADIUS,
+    HUD_PROGRESS_TRACK,
+    HUD_SHELL_RADIUS,
+    HUD_TEXT,
     HUD_WINDOW_OUTSIDE,
     HUD_WINDOW_TRANSPARENT,
+    RoundedHudShell,
     TOKEN_LEGEND_TEXT,
     TokenHudWindow,
     WindowPlacement,
@@ -114,6 +123,7 @@ from codex_usage_hud.ui.tk_hud import (
     _budget_warning_summary,
     _fixed_token_total,
     _interpolate_numeric_text,
+    _progress_fill_surface_rows,
     _request_total_line,
     _round_entry,
     _round_entry_widths,
@@ -252,6 +262,18 @@ def _flush_tk(window: TokenHudWindow, iterations: int = 3) -> None:
     for _ in range(iterations):
         window.root.update_idletasks()
         window.root.update()
+
+
+def _stop_background_jobs(window: TokenHudWindow) -> None:
+    for attr in ("_follow_job", "_settings_prewarm_job"):
+        job = getattr(window, attr, None)
+        if not job:
+            continue
+        try:
+            window.root.after_cancel(job)
+        except tk.TclError:
+            pass
+        setattr(window, attr, None)
 
 
 def _parse_tk_geometry(value: str) -> tuple[int, int, int, int]:
@@ -1065,6 +1087,37 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn(HUD_WINDOW_TRANSPARENT.lower(), rows[0].lower())
         self.assertNotIn(HUD_WINDOW_OUTSIDE.lower(), rows[0].lower())
 
+    def test_square_shell_rows_render_full_rectangular_border(self) -> None:
+        rows = _rounded_shell_surface_rows(
+            width=6,
+            height=4,
+            radius=0,
+            bg=HUD_BG,
+            border=HUD_PANEL_BORDER,
+            outside=HUD_WINDOW_TRANSPARENT,
+        )
+
+        self.assertEqual(
+            rows[0].lower(),
+            "{" + " ".join([HUD_PANEL_BORDER.lower()] * 6) + "}",
+        )
+        self.assertEqual(
+            rows[1].lower(),
+            "{"
+            + " ".join(
+                [
+                    HUD_PANEL_BORDER.lower(),
+                    HUD_BG.lower(),
+                    HUD_BG.lower(),
+                    HUD_BG.lower(),
+                    HUD_BG.lower(),
+                    HUD_PANEL_BORDER.lower(),
+                ]
+            )
+            + "}",
+        )
+        self.assertNotIn(HUD_WINDOW_TRANSPARENT.lower(), "".join(rows).lower())
+
     def test_work_overlay_header_text_formats_time_elapsed_and_title(self) -> None:
         started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()
         text = _work_overlay_header_text(
@@ -1521,6 +1574,100 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
+    def test_tk_hud_shells_use_square_outer_corners(self) -> None:
+        try:
+            window = TokenHudWindow()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable: {exc}")
+        try:
+            top_shell = next(
+                widget for widget in window.root.winfo_children() if isinstance(widget, RoundedHudShell)
+            )
+            request_shell = next(
+                widget
+                for widget in window.request_root.winfo_children()
+                if isinstance(widget, RoundedHudShell)
+            )
+
+            self.assertEqual(top_shell._radius, HUD_SHELL_RADIUS)
+            self.assertEqual(request_shell._radius, HUD_SHELL_RADIUS)
+        finally:
+            window._close()
+
+    def test_top_progress_bars_keep_rounded_radius(self) -> None:
+        window = TokenHudWindow()
+        try:
+            strip = window.top_labels["bar"]
+            self.assertTrue(all(bar._radius is HUD_PROGRESS_RADIUS for bar in strip._bars))
+
+            window.toggle_top_expanded()
+            _flush_tk(window)
+
+            self.assertIs(window.top_labels["cache_progress"]._radius, HUD_PROGRESS_RADIUS)
+            budget = window.top_labels["budget"]
+            self.assertIs(budget._day._radius, HUD_PROGRESS_RADIUS)
+            self.assertIs(budget._week._radius, HUD_PROGRESS_RADIUS)
+        finally:
+            window._close()
+
+    def test_small_progress_fill_uses_full_rail_left_cap(self) -> None:
+        rows = _progress_fill_surface_rows(
+            width=120,
+            height=32,
+            fill_width=6,
+            bg=HUD_BG,
+            track=HUD_PROGRESS_TRACK,
+            fill=HUD_PROGRESS_DAY,
+            fill_end=HUD_PROGRESS_DAY_END,
+            gloss=False,
+            radius=HUD_PROGRESS_RADIUS,
+        )
+
+        top_row = rows[0].strip("{}").split()
+        self.assertTrue(all(color == top_row[0] for color in top_row[:6]))
+
+        middle_row = rows[16].strip("{}").split()
+        self.assertTrue(any(color != middle_row[6] for color in middle_row[:6]))
+        self.assertTrue(all(color == middle_row[6] for color in middle_row[6:12]))
+
+    def test_progress_fill_rows_preserve_rounded_corner_background(self) -> None:
+        rows = _progress_fill_surface_rows(
+            width=24,
+            height=20,
+            fill_width=16,
+            bg=HUD_HEADER_BG,
+            track=HUD_PROGRESS_TRACK,
+            fill=HUD_PROGRESS_DAY,
+            fill_end=HUD_PROGRESS_DAY_END,
+            gloss=False,
+            radius=HUD_PROGRESS_RADIUS,
+        )
+
+        top_row = rows[0].strip("{}").split()
+        self.assertTrue(all(color == HUD_HEADER_BG.lower() for color in top_row[:5]))
+        self.assertTrue(all(color == HUD_HEADER_BG.lower() for color in top_row[-5:]))
+
+    def test_request_expanded_reuses_top_palette(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_request_expanded()
+            _flush_tk(window)
+
+            self.assertEqual(str(window.request_label.cget("bg")), HUD_HEADER_BG)
+            self.assertEqual(str(window.request_text.cget("bg")), HUD_PANEL_BG)
+            self.assertEqual(str(window.request_text.cget("fg")), HUD_TEXT)
+            self.assertEqual(window.request_text.tag_cget("normal", "foreground"), HUD_TEXT)
+
+            labels = [
+                widget
+                for widget in _walk_widgets(window.request_root)
+                if isinstance(widget, tk.Label) and str(widget.cget("text")) == "轮次流水"
+            ]
+            self.assertEqual(len(labels), 1)
+            self.assertEqual(str(labels[0].cget("bg")), HUD_BG)
+        finally:
+            window._close()
+
     def test_settings_dialog_hides_and_reopens_without_rebuilding_shell(self) -> None:
         window = TokenHudWindow()
         try:
@@ -1810,6 +1957,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_collapsed_top_auto_width_expands_past_saved_width(self) -> None:
         window = TokenHudWindow()
         try:
+            _stop_background_jobs(window)
             snapshot = ParsedSession()
             snapshot.confirmed.cumulative_total = 6_900_000
             snapshot.confirmed.cumulative_input = 6_690_000
@@ -2444,6 +2592,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_auto_scroll_label_updates_text_without_crashing(self) -> None:
         root = TokenHudWindow()
         try:
+            _stop_background_jobs(root)
             label = AutoScrollLabel(
                 root.root,
                 text="short",
@@ -2459,6 +2608,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_shimmer_text_label_updates_text_without_crashing(self) -> None:
         root = TokenHudWindow()
         try:
+            _stop_background_jobs(root)
             label = ShimmerTextLabel(
                 root.root,
                 text="正在思考",
@@ -2517,13 +2667,11 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.locator = locator
 
             window._attach_to_rect(rect)
-            self.assertTrue(window.should_refresh_snapshot())
-            self.assertEqual(window.root.state(), "normal")
-            self.assertEqual(window.request_root.state(), "normal")
-            self.assertFalse(window._tombstoned)
-            self.assertEqual(window._hidden_reason, "")
-            self.assertFalse(bool(window.root.attributes("-topmost")))
-            self.assertFalse(bool(window.request_root.attributes("-topmost")))
+            self.assertFalse(window.should_refresh_snapshot())
+            self.assertEqual(window.root.state(), "withdrawn")
+            self.assertEqual(window.request_root.state(), "withdrawn")
+            self.assertTrue(window._tombstoned)
+            self.assertEqual(window._hidden_reason, "inactive")
 
             locator.active = True
             window._attach_to_rect(rect)
@@ -3338,6 +3486,69 @@ class DaemonLifecycleTests(unittest.TestCase):
             timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
             launch_if_missing=True,
         )
+        fake_context.close.assert_called_once()
+
+    def test_run_tk_hud_session_keeps_work_overlay_updated_while_tombstoned(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            reload_user_config=MagicMock(),
+        )
+        overlay_items = [
+            WorkStatusItem(
+                id="session-1",
+                title="Codex 工作",
+                status="tool",
+                status_label="运行中",
+                detail="tool call",
+                status_text="apply_patch",
+            )
+        ]
+        latest_snapshot = ParsedSession(status="parsed")
+        latest_snapshot.active_work_items = overlay_items
+        fake_pump = SimpleNamespace(
+            take_latest=MagicMock(return_value=latest_snapshot),
+            request_refresh=MagicMock(return_value=True),
+            close=MagicMock(),
+        )
+        fake_overlay = SimpleNamespace(
+            configure=MagicMock(),
+            update=MagicMock(),
+            close=MagicMock(),
+        )
+        fake_window = SimpleNamespace(
+            exit_reason="",
+            root=SimpleNamespace(
+                after=lambda *args, **kwargs: None,
+                update_idletasks=lambda: None,
+            ),
+            request_root=SimpleNamespace(update_idletasks=lambda: None),
+            should_refresh_snapshot=lambda: False,
+            refresh_delay_ms=lambda normal_delay_ms: normal_delay_ms,
+            run=lambda: None,
+            update_display=MagicMock(),
+        )
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                return_value=(True, "visible", "", 456),
+            ),
+            patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window),
+            patch("codex_usage_hud.cli._TkSnapshotPump", return_value=fake_pump),
+            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay),
+        ):
+            exit_code = run_tk_hud_session(args, lock_already_held=True)
+
+        self.assertEqual(exit_code, 0)
+        fake_window.update_display.assert_not_called()
+        fake_pump.request_refresh.assert_called_once()
+        fake_overlay.configure.assert_called_once()
+        fake_overlay.update.assert_called_once_with(overlay_items)
+        fake_overlay.close.assert_called_once()
+        fake_pump.close.assert_called_once()
         fake_context.close.assert_called_once()
 
     def test_renderer_daemon_mode_waits_for_visible_window_before_connect(self) -> None:

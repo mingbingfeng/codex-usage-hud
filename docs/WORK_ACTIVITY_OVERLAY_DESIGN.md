@@ -38,6 +38,6 @@ Figma MCP is not available in this session, so this is the Figma-ready source sp
 - The body is ordered like the Codex App turn snapshot: latest assistant output first, current waiting/status text below it.
 - Completed bubbles use the green accent and card background only after the current task emits `task_complete`.
 - The bubble defaults to partial transparency, becomes more transparent while the cursor is over it, and allows clicks through its content area while keeping the close button clickable on Windows.
-- Dismissing one bubble hides only that session until its visible activity changes again.
+- Dismissing one bubble hides that session for the current task and keeps it hidden through completion; it may appear again after the next task starts.
 - Bubble text is compacted instead of scrolling; long body text wraps inside the card.
 - The main HUD remains unchanged: Renderer/Tk still display token and budget panels, while the activity overlay is desktop-level.

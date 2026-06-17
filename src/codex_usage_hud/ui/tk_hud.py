@@ -129,11 +129,18 @@ HUD_PROGRESS_DAY_TEXT = "#1A1305"
 HUD_PROGRESS_WEEK = "#FFC68D"
 HUD_PROGRESS_WEEK_END = "#FF8D5A"
 HUD_PROGRESS_WEEK_TEXT = "#1F1106"
+HUD_SHELL_RADIUS = 0
+HUD_PROGRESS_RADIUS = None
 REQUEST_BG = "#0B1016"
 REQUEST_HEADER_BG = "#151D27"
 REQUEST_PANEL_BG = "#101821"
 REQUEST_TEXT = "#DCE7F2"
 REQUEST_MUTED = "#718095"
+REQUEST_HUD_BG = HUD_BG
+REQUEST_HUD_HEADER_BG = HUD_HEADER_BG
+REQUEST_HUD_PANEL_BG = HUD_PANEL_BG
+REQUEST_HUD_TEXT = HUD_TEXT
+REQUEST_HUD_MUTED = HUD_MUTED
 RESIZE_EDGE_HIT_SIZE = 6
 RESIZE_CORNER_HIT_SIZE = 12
 HUD_GEOMETRY_LOG_FILENAME = "hud_geometry.log"
@@ -511,6 +518,7 @@ def _progress_track_surface_rows(
     bg: str,
     track: str,
     border: str,
+    radius: int | None = None,
 ) -> tuple[str, ...]:
     bg_rgb = _hex_to_rgb(bg, (16, 22, 29))
     track_rgb = _hex_to_rgb(track, (17, 24, 34))
@@ -519,13 +527,14 @@ def _progress_track_surface_rows(
     top = 1.0
     right = max(left + 1.0, float(width) - 1.0)
     bottom = max(top + 1.0, float(height) - 1.0)
-    radius = max(0.0, (bottom - top) / 2.0)
+    resolved_radius = (bottom - top) / 2.0 if radius is None else float(radius)
+    resolved_radius = max(0.0, min(resolved_radius, (right - left) / 2.0, (bottom - top) / 2.0))
     border_width = 1.0
     inner_left = left + border_width
     inner_top = top + border_width
     inner_right = max(inner_left, right - border_width)
     inner_bottom = max(inner_top, bottom - border_width)
-    inner_radius = max(0.0, radius - border_width)
+    inner_radius = max(0.0, resolved_radius - border_width)
     rows: list[str] = []
     for y in range(height):
         colors = []
@@ -533,7 +542,15 @@ def _progress_track_surface_rows(
         track_color = _progress_track_rgb(point_y, inner_top, inner_bottom, track_rgb)
         for x in range(width):
             point_x = x + 0.5
-            outer_alpha = _rounded_rect_alpha(point_x, point_y, left, top, right, bottom, radius)
+            outer_alpha = _rounded_rect_alpha(
+                point_x,
+                point_y,
+                left,
+                top,
+                right,
+                bottom,
+                resolved_radius,
+            )
             if outer_alpha <= 0.0:
                 colors.append(_rgb_to_hex(bg_rgb))
                 continue
@@ -560,11 +577,15 @@ def _progress_fill_surface_rows(
     *,
     width: int,
     height: int,
+    fill_width: int,
+    bg: str,
     track: str,
     fill: str,
     fill_end: str,
     gloss: bool,
+    radius: int | None = None,
 ) -> tuple[str, ...]:
+    bg_rgb = _hex_to_rgb(bg, (16, 22, 29))
     track_rgb = _hex_to_rgb(track, (17, 24, 34))
     fill_rgb = _hex_to_rgb(fill, _hex_to_rgb(HUD_PROGRESS_DAY, (243, 210, 122)))
     fill_end_rgb = _hex_to_rgb(fill_end, fill_rgb)
@@ -572,7 +593,9 @@ def _progress_fill_surface_rows(
     top = 0.0
     right = max(left + 1.0, float(width))
     bottom = max(top + 1.0, float(height))
-    radius = max(0.0, (bottom - top) / 2.0)
+    fill_right = max(left, min(right, float(fill_width)))
+    resolved_radius = (bottom - top) / 2.0 if radius is None else float(radius)
+    resolved_radius = max(0.0, min(resolved_radius, (right - left) / 2.0, (bottom - top) / 2.0))
     rows: list[str] = []
     for y in range(height):
         colors = []
@@ -580,9 +603,17 @@ def _progress_fill_surface_rows(
         track_color = _progress_track_rgb(point_y, top, bottom, track_rgb)
         for x in range(width):
             point_x = x + 0.5
-            fill_alpha = _rounded_rect_alpha(point_x, point_y, left, top, right, bottom, radius)
-            color = track_color
-            if fill_alpha > 0.0:
+            shell_alpha = _rounded_rect_alpha(
+                point_x,
+                point_y,
+                left,
+                top,
+                right,
+                bottom,
+                resolved_radius,
+            )
+            color = _mix_rgb(bg_rgb, track_color, shell_alpha)
+            if shell_alpha > 0.0 and point_x <= fill_right:
                 color = _mix_rgb(
                     color,
                     _progress_fill_rgb(
@@ -590,13 +621,13 @@ def _progress_fill_surface_rows(
                         point_y,
                         left,
                         top,
-                        right,
+                        fill_right,
                         bottom,
                         fill_rgb,
                         fill_end_rgb,
                         gloss=gloss,
                     ),
-                    fill_alpha,
+                    shell_alpha,
                 )
             colors.append(_rgb_to_hex(color))
         rows.append("{" + " ".join(colors) + "}")
@@ -616,6 +647,17 @@ def _rounded_shell_surface_rows(
     bg_rgb = _hex_to_rgb(bg, (16, 22, 29))
     border_rgb = _hex_to_rgb(border, (46, 56, 70))
     outside_rgb = _hex_to_rgb(outside, (14, 18, 23))
+    if radius <= 0:
+        bg_hex = _rgb_to_hex(bg_rgb)
+        border_hex = _rgb_to_hex(border_rgb)
+        rows: list[str] = []
+        for y in range(max(1, height)):
+            if y == 0 or y == height - 1 or width <= 1:
+                colors = [border_hex] * max(1, width)
+            else:
+                colors = [border_hex, *([bg_hex] * max(0, width - 2)), border_hex]
+            rows.append("{" + " ".join(colors[: max(1, width)]) + "}")
+        return tuple(rows)
     blend_base_rgb = outside_rgb
     if sys.platform.startswith("win"):
         # When a Win32 color-key transparent window is available, keep the true
@@ -644,7 +686,7 @@ def _rounded_shell_surface_rows(
     )
     for y in range(height):
         point_y = y + 0.5
-        if outer_radius <= point_y <= bottom - outer_radius:
+        if outer_radius > 0.0 and outer_radius <= point_y <= bottom - outer_radius:
             rows.append(middle_row)
             continue
         colors = []
@@ -1535,7 +1577,7 @@ def _clamp_progress_ratio(value: float | int | None) -> float:
 
 
 class TopHudProgressBar(tk.Frame):
-    """Rounded text-in-bar progress rail used by both top HUD states."""
+    """Text-in-bar progress rail used by both top HUD states."""
 
     def __init__(
         self,
@@ -1547,6 +1589,7 @@ class TopHudProgressBar(tk.Frame):
         font: Any = ("Microsoft YaHei UI", 8, "bold"),
         padding_x: int = 12,
         gloss: bool = True,
+        radius: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(master, bg=bg, **kwargs)
@@ -1556,9 +1599,10 @@ class TopHudProgressBar(tk.Frame):
         self._font = tkfont.Font(font=font)
         self._padding_x = max(4, int(padding_x))
         self._gloss = bool(gloss)
-        self._track_surface_key: tuple[int, int, str, str, str] | None = None
+        self._radius = None if radius is None else max(0, int(radius))
+        self._track_surface_key: tuple[int, int, str, str, str, int | None] | None = None
         self._track_surface_image: tk.PhotoImage | None = None
-        self._fill_surface_key: tuple[int, int, str, str, str, bool] | None = None
+        self._fill_surface_key: tuple[int, int, int, str, str, str, str, bool, int | None] | None = None
         self._fill_surface_image: tk.PhotoImage | None = None
         self._metric = TopHudProgressMetric(
             label="",
@@ -1729,6 +1773,7 @@ class TopHudProgressBar(tk.Frame):
             self._bg,
             HUD_PROGRESS_TRACK,
             HUD_PROGRESS_TRACK_BORDER,
+            self._radius,
         )
         track_image = self._track_surface_image
         if track_image is None or self._track_surface_key != track_key:
@@ -1739,6 +1784,7 @@ class TopHudProgressBar(tk.Frame):
                 bg=self._bg,
                 track=HUD_PROGRESS_TRACK,
                 border=HUD_PROGRESS_TRACK_BORDER,
+                radius=self._radius,
             )
             track_image.put(" ".join(rows), to=(0, 0))
             self._track_surface_key = track_key
@@ -1751,23 +1797,29 @@ class TopHudProgressBar(tk.Frame):
         if fill_inner_width <= 0:
             return
         fill_key = (
-            fill_inner_width,
+            inner_width,
             inner_height,
+            fill_inner_width,
+            self._bg,
             HUD_PROGRESS_TRACK,
             self._metric.fill,
             self._metric.fill_end,
             self._gloss,
+            self._radius,
         )
         fill_image = self._fill_surface_image
         if fill_image is None or self._fill_surface_key != fill_key:
-            fill_image = tk.PhotoImage(width=fill_inner_width, height=inner_height)
+            fill_image = tk.PhotoImage(width=inner_width, height=inner_height)
             rows = _progress_fill_surface_rows(
-                width=fill_inner_width,
+                width=inner_width,
                 height=inner_height,
+                fill_width=fill_inner_width,
+                bg=self._bg,
                 track=HUD_PROGRESS_TRACK,
                 fill=self._metric.fill,
                 fill_end=self._metric.fill_end,
                 gloss=self._gloss,
+                radius=self._radius,
             )
             fill_image.put(" ".join(rows), to=(0, 0))
             self._fill_surface_key = fill_key
@@ -1812,6 +1864,7 @@ class TopHudProgressStrip(tk.Frame):
                 font=("Microsoft YaHei UI", 7, "bold"),
                 padding_x=10,
                 gloss=False,
+                radius=HUD_PROGRESS_RADIUS,
             )
             bar.grid(
                 row=0,
@@ -1908,6 +1961,7 @@ class TopHudBudgetProgress(tk.Frame):
             bg=HUD_BG,
             font=("Microsoft YaHei UI", 9, "bold"),
             padding_x=14,
+            radius=HUD_PROGRESS_RADIUS,
         )
         self._week = TopHudProgressBar(
             self,
@@ -1915,6 +1969,7 @@ class TopHudBudgetProgress(tk.Frame):
             bg=HUD_BG,
             font=("Microsoft YaHei UI", 9, "bold"),
             padding_x=14,
+            radius=HUD_PROGRESS_RADIUS,
         )
         self._meta = tk.Label(
             self,
@@ -1971,7 +2026,7 @@ class TopHudBudgetProgress(tk.Frame):
 
 
 class RoundedHudShell(tk.Frame):
-    """Antialiased rounded HUD shell with a continuous 1px border."""
+    """Antialiased HUD shell with a continuous 1px border."""
 
     def __init__(
         self,
@@ -1993,7 +2048,7 @@ class RoundedHudShell(tk.Frame):
         self._bg = bg
         self._border = border
         self._outside = outside
-        self._radius = max(4, int(radius))
+        self._radius = max(0, int(radius))
         self._image: tk.PhotoImage | None = None
         self._image_key: tuple[int, int, int, str, str, str] | None = None
         self._region_key: tuple[int, int, int] | None = None
@@ -2093,8 +2148,18 @@ class RoundedHudShell(tk.Frame):
             import ctypes
 
             hwnd = int(self.winfo_toplevel().winfo_id())
-            diameter = max(2, self._radius * 2)
-            region = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, diameter, diameter)
+            if self._radius <= 0:
+                region = ctypes.windll.gdi32.CreateRectRgn(0, 0, width + 1, height + 1)
+            else:
+                diameter = self._radius * 2
+                region = ctypes.windll.gdi32.CreateRoundRectRgn(
+                    0,
+                    0,
+                    width + 1,
+                    height + 1,
+                    diameter,
+                    diameter,
+                )
             if not region:
                 return
             if ctypes.windll.user32.SetWindowRgn(hwnd, region, True):
@@ -5618,7 +5683,7 @@ class TokenHudWindow:
             bg=HUD_BG,
             border=HUD_PANEL_BORDER,
             outside=outside_color,
-            radius=9,
+            radius=HUD_SHELL_RADIUS,
             padx=5,
             pady=1,
         )
@@ -5654,6 +5719,7 @@ class TokenHudWindow:
             bg=HUD_HEADER_BG,
             font=("Microsoft YaHei UI", 8, "bold"),
             padding_x=10,
+            radius=HUD_PROGRESS_RADIUS,
         )
         cache_progress.pack(side="right", fill="y", padx=(8, 4))
         self.top_labels["cache_progress"] = cache_progress
@@ -5910,10 +5976,10 @@ class TokenHudWindow:
         self.request_text = None
         shell = RoundedHudShell(
             self.request_root,
-            bg=REQUEST_BG,
+            bg=REQUEST_HUD_BG,
             border=HUD_PANEL_BORDER,
             outside=outside_color,
-            radius=8,
+            radius=HUD_SHELL_RADIUS,
             padx=6,
             pady=2,
         )
@@ -5926,12 +5992,12 @@ class TokenHudWindow:
         self._render_request()
 
     def _build_request_collapsed(self, frame: tk.Frame) -> None:
-        frame.configure(bg=REQUEST_BG, padx=8, pady=4)
+        frame.configure(bg=REQUEST_HUD_BG, padx=8, pady=4)
         self._move_handle(frame, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             frame,
             text="↑- ↻- ↓- ◇- ∑- $0.0000",
-            bg=REQUEST_BG,
+            bg=REQUEST_HUD_BG,
             fg=HUD_ACCENT,
             font=("Consolas", 9, "bold"),
             animate_numbers=True,
@@ -5940,14 +6006,14 @@ class TokenHudWindow:
         self.request_label.pack(side="left", fill="both", expand=True)
 
     def _build_request_expanded(self, frame: tk.Frame) -> None:
-        frame.configure(bg=REQUEST_BG, padx=8, pady=5)
-        header = tk.Frame(frame, bg=REQUEST_HEADER_BG, padx=5, pady=2)
+        frame.configure(bg=REQUEST_HUD_BG, padx=8, pady=5)
+        header = tk.Frame(frame, bg=REQUEST_HUD_HEADER_BG, padx=5, pady=2)
         header.pack(fill="x", pady=(0, 4))
         self._move_handle(header, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             header,
             text="最近模型请求轮次",
-            bg=REQUEST_HEADER_BG,
+            bg=REQUEST_HUD_HEADER_BG,
             fg=HUD_ACCENT,
             font=("Consolas", 9, "bold"),
             animate_numbers=True,
@@ -5955,39 +6021,39 @@ class TokenHudWindow:
         )
         self.request_label.pack(side="left", fill="x", expand=True)
 
-        list_header = tk.Frame(frame, bg=REQUEST_BG)
+        list_header = tk.Frame(frame, bg=REQUEST_HUD_BG)
         list_header.pack(fill="x", pady=(0, 2))
         tk.Label(
             list_header,
             text="轮次流水",
             anchor="w",
-            bg=REQUEST_BG,
-            fg=REQUEST_MUTED,
+            bg=REQUEST_HUD_BG,
+            fg=REQUEST_HUD_MUTED,
             font=("Microsoft YaHei UI", 7, "bold"),
         ).pack(side="left")
         tk.Label(
             list_header,
             text="最新在上",
             anchor="e",
-            bg=REQUEST_BG,
-            fg="#566477",
+            bg=REQUEST_HUD_BG,
+            fg=REQUEST_HUD_MUTED,
             font=("Microsoft YaHei UI", 7),
         ).pack(side="right")
 
-        body = tk.Frame(frame, bg=REQUEST_PANEL_BG, padx=0, pady=0)
+        body = tk.Frame(frame, bg=REQUEST_HUD_PANEL_BG, padx=0, pady=0)
         body.pack(fill="x", expand=False)
         scrollbar = HudScrollbar(
             body,
-            track=REQUEST_PANEL_BG,
+            track=REQUEST_HUD_PANEL_BG,
             thumb=HUD_DIVIDER,
             thumb_hover=HUD_PANEL_BORDER,
             width=8,
         )
         self.request_text = tk.Text(
             body,
-            bg=REQUEST_PANEL_BG,
-            fg=REQUEST_TEXT,
-            insertbackground=REQUEST_TEXT,
+            bg=REQUEST_HUD_PANEL_BG,
+            fg=REQUEST_HUD_TEXT,
+            insertbackground=REQUEST_HUD_TEXT,
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
@@ -6002,8 +6068,8 @@ class TokenHudWindow:
             selectforeground=HUD_TEXT,
         )
         self.request_text.tag_configure("recent", foreground=HUD_ACCENT)
-        self.request_text.tag_configure("normal", foreground=REQUEST_TEXT)
-        self.request_text.tag_configure("muted", foreground=REQUEST_MUTED)
+        self.request_text.tag_configure("normal", foreground=REQUEST_HUD_TEXT)
+        self.request_text.tag_configure("muted", foreground=REQUEST_HUD_MUTED)
         scrollbar.set_command(self.request_text.yview)
         scrollbar.pack(side="right", fill="y")
         self.request_text.pack(side="left", fill="x", expand=True)
@@ -6234,10 +6300,13 @@ class TokenHudWindow:
         self._attached = True
         self._last_rect = rect
         active = self.locator.is_active(rect, self._hud_hwnds())
+        if not active:
+            self._enter_tombstone("inactive")
+            return
         self._exit_tombstone("attached")
-        self._apply_focus_state(active)
-        self._set_alpha(self.root, 0.94 if active else 0.55)
-        self._set_alpha(self.request_root, (0.94 if self.request_expanded else 0.74) if active else 0.45)
+        self._apply_focus_state(True)
+        self._set_alpha(self.root, 0.94)
+        self._set_alpha(self.request_root, 0.94 if self.request_expanded else 0.74)
         self._apply_geometry()
 
     def _enter_free_mode(self) -> None:
