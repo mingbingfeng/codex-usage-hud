@@ -127,6 +127,10 @@ def _color_for(status: str) -> tuple[str, str, str, str]:
     return "#F3D27A", "#1C190F", "#10161D", "#263241"
 
 
+def _work_overlay_command_path(state_path: Path) -> Path:
+    return state_path.with_name(f"{state_path.stem}-commands.jsonl")
+
+
 def run_work_overlay_helper_qt(
     state_file: str | Path,
     *,
@@ -438,6 +442,66 @@ def run_work_overlay_helper_qt(
             painter.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold))
             painter.drawText(self.rect(), alignment.AlignCenter, "×")
 
+    class WorkdirLinkWindow(QWidget):
+        def __init__(
+            self,
+            activate_callback: Callable[[Mapping[str, object]], None],
+        ) -> None:
+            flags = (
+                window_type.Tool
+                | window_type.FramelessWindowHint
+                | window_type.WindowStaysOnTopHint
+            )
+            super().__init__(None, flags)
+            self._activate_callback = activate_callback
+            self._item: Mapping[str, object] = {}
+            self._hover = False
+            self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
+            self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
+            self.setFocusPolicy(focus_policy.NoFocus)
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        def configure(self, item: Mapping[str, object], *, opacity: float) -> None:
+            self._item = dict(item)
+            self.setWindowOpacity(opacity)
+            tooltip = str(
+                item.get("targetTitle") or item.get("title") or item.get("workdir") or ""
+            ).strip()
+            self.setToolTip(tooltip)
+            self.update()
+
+        def enterEvent(self, event: object) -> None:
+            self._hover = True
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event: object) -> None:
+            self._hover = False
+            self.update()
+            super().leaveEvent(event)
+
+        def mouseReleaseEvent(self, event: Any) -> None:
+            if event.button() == mouse_buttons.LeftButton and self.rect().contains(
+                event.position().toPoint()
+            ):
+                self._activate_callback(self._item)
+                event.accept()
+                return
+            super().mouseReleaseEvent(event)
+
+        def paintEvent(self, event: object) -> None:
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            # Keep a near-transparent fill so Windows still treats the hot area
+            # as a hit-testable layered window instead of letting clicks pass through.
+            fill = QColor(255, 255, 255, 1)
+            if self._hover:
+                fill = QColor(156, 203, 255, 18)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(self.rect(), 4, 4)
+
     class OverlayWindow(QWidget):
         def __init__(self) -> None:
             flags = (
@@ -453,9 +517,12 @@ def run_work_overlay_helper_qt(
             self._last_payload_signature = ""
             self._last_structure_signature = ""
             self._raw_items: list[Mapping[str, object]] = []
+            self._command_path = _work_overlay_command_path(path)
             self._item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
             self._close_windows: list[CloseButtonWindow] = []
+            self._workdir_windows: list[WorkdirLinkWindow] = []
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
+            self._workdir_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._item_widgets: list[dict[str, Any]] = []
             self._empty_since = 0.0
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
@@ -486,16 +553,42 @@ def run_work_overlay_helper_qt(
             self._last_structure_signature = ""
             self.render_items(self._raw_items)
 
+        def switch_item(self, item: Mapping[str, object]) -> None:
+            session_id = str(item.get("sessionId") or item.get("id") or "").strip()
+            target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
+            if not session_id and not target_title:
+                return
+            payload = {
+                "action": "activateSession",
+                "sessionId": session_id,
+                "targetTitle": target_title,
+                "title": str(item.get("title") or "").strip(),
+                "workdir": str(item.get("workdir") or "").strip(),
+                "requestedAt": time.time(),
+                "current": bool(item.get("current")),
+            }
+            try:
+                self._command_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._command_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            except OSError:
+                return
+
         def hide_overlay(self) -> None:
             self.hide()
             for close_window in self._close_windows:
                 close_window.hide()
+            for workdir_window in self._workdir_windows:
+                workdir_window.hide()
 
         def shutdown(self) -> None:
             self.hide_overlay()
             for close_window in self._close_windows:
                 close_window.close()
             self._close_windows.clear()
+            for workdir_window in self._workdir_windows:
+                workdir_window.close()
+            self._workdir_windows.clear()
             self.close()
             app.quit()
 
@@ -515,6 +608,12 @@ def run_work_overlay_helper_qt(
                 return
             raw_items = state.get("items") or []
             items = [item for item in raw_items if isinstance(item, Mapping)]
+            command_path_text = str(state.get("commandPath") or "").strip()
+            self._command_path = (
+                Path(command_path_text).expanduser()
+                if command_path_text
+                else _work_overlay_command_path(path)
+            )
             screen = app.primaryScreen()
             screen_height = (
                 screen.availableGeometry().height()
@@ -538,12 +637,22 @@ def run_work_overlay_helper_qt(
                     window.isVisible() and window.frameGeometry().contains(cursor_pos)
                     for window in self._close_windows
                 )
-                target = hover_alpha if (inside_overlay or inside_close) else overlay_alpha
+                inside_workdir = any(
+                    window.isVisible() and window.frameGeometry().contains(cursor_pos)
+                    for window in self._workdir_windows
+                )
+                target = (
+                    hover_alpha
+                    if (inside_overlay or inside_close or inside_workdir)
+                    else overlay_alpha
+                )
             if abs(self.windowOpacity() - target) < 0.01:
                 return
             self.setWindowOpacity(target)
             for close_window in self._close_windows:
                 close_window.setWindowOpacity(target)
+            for workdir_window in self._workdir_windows:
+                workdir_window.setWindowOpacity(target)
 
         @staticmethod
         def _item_identity(item: Mapping[str, object], index: int) -> str:
@@ -552,6 +661,7 @@ def run_work_overlay_helper_qt(
 
         def _clear_shell(self) -> None:
             self._close_anchors.clear()
+            self._workdir_anchors.clear()
             self._item_widgets.clear()
             shell_layout = self._shell.layout()
             while shell_layout.count():
@@ -691,6 +801,9 @@ def run_work_overlay_helper_qt(
             )
 
             workdir_text = str(item.get("workdir") or "").strip()
+            session_id = str(item.get("sessionId") or item.get("id") or "").strip()
+            target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
+            workdir_clickable = bool(workdir_text and (session_id or target_title))
             status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
             footer_container = record["footer_container"]
             footer_container.setVisible(bool(status_text or workdir_text))
@@ -715,6 +828,13 @@ def run_work_overlay_helper_qt(
             if workdir_text:
                 workdir_label.setText(_compact_workdir_text(workdir_text, 40))
                 workdir_label.setToolTip(workdir_text)
+                workdir_label.setStyleSheet(
+                    "QLabel {"
+                    f"color: {'#9CCBFF' if workdir_clickable else '#5E6A78'};"
+                    "border: none;"
+                    "background: transparent;"
+                    "}"
+                )
                 workdir_label.setVisible(True)
             else:
                 workdir_label.setText("")
@@ -724,6 +844,8 @@ def run_work_overlay_helper_qt(
             self._close_anchors.append(
                 (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
             )
+            if workdir_clickable:
+                self._workdir_anchors.append((record["workdir_label"], dict(item)))
 
         def _sync_overlay_geometry(self) -> None:
             self._shell.setFixedWidth(WORK_OVERLAY_WIDTH)
@@ -754,7 +876,7 @@ def run_work_overlay_helper_qt(
                 max_y = max(geometry.top(), geometry.bottom() - final_height - WORK_OVERLAY_MARGIN)
                 y = min(geometry.top() + WORK_OVERLAY_TOP_OFFSET, max_y)
                 self.setGeometry(x, y, WORK_OVERLAY_WIDTH, final_height)
-            QTimer.singleShot(0, self.reposition_close_windows)
+            QTimer.singleShot(0, self.reposition_interactive_windows)
 
         def render_items(self, items: Sequence[Mapping[str, object]]) -> None:
             self._raw_items = list(items)
@@ -789,6 +911,7 @@ def run_work_overlay_helper_qt(
             )
             rebuild = structure_signature != self._last_structure_signature
             self._close_anchors.clear()
+            self._workdir_anchors.clear()
             if rebuild:
                 self._last_structure_signature = structure_signature
                 self._clear_shell()
@@ -799,7 +922,7 @@ def run_work_overlay_helper_qt(
                     self._update_item_card(record, item)
             self._sync_overlay_geometry()
 
-        def reposition_close_windows(self) -> None:
+        def reposition_interactive_windows(self) -> None:
             while len(self._close_windows) < len(self._close_anchors):
                 self._close_windows.append(CloseButtonWindow(self.dismiss_item))
             while len(self._close_windows) > len(self._close_anchors):
@@ -824,6 +947,31 @@ def run_work_overlay_helper_qt(
 
             for close_window in self._close_windows[len(self._close_anchors) :]:
                 close_window.hide()
+
+            while len(self._workdir_windows) < len(self._workdir_anchors):
+                self._workdir_windows.append(WorkdirLinkWindow(self.switch_item))
+            while len(self._workdir_windows) > len(self._workdir_anchors):
+                orphan = self._workdir_windows.pop()
+                orphan.close()
+
+            for index, workdir_window in enumerate(self._workdir_windows):
+                anchor, item = self._workdir_anchors[index]
+                if not anchor.isVisible():
+                    workdir_window.hide()
+                    continue
+                anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
+                workdir_window.configure(item, opacity=current_opacity)
+                workdir_window.setGeometry(
+                    anchor_top_left.x(),
+                    anchor_top_left.y(),
+                    max(1, anchor.width()),
+                    max(1, anchor.height()),
+                )
+                workdir_window.show()
+                workdir_window.raise_()
+
+            for workdir_window in self._workdir_windows[len(self._workdir_anchors) :]:
+                workdir_window.hide()
 
     overlay = OverlayWindow()
     poll_timer = QTimer()

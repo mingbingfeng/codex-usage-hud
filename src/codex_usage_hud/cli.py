@@ -60,7 +60,7 @@ from .platforms import (
     get_current_platform,
 )
 from .platforms.base import BasePlatform
-from .platforms.cdp_probe import cdp_port_from_env
+from .platforms.cdp_probe import CodexCdpSessionController, cdp_port_from_env
 from .settings_bridge import SettingsBridgeServer
 from .ui import TokenHudWindow
 from .ui.renderer_hud import (
@@ -312,6 +312,10 @@ def cleanup_stale_loading_feedback_files() -> None:
             path.unlink()
         except OSError:
             continue
+        try:
+            _work_overlay_command_path(path).unlink()
+        except OSError:
+            continue
 
 
 def run_loading_feedback_helper(state_file: str | Path) -> int:
@@ -522,10 +526,16 @@ def _iso_or_empty(value: datetime | None) -> str:
     return value.isoformat() if value is not None else ""
 
 
+def _work_overlay_command_path(state_path: Path) -> Path:
+    return state_path.with_name(f"{state_path.stem}-commands.jsonl")
+
+
 def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
     return {
         "id": item.id,
         "title": item.title,
+        "sessionId": item.session_id,
+        "targetTitle": item.target_title,
         "status": item.status,
         "statusLabel": item.status_label,
         "detail": item.detail,
@@ -556,6 +566,8 @@ class DesktopWorkOverlay:
         self._state_path = (
             hud_runtime_dir() / f"work-overlay-{os.getpid()}-{int(time.time() * 1000)}.json"
         )
+        self._command_path = _work_overlay_command_path(self._state_path)
+        self._command_offset = 0
         self._process: subprocess.Popen[str] | None = None
         self._closed = False
 
@@ -592,6 +604,36 @@ class DesktopWorkOverlay:
             return
         self._stop_runtime(permanent=True)
 
+    def take_commands(self) -> list[dict[str, object]]:
+        if self._closed:
+            return []
+        try:
+            stat = self._command_path.stat()
+        except OSError:
+            self._command_offset = 0
+            return []
+        if stat.st_size <= 0:
+            self._command_offset = 0
+            return []
+        if stat.st_size < self._command_offset:
+            self._command_offset = 0
+
+        commands: list[dict[str, object]] = []
+        try:
+            with self._command_path.open("r", encoding="utf-8") as handle:
+                handle.seek(self._command_offset)
+                for line in handle:
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict):
+                        commands.append(payload)
+                self._command_offset = handle.tell()
+        except OSError:
+            return []
+        return commands
+
     def _stop_runtime(self, *, permanent: bool) -> None:
         if permanent:
             self._closed = True
@@ -615,6 +657,11 @@ class DesktopWorkOverlay:
             self._state_path.unlink()
         except OSError:
             pass
+        try:
+            self._command_path.unlink()
+        except OSError:
+            pass
+        self._command_offset = 0
 
     def _start(self) -> None:
         try:
@@ -640,6 +687,7 @@ class DesktopWorkOverlay:
                     {
                         "ownerPid": os.getpid(),
                         "itemLimit": int(self.item_limit),
+                        "commandPath": str(self._command_path),
                         "items": list(items),
                         "updatedAt": time.time(),
                         "close": bool(close),
@@ -1345,7 +1393,7 @@ def _prepare_codex_window_for_tk(
             and last_status in {"not_found", "hidden", "cloaked"}
         ):
             launch_attempted = True
-            launched = launch_codex_app(debugger=False)
+            launched = launch_codex_app(debugger=True)
             _LOGGER.info(
                 "tk_codex_window_restore_requested launched=%s status=%s hwnd=%s reason=%s",
                 launched,
@@ -1357,6 +1405,59 @@ def _prepare_codex_window_for_tk(
         if time.monotonic() >= deadline:
             return False, last_status, last_reason, last_hwnd
         time.sleep(max(0.01, float(poll_seconds)))
+
+
+def _handle_work_overlay_command(
+    command: Mapping[str, object],
+    session_controller: CodexCdpSessionController,
+) -> None:
+    action = str(command.get("action") or "").strip()
+    if action != "activateSession":
+        return
+    session_id = str(command.get("sessionId") or "").strip()
+    target_title = str(command.get("targetTitle") or command.get("title") or "").strip()
+    if not session_id and not target_title:
+        _LOGGER.info("work_overlay_command_ignored reason=missing_target")
+        return
+
+    window_ready, window_status, window_reason, window_hwnd = _prepare_codex_window_for_renderer(
+        timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+        launch_if_missing=True,
+    )
+    if not window_ready:
+        _LOGGER.info(
+            "work_overlay_command_window_prepare_best_effort_failed status=%s hwnd=%s reason=%s",
+            window_status,
+            window_hwnd,
+            window_reason,
+        )
+
+    result = session_controller.activate_thread(
+        session_id=session_id,
+        title=target_title,
+        workdir=str(command.get("workdir") or "").strip(),
+    )
+    _LOGGER.info(
+        "work_overlay_command_processed ok=%s status=%s requested_session=%s active_session=%s matched_by=%s available=%s message=%s",
+        result.ok,
+        result.status,
+        result.requested_session_id or "-",
+        result.active_session_id or "-",
+        result.matched_by or "-",
+        result.available_count,
+        result.message or "-",
+    )
+
+
+def _handle_work_overlay_commands(
+    work_overlay: DesktopWorkOverlay,
+    session_controller: CodexCdpSessionController,
+) -> None:
+    take_commands = getattr(work_overlay, "take_commands", None)
+    if not callable(take_commands):
+        return
+    for command in take_commands():
+        _handle_work_overlay_command(command, session_controller)
 
 
 def _read_pid(path: Path) -> int | None:
@@ -1998,10 +2099,13 @@ def _work_item_from_snapshot(
     if source or snapshot.selection_source:
         progress_parts.append(source or snapshot.selection_source)
     progress = " | ".join(progress_parts)
-    item_id = snapshot.session_id or _session_path_key(snapshot.session_path) or display_title
+    session_id = str(snapshot.session_id or "").strip()
+    item_id = session_id or _session_path_key(snapshot.session_path) or display_title
     return WorkStatusItem(
         id=str(item_id),
         title=_compact_work_text(display_title, 56),
+        session_id=session_id,
+        target_title=display_title.strip(),
         status=status_value,
         status_label=status_label,
         detail=_compact_work_text(detail, 120),
@@ -3118,6 +3222,9 @@ def run_renderer_hud_session(
             work_overlay = DesktopWorkOverlay(
                 item_limit=_work_overlay_item_limit_for_context(context),
             )
+            session_controller = CodexCdpSessionController(
+                timeout_seconds=RENDERER_CDP_TIMEOUT_SECONDS,
+            )
             bridge = SettingsBridgeServer(
                 context.settings_store,
                 restart_callback=restart_requested.set,
@@ -3253,6 +3360,7 @@ def run_renderer_hud_session(
                             return RENDERER_HUD_UNAVAILABLE
                     update_state = update_manager.tick().to_dict()
                     command = client.take_settings_command()
+                    _handle_work_overlay_commands(work_overlay, session_controller)
                     force_fast_refresh = bool(
                         command
                         or settings_command_status
@@ -3368,6 +3476,9 @@ def _run_tk_window_session(
     work_overlay = DesktopWorkOverlay(
         item_limit=_work_overlay_item_limit_for_context(context),
     )
+    session_controller = CodexCdpSessionController(
+        timeout_seconds=RENDERER_CDP_TIMEOUT_SECONDS,
+    )
     try:
         try:
             window = existing_window or TokenHudWindow(
@@ -3387,6 +3498,7 @@ def _run_tk_window_session(
         def refresh() -> None:
             nonlocal latest_snapshot
             overlay_item_limit = _work_overlay_item_limit_for_context(context)
+            _handle_work_overlay_commands(work_overlay, session_controller)
             refresh_snapshot = window.should_refresh_snapshot()
             if refresh_snapshot or overlay_item_limit > 0:
                 snapshot = snapshot_pump.take_latest()
@@ -3523,7 +3635,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                 return 0
             if startup.mode == DAEMON_STARTUP_TK:
                 if startup.launch_codex:
-                    launch_codex_app(debugger=False)
+                    launch_codex_app(debugger=True)
                 _LOGGER.info("daemon_startup_tk_selected")
                 preferred_renderer = False
                 return run_hud_session(

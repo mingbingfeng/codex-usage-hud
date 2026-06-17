@@ -28,6 +28,7 @@ from codex_usage_hud.cli import (
     DAEMON_STARTUP_TK,
     DAEMON_RESTART_REQUESTED,
     DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
+    DesktopWorkOverlay,
     HudAlreadyRunningError,
     HudInstanceLock,
     HUD_SWITCH_TO_RENDERER,
@@ -65,6 +66,7 @@ from codex_usage_hud.cli import (
     _work_overlay_header_text,
 )
 from codex_usage_hud.config import UserConfig, UserConfigStore
+from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.core.parser import (
     GapTiming,
     JsonlSessionParser,
@@ -117,6 +119,7 @@ from codex_usage_hud.ui.tk_hud import (
     TokenHudWindow,
     WindowPlacement,
     WindowRect,
+    _WindowsCodexLocator,
     _can_animate_numeric_text,
     _copyable_gap_detail,
     _copyable_tool_command,
@@ -611,6 +614,8 @@ class BudgetHelperTests(unittest.TestCase):
             status="running",
             status_label="运行中",
             detail="用户输入：实现桌面气泡",
+            session_id="thread-123",
+            target_title="Ship primary screen bubbles",
             status_text="正在思考",
             last_text="上一轮输出保留在气泡里",
             elapsed_text="已处理 12s",
@@ -625,6 +630,8 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(payload["statusLabel"], "运行中")
         self.assertEqual(payload["title"], "Ship primary screen bubbles")
+        self.assertEqual(payload["sessionId"], "thread-123")
+        self.assertEqual(payload["targetTitle"], "Ship primary screen bubbles")
         self.assertEqual(payload["statusText"], "正在思考")
         self.assertEqual(payload["lastText"], "上一轮输出保留在气泡里")
         self.assertEqual(payload["elapsedText"], "已处理 12s")
@@ -632,6 +639,41 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(str(payload["taskStartedAt"]).startswith("2026-06-16T10:00:00"))
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
+
+    def test_desktop_work_overlay_reads_new_click_commands_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay._command_offset = 0
+
+            overlay._command_path.write_text(
+                (
+                    '{"action":"activateSession","sessionId":"thread-1","targetTitle":"Thread One"}\n'
+                    '{"action":"activateSession","sessionId":"thread-2","targetTitle":"Thread Two"}\n'
+                ),
+                encoding="utf-8",
+            )
+
+            commands = overlay.take_commands()
+
+            self.assertEqual(
+                commands,
+                [
+                    {
+                        "action": "activateSession",
+                        "sessionId": "thread-1",
+                        "targetTitle": "Thread One",
+                    },
+                    {
+                        "action": "activateSession",
+                        "sessionId": "thread-2",
+                        "targetTitle": "Thread Two",
+                    },
+                ],
+            )
+            self.assertEqual(overlay.take_commands(), [])
 
     def test_work_overlay_dismissal_stays_hidden_until_next_task(self) -> None:
         original = {
@@ -1948,6 +1990,41 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertEqual(second, (460, 86, 720, TOP_DOCK_HEIGHT))
         finally:
             window._close()
+
+    def test_top_cdp_anchor_prefers_computed_title_slot(self) -> None:
+        locator = object.__new__(_WindowsCodexLocator)
+        locator._top_dom_anchors_enabled = True
+        locator._dom_anchors_enabled = False
+        locator._last_cdp_anchor_status = {}
+        locator._cdp_probe = SimpleNamespace(
+            snapshot=lambda: CdpDomSnapshot(
+                session_id="thread-123",
+                title="Selected Thread",
+                device_pixel_ratio=1.0,
+                header_rect=CdpRect(20.0, 24.0, 920.0, 68.0),
+                title_rect=CdpRect(60.0, 28.0, 320.0, 64.0),
+                top_slot_rect=CdpRect(340.0, 24.0, 760.0, 68.0),
+            ),
+            last_status="ok",
+            last_error="",
+        )
+        rect = WindowRect(left=100, top=50, right=1500, bottom=900)
+
+        anchor = locator._cdp_anchor_geometry("top", rect, TOP_DOCK_HEIGHT)
+
+        self.assertEqual(
+            anchor,
+            HudAnchor(
+                left=440,
+                top=74,
+                right=860,
+                bottom=118,
+                default_x=440,
+                default_y=78,
+                default_width=420,
+                source="cdp:title",
+            ),
+        )
 
     def test_collapsed_top_bar_shows_session_cache_hit_rate(self) -> None:
         window = TokenHudWindow()
@@ -3458,7 +3535,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(status, "visible")
         self.assertEqual(reason, "")
         self.assertEqual(hwnd, 777)
-        launch_app.assert_called_once_with(debugger=False)
+        launch_app.assert_called_once_with(debugger=True)
 
     def test_run_renderer_hud_session_prepares_window_before_connect_in_manual_mode(self) -> None:
         fake_context = SimpleNamespace(
@@ -3786,7 +3863,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             exit_code = run_daemon(args)
 
         self.assertEqual(exit_code, 0)
-        launch.assert_called_once_with(debugger=False)
+        launch.assert_called_once_with(debugger=True)
         fake_manager.wait_for_codex.assert_not_called()
         tk_session.assert_called_once()
         tk_args = tk_session.call_args.args[0]

@@ -1,4 +1,4 @@
-"""Read-only Chrome DevTools Protocol probe for the Codex renderer DOM.
+"""Chrome DevTools Protocol helpers for the Codex renderer DOM.
 
 The probe intentionally uses only the Python standard library.  It talks to a
 local Codex remote-debugging port when one is already available and otherwise
@@ -23,6 +23,7 @@ DEFAULT_CDP_PORT = 9229
 DEFAULT_CDP_CACHE_SECONDS = 0.20
 DEFAULT_CDP_FAILURE_COOLDOWN_SECONDS = 2.0
 DEFAULT_CDP_TIMEOUT_SECONDS = 0.45
+DEFAULT_CDP_SWITCH_TIMEOUT_SECONDS = 1.8
 CDP_PORT_ENV = "CODEX_USAGE_HUD_CDP_PORT"
 CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
 
@@ -50,13 +51,34 @@ class CdpDomSnapshot:
     device_pixel_ratio: float
     header_rect: CdpRect | None = None
     title_rect: CdpRect | None = None
+    top_slot_rect: CdpRect | None = None
     composer_rect: CdpRect | None = None
     app_error: str = ""
+
+
+@dataclass(frozen=True)
+class CdpSessionSwitchResult:
+    ok: bool
+    status: str
+    requested_session_id: str = ""
+    requested_title: str = ""
+    active_session_id: str = ""
+    active_title: str = ""
+    matched_by: str = ""
+    available_count: int = 0
+    message: str = ""
 
 
 DOM_PROBE_SCRIPT = r"""
 (() => {
   const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalizeThreadId = (value) => {
+    const text = normalize(value);
+    const match = text.match(/^(?:[a-z0-9_.-]+:)(.+)$/i);
+    return match ? normalize(match[1]) : text;
+  };
+  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const hudRootSelector = "#codex-usage-hud-root";
   const visible = (node) => {
     if (!(node instanceof HTMLElement) || !node.isConnected) return false;
     const style = getComputedStyle(node);
@@ -82,21 +104,22 @@ DOM_PROBE_SCRIPT = r"""
     const match = source.match(/(?:session|conversation|thread)(?:\/|=|:|-)([A-Za-z0-9_.-]+)/i)
       || source.match(/\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:[/?#]|$)/)
       || source.match(/\/([A-Za-z0-9_-]{24,})(?:[/?#]|$)/);
-    return match ? decodeURIComponent(match[1]) : "";
+    return match ? normalizeThreadId(decodeURIComponent(match[1])) : "";
   };
   const threadRows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
   const refFromRow = (row) => {
     const href = rowHref(row);
     const idMatch = href.match(/(?:session|conversation|thread)[=/:-]([A-Za-z0-9_.-]+)/i) || href.match(/([A-Za-z0-9_-]{8,})$/);
-    const sessionId = row.getAttribute("data-app-action-sidebar-thread-id")
+    const rawSessionId = row.getAttribute("data-app-action-sidebar-thread-id")
       || (idMatch && idMatch[1])
       || row.getAttribute("data-session-id")
       || row.getAttribute("data-testid")
       || "";
+    const sessionId = normalizeThreadId(rawSessionId);
     const titleNode = row.querySelector("[data-thread-title], .truncate.select-none, .truncate.text-base");
     const rawTitle = titleNode?.textContent || (titleNode ? "" : (row.textContent || ""));
     const title = normalize(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
-    return { sessionId, title };
+    return { rawSessionId, sessionId, title };
   };
   const currentRow = (row) => {
     if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
@@ -111,7 +134,10 @@ DOM_PROBE_SCRIPT = r"""
       }
     }
     const ref = refFromRow(row);
-    return !!ref.sessionId && location.href.includes(ref.sessionId);
+    return (
+      (!!ref.rawSessionId && location.href.includes(ref.rawSessionId))
+      || (!!ref.sessionId && location.href.includes(ref.sessionId))
+    );
   };
   const activeRow = threadRows.find(currentRow) || null;
   const activeRef = activeRow ? refFromRow(activeRow) : { sessionId: locationThreadId(), title: "" };
@@ -320,6 +346,100 @@ DOM_PROBE_SCRIPT = r"""
     return titleText ? (text === titleText || titleText.startsWith(text) || text.startsWith(titleText)) : text.length >= 3;
   }) || titleCandidates[0] || null;
   const titleRect = rectFor(title);
+  const headerControlButtons = (headerNode, header) => {
+    if (!headerNode || !header) return [];
+    return Array.from(headerNode.querySelectorAll("button, [role='button'], a"))
+      .filter((node) => visible(node) && !node.closest(hudRootSelector))
+      .map((node, index) => ({ node, index, rect: node.getBoundingClientRect(), label: normalize([
+        node.getAttribute("aria-label"),
+        node.getAttribute("title"),
+        node.textContent,
+      ].filter(Boolean).join(" ")) }))
+      .filter((item) => (
+        item.rect.width > 0
+        && item.rect.height > 0
+        && item.rect.left >= header.left - 2
+        && item.rect.right <= header.right + 2
+        && item.rect.top >= header.top - 2
+        && item.rect.bottom <= header.bottom + 2
+      ))
+      .sort((left, right) => (left.rect.left - right.rect.left) || (left.index - right.index));
+  };
+  const headerLeftControlEdge = (headerNode, header, controls = headerControlButtons(headerNode, header)) => {
+    if (!headerNode || !header) return 0;
+    const leftControls = controls
+      .map((item) => item.rect)
+      .filter((rect) => rect.left < header.left + (header.width * .55));
+    if (!leftControls.length) return 0;
+    return Math.max(...leftControls.map((rect) => rect.right - header.left)) + 14;
+  };
+  const headerTitleTextEdge = (headerNode, header, matchedTitleRect) => {
+    if (!headerNode || !header) return 0;
+    if (
+      matchedTitleRect
+      && matchedTitleRect.left >= header.left - 2
+      && matchedTitleRect.right <= header.right + 2
+      && matchedTitleRect.top >= header.top - 2
+      && matchedTitleRect.bottom <= header.bottom + 2
+    ) {
+      return Math.max(0, matchedTitleRect.right - header.left) + 14;
+    }
+    const maxTextWidth = Math.min(520, header.width * .55);
+    const textRects = Array.from(headerNode.querySelectorAll("span, h1, h2, [data-thread-title]"))
+      .filter((node) => visible(node) && !node.closest(hudRootSelector))
+      .filter((node) => normalize(node.textContent).length > 0)
+      .map((node) => node.getBoundingClientRect())
+      .filter((rect) => (
+        rect.width > 0
+        && rect.height > 0
+        && rect.left >= header.left - 2
+        && rect.right <= header.right + 2
+        && rect.top >= header.top - 2
+        && rect.bottom <= header.bottom + 2
+        && rect.width <= maxTextWidth
+        && rect.left < header.left + (header.width * .68)
+      ));
+    if (!textRects.length) return 0;
+    return Math.max(...textRects.map((rect) => rect.right - header.left)) + 14;
+  };
+  const headerRightControlStart = (headerNode, header, controls = headerControlButtons(headerNode, header)) => {
+    if (!headerNode || !header) return 0;
+    const rightControls = controls
+      .map((item) => item.rect)
+      .filter((rect) => rect.right > header.right - Math.min(260, Math.max(160, header.width * .24)));
+    if (!rightControls.length) return header.right;
+    return Math.min(...rightControls.map((rect) => rect.left));
+  };
+  const topTitlebarSlot = (headerNode, header, matchedTitleRect) => {
+    if (!headerNode || !header) return null;
+    const controls = headerControlButtons(headerNode, header);
+    const chatActions = controls.find((item) => /chat actions/i.test(item.label));
+    const openIn = controls.find((item) => /^open in\b/i.test(item.label));
+    const titleEdge = headerTitleTextEdge(headerNode, header, matchedTitleRect);
+    const leftControlEdge = headerLeftControlEdge(headerNode, header, controls);
+    const fallbackLeft = Math.max(160, Math.min(header.width * .14, 240));
+    const left = clamp(
+      (chatActions ? chatActions.rect.right + 10 : header.left + Math.max(fallbackLeft, titleEdge, leftControlEdge)),
+      header.left + 8,
+      header.right - 8
+    );
+    const rightMargin = Math.max(12, header.width * .04);
+    const right = clamp(
+      (openIn ? openIn.rect.left - 10 : Math.min(header.right - rightMargin, headerRightControlStart(headerNode, header, controls) - 10)),
+      left,
+      header.right - 8
+    );
+    if (right <= left) return null;
+    return {
+      left,
+      top: header.top,
+      right,
+      bottom: header.bottom,
+      width: right - left,
+      height: header.height,
+    };
+  };
+  const topSlotRect = topTitlebarSlot(header, headerRect, titleRect);
   const resolvedTitle = titleText || normalize(title?.textContent || "").slice(0, 160);
 
   const composerClasses = [
@@ -375,9 +495,328 @@ DOM_PROBE_SCRIPT = r"""
     devicePixelRatio: window.devicePixelRatio || 1,
     headerRect,
     titleRect,
+    topSlotRect,
     composerRect: rectFor(composer),
     appError: appErrorText(),
   };
+})()
+"""
+
+SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
+(() => {
+  const target = __TARGET_PAYLOAD__;
+  const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalizeThreadId = (value) => {
+    const text = normalize(value);
+    const match = text.match(/^(?:[a-z0-9_.-]+:)(.+)$/i);
+    return match ? normalize(match[1]) : text;
+  };
+  const hudRootSelector = "#codex-usage-hud-root";
+  const visible = (node) => {
+    if (!(node instanceof HTMLElement) || !node.isConnected) return false;
+    const style = getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const rowHref = (row) => row?.getAttribute?.("href") || row?.querySelector?.("a")?.getAttribute?.("href") || "";
+  const locationThreadId = () => {
+    const source = `${location.pathname}${location.search}${location.hash}`;
+    const match = source.match(/(?:session|conversation|thread)(?:\/|=|:|-)([A-Za-z0-9_.-]+)/i)
+      || source.match(/\/([0-9a-fA-F-]{36})(?:[/?#]|$)/)
+      || source.match(/\/([A-Za-z0-9_-]{24,})(?:[/?#]|$)/);
+    return match ? normalizeThreadId(decodeURIComponent(match[1])) : "";
+  };
+  const refFromRow = (row) => {
+    const href = rowHref(row);
+    const idMatch = href.match(/(?:session|conversation|thread)[=/:-]([A-Za-z0-9_.-]+)/i) || href.match(/([A-Za-z0-9_-]{8,})$/);
+    const rawSessionId = normalize(
+      row.getAttribute("data-app-action-sidebar-thread-id")
+      || (idMatch && idMatch[1])
+      || row.getAttribute("data-session-id")
+      || row.getAttribute("data-testid")
+      || ""
+    );
+    const sessionId = normalizeThreadId(rawSessionId);
+    const titleNode = row.querySelector("[data-thread-title], .truncate.select-none, .truncate.text-base");
+    const rawTitle = titleNode?.textContent || (titleNode ? "" : (row.textContent || ""));
+    const title = normalize(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
+    return { rawSessionId, sessionId, title };
+  };
+  const currentRow = (row) => {
+    if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
+    if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+    const href = rowHref(row);
+    if (href) {
+      try {
+        const url = new URL(href, location.href);
+        if (url.href === location.href || url.pathname === location.pathname) return true;
+      } catch (_) {
+        if (location.href.includes(href)) return true;
+      }
+    }
+    const ref = refFromRow(row);
+    return (
+      (!!ref.rawSessionId && location.href.includes(ref.rawSessionId))
+      || (!!ref.sessionId && location.href.includes(ref.sessionId))
+    );
+  };
+  const activeRef = () => {
+    const rows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
+    const row = rows.find(currentRow) || null;
+    return row ? refFromRow(row) : { sessionId: locationThreadId(), title: "" };
+  };
+  const queryRows = () => Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"))
+    .filter((row) => visible(row) && !row.closest(hudRootSelector));
+  const labelForNode = (node) => normalize([
+    node?.getAttribute?.("aria-label"),
+    node?.getAttribute?.("title"),
+    node?.textContent,
+  ].filter(Boolean).join(" "));
+  const revealSidebar = async () => {
+    const toggles = Array.from(document.querySelectorAll("button, [role='button'], a"))
+      .filter((node) => visible(node) && !node.closest(hudRootSelector))
+      .map((node) => ({ node, label: labelForNode(node), rect: node.getBoundingClientRect() }))
+      .filter((item) => /sidebar|history|conversation|conversations|chat history|对话|会话|历史/i.test(item.label))
+      .sort((left, right) => (left.rect.left - right.rect.left) || (left.rect.top - right.rect.top));
+    const toggle = toggles[0]?.node;
+    if (!toggle) return false;
+    toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    if (typeof toggle.click === "function") toggle.click();
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await sleep(90);
+      if (queryRows().length > 0) return true;
+    }
+    return queryRows().length > 0;
+  };
+  const titleMatches = (candidate, requested) => {
+    if (!candidate || !requested) return false;
+    const left = normalize(candidate).toLowerCase();
+    const right = normalize(requested).toLowerCase();
+    return left === right || left.startsWith(right) || right.startsWith(left);
+  };
+  const projectLabelFromWorkdir = (value) => {
+    const text = normalize(value);
+    if (!text) return "";
+    const parts = text.split(/[\\/]+/).filter(Boolean);
+    return normalize(parts[parts.length - 1] || "");
+  };
+  const clickPrimaryNode = (node) => {
+    if (!(node instanceof HTMLElement)) return;
+    node.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window }));
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+    node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+    node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    if (typeof node.click === "function") node.click();
+  };
+  const visibleSearchInput = () => Array.from(document.querySelectorAll("input[cmdk-input], input[placeholder*='搜索'], input[role='combobox'], textarea"))
+    .find((node) => visible(node) && !node.closest(hudRootSelector)) || null;
+  const setNativeInputValue = (input, nextValue) => {
+    if (!input) return;
+    const prototype = Object.getPrototypeOf(input);
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+    if (descriptor?.set) descriptor.set.call(input, nextValue);
+    else input.value = nextValue;
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue, inputType: "insertText" }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const openSearchDialog = async () => {
+    let input = visibleSearchInput();
+    if (input) return input;
+    const buttons = Array.from(document.querySelectorAll("button, [role='button'], a"))
+      .filter((node) => visible(node) && !node.closest(hudRootSelector))
+      .map((node) => ({ node, label: labelForNode(node) }));
+    const searchButton = buttons.find((item) => /搜索|search/i.test(item.label))?.node || null;
+    if (!searchButton) return null;
+    clickPrimaryNode(searchButton);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await sleep(80);
+      input = visibleSearchInput();
+      if (input) return input;
+    }
+    return null;
+  };
+  const searchCommandItems = () => Array.from(document.querySelectorAll("[cmdk-item], [role='option']"))
+    .filter((node) => visible(node) && !node.closest(hudRootSelector))
+    .map((node) => ({
+      node,
+      text: normalize(node.textContent || ""),
+      aria: normalize(node.getAttribute("aria-label") || ""),
+      shortcut: normalize(node.querySelector?.("kbd")?.textContent || ""),
+    }));
+  const activateViaSearch = async (title, sessionId, workdir) => {
+    const input = await openSearchDialog();
+    if (!input) return { ok: false, status: "search-unavailable", matchedBy: "" };
+    input.focus?.();
+    setNativeInputValue(input, title);
+    const projectLabel = projectLabelFromWorkdir(workdir).toLowerCase();
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await sleep(80);
+      const items = searchCommandItems();
+      const match = items.find((item) => titleMatches(item.text, title) && (!projectLabel || item.text.toLowerCase().includes(projectLabel)))
+        || items.find((item) => titleMatches(item.text, title))
+        || items.find((item) => item.text.toLowerCase().includes(normalize(title).toLowerCase()));
+      if (!match) {
+        if (attempt < 11) continue;
+        return { ok: false, status: "search-no-result", matchedBy: "" };
+      }
+      const shortcutMatch = match.shortcut.match(/Ctrl\+([0-9])/i);
+      if (shortcutMatch) {
+        const digit = shortcutMatch[1];
+        const keyTarget = document.activeElement instanceof HTMLElement ? document.activeElement : input;
+        keyTarget?.dispatchEvent(new KeyboardEvent("keydown", {
+          key: digit,
+          code: `Digit${digit}`,
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }));
+        keyTarget?.dispatchEvent(new KeyboardEvent("keyup", {
+          key: digit,
+          code: `Digit${digit}`,
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }));
+      } else {
+        clickPrimaryNode(match.node);
+      }
+      for (let waitAttempt = 0; waitAttempt < 20; waitAttempt += 1) {
+        await sleep(80);
+        const active = activeRef();
+        if (
+          (sessionId && active.sessionId === sessionId)
+          || (title && titleMatches(active.title, title))
+        ) {
+          return {
+            ok: true,
+            status: "switched",
+            matchedBy: shortcutMatch
+              ? (projectLabel ? "search-shortcut-project" : "search-shortcut")
+              : (projectLabel ? "search-title-project" : "search-title"),
+          };
+        }
+      }
+      return {
+        ok: false,
+        status: "search-switch-timeout",
+        matchedBy: shortcutMatch
+          ? (projectLabel ? "search-shortcut-project" : "search-shortcut")
+          : (projectLabel ? "search-title-project" : "search-title"),
+      };
+    }
+    return { ok: false, status: "search-no-result", matchedBy: "" };
+  };
+  const targetRawSessionId = normalize(target?.sessionId || "");
+  const targetSessionId = normalizeThreadId(targetRawSessionId);
+  const targetTitle = normalize(target?.title || "");
+  const targetWorkdir = normalize(target?.workdir || "");
+  const current = activeRef();
+  if (
+    (targetSessionId && current.sessionId === targetSessionId)
+    || (!targetSessionId && targetTitle && titleMatches(current.title, targetTitle))
+  ) {
+    return Promise.resolve({
+      ok: true,
+      status: "already-active",
+      requestedSessionId: targetSessionId,
+      requestedTitle: targetTitle,
+      activeSessionId: current.sessionId || "",
+      activeTitle: current.title || "",
+      matchedBy: targetSessionId ? "active-session-id" : "active-title",
+      availableCount: queryRows().length,
+    });
+  }
+  return (async () => {
+    let rows = queryRows();
+    if (!rows.length) {
+      await revealSidebar();
+      rows = queryRows();
+    }
+    const refs = rows.map((row) => ({ row, ref: refFromRow(row) }));
+    const match = refs.find((item) => targetSessionId && item.ref.sessionId === targetSessionId)
+      || refs.find((item) => targetRawSessionId && item.ref.rawSessionId === targetRawSessionId)
+      || refs.find((item) => targetRawSessionId && item.ref.rawSessionId.endsWith(`:${targetSessionId}`))
+      || refs.find((item) => targetSessionId && rowHref(item.row).includes(targetSessionId))
+      || refs.find((item) => targetTitle && item.ref.title === targetTitle)
+      || refs.find((item) => targetTitle && titleMatches(item.ref.title, targetTitle))
+      || null;
+    if (!match) {
+      if (targetTitle) {
+        const searchResult = await activateViaSearch(targetTitle, targetSessionId, targetWorkdir);
+        const active = activeRef();
+        return {
+          ok: searchResult.ok,
+          status: searchResult.status,
+          requestedSessionId: targetSessionId,
+          requestedTitle: targetTitle,
+          activeSessionId: active.sessionId || "",
+          activeTitle: active.title || "",
+          matchedBy: searchResult.matchedBy || "",
+          availableCount: rows.length,
+        };
+      }
+      return {
+        ok: false,
+        status: rows.length ? "thread-not-found" : "sidebar-unavailable",
+        requestedSessionId: targetSessionId,
+        requestedTitle: targetTitle,
+        activeSessionId: current.sessionId || "",
+        activeTitle: current.title || "",
+        matchedBy: "",
+        availableCount: rows.length,
+      };
+    }
+    const matchedBy = targetSessionId
+      ? (
+          match.ref.sessionId === targetSessionId
+            ? "session-id"
+            : (match.ref.rawSessionId === targetRawSessionId || match.ref.rawSessionId.endsWith(`:${targetSessionId}`))
+              ? "session-id-prefixed"
+              : "href"
+        )
+      : (match.ref.title === targetTitle ? "title" : "title-prefix");
+    const row = match.row;
+    row.scrollIntoView?.({ block: "center", inline: "nearest" });
+    const titleNode = row.querySelector("[data-thread-title], .truncate.select-none, .truncate.text-base");
+    const primary = titleNode?.closest?.("a[href], button, [role='button']")
+      || row.querySelector("a[href]")
+      || row.querySelector("button, [role='button']")
+      || row;
+    clickPrimaryNode(primary);
+    for (let attempt = 0; attempt < 18; attempt += 1) {
+      await sleep(80);
+      const active = activeRef();
+      if (
+        (targetSessionId && active.sessionId === targetSessionId)
+        || (!targetSessionId && targetTitle && titleMatches(active.title, targetTitle))
+        || currentRow(row)
+      ) {
+        return {
+          ok: true,
+          status: "switched",
+          requestedSessionId: targetSessionId,
+          requestedTitle: targetTitle,
+          activeSessionId: active.sessionId || "",
+          activeTitle: active.title || "",
+          matchedBy,
+          availableCount: rows.length,
+        };
+      }
+    }
+    const active = activeRef();
+    return {
+      ok: false,
+      status: "switch-timeout",
+      requestedSessionId: targetSessionId,
+      requestedTitle: targetTitle,
+      activeSessionId: active.sessionId || "",
+      activeTitle: active.title || "",
+      matchedBy,
+      availableCount: rows.length,
+    };
+  })();
 })()
 """
 
@@ -460,6 +899,150 @@ class CodexCdpProbe:
         self.last_status = "ok"
         self.last_error = ""
         return snapshot
+
+
+def session_switch_script(
+    session_id: str = "",
+    title: str = "",
+    workdir: str = "",
+) -> str:
+    payload = json.dumps(
+        {
+            "sessionId": str(session_id or "").strip(),
+            "title": str(title or "").strip(),
+            "workdir": str(workdir or "").strip(),
+        },
+        ensure_ascii=False,
+    )
+    return SESSION_SWITCH_SCRIPT_TEMPLATE.replace("__TARGET_PAYLOAD__", payload)
+
+
+class CodexCdpSessionController:
+    """Best-effort controller that switches the active Codex thread via CDP."""
+
+    def __init__(
+        self,
+        *,
+        port: int | None = None,
+        timeout_seconds: float = DEFAULT_CDP_SWITCH_TIMEOUT_SECONDS,
+        target_cache_seconds: float = 2.0,
+        enabled: bool | None = None,
+    ) -> None:
+        self.port = int(port or cdp_port_from_env())
+        self.timeout_seconds = max(0.1, float(timeout_seconds))
+        self.target_cache_seconds = max(0.0, float(target_cache_seconds))
+        self.enabled = cdp_enabled_from_env() if enabled is None else bool(enabled)
+        self.last_status = "idle" if self.enabled else "disabled"
+        self.last_error = ""
+        self._cached_target_id = ""
+        self._cached_websocket_url = ""
+        self._target_cache_at = 0.0
+
+    def activate_thread(
+        self,
+        *,
+        session_id: str = "",
+        title: str = "",
+        workdir: str = "",
+    ) -> CdpSessionSwitchResult:
+        requested_session_id = str(session_id or "").strip()
+        requested_title = str(title or "").strip()
+        requested_workdir = str(workdir or "").strip()
+        if not self.enabled:
+            self.last_status = "disabled"
+            return CdpSessionSwitchResult(
+                ok=False,
+                status="disabled",
+                requested_session_id=requested_session_id,
+                requested_title=requested_title,
+                message="CDP controller is disabled",
+            )
+        if not requested_session_id and not requested_title:
+            self.last_status = "invalid"
+            return CdpSessionSwitchResult(
+                ok=False,
+                status="missing-target",
+                message="session id or title is required",
+            )
+        try:
+            target = self._page_target()
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            if not websocket_url:
+                raise RuntimeError("CDP target has no websocket URL")
+            result = send_cdp_command(
+                websocket_url,
+                "Runtime.evaluate",
+                runtime_evaluate_params(
+                    session_switch_script(
+                        requested_session_id,
+                        requested_title,
+                        requested_workdir,
+                    ),
+                    await_promise=True,
+                ),
+                self.timeout_seconds,
+            )
+            value = (
+                result.get("result", {})
+                .get("result", {})
+                .get("value")
+            )
+            if not isinstance(value, dict):
+                raise RuntimeError("CDP switch script returned no value")
+            switch_result = CdpSessionSwitchResult(
+                ok=bool(value.get("ok")),
+                status=str(value.get("status") or "unknown"),
+                requested_session_id=str(
+                    value.get("requestedSessionId") or requested_session_id
+                ).strip(),
+                requested_title=str(
+                    value.get("requestedTitle") or requested_title
+                ).strip(),
+                active_session_id=str(value.get("activeSessionId") or "").strip(),
+                active_title=str(value.get("activeTitle") or "").strip(),
+                matched_by=str(value.get("matchedBy") or "").strip(),
+                available_count=int(value.get("availableCount") or 0),
+                message=str(value.get("message") or "").strip(),
+            )
+        except Exception as exc:
+            self.last_status = "failed"
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self._clear_target_cache()
+            return CdpSessionSwitchResult(
+                ok=False,
+                status="cdp-error",
+                requested_session_id=requested_session_id,
+                requested_title=requested_title,
+                message=self.last_error,
+            )
+        self.last_status = switch_result.status
+        self.last_error = switch_result.message
+        return switch_result
+
+    def _page_target(self, *, force: bool = False) -> dict[str, Any]:
+        if (
+            not force
+            and self._cached_websocket_url
+            and self._cached_target_id
+            and time.monotonic() - self._target_cache_at <= self.target_cache_seconds
+        ):
+            return {
+                "id": self._cached_target_id,
+                "webSocketDebuggerUrl": self._cached_websocket_url,
+            }
+        targets = list_targets(self.port, self.timeout_seconds)
+        target = pick_page_target(targets)
+        self._cached_target_id = str(
+            target.get("id") or target.get("webSocketDebuggerUrl") or ""
+        )
+        self._cached_websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+        self._target_cache_at = time.monotonic()
+        return target
+
+    def _clear_target_cache(self) -> None:
+        self._cached_target_id = ""
+        self._cached_websocket_url = ""
+        self._target_cache_at = 0.0
 
 
 def list_targets(port: int, timeout_seconds: float) -> list[dict[str, Any]]:
@@ -548,10 +1131,16 @@ def evaluate_script(websocket_url: str, script: str, timeout_seconds: float) -> 
     )
 
 
-def runtime_evaluate_params(script: str, *, return_by_value: bool = True) -> dict[str, Any]:
+def runtime_evaluate_params(
+    script: str,
+    *,
+    return_by_value: bool = True,
+    await_promise: bool = False,
+) -> dict[str, Any]:
     return {
         "expression": script,
         "returnByValue": return_by_value,
+        "awaitPromise": bool(await_promise),
         "allowUnsafeEvalBlockedByCSP": True,
     }
 
@@ -664,6 +1253,7 @@ def snapshot_from_evaluate_result(result: dict[str, Any]) -> CdpDomSnapshot | No
         device_pixel_ratio=dpr,
         header_rect=_rect_from_value(value.get("headerRect")),
         title_rect=_rect_from_value(value.get("titleRect")),
+        top_slot_rect=_rect_from_value(value.get("topSlotRect")),
         composer_rect=_rect_from_value(value.get("composerRect")),
         app_error=str(value.get("appError") or "").strip(),
     )
@@ -800,6 +1390,8 @@ __all__ = [
     "CDP_PORT_ENV",
     "CdpDomSnapshot",
     "CdpRect",
+    "CdpSessionSwitchResult",
+    "CodexCdpSessionController",
     "CodexCdpProbe",
     "DOM_PROBE_SCRIPT",
     "DEFAULT_CDP_PORT",
@@ -807,6 +1399,7 @@ __all__ = [
     "pick_page_target",
     "remove_new_document_script",
     "runtime_evaluate_params",
+    "session_switch_script",
     "send_cdp_command",
     "send_cdp_commands",
     "snapshot_from_evaluate_result",

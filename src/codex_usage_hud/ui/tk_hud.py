@@ -2991,38 +2991,49 @@ class _WindowsCodexLocator(_BaseLocator):
         if target == "top":
             header = self._physical_rect_from_cdp(snapshot.header_rect, rect, dpr)
             title = self._physical_rect_from_cdp(snapshot.title_rect, rect, dpr)
-            source = header or title
-            if source is None or source.width < 160:
+            slot = self._physical_rect_from_cdp(snapshot.top_slot_rect, rect, dpr)
+            source = slot or header or title
+            if source is None or (slot is None and source.width < 160):
                 self._log_cdp_anchor_status(
                     target,
                     "no-title-anchor",
-                    f"session={snapshot.session_id or '-'} header={bool(header)} title={bool(title)}",
+                    "session=%s header=%s title=%s slot=%s"
+                    % (
+                        snapshot.session_id or "-",
+                        bool(header),
+                        bool(title),
+                        bool(slot),
+                    ),
                 )
                 return None
-            right_margin = max(
-                TOP_ANCHOR_RIGHT_MIN,
-                int(round(source.width * TOP_ANCHOR_RIGHT_RATIO)),
-            )
-            if title is not None and title.left >= source.left and title.left < source.right:
-                left = title.left
+            if slot is not None:
+                left = slot.left
+                right = slot.right
             else:
-                left_margin = max(
-                    TOP_ANCHOR_LEFT_MIN,
-                    int(round(source.width * TOP_ANCHOR_LEFT_RATIO)),
+                right_margin = max(
+                    TOP_ANCHOR_RIGHT_MIN,
+                    int(round(source.width * TOP_ANCHOR_RIGHT_RATIO)),
                 )
-                left = source.left + _fit_anchor_left(
-                    source.width,
-                    left_margin,
-                    right_margin,
-                    TOP_ANCHOR_MIN_WIDTH,
-                )
-            right = max(left + 1, source.right - right_margin)
+                if title is not None and title.left >= source.left and title.left < source.right:
+                    left = title.left
+                else:
+                    left_margin = max(
+                        TOP_ANCHOR_LEFT_MIN,
+                        int(round(source.width * TOP_ANCHOR_LEFT_RATIO)),
+                    )
+                    left = source.left + _fit_anchor_left(
+                        source.width,
+                        left_margin,
+                        right_margin,
+                        TOP_ANCHOR_MIN_WIDTH,
+                    )
+                right = max(left + 1, source.right - right_margin)
             y = source.top + max(0, (source.height - max(1, hud_height)) // 2)
             self._log_cdp_anchor_status(
                 target,
                 "ok",
                 f"source=cdp:title session={snapshot.session_id or '-'} "
-                f"header={bool(header)} title={bool(title)} dpr={dpr:.2f}",
+                f"header={bool(header)} title={bool(title)} slot={bool(slot)} dpr={dpr:.2f}",
             )
             return HudAnchor(
                 left=left,

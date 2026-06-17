@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>完成会话圆形气泡设计稿</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #0a0d11;
+      --panel: #10161d;
+      --panel-2: #141b24;
+      --line: #263241;
+      --line-strong: #2f9f55;
+      --text: #e8eef7;
+      --muted: #8492a6;
+      --soft: #b8c6d8;
+      --green: #8fe3a1;
+      --green-2: #48d37a;
+      --green-3: #1f8a4e;
+      --green-bg: #0e1b14;
+      --yellow: #f3d27a;
+      --blue: #9ccbff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 20% 10%, rgba(72, 211, 122, .10), transparent 28%),
+        linear-gradient(135deg, #080b0f 0%, #0f1319 48%, #090d11 100%);
+      color: var(--text);
+      font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      letter-spacing: 0;
+    }
+
+    .board {
+      width: 1200px;
+      min-height: 760px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+
+    .titlebar {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 28px;
+      margin-bottom: 22px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.18;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      max-width: 720px;
+    }
+
+    .spec-pill {
+      display: inline-flex;
+      align-items: center;
+      height: 28px;
+      padding: 0 10px;
+      border: 1px solid rgba(143, 227, 161, .32);
+      border-radius: 999px;
+      color: var(--green);
+      background: rgba(14, 27, 20, .86);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 470px;
+      gap: 26px;
+      align-items: start;
+    }
+
+    .section {
+      border: 1px solid rgba(132, 146, 166, .20);
+      border-radius: 14px;
+      background: rgba(16, 22, 29, .78);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, .24);
+      overflow: hidden;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(132, 146, 166, .14);
+      background: rgba(20, 27, 36, .72);
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: #cbd8e8;
+    }
+
+    .note {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .motion {
+      padding: 18px 18px 20px;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: 1fr 34px 1fr 34px 1fr;
+      align-items: center;
+      gap: 0;
+    }
+
+    .arrow {
+      color: rgba(143, 227, 161, .70);
+      font-size: 22px;
+      text-align: center;
+    }
+
+    .frame {
+      min-height: 164px;
+      border: 1px solid rgba(132, 146, 166, .16);
+      border-radius: 12px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .025), transparent),
+        rgba(8, 12, 16, .44);
+      position: relative;
+      padding: 12px;
+      overflow: hidden;
+    }
+
+    .frame-label {
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 10px;
+    }
+
+    .mini-card {
+      width: 100%;
+      min-height: 92px;
+      padding: 9px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: #0e1b14;
+      color: var(--soft);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, .28);
+    }
+
+    .mini-card .head {
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .mini-card .body {
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .mini-card .foot {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 10px;
+      margin-top: 8px;
+    }
+
+    .mini-pill {
+      width: 142px;
+      height: 90px;
+      margin: 16px auto 0;
+      border: 1px solid rgba(143, 227, 161, .74);
+      border-radius: 46px;
+      background: linear-gradient(180deg, rgba(31, 138, 78, .40), rgba(14, 27, 20, .96));
+      display: grid;
+      place-items: center;
+      color: var(--green);
+      text-align: center;
+      box-shadow: 0 0 0 5px rgba(72, 211, 122, .06);
+    }
+
+    .mini-pill strong {
+      display: block;
+      font-size: 18px;
+      line-height: 1;
+      margin-bottom: 5px;
+    }
+
+    .mini-pill span {
+      font-size: 10px;
+      color: #c8f5d2;
+    }
+
+    .mini-orb {
+      width: 132px;
+      height: 132px;
+      margin: 2px auto 0;
+      border-radius: 50%;
+      border: 1px solid rgba(143, 227, 161, .92);
+      background:
+        radial-gradient(circle at 50% 38%, rgba(143, 227, 161, .22), transparent 42%),
+        linear-gradient(180deg, rgba(14, 47, 28, .98), rgba(8, 21, 14, .98));
+      box-shadow:
+        0 0 0 5px rgba(72, 211, 122, .07),
+        0 16px 40px rgba(0, 0, 0, .34);
+      position: relative;
+      display: grid;
+      place-items: center;
+    }
+
+    .mini-orb::before {
+      content: "";
+      position: absolute;
+      inset: 9px;
+      border-radius: 50%;
+      border: 1px solid rgba(143, 227, 161, .16);
+    }
+
+    .mini-orb .check {
+      font-size: 45px;
+      line-height: 1;
+      color: #d8ffe0;
+      text-shadow: 0 0 16px rgba(143, 227, 161, .34);
+    }
+
+    .details {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .detail-box {
+      border: 1px solid rgba(132, 146, 166, .15);
+      border-radius: 10px;
+      padding: 11px 12px;
+      background: rgba(10, 15, 20, .46);
+    }
+
+    .detail-box b {
+      display: block;
+      color: #cbd8e8;
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+
+    .detail-box span {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .desktop {
+      height: 642px;
+      position: relative;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, .025) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(255, 255, 255, .025) 1px, transparent 1px),
+        #0d1014;
+      background-size: 40px 40px;
+    }
+
+    .app-hint {
+      position: absolute;
+      inset: 34px 78px 34px 24px;
+      border: 1px solid rgba(132, 146, 166, .16);
+      border-radius: 14px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, .025), transparent),
+        rgba(255, 255, 255, .018);
+    }
+
+    .app-row {
+      height: 60px;
+      margin: 22px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .045);
+      border: 1px solid rgba(255, 255, 255, .04);
+    }
+
+    .overlay-stack {
+      position: absolute;
+      top: 56px;
+      right: 16px;
+      width: 430px;
+    }
+
+    .complete-orb-wrap {
+      position: relative;
+      width: 100%;
+      height: 180px;
+      margin-bottom: 10px;
+      pointer-events: none;
+    }
+
+    .complete-orb {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 168px;
+      height: 168px;
+      border-radius: 50%;
+      border: 1px solid rgba(143, 227, 161, .96);
+      background:
+        radial-gradient(circle at 50% 33%, rgba(143, 227, 161, .28), transparent 35%),
+        radial-gradient(circle at 50% 50%, rgba(72, 211, 122, .13), transparent 62%),
+        linear-gradient(180deg, #10361f 0%, #0a1a11 100%);
+      box-shadow:
+        0 0 0 6px rgba(72, 211, 122, .08),
+        0 0 26px rgba(72, 211, 122, .18),
+        0 18px 48px rgba(0, 0, 0, .42);
+      overflow: hidden;
+    }
+
+    .complete-orb::before,
+    .complete-orb::after {
+      content: "";
+      position: absolute;
+      border-radius: 50%;
+      pointer-events: none;
+    }
+
+    .complete-orb::before {
+      inset: 10px;
+      border: 1px solid rgba(143, 227, 161, .18);
+    }
+
+    .complete-orb::after {
+      inset: 31px;
+      border: 1px dashed rgba(143, 227, 161, .22);
+    }
+
+    .arc-svg {
+      position: absolute;
+      inset: 0;
+      width: 168px;
+      height: 168px;
+      overflow: visible;
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .arc-title {
+      fill: #d5ffe0;
+    }
+
+    .arc-workdir {
+      fill: #9bd7ac;
+      font-size: 9.5px;
+      font-weight: 600;
+    }
+
+    .orb-center {
+      position: absolute;
+      inset: 38px 22px 26px;
+      display: grid;
+      grid-template-rows: 54px auto auto;
+      align-items: center;
+      justify-items: center;
+      text-align: center;
+    }
+
+    .big-check {
+      width: 55px;
+      height: 55px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #e8ffed;
+      font-size: 44px;
+      line-height: 1;
+      font-weight: 700;
+      text-shadow: 0 0 18px rgba(143, 227, 161, .45);
+    }
+
+    .total-time {
+      margin-top: 0;
+      color: #d8ffe0;
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px;
+      width: 128px;
+      margin-top: 10px;
+    }
+
+    .stat {
+      min-width: 0;
+      height: 30px;
+      border: 1px solid rgba(143, 227, 161, .16);
+      border-radius: 8px;
+      background: rgba(3, 12, 8, .52);
+      display: grid;
+      align-content: center;
+      gap: 2px;
+    }
+
+    .stat-label {
+      color: #7ebd91;
+      font-size: 7.5px;
+      line-height: 1;
+    }
+
+    .stat-value {
+      color: #eefbf1;
+      font-size: 9px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .pin-label {
+      position: absolute;
+      right: 184px;
+      top: 46px;
+      width: 232px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+      text-align: right;
+    }
+
+    .pin-line {
+      position: absolute;
+      right: 171px;
+      top: 83px;
+      width: 50px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(143, 227, 161, .62));
+    }
+
+    .work-card {
+      width: 430px;
+      min-height: 122px;
+      padding: 10px 10px 9px;
+      border-radius: 10px;
+      background: #10161d;
+      border: 1px solid #263241;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, .28);
+      margin-top: 8px;
+    }
+
+    .work-card.green {
+      border-color: #2f9f55;
+      background: #0e1b14;
+    }
+
+    .work-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #a9b6c6;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .work-card.green .work-head {
+      color: var(--green);
+    }
+
+    .close-dot {
+      display: grid;
+      place-items: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      color: #a9b6c6;
+      background: #07111b;
+      font-size: 12px;
+    }
+
+    .work-body {
+      color: var(--soft);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    .work-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: #5e6a78;
+      font-size: 10px;
+      margin-top: 10px;
+    }
+
+    .status-green {
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    .status-blue {
+      color: var(--blue);
+      font-weight: 700;
+    }
+
+    .motion-preview {
+      position: relative;
+      height: 194px;
+      margin-top: 18px;
+      border-radius: 12px;
+      border: 1px solid rgba(132, 146, 166, .15);
+      background: rgba(8, 12, 16, .44);
+      overflow: hidden;
+    }
+
+    .motion-track {
+      position: absolute;
+      top: 18px;
+      right: 16px;
+      width: 430px;
+      height: 150px;
+      border: 1px dashed rgba(132, 146, 166, .18);
+      border-radius: 10px;
+    }
+
+    .morph-bubble {
+      position: absolute;
+      top: 38px;
+      right: 16px;
+      width: 430px;
+      height: 116px;
+      border: 1px solid #2f9f55;
+      border-radius: 10px;
+      background:
+        radial-gradient(circle at 50% 38%, rgba(143, 227, 161, .20), transparent 38%),
+        #0e1b14;
+      box-shadow: 0 16px 42px rgba(0, 0, 0, .34);
+      animation: morphToOrb 5.2s cubic-bezier(.22, .86, .18, 1) infinite;
+    }
+
+    .morph-copy {
+      position: absolute;
+      inset: 10px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      color: var(--green);
+      font-size: 12px;
+      animation: copyFade 5.2s ease infinite;
+    }
+
+    .morph-mark {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      color: #e8ffed;
+      font-size: 48px;
+      opacity: 0;
+      animation: checkIn 5.2s ease infinite;
+    }
+
+    @keyframes morphToOrb {
+      0%, 18% {
+        top: 38px;
+        right: 16px;
+        width: 430px;
+        height: 116px;
+        border-radius: 10px;
+      }
+      48% {
+        top: 32px;
+        right: 108px;
+        width: 244px;
+        height: 116px;
+        border-radius: 58px;
+      }
+      72%, 100% {
+        top: 16px;
+        right: 16px;
+        width: 168px;
+        height: 168px;
+        border-radius: 50%;
+      }
+    }
+
+    @keyframes copyFade {
+      0%, 34% {
+        opacity: 1;
+        transform: scale(1);
+      }
+      62%, 100% {
+        opacity: 0;
+        transform: scale(.86);
+      }
+    }
+
+    @keyframes checkIn {
+      0%, 48% {
+        opacity: 0;
+        transform: scale(.74);
+      }
+      72%, 100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+    }
+
+    .implementation-note {
+      margin-top: 16px;
+      padding: 14px 16px;
+      border: 1px solid rgba(143, 227, 161, .20);
+      border-radius: 12px;
+      background: rgba(14, 27, 20, .42);
+      color: #bfeacd;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      height: 24px;
+      padding: 0 9px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .045);
+      border: 1px solid rgba(255, 255, 255, .06);
+      color: #aebbd0;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <main class="board">
+    <div class="titlebar">
+      <div>
+        <h1>完成会话气泡：矩形到圆形常驻徽章</h1>
+        <div class="subtitle">完成后的会话不再自动消失。原矩形气泡先在当前位置收缩成圆形，再移动到右上角置顶；所有运行中的长方形气泡继续在下方堆叠。</div>
+      </div>
+      <div class="spec-pill">右上常驻 · 绿色完成态 · 弧形标题/目录</div>
+    </div>
+
+    <div class="grid">
+      <section class="section">
+        <div class="section-header">
+          <h2>变形过渡</h2>
+          <div class="note">建议 520ms，cubic-bezier(.22,.86,.18,1)</div>
+        </div>
+        <div class="motion">
+          <div class="timeline">
+            <div class="frame">
+              <div class="frame-label">1. 任务完成瞬间：沿用当前绿色矩形</div>
+              <div class="mini-card">
+                <div class="head">14:16:47 | 已处理 5m15s | 递进提交1213375</div>
+                <div class="body">已完成，输出摘要保留一行到两行，随后内容淡出。</div>
+                <div class="foot"><span>已完成</span><span>E:\Work\scan_project-ui</span></div>
+              </div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="frame">
+              <div class="frame-label">2. 内容淡出，边框保持绿色，宽度收缩</div>
+              <div class="mini-pill">
+                <div>
+                  <strong>5m15s</strong>
+                  <span>正在收缩</span>
+                </div>
+              </div>
+            </div>
+            <div class="arrow">→</div>
+            <div class="frame">
+              <div class="frame-label">3. 圆形完成徽章置顶，矩形列表下移</div>
+              <div class="mini-orb">
+                <div class="check">✓</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="motion-preview" aria-label="变形动画预览">
+            <div class="motion-track"></div>
+            <div class="morph-bubble">
+              <div class="morph-copy">
+                <strong>14:16:47 | 已处理 5m15s | 递进提交1213375</strong>
+                <span>已完成，正在固定到顶部</span>
+              </div>
+              <div class="morph-mark">✓</div>
+            </div>
+          </div>
+
+          <div class="details">
+            <div class="detail-box">
+              <b>布局规则</b>
+              <span>完成圆形固定在 overlay 右上角；下方第一个矩形气泡从圆形底部 10px 后开始。</span>
+            </div>
+            <div class="detail-box">
+              <b>信息密度</b>
+              <span>圆形只放关键结果；长文本变成弧形短标题和短目录，过长以省略号截断。</span>
+            </div>
+            <div class="detail-box">
+              <b>颜色状态</b>
+              <span>完成态主色为绿色，暗绿底、亮绿边、柔和外发光；运行态颜色保持不变。</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <h2>最终右侧堆叠效果</h2>
+          <div class="note">430px overlay 宽度不变</div>
+        </div>
+        <div class="desktop">
+          <div class="app-hint">
+            <div class="app-row"></div>
+            <div class="app-row"></div>
+            <div class="app-row"></div>
+            <div class="app-row"></div>
+          </div>
+          <div class="overlay-stack">
+            <div class="complete-orb-wrap">
+              <div class="pin-label">完成会话被固定到所有长方形气泡上方，不参与 12 秒自动移除。</div>
+              <div class="pin-line"></div>
+              <div class="complete-orb" aria-label="完成会话圆形徽章">
+                <svg class="arc-svg" viewBox="0 0 168 168" role="img">
+                  <defs>
+                    <path id="titleArc" d="M 22 85 A 62 62 0 0 1 146 85"></path>
+                    <path id="dirArc" d="M 22 91 A 62 62 0 0 0 146 91"></path>
+                  </defs>
+                  <text class="arc-title">
+                    <textPath href="#titleArc" startOffset="50%" text-anchor="middle">递进提交1213375...</textPath>
+                  </text>
+                  <text class="arc-workdir">
+                    <textPath href="#dirArc" startOffset="50%" text-anchor="middle">scan_project-ui</textPath>
+                  </text>
+                </svg>
+                <div class="orb-center">
+                  <div class="big-check">✓</div>
+                  <div class="total-time">5m15s</div>
+                  <div class="stats">
+                    <div class="stat">
+                      <div class="stat-label">TOKENS</div>
+                      <div class="stat-value">2.1k</div>
+                    </div>
+                    <div class="stat">
+                      <div class="stat-label">COST</div>
+                      <div class="stat-value">$0.02</div>
+                    </div>
+                    <div class="stat">
+                      <div class="stat-label">CACHE</div>
+                      <div class="stat-value">99%</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="work-card">
+              <div class="work-head">
+                <span>14:20:52 | 已处理 1m10s | 排查 WPS 预览异常原因</span>
+                <span class="close-dot">×</span>
+              </div>
+              <div class="work-body">我先读本地运行痕迹，不猜测。重点看 E:\Work\.codex_delegate 是否没有上次启动日志、状态文件。</div>
+              <div class="work-foot"><span class="status-blue">正在思考</span><span>E:\Work</span></div>
+            </div>
+
+            <div class="work-card">
+              <div class="work-head">
+                <span>14:23:08 | 已处理 37s | 修复 overlay 置顶排序</span>
+                <span class="close-dot">×</span>
+              </div>
+              <div class="work-body">正在运行测试，确认完成徽章不会挤压正在处理的会话卡片。</div>
+              <div class="work-foot"><span class="status-blue">正在运行命令</span><span>codex-usage-hud</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="implementation-note">
+      设计建议：完成态数据进入一个 pinnedCompleted 列表，按完成时间倒序显示；默认展示最新 1 个圆形徽章，后续可扩展为右侧竖向圆形徽章列。圆形直径 168px，命中区域保持圆形但 close 可继续用右上角悬浮按钮或右键菜单。
+      <div class="legend">
+        <span>总处理时间：中心 5m15s</span>
+        <span>会话标题：顶部弧形 textPath</span>
+        <span>目录：仅最后目录名</span>
+        <span>tokens / 金额 / 缓存率：底部三格</span>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

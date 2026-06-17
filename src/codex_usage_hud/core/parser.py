@@ -339,6 +339,8 @@ class WorkStatusItem:
     status: str
     status_label: str
     detail: str
+    session_id: str = ""
+    target_title: str = ""
     status_text: str = ""
     last_text: str = ""
     elapsed_text: str = ""
