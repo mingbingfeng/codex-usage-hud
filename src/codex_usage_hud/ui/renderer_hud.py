@@ -24,7 +24,7 @@ from ..platforms.cdp_probe import (
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "10"
+RENDERER_HUD_VERSION = "12"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -61,7 +61,7 @@ def set_cost_estimator(estimator: CostEstimator) -> None:
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "11";
+  const version = "12";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -339,7 +339,7 @@ RENDERER_HUD_SCRIPT = r"""
         width: 100%;
         height: 26px;
         display: none;
-        grid-template-columns: max-content minmax(68px, 1fr) minmax(76px, 1fr);
+        grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1fr);
         gap: 7px;
         align-items: center;
       }

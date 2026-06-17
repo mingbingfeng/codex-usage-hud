@@ -345,6 +345,10 @@ class WorkStatusItem:
     last_text: str = ""
     elapsed_text: str = ""
     progress: str = ""
+    tokens_text: str = ""
+    cost_text: str = ""
+    cache_hit_text: str = ""
+    workdir_name: str = ""
     source: str = ""
     workdir: str = ""
     session_started_at: datetime | None = None

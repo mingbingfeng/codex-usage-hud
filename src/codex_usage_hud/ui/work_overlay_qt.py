@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -24,6 +25,10 @@ WORK_OVERLAY_CARD_X_PADDING = 10
 WORK_OVERLAY_CARD_Y_PADDING = 8
 WORK_OVERLAY_CARD_SPACING = 7
 WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT = 160
+WORK_OVERLAY_COMPLETED_BADGE_SIZE = 168
+WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT = 180
+WORK_OVERLAY_COMPLETED_BADGE_SPACING = 8
+WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS = 520
 WORK_OVERLAY_SHIMMER_TIMER_MS = 30
 WORK_OVERLAY_SHIMMER_STEP_PX = 3.5
 WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX = 58
@@ -52,6 +57,63 @@ def _compact_workdir_text(value: object, limit: int) -> str:
     if len(text) <= limit:
         return text
     return "..." + text[-max(0, limit - 3) :]
+
+
+def _workdir_leaf(value: object) -> str:
+    text = str(value or "").strip().rstrip("\\/")
+    if not text:
+        return ""
+    parts = [part for part in text.replace("/", "\\").split("\\") if part]
+    return parts[-1] if parts else text
+
+
+def _item_is_completed(item: Mapping[str, object]) -> bool:
+    return str(item.get("status") or "") == "recent"
+
+
+def _overlay_item_timestamp_seconds(
+    item: Mapping[str, object],
+    *keys: str,
+) -> float:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, datetime):
+            return value.timestamp()
+        text = str(value or "").strip()
+        if not text:
+            continue
+        parsed = parse_timestamp(text)
+        if parsed is not None:
+            return parsed.timestamp()
+    return 0.0
+
+
+def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    completed: list[Mapping[str, object]] = []
+    active: list[Mapping[str, object]] = []
+    for item in items:
+        if _item_is_completed(item):
+            completed.append(item)
+        else:
+            active.append(item)
+    completed.sort(
+        key=lambda item: _overlay_item_timestamp_seconds(
+            item,
+            "updatedAt",
+            "taskStartedAt",
+            "startedAt",
+        )
+    )
+    return completed + active
+
+
+def _completed_badge_row_width(count: int) -> int:
+    if count <= 0:
+        return 0
+    return (
+        WORK_OVERLAY_COMPLETED_BADGE_SIZE * count
+        + WORK_OVERLAY_COMPLETED_BADGE_SPACING * max(0, count - 1)
+    )
 
 
 def _work_overlay_header_text(
@@ -143,14 +205,16 @@ def run_work_overlay_helper_qt(
     header_title_limit: int,
 ) -> int:
     try:
-        from PySide6.QtCore import QPoint, QPointF, QSize, Qt, QTimer
+        from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer
         from PySide6.QtGui import (
             QColor,
             QCursor,
             QFont,
+            QFontMetrics,
             QLinearGradient,
             QPainter,
             QPainterPath,
+            QPen,
             QTextLayout,
             QTextOption,
         )
@@ -502,6 +566,230 @@ def run_work_overlay_helper_qt(
             painter.setBrush(fill)
             painter.drawRoundedRect(self.rect(), 4, 4)
 
+    class CompletedBadgeWidget(QWidget):
+        """Animated green circular summary for finished work."""
+
+        def __init__(self, item: Mapping[str, object], parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._item: Mapping[str, object] = dict(item)
+            self._started_at = time.monotonic()
+            self._progress = 0.0
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._advance)
+            self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.setFixedSize(
+                WORK_OVERLAY_COMPLETED_BADGE_SIZE,
+                WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
+            )
+            self._timer.start(16)
+
+        def set_item(self, item: Mapping[str, object]) -> None:
+            self._item = dict(item)
+            self.update()
+
+        def sizeHint(self) -> QSize:
+            return QSize(
+                WORK_OVERLAY_COMPLETED_BADGE_SIZE,
+                WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
+            )
+
+        def _advance(self) -> None:
+            elapsed_ms = (time.monotonic() - self._started_at) * 1000.0
+            self._progress = min(1.0, elapsed_ms / WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS)
+            if self._progress >= 1.0:
+                self._timer.stop()
+            self.update()
+
+        def paintEvent(self, event: object) -> None:
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+
+            eased = 1.0 - pow(1.0 - max(0.0, min(1.0, self._progress)), 3)
+            final_size = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
+            start_height = 118.0
+            start_width = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
+            start_rect = QRectF(
+                0.0,
+                (WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT - start_height) / 2.0,
+                start_width,
+                start_height,
+            )
+            end_rect = QRectF(
+                0.0,
+                0.0,
+                final_size,
+                final_size,
+            )
+            rect = QRectF(
+                start_rect.x() + (end_rect.x() - start_rect.x()) * eased,
+                start_rect.y() + (end_rect.y() - start_rect.y()) * eased,
+                start_rect.width() + (end_rect.width() - start_rect.width()) * eased,
+                start_rect.height() + (end_rect.height() - start_rect.height()) * eased,
+            )
+            radius = 10.0 + ((final_size / 2.0) - 10.0) * eased
+
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            gradient.setColorAt(0.0, QColor("#49E07D"))
+            gradient.setColorAt(0.5, QColor("#1FA85A"))
+            gradient.setColorAt(1.0, QColor("#0A5B35"))
+            painter.setBrush(gradient)
+            painter.setPen(QPen(QColor("#93F0AF"), 1.4))
+            painter.drawRoundedRect(rect, radius, radius)
+
+            if eased < 0.24:
+                return
+
+            content_alpha = int(255 * min(1.0, (eased - 0.24) / 0.42))
+            painter.save()
+            painter.setOpacity(content_alpha / 255.0)
+            center = QPointF(end_rect.center())
+
+            outer_pen = QPen(QColor("#B9F7C9"), 2.0)
+            painter.setPen(outer_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(end_rect.adjusted(4.0, 4.0, -4.0, -4.0))
+
+            dashed_pen = QPen(QColor(218, 255, 229, 145), 1.1)
+            dashed_pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(dashed_pen)
+            painter.drawEllipse(end_rect.adjusted(17.0, 17.0, -17.0, -17.0))
+
+            title = str(self._item.get("title") or "Codex 工作").strip()
+            workdir = str(self._item.get("workdirName") or "").strip()
+            if not workdir:
+                workdir = _workdir_leaf(self._item.get("workdir"))
+            self._draw_arc_text(
+                painter,
+                title,
+                center=center,
+                radius=67.0,
+                start_degrees=-149.0,
+                end_degrees=-31.0,
+                font=QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold),
+                color=QColor("#E9FFF0"),
+                bottom=False,
+            )
+            if workdir:
+                self._draw_arc_text(
+                    painter,
+                    workdir,
+                    center=center,
+                    radius=67.0,
+                    start_degrees=145.0,
+                    end_degrees=35.0,
+                    font=QFont("Microsoft YaHei UI", 7),
+                    color=QColor("#BFF8D1"),
+                    bottom=True,
+                )
+
+            check_font = QFont("Segoe UI Symbol", 38, QFont.Weight.Bold)
+            painter.setFont(check_font)
+            painter.setPen(QColor("#F8FFF9"))
+            painter.drawText(
+                QRectF(center.x() - 34.0, center.y() - 41.0, 68.0, 56.0),
+                alignment.AlignCenter,
+                "✓",
+            )
+
+            elapsed = str(self._item.get("elapsedText") or "已处理 --").strip()
+            painter.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
+            painter.setPen(QColor("#F4FFF7"))
+            painter.drawText(
+                QRectF(center.x() - 54.0, center.y() + 13.0, 108.0, 18.0),
+                alignment.AlignCenter,
+                _compact_work_text(elapsed, 18),
+            )
+
+            stats = [
+                ("Tokens", str(self._item.get("tokensText") or "0").strip() or "0"),
+                ("Cost", str(self._item.get("costText") or "$0").strip() or "$0"),
+                ("Cache", str(self._item.get("cacheHitText") or "--").strip() or "--"),
+            ]
+            box_width = 44.0
+            box_height = 25.0
+            spacing = 5.0
+            start_x = center.x() - ((box_width * 3.0 + spacing * 2.0) / 2.0)
+            y = center.y() + 38.0
+            for index, (label, value) in enumerate(stats):
+                box = QRectF(start_x + index * (box_width + spacing), y, box_width, box_height)
+                painter.setPen(QPen(QColor(221, 255, 230, 105), 0.8))
+                painter.setBrush(QColor(4, 57, 31, 108))
+                painter.drawRoundedRect(box, 6.0, 6.0)
+                painter.setPen(QColor("#EFFFF2"))
+                painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold))
+                painter.drawText(box.adjusted(1.0, 1.0, -1.0, -11.0), alignment.AlignCenter, value)
+                painter.setPen(QColor("#A7EFC0"))
+                painter.setFont(QFont("Microsoft YaHei UI", 5))
+                painter.drawText(box.adjusted(1.0, 13.0, -1.0, -1.0), alignment.AlignCenter, label)
+
+            painter.restore()
+
+        def _arc_limited_text(self, text: str, font: QFont, max_width: float) -> str:
+            compact = " ".join(str(text or "").split())
+            if not compact:
+                return ""
+            metrics = QFontMetrics(font)
+            if metrics.horizontalAdvance(compact) <= max_width:
+                return compact
+            suffix = "..."
+            available = max(1, int(max_width - metrics.horizontalAdvance(suffix)))
+            result = ""
+            for char in compact:
+                if metrics.horizontalAdvance(result + char) > available:
+                    break
+                result += char
+            return (result.rstrip() + suffix) if result else suffix
+
+        def _draw_arc_text(
+            self,
+            painter: QPainter,
+            text: str,
+            *,
+            center: QPointF,
+            radius: float,
+            start_degrees: float,
+            end_degrees: float,
+            font: QFont,
+            color: QColor,
+            bottom: bool,
+        ) -> None:
+            span = abs(end_degrees - start_degrees)
+            max_width = math.radians(span) * radius * 0.86
+            arc_text = self._arc_limited_text(text, font, max_width)
+            if not arc_text:
+                return
+            painter.save()
+            painter.setFont(font)
+            painter.setPen(color)
+            metrics = painter.fontMetrics()
+            widths = [max(1, metrics.horizontalAdvance(char)) for char in arc_text]
+            total_width = sum(widths)
+            degrees_per_px = span / max(1.0, total_width)
+            direction = 1.0 if end_degrees >= start_degrees else -1.0
+            current = start_degrees + direction * ((span - total_width * degrees_per_px) / 2.0)
+            for char, width in zip(arc_text, widths):
+                angle = current + direction * (width * degrees_per_px / 2.0)
+                radians = math.radians(angle)
+                x = center.x() + math.cos(radians) * radius
+                y = center.y() + math.sin(radians) * radius
+                painter.save()
+                painter.translate(QPointF(x, y))
+                rotation = angle - 90.0 if bottom else angle + 90.0
+                painter.rotate(rotation)
+                painter.drawText(
+                    QRectF(-width / 2.0 - 1.0, -metrics.ascent(), width + 2.0, metrics.height()),
+                    alignment.AlignCenter,
+                    char,
+                )
+                painter.restore()
+                current += direction * width * degrees_per_px
+            painter.restore()
+
     class OverlayWindow(QWidget):
         def __init__(self) -> None:
             flags = (
@@ -525,6 +813,7 @@ def run_work_overlay_helper_qt(
             self._workdir_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._item_widgets: list[dict[str, Any]] = []
             self._empty_since = 0.0
+            self._layout_width = WORK_OVERLAY_WIDTH
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -659,6 +948,10 @@ def run_work_overlay_helper_qt(
             item_id = str(item.get("id") or "").strip()
             return item_id or f"overlay-index-{index}"
 
+        @staticmethod
+        def _item_widget_kind(item: Mapping[str, object]) -> str:
+            return "completed" if _item_is_completed(item) else "card"
+
         def _clear_shell(self) -> None:
             self._close_anchors.clear()
             self._workdir_anchors.clear()
@@ -670,9 +963,74 @@ def run_work_overlay_helper_qt(
                 if widget is not None:
                     widget.deleteLater()
 
+        def _build_item_widget(self, item: Mapping[str, object]) -> None:
+            self._build_item_card(item)
+
+        def _update_item_widget(self, record: dict[str, Any], item: Mapping[str, object]) -> None:
+            if record.get("kind") == "completed":
+                self._update_completed_badge(record, item)
+            else:
+                self._update_item_card(record, item)
+
+        def _build_completed_row(
+            self,
+            completed_items: Sequence[Mapping[str, object]],
+        ) -> None:
+            row = QWidget(self._shell)
+            row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(WORK_OVERLAY_COMPLETED_BADGE_SPACING)
+            row_layout.addStretch(1)
+            self._shell.layout().addWidget(row)
+            for item in completed_items:
+                self._build_completed_badge(item, row, row_layout)
+
+        def _build_completed_badge(
+            self,
+            item: Mapping[str, object],
+            parent: QWidget,
+            row_layout: QHBoxLayout,
+        ) -> None:
+            badge = CompletedBadgeWidget(item, parent)
+            close_anchor = QWidget(badge)
+            close_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            close_anchor.setFixedSize(WORK_OVERLAY_CLOSE_SIZE, WORK_OVERLAY_CLOSE_SIZE)
+            close_anchor.move(
+                WORK_OVERLAY_COMPLETED_BADGE_SIZE - WORK_OVERLAY_CLOSE_SIZE - 5,
+                5,
+            )
+            close_anchor.show()
+            row_layout.addWidget(badge, 0, alignment.AlignRight)
+            record = {
+                "kind": "completed",
+                "badge": badge,
+                "close_anchor": close_anchor,
+            }
+            self._item_widgets.append(record)
+            self._update_completed_badge(record, item)
+
+        def _update_completed_badge(
+            self,
+            record: dict[str, Any],
+            item: Mapping[str, object],
+        ) -> None:
+            badge = record["badge"]
+            badge.set_item(item)
+            self._close_anchors.append(
+                (
+                    record["close_anchor"],
+                    dict(item),
+                    "#0E1B14",
+                    "#163B24",
+                    "#B9F7C9",
+                )
+            )
+
         def _build_item_card(self, item: Mapping[str, object]) -> None:
             card = QFrame(self._shell)
             card.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            card.setFixedWidth(WORK_OVERLAY_WIDTH)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(
                 WORK_OVERLAY_CARD_X_PADDING,
@@ -744,9 +1102,10 @@ def run_work_overlay_helper_qt(
             footer_layout.addWidget(workdir_label, 0)
 
             card_layout.addWidget(footer_container)
-            self._shell.layout().addWidget(card)
+            self._shell.layout().addWidget(card, 0, alignment.AlignRight)
 
             record = {
+                "kind": "card",
                 "card": card,
                 "header": header,
                 "detail": detail,
@@ -848,20 +1207,21 @@ def run_work_overlay_helper_qt(
                 self._workdir_anchors.append((record["workdir_label"], dict(item)))
 
         def _sync_overlay_geometry(self) -> None:
-            self._shell.setFixedWidth(WORK_OVERLAY_WIDTH)
+            layout_width = max(WORK_OVERLAY_WIDTH, int(self._layout_width))
+            self._shell.setFixedWidth(layout_width)
             self._shell.layout().activate()
             self.layout().activate()
             content_height = max(
                 1,
-                self.layout().totalHeightForWidth(WORK_OVERLAY_WIDTH),
+                self.layout().totalHeightForWidth(layout_width),
                 self.sizeHint().height(),
             )
             screen = app.primaryScreen()
             geometry = screen.availableGeometry() if screen is not None else self.geometry()
-            x = max(geometry.left(), geometry.right() - WORK_OVERLAY_WIDTH - WORK_OVERLAY_MARGIN)
+            x = max(geometry.left(), geometry.right() - layout_width - WORK_OVERLAY_MARGIN)
             max_y = max(geometry.top(), geometry.bottom() - content_height - WORK_OVERLAY_MARGIN)
             y = min(geometry.top() + WORK_OVERLAY_TOP_OFFSET, max_y)
-            self.setGeometry(x, y, WORK_OVERLAY_WIDTH, content_height)
+            self.setGeometry(x, y, layout_width, content_height)
             if not self.isVisible():
                 self.show()
             self.raise_()
@@ -869,19 +1229,20 @@ def run_work_overlay_helper_qt(
             self.layout().activate()
             final_height = max(
                 content_height,
-                self.layout().totalHeightForWidth(WORK_OVERLAY_WIDTH),
+                self.layout().totalHeightForWidth(layout_width),
                 self.sizeHint().height(),
             )
             if final_height != content_height:
                 max_y = max(geometry.top(), geometry.bottom() - final_height - WORK_OVERLAY_MARGIN)
                 y = min(geometry.top() + WORK_OVERLAY_TOP_OFFSET, max_y)
-                self.setGeometry(x, y, WORK_OVERLAY_WIDTH, final_height)
+                self.setGeometry(x, y, layout_width, final_height)
             QTimer.singleShot(0, self.reposition_interactive_windows)
 
         def render_items(self, items: Sequence[Mapping[str, object]]) -> None:
             self._raw_items = list(items)
+            ordered_items = _ordered_overlay_items(self._raw_items)
             visible_items = _visible_overlay_items(
-                self._raw_items,
+                ordered_items,
                 self._dismissed_instances,
                 item_limit=self._item_limit,
             )
@@ -896,17 +1257,26 @@ def run_work_overlay_helper_qt(
                 self._empty_since = 0.0
                 self._last_payload_signature = "[]"
                 self._last_structure_signature = ""
+                self._layout_width = WORK_OVERLAY_WIDTH
                 self._clear_shell()
                 self.hide_overlay()
                 return
             self._empty_since = 0.0
+            completed_count = sum(1 for item in visible_items if _item_is_completed(item))
+            self._layout_width = max(
+                WORK_OVERLAY_WIDTH,
+                _completed_badge_row_width(completed_count),
+            )
             payload_signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
             if payload_signature == self._last_payload_signature:
                 return
             self._last_payload_signature = payload_signature
 
             structure_signature = json.dumps(
-                [self._item_identity(item, index) for index, item in enumerate(visible_items)],
+                [
+                    f"{self._item_identity(item, index)}:{self._item_widget_kind(item)}"
+                    for index, item in enumerate(visible_items)
+                ],
                 ensure_ascii=False,
             )
             rebuild = structure_signature != self._last_structure_signature
@@ -915,11 +1285,19 @@ def run_work_overlay_helper_qt(
             if rebuild:
                 self._last_structure_signature = structure_signature
                 self._clear_shell()
-                for item in visible_items:
-                    self._build_item_card(item)
+                completed_items = [
+                    item for item in visible_items if self._item_widget_kind(item) == "completed"
+                ]
+                active_items = [
+                    item for item in visible_items if self._item_widget_kind(item) != "completed"
+                ]
+                if completed_items:
+                    self._build_completed_row(completed_items)
+                for item in active_items:
+                    self._build_item_widget(item)
             else:
                 for record, item in zip(self._item_widgets, visible_items):
-                    self._update_item_card(record, item)
+                    self._update_item_widget(record, item)
             self._sync_overlay_geometry()
 
         def reposition_interactive_windows(self) -> None:

@@ -24,6 +24,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from codex_usage_hud.cli import (
     AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
+    ACTIVE_WORK_STALE_SECONDS,
     DAEMON_STARTUP_RENDERER,
     DAEMON_STARTUP_TK,
     DAEMON_RESTART_REQUESTED,
@@ -68,6 +69,7 @@ from codex_usage_hud.cli import (
 from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.core.parser import (
+    Activity,
     GapTiming,
     JsonlSessionParser,
     ParsedSession,
@@ -136,6 +138,7 @@ from codex_usage_hud.ui.tk_hud import (
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     _item_dismiss_key,
+    _ordered_overlay_items,
     _visible_overlay_items,
 )
 
@@ -620,6 +623,10 @@ class BudgetHelperTests(unittest.TestCase):
             last_text="上一轮输出保留在气泡里",
             elapsed_text="已处理 12s",
             progress="1.2k tokens | 12s",
+            tokens_text="1.2k",
+            cost_text="$0.012",
+            cache_hit_text="67%",
+            workdir_name="codex-usage-hud",
             source="activity",
             workdir="E:\\Project\\codex-usage-hud",
             task_started_at=datetime(2026, 6, 16, 10, 0, 0).astimezone(),
@@ -635,6 +642,10 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["statusText"], "正在思考")
         self.assertEqual(payload["lastText"], "上一轮输出保留在气泡里")
         self.assertEqual(payload["elapsedText"], "已处理 12s")
+        self.assertEqual(payload["tokensText"], "1.2k")
+        self.assertEqual(payload["costText"], "$0.012")
+        self.assertEqual(payload["cacheHitText"], "67%")
+        self.assertEqual(payload["workdirName"], "codex-usage-hud")
         self.assertEqual(payload["workdir"], "E:\\Project\\codex-usage-hud")
         self.assertTrue(str(payload["taskStartedAt"]).startswith("2026-06-16T10:00:00"))
         self.assertTrue(payload["current"])
@@ -865,11 +876,28 @@ class BudgetHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             path = root / "session-current.jsonl"
-            rows = [
+            running_rows = [
                 row(-6, "session_meta", {"id": "session-current"}),
                 row(-5, "event_msg", {"type": "task_started"}),
                 row(-3, "event_msg", {"type": "agent_message", "message": "最后一轮输出文本"}),
                 row(-1, "event_msg", token_payload),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in running_rows),
+                encoding="utf-8",
+            )
+            running_snapshot = parser.parse_file(path)
+            running_snapshot.session_title = "Current task"
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            running_items = active_work_items_for_snapshot(context, running_snapshot, path)
+
+            rows = [
+                *running_rows,
                 row(0, "event_msg", {"type": "task_complete"}),
             ]
             path.write_text(
@@ -878,14 +906,9 @@ class BudgetHelperTests(unittest.TestCase):
             )
             snapshot = parser.parse_file(path)
             snapshot.session_title = "Current task"
-            context = SimpleNamespace(
-                sessions_root=root,
-                parser=parser,
-                active_session_tracker=None,
-            )
-
             items = active_work_items_for_snapshot(context, snapshot, path)
 
+        self.assertIn(running_items[0].status, {"running", "active"})
         self.assertEqual(items[0].status_label, "刚完成")
         self.assertEqual(items[0].status_text, "已完成")
         self.assertIn("已处理", items[0].elapsed_text)
@@ -955,7 +978,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].status_label, "处理中")
         self.assertNotEqual(items[0].status_text, "已完成")
 
-    def test_completed_task_with_post_token_output_does_not_stay_active(self) -> None:
+    def test_completed_task_requires_seen_running_overlay_before_showing_completed(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
         token_payload = {
@@ -981,7 +1004,7 @@ class BudgetHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             path = root / "session-current.jsonl"
-            rows = [
+            running_rows = [
                 {
                     "timestamp": (now + timedelta(seconds=-40)).isoformat(),
                     "type": "session_meta",
@@ -1008,21 +1031,195 @@ class BudgetHelperTests(unittest.TestCase):
                     "payload": {"type": "task_complete"},
                 },
             ]
+            rows = running_rows[:-1]
             path.write_text(
                 "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
                 encoding="utf-8",
             )
-            snapshot = parser.parse_file(path)
+            running_snapshot = parser.parse_file(path)
             context = SimpleNamespace(
                 sessions_root=root,
                 parser=parser,
                 active_session_tracker=None,
             )
+            running_items = active_work_items_for_snapshot(context, running_snapshot, path)
 
-            items = active_work_items_for_snapshot(context, snapshot, path)
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in running_rows),
+                encoding="utf-8",
+            )
+            completed_snapshot = parser.parse_file(path)
 
-        self.assertEqual(snapshot.request.status, "confirmed")
-        self.assertEqual(items, [])
+            fresh_context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+            self.assertEqual(
+                active_work_items_for_snapshot(fresh_context, completed_snapshot, path),
+                [],
+            )
+
+            items = active_work_items_for_snapshot(context, completed_snapshot, path)
+
+        self.assertIn(running_items[0].status, {"running", "active"})
+        self.assertEqual(completed_snapshot.request.status, "confirmed")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].status, "recent")
+        self.assertEqual(items[0].status_label, "刚完成")
+        self.assertEqual(items[0].status_text, "已完成")
+        self.assertTrue(items[0].elapsed_text.startswith("已处理 "))
+        self.assertEqual(items[0].tokens_text, "130")
+        self.assertIn("$", items[0].cost_text)
+        self.assertTrue(items[0].workdir_name == "" or len(items[0].workdir_name) <= 32)
+
+    def test_completed_task_ignores_active_stale_filter(self) -> None:
+        now = datetime.now().astimezone()
+        running_snapshot = ParsedSession(
+            session_id="session-completed",
+            session_title="Long completed task",
+            cwd="E:\\Project\\codex-usage-hud",
+            request=RequestTokens(
+                status="running",
+                input_tokens=100,
+                cached_tokens=25,
+                total_tokens=140,
+                cost_usd=0.0123,
+                updated_at=now,
+            ),
+            activity=Activity(
+                kind="agent",
+                detail="最后输出",
+                timestamp=now,
+            ),
+            last_output=Activity(
+                kind="agent",
+                detail="完成说明",
+                timestamp=now,
+            ),
+            task_started_at=now - timedelta(seconds=ACTIVE_WORK_STALE_SECONDS + 180),
+        )
+        snapshot = ParsedSession(
+            session_id="session-completed",
+            session_title="Long completed task",
+            cwd="E:\\Project\\codex-usage-hud",
+            request=RequestTokens(
+                status="confirmed",
+                input_tokens=100,
+                cached_tokens=25,
+                total_tokens=140,
+                cost_usd=0.0123,
+                updated_at=now - timedelta(seconds=ACTIVE_WORK_STALE_SECONDS + 60),
+            ),
+            activity=Activity(
+                kind="agent",
+                detail="最后输出",
+                timestamp=now - timedelta(seconds=ACTIVE_WORK_STALE_SECONDS + 60),
+            ),
+            last_output=Activity(
+                kind="agent",
+                detail="完成说明",
+                timestamp=now - timedelta(seconds=ACTIVE_WORK_STALE_SECONDS + 60),
+            ),
+            task_started_at=now - timedelta(seconds=ACTIVE_WORK_STALE_SECONDS + 180),
+            task_completed_at=now - timedelta(seconds=ACTIVE_WORK_STALE_SECONDS + 120),
+        )
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+        )
+        running_items = active_work_items_for_snapshot(context, running_snapshot, None)
+
+        items = active_work_items_for_snapshot(context, snapshot, None)
+
+        self.assertIn(running_items[0].status, {"running", "active"})
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].status, "recent")
+        self.assertEqual(items[0].elapsed_text, "已处理 1m00s")
+        self.assertEqual(items[0].cache_hit_text, "25%")
+
+    def test_completed_overlay_items_order_oldest_to_newest_before_active_items(self) -> None:
+        completed_latest = {
+            "id": "session-completed-latest",
+            "status": "recent",
+            "statusText": "已完成",
+            "lastText": "完成态",
+            "updatedAt": "2026-06-17T10:06:00+08:00",
+        }
+        completed_oldest = {
+            "id": "session-completed-oldest",
+            "status": "recent",
+            "statusText": "已完成",
+            "lastText": "更早完成",
+            "updatedAt": "2026-06-17T10:01:00+08:00",
+        }
+        active = {
+            "id": "session-active",
+            "status": "running",
+            "statusText": "运行中",
+            "lastText": "进行中",
+        }
+
+        ordered = _ordered_overlay_items([completed_latest, active, completed_oldest])
+
+        self.assertEqual(
+            [item["id"] for item in ordered],
+            ["session-completed-oldest", "session-completed-latest", "session-active"],
+        )
+
+    def test_historical_completed_overlay_item_does_not_show_on_startup(self) -> None:
+        now = datetime.now().astimezone()
+        current_snapshot = ParsedSession(
+            session_id="session-current",
+            session_title="Current running task",
+            request=RequestTokens(status="running", updated_at=now),
+            activity=Activity(
+                kind="agent",
+                detail="还在继续",
+                timestamp=now,
+            ),
+            task_started_at=now - timedelta(seconds=20),
+        )
+        historical_completed = ParsedSession(
+            session_id="session-history",
+            session_title="Old finished task",
+            request=RequestTokens(status="confirmed", updated_at=now - timedelta(minutes=2)),
+            activity=Activity(
+                kind="agent",
+                detail="历史完成",
+                timestamp=now - timedelta(minutes=2),
+            ),
+            last_output=Activity(
+                kind="agent",
+                detail="历史完成",
+                timestamp=now - timedelta(minutes=2),
+            ),
+            task_started_at=now - timedelta(minutes=4),
+            task_completed_at=now - timedelta(minutes=2),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current_path = root / "current.jsonl"
+            historical_path = root / "history.jsonl"
+            current_path.write_text("", encoding="utf-8")
+            historical_path.write_text("", encoding="utf-8")
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=SimpleNamespace(
+                    parse_file=MagicMock(
+                        side_effect=lambda path: historical_completed
+                        if Path(path) == historical_path
+                        else current_snapshot
+                    )
+                ),
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, current_snapshot, current_path)
+
+        self.assertEqual([item.id for item in items], ["session-current"])
 
     def test_aborted_task_does_not_stay_active(self) -> None:
         parser = JsonlSessionParser()

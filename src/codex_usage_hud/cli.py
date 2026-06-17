@@ -547,6 +547,10 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "lastText": item.last_text,
         "elapsedText": item.elapsed_text,
         "progress": item.progress,
+        "tokensText": item.tokens_text,
+        "costText": item.cost_text,
+        "cacheHitText": item.cache_hit_text,
+        "workdirName": item.workdir_name,
         "source": item.source,
         "workdir": item.workdir,
         "taskStartedAt": _iso_or_empty(item.task_started_at),
@@ -1691,6 +1695,17 @@ def _format_tokens(value: int | None) -> str:
     return f"{amount}"
 
 
+def _format_cost_compact(value: float | None) -> str:
+    amount = float(value or 0.0)
+    if amount <= 0:
+        return "$0"
+    if amount >= 1:
+        return f"${amount:.2f}"
+    if amount >= 0.01:
+        return f"${amount:.2f}"
+    return f"${amount:.3f}".rstrip("0").rstrip(".")
+
+
 def _current_task_tokens(snapshot: ParsedSession) -> int:
     request = snapshot.request
     if request.total_tokens:
@@ -1700,6 +1715,34 @@ def _current_task_tokens(snapshot: ParsedSession) -> int:
     if snapshot.estimate.total_tokens:
         return int(snapshot.estimate.total_tokens)
     return int(snapshot.confirmed.last_total or 0)
+
+
+def _current_task_cost(snapshot: ParsedSession) -> float | None:
+    if snapshot.request.cost_usd is not None:
+        return float(snapshot.request.cost_usd)
+    return None
+
+
+def _current_task_cache_hit_text(snapshot: ParsedSession) -> str:
+    request = snapshot.request
+    input_tokens = request.input_tokens
+    cached_tokens = request.cached_tokens
+    if input_tokens is None or int(input_tokens or 0) <= 0:
+        input_tokens = snapshot.confirmed.last_input
+        cached_tokens = snapshot.confirmed.last_cached
+    input_amount = int(input_tokens or 0)
+    if input_amount <= 0:
+        return "--"
+    cached_amount = max(0, min(int(cached_tokens or 0), input_amount))
+    return f"{round((cached_amount / max(1, input_amount)) * 100):.0f}%"
+
+
+def _workdir_leaf(value: object) -> str:
+    text = str(value or "").strip().rstrip("\\/")
+    if not text:
+        return ""
+    parts = [part for part in re.split(r"[\\/]+", text) if part]
+    return parts[-1] if parts else text
 
 
 def _current_session_cost(snapshot: ParsedSession) -> float:
@@ -2048,11 +2091,7 @@ def _work_status_from_snapshot(
     if request_status == "error" or snapshot.request.error:
         return "error", "出错"
     if snapshot.task_completed_at is not None:
-        completed = snapshot.task_completed_at
-        current = now.astimezone(completed.tzinfo) if completed.tzinfo is not None else now
-        if (current - completed).total_seconds() <= 12:
-            return "recent", "刚完成"
-        return None
+        return "recent", "刚完成"
     if request_status == "running":
         return "running", "运行中"
     if snapshot.activity.kind == "tool call" and activity_detail.startswith(
@@ -2078,6 +2117,7 @@ def _work_item_from_snapshot(
     status = _work_status_from_snapshot(snapshot, now=current_time)
     if status is None:
         return None
+    status_value, status_label = status
 
     updated_at = (
         snapshot.request.updated_at
@@ -2092,10 +2132,9 @@ def _work_item_from_snapshot(
             else current_time.replace(tzinfo=None)
         )
         age_seconds = (current_for_age - updated_at).total_seconds()
-        if age_seconds > ACTIVE_WORK_STALE_SECONDS:
+        if status_value != "recent" and age_seconds > ACTIVE_WORK_STALE_SECONDS:
             return None
 
-    status_value, status_label = status
     display_title = (
         title.strip()
         or snapshot.session_title.strip()
@@ -2113,7 +2152,12 @@ def _work_item_from_snapshot(
     status_text = _work_status_text(snapshot, status_value, status_label)
     last_text = snapshot.last_output.detail.strip()
     started_at = snapshot.task_started_at or snapshot.request.started_at
-    elapsed = _elapsed_compact(started_at, now=current_time)
+    elapsed_reference = (
+        snapshot.task_completed_at
+        if status_value == "recent" and snapshot.task_completed_at is not None
+        else current_time
+    )
+    elapsed = _elapsed_compact(started_at, now=elapsed_reference)
     elapsed_text = f"已处理 {elapsed}" if elapsed else ""
     tokens = _current_task_tokens(snapshot)
     progress_parts = []
@@ -2136,8 +2180,12 @@ def _work_item_from_snapshot(
         last_text=_compact_work_text(last_text, 180),
         elapsed_text=elapsed_text,
         progress=progress,
+        tokens_text=_format_tokens(tokens),
+        cost_text=_format_cost_compact(_current_task_cost(snapshot)),
+        cache_hit_text=_current_task_cache_hit_text(snapshot),
         source=source or snapshot.selection_source,
         workdir=str(snapshot.cwd or "").strip(),
+        workdir_name=_compact_work_text(_workdir_leaf(snapshot.cwd), 32),
         session_started_at=snapshot.session_started_at,
         task_started_at=snapshot.task_started_at,
         started_at=started_at,
@@ -2179,6 +2227,55 @@ def _work_overlay_item_limit_for_context(context: object) -> int:
     if configured <= 0:
         return 0
     return min(configured, _work_overlay_screen_max_items())
+
+
+def _work_overlay_runtime_task_key(item: WorkStatusItem) -> str:
+    item_id = str(item.id or item.session_id or "").strip()
+    started_at = _iso_or_empty(item.task_started_at or item.started_at)
+    if not item_id and not started_at:
+        return ""
+    return json.dumps(
+        {
+            "id": item_id,
+            "taskStartedAt": started_at,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _work_overlay_seen_task_keys(context: object) -> set[str]:
+    seen = getattr(context, "_work_overlay_seen_task_keys", None)
+    if isinstance(seen, set):
+        return seen
+    seen = set()
+    try:
+        setattr(context, "_work_overlay_seen_task_keys", seen)
+    except Exception:
+        pass
+    return seen
+
+
+def _select_runtime_work_overlay_items(
+    context: object,
+    items: Sequence[WorkStatusItem],
+    *,
+    item_limit: int,
+) -> list[WorkStatusItem]:
+    seen_task_keys = _work_overlay_seen_task_keys(context)
+    visible: list[WorkStatusItem] = []
+    for item in items:
+        if len(visible) >= item_limit:
+            break
+        task_key = _work_overlay_runtime_task_key(item)
+        if item.status == "recent":
+            if task_key and task_key in seen_task_keys:
+                visible.append(item)
+            continue
+        visible.append(item)
+        if task_key:
+            seen_task_keys.add(task_key)
+    return visible
 
 
 def active_work_items_for_snapshot(
@@ -2238,7 +2335,11 @@ def active_work_items_for_snapshot(
         return (session_seconds, task_seconds)
 
     ordered = sorted(items.values(), key=sort_key, reverse=True)
-    return ordered[:item_limit]
+    return _select_runtime_work_overlay_items(
+        context,
+        ordered,
+        item_limit=item_limit,
+    )
 
 
 def _visible_app_error_task_key(snapshot: ParsedSession) -> str:
