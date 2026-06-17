@@ -634,6 +634,42 @@ def _progress_fill_surface_rows(
     return tuple(rows)
 
 
+@lru_cache(maxsize=96)
+def _progress_fill_surface_transparency_rows(
+    *,
+    width: int,
+    height: int,
+    fill_width: int,
+    radius: int | None = None,
+) -> tuple[tuple[int, ...], ...]:
+    left = 0.0
+    top = 0.0
+    right = max(left + 1.0, float(width))
+    bottom = max(top + 1.0, float(height))
+    fill_right = max(left, min(right, float(fill_width)))
+    resolved_radius = (bottom - top) / 2.0 if radius is None else float(radius)
+    resolved_radius = max(0.0, min(resolved_radius, (right - left) / 2.0, (bottom - top) / 2.0))
+    rows: list[tuple[int, ...]] = []
+    for y in range(height):
+        transparent_pixels: list[int] = []
+        point_y = y + 0.5
+        for x in range(width):
+            point_x = x + 0.5
+            shell_alpha = _rounded_rect_alpha(
+                point_x,
+                point_y,
+                left,
+                top,
+                right,
+                bottom,
+                resolved_radius,
+            )
+            if shell_alpha <= 0.0 or point_x > fill_right:
+                transparent_pixels.append(x)
+        rows.append(tuple(transparent_pixels))
+    return tuple(rows)
+
+
 @lru_cache(maxsize=32)
 def _rounded_shell_surface_rows(
     *,
@@ -814,6 +850,7 @@ class WindowPlacement:
     anchor_x_ratio: float | None = None
     anchor_y_ratio: float | None = None
     anchor_source: str | None = None
+    collapsed_width_locked: bool = False
 
     @classmethod
     def from_dict(cls, value: Any) -> "WindowPlacement":
@@ -834,9 +871,10 @@ class WindowPlacement:
             anchor_x_ratio=_optional_float(value.get("anchor_x_ratio")),
             anchor_y_ratio=_optional_float(value.get("anchor_y_ratio")),
             anchor_source=_optional_str(value.get("anchor_source")),
+            collapsed_width_locked=_optional_bool(value.get("collapsed_width_locked")),
         )
 
-    def to_dict(self) -> dict[str, int | float | None]:
+    def to_dict(self) -> dict[str, int | float | bool | None]:
         return {
             "relative_x": self.relative_x,
             "relative_y": self.relative_y,
@@ -852,6 +890,7 @@ class WindowPlacement:
             "anchor_x_ratio": self.anchor_x_ratio,
             "anchor_y_ratio": self.anchor_y_ratio,
             "anchor_source": self.anchor_source,
+            "collapsed_width_locked": self.collapsed_width_locked,
         }
 
 
@@ -875,7 +914,7 @@ class HudSettings:
             request=WindowPlacement.from_dict(value.get("request")),
         )
 
-    def to_dict(self) -> dict[str, dict[str, int | float | None]]:
+    def to_dict(self) -> dict[str, dict[str, int | float | bool | None]]:
         return {
             "top": self.top.to_dict(),
             "request": self.request.to_dict(),
@@ -964,6 +1003,19 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    return bool(value)
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -1822,6 +1874,16 @@ class TopHudProgressBar(tk.Frame):
                 radius=self._radius,
             )
             fill_image.put(" ".join(rows), to=(0, 0))
+            if hasattr(fill_image, "transparency_set"):
+                transparent_rows = _progress_fill_surface_transparency_rows(
+                    width=inner_width,
+                    height=inner_height,
+                    fill_width=fill_inner_width,
+                    radius=self._radius,
+                )
+                for y, transparent_pixels in enumerate(transparent_rows):
+                    for x in transparent_pixels:
+                        fill_image.transparency_set(x, y, True)
             self._fill_surface_key = fill_key
             self._fill_surface_image = fill_image
         self._canvas.create_image(2, 2, anchor="nw", image=fill_image)
@@ -6492,7 +6554,14 @@ class TokenHudWindow:
             if has_width_ratio and placement.anchor_source == anchor.source
             else legacy_width
         )
-        auto_width = self._top_collapsed_auto_width() if target == "top" and not expanded else None
+        collapsed_width_locked = (
+            target == "top" and not expanded and placement.collapsed_width_locked
+        )
+        auto_width = (
+            self._top_collapsed_auto_width()
+            if target == "top" and not expanded and not collapsed_width_locked
+            else None
+        )
 
         if auto_width is not None:
             width = auto_width
@@ -6913,7 +6982,11 @@ class TokenHudWindow:
 
     def _top_size(self) -> tuple[int, int]:
         expanded = self.top_expanded
-        auto_width = self._top_collapsed_auto_width() if not expanded else None
+        auto_width = (
+            self._top_collapsed_auto_width()
+            if not expanded and not self.settings.top.collapsed_width_locked
+            else None
+        )
         if auto_width is not None:
             width = auto_width
         else:
@@ -7046,6 +7119,8 @@ class TokenHudWindow:
             int(window.winfo_width()),
         )
         placement.width = width
+        if target == "top" and not expanded:
+            placement.collapsed_width_locked = True
 
         if self._attached and self._last_rect is not None:
             anchor = self._target_anchor(target, self._last_rect, expanded)

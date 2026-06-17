@@ -124,6 +124,7 @@ from codex_usage_hud.ui.tk_hud import (
     _fixed_token_total,
     _interpolate_numeric_text,
     _progress_fill_surface_rows,
+    _progress_fill_surface_transparency_rows,
     _request_total_line,
     _round_entry,
     _round_entry_widths,
@@ -1411,6 +1412,7 @@ class HudSettingsStoreTests(unittest.TestCase):
                     anchor_x_ratio=0.25,
                     anchor_y_ratio=0.5,
                     anchor_source="geometry",
+                    collapsed_width_locked=True,
                 ),
                 request=WindowPlacement(
                     relative_x=520,
@@ -1437,6 +1439,7 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded.top.anchor_x_ratio, 0.25)
         self.assertEqual(loaded.top.anchor_y_ratio, 0.5)
         self.assertEqual(loaded.top.anchor_source, "geometry")
+        self.assertTrue(loaded.top.collapsed_width_locked)
         self.assertEqual(loaded.request.relative_bottom, 28)
         self.assertEqual(loaded.request.width, 420)
         self.assertEqual(loaded.request.height, 210)
@@ -1444,6 +1447,7 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertEqual(loaded.request.anchor_x_ratio, 0.4)
         self.assertEqual(loaded.request.anchor_y_ratio, 0.0)
         self.assertEqual(loaded.request.anchor_source, "geometry")
+        self.assertFalse(loaded.request.collapsed_width_locked)
 
     def test_geometry_save_preserves_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1646,6 +1650,18 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         top_row = rows[0].strip("{}").split()
         self.assertTrue(all(color == HUD_HEADER_BG.lower() for color in top_row[:5]))
         self.assertTrue(all(color == HUD_HEADER_BG.lower() for color in top_row[-5:]))
+
+    def test_progress_fill_surface_transparency_keeps_unfilled_right_side_clear(self) -> None:
+        rows = _progress_fill_surface_transparency_rows(
+            width=24,
+            height=20,
+            fill_width=16,
+            radius=HUD_PROGRESS_RADIUS,
+        )
+
+        middle_row = set(rows[10])
+        self.assertFalse(any(x in middle_row for x in range(0, 16)))
+        self.assertTrue(all(x in middle_row for x in range(16, 24)))
 
     def test_request_expanded_reuses_top_palette(self) -> None:
         window = TokenHudWindow()
@@ -1969,6 +1985,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             snapshot.week_cost_usd = 138.23
             snapshot.weekly_limit_usd = 300.0
             window.settings.top.width = 120
+            window.settings.top.collapsed_width_locked = False
             window.root.geometry("120x36+20+20")
 
             window.update_display(snapshot)
@@ -1991,6 +2008,44 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.settings.top.width = 900
             self.assertLess(window._top_size()[0], 900)
             self.assertEqual(window._top_size()[0], window.root.winfo_reqwidth())
+        finally:
+            window._close()
+
+    def test_collapsed_top_manual_width_survives_expand_roundtrip(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _stop_background_jobs(window)
+            snapshot = ParsedSession()
+            snapshot.confirmed.cumulative_total = 6_900_000
+            snapshot.confirmed.cumulative_input = 6_690_000
+            snapshot.confirmed.cumulative_cached = 5_970_000
+            snapshot.today_tokens = 41_100_000
+            snapshot.today_cost_usd = 39.31
+            snapshot.daily_limit_usd = 100.0
+            snapshot.week_tokens = 159_500_000
+            snapshot.week_cost_usd = 138.23
+            snapshot.weekly_limit_usd = 300.0
+
+            window.update_display(snapshot)
+            _flush_tk(window)
+
+            resized_width = window.root.winfo_reqwidth() + 160
+            window.root.geometry(
+                f"{resized_width}x{window.root.winfo_height()}+20+20"
+            )
+            _flush_tk(window)
+            window._remember_window_width("top", window.root, reason="test-resize")
+
+            self.assertTrue(window.settings.top.collapsed_width_locked)
+            self.assertEqual(window.settings.top.width, resized_width)
+
+            window.toggle_top_expanded()
+            _flush_tk(window)
+            self.assertEqual(window.root.winfo_width(), resized_width)
+
+            window.toggle_top_expanded()
+            _flush_tk(window)
+            self.assertEqual(window.root.winfo_width(), resized_width)
         finally:
             window._close()
 
