@@ -39,6 +39,7 @@ from .core import (
     CostEstimator,
     JsonlSessionParser,
     ParsedSession,
+    RequestRound,
     SseRequestStateMachine,
     UsageCalculator,
     UsageSummary,
@@ -1707,23 +1708,30 @@ def _format_cost_compact(value: float | None) -> str:
 
 
 def _current_task_tokens(snapshot: ParsedSession) -> int:
-    request = snapshot.request
-    if request.total_tokens:
-        return int(request.total_tokens)
-    if request.input_tokens is not None or request.output_tokens is not None:
-        return int(request.input_tokens or 0) + int(request.output_tokens or 0)
-    if snapshot.estimate.total_tokens:
-        return int(snapshot.estimate.total_tokens)
-    return int(snapshot.confirmed.last_total or 0)
+    tokens, _cost = _current_task_usage(snapshot)
+    return tokens
 
 
 def _current_task_cost(snapshot: ParsedSession) -> float | None:
-    if snapshot.request.cost_usd is not None:
-        return float(snapshot.request.cost_usd)
-    return None
+    _tokens, cost = _current_task_usage(snapshot)
+    return cost
 
 
 def _current_task_cache_hit_text(snapshot: ParsedSession) -> str:
+    rows = _current_task_rounds(snapshot)
+    if rows:
+        input_total = 0
+        cached_total = 0
+        for item in rows:
+            input_amount = int(item.input_tokens or 0)
+            if input_amount <= 0:
+                continue
+            cached_amount = max(0, min(int(item.cached_tokens or 0), input_amount))
+            input_total += input_amount
+            cached_total += cached_amount
+        if input_total > 0:
+            return f"{round((cached_total / max(1, input_total)) * 100):.0f}%"
+
     request = snapshot.request
     input_tokens = request.input_tokens
     cached_tokens = request.cached_tokens
@@ -1735,6 +1743,65 @@ def _current_task_cache_hit_text(snapshot: ParsedSession) -> str:
         return "--"
     cached_amount = max(0, min(int(cached_tokens or 0), input_amount))
     return f"{round((cached_amount / max(1, input_amount)) * 100):.0f}%"
+
+
+def _request_round_from_snapshot(snapshot: ParsedSession) -> RequestRound | None:
+    request = snapshot.request
+    if not (
+        request.total_tokens
+        or request.input_tokens is not None
+        or request.output_tokens is not None
+        or request.cost_usd is not None
+    ):
+        return None
+    total_tokens = request.total_tokens
+    if not total_tokens:
+        total_tokens = int(request.input_tokens or 0) + int(request.output_tokens or 0)
+    return RequestRound(
+        index=max(1, int(request.round_index or 1)),
+        status=request.status,
+        model=request.model,
+        input_tokens=request.input_tokens,
+        cached_tokens=request.cached_tokens,
+        output_tokens=request.output_tokens,
+        reasoning_tokens=request.reasoning_tokens,
+        total_tokens=total_tokens,
+        estimated=request.estimated,
+        cost_usd=request.cost_usd,
+        started_at=request.started_at,
+        completed_at=request.completed_at,
+    )
+
+
+def _current_task_rounds(snapshot: ParsedSession) -> list[RequestRound]:
+    if snapshot.request_history:
+        return list(snapshot.request_history)
+    current = _request_round_from_snapshot(snapshot)
+    return [current] if current is not None else []
+
+
+def _current_task_usage(snapshot: ParsedSession) -> tuple[int, float | None]:
+    rows = _current_task_rounds(snapshot)
+    if not rows:
+        if snapshot.estimate.total_tokens:
+            return int(snapshot.estimate.total_tokens), None
+        return int(snapshot.confirmed.last_total or 0), None
+
+    total_tokens = 0
+    cost = 0.0
+    has_cost = False
+    for index, item in enumerate(rows):
+        item_total = item.total_tokens
+        if not item_total:
+            item_total = int(item.input_tokens or 0) + int(item.output_tokens or 0)
+        total_tokens += int(item_total or 0)
+        if item.cost_usd is not None:
+            cost += float(item.cost_usd)
+            has_cost = True
+        elif index == len(rows) - 1 and snapshot.request.cost_usd is not None:
+            cost += float(snapshot.request.cost_usd)
+            has_cost = True
+    return total_tokens, (round(cost, 6) if has_cost else None)
 
 
 def _workdir_leaf(value: object) -> str:

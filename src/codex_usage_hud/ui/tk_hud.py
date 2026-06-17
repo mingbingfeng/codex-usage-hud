@@ -129,6 +129,13 @@ HUD_PROGRESS_DAY_TEXT = "#1A1305"
 HUD_PROGRESS_WEEK = "#FFC68D"
 HUD_PROGRESS_WEEK_END = "#FF8D5A"
 HUD_PROGRESS_WEEK_TEXT = "#1F1106"
+HUD_PROGRESS_OVERFLOW = "#FF875A"
+HUD_PROGRESS_OVERFLOW_HIGHLIGHT = "#FFD8BD"
+HUD_PROGRESS_OVERFLOW_ANCHOR = "#FF6B64"
+HUD_PROGRESS_OVERFLOW_ANCHOR_EDGE = "#FFC3A4"
+HUD_PROGRESS_OVERFLOW_BADGE = "#7F3E3A"
+HUD_PROGRESS_OVERFLOW_BADGE_EDGE = "#FF875A"
+HUD_PROGRESS_OVERFLOW_BADGE_TEXT = "#FFD7CA"
 HUD_SHELL_RADIUS = 0
 HUD_PROGRESS_RADIUS = None
 REQUEST_BG = "#0B1016"
@@ -747,6 +754,62 @@ def _rounded_shell_surface_rows(
             colors.append(_rgb_to_hex(color))
         rows.append("{" + " ".join(colors) + "}")
     return tuple(rows)
+
+
+@dataclass(frozen=True)
+class _Win32RegionApi:
+    ctypes: Any
+    wintypes: Any
+    gdi32: Any
+    user32: Any
+    hrgn_type: Any
+
+
+@lru_cache(maxsize=1)
+def _win32_region_api() -> _Win32RegionApi | None:
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        hrgn_type = wintypes.HANDLE
+
+        gdi32.CreateRectRgn.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        gdi32.CreateRectRgn.restype = hrgn_type
+        gdi32.CreateRoundRectRgn.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        gdi32.CreateRoundRectRgn.restype = hrgn_type
+        gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+        gdi32.DeleteObject.restype = wintypes.BOOL
+        user32.SetWindowRgn.argtypes = [
+            wintypes.HWND,
+            hrgn_type,
+            wintypes.BOOL,
+        ]
+        user32.SetWindowRgn.restype = ctypes.c_int
+        return _Win32RegionApi(
+            ctypes=ctypes,
+            wintypes=wintypes,
+            gdi32=gdi32,
+            user32=user32,
+            hrgn_type=hrgn_type,
+        )
+    except Exception:
+        return None
 
 
 def _window_outside_color() -> str:
@@ -1618,6 +1681,8 @@ class TopHudProgressMetric:
     fill_text: str
     track_text: str = HUD_PROGRESS_TRACK_TEXT
     right_text: str = ""
+    overflow_ratio: float = 0.0
+    overflow_badge: str = ""
 
 
 def _clamp_progress_ratio(value: float | int | None) -> float:
@@ -1735,6 +1800,8 @@ class TopHudProgressBar(tk.Frame):
             fill_text=str(metric.fill_text or HUD_PROGRESS_DAY_TEXT),
             track_text=str(metric.track_text or HUD_PROGRESS_TRACK_TEXT),
             right_text=str(metric.right_text or ""),
+            overflow_ratio=_clamp_progress_ratio(metric.overflow_ratio),
+            overflow_badge=str(metric.overflow_badge or ""),
         )
         self._draw()
 
@@ -1743,7 +1810,14 @@ class TopHudProgressBar(tk.Frame):
         right_width = self._font.measure(self._metric.right_text) if self._metric.right_text else 0
         gap = 8 if right_width else 0
         # Match the real drawable width in _draw(): 1px inset on both sides plus text padding.
-        return label_width + right_width + gap + (self._padding_x * 2) + 2
+        return (
+            label_width
+            + right_width
+            + gap
+            + (self._padding_x * 2)
+            + self._overflow_reserved_width()
+            + 2
+        )
 
     def set_requested_width(self, width: int) -> None:
         self._width = max(1, int(width))
@@ -1752,9 +1826,22 @@ class TopHudProgressBar(tk.Frame):
     def _tooltip_text(self) -> str:
         label = self._metric.label.strip()
         right_text = self._metric.right_text.strip()
+        parts = []
         if label and right_text:
-            return f"{label} / {right_text}"
-        return label or right_text
+            parts.append(f"{label} / {right_text}")
+        else:
+            parts.append(label or right_text)
+        overflow_badge = self._metric.overflow_badge.strip()
+        if overflow_badge:
+            parts.append(overflow_badge)
+        return " | ".join(part for part in parts if part)
+
+    def _overflow_reserved_width(self) -> int:
+        if self._metric.overflow_badge:
+            return self._font.measure(self._metric.overflow_badge) + 32
+        if self._metric.overflow_ratio > 0.0:
+            return 24
+        return 0
 
     def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
         del event
@@ -1769,11 +1856,12 @@ class TopHudProgressBar(tk.Frame):
 
         fill_width = max(0, int((x2 - x1) * self._metric.ratio))
         self._draw_progress_surface(width, height, fill_width)
+        self._draw_overflow_decoration(x1, y1, x2, y2)
 
         label = self._metric.label
         right_text = self._metric.right_text
         text_x = x1 + self._padding_x
-        right_x = x2 - self._padding_x
+        right_x = x2 - self._padding_x - self._overflow_reserved_width()
         right_width = self._font.measure(right_text) if right_text else 0
         text_gap = 8 if right_width else 0
         label_max_width = max(0, right_x - right_width - text_gap - text_x)
@@ -1815,6 +1903,104 @@ class TopHudProgressBar(tk.Frame):
                 fill=self._metric.fill_text,
                 font=self._font,
             )
+
+    def _draw_overflow_decoration(self, x1: int, y1: int, x2: int, y2: int) -> None:
+        if self._metric.overflow_ratio <= 0.0:
+            return
+        canvas = self._canvas
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        ridge_height = max(4, min(10, int(round(height * 0.24))))
+        ridge_center_y = y1 + 6 + (ridge_height / 2)
+        ridge_right = x2 - 8
+        ridge_span = max(2, int(round(max(0, width - 16) * self._metric.overflow_ratio)))
+        ridge_left = max(x1 + 8, ridge_right - ridge_span)
+        canvas.create_line(
+            ridge_left,
+            ridge_center_y,
+            ridge_right,
+            ridge_center_y,
+            fill=HUD_PROGRESS_OVERFLOW,
+            width=ridge_height,
+            capstyle=tk.ROUND,
+        )
+        canvas.create_line(
+            ridge_left,
+            ridge_center_y - max(1, ridge_height * 0.18),
+            ridge_right,
+            ridge_center_y - max(1, ridge_height * 0.18),
+            fill=HUD_PROGRESS_OVERFLOW_HIGHLIGHT,
+            width=max(1, ridge_height // 3),
+            capstyle=tk.ROUND,
+        )
+
+        anchor_radius = max(4, int(round(ridge_height / 2 + 2)))
+        canvas.create_oval(
+            ridge_right - anchor_radius,
+            ridge_center_y - anchor_radius,
+            ridge_right + anchor_radius,
+            ridge_center_y + anchor_radius,
+            fill=HUD_PROGRESS_OVERFLOW_ANCHOR,
+            outline=HUD_PROGRESS_OVERFLOW_ANCHOR_EDGE,
+            width=1,
+        )
+        highlight_radius = max(1, anchor_radius // 3)
+        highlight_offset = max(1, anchor_radius // 2)
+        canvas.create_oval(
+            ridge_right - highlight_offset - highlight_radius,
+            ridge_center_y - highlight_offset - highlight_radius,
+            ridge_right - highlight_offset + highlight_radius,
+            ridge_center_y - highlight_offset + highlight_radius,
+            fill="#FFF4D9",
+            outline="",
+        )
+
+        if not self._metric.overflow_badge:
+            return
+        badge_text = self._metric.overflow_badge
+        badge_height = max(18, min(height - 10, 20))
+        badge_width = self._font.measure(badge_text) + 30
+        badge_left = max(x1 + 10, x2 - badge_width - 10)
+        badge_right = x2 - 10
+        badge_center_y = (y1 + y2) / 2
+        badge_start = badge_left + (badge_height / 2)
+        badge_end = badge_right - (badge_height / 2)
+        canvas.create_line(
+            badge_start,
+            badge_center_y,
+            badge_end,
+            badge_center_y,
+            fill=HUD_PROGRESS_OVERFLOW_BADGE_EDGE,
+            width=badge_height + 2,
+            capstyle=tk.ROUND,
+        )
+        canvas.create_line(
+            badge_start,
+            badge_center_y,
+            badge_end,
+            badge_center_y,
+            fill=HUD_PROGRESS_OVERFLOW_BADGE,
+            width=badge_height,
+            capstyle=tk.ROUND,
+        )
+        dot_radius = 3
+        dot_x = badge_left + 11
+        canvas.create_oval(
+            dot_x - dot_radius,
+            badge_center_y - dot_radius,
+            dot_x + dot_radius,
+            badge_center_y + dot_radius,
+            fill=HUD_PROGRESS_OVERFLOW_ANCHOR,
+            outline="",
+        )
+        canvas.create_text(
+            dot_x + 8,
+            badge_center_y,
+            anchor="w",
+            text=badge_text,
+            fill=HUD_PROGRESS_OVERFLOW_BADGE_TEXT,
+            font=self._font,
+        )
 
     def _draw_progress_surface(self, width: int, height: int, fill_width: int) -> None:
         if width <= 1 or height <= 1:
@@ -2206,15 +2392,18 @@ class RoundedHudShell(tk.Frame):
         key = (width, height, self._radius)
         if self._region_key == key:
             return
+        region = None
+        api = None
         try:
-            import ctypes
-
-            hwnd = int(self.winfo_toplevel().winfo_id())
+            api = _win32_region_api()
+            if api is None:
+                return
+            hwnd = api.wintypes.HWND(int(self.winfo_toplevel().winfo_id()))
             if self._radius <= 0:
-                region = ctypes.windll.gdi32.CreateRectRgn(0, 0, width + 1, height + 1)
+                region = api.gdi32.CreateRectRgn(0, 0, width + 1, height + 1)
             else:
                 diameter = self._radius * 2
-                region = ctypes.windll.gdi32.CreateRoundRectRgn(
+                region = api.gdi32.CreateRoundRectRgn(
                     0,
                     0,
                     width + 1,
@@ -2224,12 +2413,18 @@ class RoundedHudShell(tk.Frame):
                 )
             if not region:
                 return
-            if ctypes.windll.user32.SetWindowRgn(hwnd, region, True):
+            if api.user32.SetWindowRgn(hwnd, region, True):
                 self._region_key = key
+                region = None
                 return
-            ctypes.windll.gdi32.DeleteObject(region)
         except Exception:
             return
+        finally:
+            if region is not None and api is not None:
+                try:
+                    api.gdi32.DeleteObject(region)
+                except Exception:
+                    pass
 
 
 @dataclass(frozen=True)
@@ -3409,12 +3604,39 @@ def _top_cache_progress_label(snapshot: ParsedSession) -> str:
     return f"缓存命中 {label}"
 
 
-def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
+def _budget_progress_total_ratio(cost: float | None, limit: float | None) -> float:
     amount = max(0.0, float(cost or 0.0))
     budget = max(0.0, float(limit or 0.0))
     if budget <= 0.0:
         return 0.0
-    return _clamp_progress_ratio(amount / budget)
+    return max(0.0, amount / budget)
+
+
+def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
+    return _clamp_progress_ratio(_budget_progress_total_ratio(cost, limit))
+
+
+def _budget_progress_total_text(cost: float | None, limit: float | None) -> str:
+    total_ratio = _budget_progress_total_ratio(cost, limit)
+    if total_ratio <= 0.0:
+        return ""
+    return f"{total_ratio:.0%}"
+
+
+def _budget_progress_overflow_ratio(cost: float | None, limit: float | None) -> float:
+    total_ratio = _budget_progress_total_ratio(cost, limit)
+    return max(0.0, min(1.0, total_ratio - 1.0))
+
+
+def _budget_progress_overflow_badge(cost: float | None, limit: float | None) -> str:
+    total_ratio = _budget_progress_total_ratio(cost, limit)
+    if total_ratio <= 1.0:
+        return ""
+    amount = max(0.0, float(cost or 0.0))
+    budget = max(0.0, float(limit or 0.0))
+    overflow_ratio = max(0.0, total_ratio - 1.0)
+    overflow_cost = max(0.0, amount - budget)
+    return f"+{overflow_ratio:.0%} / +{_format_money(overflow_cost)}"
 
 
 def _budget_limit_text(limit: float | None) -> str:
@@ -3422,6 +3644,14 @@ def _budget_limit_text(limit: float | None) -> str:
 
 
 def _top_collapsed_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgressMetric]:
+    day_overflow = _budget_progress_overflow_ratio(
+        snapshot.today_cost_usd,
+        snapshot.daily_limit_usd,
+    )
+    week_overflow = _budget_progress_overflow_ratio(
+        snapshot.week_cost_usd,
+        snapshot.weekly_limit_usd,
+    )
     return [
         TopHudProgressMetric(
             label=_top_session_usage_summary(snapshot),
@@ -3437,7 +3667,12 @@ def _top_collapsed_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgr
             fill=HUD_PROGRESS_DAY,
             fill_end=HUD_PROGRESS_DAY_END,
             fill_text=HUD_PROGRESS_DAY_TEXT,
-            right_text=_budget_limit_text(snapshot.daily_limit_usd),
+            right_text=(
+                _budget_progress_total_text(snapshot.today_cost_usd, snapshot.daily_limit_usd)
+                if day_overflow > 0.0
+                else _budget_limit_text(snapshot.daily_limit_usd)
+            ),
+            overflow_ratio=day_overflow,
         ),
         TopHudProgressMetric(
             label=f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
@@ -3445,7 +3680,12 @@ def _top_collapsed_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgr
             fill=HUD_PROGRESS_WEEK,
             fill_end=HUD_PROGRESS_WEEK_END,
             fill_text=HUD_PROGRESS_WEEK_TEXT,
-            right_text=_budget_limit_text(snapshot.weekly_limit_usd),
+            right_text=(
+                _budget_progress_total_text(snapshot.week_cost_usd, snapshot.weekly_limit_usd)
+                if week_overflow > 0.0
+                else _budget_limit_text(snapshot.weekly_limit_usd)
+            ),
+            overflow_ratio=week_overflow,
         ),
     ]
 
@@ -3462,6 +3702,14 @@ def _top_cache_progress_metric(snapshot: ParsedSession) -> TopHudProgressMetric:
 
 
 def _top_budget_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgressMetric]:
+    day_overflow = _budget_progress_overflow_ratio(
+        snapshot.today_cost_usd,
+        snapshot.daily_limit_usd,
+    )
+    week_overflow = _budget_progress_overflow_ratio(
+        snapshot.week_cost_usd,
+        snapshot.weekly_limit_usd,
+    )
     return [
         TopHudProgressMetric(
             label=f"本日累计 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
@@ -3469,7 +3717,12 @@ def _top_budget_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgress
             fill=HUD_PROGRESS_DAY,
             fill_end=HUD_PROGRESS_DAY_END,
             fill_text=HUD_PROGRESS_DAY_TEXT,
-            right_text=_budget_limit_text(snapshot.daily_limit_usd),
+            right_text="" if day_overflow > 0.0 else _budget_limit_text(snapshot.daily_limit_usd),
+            overflow_ratio=day_overflow,
+            overflow_badge=_budget_progress_overflow_badge(
+                snapshot.today_cost_usd,
+                snapshot.daily_limit_usd,
+            ),
         ),
         TopHudProgressMetric(
             label=f"本周累计 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
@@ -3477,7 +3730,12 @@ def _top_budget_progress_metrics(snapshot: ParsedSession) -> list[TopHudProgress
             fill=HUD_PROGRESS_WEEK,
             fill_end=HUD_PROGRESS_WEEK_END,
             fill_text=HUD_PROGRESS_WEEK_TEXT,
-            right_text=_budget_limit_text(snapshot.weekly_limit_usd),
+            right_text="" if week_overflow > 0.0 else _budget_limit_text(snapshot.weekly_limit_usd),
+            overflow_ratio=week_overflow,
+            overflow_badge=_budget_progress_overflow_badge(
+                snapshot.week_cost_usd,
+                snapshot.weekly_limit_usd,
+            ),
         ),
     ]
 

@@ -61,7 +61,7 @@ def set_cost_estimator(estimator: CostEstimator) -> None:
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "12";
+  const version = "13";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -455,6 +455,98 @@ RENDERER_HUD_SCRIPT = r"""
         border-radius: inherit;
         background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,.18));
         pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] {
+        border-color: rgba(255,136,92,.18);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] .codex-usage-hud-progress-track-text,
+      #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] .codex-usage-hud-progress-fill-text,
+      #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] .codex-usage-hud-progress-size-probe {
+        padding-right: 28px;
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-track-text,
+      #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-fill-text,
+      #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-size-probe {
+        padding-right: 108px;
+      }
+      #${rootId} .codex-usage-hud-progress-overflow {
+        position: absolute;
+        top: 5px;
+        right: 6px;
+        height: 8px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #ffcfaa, #ff875a 60%, #ff5b64);
+        box-shadow: 0 10px 22px rgba(255,91,100,.18);
+        z-index: 3;
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-overflow::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: linear-gradient(180deg, rgba(255,255,255,.28), rgba(255,255,255,0) 70%);
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-overflow-anchor {
+        position: absolute;
+        top: 3px;
+        right: 5px;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 35%, #fff4d9 0%, #ff8e61 58%, #ff5b64 100%);
+        box-shadow: 0 0 0 2px rgba(255,107,99,.12), 0 0 14px rgba(255,107,99,.32);
+        z-index: 4;
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-badge {
+        position: absolute;
+        top: 50%;
+        right: 10px;
+        transform: translateY(-50%);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 22px;
+        padding: 0 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255,132,88,.24);
+        background: rgba(255,95,92,.12);
+        color: #ffd7ca;
+        font-size: 10.5px;
+        font-weight: 800;
+        box-shadow: 0 8px 18px rgba(255,91,100,.12);
+        backdrop-filter: blur(10px);
+        z-index: 5;
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-progress-badge::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: linear-gradient(180deg, #ffcfaa, #ff5b64);
+        box-shadow: 0 0 10px rgba(255,91,100,.32);
+      }
+      #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-badge {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-overflow {
+        top: 7px;
+        right: 8px;
+        height: 12px;
+      }
+      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-overflow-anchor {
+        top: 6px;
+        right: 7px;
+        width: 16px;
+        height: 16px;
+      }
+      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-badge {
+        min-height: 24px;
+        padding: 0 11px;
+        font-size: 11px;
       }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill {
         background: linear-gradient(90deg, #9ccbff, #5ea7ff);
@@ -3113,25 +3205,33 @@ RENDERER_HUD_SCRIPT = r"""
     rail.dataset.tone = String(metric?.tone || "day");
     const label = String(metric?.label || "");
     const rightText = String(metric?.rightText || "");
+    const overflowBadge = String(metric?.overflowBadge || "");
     const ratio = normalizeProgressRatio(metric?.ratio);
+    const overflowRatio = normalizeProgressRatio(metric?.overflowRatio);
+    const hasOverflow = overflowRatio > 0;
+    if (hasOverflow) rail.dataset.overflow = "true";
+    else delete rail.dataset.overflow;
+    if (overflowBadge) rail.dataset.badge = "true";
+    else delete rail.dataset.badge;
     const fullText = rightText ? `${label} / ${rightText}` : label;
-    rail.title = fullText;
-    rail.setAttribute("aria-label", fullText);
+    const tooltip = overflowBadge ? `${fullText || label} | ${overflowBadge}` : fullText;
+    rail.title = tooltip;
+    rail.setAttribute("aria-label", tooltip);
 
     function progressTextLayer(className, includeRightText = true) {
       const layer = document.createElement("span");
       layer.className = className;
-      layer.title = fullText;
+      layer.title = tooltip;
       const labelNode = document.createElement("span");
       labelNode.className = "codex-usage-hud-progress-label";
       labelNode.textContent = label;
-      labelNode.title = fullText;
+      labelNode.title = tooltip;
       layer.appendChild(labelNode);
       if (includeRightText && rightText) {
         const totalNode = document.createElement("span");
         totalNode.className = "codex-usage-hud-progress-total";
         totalNode.textContent = rightText;
-        totalNode.title = fullText;
+        totalNode.title = tooltip;
         layer.appendChild(totalNode);
       }
       return layer;
@@ -3144,6 +3244,22 @@ RENDERER_HUD_SCRIPT = r"""
     fill.className = "codex-usage-hud-progress-fill";
     fill.style.width = `${Math.round(ratio * 1000) / 10}%`;
     rail.appendChild(fill);
+    if (hasOverflow) {
+      const overflow = document.createElement("span");
+      overflow.className = "codex-usage-hud-progress-overflow";
+      overflow.style.width = `${Math.round(overflowRatio * 1000) / 10}%`;
+      rail.appendChild(overflow);
+
+      const anchor = document.createElement("span");
+      anchor.className = "codex-usage-hud-progress-overflow-anchor";
+      rail.appendChild(anchor);
+    }
+    if (overflowBadge) {
+      const badge = document.createElement("span");
+      badge.className = "codex-usage-hud-progress-badge";
+      badge.textContent = overflowBadge;
+      rail.appendChild(badge);
+    }
     return rail;
   }
 
@@ -4029,12 +4145,39 @@ def _top_cache_progress_label(snapshot: ParsedSession) -> str:
     return f"缓存命中 {label}"
 
 
-def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
+def _budget_progress_total_ratio(cost: float | None, limit: float | None) -> float:
     amount = max(0.0, float(cost or 0.0))
     budget = max(0.0, float(limit or 0.0))
     if budget <= 0.0:
         return 0.0
-    return max(0.0, min(1.0, amount / budget))
+    return max(0.0, amount / budget)
+
+
+def _budget_progress_ratio(cost: float | None, limit: float | None) -> float:
+    return max(0.0, min(1.0, _budget_progress_total_ratio(cost, limit)))
+
+
+def _budget_progress_total_text(cost: float | None, limit: float | None) -> str:
+    total_ratio = _budget_progress_total_ratio(cost, limit)
+    if total_ratio <= 0.0:
+        return ""
+    return f"{total_ratio:.0%}"
+
+
+def _budget_progress_overflow_ratio(cost: float | None, limit: float | None) -> float:
+    total_ratio = _budget_progress_total_ratio(cost, limit)
+    return max(0.0, min(1.0, total_ratio - 1.0))
+
+
+def _budget_progress_overflow_badge(cost: float | None, limit: float | None) -> str:
+    total_ratio = _budget_progress_total_ratio(cost, limit)
+    if total_ratio <= 1.0:
+        return ""
+    amount = max(0.0, float(cost or 0.0))
+    budget = max(0.0, float(limit or 0.0))
+    overflow_ratio = max(0.0, total_ratio - 1.0)
+    overflow_cost = max(0.0, amount - budget)
+    return f"+{overflow_ratio:.0%} / +{_format_money(overflow_cost)}"
 
 
 def _budget_limit_text(limit: float | None) -> str:
@@ -4047,6 +4190,8 @@ def _top_progress_metric(
     tone: str,
     *,
     right_text: str = "",
+    overflow_ratio: float | None = None,
+    overflow_badge: str = "",
 ) -> dict[str, object]:
     metric: dict[str, object] = {
         "label": label,
@@ -4055,11 +4200,23 @@ def _top_progress_metric(
     }
     if right_text:
         metric["rightText"] = right_text
+    if overflow_ratio is not None and float(overflow_ratio) > 0.0:
+        metric["overflowRatio"] = max(0.0, min(1.0, float(overflow_ratio)))
+    if overflow_badge:
+        metric["overflowBadge"] = overflow_badge
     return metric
 
 
 def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
     cache_ratio, _cache_estimated = _session_cache_hit_rate(snapshot)
+    day_overflow = _budget_progress_overflow_ratio(
+        snapshot.today_cost_usd,
+        snapshot.daily_limit_usd,
+    )
+    week_overflow = _budget_progress_overflow_ratio(
+        snapshot.week_cost_usd,
+        snapshot.weekly_limit_usd,
+    )
     session = _top_progress_metric(
         _top_session_usage_summary(snapshot),
         0.0,
@@ -4074,25 +4231,45 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
-        right_text=_budget_limit_text(snapshot.daily_limit_usd),
+        right_text=(
+            _budget_progress_total_text(snapshot.today_cost_usd, snapshot.daily_limit_usd)
+            if day_overflow > 0.0
+            else _budget_limit_text(snapshot.daily_limit_usd)
+        ),
+        overflow_ratio=day_overflow,
     )
     week = _top_progress_metric(
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
-        right_text=_budget_limit_text(snapshot.weekly_limit_usd),
+        right_text=(
+            _budget_progress_total_text(snapshot.week_cost_usd, snapshot.weekly_limit_usd)
+            if week_overflow > 0.0
+            else _budget_limit_text(snapshot.weekly_limit_usd)
+        ),
+        overflow_ratio=week_overflow,
     )
     budget_day = _top_progress_metric(
         f"本日累计 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
-        right_text=_budget_limit_text(snapshot.daily_limit_usd),
+        right_text="" if day_overflow > 0.0 else _budget_limit_text(snapshot.daily_limit_usd),
+        overflow_ratio=day_overflow,
+        overflow_badge=_budget_progress_overflow_badge(
+            snapshot.today_cost_usd,
+            snapshot.daily_limit_usd,
+        ),
     )
     budget_week = _top_progress_metric(
         f"本周累计 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
-        right_text=_budget_limit_text(snapshot.weekly_limit_usd),
+        right_text="" if week_overflow > 0.0 else _budget_limit_text(snapshot.weekly_limit_usd),
+        overflow_ratio=week_overflow,
+        overflow_badge=_budget_progress_overflow_badge(
+            snapshot.week_cost_usd,
+            snapshot.weekly_limit_usd,
+        ),
     )
     return {
         "collapsed": [session, day, week],

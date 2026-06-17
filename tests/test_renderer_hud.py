@@ -87,6 +87,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(top_progress["cache"]["label"], "缓存命中 ~61%")
         self.assertEqual(top_progress["budget"][0]["label"], "本日累计 50k/$0.500")
         self.assertEqual(top_progress["budget"][0]["rightText"], "总 $100.00")
+        self.assertNotIn("overflowRatio", top_progress["budget"][0])
+        self.assertNotIn("overflowBadge", top_progress["budget"][0])
         self.assertEqual(top_progress["budget"][1]["label"], "本周累计 200k/$1.50")
         self.assertEqual(top_progress["budget"][1]["rightText"], "总 $400.00")
         request_line = str(payload["requestLine"])
@@ -118,6 +120,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-action="settings-open"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-resize-edge-left", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-resize-corner-bottom-right", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-progress-overflow", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-progress-badge", renderer_hud.RENDERER_HUD_SCRIPT)
+
         self.assertIn("codex-usage-hud-resize-corner-top-left", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-edge="left"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-edge="bottom-right"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -222,6 +227,37 @@ class RendererHudPayloadTests(unittest.TestCase):
         request_row_details = payload["requestRowDetails"]
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
+
+    def test_payload_from_snapshot_exposes_overflow_progress_style(self) -> None:
+        snapshot = ParsedSession(status="parsed")
+        snapshot.today_tokens = 6600000
+        snapshot.today_cost_usd = 112.0
+        snapshot.daily_limit_usd = 100.0
+        snapshot.week_tokens = 124700000
+        snapshot.week_cost_usd = 128.0
+        snapshot.weekly_limit_usd = 100.0
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        top_progress = payload["topProgress"]
+        collapsed = top_progress["collapsed"]
+        day = collapsed[1]
+        week = collapsed[2]
+        self.assertEqual(day["rightText"], "112%")
+        self.assertEqual(day["ratio"], 1.0)
+        self.assertAlmostEqual(day["overflowRatio"], 0.12, places=3)
+        self.assertEqual(week["rightText"], "128%")
+        self.assertEqual(week["ratio"], 1.0)
+        self.assertAlmostEqual(week["overflowRatio"], 0.28, places=3)
+
+        budget_day = top_progress["budget"][0]
+        budget_week = top_progress["budget"][1]
+        self.assertNotIn("rightText", budget_day)
+        self.assertAlmostEqual(budget_day["overflowRatio"], 0.12, places=3)
+        self.assertEqual(budget_day["overflowBadge"], "+12% / +$12.00")
+        self.assertNotIn("rightText", budget_week)
+        self.assertAlmostEqual(budget_week["overflowRatio"], 0.28, places=3)
+        self.assertEqual(budget_week["overflowBadge"], "+28% / +$28.00")
 
     def test_payload_warning_summary_uses_ratio_and_threshold_only(self) -> None:
         now = datetime(2026, 6, 5, 13, 10, 11).astimezone()

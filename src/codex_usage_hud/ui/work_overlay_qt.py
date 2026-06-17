@@ -670,7 +670,7 @@ def run_work_overlay_helper_qt(
                 radius=67.0,
                 start_degrees=-149.0,
                 end_degrees=-31.0,
-                font=QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold),
+                font=QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold),
                 color=QColor("#E9FFF0"),
                 bottom=False,
             )
@@ -679,10 +679,10 @@ def run_work_overlay_helper_qt(
                     painter,
                     workdir,
                     center=center,
-                    radius=67.0,
+                    radius=73.0,
                     start_degrees=145.0,
                     end_degrees=35.0,
-                    font=QFont("Microsoft YaHei UI", 7),
+                    font=QFont("Microsoft YaHei UI", 9),
                     color=QColor("#BFF8D1"),
                     bottom=True,
                 )
@@ -691,7 +691,7 @@ def run_work_overlay_helper_qt(
             painter.setFont(check_font)
             painter.setPen(QColor("#F8FFF9"))
             painter.drawText(
-                QRectF(center.x() - 34.0, center.y() - 41.0, 68.0, 56.0),
+                QRectF(center.x() - 34.0, center.y() - 58.0, 68.0, 56.0),
                 alignment.AlignCenter,
                 "✓",
             )
@@ -700,7 +700,7 @@ def run_work_overlay_helper_qt(
             painter.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
             painter.setPen(QColor("#F4FFF7"))
             painter.drawText(
-                QRectF(center.x() - 54.0, center.y() + 13.0, 108.0, 18.0),
+                QRectF(center.x() - 54.0, center.y() - 2.0, 108.0, 18.0),
                 alignment.AlignCenter,
                 _compact_work_text(elapsed, 18),
             )
@@ -714,7 +714,7 @@ def run_work_overlay_helper_qt(
             box_height = 25.0
             spacing = 5.0
             start_x = center.x() - ((box_width * 3.0 + spacing * 2.0) / 2.0)
-            y = center.y() + 38.0
+            y = center.y() + 22.0
             for index, (label, value) in enumerate(stats):
                 box = QRectF(start_x + index * (box_width + spacing), y, box_width, box_height)
                 painter.setPen(QPen(QColor(221, 255, 230, 105), 0.8))

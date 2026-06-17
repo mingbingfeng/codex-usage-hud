@@ -134,7 +134,10 @@ from codex_usage_hud.ui.tk_hud import (
     _round_entry,
     _round_entry_widths,
     _rounded_shell_surface_rows,
+    _top_budget_progress_metrics,
+    _top_collapsed_progress_metrics,
     _visual_anchor_geometry,
+    _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     _item_dismiss_key,
@@ -1073,6 +1076,86 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("$", items[0].cost_text)
         self.assertTrue(items[0].workdir_name == "" or len(items[0].workdir_name) <= 32)
 
+    def test_completed_work_overlay_uses_all_current_task_rounds(self) -> None:
+        now = datetime.now().astimezone()
+        rounds = [
+            RequestRound(
+                index=1,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=2_000_000,
+                cached_tokens=1_920_000,
+                output_tokens=0,
+                reasoning_tokens=0,
+                total_tokens=2_000_000,
+                estimated=False,
+                cost_usd=2.22,
+                started_at=now - timedelta(minutes=11),
+                completed_at=now - timedelta(minutes=1),
+            ),
+            RequestRound(
+                index=2,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=420_000,
+                cached_tokens=361_200,
+                output_tokens=0,
+                reasoning_tokens=0,
+                total_tokens=420_000,
+                estimated=False,
+                cost_usd=0.09,
+                started_at=now - timedelta(minutes=1),
+                completed_at=now,
+            ),
+        ]
+        running_snapshot = ParsedSession(
+            session_id="session-completed",
+            session_title="Multi-round task",
+            request=RequestTokens(
+                status="running",
+                input_tokens=420_000,
+                cached_tokens=361_200,
+                total_tokens=420_000,
+                cost_usd=0.09,
+                updated_at=now,
+            ),
+            request_history=rounds,
+            activity=Activity(kind="agent", detail="最后一轮处理中", timestamp=now),
+            last_output=Activity(kind="agent", detail="最后一轮处理中", timestamp=now),
+            task_started_at=now - timedelta(minutes=11),
+        )
+        completed_snapshot = ParsedSession(
+            session_id="session-completed",
+            session_title="Multi-round task",
+            request=RequestTokens(
+                status="confirmed",
+                input_tokens=420_000,
+                cached_tokens=361_200,
+                total_tokens=420_000,
+                cost_usd=0.09,
+                updated_at=now,
+            ),
+            request_history=rounds,
+            activity=Activity(kind="agent", detail="完成说明", timestamp=now),
+            last_output=Activity(kind="agent", detail="完成说明", timestamp=now),
+            task_started_at=now - timedelta(minutes=11),
+            task_completed_at=now,
+        )
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+        )
+
+        active_work_items_for_snapshot(context, running_snapshot, None)
+        items = active_work_items_for_snapshot(context, completed_snapshot, None)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].status, "recent")
+        self.assertEqual(items[0].tokens_text, "2.42M")
+        self.assertEqual(items[0].cost_text, "$2.31")
+        self.assertEqual(items[0].cache_hit_text, "94%")
+
     def test_completed_task_ignores_active_stale_filter(self) -> None:
         now = datetime.now().astimezone()
         running_snapshot = ParsedSession(
@@ -1394,6 +1477,33 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("before today reset $98.915585", text)
         self.assertIn("today $20.226427", text)
         self.assertIn("This Week Manual Adjustment: $12.500000", text)
+
+    def test_budget_progress_metrics_split_overflow_from_main_fill(self) -> None:
+        snapshot = ParsedSession(
+            today_tokens=6600000,
+            today_cost_usd=112.0,
+            daily_limit_usd=100.0,
+            week_tokens=124700000,
+            week_cost_usd=128.0,
+            weekly_limit_usd=100.0,
+        )
+
+        collapsed = _top_collapsed_progress_metrics(snapshot)
+        budget = _top_budget_progress_metrics(snapshot)
+
+        self.assertEqual(collapsed[1].right_text, "112%")
+        self.assertEqual(collapsed[1].ratio, 1.0)
+        self.assertAlmostEqual(collapsed[1].overflow_ratio, 0.12, places=3)
+        self.assertEqual(collapsed[2].right_text, "128%")
+        self.assertEqual(collapsed[2].ratio, 1.0)
+        self.assertAlmostEqual(collapsed[2].overflow_ratio, 0.28, places=3)
+
+        self.assertEqual(budget[0].right_text, "")
+        self.assertAlmostEqual(budget[0].overflow_ratio, 0.12, places=3)
+        self.assertEqual(budget[0].overflow_badge, "+12% / +$12.00")
+        self.assertEqual(budget[1].right_text, "")
+        self.assertAlmostEqual(budget[1].overflow_ratio, 0.28, places=3)
+        self.assertEqual(budget[1].overflow_badge, "+28% / +$28.00")
 
     def test_hud_instance_lock_prevents_duplicate_instances(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1836,6 +1946,73 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertEqual(request_shell._radius, HUD_SHELL_RADIUS)
         finally:
             window._close()
+
+    def test_win32_region_api_binds_64_bit_safe_signatures(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class FakeFunction:
+            def __init__(self, result: int = 1) -> None:
+                self.result = result
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args: object) -> int:
+                return self.result
+
+        dlls: dict[str, SimpleNamespace] = {}
+
+        def fake_dll(name: str, *, use_last_error: bool = False) -> SimpleNamespace:
+            del use_last_error
+            if name == "gdi32":
+                dll = SimpleNamespace(
+                    CreateRectRgn=FakeFunction(),
+                    CreateRoundRectRgn=FakeFunction(),
+                    DeleteObject=FakeFunction(),
+                )
+            elif name == "user32":
+                dll = SimpleNamespace(SetWindowRgn=FakeFunction())
+            else:
+                raise OSError(name)
+            dlls[name] = dll
+            return dll
+
+        _win32_region_api.cache_clear()
+        try:
+            with patch.object(sys, "platform", "win32"), patch(
+                "ctypes.WinDLL",
+                side_effect=fake_dll,
+                create=True,
+            ):
+                api = _win32_region_api()
+        finally:
+            _win32_region_api.cache_clear()
+
+        self.assertIsNotNone(api)
+        self.assertEqual(
+            dlls["gdi32"].CreateRectRgn.argtypes,
+            [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int],
+        )
+        self.assertIs(dlls["gdi32"].CreateRectRgn.restype, wintypes.HANDLE)
+        self.assertEqual(
+            dlls["gdi32"].CreateRoundRectRgn.argtypes,
+            [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+            ],
+        )
+        self.assertIs(dlls["gdi32"].CreateRoundRectRgn.restype, wintypes.HANDLE)
+        self.assertEqual(dlls["gdi32"].DeleteObject.argtypes, [wintypes.HANDLE])
+        self.assertIs(dlls["gdi32"].DeleteObject.restype, wintypes.BOOL)
+        self.assertEqual(
+            dlls["user32"].SetWindowRgn.argtypes,
+            [wintypes.HWND, wintypes.HANDLE, wintypes.BOOL],
+        )
+        self.assertIs(dlls["user32"].SetWindowRgn.restype, ctypes.c_int)
 
     def test_top_progress_bars_keep_rounded_radius(self) -> None:
         window = TokenHudWindow()
