@@ -56,11 +56,14 @@ from .daemon import (
 from .platforms import (
     ActiveSessionTracker,
     CodexWindowTracker,
+    CdpSessionSwitchBackend,
     SessionPathResolver,
+    SessionSwitchController,
+    WindowsSearchSessionSwitchBackend,
     get_current_platform,
 )
 from .platforms.base import BasePlatform
-from .platforms.cdp_probe import CodexCdpSessionController, cdp_port_from_env
+from .platforms.cdp_probe import cdp_port_from_env
 from .settings_bridge import SettingsBridgeServer
 from .ui import TokenHudWindow
 from .ui.renderer_hud import (
@@ -88,6 +91,7 @@ DEFAULT_SESSION_INDEX = "session_index.jsonl"
 DEFAULT_BUDGET_THRESHOLDS_TEXT = ",".join(f"{item:g}" for item in DEFAULT_BUDGET_THRESHOLDS)
 DEFAULT_ACTIVE_SESSION_POLL_MS = 500
 DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
+NATIVE_SEARCH_SESSION_SWITCH_ENV = "CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH"
 DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
 RENDERER_IDLE_POLL_MS = 1500
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
@@ -1393,7 +1397,7 @@ def _prepare_codex_window_for_tk(
             and last_status in {"not_found", "hidden", "cloaked"}
         ):
             launch_attempted = True
-            launched = launch_codex_app(debugger=True)
+            launched = launch_codex_app(debugger=False)
             _LOGGER.info(
                 "tk_codex_window_restore_requested launched=%s status=%s hwnd=%s reason=%s",
                 launched,
@@ -1407,9 +1411,28 @@ def _prepare_codex_window_for_tk(
         time.sleep(max(0.01, float(poll_seconds)))
 
 
+def _build_session_switch_controller(
+    platform: BasePlatform,
+    *,
+    prefer_native_search: bool,
+) -> SessionSwitchController:
+    cdp = CdpSessionSwitchBackend(timeout_seconds=RENDERER_CDP_TIMEOUT_SECONDS)
+    native_enabled = os.environ.get(NATIVE_SEARCH_SESSION_SWITCH_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    backends: list[object] = [cdp]
+    if native_enabled:
+        native = WindowsSearchSessionSwitchBackend(platform)
+        backends = [native, cdp] if prefer_native_search else [cdp, native]
+    return SessionSwitchController(backends)
+
+
 def _handle_work_overlay_command(
     command: Mapping[str, object],
-    session_controller: CodexCdpSessionController,
+    session_controller: SessionSwitchController,
 ) -> None:
     action = str(command.get("action") or "").strip()
     if action != "activateSession":
@@ -1420,7 +1443,7 @@ def _handle_work_overlay_command(
         _LOGGER.info("work_overlay_command_ignored reason=missing_target")
         return
 
-    window_ready, window_status, window_reason, window_hwnd = _prepare_codex_window_for_renderer(
+    window_ready, window_status, window_reason, window_hwnd = _prepare_codex_window_for_tk(
         timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
         launch_if_missing=True,
     )
@@ -1432,26 +1455,26 @@ def _handle_work_overlay_command(
             window_reason,
         )
 
-    result = session_controller.activate_thread(
+    result = session_controller.activate_session(
         session_id=session_id,
         title=target_title,
         workdir=str(command.get("workdir") or "").strip(),
     )
     _LOGGER.info(
-        "work_overlay_command_processed ok=%s status=%s requested_session=%s active_session=%s matched_by=%s available=%s message=%s",
+        "work_overlay_command_processed ok=%s status=%s backend=%s requested_session=%s active_session=%s matched_by=%s message=%s",
         result.ok,
         result.status,
+        result.backend or "-",
         result.requested_session_id or "-",
         result.active_session_id or "-",
         result.matched_by or "-",
-        result.available_count,
         result.message or "-",
     )
 
 
 def _handle_work_overlay_commands(
     work_overlay: DesktopWorkOverlay,
-    session_controller: CodexCdpSessionController,
+    session_controller: SessionSwitchController,
 ) -> None:
     take_commands = getattr(work_overlay, "take_commands", None)
     if not callable(take_commands):
@@ -3222,8 +3245,9 @@ def run_renderer_hud_session(
             work_overlay = DesktopWorkOverlay(
                 item_limit=_work_overlay_item_limit_for_context(context),
             )
-            session_controller = CodexCdpSessionController(
-                timeout_seconds=RENDERER_CDP_TIMEOUT_SECONDS,
+            session_controller = _build_session_switch_controller(
+                getattr(context, "platform", get_current_platform()),
+                prefer_native_search=False,
             )
             bridge = SettingsBridgeServer(
                 context.settings_store,
@@ -3476,8 +3500,9 @@ def _run_tk_window_session(
     work_overlay = DesktopWorkOverlay(
         item_limit=_work_overlay_item_limit_for_context(context),
     )
-    session_controller = CodexCdpSessionController(
-        timeout_seconds=RENDERER_CDP_TIMEOUT_SECONDS,
+    session_controller = _build_session_switch_controller(
+        getattr(context, "platform", get_current_platform()),
+        prefer_native_search=True,
     )
     try:
         try:
@@ -3635,7 +3660,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                 return 0
             if startup.mode == DAEMON_STARTUP_TK:
                 if startup.launch_codex:
-                    launch_codex_app(debugger=True)
+                    launch_codex_app(debugger=False)
                 _LOGGER.info("daemon_startup_tk_selected")
                 preferred_renderer = False
                 return run_hud_session(

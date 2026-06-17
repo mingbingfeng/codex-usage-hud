@@ -19,6 +19,11 @@ from codex_usage_hud.platforms import get_current_platform
 from codex_usage_hud.platforms.base import BasePlatform
 from codex_usage_hud.platforms.linux import LinuxPlatform
 from codex_usage_hud.platforms.macos import MacOSPlatform
+from codex_usage_hud.platforms.session_switch import (
+    SessionSwitchController,
+    SessionSwitchRequest,
+    SessionSwitchResult,
+)
 from codex_usage_hud.platforms.windows import (
     MOUSE_HOOK_ENV,
     _UIA_LIST_ITEM_CONTROL_TYPE_ID,
@@ -92,6 +97,59 @@ class PlatformFactoryTests(unittest.TestCase):
             self.assertIsInstance(platform, LinuxPlatform)
         else:
             self.fail(f"Unexpected platform under test: {sys.platform}")
+
+
+class SessionSwitchControllerTests(unittest.TestCase):
+    class _Backend:
+        def __init__(self, name: str, result: SessionSwitchResult) -> None:
+            self.name = name
+            self.result = result
+            self.requests: list[SessionSwitchRequest] = []
+
+        def activate(self, request: SessionSwitchRequest) -> SessionSwitchResult:
+            self.requests.append(request)
+            return self.result
+
+    def test_controller_returns_first_successful_backend(self) -> None:
+        first = self._Backend(
+            "native",
+            SessionSwitchResult(ok=False, status="unsupported", backend="native"),
+        )
+        second = self._Backend(
+            "cdp",
+            SessionSwitchResult(ok=True, status="switched", backend="cdp"),
+        )
+
+        controller = SessionSwitchController([first, second])
+        result = controller.activate_session(
+            session_id="thread-1",
+            title="Target Thread",
+            workdir="E:\\Work",
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.backend, "cdp")
+        self.assertEqual(len(first.requests), 1)
+        self.assertEqual(len(second.requests), 1)
+        self.assertEqual(second.requests[0].title, "Target Thread")
+
+    def test_controller_stops_on_missing_target(self) -> None:
+        first = self._Backend(
+            "native",
+            SessionSwitchResult(ok=False, status="missing-target", backend="native"),
+        )
+        second = self._Backend(
+            "cdp",
+            SessionSwitchResult(ok=True, status="switched", backend="cdp"),
+        )
+
+        controller = SessionSwitchController([first, second])
+        result = controller.activate_session()
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "missing-target")
+        self.assertEqual(len(first.requests), 1)
+        self.assertEqual(len(second.requests), 0)
 
 
 class WindowsActiveTitleTests(unittest.TestCase):

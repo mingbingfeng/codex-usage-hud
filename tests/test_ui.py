@@ -3535,7 +3535,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(status, "visible")
         self.assertEqual(reason, "")
         self.assertEqual(hwnd, 777)
-        launch_app.assert_called_once_with(debugger=True)
+        launch_app.assert_called_once_with(debugger=False)
 
     def test_run_renderer_hud_session_prepares_window_before_connect_in_manual_mode(self) -> None:
         fake_context = SimpleNamespace(
@@ -3863,7 +3863,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             exit_code = run_daemon(args)
 
         self.assertEqual(exit_code, 0)
-        launch.assert_called_once_with(debugger=True)
+        launch.assert_called_once_with(debugger=False)
         fake_manager.wait_for_codex.assert_not_called()
         tk_session.assert_called_once()
         tk_args = tk_session.call_args.args[0]

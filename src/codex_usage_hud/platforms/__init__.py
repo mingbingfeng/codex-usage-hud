@@ -2,6 +2,13 @@
 
 from .active_session import ActiveSessionTracker, SessionPathResolver, find_session_file
 from .base import get_current_platform
+from .session_switch import (
+    CdpSessionSwitchBackend,
+    SessionSwitchController,
+    SessionSwitchRequest,
+    SessionSwitchResult,
+    WindowsSearchSessionSwitchBackend,
+)
 from .windows_tracker import (
     CodexWindowTracker,
     DockSnapshot,
@@ -12,9 +19,14 @@ from .windows_tracker import (
 __all__ = [
     "ActiveSessionTracker",
     "CodexWindowTracker",
+    "CdpSessionSwitchBackend",
     "DockSnapshot",
     "PhysicalRect",
+    "SessionSwitchController",
+    "SessionSwitchRequest",
+    "SessionSwitchResult",
     "SessionPathResolver",
+    "WindowsSearchSessionSwitchBackend",
     "find_session_file",
     "get_current_platform",
     "window_tracker_log_path",
