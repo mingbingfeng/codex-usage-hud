@@ -709,9 +709,13 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-top-grid {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(230px, 37%);
+        grid-template-columns: minmax(320px, 1fr) minmax(230px, 37%);
         gap: 12px;
+        min-width: max(100%, 562px);
         min-height: 100%;
+      }
+      #${rootId} .codex-usage-hud-top-grid > :first-child {
+        min-width: 320px;
       }
       #${rootId} .codex-usage-hud-top-side {
         border-radius: 5px;

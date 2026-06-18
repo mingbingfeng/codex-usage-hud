@@ -202,6 +202,8 @@ class RendererHudPayloadTests(unittest.TestCase):
             renderer_hud.RENDERER_HUD_SCRIPT,
         )
         self.assertIn("codex-usage-hud-budget-rails", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("grid-template-columns: minmax(320px, 1fr) minmax(230px, 37%);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("min-width: max(100%, 562px);", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("interpolateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("canAnimateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("FileEditViewWindowHelp", renderer_hud.RENDERER_HUD_SCRIPT)
