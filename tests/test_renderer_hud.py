@@ -112,7 +112,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settingsCommandStatus", payload)
         self.assertIn("workOverlaySelectableMax", payload)
         self.assertIn("updateState", payload)
-        self.assertEqual(payload["appVersion"], "1.0.1")
+        self.assertEqual(payload["appVersion"], "1.0.2")
         self.assertIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-update-button", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="update-action"', renderer_hud.RENDERER_HUD_SCRIPT)

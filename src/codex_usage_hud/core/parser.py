@@ -341,6 +341,8 @@ class WorkStatusItem:
     detail: str
     session_id: str = ""
     target_title: str = ""
+    round_index: int = 0
+    model_name: str = ""
     status_text: str = ""
     last_text: str = ""
     elapsed_text: str = ""

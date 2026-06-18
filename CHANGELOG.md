@@ -7,6 +7,26 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-18
+
+Completed Bubble Transition Patch.
+
+### Fixed
+
+- Reworked the work-overlay completion animation so cards shrink in place,
+  move along the right-side vertical track, and restore back through the same
+  path when a finished task becomes active again.
+- Restored the information-rich completed bubble badge after the transition,
+  including the title, runtime, token/cost/cache metrics, workdir label, and
+  click-through affordances.
+- Tightened startup filtering so historical completed tasks do not appear as
+  fresh completed bubbles before the current runtime has actually seen them run.
+- Moved work-overlay session-switch command draining off the UI refresh path so
+  click-to-activate stays responsive while the HUD keeps repainting.
+- Normalized the CDP websocket handshake authority/origin fields for IPv6 and
+  loopback hosts so renderer probing and session switching stay compatible with
+  more local debugger endpoints.
+
 ## [1.0.1] - 2026-06-11
 
 Archived Sessions Summary Patch.

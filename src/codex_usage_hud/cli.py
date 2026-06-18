@@ -87,6 +87,7 @@ from .updater import (
 )
 
 DEFAULT_POLL_MS = 500
+WORK_OVERLAY_COMMAND_POLL_MS = 60
 DEFAULT_SQLITE_LOG = "logs_2.sqlite"
 DEFAULT_STATE_DB = "state_5.sqlite"
 DEFAULT_SESSION_INDEX = "session_index.jsonl"
@@ -541,6 +542,8 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "title": item.title,
         "sessionId": item.session_id,
         "targetTitle": item.target_title,
+        "roundIndex": item.round_index,
+        "modelName": item.model_name,
         "status": item.status,
         "statusLabel": item.status_label,
         "detail": item.detail,
@@ -626,6 +629,8 @@ class DesktopWorkOverlay:
             return []
         if stat.st_size < self._command_offset:
             self._command_offset = 0
+        elif stat.st_size == self._command_offset:
+            return []
 
         commands: list[dict[str, object]] = []
         try:
@@ -703,6 +708,68 @@ class DesktopWorkOverlay:
             )
         except OSError:
             return
+
+
+class _WorkOverlayCommandPump:
+    """Drain work-overlay click commands off the UI thread."""
+
+    def __init__(
+        self,
+        work_overlay: DesktopWorkOverlay,
+        session_controller: SessionSwitchController,
+        *,
+        poll_ms: int = WORK_OVERLAY_COMMAND_POLL_MS,
+        command_event: Event | None = None,
+    ) -> None:
+        self._work_overlay = work_overlay
+        self._session_controller = session_controller
+        self._poll_seconds = max(0.05, float(poll_ms) / 1000.0)
+        self._command_event = command_event
+        self._stop_event = Event()
+        self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return True
+            self._stop_event.clear()
+            worker = threading.Thread(
+                target=self._run,
+                name="codex-usage-hud-work-overlay",
+                daemon=True,
+            )
+            self._worker = worker
+            worker.start()
+            return True
+
+    def close(self, timeout_seconds: float = 0.5) -> None:
+        self._stop_event.set()
+        with self._lock:
+            worker = self._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=max(0.0, float(timeout_seconds)))
+
+    def drain_once(self) -> int:
+        handled = _handle_work_overlay_commands(
+            self._work_overlay,
+            self._session_controller,
+            prepare_window=False,
+        )
+        if handled and self._command_event is not None:
+            self._command_event.set()
+        return handled
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self.drain_once()
+            except Exception as exc:
+                _LOGGER.debug("work_overlay_command_pump_failed error=%s", exc)
+            self._stop_event.wait(self._poll_seconds)
+
+
+_TkWorkOverlayCommandPump = _WorkOverlayCommandPump
 
 
 def run_work_overlay_helper(state_file: str | Path) -> int:
@@ -1462,6 +1529,8 @@ def _build_session_switch_controller(
 def _handle_work_overlay_command(
     command: Mapping[str, object],
     session_controller: SessionSwitchController,
+    *,
+    prepare_window: bool = True,
 ) -> None:
     action = str(command.get("action") or "").strip()
     if action != "activateSession":
@@ -1472,17 +1541,18 @@ def _handle_work_overlay_command(
         _LOGGER.info("work_overlay_command_ignored reason=missing_target")
         return
 
-    window_ready, window_status, window_reason, window_hwnd = _prepare_codex_window_for_tk(
-        timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
-        launch_if_missing=True,
-    )
-    if not window_ready:
-        _LOGGER.info(
-            "work_overlay_command_window_prepare_best_effort_failed status=%s hwnd=%s reason=%s",
-            window_status,
-            window_hwnd,
-            window_reason,
+    if prepare_window:
+        window_ready, window_status, window_reason, window_hwnd = _prepare_codex_window_for_tk(
+            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            launch_if_missing=True,
         )
+        if not window_ready:
+            _LOGGER.info(
+                "work_overlay_command_window_prepare_best_effort_failed status=%s hwnd=%s reason=%s",
+                window_status,
+                window_hwnd,
+                window_reason,
+            )
 
     result = session_controller.activate_session(
         session_id=session_id,
@@ -1504,12 +1574,21 @@ def _handle_work_overlay_command(
 def _handle_work_overlay_commands(
     work_overlay: DesktopWorkOverlay,
     session_controller: SessionSwitchController,
-) -> None:
+    *,
+    prepare_window: bool = True,
+) -> int:
     take_commands = getattr(work_overlay, "take_commands", None)
     if not callable(take_commands):
-        return
+        return 0
+    handled = 0
     for command in take_commands():
-        _handle_work_overlay_command(command, session_controller)
+        _handle_work_overlay_command(
+            command,
+            session_controller,
+            prepare_window=prepare_window,
+        )
+        handled += 1
+    return handled
 
 
 def _read_pid(path: Path) -> int | None:
@@ -1802,6 +1881,25 @@ def _current_task_rounds(snapshot: ParsedSession) -> list[RequestRound]:
         return list(snapshot.request_history)
     current = _request_round_from_snapshot(snapshot)
     return [current] if current is not None else []
+
+
+def _current_task_round_index(snapshot: ParsedSession) -> int:
+    round_index = max(0, int(snapshot.request.round_index or 0))
+    rows = _current_task_rounds(snapshot)
+    if rows:
+        round_index = max(round_index, int(rows[-1].index or 0))
+    return round_index
+
+
+def _current_task_model_name(snapshot: ParsedSession) -> str:
+    model_name = str(snapshot.request.model or "").strip()
+    if model_name:
+        return model_name
+    for item in reversed(_current_task_rounds(snapshot)):
+        model_name = str(item.model or "").strip()
+        if model_name:
+            return model_name
+    return ""
 
 
 def _current_task_usage(snapshot: ParsedSession) -> tuple[int, float | None]:
@@ -2145,7 +2243,8 @@ def _work_status_text(
     if status_value in {"running", "active"}:
         if activity.kind in {"agent", "assistant"}:
             return "正在输出"
-        return "正在思考"
+        model_name = _current_task_model_name(snapshot)
+        return f"{model_name} 正在思考" if model_name else "正在思考"
     return status_label
 
 
@@ -2240,6 +2339,8 @@ def _work_item_from_snapshot(
     )
     if snapshot.activity.kind:
         detail = f"{_work_activity_label(snapshot.activity.kind)}：{detail}"
+    round_index = _current_task_round_index(snapshot)
+    model_name = _current_task_model_name(snapshot)
     status_text = _work_status_text(snapshot, status_value, status_label)
     last_text = snapshot.last_output.detail.strip()
     started_at = snapshot.task_started_at or snapshot.request.started_at
@@ -2264,6 +2365,8 @@ def _work_item_from_snapshot(
         title=_compact_work_text(display_title, 56),
         session_id=session_id,
         target_title=display_title.strip(),
+        round_index=round_index,
+        model_name=model_name,
         status=status_value,
         status_label=status_label,
         detail=_compact_work_text(detail, 120),
@@ -2354,13 +2457,14 @@ def _select_runtime_work_overlay_items(
     item_limit: int,
 ) -> list[WorkStatusItem]:
     seen_task_keys = _work_overlay_seen_task_keys(context)
+    previously_seen_task_keys = set(seen_task_keys)
     visible: list[WorkStatusItem] = []
     for item in items:
         if len(visible) >= item_limit:
             break
         task_key = _work_overlay_runtime_task_key(item)
         if item.status == "recent":
-            if task_key and task_key in seen_task_keys:
+            if task_key and task_key in previously_seen_task_keys:
                 visible.append(item)
             continue
         visible.append(item)
@@ -3441,6 +3545,12 @@ def run_renderer_hud_session(
                 getattr(context, "platform", get_current_platform()),
                 prefer_native_search=False,
             )
+            command_refresh_requested = Event()
+            command_pump = _WorkOverlayCommandPump(
+                work_overlay,
+                session_controller,
+                command_event=command_refresh_requested,
+            )
             bridge = SettingsBridgeServer(
                 context.settings_store,
                 restart_callback=restart_requested.set,
@@ -3554,6 +3664,7 @@ def run_renderer_hud_session(
                     return RENDERER_HUD_UNAVAILABLE
 
                 local_loading.close()
+                command_pump.start()
                 failures = 0
                 runtime_failure_reported = False
                 settings_command_status: dict[str, object] = {}
@@ -3576,12 +3687,14 @@ def run_renderer_hud_session(
                             return RENDERER_HUD_UNAVAILABLE
                     update_state = update_manager.tick().to_dict()
                     command = client.take_settings_command()
-                    _handle_work_overlay_commands(work_overlay, session_controller)
                     force_fast_refresh = bool(
                         command
                         or settings_command_status
                         or update_state.get("phase") == "downloading"
                     )
+                    if command_refresh_requested.is_set():
+                        command_refresh_requested.clear()
+                        force_fast_refresh = True
                     if command:
                         settings_command_status = _handle_renderer_settings_command(
                             command,
@@ -3671,6 +3784,7 @@ def run_renderer_hud_session(
             finally:
                 client.close()
                 bridge.close()
+                command_pump.close()
                 work_overlay.close()
                 update_manager.close()
                 context.close()
@@ -3692,6 +3806,7 @@ def _run_tk_window_session(
     work_overlay = DesktopWorkOverlay(
         item_limit=_work_overlay_item_limit_for_context(context),
     )
+    command_pump: _WorkOverlayCommandPump | None = None
     session_controller = _build_session_switch_controller(
         getattr(context, "platform", get_current_platform()),
         prefer_native_search=True,
@@ -3710,12 +3825,13 @@ def _run_tk_window_session(
         except Exception as exc:
             _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
             return 1
+        command_pump = _WorkOverlayCommandPump(work_overlay, session_controller)
+        command_pump.start()
         latest_snapshot = ParsedSession(status="waiting")
 
         def refresh() -> None:
             nonlocal latest_snapshot
             overlay_item_limit = _work_overlay_item_limit_for_context(context)
-            _handle_work_overlay_commands(work_overlay, session_controller)
             refresh_snapshot = window.should_refresh_snapshot()
             if refresh_snapshot or overlay_item_limit > 0:
                 snapshot = snapshot_pump.take_latest()
@@ -3764,6 +3880,8 @@ def _run_tk_window_session(
             return HUD_SWITCH_TO_RENDERER
         return 0
     finally:
+        if command_pump is not None:
+            command_pump.close()
         work_overlay.close()
         snapshot_pump.close()
         if close_context:

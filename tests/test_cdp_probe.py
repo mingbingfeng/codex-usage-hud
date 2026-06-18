@@ -192,6 +192,36 @@ class CdpProbeTests(unittest.TestCase):
         self.assertEqual(calls[2][0], "Runtime.evaluate")
         self.assertEqual(calls[2][1]["expression"], "window.x=1")
 
+    def test_websocket_handshake_formats_ipv6_host_and_loopback_origin(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.sent = b""
+                self._response = (
+                    b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\n"
+                    b"Connection: Upgrade\r\n\r\n"
+                )
+
+            def sendall(self, payload: bytes) -> None:
+                self.sent += payload
+
+            def recv(self, size: int) -> bytes:
+                del size
+                if not self._response:
+                    return b""
+                chunk = self._response
+                self._response = b""
+                return chunk
+
+        sock = FakeSocket()
+
+        cdp_probe._websocket_handshake(sock, "::1", 9229, "/devtools/page/test")
+
+        request = sock.sent.decode("ascii")
+        self.assertIn("GET /devtools/page/test HTTP/1.1\r\n", request)
+        self.assertIn("Host: [::1]:9229\r\n", request)
+        self.assertIn("Origin: http://127.0.0.1:9229\r\n", request)
+
     def test_session_switch_script_targets_sidebar_thread_rows(self) -> None:
         script = session_switch_script("thread-123", "Selected Thread")
 

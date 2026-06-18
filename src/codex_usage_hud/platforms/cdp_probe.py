@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import ipaddress
 import json
 import os
 import socket
@@ -1295,14 +1296,16 @@ def _finite_float(value: Any) -> float | None:
 
 def _websocket_handshake(sock: socket.socket, host: str, port: int, path: str) -> None:
     key = base64.b64encode(os.urandom(16)).decode("ascii")
+    authority = _http_authority(host, port)
+    origin_authority = _http_authority(_cdp_origin_host(host), port)
     request = (
         f"GET {path} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
+        f"Host: {authority}\r\n"
         "Connection: Upgrade\r\n"
         "Upgrade: websocket\r\n"
         "Sec-WebSocket-Version: 13\r\n"
         f"Sec-WebSocket-Key: {key}\r\n"
-        f"Origin: http://{host}:{port}\r\n"
+        f"Origin: http://{origin_authority}\r\n"
         "\r\n"
     )
     sock.sendall(request.encode("ascii"))
@@ -1315,6 +1318,27 @@ def _websocket_handshake(sock: socket.socket, host: str, port: int, path: str) -
     first_line = response.split(b"\r\n", 1)[0]
     if b" 101 " not in first_line:
         raise RuntimeError("CDP websocket handshake failed")
+
+
+def _http_authority(host: str, port: int) -> str:
+    normalized = str(host or "").strip().strip("[]") or "127.0.0.1"
+    if ":" in normalized:
+        return f"[{normalized}]:{port}"
+    return f"{normalized}:{port}"
+
+
+def _cdp_origin_host(host: str) -> str:
+    normalized = str(host or "").strip().strip("[]")
+    if not normalized:
+        return "127.0.0.1"
+    if normalized.lower() == "localhost":
+        return "127.0.0.1"
+    try:
+        if ipaddress.ip_address(normalized).is_loopback:
+            return "127.0.0.1"
+    except ValueError:
+        return normalized
+    return normalized
 
 
 def _send_text_frame(sock: socket.socket, payload: str) -> None:

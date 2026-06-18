@@ -42,6 +42,7 @@ from codex_usage_hud.cli import (
     UsageSummaryCache,
     _VisibleAppErrorCache,
     _TkSnapshotPump,
+    _TkWorkOverlayCommandPump,
     _apply_visible_app_error,
     _build_session_switch_controller,
     _enable_crash_diagnostics,
@@ -148,10 +149,21 @@ from codex_usage_hud.ui.tk_hud import (
     _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
+    _completed_badge_slot_moves,
+    _completed_badge_slot_rects,
+    _detect_transition,
+    _detect_transition_item_id,
+    _find_item_rect,
+    _find_item_position,
     _item_dismiss_key,
     _overlay_hover_hit_test,
     _ordered_overlay_items,
     _point_in_inscribed_circle,
+    _remembered_card_rect_for_layout,
+    _transition_clearance_offset,
+    _transition_rect_for_progress,
+    _transition_required_height,
+    _transition_slot_shift_progress,
     _visible_overlay_items,
 )
 
@@ -632,7 +644,9 @@ class BudgetHelperTests(unittest.TestCase):
             detail="用户输入：实现桌面气泡",
             session_id="thread-123",
             target_title="Ship primary screen bubbles",
-            status_text="正在思考",
+            round_index=3,
+            model_name="gpt-5.5",
+            status_text="gpt-5.5 正在思考",
             last_text="上一轮输出保留在气泡里",
             elapsed_text="已处理 12s",
             progress="1.2k tokens | 12s",
@@ -652,7 +666,9 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["title"], "Ship primary screen bubbles")
         self.assertEqual(payload["sessionId"], "thread-123")
         self.assertEqual(payload["targetTitle"], "Ship primary screen bubbles")
-        self.assertEqual(payload["statusText"], "正在思考")
+        self.assertEqual(payload["roundIndex"], 3)
+        self.assertEqual(payload["modelName"], "gpt-5.5")
+        self.assertEqual(payload["statusText"], "gpt-5.5 正在思考")
         self.assertEqual(payload["lastText"], "上一轮输出保留在气泡里")
         self.assertEqual(payload["elapsedText"], "已处理 12s")
         self.assertEqual(payload["tokensText"], "1.2k")
@@ -663,6 +679,34 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(str(payload["taskStartedAt"]).startswith("2026-06-16T10:00:00"))
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
+
+    def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
+        now = datetime.now().astimezone()
+        snapshot = ParsedSession(
+            session_id="session-running",
+            session_title="Focus current round",
+            request=RequestTokens(
+                status="running",
+                round_index=3,
+                model="gpt-5.5",
+                updated_at=now,
+                started_at=now - timedelta(seconds=12),
+            ),
+            task_started_at=now - timedelta(minutes=2),
+            activity=Activity(kind="idle", detail="", timestamp=now),
+        )
+        context = SimpleNamespace(
+            sessions_root=Path(tempfile.gettempdir()) / "missing-codex-work-root",
+            parser=JsonlSessionParser(),
+            active_session_tracker=None,
+        )
+
+        items = active_work_items_for_snapshot(context, snapshot, None)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].round_index, 3)
+        self.assertEqual(items[0].model_name, "gpt-5.5")
+        self.assertEqual(items[0].status_text, "gpt-5.5 正在思考")
 
     def test_desktop_work_overlay_reads_new_click_commands_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -698,6 +742,44 @@ class BudgetHelperTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(overlay.take_commands(), [])
+
+    def test_tk_work_overlay_command_pump_drains_commands_without_window_prep(self) -> None:
+        overlay = SimpleNamespace(
+            take_commands=MagicMock(
+                return_value=[
+                    {
+                        "action": "activateSession",
+                        "sessionId": "thread-1",
+                        "targetTitle": "Thread One",
+                    }
+                ]
+            )
+        )
+        session_controller = SimpleNamespace(
+            activate_session=MagicMock(
+                return_value=SessionSwitchResult(
+                    ok=True,
+                    status="switched",
+                    backend="windows-search",
+                    requested_session_id="thread-1",
+                    requested_title="Thread One",
+                    active_title="Thread One",
+                )
+            )
+        )
+        pump = _TkWorkOverlayCommandPump(overlay, session_controller)
+
+        with patch("codex_usage_hud.cli._prepare_codex_window_for_tk") as prepare_window:
+            handled = pump.drain_once()
+
+        self.assertEqual(handled, 1)
+        overlay.take_commands.assert_called_once()
+        session_controller.activate_session.assert_called_once_with(
+            session_id="thread-1",
+            title="Thread One",
+            workdir="",
+        )
+        prepare_window.assert_not_called()
 
     def test_desktop_work_overlay_writes_state_with_atomic_json_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1471,6 +1553,54 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual([item.id for item in items], ["session-current"])
 
+    def test_only_historical_completed_overlay_items_do_not_show_on_startup(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def completed_rows(session_id: str, offset_minutes: int) -> list[dict[str, object]]:
+            return [
+                {
+                    "timestamp": (now - timedelta(minutes=offset_minutes + 4)).isoformat(),
+                    "type": "session_meta",
+                    "payload": {"id": session_id},
+                },
+                {
+                    "timestamp": (now - timedelta(minutes=offset_minutes + 3)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                },
+                {
+                    "timestamp": (now - timedelta(minutes=offset_minutes + 2)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "历史完成输出"},
+                },
+                {
+                    "timestamp": (now - timedelta(minutes=offset_minutes + 1)).isoformat(),
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete"},
+                },
+            ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = [root / "history-a.jsonl", root / "history-b.jsonl"]
+            for index, path in enumerate(paths):
+                rows = completed_rows(f"session-history-{index}", index * 3)
+                path.write_text(
+                    "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                    encoding="utf-8",
+                )
+            current_snapshot = parser.parse_file(paths[0])
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, current_snapshot, paths[0])
+
+        self.assertEqual(items, [])
+
     def test_aborted_task_does_not_stay_active(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
@@ -1710,6 +1840,235 @@ class BudgetHelperTests(unittest.TestCase):
 
             self.assertIn("Removed stale", message)
             self.assertFalse(path.exists())
+
+
+class WorkOverlayTransitionTests(unittest.TestCase):
+    def assertRectAlmostEqual(
+        self,
+        actual: tuple[float, float, float, float],
+        expected: tuple[float, float, float, float],
+        *,
+        places: int = 3,
+    ) -> None:
+        self.assertEqual(len(actual), len(expected))
+        for actual_value, expected_value in zip(actual, expected):
+            self.assertAlmostEqual(actual_value, expected_value, places=places)
+
+    def test_detect_card_to_completed_transition(self) -> None:
+        old_items = [
+            {"id": "1", "status": "tool", "title": "正在执行"},
+            {"id": "2", "status": "recent", "title": "已完成"},
+        ]
+        new_items = [
+            {"id": "1", "status": "recent", "title": "已完成"},
+            {"id": "2", "status": "recent", "title": "已完成"},
+        ]
+        result = _detect_transition(old_items, new_items)
+        self.assertEqual(result, "card_to_completed")
+        self.assertEqual(_detect_transition_item_id(old_items, new_items), "1")
+
+    def test_detect_completed_to_card_transition(self) -> None:
+        old_items = [
+            {"id": "1", "status": "recent", "title": "已完成"},
+            {"id": "2", "status": "tool", "title": "正在执行"},
+        ]
+        new_items = [
+            {"id": "1", "status": "tool", "title": "继续执行"},
+            {"id": "2", "status": "tool", "title": "正在执行"},
+        ]
+        result = _detect_transition(old_items, new_items)
+        self.assertEqual(result, "completed_to_card")
+        self.assertEqual(_detect_transition_item_id(old_items, new_items), "1")
+
+    def test_no_transition_when_kinds_unchanged(self) -> None:
+        old_items = [
+            {"id": "1", "status": "tool", "title": "正在执行"},
+            {"id": "2", "status": "recent", "title": "已完成"},
+        ]
+        new_items = [
+            {"id": "1", "status": "tool", "title": "更新了标题"},
+            {"id": "2", "status": "recent", "title": "已完成 2"},
+        ]
+        result = _detect_transition(old_items, new_items)
+        self.assertIsNone(result)
+        self.assertEqual(_detect_transition_item_id(old_items, new_items), "")
+
+    def test_no_transition_for_empty_ids(self) -> None:
+        old_items = [
+            {"id": "", "status": "tool", "title": "正在执行"},
+        ]
+        new_items = [
+            {"id": "", "status": "recent", "title": "已完成"},
+        ]
+
+        result = _detect_transition(old_items, new_items)
+
+        self.assertIsNone(result)
+        self.assertEqual(_detect_transition_item_id(old_items, new_items), "")
+
+    def test_no_transition_with_new_items(self) -> None:
+        old_items = [
+            {"id": "1", "status": "tool", "title": "正在执行"},
+        ]
+        new_items = [
+            {"id": "1", "status": "tool", "title": "正在执行"},
+            {"id": "2", "status": "recent", "title": "新完成"},
+        ]
+        result = _detect_transition(old_items, new_items)
+        self.assertIsNone(result)
+
+    def test_no_transition_with_removed_items(self) -> None:
+        old_items = [
+            {"id": "1", "status": "tool", "title": "正在执行"},
+            {"id": "2", "status": "recent", "title": "已完成"},
+        ]
+        new_items = [
+            {"id": "1", "status": "tool", "title": "正在执行"},
+        ]
+        result = _detect_transition(old_items, new_items)
+        self.assertIsNone(result)
+
+    def test_find_completed_item_position_aligns_right_with_spacing(self) -> None:
+        items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "latest", "status": "recent"},
+        ]
+
+        oldest = _find_item_position(items, "oldest", "completed", layout_width=430)
+        latest = _find_item_position(items, "latest", "completed", layout_width=430)
+
+        self.assertEqual(oldest, (86, 0))
+        self.assertEqual(latest, (262, 0))
+
+    def test_find_active_item_position_respects_completed_row_and_right_alignment(self) -> None:
+        items = [
+            {"id": "done", "status": "recent"},
+            {"id": "running", "status": "tool"},
+        ]
+
+        active = _find_item_position(items, "running", "card", layout_width=520)
+
+        self.assertEqual(active, (90, 188))
+
+    def test_completed_badge_slot_rects_put_latest_on_right(self) -> None:
+        items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "middle", "status": "recent"},
+            {"id": "latest", "status": "recent"},
+        ]
+
+        slots = _completed_badge_slot_rects(items, layout_width=520)
+
+        self.assertRectAlmostEqual(slots["oldest"], (0.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(slots["middle"], (176.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(slots["latest"], (352.0, 0.0, 168.0, 168.0))
+
+    def test_existing_completed_badge_moves_left_for_new_completed_slot(self) -> None:
+        old_items = [
+            {"id": "old", "status": "recent"},
+            {"id": "running", "status": "tool"},
+        ]
+        new_items = [
+            {"id": "old", "status": "recent"},
+            {"id": "running", "status": "recent"},
+        ]
+
+        moves = _completed_badge_slot_moves(old_items, new_items, layout_width=430)
+
+        self.assertRectAlmostEqual(moves["old"][0], (262.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(moves["old"][1], (86.0, 0.0, 168.0, 168.0))
+
+    def test_remaining_completed_badge_moves_right_after_restore(self) -> None:
+        old_items = [
+            {"id": "old", "status": "recent"},
+            {"id": "restoring", "status": "recent"},
+        ]
+        new_items = [
+            {"id": "old", "status": "recent"},
+            {"id": "restoring", "status": "tool"},
+        ]
+
+        moves = _completed_badge_slot_moves(old_items, new_items, layout_width=430)
+
+        self.assertRectAlmostEqual(moves["old"][0], (86.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(moves["old"][1], (262.0, 0.0, 168.0, 168.0))
+
+    def test_card_to_completed_morphs_to_right_edge_before_vertical_rise(self) -> None:
+        source = (0.0, 188.0, 430.0, 110.0)
+        target = (262.0, 0.0, 168.0, 168.0)
+
+        start = _transition_rect_for_progress("card_to_completed", source, target, 0.0)
+        after_morph = _transition_rect_for_progress("card_to_completed", source, target, 0.35)
+        moving = _transition_rect_for_progress("card_to_completed", source, target, 0.75)
+        final = _transition_rect_for_progress("card_to_completed", source, target, 1.0)
+
+        self.assertRectAlmostEqual(start, source)
+        self.assertRectAlmostEqual(after_morph, (262.0, 159.0, 168.0, 168.0))
+        self.assertEqual(moving[2:], (168.0, 168.0))
+        self.assertAlmostEqual(moving[0], after_morph[0])
+        self.assertLess(moving[1], after_morph[1])
+        self.assertRectAlmostEqual(final, target)
+
+    def test_top_card_to_completed_circle_stays_inside_transition_canvas(self) -> None:
+        source = (0.0, 0.0, 430.0, 110.0)
+        target = (262.0, 0.0, 168.0, 168.0)
+
+        after_morph = _transition_rect_for_progress("card_to_completed", source, target, 0.35)
+        required_height = _transition_required_height("card_to_completed", source, target)
+
+        self.assertRectAlmostEqual(after_morph, (262.0, 0.0, 168.0, 168.0))
+        self.assertGreaterEqual(required_height, 168)
+        self.assertLessEqual(after_morph[1] + after_morph[3], required_height)
+
+    def test_completed_to_card_returns_on_right_edge_before_expanding(self) -> None:
+        source = (262.0, 0.0, 168.0, 168.0)
+        target = (0.0, 188.0, 430.0, 110.0)
+
+        moving = _transition_rect_for_progress("completed_to_card", source, target, 0.25)
+        before_expand = _transition_rect_for_progress("completed_to_card", source, target, 0.55)
+        final = _transition_rect_for_progress("completed_to_card", source, target, 1.0)
+
+        self.assertEqual(moving[2:], (168.0, 168.0))
+        self.assertAlmostEqual(moving[0], source[0])
+        self.assertGreater(moving[1], source[1])
+        self.assertRectAlmostEqual(before_expand, (262.0, 159.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(final, target)
+
+    def test_card_clearance_moves_left_before_completed_circle_takes_off(self) -> None:
+        self.assertEqual(_transition_clearance_offset("card_to_completed", 0.30), 0.0)
+        self.assertLess(_transition_clearance_offset("card_to_completed", 0.50), 0.0)
+        self.assertLess(_transition_clearance_offset("card_to_completed", 0.80), 0.0)
+        self.assertAlmostEqual(_transition_clearance_offset("card_to_completed", 1.0), 0.0)
+
+    def test_completed_badge_slot_shift_waits_until_morph_pause(self) -> None:
+        self.assertEqual(_transition_slot_shift_progress("card_to_completed", 0.30), 0.0)
+        self.assertGreater(_transition_slot_shift_progress("card_to_completed", 0.50), 0.0)
+        self.assertEqual(_transition_slot_shift_progress("card_to_completed", 0.75), 1.0)
+
+    def test_restore_clearance_uses_reverse_path_timing(self) -> None:
+        self.assertLess(_transition_clearance_offset("completed_to_card", 0.10), 0.0)
+        self.assertLess(_transition_clearance_offset("completed_to_card", 0.35), 0.0)
+        self.assertAlmostEqual(_transition_clearance_offset("completed_to_card", 0.70), 0.0)
+
+    def test_remembered_card_rect_keeps_stack_y_and_current_right_edge(self) -> None:
+        remembered = (90.0, 306.0, 430.0, 110.0)
+
+        rect = _remembered_card_rect_for_layout(remembered, layout_width=430)
+
+        self.assertRectAlmostEqual(rect, (0.0, 306.0, 430.0, 110.0))
+
+    def test_find_item_rect_uses_stack_spacing_between_completed_row_and_cards(self) -> None:
+        items = [
+            {"id": "done", "status": "recent"},
+            {"id": "first", "status": "tool"},
+            {"id": "second", "status": "tool"},
+        ]
+
+        first = _find_item_rect(items, "first", "card", layout_width=430)
+        second = _find_item_rect(items, "second", "card", layout_width=430)
+
+        self.assertRectAlmostEqual(first, (0.0, 188.0, 430.0, 110.0))
+        self.assertRectAlmostEqual(second, (0.0, 306.0, 430.0, 110.0))
 
 
 class AutoScrollHelpersTests(unittest.TestCase):
@@ -4124,6 +4483,116 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_run_renderer_hud_session_drains_work_overlay_commands_without_window_prep(self) -> None:
+        fake_context = SimpleNamespace(
+            settings_store=SimpleNamespace(path=Path("hud_settings.json")),
+            user_config=UserConfig.defaults(),
+            poll_ms=250,
+            platform=SimpleNamespace(),
+            close=MagicMock(),
+            reload_user_config=MagicMock(),
+        )
+        command_started = threading.Event()
+        command_finished = threading.Event()
+        fake_snapshot = ParsedSession(status="parsed")
+        fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+
+        def take_commands() -> list[dict[str, object]]:
+            if command_started.is_set():
+                return []
+            command_started.set()
+            return [
+                {
+                    "action": "activateSession",
+                    "sessionId": "thread-1",
+                    "targetTitle": "Thread One",
+                }
+            ]
+
+        fake_overlay = SimpleNamespace(
+            configure=MagicMock(),
+            update=MagicMock(),
+            close=MagicMock(),
+            take_commands=MagicMock(side_effect=take_commands),
+        )
+        fake_update_manager = SimpleNamespace(
+            tick=MagicMock(return_value=fake_update_state),
+            status=MagicMock(return_value=fake_update_state),
+            close=MagicMock(),
+        )
+        fake_client = SimpleNamespace(
+            last_status="ok",
+            last_error="",
+            close=MagicMock(),
+            timeout_seconds=1.0,
+            take_settings_command=MagicMock(return_value=None),
+            update=MagicMock(),
+        )
+        fake_bridge = MagicMock()
+        fake_bridge.start.return_value = "http://127.0.0.1:8765"
+        session_controller = SimpleNamespace(
+            activate_session=MagicMock(
+                side_effect=lambda **kwargs: (
+                    command_finished.set(),
+                    SessionSwitchResult(
+                        ok=True,
+                        status="switched",
+                        backend="cdp",
+                        requested_session_id=kwargs["session_id"],
+                        requested_title=kwargs["title"],
+                        active_title=kwargs["title"],
+                    ),
+                )[1]
+            )
+        )
+
+        def update_side_effect(*args: object, **kwargs: object) -> bool:
+            self.assertTrue(command_finished.wait(timeout=1.0))
+            return True
+
+        fake_client.update.side_effect = update_side_effect
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+            patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay),
+            patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+            patch(
+                "codex_usage_hud.cli._build_session_switch_controller",
+                return_value=session_controller,
+            ),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                return_value=(True, "visible", "", 123),
+            ) as prepare_window,
+            patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+            patch("codex_usage_hud.cli.build_snapshot", return_value=fake_snapshot),
+            patch("codex_usage_hud.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            exit_code = run_renderer_hud_session(
+                SimpleNamespace(hud_mode="renderer"),
+                lock_already_held=True,
+            )
+
+        self.assertEqual(exit_code, 130)
+        self.assertTrue(command_started.is_set())
+        self.assertTrue(command_finished.is_set())
+        fake_overlay.take_commands.assert_called()
+        session_controller.activate_session.assert_called_once_with(
+            session_id="thread-1",
+            title="Thread One",
+            workdir="",
+        )
+        prepare_window.assert_called_once_with(
+            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            launch_if_missing=True,
+        )
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_update_manager.close.assert_called_once()
         fake_context.close.assert_called_once()
 
     def test_run_tk_hud_session_prepares_window_before_opening_tk(self) -> None:

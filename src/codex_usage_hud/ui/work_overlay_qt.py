@@ -29,6 +29,15 @@ WORK_OVERLAY_COMPLETED_BADGE_SIZE = 168
 WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT = 180
 WORK_OVERLAY_COMPLETED_BADGE_SPACING = 8
 WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS = 520
+WORK_OVERLAY_STACK_SPACING = 8
+WORK_OVERLAY_TRANSITION_CARD_HEIGHT = 110
+WORK_OVERLAY_TRANSITION_SHRINK_MS = 220
+WORK_OVERLAY_TRANSITION_PAUSE_MS = 140
+WORK_OVERLAY_TRANSITION_MOVE_MS = 280
+WORK_OVERLAY_TRANSITION_SHIFT_MS = 240
+WORK_OVERLAY_TRANSITION_CLEARANCE_PX = (
+    WORK_OVERLAY_COMPLETED_BADGE_SIZE + WORK_OVERLAY_COMPLETED_BADGE_SPACING
+)
 WORK_OVERLAY_SHIMMER_TIMER_MS = 30
 WORK_OVERLAY_SHIMMER_STEP_PX = 3.5
 WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX = 58
@@ -70,6 +79,337 @@ def _workdir_leaf(value: object) -> str:
 
 def _item_is_completed(item: Mapping[str, object]) -> bool:
     return str(item.get("status") or "") == "recent"
+
+
+OverlayRect = tuple[float, float, float, float]
+
+
+def _item_id(item: Mapping[str, object]) -> str:
+    return str(item.get("id") or "").strip()
+
+
+def _item_kind(item: Mapping[str, object]) -> str:
+    return "completed" if _item_is_completed(item) else "card"
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _ease_out_cubic(value: float) -> float:
+    value = _clamp01(value)
+    return 1.0 - pow(1.0 - value, 3)
+
+
+def _ease_in_out_cubic(value: float) -> float:
+    value = _clamp01(value)
+    if value < 0.5:
+        return 4.0 * value * value * value
+    return 1.0 - pow(-2.0 * value + 2.0, 3) / 2.0
+
+
+def _transition_total_ms() -> int:
+    return (
+        WORK_OVERLAY_TRANSITION_SHRINK_MS
+        + WORK_OVERLAY_TRANSITION_PAUSE_MS
+        + WORK_OVERLAY_TRANSITION_MOVE_MS
+    )
+
+
+def _detect_transition(
+    old_items: Sequence[Mapping[str, object]],
+    new_items: Sequence[Mapping[str, object]],
+) -> str | None:
+    old_by_id = {_item_id(item): item for item in old_items if _item_id(item)}
+    for item in new_items:
+        item_id = _item_id(item)
+        if not item_id or item_id not in old_by_id:
+            continue
+        old_kind = _item_kind(old_by_id[item_id])
+        new_kind = _item_kind(item)
+        if old_kind == "card" and new_kind == "completed":
+            return "card_to_completed"
+        if old_kind == "completed" and new_kind == "card":
+            return "completed_to_card"
+    return None
+
+
+def _detect_transition_item_id(
+    old_items: Sequence[Mapping[str, object]],
+    new_items: Sequence[Mapping[str, object]],
+) -> str:
+    old_by_id = {_item_id(item): item for item in old_items if _item_id(item)}
+    for item in new_items:
+        item_id = _item_id(item)
+        if item_id and item_id in old_by_id and _item_kind(old_by_id[item_id]) != _item_kind(item):
+            return item_id
+    return ""
+
+
+def _completed_badge_slot_rects(
+    items: Sequence[Mapping[str, object]],
+    *,
+    layout_width: int = WORK_OVERLAY_WIDTH,
+) -> dict[str, OverlayRect]:
+    completed_items = [item for item in items if _item_is_completed(item)]
+    row_width = _completed_badge_row_width(len(completed_items))
+    start_x = max(0, int(layout_width) - row_width)
+    rects: dict[str, OverlayRect] = {}
+    for index, item in enumerate(completed_items):
+        item_id = _item_id(item)
+        if not item_id:
+            continue
+        rects[item_id] = (
+            float(
+                start_x
+                + index
+                * (WORK_OVERLAY_COMPLETED_BADGE_SIZE + WORK_OVERLAY_COMPLETED_BADGE_SPACING)
+            ),
+            0.0,
+            float(WORK_OVERLAY_COMPLETED_BADGE_SIZE),
+            float(WORK_OVERLAY_COMPLETED_BADGE_SIZE),
+        )
+    return rects
+
+
+def _find_item_rect(
+    items: Sequence[Mapping[str, object]],
+    item_id: str,
+    kind: str,
+    *,
+    layout_width: int = WORK_OVERLAY_WIDTH,
+) -> OverlayRect:
+    if not item_id:
+        return (0.0, 0.0, 0.0, 0.0)
+    completed_items = [item for item in items if _item_is_completed(item)]
+    active_items = [item for item in items if not _item_is_completed(item)]
+    if kind == "completed":
+        return _completed_badge_slot_rects(items, layout_width=layout_width).get(
+            item_id,
+            (0.0, 0.0, 0.0, 0.0),
+        )
+
+    active_index = next(
+        (
+            idx
+            for idx, item in enumerate(active_items)
+            if _item_id(item) == item_id
+        ),
+        -1,
+    )
+    if active_index < 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    row_top = 0
+    if completed_items:
+        row_top += WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT + WORK_OVERLAY_STACK_SPACING
+    row_top += active_index * (WORK_OVERLAY_TRANSITION_CARD_HEIGHT + WORK_OVERLAY_STACK_SPACING)
+    x = max(0, int(layout_width) - WORK_OVERLAY_WIDTH)
+    return (
+        float(x),
+        float(row_top),
+        float(WORK_OVERLAY_WIDTH),
+        float(WORK_OVERLAY_TRANSITION_CARD_HEIGHT),
+    )
+
+
+def _find_item_position(
+    items: Sequence[Mapping[str, object]],
+    item_id: str,
+    kind: str,
+    *,
+    layout_width: int = WORK_OVERLAY_WIDTH,
+) -> tuple[int, int]:
+    rect = _find_item_rect(items, item_id, kind, layout_width=layout_width)
+    return int(rect[0]), int(rect[1])
+
+
+def _remembered_card_rect_for_layout(
+    rect: OverlayRect,
+    *,
+    layout_width: int = WORK_OVERLAY_WIDTH,
+) -> OverlayRect:
+    return (
+        float(max(0, int(layout_width) - int(rect[2]))),
+        rect[1],
+        rect[2],
+        rect[3],
+    )
+
+
+def _rect_center(rect: OverlayRect) -> tuple[float, float]:
+    return rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0
+
+
+def _rect_from_center(center_x: float, center_y: float, width: float, height: float) -> OverlayRect:
+    return (
+        center_x - width / 2.0,
+        center_y - height / 2.0,
+        width,
+        height,
+    )
+
+
+def _lerp(start: float, end: float, progress: float) -> float:
+    return start + (end - start) * progress
+
+
+def _lerp_rect(start: OverlayRect, end: OverlayRect, progress: float) -> OverlayRect:
+    progress = _clamp01(progress)
+    return (
+        _lerp(start[0], end[0], progress),
+        _lerp(start[1], end[1], progress),
+        _lerp(start[2], end[2], progress),
+        _lerp(start[3], end[3], progress),
+    )
+
+
+def _circle_rect_at_rect_center(rect: OverlayRect) -> OverlayRect:
+    center_x, center_y = _rect_center(rect)
+    size = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
+    return _rect_from_center(center_x, center_y, size, size)
+
+
+def _right_edge_circle_rect_for_rect(rect: OverlayRect) -> OverlayRect:
+    size = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
+    center_y = rect[1] + rect[3] / 2.0
+    top = max(0.0, center_y - size / 2.0)
+    return (
+        rect[0] + rect[2] - size,
+        top,
+        size,
+        size,
+    )
+
+
+def _transition_required_height(
+    transition_type: str,
+    source_rect: OverlayRect,
+    target_rect: OverlayRect,
+) -> int:
+    rects = [
+        source_rect,
+        target_rect,
+        _transition_rect_for_progress(transition_type, source_rect, target_rect, 0.0),
+        _transition_rect_for_progress(transition_type, source_rect, target_rect, 0.35),
+        _transition_rect_for_progress(transition_type, source_rect, target_rect, 0.75),
+        _transition_rect_for_progress(transition_type, source_rect, target_rect, 1.0),
+    ]
+    return max(1, int(math.ceil(max(rect[1] + rect[3] for rect in rects))))
+
+
+def _transition_rect_for_progress(
+    transition_type: str,
+    source_rect: OverlayRect,
+    target_rect: OverlayRect,
+    progress: float,
+) -> OverlayRect:
+    progress = _clamp01(progress)
+    total_ms = float(_transition_total_ms())
+    shrink_end = WORK_OVERLAY_TRANSITION_SHRINK_MS / total_ms
+    pause_end = (WORK_OVERLAY_TRANSITION_SHRINK_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS) / total_ms
+
+    if transition_type == "card_to_completed":
+        source_circle = _right_edge_circle_rect_for_rect(source_rect)
+        if progress <= shrink_end:
+            return _lerp_rect(source_rect, source_circle, _ease_out_cubic(progress / shrink_end))
+        if progress <= pause_end:
+            return source_circle
+        move_progress = (progress - pause_end) / max(0.001, 1.0 - pause_end)
+        return _lerp_rect(source_circle, target_rect, _ease_in_out_cubic(move_progress))
+
+    if transition_type == "completed_to_card":
+        target_circle = _right_edge_circle_rect_for_rect(target_rect)
+        move_end = WORK_OVERLAY_TRANSITION_MOVE_MS / total_ms
+        pause_end = (WORK_OVERLAY_TRANSITION_MOVE_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS) / total_ms
+        if progress <= move_end:
+            return _lerp_rect(source_rect, target_circle, _ease_in_out_cubic(progress / move_end))
+        if progress <= pause_end:
+            return target_circle
+        expand_progress = (progress - pause_end) / max(0.001, 1.0 - pause_end)
+        return _lerp_rect(target_circle, target_rect, _ease_out_cubic(expand_progress))
+
+    return source_rect
+
+
+def _transition_slot_shift_progress(transition_type: str, progress: float) -> float:
+    progress = _clamp01(progress)
+    total_ms = float(_transition_total_ms())
+    shrink_end = WORK_OVERLAY_TRANSITION_SHRINK_MS / total_ms
+    pause_end = (WORK_OVERLAY_TRANSITION_SHRINK_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS) / total_ms
+
+    if transition_type == "card_to_completed":
+        if progress <= shrink_end:
+            return 0.0
+        if progress <= pause_end:
+            return _ease_out_cubic(
+                (progress - shrink_end) / max(0.001, pause_end - shrink_end)
+            )
+        return 1.0
+
+    if transition_type == "completed_to_card":
+        move_end = WORK_OVERLAY_TRANSITION_MOVE_MS / total_ms
+        if progress <= move_end:
+            return _ease_out_cubic(progress / max(0.001, move_end))
+        return 1.0
+
+    return 1.0
+
+
+def _transition_clearance_offset(
+    transition_type: str,
+    progress: float,
+    *,
+    distance: float = float(WORK_OVERLAY_TRANSITION_CLEARANCE_PX),
+) -> float:
+    progress = _clamp01(progress)
+    total_ms = float(_transition_total_ms())
+
+    if transition_type == "card_to_completed":
+        shrink_end = WORK_OVERLAY_TRANSITION_SHRINK_MS / total_ms
+        pause_end = (WORK_OVERLAY_TRANSITION_SHRINK_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS) / total_ms
+        if progress <= shrink_end:
+            return 0.0
+        if progress <= pause_end:
+            shift = _ease_out_cubic(
+                (progress - shrink_end) / max(0.001, pause_end - shrink_end)
+            )
+            return -distance * shift
+        return_start = pause_end + (1.0 - pause_end) * 0.72
+        if progress <= return_start:
+            return -distance
+        rebound = _ease_out_cubic((progress - return_start) / max(0.001, 1.0 - return_start))
+        return -distance * (1.0 - rebound)
+
+    if transition_type == "completed_to_card":
+        move_end = WORK_OVERLAY_TRANSITION_MOVE_MS / total_ms
+        pause_end = (WORK_OVERLAY_TRANSITION_MOVE_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS) / total_ms
+        lead_in_end = min(move_end, 0.18)
+        if progress <= lead_in_end:
+            lead_in = _ease_out_cubic(progress / max(0.001, lead_in_end))
+            return -distance * lead_in
+        if progress <= move_end:
+            return -distance
+        if progress <= pause_end:
+            rebound = _ease_out_cubic((progress - move_end) / max(0.001, pause_end - move_end))
+            return -distance * (1.0 - rebound)
+        return 0.0
+
+    return 0.0
+
+
+def _completed_badge_slot_moves(
+    old_items: Sequence[Mapping[str, object]],
+    new_items: Sequence[Mapping[str, object]],
+    *,
+    layout_width: int = WORK_OVERLAY_WIDTH,
+) -> dict[str, tuple[OverlayRect, OverlayRect]]:
+    old_rects = _completed_badge_slot_rects(old_items, layout_width=layout_width)
+    new_rects = _completed_badge_slot_rects(new_items, layout_width=layout_width)
+    return {
+        item_id: (old_rects[item_id], new_rects[item_id])
+        for item_id in old_rects.keys() & new_rects.keys()
+        if old_rects[item_id] != new_rects[item_id]
+    }
 
 
 def _overlay_item_timestamp_seconds(
@@ -699,11 +1039,17 @@ def run_work_overlay_helper_qt(
     class CompletedBadgeWidget(QWidget):
         """Animated green circular summary for finished work."""
 
-        def __init__(self, item: Mapping[str, object], parent: QWidget | None = None) -> None:
+        def __init__(
+            self,
+            item: Mapping[str, object],
+            parent: QWidget | None = None,
+            *,
+            animate_intro: bool = True,
+        ) -> None:
             super().__init__(parent)
             self._item: Mapping[str, object] = dict(item)
             self._started_at = time.monotonic()
-            self._progress = 0.0
+            self._progress = 0.0 if animate_intro else 1.0
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._advance)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -713,7 +1059,8 @@ def run_work_overlay_helper_qt(
                 WORK_OVERLAY_COMPLETED_BADGE_SIZE,
                 WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
             )
-            self._timer.start(16)
+            if animate_intro:
+                self._timer.start(16)
 
         def set_item(self, item: Mapping[str, object]) -> None:
             self._item = dict(item)
@@ -812,9 +1159,10 @@ def run_work_overlay_helper_qt(
                     radius=78.0,
                     start_degrees=145.0,
                     end_degrees=35.0,
-                    font=QFont("Microsoft YaHei UI", 7),
-                    color=QColor("#BFF8D1"),
+                    font=QFont("Microsoft YaHei UI", 9),
+                    color=QColor("#9CCBFF"),
                     bottom=True,
+                    compact_spacing=True,
                 )
 
             check_font = QFont("Segoe UI Symbol", 38, QFont.Weight.Bold)
@@ -887,6 +1235,7 @@ def run_work_overlay_helper_qt(
             font: QFont,
             color: QColor,
             bottom: bool,
+            compact_spacing: bool = False,
         ) -> None:
             span = abs(end_degrees - start_degrees)
             max_width = math.radians(span) * radius * 0.86
@@ -898,10 +1247,15 @@ def run_work_overlay_helper_qt(
             painter.setPen(color)
             metrics = painter.fontMetrics()
             widths = [max(1, metrics.horizontalAdvance(char)) for char in arc_text]
-            total_width = sum(widths)
-            degrees_per_px = span / max(1.0, total_width)
+            total_width = float(sum(widths))
+            tracking_px = 0.0
+            layout_width = total_width + tracking_px * max(0, len(widths) - 1)
+            effective_span = span
+            if compact_spacing:
+                effective_span = min(span, math.degrees(layout_width / max(1.0, radius)))
+            degrees_per_px = effective_span / max(1.0, layout_width)
             direction = 1.0 if end_degrees >= start_degrees else -1.0
-            current = start_degrees + direction * ((span - total_width * degrees_per_px) / 2.0)
+            current = start_degrees + direction * ((span - effective_span) / 2.0)
             for char, width in zip(arc_text, widths):
                 angle = current + direction * (width * degrees_per_px / 2.0)
                 radians = math.radians(angle)
@@ -917,8 +1271,135 @@ def run_work_overlay_helper_qt(
                     char,
                 )
                 painter.restore()
-                current += direction * width * degrees_per_px
+                current += direction * (width + tracking_px) * degrees_per_px
             painter.restore()
+
+    class TransitionOverlay(QWidget):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
+            self._progress = 0.0
+            self._transition_type = ""
+            self._source_rect = QRectF()
+            self._target_rect = QRectF()
+            self._item: Mapping[str, object] = {}
+
+        def set_transition(
+            self,
+            transition_type: str,
+            source_rect: QRectF,
+            target_rect: QRectF,
+            item: Mapping[str, object],
+        ) -> None:
+            self._transition_type = transition_type
+            self._source_rect = QRectF(source_rect)
+            self._target_rect = QRectF(target_rect)
+            self._item = dict(item)
+            self._progress = 0.0
+            self.update()
+
+        def set_progress(self, progress: float) -> None:
+            self._progress = max(0.0, min(1.0, progress))
+            self.update()
+
+        def paintEvent(self, event: object) -> None:
+            del event
+            if self._transition_type not in ("card_to_completed", "completed_to_card"):
+                return
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            source_rect = (
+                self._source_rect.x(),
+                self._source_rect.y(),
+                self._source_rect.width(),
+                self._source_rect.height(),
+            )
+            target_rect = (
+                self._target_rect.x(),
+                self._target_rect.y(),
+                self._target_rect.width(),
+                self._target_rect.height(),
+            )
+            current = _transition_rect_for_progress(
+                self._transition_type,
+                source_rect,
+                target_rect,
+                self._progress,
+            )
+            current_rect = QRectF(*current)
+            radius = min(current_rect.width(), current_rect.height()) / 2
+            gradient = QLinearGradient(current_rect.topLeft(), current_rect.bottomRight())
+            if self._transition_type == "completed_to_card":
+                gradient.setColorAt(0.0, QColor("#73BEFF"))
+                gradient.setColorAt(0.5, QColor("#357FCE"))
+                gradient.setColorAt(1.0, QColor("#164A87"))
+                pen_color = QColor("#9CCBFF")
+            else:
+                gradient.setColorAt(0.0, QColor("#49E07D"))
+                gradient.setColorAt(0.5, QColor("#1FA85A"))
+                gradient.setColorAt(1.0, QColor("#0A5B35"))
+                pen_color = QColor("#93F0AF")
+            painter.setBrush(gradient)
+            painter.setPen(QPen(pen_color, 1.4))
+            painter.drawRoundedRect(current_rect, radius, radius)
+
+            if self._transition_type == "card_to_completed" and self._progress < 0.24:
+                title = _compact_work_text(self._item.get("title") or "Codex 工作", 42)
+                elapsed = _compact_work_text(self._item.get("elapsedText") or "已处理 --", 24)
+                painter.save()
+                painter.setOpacity(1.0 - self._progress / 0.24)
+                painter.setPen(QColor("#D9FBE2"))
+                painter.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
+                painter.drawText(
+                    current_rect.adjusted(12.0, 10.0, -12.0, -62.0),
+                    alignment.AlignLeft | alignment.AlignVCenter,
+                    title,
+                )
+                painter.setPen(QColor("#A9E8B9"))
+                painter.setFont(QFont("Microsoft YaHei UI", 8))
+                painter.drawText(
+                    current_rect.adjusted(12.0, 42.0, -12.0, -18.0),
+                    alignment.AlignLeft | alignment.AlignVCenter,
+                    elapsed,
+                )
+                painter.restore()
+
+            if self._transition_type == "completed_to_card" and self._progress > 0.76:
+                title = _compact_work_text(self._item.get("title") or "Codex 工作", 42)
+                elapsed = _compact_work_text(self._item.get("elapsedText") or "已处理 --", 24)
+                painter.save()
+                painter.setOpacity(min(1.0, (self._progress - 0.76) / 0.24))
+                painter.setPen(QColor("#E4F2FF"))
+                painter.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
+                painter.drawText(
+                    current_rect.adjusted(12.0, 10.0, -12.0, -62.0),
+                    alignment.AlignLeft | alignment.AlignVCenter,
+                    title,
+                )
+                painter.setPen(QColor("#B8D9FF"))
+                painter.setFont(QFont("Microsoft YaHei UI", 8))
+                painter.drawText(
+                    current_rect.adjusted(12.0, 42.0, -12.0, -18.0),
+                    alignment.AlignLeft | alignment.AlignVCenter,
+                    elapsed,
+                )
+                painter.restore()
+
+            check_visible = (
+                self._transition_type == "card_to_completed"
+                and self._progress >= 0.24
+            ) or (
+                self._transition_type == "completed_to_card"
+                and self._progress <= 0.76
+            )
+            if check_visible:
+                check_font = QFont("Segoe UI Symbol", 24, QFont.Weight.Bold)
+                painter.setFont(check_font)
+                painter.setPen(QColor("#F8FFF9"))
+                mark = "↻" if self._transition_type == "completed_to_card" else "✓"
+                painter.drawText(current_rect, Qt.AlignmentFlag.AlignCenter, mark)
 
     class OverlayWindow(QWidget):
         def __init__(self) -> None:
@@ -935,6 +1416,7 @@ def run_work_overlay_helper_qt(
             self._last_payload_signature = ""
             self._last_structure_signature = ""
             self._raw_items: list[Mapping[str, object]] = []
+            self._previous_visible_items: list[Mapping[str, object]] = []
             self._command_path = _work_overlay_command_path(path)
             self._item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
             self._close_windows: list[CloseButtonWindow] = []
@@ -949,6 +1431,18 @@ def run_work_overlay_helper_qt(
             self._empty_since = 0.0
             self._state_read_failed_at = 0.0
             self._layout_width = WORK_OVERLAY_WIDTH
+            self._transition_in_progress = False
+            self._transition_type = ""
+            self._transition_item_id = ""
+            self._transition_started_at = 0.0
+            self._transition_widget: TransitionOverlay | None = None
+            self._transition_hidden_widget: QWidget | None = None
+            self._completed_badge_moves: list[tuple[QWidget, int, int]] = []
+            self._card_clearance_moves: list[tuple[QWidget, int]] = []
+            self._completed_card_memory_rects: dict[str, OverlayRect] = {}
+            self._settled_completed_intro_ids: set[str] = set()
+            self._transition_timer = QTimer(self)
+            self._transition_timer.timeout.connect(self._update_transition)
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -1166,7 +1660,11 @@ def run_work_overlay_helper_qt(
             parent: QWidget,
             row_layout: QHBoxLayout,
         ) -> None:
-            badge = CompletedBadgeWidget(item, parent)
+            item_id = _item_id(item)
+            animate_intro = item_id not in self._settled_completed_intro_ids
+            badge = CompletedBadgeWidget(item, parent, animate_intro=animate_intro)
+            if item_id:
+                self._settled_completed_intro_ids.add(item_id)
             hover_anchor = QWidget(badge)
             hover_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             hover_anchor.setFixedSize(
@@ -1188,6 +1686,7 @@ def run_work_overlay_helper_qt(
             row_layout.addWidget(badge, 0, alignment.AlignRight)
             record = {
                 "kind": "completed",
+                "item_id": item_id,
                 "badge": badge,
                 "hover_anchor": hover_anchor,
                 "workdir_anchor": workdir_anchor,
@@ -1269,6 +1768,15 @@ def run_work_overlay_helper_qt(
             status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
             footer_layout.addWidget(status_label, 1)
 
+            round_badge = QLabel("", footer_container)
+            round_badge.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            round_badge.setTextFormat(text_format.PlainText)
+            round_badge.setAlignment(alignment.AlignCenter)
+            round_badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            round_badge.setFont(QFont("Microsoft YaHei UI", 6, QFont.Weight.Bold))
+            round_badge.setFixedHeight(18)
+            round_badge.setVisible(False)
+
             workdir_label = QLabel("", footer_container)
             workdir_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             workdir_label.setWordWrap(False)
@@ -1286,17 +1794,20 @@ def run_work_overlay_helper_qt(
                 "}"
             )
             footer_layout.addWidget(workdir_label, 0)
+            footer_layout.addWidget(round_badge, 0)
 
             card_layout.addWidget(footer_container)
             self._shell.layout().addWidget(card, 0, alignment.AlignRight)
 
             record = {
                 "kind": "card",
+                "item_id": _item_id(item),
                 "card": card,
                 "header": header,
                 "detail": detail,
                 "footer_container": footer_container,
                 "status_label": status_label,
+                "round_badge": round_badge,
                 "workdir_label": workdir_label,
                 "close_anchor": close_anchor,
             }
@@ -1332,6 +1843,30 @@ def run_work_overlay_helper_qt(
                 "background: transparent;"
                 "}"
             )
+
+            round_badge = record["round_badge"]
+            round_index = max(0, int(item.get("roundIndex") or 0))
+            badge_visible = status != "recent" and round_index > 0
+            if badge_visible:
+                round_badge.setText(str(round_index))
+                round_badge.setToolTip(f"当前第 {round_index} 轮")
+                round_badge.setStyleSheet(
+                    "QLabel {"
+                    "color: #FFFFFF;"
+                    "background-color: #FA5151;"
+                    "border: 1px solid rgba(255, 255, 255, 0.14);"
+                    "border-radius: 9px;"
+                    "padding: 0 6px;"
+                    "}"
+                )
+                round_badge.adjustSize()
+                round_badge.setFixedWidth(max(18, round_badge.sizeHint().width()))
+                round_badge.setVisible(True)
+            else:
+                round_badge.setText("")
+                round_badge.setToolTip("")
+                round_badge.setFixedWidth(18)
+                round_badge.setVisible(False)
 
             body_text = str(item.get("lastText") or item.get("detail") or "").strip()
             detail = record["detail"]
@@ -1393,6 +1928,238 @@ def run_work_overlay_helper_qt(
             if workdir_clickable:
                 self._workdir_anchors.append((record["workdir_label"], dict(item)))
 
+        def _widget_shell_rect(self, widget: QWidget) -> QRectF:
+            top_left = widget.mapTo(self._shell, QPoint(0, 0))
+            return QRectF(
+                float(top_left.x()),
+                float(top_left.y()),
+                float(max(1, widget.width())),
+                float(max(1, widget.height())),
+            )
+
+        def _record_widget_for_kind(
+            self,
+            item_id: str,
+            kind: str,
+        ) -> QWidget | None:
+            for record in self._item_widgets:
+                if record.get("kind") == kind and str(record.get("item_id") or "") == item_id:
+                    widget = record.get("card") if kind == "card" else record.get("badge")
+                    if isinstance(widget, QWidget):
+                        return widget
+            return None
+
+        def _prepare_completed_badge_moves(
+            self,
+            old_items: list[Mapping[str, object]],
+            new_items: list[Mapping[str, object]],
+            source_rect: QRectF,
+            target_rect: QRectF,
+        ) -> None:
+            moves = _completed_badge_slot_moves(
+                old_items,
+                new_items,
+                layout_width=self._layout_width,
+            )
+            self._completed_badge_moves = []
+            for record in self._item_widgets:
+                if record.get("kind") != "completed":
+                    continue
+                item_id = str(record.get("item_id") or "")
+                if item_id == self._transition_item_id or item_id not in moves:
+                    continue
+                widget = record.get("badge")
+                if not isinstance(widget, QWidget):
+                    continue
+                start_slot_rect, target_slot_rect = moves[item_id]
+                start_x = int(round(start_slot_rect[0]))
+                target_x = int(round(target_slot_rect[0]))
+                widget.move(start_x, widget.y())
+                self._completed_badge_moves.append((widget, start_x, target_x))
+            self._card_clearance_moves = []
+            source_circle = QRectF(
+                *_right_edge_circle_rect_for_rect(
+                    (
+                        source_rect.x(),
+                        source_rect.y(),
+                        source_rect.width(),
+                        source_rect.height(),
+                    )
+                )
+            )
+            path_top = min(source_circle.top(), target_rect.top())
+            path_bottom = max(source_circle.bottom(), target_rect.bottom())
+            path_left = min(source_circle.left(), target_rect.left())
+            path_right = max(source_circle.right(), target_rect.right())
+            for record in self._item_widgets:
+                if record.get("kind") != "card":
+                    continue
+                item_id = str(record.get("item_id") or "")
+                if item_id == self._transition_item_id:
+                    continue
+                widget = record.get("card")
+                if not isinstance(widget, QWidget):
+                    continue
+                rect = self._widget_shell_rect(widget)
+                overlaps_path = (
+                    rect.right() > path_left
+                    and rect.left() < path_right
+                    and rect.bottom() > path_top
+                    and rect.top() < path_bottom
+                )
+                if not overlaps_path:
+                    continue
+                self._card_clearance_moves.append((widget, widget.x()))
+
+        def _remembered_card_rect(self, item_id: str) -> OverlayRect | None:
+            rect = self._completed_card_memory_rects.get(item_id)
+            if rect is None:
+                return None
+            return _remembered_card_rect_for_layout(rect, layout_width=self._layout_width)
+
+        def _hide_transition_interactive_windows(self) -> None:
+            for window in [*self._close_windows, *self._completed_check_windows]:
+                window.hide()
+
+        def _start_transition(
+            self,
+            transition_type: str,
+            item_id: str,
+            old_items: list[Mapping[str, object]],
+            new_items: list[Mapping[str, object]],
+        ) -> None:
+            self._transition_in_progress = True
+            self._transition_type = transition_type
+            self._transition_item_id = item_id
+            self._transition_started_at = time.monotonic()
+            source_kind = "card" if transition_type == "card_to_completed" else "completed"
+            target_kind = "completed" if transition_type == "card_to_completed" else "card"
+            source_widget = self._record_widget_for_kind(item_id, source_kind)
+            source_rect = (
+                self._widget_shell_rect(source_widget)
+                if source_widget is not None
+                else QRectF(
+                    *_find_item_rect(
+                        old_items,
+                        item_id,
+                        source_kind,
+                        layout_width=self._layout_width,
+                    )
+                )
+            )
+            target_rect = QRectF(
+                *_find_item_rect(
+                    new_items,
+                    item_id,
+                    target_kind,
+                    layout_width=self._layout_width,
+                )
+            )
+            if transition_type == "card_to_completed":
+                self._completed_card_memory_rects[item_id] = (
+                    source_rect.x(),
+                    source_rect.y(),
+                    source_rect.width(),
+                    source_rect.height(),
+                )
+            elif transition_type == "completed_to_card":
+                remembered_rect = self._remembered_card_rect(item_id)
+                if remembered_rect is not None:
+                    target_rect = QRectF(*remembered_rect)
+            required_height = _transition_required_height(
+                transition_type,
+                (
+                    source_rect.x(),
+                    source_rect.y(),
+                    source_rect.width(),
+                    source_rect.height(),
+                ),
+                (
+                    target_rect.x(),
+                    target_rect.y(),
+                    target_rect.width(),
+                    target_rect.height(),
+                ),
+            )
+            self._shell.setMinimumHeight(max(self._shell.minimumHeight(), required_height))
+            self._sync_overlay_geometry()
+            item = {}
+            for it in old_items:
+                if _item_id(it) == item_id:
+                    item = it
+                    break
+            if not item:
+                for it in new_items:
+                    if _item_id(it) == item_id:
+                        item = it
+                        break
+            if self._transition_widget is None:
+                self._transition_widget = TransitionOverlay(self._shell)
+            self._transition_widget.setGeometry(self._shell.rect())
+            self._transition_widget.show()
+            self._transition_widget.raise_()
+            self._transition_widget.set_transition(
+                transition_type,
+                source_rect,
+                target_rect,
+                item,
+            )
+            self._transition_hidden_widget = None
+            if source_widget is not None:
+                self._transition_hidden_widget = source_widget
+                source_widget.hide()
+            self._hide_transition_interactive_windows()
+            self._prepare_completed_badge_moves(old_items, new_items, source_rect, target_rect)
+            self._transition_timer.start(16)
+
+        def _update_transition(self) -> None:
+            if not self._transition_in_progress:
+                return
+            elapsed_ms = int(max(0.0, (time.monotonic() - self._transition_started_at) * 1000.0))
+            total_duration = _transition_total_ms()
+            progress = min(1.0, elapsed_ms / max(1, total_duration))
+            if self._transition_widget is not None:
+                self._transition_widget.set_progress(progress)
+            self._update_completed_badge_moves(progress)
+            if progress >= 1.0:
+                self._end_transition()
+
+        def _update_completed_badge_moves(self, progress: float) -> None:
+            shift_progress = _transition_slot_shift_progress(self._transition_type, progress)
+            for widget, start_x, target_x in self._completed_badge_moves:
+                widget.move(int(round(_lerp(start_x, target_x, shift_progress))), widget.y())
+            clearance_offset = _transition_clearance_offset(self._transition_type, progress)
+            for widget, start_x in self._card_clearance_moves:
+                widget.move(int(round(start_x + clearance_offset)), widget.y())
+
+        def _end_transition(self) -> None:
+            finished_transition_type = self._transition_type
+            finished_item_id = self._transition_item_id
+            completed_ids = {
+                _item_id(item)
+                for item in self._raw_items
+                if _item_id(item) and _item_is_completed(item)
+            }
+            self._settled_completed_intro_ids.update(completed_ids)
+            self._transition_in_progress = False
+            self._transition_type = ""
+            self._transition_item_id = ""
+            self._transition_started_at = 0.0
+            self._completed_badge_moves.clear()
+            self._card_clearance_moves.clear()
+            self._transition_timer.stop()
+            if self._transition_widget is not None:
+                self._transition_widget.setParent(None)
+                self._transition_widget.deleteLater()
+                self._transition_widget = None
+            self._transition_hidden_widget = None
+            self._shell.setMinimumHeight(0)
+            if finished_transition_type == "completed_to_card":
+                self._completed_card_memory_rects.pop(finished_item_id, None)
+            self._last_payload_signature = ""
+            self._last_structure_signature = ""
+            self.render_items(self._raw_items)
+
         def _sync_overlay_geometry(self) -> None:
             layout_width = max(WORK_OVERLAY_WIDTH, int(self._layout_width))
             self._shell.setFixedWidth(layout_width)
@@ -1423,9 +2190,16 @@ def run_work_overlay_helper_qt(
                 max_y = max(geometry.top(), geometry.bottom() - final_height - WORK_OVERLAY_MARGIN)
                 y = min(geometry.top() + WORK_OVERLAY_TOP_OFFSET, max_y)
                 self.setGeometry(x, y, layout_width, final_height)
+            if self._transition_widget is not None:
+                self._transition_widget.setGeometry(self._shell.rect())
+                self._transition_widget.show()
+                self._transition_widget.raise_()
             QTimer.singleShot(0, self.reposition_interactive_windows)
 
         def render_items(self, items: Sequence[Mapping[str, object]]) -> None:
+            if self._transition_in_progress:
+                self._raw_items = list(items)
+                return
             self._raw_items = list(items)
             ordered_items = _ordered_overlay_items(self._raw_items)
             visible_items = _visible_overlay_items(
@@ -1447,6 +2221,7 @@ def run_work_overlay_helper_qt(
                 self._layout_width = WORK_OVERLAY_WIDTH
                 self._clear_shell()
                 self.hide_overlay()
+                self._previous_visible_items = []
                 return
             self._empty_since = 0.0
             completed_count = sum(1 for item in visible_items if _item_is_completed(item))
@@ -1454,9 +2229,29 @@ def run_work_overlay_helper_qt(
                 WORK_OVERLAY_WIDTH,
                 _completed_badge_row_width(completed_count),
             )
+            visible_completed_ids = {
+                _item_id(item)
+                for item in visible_items
+                if _item_id(item) and _item_is_completed(item)
+            }
+            self._settled_completed_intro_ids.intersection_update(visible_completed_ids)
             payload_signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
             if payload_signature == self._last_payload_signature:
                 return
+            transition = _detect_transition(self._previous_visible_items, visible_items)
+            if transition is not None:
+                item_id = _detect_transition_item_id(self._previous_visible_items, visible_items)
+                if item_id:
+                    self._sync_overlay_geometry()
+                    self._start_transition(
+                        transition,
+                        item_id,
+                        self._previous_visible_items,
+                        visible_items,
+                    )
+                    self._previous_visible_items = list(visible_items)
+                    return
+            self._previous_visible_items = list(visible_items)
             self._last_payload_signature = payload_signature
 
             structure_signature = json.dumps(
