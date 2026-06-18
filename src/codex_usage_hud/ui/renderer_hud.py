@@ -2982,8 +2982,11 @@ RENDERER_HUD_SCRIPT = r"""
     const available = Math.max(1, viewport.clientWidth || viewport.getBoundingClientRect().width || 0);
     const gapStyle = getComputedStyle(node);
     const gap = Number.parseFloat(gapStyle.columnGap || gapStyle.gap || "0") || 0;
+    const collapsedTailPeekWidth = 40;
+    const remainingAfterSession = Math.max(0, available - widths[0] - (gap * Math.max(0, rails.length - 1)));
+    const tailShare = remainingAfterSession / Math.max(1, rails.length - 1);
     const required = widths.reduce((sum, width) => sum + width, 0) + (gap * Math.max(0, rails.length - 1));
-    if (required <= available + 1) {
+    if (required <= available + 1 || tailShare > collapsedTailPeekWidth) {
       clearCollapsedProgressStrip(node);
       delete node.dataset.layoutSignature;
       rails[0].style.width = `${widths[0]}px`;

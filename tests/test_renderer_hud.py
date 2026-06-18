@@ -197,6 +197,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-progress-size-probe", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-total", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function refreshCollapsedProgressStrip(node)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const collapsedTailPeekWidth = 40;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("tailShare > collapsedTailPeekWidth", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn(
             "grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1fr);",
             renderer_hud.RENDERER_HUD_SCRIPT,
