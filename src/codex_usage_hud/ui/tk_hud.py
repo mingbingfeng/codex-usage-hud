@@ -795,6 +795,8 @@ def _win32_region_api() -> _Win32RegionApi | None:
         gdi32.CreateRoundRectRgn.restype = hrgn_type
         gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
         gdi32.DeleteObject.restype = wintypes.BOOL
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindow.restype = wintypes.BOOL
         user32.SetWindowRgn.argtypes = [
             wintypes.HWND,
             hrgn_type,
@@ -2389,6 +2391,10 @@ class RoundedHudShell(tk.Frame):
     def _apply_window_region(self, width: int, height: int) -> None:
         if not sys.platform.startswith("win"):
             return
+        width = int(width or 0)
+        height = int(height or 0)
+        if width <= 0 or height <= 0:
+            return
         key = (width, height, self._radius)
         if self._region_key == key:
             return
@@ -2398,7 +2404,13 @@ class RoundedHudShell(tk.Frame):
             api = _win32_region_api()
             if api is None:
                 return
-            hwnd = api.wintypes.HWND(int(self.winfo_toplevel().winfo_id()))
+            toplevel = self.winfo_toplevel()
+            if not int(toplevel.winfo_exists()):
+                return
+            hwnd_value = int(toplevel.winfo_id() or 0)
+            hwnd = api.wintypes.HWND(hwnd_value)
+            if not hwnd_value or not api.user32.IsWindow(hwnd):
+                return
             if self._radius <= 0:
                 region = api.gdi32.CreateRectRgn(0, 0, width + 1, height + 1)
             else:

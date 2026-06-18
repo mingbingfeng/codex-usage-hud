@@ -113,6 +113,8 @@ DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
 RENDERER_UPDATE_FAILURE_LIMIT = 6
 AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT = 3
 RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
+CRASH_DIAGNOSTIC_FILENAME = "crash.log"
+CRASH_DIAGNOSTICS_ENV = "CODEX_USAGE_HUD_CRASH_DIAGNOSTICS"
 CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
 CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
 CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
@@ -131,6 +133,7 @@ WORK_OVERLAY_HOVER_ALPHA = 0.52
 WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
+_CRASH_DIAGNOSTIC_FILE: Any | None = None
 
 
 class HudAlreadyRunningError(RuntimeError):
@@ -1146,6 +1149,38 @@ def renderer_diagnostic_path() -> Path:
     return hud_runtime_dir() / RENDERER_DIAGNOSTIC_FILENAME
 
 
+def crash_diagnostic_path() -> Path:
+    """Return the fatal-crash diagnostics path."""
+    return hud_runtime_dir() / CRASH_DIAGNOSTIC_FILENAME
+
+
+def _enable_crash_diagnostics() -> Path | None:
+    """Enable faulthandler so native ctypes crashes leave a Python stack."""
+    global _CRASH_DIAGNOSTIC_FILE
+    setting = os.environ.get(CRASH_DIAGNOSTICS_ENV, "").strip().lower()
+    if setting in {"0", "false", "no", "off"}:
+        return None
+    if not sys.platform.startswith("win"):
+        return None
+    if _CRASH_DIAGNOSTIC_FILE is not None:
+        return crash_diagnostic_path()
+    try:
+        import faulthandler
+
+        path = crash_diagnostic_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a", encoding="utf-8", buffering=1)
+        handle.write(
+            "\n--- codex-usage-hud crash diagnostics enabled "
+            f"pid={os.getpid()} time={datetime.now().astimezone().isoformat()} ---\n"
+        )
+        faulthandler.enable(file=handle, all_threads=True)
+        _CRASH_DIAGNOSTIC_FILE = handle
+        return path
+    except Exception:
+        return None
+
+
 def _append_renderer_diagnostic(stage: str, **fields: object) -> None:
     """Persist one renderer fallback diagnostic record for postmortems."""
     path = renderer_diagnostic_path()
@@ -1422,12 +1457,8 @@ def _build_session_switch_controller(
     prefer_native_search: bool,
 ) -> SessionSwitchController:
     cdp = CdpSessionSwitchBackend(timeout_seconds=RENDERER_CDP_TIMEOUT_SECONDS)
-    native_enabled = os.environ.get(NATIVE_SEARCH_SESSION_SWITCH_ENV, "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    native_setting = os.environ.get(NATIVE_SEARCH_SESSION_SWITCH_ENV, "").strip().lower()
+    native_enabled = native_setting not in {"0", "false", "no", "off"}
     backends: list[object] = [cdp]
     if native_enabled:
         native = WindowsSearchSessionSwitchBackend(platform)
@@ -3898,6 +3929,7 @@ def run_daemon(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI entry point."""
     configure_stdout()
+    _enable_crash_diagnostics()
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "loading_feedback_helper", False):

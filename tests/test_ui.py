@@ -42,6 +42,8 @@ from codex_usage_hud.cli import (
     _VisibleAppErrorCache,
     _TkSnapshotPump,
     _apply_visible_app_error,
+    _build_session_switch_controller,
+    _enable_crash_diagnostics,
     active_work_items_for_snapshot,
     _prepare_codex_window_for_renderer,
     _prepare_codex_window_for_tk,
@@ -65,6 +67,11 @@ from codex_usage_hud.cli import (
     stop_running_hud,
     usage_before_today_in_week,
     _work_overlay_header_text,
+)
+from codex_usage_hud.platforms.session_switch import (
+    SessionSwitchController,
+    SessionSwitchRequest,
+    SessionSwitchResult,
 )
 from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
@@ -688,6 +695,88 @@ class BudgetHelperTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(overlay.take_commands(), [])
+
+    def test_work_overlay_session_switch_uses_search_fallback_by_default(self) -> None:
+        class FakeCdpBackend:
+            name = "cdp"
+
+            def __init__(self, *, timeout_seconds: float) -> None:
+                self.timeout_seconds = timeout_seconds
+
+        class FakeNativeBackend:
+            name = "windows-search"
+
+            def __init__(self, platform: object) -> None:
+                self.platform = platform
+
+        with patch("codex_usage_hud.cli.CdpSessionSwitchBackend", FakeCdpBackend), patch(
+            "codex_usage_hud.cli.WindowsSearchSessionSwitchBackend",
+            FakeNativeBackend,
+        ), patch.dict(os.environ, {"CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH": ""}, clear=False):
+            controller = _build_session_switch_controller(
+                SimpleNamespace(),
+                prefer_native_search=False,
+            )
+            self.assertEqual(
+                [backend.name for backend in controller._backends],
+                ["cdp", "windows-search"],
+            )
+
+            native_first = _build_session_switch_controller(
+                SimpleNamespace(),
+                prefer_native_search=True,
+            )
+            self.assertEqual(
+                [backend.name for backend in native_first._backends],
+                ["windows-search", "cdp"],
+            )
+
+        with patch("codex_usage_hud.cli.CdpSessionSwitchBackend", FakeCdpBackend), patch(
+            "codex_usage_hud.cli.WindowsSearchSessionSwitchBackend",
+            FakeNativeBackend,
+        ), patch.dict(os.environ, {"CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH": "off"}, clear=False):
+            disabled = _build_session_switch_controller(
+                SimpleNamespace(),
+                prefer_native_search=False,
+            )
+            self.assertEqual([backend.name for backend in disabled._backends], ["cdp"])
+
+    def test_session_switch_controller_continues_after_backend_exception(self) -> None:
+        class FailingBackend:
+            name = "cdp"
+
+            def activate(self, request: SessionSwitchRequest) -> SessionSwitchResult:
+                del request
+                raise RuntimeError("boom")
+
+        class FallbackBackend:
+            name = "windows-search"
+
+            def activate(self, request: SessionSwitchRequest) -> SessionSwitchResult:
+                return SessionSwitchResult(
+                    ok=True,
+                    status="switched",
+                    backend=self.name,
+                    requested_session_id=request.session_id,
+                    requested_title=request.title,
+                    active_title=request.title,
+                )
+
+        controller = SessionSwitchController([FailingBackend(), FallbackBackend()])
+
+        result = controller.activate_session(session_id="thread-1", title="Thread One")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.backend, "windows-search")
+        self.assertEqual(result.active_title, "Thread One")
+
+    def test_crash_diagnostics_can_be_disabled(self) -> None:
+        with patch.object(sys, "platform", "win32"), patch.dict(
+            os.environ,
+            {"CODEX_USAGE_HUD_CRASH_DIAGNOSTICS": "off"},
+            clear=False,
+        ):
+            self.assertIsNone(_enable_crash_diagnostics())
 
     def test_work_overlay_dismissal_stays_hidden_until_next_task(self) -> None:
         original = {
@@ -1971,7 +2060,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                     DeleteObject=FakeFunction(),
                 )
             elif name == "user32":
-                dll = SimpleNamespace(SetWindowRgn=FakeFunction())
+                dll = SimpleNamespace(IsWindow=FakeFunction(), SetWindowRgn=FakeFunction())
             else:
                 raise OSError(name)
             dlls[name] = dll
@@ -2008,6 +2097,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         self.assertIs(dlls["gdi32"].CreateRoundRectRgn.restype, wintypes.HANDLE)
         self.assertEqual(dlls["gdi32"].DeleteObject.argtypes, [wintypes.HANDLE])
         self.assertIs(dlls["gdi32"].DeleteObject.restype, wintypes.BOOL)
+        self.assertEqual(dlls["user32"].IsWindow.argtypes, [wintypes.HWND])
+        self.assertIs(dlls["user32"].IsWindow.restype, wintypes.BOOL)
         self.assertEqual(
             dlls["user32"].SetWindowRgn.argtypes,
             [wintypes.HWND, wintypes.HANDLE, wintypes.BOOL],

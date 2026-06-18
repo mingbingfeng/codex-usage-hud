@@ -566,6 +566,81 @@ def run_work_overlay_helper_qt(
             painter.setBrush(fill)
             painter.drawRoundedRect(self.rect(), 4, 4)
 
+    class ClickHotspotWindow(QWidget):
+        def __init__(
+            self,
+            callback: Callable[[Mapping[str, object]], None],
+            *,
+            circle: bool = False,
+            hover_color: str = "#9CCBFF",
+        ) -> None:
+            flags = (
+                window_type.Tool
+                | window_type.FramelessWindowHint
+                | window_type.WindowStaysOnTopHint
+            )
+            super().__init__(None, flags)
+            self._callback = callback
+            self._item: Mapping[str, object] = {}
+            self._circle = bool(circle)
+            self._hover = False
+            self._hover_color = QColor(hover_color)
+            self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
+            self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
+            self.setFocusPolicy(focus_policy.NoFocus)
+            self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        def configure(self, item: Mapping[str, object], *, opacity: float, tooltip: str = "") -> None:
+            self._item = dict(item)
+            self.setWindowOpacity(opacity)
+            self.setToolTip(tooltip)
+            self.update()
+
+        def enterEvent(self, event: object) -> None:
+            self._hover = True
+            self.update()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event: object) -> None:
+            self._hover = False
+            self.update()
+            super().leaveEvent(event)
+
+        def _contains_point(self, point: QPoint) -> bool:
+            if not self.rect().contains(point):
+                return False
+            if not self._circle:
+                return True
+            center = self.rect().center()
+            radius = min(self.width(), self.height()) / 2.0
+            dx = float(point.x() - center.x())
+            dy = float(point.y() - center.y())
+            return (dx * dx + dy * dy) <= radius * radius
+
+        def mouseReleaseEvent(self, event: Any) -> None:
+            if event.button() == mouse_buttons.LeftButton and self._contains_point(
+                event.position().toPoint()
+            ):
+                self._callback(self._item)
+                event.accept()
+                return
+            super().mouseReleaseEvent(event)
+
+        def paintEvent(self, event: object) -> None:
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            fill = QColor(255, 255, 255, 1)
+            if self._hover:
+                fill = QColor(self._hover_color)
+                fill.setAlpha(18)
+            painter.setBrush(fill)
+            if self._circle:
+                painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+            else:
+                painter.drawRoundedRect(self.rect(), 6, 6)
+
     class CompletedBadgeWidget(QWidget):
         """Animated green circular summary for finished work."""
 
@@ -679,10 +754,10 @@ def run_work_overlay_helper_qt(
                     painter,
                     workdir,
                     center=center,
-                    radius=73.0,
+                    radius=78.0,
                     start_degrees=145.0,
                     end_degrees=35.0,
-                    font=QFont("Microsoft YaHei UI", 9),
+                    font=QFont("Microsoft YaHei UI", 7),
                     color=QColor("#BFF8D1"),
                     bottom=True,
                 )
@@ -691,7 +766,7 @@ def run_work_overlay_helper_qt(
             painter.setFont(check_font)
             painter.setPen(QColor("#F8FFF9"))
             painter.drawText(
-                QRectF(center.x() - 34.0, center.y() - 58.0, 68.0, 56.0),
+                QRectF(center.x() - 34.0, center.y() - 66.0, 68.0, 56.0),
                 alignment.AlignCenter,
                 "✓",
             )
@@ -700,7 +775,7 @@ def run_work_overlay_helper_qt(
             painter.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
             painter.setPen(QColor("#F4FFF7"))
             painter.drawText(
-                QRectF(center.x() - 54.0, center.y() - 2.0, 108.0, 18.0),
+                QRectF(center.x() - 54.0, center.y() - 10.0, 108.0, 18.0),
                 alignment.AlignCenter,
                 _compact_work_text(elapsed, 18),
             )
@@ -714,7 +789,7 @@ def run_work_overlay_helper_qt(
             box_height = 25.0
             spacing = 5.0
             start_x = center.x() - ((box_width * 3.0 + spacing * 2.0) / 2.0)
-            y = center.y() + 22.0
+            y = center.y() + 14.0
             for index, (label, value) in enumerate(stats):
                 box = QRectF(start_x + index * (box_width + spacing), y, box_width, box_height)
                 painter.setPen(QPen(QColor(221, 255, 230, 105), 0.8))
@@ -809,8 +884,10 @@ def run_work_overlay_helper_qt(
             self._item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
             self._close_windows: list[CloseButtonWindow] = []
             self._workdir_windows: list[WorkdirLinkWindow] = []
+            self._completed_check_windows: list[ClickHotspotWindow] = []
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
             self._workdir_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
+            self._completed_check_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._item_widgets: list[dict[str, Any]] = []
             self._empty_since = 0.0
             self._layout_width = WORK_OVERLAY_WIDTH
@@ -869,6 +946,8 @@ def run_work_overlay_helper_qt(
                 close_window.hide()
             for workdir_window in self._workdir_windows:
                 workdir_window.hide()
+            for check_window in self._completed_check_windows:
+                check_window.hide()
 
         def shutdown(self) -> None:
             self.hide_overlay()
@@ -878,6 +957,9 @@ def run_work_overlay_helper_qt(
             for workdir_window in self._workdir_windows:
                 workdir_window.close()
             self._workdir_windows.clear()
+            for check_window in self._completed_check_windows:
+                check_window.close()
+            self._completed_check_windows.clear()
             self.close()
             app.quit()
 
@@ -930,9 +1012,13 @@ def run_work_overlay_helper_qt(
                     window.isVisible() and window.frameGeometry().contains(cursor_pos)
                     for window in self._workdir_windows
                 )
+                inside_completed = any(
+                    window.isVisible() and window.frameGeometry().contains(cursor_pos)
+                    for window in self._completed_check_windows
+                )
                 target = (
                     hover_alpha
-                    if (inside_overlay or inside_close or inside_workdir)
+                    if (inside_overlay or inside_close or inside_workdir or inside_completed)
                     else overlay_alpha
                 )
             if abs(self.windowOpacity() - target) < 0.01:
@@ -942,6 +1028,8 @@ def run_work_overlay_helper_qt(
                 close_window.setWindowOpacity(target)
             for workdir_window in self._workdir_windows:
                 workdir_window.setWindowOpacity(target)
+            for check_window in self._completed_check_windows:
+                check_window.setWindowOpacity(target)
 
         @staticmethod
         def _item_identity(item: Mapping[str, object], index: int) -> str:
@@ -955,6 +1043,7 @@ def run_work_overlay_helper_qt(
         def _clear_shell(self) -> None:
             self._close_anchors.clear()
             self._workdir_anchors.clear()
+            self._completed_check_anchors.clear()
             self._item_widgets.clear()
             shell_layout = self._shell.layout()
             while shell_layout.count():
@@ -993,19 +1082,22 @@ def run_work_overlay_helper_qt(
             row_layout: QHBoxLayout,
         ) -> None:
             badge = CompletedBadgeWidget(item, parent)
-            close_anchor = QWidget(badge)
-            close_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-            close_anchor.setFixedSize(WORK_OVERLAY_CLOSE_SIZE, WORK_OVERLAY_CLOSE_SIZE)
-            close_anchor.move(
-                WORK_OVERLAY_COMPLETED_BADGE_SIZE - WORK_OVERLAY_CLOSE_SIZE - 5,
-                5,
-            )
-            close_anchor.show()
+            workdir_anchor = QWidget(badge)
+            workdir_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            workdir_anchor.setFixedSize(WORK_OVERLAY_COMPLETED_BADGE_SIZE - 24, 40)
+            workdir_anchor.move(12, 124)
+            workdir_anchor.show()
+            check_anchor = QWidget(badge)
+            check_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            check_anchor.setFixedSize(68, 56)
+            check_anchor.move(50, 18)
+            check_anchor.show()
             row_layout.addWidget(badge, 0, alignment.AlignRight)
             record = {
                 "kind": "completed",
                 "badge": badge,
-                "close_anchor": close_anchor,
+                "workdir_anchor": workdir_anchor,
+                "check_anchor": check_anchor,
             }
             self._item_widgets.append(record)
             self._update_completed_badge(record, item)
@@ -1017,15 +1109,14 @@ def run_work_overlay_helper_qt(
         ) -> None:
             badge = record["badge"]
             badge.set_item(item)
-            self._close_anchors.append(
-                (
-                    record["close_anchor"],
-                    dict(item),
-                    "#0E1B14",
-                    "#163B24",
-                    "#B9F7C9",
-                )
-            )
+            session_id = str(item.get("sessionId") or item.get("id") or "").strip()
+            target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
+            workdir_text = str(item.get("workdirName") or "").strip()
+            if not workdir_text:
+                workdir_text = _workdir_leaf(item.get("workdir"))
+            if workdir_text and (session_id or target_title):
+                self._workdir_anchors.append((record["workdir_anchor"], dict(item)))
+            self._completed_check_anchors.append((record["check_anchor"], dict(item)))
 
         def _build_item_card(self, item: Mapping[str, object]) -> None:
             card = QFrame(self._shell)
@@ -1282,6 +1373,7 @@ def run_work_overlay_helper_qt(
             rebuild = structure_signature != self._last_structure_signature
             self._close_anchors.clear()
             self._workdir_anchors.clear()
+            self._completed_check_anchors.clear()
             if rebuild:
                 self._last_structure_signature = structure_signature
                 self._clear_shell()
@@ -1350,6 +1442,34 @@ def run_work_overlay_helper_qt(
 
             for workdir_window in self._workdir_windows[len(self._workdir_anchors) :]:
                 workdir_window.hide()
+
+            while len(self._completed_check_windows) < len(self._completed_check_anchors):
+                self._completed_check_windows.append(
+                    ClickHotspotWindow(
+                        self.dismiss_item,
+                        circle=False,
+                        hover_color="#B9F7C9",
+                    )
+                )
+            while len(self._completed_check_windows) > len(self._completed_check_anchors):
+                orphan = self._completed_check_windows.pop()
+                orphan.close()
+
+            for index, check_window in enumerate(self._completed_check_windows):
+                anchor, item = self._completed_check_anchors[index]
+                if not anchor.isVisible():
+                    check_window.hide()
+                    continue
+                anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
+                check_window.configure(item, opacity=current_opacity, tooltip="关闭气泡")
+                check_window.setGeometry(
+                    anchor_top_left.x(),
+                    anchor_top_left.y(),
+                    max(1, anchor.width()),
+                    max(1, anchor.height()),
+                )
+                check_window.show()
+                check_window.raise_()
 
     overlay = OverlayWindow()
     poll_timer = QTimer()

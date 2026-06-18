@@ -7,6 +7,7 @@ from ctypes import wintypes
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 import sys
 import time
 from typing import Protocol
@@ -24,6 +25,7 @@ _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE = 0x0002
 _KEYEVENTF_KEYUP = 0x0002
 _INPUT_KEYBOARD = 1
+_LOGGER = logging.getLogger(__name__)
 
 if sys.platform.startswith("win"):
     _USER32 = ctypes.windll.user32
@@ -419,7 +421,25 @@ class SessionSwitchController:
             requested_title=request.title,
         )
         for backend in self._backends:
-            result = backend.activate(request)
+            try:
+                result = backend.activate(request)
+            except Exception as exc:
+                backend_name = str(getattr(backend, "name", "") or type(backend).__name__)
+                _LOGGER.exception(
+                    "session_switch_backend_failed backend=%s requested_session=%s requested_title=%s",
+                    backend_name,
+                    request.session_id or "-",
+                    request.title or "-",
+                )
+                last_result = SessionSwitchResult(
+                    ok=False,
+                    status="backend-error",
+                    backend=backend_name,
+                    requested_session_id=request.session_id,
+                    requested_title=request.title,
+                    message=f"{type(exc).__name__}: {exc}",
+                )
+                continue
             if result.ok:
                 return result
             last_result = result
