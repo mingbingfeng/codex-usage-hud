@@ -128,6 +128,7 @@ LOADING_FEEDBACK_STALE_SECONDS = 20.0
 ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
+RECENT_WORK_STARTUP_GRACE_SECONDS = 60.0
 VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_ALPHA = 0.88
@@ -2450,6 +2451,19 @@ def _work_overlay_seen_task_keys(context: object) -> set[str]:
     return seen
 
 
+def _should_show_recent_work_overlay_item_on_first_sight(
+    item: WorkStatusItem,
+    *,
+    now: datetime,
+) -> bool:
+    if item.current:
+        return True
+    completed_at = item.updated_at or item.started_at or item.session_started_at
+    if completed_at is None:
+        return False
+    return _datetime_age_seconds(completed_at, now) <= RECENT_WORK_STARTUP_GRACE_SECONDS
+
+
 def _select_runtime_work_overlay_items(
     context: object,
     items: Sequence[WorkStatusItem],
@@ -2458,14 +2472,23 @@ def _select_runtime_work_overlay_items(
 ) -> list[WorkStatusItem]:
     seen_task_keys = _work_overlay_seen_task_keys(context)
     previously_seen_task_keys = set(seen_task_keys)
+    now = datetime.now().astimezone()
     visible: list[WorkStatusItem] = []
     for item in items:
         if len(visible) >= item_limit:
             break
         task_key = _work_overlay_runtime_task_key(item)
         if item.status == "recent":
-            if task_key and task_key in previously_seen_task_keys:
+            should_show = bool(task_key and task_key in previously_seen_task_keys)
+            if not should_show:
+                should_show = _should_show_recent_work_overlay_item_on_first_sight(
+                    item,
+                    now=now,
+                )
+            if should_show:
                 visible.append(item)
+                if task_key:
+                    seen_task_keys.add(task_key)
             continue
         visible.append(item)
         if task_key:

@@ -1193,7 +1193,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].status_label, "处理中")
         self.assertNotEqual(items[0].status_text, "已完成")
 
-    def test_completed_task_requires_seen_running_overlay_before_showing_completed(self) -> None:
+    def test_current_completed_task_shows_without_prior_running_overlay(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
         token_payload = {
@@ -1270,15 +1270,15 @@ class BudgetHelperTests(unittest.TestCase):
                 parser=parser,
                 active_session_tracker=None,
             )
-            self.assertEqual(
-                active_work_items_for_snapshot(fresh_context, completed_snapshot, path),
-                [],
-            )
+            fresh_items = active_work_items_for_snapshot(fresh_context, completed_snapshot, path)
 
             items = active_work_items_for_snapshot(context, completed_snapshot, path)
 
         self.assertIn(running_items[0].status, {"running", "active"})
         self.assertEqual(completed_snapshot.request.status, "confirmed")
+        self.assertEqual(len(fresh_items), 1)
+        self.assertEqual(fresh_items[0].id, "session-current")
+        self.assertEqual(fresh_items[0].status, "recent")
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].status, "recent")
         self.assertEqual(items[0].status_label, "刚完成")
@@ -1553,7 +1553,63 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual([item.id for item in items], ["session-current"])
 
-    def test_only_historical_completed_overlay_items_do_not_show_on_startup(self) -> None:
+    def test_fresh_historical_completed_overlay_item_shows_on_startup(self) -> None:
+        now = datetime.now().astimezone()
+        current_snapshot = ParsedSession(
+            session_id="session-current",
+            session_title="Current running task",
+            request=RequestTokens(status="running", updated_at=now),
+            activity=Activity(
+                kind="agent",
+                detail="还在继续",
+                timestamp=now,
+            ),
+            task_started_at=now - timedelta(seconds=20),
+        )
+        historical_completed = ParsedSession(
+            session_id="session-history",
+            session_title="Fresh finished task",
+            request=RequestTokens(status="confirmed", updated_at=now - timedelta(seconds=15)),
+            activity=Activity(
+                kind="agent",
+                detail="刚刚完成",
+                timestamp=now - timedelta(seconds=15),
+            ),
+            last_output=Activity(
+                kind="agent",
+                detail="刚刚完成",
+                timestamp=now - timedelta(seconds=15),
+            ),
+            task_started_at=now - timedelta(minutes=1),
+            task_completed_at=now - timedelta(seconds=15),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current_path = root / "current.jsonl"
+            historical_path = root / "history.jsonl"
+            current_path.write_text("", encoding="utf-8")
+            historical_path.write_text("", encoding="utf-8")
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=SimpleNamespace(
+                    parse_file=MagicMock(
+                        side_effect=lambda path: historical_completed
+                        if Path(path) == historical_path
+                        else current_snapshot
+                    )
+                ),
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, current_snapshot, current_path)
+
+        self.assertEqual(
+            [item.id for item in items],
+            ["session-current", "session-history"],
+        )
+
+    def test_current_completed_overlay_item_shows_on_startup(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
 
@@ -1599,7 +1655,7 @@ class BudgetHelperTests(unittest.TestCase):
 
             items = active_work_items_for_snapshot(context, current_snapshot, paths[0])
 
-        self.assertEqual(items, [])
+        self.assertEqual([item.id for item in items], ["session-history-0"])
 
     def test_aborted_task_does_not_stay_active(self) -> None:
         parser = JsonlSessionParser()
