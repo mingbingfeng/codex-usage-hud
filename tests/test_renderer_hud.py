@@ -192,8 +192,11 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-line-inner", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-marquee", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-strip", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-progress-strip-viewport", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-progress-strip-marquee", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-size-probe", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-total", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function refreshCollapsedProgressStrip(node)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn(
             "grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1fr);",
             renderer_hud.RENDERER_HUD_SCRIPT,

@@ -334,6 +334,12 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .${topClass} .codex-usage-hud-main[data-progress="true"] .codex-usage-hud-line {
         display: none;
       }
+      #${rootId} .codex-usage-hud-progress-strip-viewport {
+        min-width: 0;
+        width: 100%;
+        display: none;
+        overflow: hidden;
+      }
       #${rootId} .codex-usage-hud-progress-strip {
         min-width: 0;
         width: 100%;
@@ -342,12 +348,37 @@ RENDERER_HUD_SCRIPT = r"""
         grid-template-columns: max-content minmax(0, 1fr) minmax(0, 1fr);
         gap: 7px;
         align-items: center;
+        transform: translateX(0);
+        will-change: transform;
+      }
+      #${rootId} .codex-usage-hud-main[data-progress="true"] .codex-usage-hud-progress-strip-viewport,
+      #${rootId} .codex-usage-hud-main[data-progress="true"] .codex-usage-hud-progress-strip {
+        display: block;
       }
       #${rootId} .codex-usage-hud-main[data-progress="true"] .codex-usage-hud-progress-strip {
         display: grid;
       }
       #${rootId} .codex-usage-hud-progress-strip[data-count="1"] {
         grid-template-columns: minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-progress-strip[data-overflow="true"] {
+        width: max-content;
+        min-width: max-content;
+        animation-name: codex-usage-hud-progress-strip-marquee;
+        animation-duration: var(--codex-usage-hud-progress-strip-duration, 6000ms);
+        animation-timing-function: linear;
+        animation-iteration-count: infinite;
+      }
+      @keyframes codex-usage-hud-progress-strip-marquee {
+        0%, 22% {
+          transform: translateX(0);
+        }
+        48%, 70% {
+          transform: translateX(calc(var(--codex-usage-hud-progress-strip-distance, 0px) * -1));
+        }
+        100% {
+          transform: translateX(0);
+        }
       }
       #${rootId} .codex-usage-hud-progress-strip:not([data-count="1"]) .codex-usage-hud-progress-rail:first-child {
         justify-self: start;
@@ -1188,7 +1219,7 @@ RENDERER_HUD_SCRIPT = r"""
           </div>
           <button class="codex-usage-hud-main" data-action="toggle" data-has-glyph="${glyph ? "true" : "false"}" aria-label="${ariaLabel}">
             ${glyphMarkup}
-            ${name === "top" ? `<span class="codex-usage-hud-progress-strip" data-field="topCollapsedProgress"></span>` : ""}
+            ${name === "top" ? `<span class="codex-usage-hud-progress-strip-viewport"><span class="codex-usage-hud-progress-strip" data-field="topCollapsedProgress"></span></span>` : ""}
             <span class="codex-usage-hud-line" data-field="${name}Line"></span>
           </button>
           ${settingsButtonMarkup}
@@ -2893,6 +2924,88 @@ RENDERER_HUD_SCRIPT = r"""
     return inner;
   }
 
+  function progressStripViewport(node) {
+    const parent = node?.parentElement;
+    if (!parent?.classList?.contains("codex-usage-hud-progress-strip-viewport")) return null;
+    return parent;
+  }
+
+  function measureProgressRailWidth(rail) {
+    const probe = rail?.querySelector?.(":scope > .codex-usage-hud-progress-size-probe");
+    if (!probe) return 0;
+    const measured = Math.max(
+      probe.scrollWidth || 0,
+      probe.getBoundingClientRect?.().width || 0,
+    );
+    return Math.max(0, Math.ceil(measured + 2));
+  }
+
+  function clearCollapsedProgressStrip(node) {
+    if (!node) return;
+    delete node.dataset.overflow;
+    node.style.removeProperty("--codex-usage-hud-progress-strip-distance");
+    node.style.removeProperty("--codex-usage-hud-progress-strip-duration");
+    node.style.removeProperty("grid-template-columns");
+    node.style.removeProperty("width");
+    node.style.removeProperty("min-width");
+    node.querySelectorAll(":scope > .codex-usage-hud-progress-rail").forEach((rail) => {
+      rail.style.removeProperty("width");
+    });
+  }
+
+  function collapsedProgressStripSignature(widths, overflow) {
+    return `${widths.join(",")}|${overflow}`;
+  }
+
+  function refreshCollapsedProgressStrip(node) {
+    if (!node?.classList?.contains("codex-usage-hud-progress-strip") || !node.isConnected) return;
+    const viewport = progressStripViewport(node);
+    if (!viewport) return;
+    const rails = Array.from(node.querySelectorAll(":scope > .codex-usage-hud-progress-rail"));
+    if (rails.length <= 1) {
+      clearCollapsedProgressStrip(node);
+      delete node.dataset.layoutSignature;
+      return;
+    }
+
+    const widths = rails.map(measureProgressRailWidth);
+    if (widths.some((width) => width <= 0)) {
+      clearCollapsedProgressStrip(node);
+      delete node.dataset.layoutSignature;
+      return;
+    }
+
+    const available = Math.max(1, viewport.clientWidth || viewport.getBoundingClientRect().width || 0);
+    const gapStyle = getComputedStyle(node);
+    const gap = Number.parseFloat(gapStyle.columnGap || gapStyle.gap || "0") || 0;
+    const required = widths.reduce((sum, width) => sum + width, 0) + (gap * Math.max(0, rails.length - 1));
+    if (required <= available + 1) {
+      clearCollapsedProgressStrip(node);
+      delete node.dataset.layoutSignature;
+      rails[0].style.width = `${widths[0]}px`;
+      return;
+    }
+
+    const overflow = Math.ceil(required - available);
+    const signature = collapsedProgressStripSignature(widths, overflow);
+    if (node.dataset.layoutSignature === signature) return;
+
+    clearCollapsedProgressStrip(node);
+    node.dataset.layoutSignature = signature;
+    rails.forEach((rail, index) => {
+      rail.style.width = `${widths[index]}px`;
+    });
+    node.dataset.overflow = "true";
+    node.style.gridTemplateColumns = widths.map((width) => `${width}px`).join(" ");
+    node.style.width = `${required}px`;
+    node.style.minWidth = `${required}px`;
+    node.style.setProperty("--codex-usage-hud-progress-strip-distance", `${overflow}px`);
+    node.style.setProperty(
+      "--codex-usage-hud-progress-strip-duration",
+      `${Math.max(5000, 3200 + (overflow * 55))}ms`,
+    );
+  }
+
   function refreshMarquee(node) {
     if (!node?.classList?.contains("codex-usage-hud-line") || !node.isConnected) return;
     const inner = node.querySelector(":scope > .codex-usage-hud-line-inner");
@@ -2913,6 +3026,7 @@ RENDERER_HUD_SCRIPT = r"""
   function refreshAllMarquees(root = document.getElementById(rootId)) {
     if (!root) return;
     root.querySelectorAll(".codex-usage-hud-line").forEach(refreshMarquee);
+    root.querySelectorAll(".codex-usage-hud-progress-strip").forEach(refreshCollapsedProgressStrip);
   }
 
   function applyLineText(node, value, { refresh = true } = {}) {
