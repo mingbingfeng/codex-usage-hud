@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -18,6 +19,7 @@ from codex_usage_hud.config import (
     UserConfig,
     UserConfigStore,
     extract_model_prices,
+    write_json_object,
 )
 from codex_usage_hud.cli import current_budget_windows
 
@@ -98,6 +100,24 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(day_start.day, 2)
         self.assertEqual(week_start.weekday(), 0)
         self.assertEqual(week_start.hour, 4)
+
+    def test_write_json_object_retries_replace_after_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            original_replace = Path.replace
+            call_count = {"count": 0}
+
+            def flaky_replace(self: Path, target: Path) -> Path:
+                call_count["count"] += 1
+                if call_count["count"] == 1:
+                    raise PermissionError("file is busy")
+                return original_replace(self, target)
+
+            with patch.object(Path, "replace", new=flaky_replace):
+                write_json_object(path, {"ok": True})
+
+            self.assertGreaterEqual(call_count["count"], 2)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"ok": True})
 
 
 if __name__ == "__main__":

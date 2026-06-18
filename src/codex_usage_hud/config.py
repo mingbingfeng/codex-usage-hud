@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -25,6 +26,8 @@ DEFAULT_DISPLAY_MODE = "auto"
 VALID_DISPLAY_MODES = {"auto", "renderer", "tk"}
 DEFAULT_SUPPORT_URL = "https://github.com/mingbingfeng/codex-usage-hud"
 DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
+JSON_WRITE_REPLACE_RETRIES = 8
+JSON_WRITE_REPLACE_DELAY_SECONDS = 0.01
 
 _PRICE_ALIASES = {
     "input": ("input", "prompt", "input_price", "input_per_million"),
@@ -266,7 +269,18 @@ def write_json_object(path: Path, value: Mapping[str, Any]) -> None:
         json.dumps(dict(value), indent=2, sort_keys=True, ensure_ascii=False),
         encoding="utf-8",
     )
-    temp_path.replace(path)
+    last_error: OSError | None = None
+    for attempt in range(JSON_WRITE_REPLACE_RETRIES):
+        try:
+            temp_path.replace(path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if attempt + 1 >= JSON_WRITE_REPLACE_RETRIES:
+                break
+            time.sleep(JSON_WRITE_REPLACE_DELAY_SECONDS)
+    if last_error is not None:
+        raise last_error
 
 
 def parse_thresholds(

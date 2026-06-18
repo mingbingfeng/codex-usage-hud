@@ -35,6 +35,7 @@ WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX = 58
 WORK_OVERLAY_SHIMMER_HIGHLIGHT = "#FFFFFF"
 WORK_OVERLAY_SHIMMER_PEAK_ALPHA = 245
 WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
+WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS = 1.2
 
 
 def work_overlay_max_items_for_screen_height(screen_height: int) -> int:
@@ -114,6 +115,60 @@ def _completed_badge_row_width(count: int) -> int:
         WORK_OVERLAY_COMPLETED_BADGE_SIZE * count
         + WORK_OVERLAY_COMPLETED_BADGE_SPACING * max(0, count - 1)
     )
+
+
+def _point_in_rect(
+    point_x: int,
+    point_y: int,
+    *,
+    left: int,
+    top: int,
+    width: int,
+    height: int,
+) -> bool:
+    return left <= point_x < (left + width) and top <= point_y < (top + height)
+
+
+def _point_in_inscribed_circle(
+    point_x: int,
+    point_y: int,
+    *,
+    left: int,
+    top: int,
+    width: int,
+    height: int,
+) -> bool:
+    if not _point_in_rect(point_x, point_y, left=left, top=top, width=width, height=height):
+        return False
+    radius = min(width, height) / 2.0
+    center_x = left + (width / 2.0)
+    center_y = top + (height / 2.0)
+    dx = float(point_x) - center_x
+    dy = float(point_y) - center_y
+    return (dx * dx + dy * dy) <= (radius * radius)
+
+
+def _overlay_hover_hit_test(
+    point_x: int,
+    point_y: int,
+    *,
+    rects: Sequence[tuple[int, int, int, int]] = (),
+    circle_rects: Sequence[tuple[int, int, int, int]] = (),
+) -> bool:
+    for left, top, width, height in rects:
+        if _point_in_rect(point_x, point_y, left=left, top=top, width=width, height=height):
+            return True
+    for left, top, width, height in circle_rects:
+        if _point_in_inscribed_circle(
+            point_x,
+            point_y,
+            left=left,
+            top=top,
+            width=width,
+            height=height,
+        ):
+            return True
+    return False
 
 
 def _work_overlay_header_text(
@@ -888,8 +943,11 @@ def run_work_overlay_helper_qt(
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
             self._workdir_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._completed_check_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
+            self._card_hover_anchors: list[QWidget] = []
+            self._completed_hover_anchors: list[QWidget] = []
             self._item_widgets: list[dict[str, Any]] = []
             self._empty_since = 0.0
+            self._state_read_failed_at = 0.0
             self._layout_width = WORK_OVERLAY_WIDTH
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
@@ -966,8 +1024,20 @@ def run_work_overlay_helper_qt(
         def poll_state(self) -> None:
             state = read_state()
             if state is None:
+                now = time.time()
+                if owner_pid is not None and not process_exists(owner_pid):
+                    self.shutdown()
+                    return
+                if self._state_read_failed_at <= 0.0:
+                    self._state_read_failed_at = now
+                    return
+                if (
+                    now - self._state_read_failed_at
+                ) < WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS:
+                    return
                 self.shutdown()
                 return
+            self._state_read_failed_at = 0.0
             should_close = bool(state.get("close"))
             updated_at = float(state.get("updatedAt") or 0.0)
             file_stale = updated_at > 0 and (time.time() - updated_at) > stale_seconds
@@ -1003,22 +1073,23 @@ def run_work_overlay_helper_qt(
                 target = overlay_alpha
             else:
                 cursor_pos = QCursor.pos()
-                inside_overlay = self.frameGeometry().contains(cursor_pos)
-                inside_close = any(
-                    window.isVisible() and window.frameGeometry().contains(cursor_pos)
-                    for window in self._close_windows
-                )
-                inside_workdir = any(
-                    window.isVisible() and window.frameGeometry().contains(cursor_pos)
-                    for window in self._workdir_windows
-                )
-                inside_completed = any(
-                    window.isVisible() and window.frameGeometry().contains(cursor_pos)
-                    for window in self._completed_check_windows
+                inside_overlay = _overlay_hover_hit_test(
+                    cursor_pos.x(),
+                    cursor_pos.y(),
+                    rects=[
+                        bounds
+                        for anchor in self._card_hover_anchors
+                        if (bounds := self._widget_global_bounds(anchor)) is not None
+                    ],
+                    circle_rects=[
+                        bounds
+                        for anchor in self._completed_hover_anchors
+                        if (bounds := self._widget_global_bounds(anchor)) is not None
+                    ],
                 )
                 target = (
                     hover_alpha
-                    if (inside_overlay or inside_close or inside_workdir or inside_completed)
+                    if inside_overlay
                     else overlay_alpha
                 )
             if abs(self.windowOpacity() - target) < 0.01:
@@ -1040,10 +1111,24 @@ def run_work_overlay_helper_qt(
         def _item_widget_kind(item: Mapping[str, object]) -> str:
             return "completed" if _item_is_completed(item) else "card"
 
+        @staticmethod
+        def _widget_global_bounds(widget: QWidget) -> tuple[int, int, int, int] | None:
+            if not widget.isVisible():
+                return None
+            top_left = widget.mapToGlobal(QPoint(0, 0))
+            return (
+                top_left.x(),
+                top_left.y(),
+                max(1, widget.width()),
+                max(1, widget.height()),
+            )
+
         def _clear_shell(self) -> None:
             self._close_anchors.clear()
             self._workdir_anchors.clear()
             self._completed_check_anchors.clear()
+            self._card_hover_anchors.clear()
+            self._completed_hover_anchors.clear()
             self._item_widgets.clear()
             shell_layout = self._shell.layout()
             while shell_layout.count():
@@ -1082,6 +1167,14 @@ def run_work_overlay_helper_qt(
             row_layout: QHBoxLayout,
         ) -> None:
             badge = CompletedBadgeWidget(item, parent)
+            hover_anchor = QWidget(badge)
+            hover_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            hover_anchor.setFixedSize(
+                WORK_OVERLAY_COMPLETED_BADGE_SIZE,
+                WORK_OVERLAY_COMPLETED_BADGE_SIZE,
+            )
+            hover_anchor.move(0, 0)
+            hover_anchor.show()
             workdir_anchor = QWidget(badge)
             workdir_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             workdir_anchor.setFixedSize(WORK_OVERLAY_COMPLETED_BADGE_SIZE - 24, 40)
@@ -1096,6 +1189,7 @@ def run_work_overlay_helper_qt(
             record = {
                 "kind": "completed",
                 "badge": badge,
+                "hover_anchor": hover_anchor,
                 "workdir_anchor": workdir_anchor,
                 "check_anchor": check_anchor,
             }
@@ -1109,6 +1203,7 @@ def run_work_overlay_helper_qt(
         ) -> None:
             badge = record["badge"]
             badge.set_item(item)
+            self._completed_hover_anchors.append(record["hover_anchor"])
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
             target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
             workdir_text = str(item.get("workdirName") or "").strip()
@@ -1291,6 +1386,7 @@ def run_work_overlay_helper_qt(
                 workdir_label.setToolTip("")
                 workdir_label.setVisible(False)
 
+            self._card_hover_anchors.append(card)
             self._close_anchors.append(
                 (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
             )
@@ -1374,6 +1470,8 @@ def run_work_overlay_helper_qt(
             self._close_anchors.clear()
             self._workdir_anchors.clear()
             self._completed_check_anchors.clear()
+            self._card_hover_anchors.clear()
+            self._completed_hover_anchors.clear()
             if rebuild:
                 self._last_structure_signature = structure_signature
                 self._clear_shell()

@@ -22,6 +22,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+import codex_usage_hud.cli as cli_module
 from codex_usage_hud.cli import (
     AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
     ACTIVE_WORK_STALE_SECONDS,
@@ -148,7 +149,9 @@ from codex_usage_hud.ui.tk_hud import (
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     _item_dismiss_key,
+    _overlay_hover_hit_test,
     _ordered_overlay_items,
+    _point_in_inscribed_circle,
     _visible_overlay_items,
 )
 
@@ -695,6 +698,44 @@ class BudgetHelperTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(overlay.take_commands(), [])
+
+    def test_desktop_work_overlay_writes_state_with_atomic_json_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+
+            with patch("codex_usage_hud.cli.write_json_object") as write_json:
+                overlay._write_state([{"id": "thread-1"}], close=False)
+
+            write_json.assert_called_once()
+            path_arg, payload_arg = write_json.call_args.args
+            self.assertEqual(path_arg, overlay._state_path)
+            self.assertEqual(payload_arg["commandPath"], str(overlay._command_path))
+            self.assertEqual(payload_arg["items"], [{"id": "thread-1"}])
+            self.assertEqual(payload_arg["itemLimit"], 2)
+            self.assertFalse(payload_arg["close"])
+
+    def test_loading_feedback_writes_state_with_atomic_json_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            feedback = cli_module.HudLoadingFeedback(
+                "Switching HUD",
+                "Opening Tk overlay...",
+                enabled=True,
+            )
+            feedback._state_path = root / "loading-123-1.json"
+
+            with patch("codex_usage_hud.cli.write_json_object") as write_json:
+                feedback._write_state(close=True)
+
+            write_json.assert_called_once()
+            path_arg, payload_arg = write_json.call_args.args
+            self.assertEqual(path_arg, feedback._state_path)
+            self.assertEqual(payload_arg["title"], "Switching HUD")
+            self.assertEqual(payload_arg["message"], "Opening Tk overlay...")
+            self.assertTrue(payload_arg["close"])
 
     def test_work_overlay_session_switch_uses_search_fallback_by_default(self) -> None:
         class FakeCdpBackend:
@@ -1338,6 +1379,43 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in ordered],
             ["session-completed-oldest", "session-completed-latest", "session-active"],
+        )
+
+    def test_completed_badge_hover_ignores_bounding_box_corner(self) -> None:
+        self.assertFalse(
+            _point_in_inscribed_circle(
+                104,
+                54,
+                left=100,
+                top=50,
+                width=168,
+                height=168,
+            )
+        )
+        self.assertFalse(
+            _overlay_hover_hit_test(
+                104,
+                54,
+                circle_rects=[(100, 50, 168, 168)],
+            )
+        )
+
+    def test_completed_badge_hover_accepts_circle_center(self) -> None:
+        self.assertTrue(
+            _overlay_hover_hit_test(
+                184,
+                134,
+                circle_rects=[(100, 50, 168, 168)],
+            )
+        )
+
+    def test_overlay_hover_hit_test_keeps_active_card_rectangles(self) -> None:
+        self.assertTrue(
+            _overlay_hover_hit_test(
+                24,
+                42,
+                rects=[(0, 0, 430, 118)],
+            )
         )
 
     def test_historical_completed_overlay_item_does_not_show_on_startup(self) -> None:

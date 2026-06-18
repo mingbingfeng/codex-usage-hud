@@ -34,6 +34,7 @@ from .config import (
     normalize_work_overlay_max_items,
     parse_thresholds as parse_config_thresholds,
     time_parts,
+    write_json_object,
 )
 from .core import (
     CostEstimator,
@@ -222,19 +223,15 @@ class HudLoadingFeedback:
         if self._state_path is None:
             return
         try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._state_path.write_text(
-                json.dumps(
-                    {
-                        "ownerPid": os.getpid(),
-                        "title": self.title,
-                        "message": self.message,
-                        "updatedAt": time.time(),
-                        "close": bool(close),
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
+            write_json_object(
+                self._state_path,
+                {
+                    "ownerPid": os.getpid(),
+                    "title": self.title,
+                    "message": self.message,
+                    "updatedAt": time.time(),
+                    "close": bool(close),
+                },
             )
         except OSError:
             return
@@ -693,20 +690,16 @@ class DesktopWorkOverlay:
         close: bool,
     ) -> None:
         try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            self._state_path.write_text(
-                json.dumps(
-                    {
-                        "ownerPid": os.getpid(),
-                        "itemLimit": int(self.item_limit),
-                        "commandPath": str(self._command_path),
-                        "items": list(items),
-                        "updatedAt": time.time(),
-                        "close": bool(close),
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
+            write_json_object(
+                self._state_path,
+                {
+                    "ownerPid": os.getpid(),
+                    "itemLimit": int(self.item_limit),
+                    "commandPath": str(self._command_path),
+                    "items": list(items),
+                    "updatedAt": time.time(),
+                    "close": bool(close),
+                },
             )
         except OSError:
             return
