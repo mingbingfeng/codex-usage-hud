@@ -126,6 +126,8 @@ from codex_usage_hud.ui.tk_hud import (
     HUD_WINDOW_OUTSIDE,
     HUD_WINDOW_TRANSPARENT,
     RoundedHudShell,
+    TopHudProgressMetric,
+    TopHudProgressStrip,
     TOKEN_LEGEND_TEXT,
     TokenHudWindow,
     WindowPlacement,
@@ -143,6 +145,7 @@ from codex_usage_hud.ui.tk_hud import (
     _round_entry,
     _round_entry_widths,
     _rounded_shell_surface_rows,
+    _collapsed_progress_strip_should_scroll,
     _top_budget_progress_metrics,
     _top_collapsed_progress_metrics,
     _visual_anchor_geometry,
@@ -3692,6 +3695,53 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             label.set_text("↑10 ↻2 ↓3 ◇1 ∑13 $0.5000")
             label.set_text("↑20 ↻4 ↓9 ◇3 ∑29 $0.9000")
             root.root.update_idletasks()
+        finally:
+            root._close()
+
+    def test_collapsed_progress_strip_scroll_threshold_matches_renderer_behavior(self) -> None:
+        widths = [166, 178, 195]
+        self.assertFalse(
+            _collapsed_progress_strip_should_scroll(
+                widths,
+                available_width=507,
+                gap=7,
+            )
+        )
+        self.assertTrue(
+            _collapsed_progress_strip_should_scroll(
+                widths,
+                available_width=210,
+                gap=7,
+            )
+        )
+
+    def test_top_hud_progress_strip_enters_scroll_mode_only_when_tail_space_collapses(self) -> None:
+        try:
+            root = TokenHudWindow()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk unavailable: {exc}")
+        try:
+            _stop_background_jobs(root)
+            host = tk.Frame(root.root, bg=HUD_BG)
+            host.place(x=0, y=0, width=507, height=28)
+            strip = TopHudProgressStrip(host)
+            strip.pack(fill="both", expand=True)
+            strip.set_metrics(
+                [
+                    TopHudProgressMetric(label="本会话 10.2M/$5.09/◎94%", ratio=0.25, fill=HUD_PROGRESS_DAY, fill_end=HUD_PROGRESS_DAY_END, fill_text=HUD_TEXT),
+                    TopHudProgressMetric(label="今日 18.9M/$8.96", right_text="总 $100.00", ratio=0.35, fill=HUD_PROGRESS_DAY, fill_end=HUD_PROGRESS_DAY_END, fill_text=HUD_TEXT),
+                    TopHudProgressMetric(label="本周 39.5M/$33.41", right_text="总 $400.00", ratio=0.42, fill=HUD_PROGRESS_DAY, fill_end=HUD_PROGRESS_DAY_END, fill_text=HUD_TEXT),
+                ]
+            )
+            root.root.update_idletasks()
+            root.root.update()
+            self.assertFalse(strip._scrolling_enabled)
+
+            host.place_configure(width=210)
+            root.root.update_idletasks()
+            root.root.update()
+            self.assertTrue(strip._scrolling_enabled)
+            self.assertLess(strip._scroll_min_x, 0.0)
         finally:
             root._close()
 

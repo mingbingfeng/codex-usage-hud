@@ -97,6 +97,7 @@ MARQUEE_START_PAUSE_MS = 1500
 MARQUEE_END_PAUSE_MS = 1500
 MARQUEE_STEP_PX = 1
 MARQUEE_INTERVAL_MS = 30
+COLLAPSED_PROGRESS_TAIL_PEEK_WIDTH = 40
 SHIMMER_INTERVAL_MS = 30
 SHIMMER_STEP_PX = 3
 SHIMMER_BAND_WIDTH_PX = 58
@@ -1695,6 +1696,23 @@ def _clamp_progress_ratio(value: float | int | None) -> float:
     return max(0.0, min(1.0, ratio))
 
 
+def _collapsed_progress_strip_should_scroll(
+    widths: list[int],
+    *,
+    available_width: int,
+    gap: int,
+    tail_peek_width: int = COLLAPSED_PROGRESS_TAIL_PEEK_WIDTH,
+) -> bool:
+    if len(widths) <= 1:
+        return False
+    required = sum(max(0, int(width)) for width in widths) + max(0, int(gap)) * (len(widths) - 1)
+    if required <= max(1, int(available_width)) + 1:
+        return False
+    remaining_after_session = max(0, int(available_width) - widths[0] - (max(0, int(gap)) * (len(widths) - 1)))
+    tail_share = remaining_after_session / max(1, len(widths) - 1)
+    return tail_share <= max(0, int(tail_peek_width))
+
+
 class TopHudProgressBar(tk.Frame):
     """Text-in-bar progress rail used by both top HUD states."""
 
@@ -2105,9 +2123,33 @@ class TopHudProgressStrip(tk.Frame):
         self._bars: list[TopHudProgressBar] = []
         self._base_widths = (72, 68, 76)
         self._column_gap = 7
+        self._scroll_job: str | None = None
+        self._scroll_direction = -1
+        self._scroll_x = 0.0
+        self._scroll_min_x = 0.0
+        self._scroll_max_x = 0.0
+        self._scrolling_enabled = False
+        self._layout_signature = ""
+        self._viewport = tk.Canvas(
+            self,
+            bg=HUD_BG,
+            height=28,
+            highlightthickness=0,
+            borderwidth=0,
+            relief="flat",
+        )
+        setattr(self._viewport, "_hud_progress_canvas", True)
+        self._viewport.pack(fill="both", expand=True)
+        self._content = tk.Frame(self._viewport, bg=HUD_BG)
+        self._content_window = self._viewport.create_window(
+            0,
+            0,
+            anchor="nw",
+            window=self._content,
+        )
         for index in range(3):
             bar = TopHudProgressBar(
-                self,
+                self._content,
                 height=28,
                 width=self._base_widths[index],
                 bg=HUD_BG,
@@ -2122,9 +2164,15 @@ class TopHudProgressStrip(tk.Frame):
                 sticky="nsew",
                 padx=(0 if index == 0 else self._column_gap, 0),
             )
-            self.columnconfigure(index, weight=0, minsize=self._base_widths[index])
+            self._content.columnconfigure(index, weight=0, minsize=self._base_widths[index])
             self._bars.append(bar)
-        self.rowconfigure(0, weight=1)
+        self._content.rowconfigure(0, weight=1)
+        self.bind("<Configure>", self._handle_configure)
+        self.bind("<Map>", self._handle_map)
+        self.bind("<Unmap>", self._handle_unmap)
+        self.bind("<Destroy>", self._handle_destroy)
+        self._viewport.bind("<Configure>", self._handle_configure)
+        self._content.bind("<Configure>", self._handle_content_configure)
 
     def cget(self, key: str) -> Any:
         if key == "text":
@@ -2165,11 +2213,117 @@ class TopHudProgressStrip(tk.Frame):
             self._layout_multi_metric()
         self._text = " | ".join(label for label in labels if label)
 
+    def destroy(self) -> None:
+        self._cancel_scroll_job()
+        super().destroy()
+
+    def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._layout_for_current_metrics()
+
+    def _handle_content_configure(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        content_height = max(1, self._content.winfo_reqheight())
+        content_width = max(1, self._content.winfo_reqwidth())
+        self._viewport.configure(scrollregion=(0, 0, content_width, content_height))
+
+    def _handle_map(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._layout_for_current_metrics()
+
+    def _handle_unmap(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._scrolling_enabled = False
+        self._cancel_scroll_job()
+
+    def _handle_destroy(self, event: tk.Event[tk.Misc]) -> None:
+        del event
+        self._cancel_scroll_job()
+
+    def _available_width(self) -> int:
+        width = self._viewport.winfo_width() or self.winfo_width()
+        return max(1, int(width))
+
+    def _cancel_scroll_job(self) -> None:
+        if self._scroll_job is None:
+            return
+        try:
+            self.after_cancel(self._scroll_job)
+        except tk.TclError:
+            pass
+        self._scroll_job = None
+
+    def _set_content_offset(self, x: float) -> None:
+        self._scroll_x = float(x)
+        self._viewport.coords(self._content_window, self._scroll_x, 0)
+
+    def _set_content_width(self, width: int) -> None:
+        content_width = max(1, int(width))
+        self._viewport.itemconfigure(self._content_window, width=content_width)
+        self._viewport.configure(
+            scrollregion=(
+                0,
+                0,
+                content_width,
+                max(1, self._content.winfo_reqheight() or 28),
+            )
+        )
+
+    def _stop_scrolling(self) -> None:
+        self._scrolling_enabled = False
+        self._cancel_scroll_job()
+        self._set_content_offset(0.0)
+
+    def _scroll_step(self) -> None:
+        self._scroll_job = None
+        if not self.winfo_exists() or not self.winfo_ismapped() or not self._scrolling_enabled:
+            return
+        next_x = self._scroll_x + (MARQUEE_STEP_PX * self._scroll_direction)
+        if self._scroll_direction < 0 and next_x <= self._scroll_min_x:
+            self._set_content_offset(self._scroll_min_x)
+            self._scroll_direction = 1
+            self._scroll_job = self.after(MARQUEE_END_PAUSE_MS, self._scroll_step)
+            return
+        if self._scroll_direction > 0 and next_x >= self._scroll_max_x:
+            self._set_content_offset(self._scroll_max_x)
+            self._scroll_direction = -1
+            self._scroll_job = self.after(MARQUEE_START_PAUSE_MS, self._scroll_step)
+            return
+        self._set_content_offset(next_x)
+        self._scroll_job = self.after(MARQUEE_INTERVAL_MS, self._scroll_step)
+
+    def _start_scrolling(self, required_width: int, available_width: int) -> None:
+        overflow = max(0, int(required_width) - int(available_width))
+        if overflow <= 0:
+            self._stop_scrolling()
+            return
+        self._scrolling_enabled = True
+        self._scroll_max_x = 0.0
+        self._scroll_min_x = float(-overflow)
+        self._scroll_direction = -1
+        self._set_content_offset(self._scroll_max_x)
+        self._cancel_scroll_job()
+        self._scroll_job = self.after(MARQUEE_START_PAUSE_MS, self._scroll_step)
+
+    def _layout_for_current_metrics(self) -> None:
+        if len([bar for bar in self._bars if bar.winfo_manager()]) <= 1:
+            self._layout_single_metric()
+            return
+        self._layout_multi_metric()
+
     def _layout_multi_metric(self) -> None:
         widths = [max(self._base_widths[index], bar.preferred_width()) for index, bar in enumerate(self._bars)]
+        available_width = self._available_width()
+        gap_total = self._column_gap * max(0, len(self._bars) - 1)
+        required_width = sum(widths) + gap_total
+        should_scroll = _collapsed_progress_strip_should_scroll(
+            widths,
+            available_width=available_width,
+            gap=self._column_gap,
+        )
         tail_width = max(widths[1], widths[2])
         for index, bar in enumerate(self._bars):
-            width = widths[0] if index == 0 else tail_width
+            width = widths[index] if should_scroll else (widths[0] if index == 0 else tail_width)
             bar.grid(
                 row=0,
                 column=index,
@@ -2178,14 +2332,27 @@ class TopHudProgressStrip(tk.Frame):
                 padx=(0 if index == 0 else self._column_gap, 0),
             )
             bar.set_requested_width(width)
-            self.columnconfigure(
+            self._content.columnconfigure(
                 index,
-                weight=0 if index == 0 else 1,
-                minsize=width,
-                uniform=None if index == 0 else "top-collapsed-tail",
+                weight=0 if should_scroll or index == 0 else 1,
+                minsize=widths[index] if should_scroll or index == 0 else 0,
+                uniform=None if should_scroll or index == 0 else "top-collapsed-tail",
             )
+        if available_width <= 1:
+            available_width = required_width
+        if not should_scroll:
+            self._layout_signature = ""
+            self._set_content_width(available_width)
+            self._stop_scrolling()
+            return
+        signature = f"{','.join(str(width) for width in widths)}|{required_width}|{available_width}"
+        self._set_content_width(required_width)
+        if self._layout_signature != signature or not self._scrolling_enabled:
+            self._layout_signature = signature
+            self._start_scrolling(required_width, available_width)
 
     def _layout_single_metric(self) -> None:
+        available_width = self._available_width()
         for index, bar in enumerate(self._bars):
             if index == 0:
                 bar.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=0)
@@ -2194,9 +2361,12 @@ class TopHudProgressStrip(tk.Frame):
             if index == 0:
                 width = max(self._base_widths[0], bar.preferred_width())
                 bar.set_requested_width(width)
-                self.columnconfigure(index, weight=1, minsize=width, uniform=None)
+                self._content.columnconfigure(index, weight=1, minsize=width, uniform=None)
             else:
-                self.columnconfigure(index, weight=0, minsize=0, uniform=None)
+                self._content.columnconfigure(index, weight=0, minsize=0, uniform=None)
+        self._layout_signature = ""
+        self._set_content_width(available_width if available_width > 1 else width)
+        self._stop_scrolling()
 
 
 class TopHudBudgetProgress(tk.Frame):
