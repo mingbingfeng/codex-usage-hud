@@ -34,6 +34,7 @@ from ..config import (
 )
 from ..core.parser import CostEstimator, ParsedSession, RequestRound
 from ..platforms.cdp_probe import cdp_port_from_env, list_targets, pick_page_target
+from ..platforms.codex_theme import CodexThemeProbe, HudThemeTokens
 from ..support_assets import support_qr_asset_paths
 from ..updater import (
     AutoUpdateManager,
@@ -156,6 +157,94 @@ HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
 HUD_CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
 HUD_NATIVE_GEOMETRY_ENV = "CODEX_USAGE_HUD_NATIVE_GEOMETRY"
 HUD_INTERACTION_SETTLE_MS = 120
+
+
+def _hud_theme_signature(tokens: HudThemeTokens) -> tuple[tuple[str, object], ...]:
+    return tuple(sorted(tokens.to_dict().items()))
+
+
+def _apply_hud_theme_tokens(tokens: HudThemeTokens) -> tuple[tuple[str, object], ...]:
+    global HUD_BG
+    global HUD_PANEL_BG
+    global HUD_PANEL_BORDER
+    global HUD_HEADER_BG
+    global HUD_DIVIDER
+    global HUD_TEXT
+    global HUD_MUTED
+    global HUD_ACCENT
+    global HUD_BLUE
+    global HUD_ERROR
+    global HUD_PROGRESS_TRACK
+    global HUD_PROGRESS_TRACK_BORDER
+    global HUD_PROGRESS_TRACK_TEXT
+    global HUD_PROGRESS_CACHE
+    global HUD_PROGRESS_CACHE_END
+    global HUD_PROGRESS_CACHE_TEXT
+    global HUD_PROGRESS_DAY
+    global HUD_PROGRESS_DAY_END
+    global HUD_PROGRESS_DAY_TEXT
+    global HUD_PROGRESS_WEEK
+    global HUD_PROGRESS_WEEK_END
+    global HUD_PROGRESS_WEEK_TEXT
+    global HUD_PROGRESS_OVERFLOW
+    global HUD_PROGRESS_OVERFLOW_HIGHLIGHT
+    global HUD_PROGRESS_OVERFLOW_ANCHOR
+    global HUD_PROGRESS_OVERFLOW_ANCHOR_EDGE
+    global HUD_PROGRESS_OVERFLOW_BADGE
+    global HUD_PROGRESS_OVERFLOW_BADGE_EDGE
+    global HUD_PROGRESS_OVERFLOW_BADGE_TEXT
+    global REQUEST_BG
+    global REQUEST_HEADER_BG
+    global REQUEST_PANEL_BG
+    global REQUEST_TEXT
+    global REQUEST_MUTED
+    global REQUEST_HUD_BG
+    global REQUEST_HUD_HEADER_BG
+    global REQUEST_HUD_PANEL_BG
+    global REQUEST_HUD_TEXT
+    global REQUEST_HUD_MUTED
+
+    HUD_BG = tokens.surface
+    HUD_PANEL_BG = tokens.panel_surface
+    HUD_PANEL_BORDER = tokens.panel_border
+    HUD_HEADER_BG = tokens.header_surface
+    HUD_DIVIDER = tokens.divider
+    HUD_TEXT = tokens.text
+    HUD_MUTED = tokens.muted
+    HUD_ACCENT = tokens.accent
+    HUD_BLUE = tokens.info
+    HUD_ERROR = tokens.error
+    HUD_PROGRESS_TRACK = tokens.progress_track
+    HUD_PROGRESS_TRACK_BORDER = tokens.progress_track_border
+    HUD_PROGRESS_TRACK_TEXT = tokens.progress_track_text
+    HUD_PROGRESS_CACHE = tokens.progress_cache
+    HUD_PROGRESS_CACHE_END = tokens.progress_cache_end
+    HUD_PROGRESS_CACHE_TEXT = tokens.progress_cache_text
+    HUD_PROGRESS_DAY = tokens.progress_day
+    HUD_PROGRESS_DAY_END = tokens.progress_day_end
+    HUD_PROGRESS_DAY_TEXT = tokens.progress_day_text
+    HUD_PROGRESS_WEEK = tokens.progress_week
+    HUD_PROGRESS_WEEK_END = tokens.progress_week_end
+    HUD_PROGRESS_WEEK_TEXT = tokens.progress_week_text
+    HUD_PROGRESS_OVERFLOW = tokens.progress_overflow
+    HUD_PROGRESS_OVERFLOW_HIGHLIGHT = tokens.progress_overflow_highlight
+    HUD_PROGRESS_OVERFLOW_ANCHOR = tokens.progress_overflow_anchor
+    HUD_PROGRESS_OVERFLOW_ANCHOR_EDGE = tokens.progress_overflow_anchor_edge
+    HUD_PROGRESS_OVERFLOW_BADGE = tokens.progress_overflow_badge
+    HUD_PROGRESS_OVERFLOW_BADGE_EDGE = tokens.progress_overflow_badge_edge
+    HUD_PROGRESS_OVERFLOW_BADGE_TEXT = tokens.progress_overflow_badge_text
+    REQUEST_BG = tokens.request_surface
+    REQUEST_HEADER_BG = tokens.request_header_surface
+    REQUEST_PANEL_BG = tokens.request_panel_surface
+    REQUEST_TEXT = tokens.request_text
+    REQUEST_MUTED = tokens.request_muted
+    REQUEST_HUD_BG = tokens.request_surface
+    REQUEST_HUD_HEADER_BG = tokens.request_header_surface
+    REQUEST_HUD_PANEL_BG = tokens.request_panel_surface
+    REQUEST_HUD_TEXT = tokens.request_text
+    REQUEST_HUD_MUTED = tokens.request_muted
+    _scrollbar_active_thumb_color.cache_clear()
+    return _hud_theme_signature(tokens)
 
 
 class _HoverTip:
@@ -4377,6 +4466,12 @@ class TokenHudWindow:
         self._top_rebuild_job: str | None = None
         self._request_rebuild_job: str | None = None
         self._follow_job: str | None = None
+        self._theme_probe = CodexThemeProbe(
+            timeout_seconds=0.08,
+            cache_seconds=0.8,
+            failure_cooldown_seconds=5.0,
+        )
+        self._theme_signature: tuple[tuple[str, object], ...] | None = None
 
         self.top_labels: dict[str, tk.Misc] = {}
         self.request_label: tk.Misc | None = None
@@ -4401,6 +4496,20 @@ class TokenHudWindow:
             self._enter_tombstone("waiting")
             self.sync_codex_window()
         self._follow_job = self.root.after(self.follow_ms, self._follow_codex_window)
+
+    def _maybe_apply_live_theme(self) -> None:
+        snapshot = self._theme_probe.snapshot()
+        if snapshot.source not in {"cdp", "persisted"}:
+            return
+        signature = _hud_theme_signature(snapshot.hud_tokens)
+        if signature == self._theme_signature:
+            return
+        self._theme_signature = _apply_hud_theme_tokens(snapshot.hud_tokens)
+        self._rebuild_top_ui()
+        if hasattr(self, "request_root"):
+            self._rebuild_request_ui()
+        if self._attached and self._last_rect is not None:
+            self._apply_geometry()
 
     def _move_handle(self, parent: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> tk.Label:
         label = tk.Label(
@@ -7723,6 +7832,7 @@ class TokenHudWindow:
         update_state: AutoUpdateState | None = None,
     ) -> None:
         """Refresh both HUD windows with the latest parsed session snapshot."""
+        self._maybe_apply_live_theme()
         self._snapshot = parsed_session
         if update_state is not None:
             self._update_state = update_state

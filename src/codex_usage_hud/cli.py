@@ -66,6 +66,7 @@ from .platforms import (
 )
 from .platforms.base import BasePlatform
 from .platforms.cdp_probe import cdp_port_from_env
+from .platforms.codex_theme import CodexThemeProbe
 from .settings_bridge import SettingsBridgeServer
 from .ui import TokenHudWindow
 from .ui.renderer_hud import (
@@ -583,6 +584,11 @@ class DesktopWorkOverlay:
         self._command_offset = 0
         self._process: subprocess.Popen[str] | None = None
         self._closed = False
+        self._theme_probe = CodexThemeProbe(
+            timeout_seconds=0.08,
+            cache_seconds=0.8,
+            failure_cooldown_seconds=5.0,
+        )
 
     def configure(
         self,
@@ -604,11 +610,12 @@ class DesktopWorkOverlay:
             self._stop_runtime(permanent=False)
             return
         payload_items = [work_item_to_overlay_dict(item) for item in items]
+        theme_payload = self._theme_payload()
         if not payload_items and self._process is None:
             return
         if self._process is not None and self._process.poll() is not None:
             self._process = None
-        self._write_state(payload_items, close=False)
+        self._write_state(payload_items, theme=theme_payload, close=False)
         if self._process is None:
             self._start()
 
@@ -693,6 +700,7 @@ class DesktopWorkOverlay:
         self,
         items: Sequence[Mapping[str, object]],
         *,
+        theme: Mapping[str, object] | None = None,
         close: bool,
     ) -> None:
         try:
@@ -703,12 +711,19 @@ class DesktopWorkOverlay:
                     "itemLimit": int(self.item_limit),
                     "commandPath": str(self._command_path),
                     "items": list(items),
+                    "theme": dict(theme or {}),
                     "updatedAt": time.time(),
                     "close": bool(close),
                 },
             )
         except OSError:
             return
+
+    def _theme_payload(self) -> dict[str, object]:
+        snapshot = self._theme_probe.snapshot()
+        if snapshot.source not in {"cdp", "persisted"}:
+            return {}
+        return snapshot.hud_tokens.to_dict()
 
 
 class _WorkOverlayCommandPump:

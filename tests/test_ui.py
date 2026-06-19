@@ -77,6 +77,7 @@ from codex_usage_hud.platforms.session_switch import (
 )
 from codex_usage_hud.config import UserConfig, UserConfigStore
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
+from codex_usage_hud.platforms.codex_theme import CodexThemeExport, HudThemeTokens
 from codex_usage_hud.core.parser import (
     Activity,
     GapTiming,
@@ -152,6 +153,7 @@ from codex_usage_hud.ui.tk_hud import (
     _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
+    _completed_badge_palette,
     _completed_badge_slot_moves,
     _completed_badge_slot_rects,
     _detect_transition,
@@ -159,10 +161,13 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _find_item_rect,
     _find_item_position,
     _item_dismiss_key,
+    _overlay_payload_signature,
     _overlay_hover_hit_test,
     _ordered_overlay_items,
     _point_in_inscribed_circle,
+    _round_badge_palette,
     _remembered_card_rect_for_layout,
+    _transition_palette,
     _transition_clearance_offset,
     _transition_rect_for_progress,
     _transition_required_height,
@@ -801,6 +806,54 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["items"], [{"id": "thread-1"}])
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
+
+    def test_desktop_work_overlay_exports_runtime_theme_tokens_when_available(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=2)
+        overlay._theme_probe = SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(
+                source="cdp",
+                hud_tokens=SimpleNamespace(
+                    to_dict=lambda: {
+                        "variant": "dark",
+                        "accent": "#339cff",
+                        "surface": "#181818",
+                    }
+                ),
+            )
+        )
+
+        self.assertEqual(
+            overlay._theme_payload(),
+            {
+                "variant": "dark",
+                "accent": "#339cff",
+                "surface": "#181818",
+            },
+        )
+
+    def test_desktop_work_overlay_accepts_persisted_theme_tokens(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=2)
+        overlay._theme_probe = SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(
+                source="persisted",
+                hud_tokens=SimpleNamespace(
+                    to_dict=lambda: {
+                        "variant": "light",
+                        "accent": "#0969da",
+                        "surface": "#ffffff",
+                    }
+                ),
+            )
+        )
+
+        self.assertEqual(
+            overlay._theme_payload(),
+            {
+                "variant": "light",
+                "accent": "#0969da",
+                "surface": "#ffffff",
+            },
+        )
 
     def test_loading_feedback_writes_state_with_atomic_json_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1913,6 +1966,46 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         for actual_value, expected_value in zip(actual, expected):
             self.assertAlmostEqual(actual_value, expected_value, places=places)
 
+    @staticmethod
+    def _light_overlay_theme() -> dict[str, str]:
+        return {
+            "surface": "#f7f8fb",
+            "panelSurface": "#fafbfc",
+            "panelBorder": "#c8d2dc",
+            "text": "#111111",
+            "muted": "#5e6a78",
+            "accent": "#0969da",
+            "info": "#8250df",
+            "warning": "#bf8700",
+            "error": "#cf222e",
+            "success": "#1a7f37",
+            "requestPanelSurface": "#ffffff",
+            "requestText": "#1f2328",
+            "requestMuted": "#656d76",
+            "progressOverflowBadge": "#f4c7c3",
+            "progressOverflowBadgeEdge": "#cf222e",
+        }
+
+    @staticmethod
+    def _dark_overlay_theme() -> dict[str, str]:
+        return {
+            "surface": "#181818",
+            "panelSurface": "#1f1f1f",
+            "panelBorder": "#333333",
+            "text": "#ffffff",
+            "muted": "#a0a0a0",
+            "accent": "#339cff",
+            "info": "#ad7bf9",
+            "warning": "#ffb86b",
+            "error": "#fa423e",
+            "success": "#40c977",
+            "requestPanelSurface": "#202020",
+            "requestText": "#e8e8e8",
+            "requestMuted": "#8f8f8f",
+            "progressOverflowBadge": "#7F3E3A",
+            "progressOverflowBadgeEdge": "#FF875A",
+        }
+
     def test_detect_card_to_completed_transition(self) -> None:
         old_items = [
             {"id": "1", "status": "tool", "title": "正在执行"},
@@ -1986,6 +2079,39 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         ]
         result = _detect_transition(old_items, new_items)
         self.assertIsNone(result)
+
+    def test_overlay_payload_signature_changes_when_theme_changes(self) -> None:
+        items = [{"id": "1", "status": "tool", "title": "正在执行"}]
+
+        light_signature = _overlay_payload_signature(items, self._light_overlay_theme())
+        dark_signature = _overlay_payload_signature(items, self._dark_overlay_theme())
+
+        self.assertNotEqual(light_signature, dark_signature)
+
+    def test_round_badge_palette_uses_status_color_and_contrast_text(self) -> None:
+        light_theme = self._light_overlay_theme()
+        dark_theme = self._dark_overlay_theme()
+
+        light_tool = _round_badge_palette("tool", light_theme)
+        light_error = _round_badge_palette("error", light_theme)
+        dark_tool = _round_badge_palette("tool", dark_theme)
+
+        self.assertNotEqual(light_tool["background"], light_error["background"])
+        self.assertEqual(light_tool["text"], light_theme["text"])
+        self.assertEqual(light_error["text"], light_theme["surface"])
+        self.assertEqual(dark_tool["text"], dark_theme["surface"])
+
+    def test_completed_transition_palette_matches_completed_badge_palette(self) -> None:
+        light_theme = self._light_overlay_theme()
+
+        badge_palette = _completed_badge_palette(light_theme)
+        transition_palette = _transition_palette("card_to_completed", light_theme)
+
+        self.assertEqual(transition_palette["fillStart"], badge_palette["fillStart"])
+        self.assertEqual(transition_palette["fillMid"], badge_palette["fillMid"])
+        self.assertEqual(transition_palette["fillEnd"], badge_palette["fillEnd"])
+        self.assertEqual(transition_palette["border"], badge_palette["border"])
+        self.assertEqual(transition_palette["markText"], badge_palette["checkText"])
 
     def test_find_completed_item_position_aligns_right_with_spacing(self) -> None:
         items = [
@@ -3005,6 +3131,52 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertIn("/◎87%", window.top_labels["bar"].cget("text"))
             self.assertIn("今日 41.1M/$39.31", window.top_labels["bar"].cget("text"))
             self.assertIn("本周 159.5M/$138.23", window.top_labels["bar"].cget("text"))
+        finally:
+            window._close()
+
+    def test_collapsed_hud_applies_live_codex_theme_tokens(self) -> None:
+        window = TokenHudWindow()
+        try:
+            themed_export = CodexThemeExport.from_share_string(
+                'codex-theme-v1:{"codeThemeId":"codex","theme":{"accent":"#339cff",'
+                '"contrast":60,"fonts":{"code":null,"ui":null},"ink":"#ffffff",'
+                '"opaqueWindows":false,"semanticColors":{"diffAdded":"#40c977",'
+                '"diffRemoved":"#fa423e","skill":"#ad7bf9"},"surface":"#181818"},'
+                '"variant":"dark"}'
+            )
+            tokens = HudThemeTokens.from_theme(themed_export)
+            window._theme_probe = SimpleNamespace(
+                snapshot=lambda: SimpleNamespace(
+                    source="cdp",
+                    hud_tokens=tokens,
+                )
+            )
+            window.update_display(ParsedSession())
+
+            self.assertEqual(str(window.request_label.cget("fg")).lower(), "#339cff")
+        finally:
+            window._close()
+
+    def test_collapsed_hud_applies_persisted_codex_theme_tokens(self) -> None:
+        window = TokenHudWindow()
+        try:
+            themed_export = CodexThemeExport.from_share_string(
+                'codex-theme-v1:{"codeThemeId":"github","theme":{"accent":"#0969da",'
+                '"contrast":40,"fonts":{"code":null,"ui":null},"ink":"#1f2328",'
+                '"opaqueWindows":false,"semanticColors":{"diffAdded":"#1a7f37",'
+                '"diffRemoved":"#cf222e","skill":"#8250df"},"surface":"#ffffff"},'
+                '"variant":"light"}'
+            )
+            tokens = HudThemeTokens.from_theme(themed_export)
+            window._theme_probe = SimpleNamespace(
+                snapshot=lambda: SimpleNamespace(
+                    source="persisted",
+                    hud_tokens=tokens,
+                )
+            )
+            window.update_display(ParsedSession())
+
+            self.assertEqual(str(window.request_label.cget("fg")).lower(), "#0969da")
         finally:
             window._close()
 

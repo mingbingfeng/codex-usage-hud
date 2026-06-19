@@ -53,6 +53,7 @@ If this HUD saves you time while checking token usage and cost, you can support 
 
 - Renderer-first HUD: when Codex exposes a local CDP target, the HUD renders inside Codex App.
 - Tk fallback: when CDP is unavailable, the local Tk HUD remains available.
+- Codex theme sync: Renderer mode follows the live Codex App theme first; without CDP, Tk and overlay fall back to the saved Codex theme settings so light/dark mode and most custom chrome colors still carry over.
 - Real-time tokens and cost: input, cached input, output, reasoning, total, cache hit rate, and live USD estimate.
 - Day/week budgets: custom limits, reset time, weekly reset day, thresholds, and manual weekly adjustment.
 - Work status visibility: current activity, longest wait, slowest tool, and request timeline.
@@ -103,6 +104,13 @@ The installer runs `codex-hud --stop` before replacing files so the previous HUD
 - HUD settings: `%LOCALAPPDATA%\codex-usage-hud\hud_settings.json`
 - HUD daemon log: `%LOCALAPPDATA%\codex-usage-hud\daemon.log`
 - Default install directory: `%LOCALAPPDATA%\Programs\codex-usage-hud`
+
+## Codex Theme Sync
+
+The HUD can now follow the active Codex App theme, including light/dark
+variants and `Copy theme` share strings. For implementation details, theme
+export steps, and current limitations, see
+[docs/CODEX_APP_THEME_SYNC.md](docs/CODEX_APP_THEME_SYNC.md).
 
 ## FAQ
 

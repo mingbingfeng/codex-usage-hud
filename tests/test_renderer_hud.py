@@ -21,12 +21,48 @@ from codex_usage_hud.core.parser import (
     SlowSummary,
     ToolCallTiming,
 )
+from codex_usage_hud.platforms.codex_theme import CodexThemeSnapshot
 from codex_usage_hud.support_assets import support_qr_asset_paths, support_qr_payload
 from codex_usage_hud.ui import renderer_hud
-from codex_usage_hud.ui.renderer_hud import RendererHudClient, payload_from_snapshot
+from codex_usage_hud.ui.renderer_hud import (
+    RendererHudClient,
+    _renderer_theme_payload,
+    payload_from_snapshot,
+)
 
 
 class RendererHudPayloadTests(unittest.TestCase):
+    def test_renderer_theme_payload_accepts_persisted_source(self) -> None:
+        snapshot = CodexThemeSnapshot.from_probe_result(
+            {
+                "mode": "dark",
+                "effectiveVariant": "dark",
+                "darkCodeThemeId": "linear",
+                "darkTheme": {
+                    "accent": "#5e6ad2",
+                    "contrast": 60,
+                    "fonts": {"code": None, "ui": "Inter"},
+                    "ink": "#e3e4e6",
+                    "opaqueWindows": True,
+                    "semanticColors": {
+                        "diffAdded": "#69c967",
+                        "diffRemoved": "#ff7e78",
+                        "skill": "#c2a1ff",
+                    },
+                    "surface": "#0f0f11",
+                },
+            },
+            source="persisted",
+        )
+
+        assert snapshot is not None
+        payload = _renderer_theme_payload(snapshot)
+
+        self.assertEqual(payload["source"], "persisted")
+        self.assertEqual(payload["variant"], "dark")
+        self.assertEqual(payload["tokens"]["accent"], "#5e6ad2")
+        self.assertEqual(payload["effectiveTheme"]["codeThemeId"], "linear")
+
     def test_payload_from_snapshot_formats_compact_hud_lines(self) -> None:
         snapshot = ParsedSession(
             session_id="session-abcdef123456",
@@ -61,6 +97,48 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         payload = payload_from_snapshot(
             snapshot,
+            theme={
+                "variant": "dark",
+                "source": "cdp",
+                "tokens": {
+                    "surface": "#181818",
+                    "panelSurface": "#202020",
+                    "panelBorder": "#3a485a",
+                    "headerSurface": "#202833",
+                    "divider": "#273241",
+                    "text": "#e8eef7",
+                    "muted": "#8492a6",
+                    "accent": "#339cff",
+                    "info": "#ad7bf9",
+                    "warning": "#ffb86b",
+                    "error": "#fa423e",
+                    "success": "#40c977",
+                    "requestSurface": "#151515",
+                    "requestHeaderSurface": "#202020",
+                    "requestPanelSurface": "#171717",
+                    "requestText": "#f0f0f0",
+                    "requestMuted": "#808080",
+                    "progressTrack": "#111822",
+                    "progressTrackBorder": "#314052",
+                    "progressTrackText": "#657589",
+                    "progressCache": "#5d8bff",
+                    "progressCacheEnd": "#7d6dff",
+                    "progressCacheText": "#07131f",
+                    "progressDay": "#339cff",
+                    "progressDayEnd": "#5d8bff",
+                    "progressDayText": "#07131f",
+                    "progressWeek": "#6ea8ff",
+                    "progressWeekEnd": "#8db7ff",
+                    "progressWeekText": "#07131f",
+                    "progressOverflow": "#fa423e",
+                    "progressOverflowHighlight": "#ffb5b2",
+                    "progressOverflowAnchor": "#ff7a77",
+                    "progressOverflowAnchorEdge": "#ffc3a4",
+                    "progressOverflowBadge": "#5e2424",
+                    "progressOverflowBadgeEdge": "#fa423e",
+                    "progressOverflowBadgeText": "#ffe0de",
+                },
+            },
             update_state={
                 "visible": True,
                 "phase": "downloading",
@@ -111,9 +189,14 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("settingsBridgeUrl", payload)
         self.assertIn("settingsCommandStatus", payload)
         self.assertIn("workOverlaySelectableMax", payload)
+        self.assertIn("theme", payload)
+        self.assertEqual(payload["theme"]["variant"], "dark")
+        self.assertEqual(payload["theme"]["tokens"]["accent"], "#339cff")
         self.assertIn("updateState", payload)
         self.assertEqual(payload["appVersion"], "1.0.2")
         self.assertIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("applyTheme(root, nextPayload)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("--codex-usage-hud-surface", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-update-button", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="update-action"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-settings-button", renderer_hud.RENDERER_HUD_SCRIPT)

@@ -21,10 +21,11 @@ from ..platforms.cdp_probe import (
     remove_new_document_script,
     send_cdp_command,
 )
+from ..platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "12"
+RENDERER_HUD_VERSION = "14"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -59,9 +60,20 @@ def set_cost_estimator(estimator: CostEstimator) -> None:
     global _COST_ESTIMATOR
     _COST_ESTIMATOR = estimator
 
+
+def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, object]:
+    if snapshot is None or snapshot.source not in {"cdp", "persisted"}:
+        return {}
+    return {
+        "variant": snapshot.effective_variant,
+        "source": snapshot.source,
+        "tokens": snapshot.hud_tokens.to_dict(),
+        "effectiveTheme": snapshot.effective_theme.to_dict(),
+    }
+
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "13";
+  const version = "14";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -134,6 +146,42 @@ RENDERER_HUD_SCRIPT = r"""
     style.dataset.version = version;
     style.textContent = `
       #${rootId} {
+        --codex-usage-hud-surface: #10161d;
+        --codex-usage-hud-panel-surface: #141b24;
+        --codex-usage-hud-panel-border: #3a485a;
+        --codex-usage-hud-header-surface: #202833;
+        --codex-usage-hud-divider: #273241;
+        --codex-usage-hud-text: #e8eef7;
+        --codex-usage-hud-muted: #8492a6;
+        --codex-usage-hud-accent: #f3d27a;
+        --codex-usage-hud-info: #9ccbff;
+        --codex-usage-hud-warning: #ffb86b;
+        --codex-usage-hud-error: #ff6b6b;
+        --codex-usage-hud-success: #8fe3a1;
+        --codex-usage-hud-request-surface: #0b1016;
+        --codex-usage-hud-request-header-surface: #151d27;
+        --codex-usage-hud-request-panel-surface: #101821;
+        --codex-usage-hud-request-text: #dce7f2;
+        --codex-usage-hud-request-muted: #718095;
+        --codex-usage-hud-progress-track: #111822;
+        --codex-usage-hud-progress-track-border: #314052;
+        --codex-usage-hud-progress-track-text: #657589;
+        --codex-usage-hud-progress-cache: #9ccbff;
+        --codex-usage-hud-progress-cache-end: #5ea7ff;
+        --codex-usage-hud-progress-cache-text: #07131f;
+        --codex-usage-hud-progress-day: #f3d27a;
+        --codex-usage-hud-progress-day-end: #ffb86b;
+        --codex-usage-hud-progress-day-text: #1a1305;
+        --codex-usage-hud-progress-week: #ffc68d;
+        --codex-usage-hud-progress-week-end: #ff8d5a;
+        --codex-usage-hud-progress-week-text: #1f1106;
+        --codex-usage-hud-progress-overflow: #ff875a;
+        --codex-usage-hud-progress-overflow-highlight: #ffd8bd;
+        --codex-usage-hud-progress-overflow-anchor: #ff6b64;
+        --codex-usage-hud-progress-overflow-anchor-edge: #ffc3a4;
+        --codex-usage-hud-progress-overflow-badge: #7f3e3a;
+        --codex-usage-hud-progress-overflow-badge-edge: #ff875a;
+        --codex-usage-hud-progress-overflow-badge-text: #ffd7ca;
         position: fixed;
         inset: 0;
         z-index: 2147482600;
@@ -1156,6 +1204,152 @@ RENDERER_HUD_SCRIPT = r"""
         border-radius: 6px;
         background: #ffffff;
       }
+      #${rootId}[data-theme-variant="light"] {
+        color-scheme: light;
+      }
+      #${rootId}[data-theme-variant="dark"] {
+        color-scheme: dark;
+      }
+      #${rootId} .codex-usage-hud-panel {
+        border-color: var(--codex-usage-hud-panel-border);
+        color: var(--codex-usage-hud-text);
+      }
+      #${rootId} .${topClass} {
+        background: var(--codex-usage-hud-surface);
+      }
+      #${rootId} .${requestClass} {
+        background: var(--codex-usage-hud-request-surface);
+      }
+      #${rootId} .codex-usage-hud-handle,
+      #${rootId} .codex-usage-hud-update-button,
+      #${rootId} .codex-usage-hud-settings-button {
+        background: var(--codex-usage-hud-header-surface);
+      }
+      #${rootId} .codex-usage-hud-handle {
+        color: var(--codex-usage-hud-muted);
+      }
+      #${rootId} .codex-usage-hud-update-button {
+        color: var(--codex-usage-hud-info);
+      }
+      #${rootId} .codex-usage-hud-update-button[data-state="paused"],
+      #${rootId} .codex-usage-hud-update-button[data-state="error"],
+      #${rootId} .codex-usage-hud-update-button[data-icon="install"] {
+        color: var(--codex-usage-hud-warning);
+      }
+      #${rootId} .codex-usage-hud-settings-button {
+        color: var(--codex-usage-hud-muted);
+      }
+      #${rootId} .codex-usage-hud-handle:hover,
+      #${rootId} .codex-usage-hud-update-button:hover,
+      #${rootId} .codex-usage-hud-settings-button:hover {
+        background: var(--codex-usage-hud-panel-border);
+        color: var(--codex-usage-hud-accent);
+      }
+      #${rootId} .codex-usage-hud-progress-rail {
+        border-color: var(--codex-usage-hud-progress-track-border);
+        background: linear-gradient(180deg, rgba(255,255,255,.032), rgba(255,255,255,0)), var(--codex-usage-hud-progress-track);
+      }
+      #${rootId} .codex-usage-hud-progress-track-text {
+        color: var(--codex-usage-hud-progress-track-text);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] .codex-usage-hud-progress-fill,
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, var(--codex-usage-hud-progress-cache), var(--codex-usage-hud-progress-cache-end));
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] .codex-usage-hud-progress-fill-text,
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill-text {
+        color: var(--codex-usage-hud-progress-cache-text);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, var(--codex-usage-hud-progress-day), var(--codex-usage-hud-progress-day-end));
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill-text {
+        color: var(--codex-usage-hud-progress-day-text);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, var(--codex-usage-hud-progress-week), var(--codex-usage-hud-progress-week-end));
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill-text {
+        color: var(--codex-usage-hud-progress-week-text);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill {
+        background: linear-gradient(90deg, var(--codex-usage-hud-progress-overflow), var(--codex-usage-hud-error));
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill-text {
+        color: var(--codex-usage-hud-progress-day-text);
+      }
+      #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] {
+        border-color: var(--codex-usage-hud-progress-overflow-badge-edge);
+      }
+      #${rootId} .codex-usage-hud-progress-overflow {
+        background: linear-gradient(90deg, var(--codex-usage-hud-progress-overflow-highlight), var(--codex-usage-hud-progress-overflow) 60%, var(--codex-usage-hud-error));
+      }
+      #${rootId} .codex-usage-hud-progress-overflow-anchor {
+        background: radial-gradient(circle at 35% 35%, var(--codex-usage-hud-progress-overflow-highlight) 0%, var(--codex-usage-hud-progress-overflow) 58%, var(--codex-usage-hud-error) 100%);
+        box-shadow: 0 0 0 2px rgba(255,255,255,.06), 0 0 14px rgba(0,0,0,.18);
+      }
+      #${rootId} .codex-usage-hud-progress-badge {
+        border-color: var(--codex-usage-hud-progress-overflow-badge-edge);
+        background: var(--codex-usage-hud-progress-overflow-badge);
+        color: var(--codex-usage-hud-progress-overflow-badge-text);
+      }
+      #${rootId} .codex-usage-hud-progress-badge::before {
+        background: linear-gradient(180deg, var(--codex-usage-hud-progress-overflow-highlight), var(--codex-usage-hud-error));
+      }
+      #${rootId} .codex-usage-hud-panel-header,
+      #${rootId} .codex-usage-hud-top-right,
+      #${rootId} .codex-usage-hud-settings-tab.is-active,
+      #${rootId} .codex-usage-hud-settings-loading-kicker {
+        background: var(--codex-usage-hud-header-surface);
+      }
+      #${rootId} .codex-usage-hud-top-right,
+      #${rootId} .codex-usage-hud-settings-modal-shell,
+      #${rootId} .codex-usage-hud-settings-shell {
+        background: var(--codex-usage-hud-panel-surface);
+      }
+      #${rootId} .codex-usage-hud-top-right,
+      #${rootId} .codex-usage-hud-settings-modal-shell,
+      #${rootId} .codex-usage-hud-settings-shell,
+      #${rootId} .codex-usage-hud-input,
+      #${rootId} .codex-usage-hud-select,
+      #${rootId} .codex-usage-hud-textarea {
+        border-color: var(--codex-usage-hud-divider);
+      }
+      #${rootId} .codex-usage-hud-request-list {
+        background: var(--codex-usage-hud-request-panel-surface);
+        scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-request-panel-surface);
+      }
+      #${rootId} .codex-usage-hud-row {
+        color: var(--codex-usage-hud-request-text);
+      }
+      #${rootId} .codex-usage-hud-row[data-latest="true"] {
+        color: var(--codex-usage-hud-accent);
+      }
+      #${rootId} .codex-usage-hud-row-time,
+      #${rootId} .codex-usage-hud-session-meta,
+      #${rootId} .codex-usage-hud-support-qr-title span:last-child {
+        color: var(--codex-usage-hud-request-muted);
+      }
+      #${rootId} .codex-usage-hud-warning,
+      #${rootId} .codex-usage-hud-line-warning,
+      #${rootId} [data-field="topWarnings"] {
+        color: var(--codex-usage-hud-warning) !important;
+      }
+      #${rootId} .codex-usage-hud-error {
+        color: var(--codex-usage-hud-error) !important;
+      }
+      #${rootId} .codex-usage-hud-line-accent,
+      #${rootId} .codex-usage-hud-support-qr-title span:first-child {
+        color: var(--codex-usage-hud-accent);
+      }
+      #${rootId} .codex-usage-hud-line-info {
+        color: var(--codex-usage-hud-info);
+      }
+      #${rootId} .codex-usage-hud-line-muted,
+      #${rootId} .codex-usage-hud-label,
+      #${rootId} .codex-usage-hud-field-caption {
+        color: var(--codex-usage-hud-muted);
+      }
       @media (max-width: 760px) {
         #${rootId} .codex-usage-hud-top-grid {
           grid-template-columns: minmax(0, 1fr);
@@ -1182,6 +1376,93 @@ RENDERER_HUD_SCRIPT = r"""
       }
     `;
     document.documentElement.appendChild(style);
+  }
+
+  function applyTheme(root, payload) {
+    if (!root) return;
+    const tokens = payload?.theme?.tokens || {};
+    const variant = String(payload?.theme?.variant || "dark").toLowerCase() === "light" ? "light" : "dark";
+    const defaults = {
+      surface: "#10161d",
+      panelSurface: "#141b24",
+      panelBorder: "#3a485a",
+      headerSurface: "#202833",
+      divider: "#273241",
+      text: "#e8eef7",
+      muted: "#8492a6",
+      accent: "#f3d27a",
+      info: "#9ccbff",
+      warning: "#ffb86b",
+      error: "#ff6b6b",
+      success: "#8fe3a1",
+      requestSurface: "#0b1016",
+      requestHeaderSurface: "#151d27",
+      requestPanelSurface: "#101821",
+      requestText: "#dce7f2",
+      requestMuted: "#718095",
+      progressTrack: "#111822",
+      progressTrackBorder: "#314052",
+      progressTrackText: "#657589",
+      progressCache: "#9ccbff",
+      progressCacheEnd: "#5ea7ff",
+      progressCacheText: "#07131f",
+      progressDay: "#f3d27a",
+      progressDayEnd: "#ffb86b",
+      progressDayText: "#1a1305",
+      progressWeek: "#ffc68d",
+      progressWeekEnd: "#ff8d5a",
+      progressWeekText: "#1f1106",
+      progressOverflow: "#ff875a",
+      progressOverflowHighlight: "#ffd8bd",
+      progressOverflowAnchor: "#ff6b64",
+      progressOverflowAnchorEdge: "#ffc3a4",
+      progressOverflowBadge: "#7f3e3a",
+      progressOverflowBadgeEdge: "#ff875a",
+      progressOverflowBadgeText: "#ffd7ca",
+    };
+    const resolved = { ...defaults, ...(tokens || {}) };
+    const variableEntries = [
+      ["--codex-usage-hud-surface", resolved.surface],
+      ["--codex-usage-hud-panel-surface", resolved.panelSurface],
+      ["--codex-usage-hud-panel-border", resolved.panelBorder],
+      ["--codex-usage-hud-header-surface", resolved.headerSurface],
+      ["--codex-usage-hud-divider", resolved.divider],
+      ["--codex-usage-hud-text", resolved.text],
+      ["--codex-usage-hud-muted", resolved.muted],
+      ["--codex-usage-hud-accent", resolved.accent],
+      ["--codex-usage-hud-info", resolved.info],
+      ["--codex-usage-hud-warning", resolved.warning],
+      ["--codex-usage-hud-error", resolved.error],
+      ["--codex-usage-hud-success", resolved.success],
+      ["--codex-usage-hud-request-surface", resolved.requestSurface],
+      ["--codex-usage-hud-request-header-surface", resolved.requestHeaderSurface],
+      ["--codex-usage-hud-request-panel-surface", resolved.requestPanelSurface],
+      ["--codex-usage-hud-request-text", resolved.requestText],
+      ["--codex-usage-hud-request-muted", resolved.requestMuted],
+      ["--codex-usage-hud-progress-track", resolved.progressTrack],
+      ["--codex-usage-hud-progress-track-border", resolved.progressTrackBorder],
+      ["--codex-usage-hud-progress-track-text", resolved.progressTrackText],
+      ["--codex-usage-hud-progress-cache", resolved.progressCache],
+      ["--codex-usage-hud-progress-cache-end", resolved.progressCacheEnd],
+      ["--codex-usage-hud-progress-cache-text", resolved.progressCacheText],
+      ["--codex-usage-hud-progress-day", resolved.progressDay],
+      ["--codex-usage-hud-progress-day-end", resolved.progressDayEnd],
+      ["--codex-usage-hud-progress-day-text", resolved.progressDayText],
+      ["--codex-usage-hud-progress-week", resolved.progressWeek],
+      ["--codex-usage-hud-progress-week-end", resolved.progressWeekEnd],
+      ["--codex-usage-hud-progress-week-text", resolved.progressWeekText],
+      ["--codex-usage-hud-progress-overflow", resolved.progressOverflow],
+      ["--codex-usage-hud-progress-overflow-highlight", resolved.progressOverflowHighlight],
+      ["--codex-usage-hud-progress-overflow-anchor", resolved.progressOverflowAnchor],
+      ["--codex-usage-hud-progress-overflow-anchor-edge", resolved.progressOverflowAnchorEdge],
+      ["--codex-usage-hud-progress-overflow-badge", resolved.progressOverflowBadge],
+      ["--codex-usage-hud-progress-overflow-badge-edge", resolved.progressOverflowBadgeEdge],
+      ["--codex-usage-hud-progress-overflow-badge-text", resolved.progressOverflowBadgeText],
+    ];
+    root.dataset.themeVariant = variant;
+    for (const [name, value] of variableEntries) {
+      root.style.setProperty(name, String(value || ""));
+    }
   }
 
   function resizeEdgesMarkup() {
@@ -3463,6 +3744,7 @@ RENDERER_HUD_SCRIPT = r"""
     window[stateName] = { payload: nextPayload, updatedAt: Date.now() };
     const root = ensureRoot();
     if (!root) return false;
+    applyTheme(root, nextPayload);
     setText(root, "topLine", nextPayload?.topLine || "codex-usage-hud 等待数据");
     setText(root, "requestLine", nextPayload?.requestLine || "本次请求 等待");
     setText(root, "requestLineExpanded", nextPayload?.requestLine || "最近模型请求轮次");
@@ -3575,6 +3857,7 @@ class RendererHudPayload:
     settings_command_status: dict[str, object] = field(default_factory=dict)
     work_overlay_selectable_max: int = 6
     support_images: list[dict[str, str]] = field(default_factory=list)
+    theme: dict[str, object] = field(default_factory=dict)
     update_state: dict[str, object] = field(default_factory=dict)
     app_version: str = __version__
 
@@ -3601,6 +3884,7 @@ class RendererHudPayload:
             "settingsCommandStatus": dict(self.settings_command_status),
             "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
             "supportImages": [dict(item) for item in self.support_images],
+            "theme": dict(self.theme),
             "updateState": dict(self.update_state),
             "appVersion": self.app_version,
         }
@@ -3633,6 +3917,12 @@ class RendererHudClient:
         self._target_cache_at = 0.0
         self._next_settings_poll_at = 0.0
         self._support_images_sent = False
+        self._theme_probe = CodexThemeProbe(
+            port=self.port,
+            timeout_seconds=max(0.08, min(self.timeout_seconds, 0.25)),
+            cache_seconds=max(0.35, self.target_cache_seconds),
+            failure_cooldown_seconds=4.0,
+        )
 
     def update(
         self,
@@ -3647,6 +3937,7 @@ class RendererHudClient:
         work_overlay_selectable_max: int = 6,
     ) -> bool:
         support_images = [] if self._support_images_sent else support_qr_payload()
+        theme_snapshot = self._theme_probe.snapshot()
         payload = payload_from_snapshot(
             snapshot,
             settings=settings,
@@ -3655,6 +3946,7 @@ class RendererHudClient:
             settings_bridge_url=settings_bridge_url,
             settings_command_status=settings_command_status,
             support_images=support_images,
+            theme=_renderer_theme_payload(theme_snapshot),
             update_state=update_state,
             work_overlay_selectable_max=work_overlay_selectable_max,
         ).to_json()
@@ -3899,6 +4191,7 @@ def payload_from_snapshot(
     settings_bridge_url: str = "",
     settings_command_status: dict[str, object] | None = None,
     support_images: list[dict[str, str]] | None = None,
+    theme: dict[str, object] | None = None,
     update_state: dict[str, object] | None = None,
     work_overlay_selectable_max: int = 6,
 ) -> RendererHudPayload:
@@ -3947,6 +4240,7 @@ def payload_from_snapshot(
         settings_command_status=settings_command_status or {},
         work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),
         support_images=support_images or [],
+        theme=theme or {},
         update_state=update_state or {},
         app_version=__version__,
     )

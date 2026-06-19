@@ -45,6 +45,23 @@ WORK_OVERLAY_SHIMMER_HIGHLIGHT = "#FFFFFF"
 WORK_OVERLAY_SHIMMER_PEAK_ALPHA = 245
 WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
 WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS = 1.2
+DEFAULT_WORK_OVERLAY_THEME: dict[str, str] = {
+    "surface": "#10161D",
+    "panelSurface": "#141B24",
+    "panelBorder": "#263241",
+    "text": "#DCE7F2",
+    "muted": "#8492A6",
+    "accent": "#F3D27A",
+    "info": "#9CCBFF",
+    "warning": "#FFB86B",
+    "error": "#FF6B6B",
+    "success": "#8FE3A1",
+    "requestPanelSurface": "#10161D",
+    "requestText": "#B8C6D8",
+    "requestMuted": "#5E6A78",
+    "progressOverflowBadge": "#7F3E3A",
+    "progressOverflowBadgeEdge": "#FF875A",
+}
 
 
 def work_overlay_max_items_for_screen_height(screen_height: int) -> int:
@@ -572,16 +589,276 @@ def _visible_overlay_items(
     return visible
 
 
-def _color_for(status: str) -> tuple[str, str, str, str]:
+def _theme_hex(value: object, fallback: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("#") and len(text) in {4, 7}:
+        return text
+    return fallback
+
+
+def _theme_hex_to_rgb(value: object, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
+    text = _theme_hex(value, "")
+    if len(text) == 4:
+        text = f"#{text[1] * 2}{text[2] * 2}{text[3] * 2}"
+    if len(text) != 7:
+        return fallback
+    try:
+        return int(text[1:3], 16), int(text[3:5], 16), int(text[5:7], 16)
+    except ValueError:
+        return fallback
+
+
+def _theme_mix(base: object, overlay: object, alpha: float, *, fallback: str) -> str:
+    alpha = max(0.0, min(1.0, float(alpha)))
+    base_rgb = _theme_hex_to_rgb(base, _theme_hex_to_rgb(fallback, (16, 22, 29)))
+    overlay_rgb = _theme_hex_to_rgb(overlay, _theme_hex_to_rgb(fallback, (16, 22, 29)))
+    channels = []
+    for base_channel, overlay_channel in zip(base_rgb, overlay_rgb):
+        channels.append(
+            int(round((base_channel * (1.0 - alpha)) + (overlay_channel * alpha)))
+        )
+    return f"#{channels[0]:02x}{channels[1]:02x}{channels[2]:02x}"
+
+
+def _theme_relative_luma(
+    value: object,
+    fallback: tuple[int, int, int] = (0, 0, 0),
+) -> float:
+    red, green, blue = _theme_hex_to_rgb(value, fallback)
+    channels = []
+    for channel in (red, green, blue):
+        normalized = channel / 255.0
+        if normalized <= 0.03928:
+            channels.append(normalized / 12.92)
+        else:
+            channels.append(((normalized + 0.055) / 1.055) ** 2.4)
+    return (channels[0] * 0.2126) + (channels[1] * 0.7152) + (channels[2] * 0.0722)
+
+
+def _theme_contrast_ratio(left: object, right: object) -> float:
+    left_luma = _theme_relative_luma(left)
+    right_luma = _theme_relative_luma(right)
+    lighter = max(left_luma, right_luma)
+    darker = min(left_luma, right_luma)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _theme_contrast_choice(
+    background: object,
+    primary: object,
+    secondary: object,
+    *,
+    fallback: str,
+) -> str:
+    primary_hex = _theme_hex(primary, fallback)
+    secondary_hex = _theme_hex(secondary, fallback)
+    if not primary_hex:
+        return secondary_hex or fallback
+    if not secondary_hex:
+        return primary_hex
+    if _theme_contrast_ratio(background, primary_hex) >= _theme_contrast_ratio(
+        background,
+        secondary_hex,
+    ):
+        return primary_hex
+    return secondary_hex
+
+
+def _resolved_overlay_theme(theme_tokens: Mapping[str, object] | None) -> dict[str, str]:
+    resolved = dict(DEFAULT_WORK_OVERLAY_THEME)
+    if theme_tokens is None:
+        return resolved
+    for key, fallback in DEFAULT_WORK_OVERLAY_THEME.items():
+        resolved[key] = _theme_hex(theme_tokens.get(key), fallback)
+    return resolved
+
+
+def _overlay_payload_signature(
+    items: Sequence[Mapping[str, object]],
+    theme_tokens: Mapping[str, object] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "items": list(items),
+            "theme": _resolved_overlay_theme(theme_tokens),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _color_for(
+    status: str,
+    theme_tokens: Mapping[str, object] | None = None,
+) -> tuple[str, str, str, str]:
+    theme = _resolved_overlay_theme(theme_tokens)
+    base_card = theme["requestPanelSurface"]
+    base_border = theme["panelBorder"]
     if status == "error":
-        return "#FF6B6B", "#2A1013", "#1A1012", "#A63A3A"
+        accent = theme["error"]
+        return (
+            accent,
+            _theme_mix(theme["surface"], accent, 0.10, fallback=base_card),
+            _theme_mix(base_card, accent, 0.16, fallback=base_card),
+            _theme_mix(base_border, accent, 0.55, fallback=base_border),
+        )
     if status == "waiting_user":
-        return "#FFB86B", "#1D1610", "#10161D", "#263241"
+        accent = theme["warning"]
+        return (
+            accent,
+            _theme_mix(theme["surface"], accent, 0.10, fallback=base_card),
+            _theme_mix(base_card, accent, 0.12, fallback=base_card),
+            _theme_mix(base_border, accent, 0.45, fallback=base_border),
+        )
     if status == "tool":
-        return "#9CCBFF", "#0D1722", "#10161D", "#263241"
+        accent = theme["info"]
+        return (
+            accent,
+            _theme_mix(theme["surface"], accent, 0.10, fallback=base_card),
+            _theme_mix(base_card, accent, 0.12, fallback=base_card),
+            _theme_mix(base_border, accent, 0.45, fallback=base_border),
+        )
     if status == "recent":
-        return "#8FE3A1", "#0E1B14", "#0E1B14", "#2F9F55"
-    return "#F3D27A", "#1C190F", "#10161D", "#263241"
+        accent = theme["success"]
+        return (
+            accent,
+            _theme_mix(theme["surface"], accent, 0.11, fallback=base_card),
+            _theme_mix(base_card, accent, 0.16, fallback=base_card),
+            _theme_mix(base_border, accent, 0.55, fallback=base_border),
+        )
+    accent = theme["accent"]
+    return (
+        accent,
+        _theme_mix(theme["surface"], accent, 0.10, fallback=base_card),
+        _theme_mix(base_card, accent, 0.12, fallback=base_card),
+        _theme_mix(base_border, accent, 0.40, fallback=base_border),
+    )
+
+
+def _round_badge_palette(
+    status: str,
+    theme_tokens: Mapping[str, object] | None = None,
+) -> dict[str, str]:
+    theme = _resolved_overlay_theme(theme_tokens)
+    accent, _, _, _ = _color_for(status, theme)
+    background = _theme_mix(accent, theme["surface"], 0.10, fallback=accent)
+    border = _theme_mix(theme["panelBorder"], accent, 0.68, fallback=theme["panelBorder"])
+    text = _theme_contrast_choice(
+        background,
+        theme["text"],
+        theme["surface"],
+        fallback=theme["text"],
+    )
+    return {
+        "background": background,
+        "border": border,
+        "text": text,
+    }
+
+
+def _completed_badge_palette(
+    theme_tokens: Mapping[str, object] | None = None,
+) -> dict[str, str]:
+    theme = _resolved_overlay_theme(theme_tokens)
+    success = _theme_mix(theme["success"], theme["accent"], 0.18, fallback=theme["success"])
+    fill_start = _theme_mix(success, theme["text"], 0.10, fallback=success)
+    fill_mid = _theme_mix(success, theme["accent"], 0.22, fallback=success)
+    fill_end = _theme_mix(
+        theme["requestPanelSurface"],
+        success,
+        0.54,
+        fallback=theme["requestPanelSurface"],
+    )
+    border = _theme_mix(theme["panelBorder"], success, 0.68, fallback=theme["panelBorder"])
+    primary_ink = _theme_contrast_choice(
+        fill_mid,
+        theme["text"],
+        theme["surface"],
+        fallback=theme["text"],
+    )
+    secondary_ink = _theme_mix(primary_ink, theme["info"], 0.34, fallback=primary_ink)
+    elapsed_ink = _theme_mix(primary_ink, fill_mid, 0.16, fallback=primary_ink)
+    ring = _theme_mix(primary_ink, success, 0.24, fallback=primary_ink)
+    dashed_ring = _theme_mix(primary_ink, success, 0.48, fallback=primary_ink)
+    stat_box_fill = _theme_mix(
+        theme["requestPanelSurface"],
+        success,
+        0.30,
+        fallback=theme["requestPanelSurface"],
+    )
+    stat_box_border = _theme_mix(
+        theme["panelBorder"],
+        success,
+        0.56,
+        fallback=theme["panelBorder"],
+    )
+    stat_value = _theme_contrast_choice(
+        stat_box_fill,
+        theme["text"],
+        theme["surface"],
+        fallback=primary_ink,
+    )
+    stat_label = _theme_mix(stat_value, success, 0.28, fallback=stat_value)
+    return {
+        "fillStart": fill_start,
+        "fillMid": fill_mid,
+        "fillEnd": fill_end,
+        "border": border,
+        "ring": ring,
+        "dashedRing": dashed_ring,
+        "titleText": primary_ink,
+        "workdirText": secondary_ink,
+        "checkText": primary_ink,
+        "elapsedText": elapsed_ink,
+        "statBoxFill": stat_box_fill,
+        "statBoxBorder": stat_box_border,
+        "statValue": stat_value,
+        "statLabel": stat_label,
+    }
+
+
+def _transition_palette(
+    transition_type: str,
+    theme_tokens: Mapping[str, object] | None = None,
+) -> dict[str, str]:
+    theme = _resolved_overlay_theme(theme_tokens)
+    if transition_type == "card_to_completed":
+        completed = _completed_badge_palette(theme)
+        return {
+            "fillStart": completed["fillStart"],
+            "fillMid": completed["fillMid"],
+            "fillEnd": completed["fillEnd"],
+            "border": completed["border"],
+            "titleText": completed["titleText"],
+            "subtitleText": completed["statLabel"],
+            "markText": completed["checkText"],
+        }
+    base = _theme_mix(theme["accent"], theme["info"], 0.22, fallback=theme["accent"])
+    fill_start = _theme_mix(base, theme["text"], 0.12, fallback=base)
+    fill_mid = _theme_mix(base, theme["info"], 0.26, fallback=base)
+    fill_end = _theme_mix(
+        theme["requestPanelSurface"],
+        base,
+        0.52,
+        fallback=theme["requestPanelSurface"],
+    )
+    border = _theme_mix(theme["panelBorder"], base, 0.62, fallback=theme["panelBorder"])
+    primary_ink = _theme_contrast_choice(
+        fill_mid,
+        theme["text"],
+        theme["surface"],
+        fallback=theme["text"],
+    )
+    subtitle_ink = _theme_mix(primary_ink, theme["info"], 0.34, fallback=primary_ink)
+    return {
+        "fillStart": fill_start,
+        "fillMid": fill_mid,
+        "fillEnd": fill_end,
+        "border": border,
+        "titleText": primary_ink,
+        "subtitleText": subtitle_ink,
+        "markText": primary_ink,
+    }
 
 
 def _work_overlay_command_path(state_path: Path) -> Path:
@@ -1037,7 +1314,7 @@ def run_work_overlay_helper_qt(
                 painter.drawRoundedRect(self.rect(), 6, 6)
 
     class CompletedBadgeWidget(QWidget):
-        """Animated green circular summary for finished work."""
+        """Animated circular summary for finished work."""
 
         def __init__(
             self,
@@ -1045,9 +1322,11 @@ def run_work_overlay_helper_qt(
             parent: QWidget | None = None,
             *,
             animate_intro: bool = True,
+            theme_tokens: Mapping[str, object] | None = None,
         ) -> None:
             super().__init__(parent)
             self._item: Mapping[str, object] = dict(item)
+            self._theme_tokens = _resolved_overlay_theme(theme_tokens)
             self._started_at = time.monotonic()
             self._progress = 0.0 if animate_intro else 1.0
             self._timer = QTimer(self)
@@ -1064,6 +1343,13 @@ def run_work_overlay_helper_qt(
 
         def set_item(self, item: Mapping[str, object]) -> None:
             self._item = dict(item)
+            self.update()
+
+        def set_theme_tokens(
+            self,
+            theme_tokens: Mapping[str, object] | None,
+        ) -> None:
+            self._theme_tokens = _resolved_overlay_theme(theme_tokens)
             self.update()
 
         def sizeHint(self) -> QSize:
@@ -1087,6 +1373,7 @@ def run_work_overlay_helper_qt(
             painter.setPen(Qt.PenStyle.NoPen)
 
             eased = 1.0 - pow(1.0 - max(0.0, min(1.0, self._progress)), 3)
+            palette = _completed_badge_palette(self._theme_tokens)
             final_size = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
             start_height = 118.0
             start_width = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
@@ -1111,11 +1398,11 @@ def run_work_overlay_helper_qt(
             radius = 10.0 + ((final_size / 2.0) - 10.0) * eased
 
             gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-            gradient.setColorAt(0.0, QColor("#49E07D"))
-            gradient.setColorAt(0.5, QColor("#1FA85A"))
-            gradient.setColorAt(1.0, QColor("#0A5B35"))
+            gradient.setColorAt(0.0, QColor(palette["fillStart"]))
+            gradient.setColorAt(0.5, QColor(palette["fillMid"]))
+            gradient.setColorAt(1.0, QColor(palette["fillEnd"]))
             painter.setBrush(gradient)
-            painter.setPen(QPen(QColor("#93F0AF"), 1.4))
+            painter.setPen(QPen(QColor(palette["border"]), 1.4))
             painter.drawRoundedRect(rect, radius, radius)
 
             if eased < 0.24:
@@ -1126,12 +1413,14 @@ def run_work_overlay_helper_qt(
             painter.setOpacity(content_alpha / 255.0)
             center = QPointF(end_rect.center())
 
-            outer_pen = QPen(QColor("#B9F7C9"), 2.0)
+            outer_pen = QPen(QColor(palette["ring"]), 2.0)
             painter.setPen(outer_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(end_rect.adjusted(4.0, 4.0, -4.0, -4.0))
 
-            dashed_pen = QPen(QColor(218, 255, 229, 145), 1.1)
+            dashed_color = QColor(palette["dashedRing"])
+            dashed_color.setAlpha(145)
+            dashed_pen = QPen(dashed_color, 1.1)
             dashed_pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(dashed_pen)
             painter.drawEllipse(end_rect.adjusted(17.0, 17.0, -17.0, -17.0))
@@ -1148,7 +1437,7 @@ def run_work_overlay_helper_qt(
                 start_degrees=-149.0,
                 end_degrees=-31.0,
                 font=QFont("Microsoft YaHei UI", 11, QFont.Weight.Bold),
-                color=QColor("#E9FFF0"),
+                color=QColor(palette["titleText"]),
                 bottom=False,
             )
             if workdir:
@@ -1160,14 +1449,14 @@ def run_work_overlay_helper_qt(
                     start_degrees=145.0,
                     end_degrees=35.0,
                     font=QFont("Microsoft YaHei UI", 9),
-                    color=QColor("#9CCBFF"),
+                    color=QColor(palette["workdirText"]),
                     bottom=True,
                     compact_spacing=True,
                 )
 
             check_font = QFont("Segoe UI Symbol", 38, QFont.Weight.Bold)
             painter.setFont(check_font)
-            painter.setPen(QColor("#F8FFF9"))
+            painter.setPen(QColor(palette["checkText"]))
             painter.drawText(
                 QRectF(center.x() - 34.0, center.y() - 66.0, 68.0, 56.0),
                 alignment.AlignCenter,
@@ -1176,7 +1465,7 @@ def run_work_overlay_helper_qt(
 
             elapsed = str(self._item.get("elapsedText") or "已处理 --").strip()
             painter.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
-            painter.setPen(QColor("#F4FFF7"))
+            painter.setPen(QColor(palette["elapsedText"]))
             painter.drawText(
                 QRectF(center.x() - 54.0, center.y() - 10.0, 108.0, 18.0),
                 alignment.AlignCenter,
@@ -1195,13 +1484,17 @@ def run_work_overlay_helper_qt(
             y = center.y() + 14.0
             for index, (label, value) in enumerate(stats):
                 box = QRectF(start_x + index * (box_width + spacing), y, box_width, box_height)
-                painter.setPen(QPen(QColor(221, 255, 230, 105), 0.8))
-                painter.setBrush(QColor(4, 57, 31, 108))
+                stat_border = QColor(palette["statBoxBorder"])
+                stat_border.setAlpha(168)
+                painter.setPen(QPen(stat_border, 0.8))
+                stat_fill = QColor(palette["statBoxFill"])
+                stat_fill.setAlpha(136)
+                painter.setBrush(stat_fill)
                 painter.drawRoundedRect(box, 6.0, 6.0)
-                painter.setPen(QColor("#EFFFF2"))
+                painter.setPen(QColor(palette["statValue"]))
                 painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.Bold))
                 painter.drawText(box.adjusted(1.0, 1.0, -1.0, -11.0), alignment.AlignCenter, value)
-                painter.setPen(QColor("#A7EFC0"))
+                painter.setPen(QColor(palette["statLabel"]))
                 painter.setFont(QFont("Microsoft YaHei UI", 5))
                 painter.drawText(box.adjusted(1.0, 13.0, -1.0, -1.0), alignment.AlignCenter, label)
 
@@ -1275,7 +1568,12 @@ def run_work_overlay_helper_qt(
             painter.restore()
 
     class TransitionOverlay(QWidget):
-        def __init__(self, parent: QWidget | None = None) -> None:
+        def __init__(
+            self,
+            parent: QWidget | None = None,
+            *,
+            theme_tokens: Mapping[str, object] | None = None,
+        ) -> None:
             super().__init__(parent)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
@@ -1284,6 +1582,14 @@ def run_work_overlay_helper_qt(
             self._source_rect = QRectF()
             self._target_rect = QRectF()
             self._item: Mapping[str, object] = {}
+            self._theme_tokens = _resolved_overlay_theme(theme_tokens)
+
+        def set_theme_tokens(
+            self,
+            theme_tokens: Mapping[str, object] | None,
+        ) -> None:
+            self._theme_tokens = _resolved_overlay_theme(theme_tokens)
+            self.update()
 
         def set_transition(
             self,
@@ -1328,19 +1634,14 @@ def run_work_overlay_helper_qt(
                 target_rect,
                 self._progress,
             )
+            palette = _transition_palette(self._transition_type, self._theme_tokens)
             current_rect = QRectF(*current)
             radius = min(current_rect.width(), current_rect.height()) / 2
             gradient = QLinearGradient(current_rect.topLeft(), current_rect.bottomRight())
-            if self._transition_type == "completed_to_card":
-                gradient.setColorAt(0.0, QColor("#73BEFF"))
-                gradient.setColorAt(0.5, QColor("#357FCE"))
-                gradient.setColorAt(1.0, QColor("#164A87"))
-                pen_color = QColor("#9CCBFF")
-            else:
-                gradient.setColorAt(0.0, QColor("#49E07D"))
-                gradient.setColorAt(0.5, QColor("#1FA85A"))
-                gradient.setColorAt(1.0, QColor("#0A5B35"))
-                pen_color = QColor("#93F0AF")
+            gradient.setColorAt(0.0, QColor(palette["fillStart"]))
+            gradient.setColorAt(0.5, QColor(palette["fillMid"]))
+            gradient.setColorAt(1.0, QColor(palette["fillEnd"]))
+            pen_color = QColor(palette["border"])
             painter.setBrush(gradient)
             painter.setPen(QPen(pen_color, 1.4))
             painter.drawRoundedRect(current_rect, radius, radius)
@@ -1350,14 +1651,14 @@ def run_work_overlay_helper_qt(
                 elapsed = _compact_work_text(self._item.get("elapsedText") or "已处理 --", 24)
                 painter.save()
                 painter.setOpacity(1.0 - self._progress / 0.24)
-                painter.setPen(QColor("#D9FBE2"))
+                painter.setPen(QColor(palette["titleText"]))
                 painter.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
                 painter.drawText(
                     current_rect.adjusted(12.0, 10.0, -12.0, -62.0),
                     alignment.AlignLeft | alignment.AlignVCenter,
                     title,
                 )
-                painter.setPen(QColor("#A9E8B9"))
+                painter.setPen(QColor(palette["subtitleText"]))
                 painter.setFont(QFont("Microsoft YaHei UI", 8))
                 painter.drawText(
                     current_rect.adjusted(12.0, 42.0, -12.0, -18.0),
@@ -1371,14 +1672,14 @@ def run_work_overlay_helper_qt(
                 elapsed = _compact_work_text(self._item.get("elapsedText") or "已处理 --", 24)
                 painter.save()
                 painter.setOpacity(min(1.0, (self._progress - 0.76) / 0.24))
-                painter.setPen(QColor("#E4F2FF"))
+                painter.setPen(QColor(palette["titleText"]))
                 painter.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
                 painter.drawText(
                     current_rect.adjusted(12.0, 10.0, -12.0, -62.0),
                     alignment.AlignLeft | alignment.AlignVCenter,
                     title,
                 )
-                painter.setPen(QColor("#B8D9FF"))
+                painter.setPen(QColor(palette["subtitleText"]))
                 painter.setFont(QFont("Microsoft YaHei UI", 8))
                 painter.drawText(
                     current_rect.adjusted(12.0, 42.0, -12.0, -18.0),
@@ -1397,7 +1698,7 @@ def run_work_overlay_helper_qt(
             if check_visible:
                 check_font = QFont("Segoe UI Symbol", 24, QFont.Weight.Bold)
                 painter.setFont(check_font)
-                painter.setPen(QColor("#F8FFF9"))
+                painter.setPen(QColor(palette["markText"]))
                 mark = "↻" if self._transition_type == "completed_to_card" else "✓"
                 painter.drawText(current_rect, Qt.AlignmentFlag.AlignCenter, mark)
 
@@ -1419,6 +1720,7 @@ def run_work_overlay_helper_qt(
             self._previous_visible_items: list[Mapping[str, object]] = []
             self._command_path = _work_overlay_command_path(path)
             self._item_limit = normalize_work_overlay_max_items(item_limit, item_limit)
+            self._theme_tokens = dict(DEFAULT_WORK_OVERLAY_THEME)
             self._close_windows: list[CloseButtonWindow] = []
             self._workdir_windows: list[WorkdirLinkWindow] = []
             self._completed_check_windows: list[ClickHotspotWindow] = []
@@ -1549,6 +1851,12 @@ def run_work_overlay_helper_qt(
                 if command_path_text
                 else _work_overlay_command_path(path)
             )
+            theme_payload = state.get("theme")
+            self._theme_tokens = _resolved_overlay_theme(
+                theme_payload if isinstance(theme_payload, Mapping) else None
+            )
+            if self._transition_widget is not None:
+                self._transition_widget.set_theme_tokens(self._theme_tokens)
             screen = app.primaryScreen()
             screen_height = (
                 screen.availableGeometry().height()
@@ -1662,7 +1970,12 @@ def run_work_overlay_helper_qt(
         ) -> None:
             item_id = _item_id(item)
             animate_intro = item_id not in self._settled_completed_intro_ids
-            badge = CompletedBadgeWidget(item, parent, animate_intro=animate_intro)
+            badge = CompletedBadgeWidget(
+                item,
+                parent,
+                animate_intro=animate_intro,
+                theme_tokens=self._theme_tokens,
+            )
             if item_id:
                 self._settled_completed_intro_ids.add(item_id)
             hover_anchor = QWidget(badge)
@@ -1701,6 +2014,7 @@ def run_work_overlay_helper_qt(
             item: Mapping[str, object],
         ) -> None:
             badge = record["badge"]
+            badge.set_theme_tokens(self._theme_tokens)
             badge.set_item(item)
             self._completed_hover_anchors.append(record["hover_anchor"])
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
@@ -1816,7 +2130,11 @@ def run_work_overlay_helper_qt(
 
         def _update_item_card(self, record: dict[str, Any], item: Mapping[str, object]) -> None:
             status = str(item.get("status") or "")
-            accent, pill_bg, card_bg, border_color = _color_for(status)
+            accent, pill_bg, card_bg, border_color = _color_for(
+                status,
+                self._theme_tokens,
+            )
+            theme = self._theme_tokens
             elapsed_text = str(item.get("elapsedText") or "").strip() or "已处理 --"
             header_text = _work_overlay_header_text(
                 str(item.get("startedAt") or ""),
@@ -1838,7 +2156,7 @@ def run_work_overlay_helper_qt(
             header.setText(header_text)
             header.setStyleSheet(
                 "QLabel {"
-                f"color: {accent if status == 'recent' else '#A9B6C6'};"
+                f"color: {accent if status == 'recent' else _theme_mix(theme['text'], theme['muted'], 0.36, fallback=theme['text'])};"
                 "border: none;"
                 "background: transparent;"
                 "}"
@@ -1848,13 +2166,14 @@ def run_work_overlay_helper_qt(
             round_index = max(0, int(item.get("roundIndex") or 0))
             badge_visible = status != "recent" and round_index > 0
             if badge_visible:
+                round_badge_theme = _round_badge_palette(status, theme)
                 round_badge.setText(str(round_index))
                 round_badge.setToolTip(f"当前第 {round_index} 轮")
                 round_badge.setStyleSheet(
                     "QLabel {"
-                    "color: #FFFFFF;"
-                    "background-color: #FA5151;"
-                    "border: 1px solid rgba(255, 255, 255, 0.14);"
+                    f"color: {round_badge_theme['text']};"
+                    f"background-color: {round_badge_theme['background']};"
+                    f"border: 1px solid {round_badge_theme['border']};"
                     "border-radius: 9px;"
                     "padding: 0 6px;"
                     "}"
@@ -1874,7 +2193,7 @@ def run_work_overlay_helper_qt(
             detail.setMinimumHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
             detail.setStyleSheet(
                 "QLabel {"
-                "color: #B8C6D8;"
+                f"color: {theme['requestText']};"
                 "border: none;"
                 "background: transparent;"
                 "}"
@@ -1890,7 +2209,7 @@ def run_work_overlay_helper_qt(
 
             status_label = record["status_label"]
             if status_text:
-                status_text_color = accent if status in {"recent", "error"} else "#8492A6"
+                status_text_color = accent if status in {"recent", "error"} else theme["muted"]
                 footer_status_text = _compact_work_text(
                     status_text,
                     48 if workdir_text else 80,
@@ -1910,7 +2229,7 @@ def run_work_overlay_helper_qt(
                 workdir_label.setToolTip(workdir_text)
                 workdir_label.setStyleSheet(
                     "QLabel {"
-                    f"color: {'#9CCBFF' if workdir_clickable else '#5E6A78'};"
+                    f"color: {theme['info'] if workdir_clickable else theme['requestMuted']};"
                     "border: none;"
                     "background: transparent;"
                     "}"
@@ -2094,7 +2413,12 @@ def run_work_overlay_helper_qt(
                         item = it
                         break
             if self._transition_widget is None:
-                self._transition_widget = TransitionOverlay(self._shell)
+                self._transition_widget = TransitionOverlay(
+                    self._shell,
+                    theme_tokens=self._theme_tokens,
+                )
+            else:
+                self._transition_widget.set_theme_tokens(self._theme_tokens)
             self._transition_widget.setGeometry(self._shell.rect())
             self._transition_widget.show()
             self._transition_widget.raise_()
@@ -2235,7 +2559,10 @@ def run_work_overlay_helper_qt(
                 if _item_id(item) and _item_is_completed(item)
             }
             self._settled_completed_intro_ids.intersection_update(visible_completed_ids)
-            payload_signature = json.dumps(visible_items, ensure_ascii=False, sort_keys=True)
+            payload_signature = _overlay_payload_signature(
+                visible_items,
+                self._theme_tokens,
+            )
             if payload_signature == self._last_payload_signature:
                 return
             transition = _detect_transition(self._previous_visible_items, visible_items)

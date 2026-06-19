@@ -53,6 +53,7 @@ codex-hud --update
 
 - Renderer 注入优先：Codex 暴露本地 CDP target 时，HUD 直接显示在 Codex App 内部。
 - Tk fallback：CDP 不可用时自动回退到本地 Tk HUD。
+- Codex 主题跟随：Renderer 模式优先跟随 live 主题；无 CDP 时，Tk / overlay 会读取 Codex App 已保存的主题设置，继续区分浅色/深色并尽量复用自定义配色。
 - 实时 token 与金额：输入、缓存输入、输出、推理、合计、缓存率和实时 USD 估算同屏展示。
 - 日/周预算：自定义日额度、周额度、刷新时间、周起始日和提醒阈值。
 - 工作状态观察：显示当前活动、最长等待、最慢工具和请求轮次流水。
@@ -103,6 +104,12 @@ codex-hud --update
 - HUD 配置：`%LOCALAPPDATA%\codex-usage-hud\hud_settings.json`
 - HUD daemon 日志：`%LOCALAPPDATA%\codex-usage-hud\daemon.log`
 - 默认安装目录：`%LOCALAPPDATA%\Programs\codex-usage-hud`
+
+## Codex 主题同步
+
+HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Copy theme`
+分享字符串解析。实现方式、导出全部内置主题的方法和当前限制见
+[docs/CODEX_APP_THEME_SYNC.md](docs/CODEX_APP_THEME_SYNC.md)。
 
 ## 常见问题
 
