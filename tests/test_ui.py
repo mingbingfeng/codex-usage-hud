@@ -9,6 +9,7 @@ import json
 import tempfile
 import subprocess
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 import unittest
@@ -175,6 +176,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _transition_slot_shift_progress,
     _theme_contrast_ratio,
     _visible_overlay_items,
+    _workdir_display_name,
 )
 
 
@@ -2059,6 +2061,20 @@ class WorkOverlayTransitionTests(unittest.TestCase):
             "progressOverflowBadgeEdge": "#FF875A",
         }
 
+    @staticmethod
+    def _hex_distance(left: str, right: str) -> float:
+        def rgb(value: str) -> tuple[int, int, int]:
+            text = str(value).strip().lstrip("#")
+            return (
+                int(text[0:2], 16),
+                int(text[2:4], 16),
+                int(text[4:6], 16),
+            )
+
+        left_rgb = rgb(left)
+        right_rgb = rgb(right)
+        return sum((a - b) ** 2 for a, b in zip(left_rgb, right_rgb)) ** 0.5
+
     def test_detect_card_to_completed_transition(self) -> None:
         old_items = [
             {"id": "1", "status": "tool", "title": "正在执行"},
@@ -2141,6 +2157,23 @@ class WorkOverlayTransitionTests(unittest.TestCase):
 
         self.assertNotEqual(light_signature, dark_signature)
 
+    def test_workdir_display_always_uses_leaf_even_when_duplicates_exist(self) -> None:
+        items = [
+            {"id": "a", "status": "tool", "workdir": r"E:\Work\client\app"},
+            {"id": "b", "status": "tool", "workdir": r"D:\Archive\client\app"},
+            {"id": "c", "status": "tool", "workdir": r"E:\Work\server\app"},
+        ]
+
+        self.assertEqual(
+            [_workdir_display_name(item) for item in items],
+            ["app", "app", "app"],
+        )
+
+    def test_workdir_display_falls_back_to_workdir_name_leaf(self) -> None:
+        item = {"id": "a", "status": "tool", "workdirName": r"Alpha\app"}
+
+        self.assertEqual(_workdir_display_name(item), "app")
+
     def test_round_badge_palette_uses_status_color_and_contrast_text(self) -> None:
         light_theme = self._light_overlay_theme()
         dark_theme = self._dark_overlay_theme()
@@ -2172,13 +2205,37 @@ class WorkOverlayTransitionTests(unittest.TestCase):
 
         for theme in (light_theme, dark_theme):
             palette = _completed_badge_palette(theme)
+            self.assertLess(
+                self._hex_distance(palette["fillMid"], theme["panelSurface"]),
+                self._hex_distance(palette["fillMid"], theme["success"]),
+            )
             self.assertGreaterEqual(
                 _theme_contrast_ratio(palette["fillMid"], palette["checkText"]),
                 4.5,
             )
             self.assertGreaterEqual(
+                _theme_contrast_ratio(palette["fillMid"], palette["titleText"]),
+                4.5,
+            )
+            self.assertGreaterEqual(
+                _theme_contrast_ratio(palette["fillMid"], palette["workdirText"]),
+                4.5,
+            )
+            self.assertGreaterEqual(
+                _theme_contrast_ratio(palette["fillMid"], palette["elapsedText"]),
+                4.5,
+            )
+            self.assertGreaterEqual(
                 _theme_contrast_ratio(palette["statBoxFill"], palette["statValue"]),
                 4.5,
+            )
+            self.assertGreaterEqual(
+                _theme_contrast_ratio(palette["statBoxFill"], palette["statLabel"]),
+                4.5,
+            )
+            self.assertGreaterEqual(
+                _theme_contrast_ratio(palette["fillMid"], palette["ring"]),
+                2.15,
             )
             self.assertNotEqual(palette["ring"], palette["dashedRing"])
             self.assertNotEqual(palette["fillMid"], palette["fillEnd"])
@@ -3058,7 +3115,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window = TokenHudWindow()
             try:
                 self.assertFalse(window._use_dom_anchors)
-                self.assertTrue(window._use_top_dom_anchors)
+                self.assertFalse(window._use_top_dom_anchors)
+                self.assertFalse(window._theme_probe.enabled)
             finally:
                 window._close()
 
@@ -3066,6 +3124,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window = TokenHudWindow()
             try:
                 self.assertTrue(window._use_dom_anchors)
+                self.assertTrue(window._use_top_dom_anchors)
+                self.assertFalse(window._theme_probe.enabled)
             finally:
                 window._close()
 
@@ -3186,6 +3246,17 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             ),
         )
 
+    def test_windows_locator_does_not_enable_cdp_anchors_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(HUD_CDP_DOM_ENV, None)
+
+            locator = _WindowsCodexLocator()
+
+        if locator.enabled:
+            self.assertFalse(locator._top_dom_anchors_enabled)
+            self.assertFalse(locator._dom_anchors_enabled)
+            self.assertIsNone(locator._cdp_probe)
+
     def test_collapsed_top_bar_shows_session_cache_hit_rate(self) -> None:
         window = TokenHudWindow()
         try:
@@ -3250,6 +3321,88 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.update_display(ParsedSession())
 
             self.assertEqual(str(window.request_label.cget("fg")).lower(), "#0969da")
+            strip = window.top_labels["bar"]
+            budget_bar = strip._bars[1]
+            self.assertNotEqual(budget_bar._metric.track_text.lower(), "#c1c7d0")
+            self.assertGreaterEqual(
+                tk_hud_module._contrast_ratio_hex(
+                    budget_bar._metric.track_text,
+                    tk_hud_module.HUD_PROGRESS_TRACK,
+                ),
+                4.5,
+            )
+        finally:
+            window._close()
+
+    def test_settings_dialog_uses_readable_live_theme_colors(self) -> None:
+        window = TokenHudWindow()
+        try:
+            themed_export = CodexThemeExport.from_share_string(
+                'codex-theme-v1:{"codeThemeId":"codex","theme":{"accent":"#339cff",'
+                '"contrast":45,"fonts":{"code":null,"ui":null},"ink":"#1a1c1f",'
+                '"opaqueWindows":false,"semanticColors":{"diffAdded":"#40c977",'
+                '"diffRemoved":"#fa423e","skill":"#8250df"},"surface":"#ffffff"},'
+                '"variant":"light"}'
+            )
+            tokens = HudThemeTokens.from_theme(themed_export)
+            window._theme_probe = SimpleNamespace(
+                snapshot=lambda: SimpleNamespace(
+                    source="persisted",
+                    hud_tokens=tokens,
+                )
+            )
+            window.update_display(ParsedSession())
+            window._open_settings_dialog("settings")
+            _flush_tk(window, iterations=5)
+
+            self.assertIsNotNone(window._settings_status_label)
+            status_label = window._settings_status_label
+            status_bg = str(status_label.cget("bg"))
+            status_fg = str(status_label.cget("fg"))
+            self.assertGreaterEqual(
+                tk_hud_module._contrast_ratio_hex(status_fg, status_bg),
+                4.5,
+            )
+
+            entries = [
+                widget
+                for widget in _walk_widgets(window._settings_dialog)
+                if type(widget) is tk.Entry
+            ]
+            self.assertTrue(entries)
+            for entry in entries[:4]:
+                self.assertGreaterEqual(
+                    tk_hud_module._contrast_ratio_hex(
+                        str(entry.cget("fg")),
+                        str(entry.cget("bg")),
+                    ),
+                    4.5,
+                )
+
+            for button in window._settings_tab_buttons.values():
+                self.assertGreaterEqual(
+                    tk_hud_module._contrast_ratio_hex(
+                        str(button.cget("fg")),
+                        str(button.cget("bg")),
+                    ),
+                    4.5,
+                )
+
+            style = ttk.Style(window.root)
+            combo_fg = style.lookup(
+                "CodexUsageHud.TCombobox",
+                "foreground",
+                ("readonly",),
+            ) or style.lookup("CodexUsageHud.TCombobox", "foreground")
+            combo_bg = style.lookup(
+                "CodexUsageHud.TCombobox",
+                "fieldbackground",
+                ("readonly",),
+            ) or style.lookup("CodexUsageHud.TCombobox", "fieldbackground")
+            self.assertGreaterEqual(
+                tk_hud_module._contrast_ratio_hex(combo_fg, combo_bg),
+                4.5,
+            )
         finally:
             window._close()
 
@@ -4045,6 +4198,73 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertTrue(window.should_refresh_snapshot())
         finally:
             window._close()
+
+    def test_click_priority_temporarily_defers_refresh_work(self) -> None:
+        window = object.__new__(TokenHudWindow)
+        window._tombstoned = False
+        window._ui_interaction_hold_until = 0.0
+        window._click_priority_hold_until = 0.0
+        window._pointer_priority_hold_until = 0.0
+
+        window._mark_click_priority()
+
+        self.assertTrue(window._click_priority_active())
+        self.assertFalse(window.should_refresh_snapshot())
+        self.assertEqual(
+            window.refresh_delay_ms(1000),
+            tk_hud_module.HUD_CLICK_REFRESH_DELAY_MS,
+        )
+
+        window._click_priority_hold_until = time.monotonic() - 0.001
+        self.assertTrue(window.should_refresh_snapshot())
+
+    def test_pointer_priority_defers_refresh_below_click_priority(self) -> None:
+        window = object.__new__(TokenHudWindow)
+        window._tombstoned = False
+        window._ui_interaction_hold_until = 0.0
+        window._click_priority_hold_until = 0.0
+        window._pointer_priority_hold_until = 0.0
+
+        window._mark_pointer_priority()
+
+        self.assertTrue(window._pointer_priority_active())
+        self.assertFalse(window.should_refresh_snapshot())
+        self.assertEqual(
+            window.refresh_delay_ms(1000),
+            tk_hud_module.HUD_POINTER_REFRESH_DELAY_MS,
+        )
+
+        window._mark_click_priority()
+        self.assertEqual(
+            window.refresh_delay_ms(1000),
+            tk_hud_module.HUD_CLICK_REFRESH_DELAY_MS,
+        )
+
+        window._click_priority_hold_until = time.monotonic() - 0.001
+        self.assertEqual(
+            window.refresh_delay_ms(1000),
+            tk_hud_module.HUD_POINTER_REFRESH_DELAY_MS,
+        )
+
+    def test_click_rebuilds_are_scheduled_before_idle_work(self) -> None:
+        window = object.__new__(TokenHudWindow)
+        window.root = SimpleNamespace(after=MagicMock(return_value="job"))
+        window._top_rebuild_job = None
+        window._request_rebuild_job = None
+
+        window._schedule_top_rebuild()
+        window._schedule_request_rebuild()
+
+        self.assertEqual(window.root.after.call_args_list[0].args[0], 0)
+        self.assertEqual(
+            window.root.after.call_args_list[0].args[1].__name__,
+            "_flush_top_rebuild",
+        )
+        self.assertEqual(window.root.after.call_args_list[1].args[0], 0)
+        self.assertEqual(
+            window.root.after.call_args_list[1].args[1].__name__,
+            "_flush_request_rebuild",
+        )
 
     def test_minimized_hidden_hud_reappears_when_codex_is_active_again(self) -> None:
         window = TokenHudWindow()
@@ -5114,6 +5334,61 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_pump.request_refresh.assert_called_once()
         fake_overlay.configure.assert_called_once()
         fake_overlay.update.assert_called_once_with(overlay_items)
+        fake_overlay.close.assert_called_once()
+        fake_pump.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_run_tk_hud_session_defers_background_work_during_manual_input(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            reload_user_config=MagicMock(),
+        )
+        fake_pump = SimpleNamespace(
+            take_latest=MagicMock(),
+            request_refresh=MagicMock(),
+            close=MagicMock(),
+        )
+        fake_overlay = SimpleNamespace(
+            configure=MagicMock(),
+            update=MagicMock(),
+            close=MagicMock(),
+        )
+        fake_window = SimpleNamespace(
+            exit_reason="",
+            root=SimpleNamespace(
+                after=MagicMock(),
+                update_idletasks=lambda: None,
+            ),
+            request_root=SimpleNamespace(update_idletasks=lambda: None),
+            should_defer_background_work=lambda: True,
+            should_refresh_snapshot=lambda: True,
+            refresh_delay_ms=MagicMock(return_value=75),
+            run=lambda: None,
+            update_display=MagicMock(),
+        )
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                return_value=(True, "visible", "", 456),
+            ),
+            patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window),
+            patch("codex_usage_hud.cli._TkSnapshotPump", return_value=fake_pump),
+            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay),
+        ):
+            exit_code = run_tk_hud_session(args, lock_already_held=True)
+
+        self.assertEqual(exit_code, 0)
+        fake_pump.take_latest.assert_not_called()
+        fake_pump.request_refresh.assert_not_called()
+        fake_window.update_display.assert_not_called()
+        fake_overlay.configure.assert_not_called()
+        fake_overlay.update.assert_not_called()
+        fake_window.root.after.assert_called_once()
+        self.assertEqual(fake_window.root.after.call_args.args[0], 75)
         fake_overlay.close.assert_called_once()
         fake_pump.close.assert_called_once()
         fake_context.close.assert_called_once()

@@ -296,6 +296,78 @@ skill = "#c2a1ff"
         self.assertEqual(probe.last_status, "persisted")
         self.assertIn("CDP unavailable", probe.last_error)
 
+    def test_probe_failure_cooldown_refreshes_persisted_theme_over_stale_cache(self) -> None:
+        dark_config_text = """
+[desktop]
+appearanceTheme = "dark"
+appearanceDarkCodeThemeId = "codex"
+
+[desktop.appearanceDarkChromeTheme]
+accent = "#339cff"
+contrast = 60
+ink = "#ffffff"
+opaqueWindows = false
+surface = "#181818"
+"""
+        light_config_text = """
+[desktop]
+appearanceTheme = "light"
+appearanceLightCodeThemeId = "codex"
+
+[desktop.appearanceLightChromeTheme]
+accent = "#0969da"
+contrast = 40
+ink = "#1f2328"
+opaqueWindows = false
+surface = "#ffffff"
+"""
+        originals = (
+            codex_theme.list_targets,
+            codex_theme.pick_page_target,
+            codex_theme.send_cdp_command,
+        )
+        calls = {"list_targets": 0}
+
+        def failing_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            calls["list_targets"] += 1
+            raise RuntimeError("CDP unavailable")
+
+        codex_theme.list_targets = failing_list_targets
+        codex_theme.pick_page_target = lambda targets: targets[0]  # type: ignore[assignment]
+        codex_theme.send_cdp_command = lambda *args, **kwargs: {}  # type: ignore[assignment]
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                config_path = Path(temp_dir) / "config.toml"
+                config_path.write_text(dark_config_text.strip() + "\n", encoding="utf-8")
+
+                probe = CodexThemeProbe(
+                    port=9229,
+                    timeout_seconds=0.01,
+                    cache_seconds=0.0,
+                    failure_cooldown_seconds=10.0,
+                    enabled=True,
+                    config_path=config_path,
+                )
+                first = probe.snapshot()
+                config_path.write_text(light_config_text.strip() + "\n", encoding="utf-8")
+                probe._cache_at = 0.0
+                second = probe.snapshot()
+        finally:
+            (
+                codex_theme.list_targets,
+                codex_theme.pick_page_target,
+                codex_theme.send_cdp_command,
+            ) = originals
+
+        self.assertEqual(first.source, "persisted")
+        self.assertEqual(first.effective_variant, "dark")
+        self.assertEqual(second.source, "persisted")
+        self.assertEqual(second.effective_variant, "light")
+        self.assertEqual(second.effective_theme.theme.surface, "#ffffff")
+        self.assertEqual(probe.last_status, "persisted")
+        self.assertEqual(calls["list_targets"], 1)
+
     def test_probe_failure_cooldown_returns_fallback_without_retrying_immediately(self) -> None:
         originals = (
             codex_theme.list_targets,

@@ -157,6 +157,10 @@ HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
 HUD_CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
 HUD_NATIVE_GEOMETRY_ENV = "CODEX_USAGE_HUD_NATIVE_GEOMETRY"
 HUD_INTERACTION_SETTLE_MS = 120
+HUD_CLICK_PRIORITY_MS = 180
+HUD_CLICK_REFRESH_DELAY_MS = 50
+HUD_POINTER_PRIORITY_MS = 120
+HUD_POINTER_REFRESH_DELAY_MS = 75
 
 
 def _hud_theme_signature(tokens: HudThemeTokens) -> tuple[tuple[str, object], ...]:
@@ -364,6 +368,199 @@ def _mix_rgb(
         max(0, min(255, int(round((base[1] * inverse) + (overlay[1] * alpha))))),
         max(0, min(255, int(round((base[2] * inverse) + (overlay[2] * alpha))))),
     )
+
+
+def _relative_luma(rgb: tuple[int, int, int]) -> float:
+    channels = []
+    for channel in rgb:
+        normalized = channel / 255.0
+        if normalized <= 0.03928:
+            channels.append(normalized / 12.92)
+        else:
+            channels.append(((normalized + 0.055) / 1.055) ** 2.4)
+    return (channels[0] * 0.2126) + (channels[1] * 0.7152) + (channels[2] * 0.0722)
+
+
+def _contrast_ratio_hex(left: object, right: object) -> float:
+    left_luma = _relative_luma(_hex_to_rgb(str(left or ""), (0, 0, 0)))
+    right_luma = _relative_luma(_hex_to_rgb(str(right or ""), (0, 0, 0)))
+    lighter = max(left_luma, right_luma)
+    darker = min(left_luma, right_luma)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _readable_theme_color(
+    color: object,
+    background: object,
+    *,
+    fallback: object = "",
+    min_ratio: float = 4.5,
+) -> str:
+    bg = str(background or HUD_BG)
+    preferred = str(color or fallback or HUD_TEXT)
+    fallback_text = str(fallback or HUD_TEXT)
+
+    best = preferred
+    best_ratio = _contrast_ratio_hex(preferred, bg)
+    if best_ratio >= min_ratio:
+        return preferred
+
+    for candidate in (fallback_text, HUD_TEXT, HUD_BG):
+        ratio = _contrast_ratio_hex(candidate, bg)
+        if ratio > best_ratio:
+            best = str(candidate)
+            best_ratio = ratio
+        if ratio >= min_ratio:
+            return str(candidate)
+
+    target = best
+    start_rgb = _hex_to_rgb(preferred, _hex_to_rgb(target, (255, 255, 255)))
+    target_rgb = _hex_to_rgb(target, (255, 255, 255))
+    for ratio in (0.18, 0.32, 0.46, 0.60, 0.74, 0.88, 1.0):
+        candidate = _rgb_to_hex(_mix_rgb(start_rgb, target_rgb, ratio))
+        contrast = _contrast_ratio_hex(candidate, bg)
+        if contrast > best_ratio:
+            best = candidate
+            best_ratio = contrast
+        if contrast >= min_ratio:
+            return candidate
+    return best
+
+
+def _theme_hover_surface(background: object) -> str:
+    bg = str(background or HUD_BG)
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(bg, (16, 22, 29)),
+            _hex_to_rgb(HUD_TEXT, (232, 238, 247)),
+            0.08,
+        )
+    )
+
+
+def _theme_primary_text(background: object = "") -> str:
+    return _readable_theme_color(HUD_TEXT, background or HUD_BG, fallback=HUD_TEXT)
+
+
+def _theme_secondary_text(background: object = "") -> str:
+    return _readable_theme_color(HUD_MUTED, background or HUD_BG, fallback=HUD_TEXT)
+
+
+def _theme_accent_text(background: object = "") -> str:
+    return _readable_theme_color(HUD_ACCENT, background or HUD_BG, fallback=HUD_TEXT)
+
+
+def _theme_info_text(background: object = "") -> str:
+    return _readable_theme_color(HUD_BLUE, background or HUD_BG, fallback=HUD_TEXT)
+
+
+def _theme_warning_text(background: object = "") -> str:
+    return _readable_theme_color("#FFB86B", background or HUD_BG, fallback=HUD_TEXT)
+
+
+def _theme_error_text(background: object = "") -> str:
+    return _readable_theme_color(HUD_ERROR, background or HUD_BG, fallback=HUD_TEXT)
+
+
+def _theme_control_surface(background: object = "") -> str:
+    bg = str(background or HUD_BG)
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(bg, (16, 22, 29)),
+            _hex_to_rgb(HUD_TEXT, (232, 238, 247)),
+            0.045,
+        )
+    )
+
+
+def _theme_control_border(background: object = "") -> str:
+    bg = str(background or HUD_BG)
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(bg, (16, 22, 29)),
+            _hex_to_rgb(HUD_TEXT, (232, 238, 247)),
+            0.18,
+        )
+    )
+
+
+def _theme_secondary_button_bg(background: object = "") -> str:
+    bg = str(background or HUD_BG)
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(bg, (16, 22, 29)),
+            _hex_to_rgb(HUD_TEXT, (232, 238, 247)),
+            0.10,
+        )
+    )
+
+
+def _theme_secondary_button_active_bg(background: object = "") -> str:
+    bg = str(background or HUD_BG)
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(bg, (16, 22, 29)),
+            _hex_to_rgb(HUD_TEXT, (232, 238, 247)),
+            0.16,
+        )
+    )
+
+
+def _theme_primary_button_fg() -> str:
+    return _readable_theme_color(HUD_BG, HUD_ACCENT, fallback=HUD_TEXT)
+
+
+def _theme_primary_button_active_bg() -> str:
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(HUD_ACCENT, (64, 160, 255)),
+            _hex_to_rgb(HUD_TEXT, (232, 238, 247)),
+            0.12,
+        )
+    )
+
+
+def _settings_entry_kwargs(background: object = "") -> dict[str, object]:
+    surface = _theme_control_surface(background or HUD_BG)
+    return {
+        "bg": surface,
+        "fg": _theme_primary_text(surface),
+        "insertbackground": _theme_primary_text(surface),
+        "selectbackground": HUD_ACCENT,
+        "selectforeground": _theme_primary_button_fg(),
+        "highlightthickness": 1,
+        "highlightbackground": _theme_control_border(background or HUD_BG),
+        "highlightcolor": HUD_ACCENT,
+        "relief": "flat",
+    }
+
+
+def _settings_secondary_button_kwargs(background: object = "") -> dict[str, object]:
+    parent_bg = str(background or HUD_BG)
+    button_bg = _theme_secondary_button_bg(parent_bg)
+    active_bg = _theme_secondary_button_active_bg(parent_bg)
+    return {
+        "bg": button_bg,
+        "fg": _theme_primary_text(button_bg),
+        "activebackground": active_bg,
+        "activeforeground": _theme_primary_text(active_bg),
+        "relief": "flat",
+    }
+
+
+def _settings_primary_button_kwargs() -> dict[str, object]:
+    active_bg = _theme_primary_button_active_bg()
+    return {
+        "bg": HUD_ACCENT,
+        "fg": _theme_primary_button_fg(),
+        "activebackground": active_bg,
+        "activeforeground": _readable_theme_color(
+            _theme_primary_button_fg(),
+            active_bg,
+            fallback=HUD_TEXT,
+        ),
+        "relief": "flat",
+    }
 
 
 def _lerp_rgb(
@@ -1771,7 +1968,7 @@ class TopHudProgressMetric:
     fill: str
     fill_end: str
     fill_text: str
-    track_text: str = HUD_PROGRESS_TRACK_TEXT
+    track_text: str = ""
     right_text: str = ""
     overflow_ratio: float = 0.0
     overflow_badge: str = ""
@@ -1901,13 +2098,30 @@ class TopHudProgressBar(tk.Frame):
         return result
 
     def set_metric(self, metric: TopHudProgressMetric) -> None:
+        fill = str(metric.fill or HUD_PROGRESS_DAY)
+        fill_end = str(metric.fill_end or metric.fill or HUD_PROGRESS_DAY)
+        fill_mid = _rgb_to_hex(
+            _mix_rgb(
+                _hex_to_rgb(fill, (64, 160, 255)),
+                _hex_to_rgb(fill_end, _hex_to_rgb(fill, (64, 160, 255))),
+                0.5,
+            )
+        )
         self._metric = TopHudProgressMetric(
             label=str(metric.label or ""),
             ratio=_clamp_progress_ratio(metric.ratio),
-            fill=str(metric.fill or HUD_PROGRESS_DAY),
-            fill_end=str(metric.fill_end or metric.fill or HUD_PROGRESS_DAY),
-            fill_text=str(metric.fill_text or HUD_PROGRESS_DAY_TEXT),
-            track_text=str(metric.track_text or HUD_PROGRESS_TRACK_TEXT),
+            fill=fill,
+            fill_end=fill_end,
+            fill_text=_readable_theme_color(
+                metric.fill_text or HUD_PROGRESS_DAY_TEXT,
+                fill_mid,
+                fallback=HUD_BG,
+            ),
+            track_text=_readable_theme_color(
+                metric.track_text or HUD_PROGRESS_TRACK_TEXT,
+                HUD_PROGRESS_TRACK,
+                fallback=HUD_TEXT,
+            ),
             right_text=str(metric.right_text or ""),
             overflow_ratio=_clamp_progress_ratio(metric.overflow_ratio),
             overflow_badge=str(metric.overflow_badge or ""),
@@ -2411,8 +2625,13 @@ class TopHudProgressStrip(tk.Frame):
             gap=self._column_gap,
         )
         tail_width = max(widths[1], widths[2])
+        if should_scroll:
+            column_widths = widths
+        else:
+            first_width = max(widths[0], available_width - gap_total - (tail_width * 2))
+            column_widths = [first_width, tail_width, tail_width]
         for index, bar in enumerate(self._bars):
-            width = widths[index] if should_scroll else (widths[0] if index == 0 else tail_width)
+            width = column_widths[index]
             bar.grid(
                 row=0,
                 column=index,
@@ -2423,9 +2642,9 @@ class TopHudProgressStrip(tk.Frame):
             bar.set_requested_width(width)
             self._content.columnconfigure(
                 index,
-                weight=0 if should_scroll or index == 0 else 1,
-                minsize=widths[index] if should_scroll or index == 0 else 0,
-                uniform=None if should_scroll or index == 0 else "top-collapsed-tail",
+                weight=0,
+                minsize=width,
+                uniform=None,
             )
         if available_width <= 1:
             available_width = required_width
@@ -2486,7 +2705,7 @@ class TopHudBudgetProgress(tk.Frame):
             anchor="w",
             justify="left",
             bg=HUD_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 7),
             wraplength=360,
         )
@@ -3106,7 +3325,7 @@ class _WindowsCodexLocator(_BaseLocator):
             self.wintypes = wintypes
             self.user32 = ctypes.windll.user32
             self.kernel32 = ctypes.windll.kernel32
-            self._top_dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=True)
+            self._top_dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=False)
             self._dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=False)
             self._native_anchors_enabled = _env_flag(HUD_NATIVE_ANCHORS_ENV)
             if self._top_dom_anchors_enabled or self._dom_anchors_enabled:
@@ -4388,7 +4607,7 @@ class TokenHudWindow:
         self._restart_codex_for_renderer = False
         self._geometry_log_path = configure_hud_geometry_logging()
         self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
-        self._use_top_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=True)
+        self._use_top_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
         self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
         self.update_manager = update_manager
         self._update_state = AutoUpdateState(current_version=__version__)
@@ -4470,6 +4689,8 @@ class TokenHudWindow:
         self._snapshot = ParsedSession(status="waiting")
         self._top_collapsed_width_override: int | None = None
         self._ui_interaction_hold_until = 0.0
+        self._click_priority_hold_until = 0.0
+        self._pointer_priority_hold_until = 0.0
         self._top_rebuild_job: str | None = None
         self._request_rebuild_job: str | None = None
         self._follow_job: str | None = None
@@ -4477,6 +4698,7 @@ class TokenHudWindow:
             timeout_seconds=0.08,
             cache_seconds=0.8,
             failure_cooldown_seconds=5.0,
+            enabled=False,
         )
         self._theme_signature: tuple[tuple[str, object], ...] | None = None
 
@@ -4515,15 +4737,17 @@ class TokenHudWindow:
         self._rebuild_top_ui()
         if hasattr(self, "request_root"):
             self._rebuild_request_ui()
+        self._reset_settings_dialog_for_theme_change()
         if self._attached and self._last_rect is not None:
             self._apply_geometry()
 
     def _move_handle(self, parent: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> tk.Label:
+        parent_bg = str(parent.cget("bg"))
         label = tk.Label(
             parent,
             text="≡",
-            bg=str(parent.cget("bg")),
-            fg="#8EA0B5",
+            bg=parent_bg,
+            fg=_theme_secondary_text(parent_bg),
             font=("Consolas", 10, "bold"),
             cursor="fleur",
             width=2,
@@ -4554,6 +4778,7 @@ class TokenHudWindow:
         window: tk.Tk | tk.Toplevel,
         target: str,
     ) -> None:
+        self._bind_manual_priority_events(window)
         window.bind(
             "<Motion>",
             lambda event, t=target, w=window: self._handle_window_motion(event, t, w),
@@ -4579,6 +4804,35 @@ class TokenHudWindow:
             lambda event, t=target, w=window: self._handle_window_release(event, t, w),
             add="+",
         )
+
+    def _bind_manual_priority_events(self, widget: tk.Misc) -> None:
+        if bool(getattr(widget, "_hud_manual_priority_bound", False)):
+            return
+        setattr(widget, "_hud_manual_priority_bound", True)
+        widget.bind("<ButtonPress>", self._handle_manual_button_event, add="+")
+        widget.bind("<ButtonRelease>", self._handle_manual_button_event, add="+")
+        widget.bind("<Motion>", self._handle_manual_pointer_event, add="+")
+        widget.bind("<B1-Motion>", self._handle_manual_pointer_event, add="+")
+        widget.bind("<MouseWheel>", self._handle_manual_pointer_event, add="+")
+        widget.bind("<Button-4>", self._handle_manual_pointer_event, add="+")
+        widget.bind("<Button-5>", self._handle_manual_pointer_event, add="+")
+
+    def _handle_manual_button_event(self, event: object | None = None) -> None:
+        del event
+        self._mark_click_priority()
+
+    def _handle_manual_pointer_event(self, event: object | None = None) -> None:
+        del event
+        self._mark_pointer_priority()
+
+    def _bind_manual_priority_tree(self, widget: tk.Misc) -> None:
+        try:
+            self._bind_manual_priority_events(widget)
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            self._bind_manual_priority_tree(child)
 
     @staticmethod
     def _point_in_hit_rect(
@@ -4700,6 +4954,7 @@ class TokenHudWindow:
         target: str,
         window: tk.Tk | tk.Toplevel,
     ) -> None:
+        self._mark_pointer_priority()
         if self._resize_window is window:
             return
         if self._blocks_window_interaction(getattr(event, "widget", None)):
@@ -4724,6 +4979,7 @@ class TokenHudWindow:
         target: str,
         window: tk.Tk | tk.Toplevel,
     ) -> str | None:
+        self._mark_click_priority()
         if self._blocks_window_interaction(getattr(event, "widget", None)):
             self._set_window_cursor(window, "")
             return None
@@ -4742,6 +4998,7 @@ class TokenHudWindow:
         target: str,
         window: tk.Tk | tk.Toplevel,
     ) -> str | None:
+        self._mark_pointer_priority()
         del target
         if self._resize_window is window:
             return self._resize_window_size(event)
@@ -4753,6 +5010,7 @@ class TokenHudWindow:
         target: str,
         window: tk.Tk | tk.Toplevel,
     ) -> str | None:
+        self._mark_click_priority()
         del target
         if self._resize_window is window:
             result = self._finish_resize(event)
@@ -4761,14 +5019,15 @@ class TokenHudWindow:
         return self._release_pointer(event)
 
     def _settings_button(self, parent: tk.Misc) -> tk.Button:
+        parent_bg = str(parent.cget("bg"))
         button = tk.Button(
             parent,
             text="⚙",
             command=self._open_settings_dialog,
-            bg=str(parent.cget("bg")),
-            fg="#A9BCD2",
-            activebackground="#2E3846",
-            activeforeground=HUD_ACCENT,
+            bg=parent_bg,
+            fg=_theme_secondary_text(parent_bg),
+            activebackground=_theme_hover_surface(parent_bg),
+            activeforeground=_theme_accent_text(parent_bg),
             relief="flat",
             padx=5,
             pady=1,
@@ -4779,14 +5038,15 @@ class TokenHudWindow:
         return button
 
     def _update_button(self, parent: tk.Misc) -> tk.Button:
+        parent_bg = str(parent.cget("bg"))
         button = tk.Button(
             parent,
             text="↓",
             command=self._handle_update_action,
-            bg=str(parent.cget("bg")),
-            fg=HUD_BLUE,
-            activebackground="#2E3846",
-            activeforeground=HUD_ACCENT,
+            bg=parent_bg,
+            fg=_theme_info_text(parent_bg),
+            activebackground=_theme_hover_surface(parent_bg),
+            activeforeground=_theme_accent_text(parent_bg),
             relief="flat",
             padx=5,
             pady=1,
@@ -4822,9 +5082,14 @@ class TokenHudWindow:
                 button.pack_forget()
             return
         glyph = "⇪" if state.icon == "install" else "↓"
-        color = HUD_ACCENT if state.icon == "install" else HUD_BLUE
+        button_bg = str(button.cget("bg"))
+        color = (
+            _theme_accent_text(button_bg)
+            if state.icon == "install"
+            else _theme_info_text(button_bg)
+        )
         if state.phase in {"paused", "error"}:
-            color = "#FFB86B"
+            color = _theme_warning_text(button_bg)
         button.configure(text=glyph, fg=color)
         if not button.winfo_manager():
             button.pack(side="left", padx=(4, 0))
@@ -4868,11 +5133,68 @@ class TokenHudWindow:
             and self._settings_actions_frame.winfo_children()
         )
 
+    def _configure_settings_ttk_style(self) -> None:
+        control_bg = _theme_control_surface(HUD_BG)
+        control_fg = _theme_primary_text(control_bg)
+        selected_fg = _theme_primary_button_fg()
+        try:
+            style = ttk.Style(self.root)
+            style.configure(
+                "CodexUsageHud.TCombobox",
+                fieldbackground=control_bg,
+                background=control_bg,
+                foreground=control_fg,
+                arrowcolor=_theme_secondary_text(control_bg),
+                bordercolor=_theme_control_border(HUD_BG),
+                lightcolor=_theme_control_border(HUD_BG),
+                darkcolor=_theme_control_border(HUD_BG),
+                insertcolor=control_fg,
+                relief="flat",
+            )
+            style.map(
+                "CodexUsageHud.TCombobox",
+                fieldbackground=[
+                    ("readonly", control_bg),
+                    ("disabled", control_bg),
+                    ("active", control_bg),
+                ],
+                foreground=[
+                    ("readonly", control_fg),
+                    ("disabled", _theme_secondary_text(control_bg)),
+                    ("active", control_fg),
+                ],
+                selectbackground=[("readonly", HUD_ACCENT)],
+                selectforeground=[("readonly", selected_fg)],
+            )
+        except tk.TclError:
+            return
+        self.root.option_add("*TCombobox*Listbox.background", control_bg)
+        self.root.option_add("*TCombobox*Listbox.foreground", control_fg)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", HUD_ACCENT)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", selected_fg)
+
+    def _reset_settings_dialog_for_theme_change(self) -> None:
+        dialog = self._settings_dialog
+        if dialog is None or not dialog.winfo_exists():
+            return
+        active_tab = self._settings_active_tab
+        was_visible = self._settings_dialog_visible()
+        try:
+            dialog.destroy()
+        except tk.TclError:
+            return
+        if was_visible:
+            try:
+                self.root.after_idle(lambda tab=active_tab: self._open_settings_dialog(tab))
+            except tk.TclError:
+                pass
+
     def _ensure_settings_dialog_shell(self) -> tk.Toplevel | None:
         dialog = self._settings_dialog
         if dialog is not None and dialog.winfo_exists():
             return dialog
         self._cancel_settings_dialog_prewarm()
+        self._configure_settings_ttk_style()
         settings = self.user_settings_store.load()
         self.user_settings = settings
         self._settings_configured_display_mode = str(settings.display_mode)
@@ -4893,6 +5215,7 @@ class TokenHudWindow:
         )
         dialog.minsize(620, 480)
         dialog.protocol("WM_DELETE_WINDOW", self._hide_settings_dialog)
+        self._bind_manual_priority_events(dialog)
         dialog.bind("<Destroy>", self._settings_dialog_destroyed, add="+")
 
         head = tk.Frame(dialog, bg=REQUEST_HEADER_BG, padx=12, pady=10)
@@ -4910,11 +5233,7 @@ class TokenHudWindow:
             head,
             text="×",
             command=self._hide_settings_dialog,
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            activebackground=HUD_DIVIDER,
-            activeforeground=HUD_TEXT,
-            relief="flat",
+            **_settings_secondary_button_kwargs(REQUEST_HEADER_BG),
             padx=8,
             pady=1,
             font=("Microsoft YaHei UI", 9, "bold"),
@@ -4974,7 +5293,7 @@ class TokenHudWindow:
             anchor="w",
             justify="left",
             bg=REQUEST_HEADER_BG,
-            fg="#A9BCD2",
+            fg=_theme_secondary_text(REQUEST_HEADER_BG),
             font=("Microsoft YaHei UI", 8),
         )
         self._settings_status_label.pack(side="left", fill="x", expand=True)
@@ -5019,6 +5338,36 @@ class TokenHudWindow:
 
     def _ui_interaction_active(self, now: float | None = None) -> bool:
         return self._ui_interaction_hold_until > (time.monotonic() if now is None else now)
+
+    def _mark_click_priority(self, duration_ms: int = HUD_CLICK_PRIORITY_MS) -> None:
+        grace_seconds = max(0, int(duration_ms)) / 1000.0
+        until = time.monotonic() + grace_seconds
+        self._click_priority_hold_until = max(self._click_priority_hold_until, until)
+        self._mark_ui_interaction(duration_ms=max(duration_ms, HUD_INTERACTION_SETTLE_MS))
+
+    def _click_priority_active(self, now: float | None = None) -> bool:
+        return self._click_priority_hold_until > (time.monotonic() if now is None else now)
+
+    def _mark_pointer_priority(self, duration_ms: int = HUD_POINTER_PRIORITY_MS) -> None:
+        grace_seconds = max(0, int(duration_ms)) / 1000.0
+        until = time.monotonic() + grace_seconds
+        self._pointer_priority_hold_until = max(self._pointer_priority_hold_until, until)
+        self._mark_ui_interaction(duration_ms=max(duration_ms, HUD_INTERACTION_SETTLE_MS))
+
+    def _pointer_priority_active(self, now: float | None = None) -> bool:
+        return self._pointer_priority_hold_until > (time.monotonic() if now is None else now)
+
+    def _manual_input_active(self, now: float | None = None) -> bool:
+        if now is None:
+            now = time.monotonic()
+        return self._click_priority_active(now) or self._pointer_priority_active(now)
+
+    def _manual_input_refresh_delay(self, fallback_ms: int) -> int:
+        if self._click_priority_active():
+            return HUD_CLICK_REFRESH_DELAY_MS
+        if self._pointer_priority_active():
+            return HUD_POINTER_REFRESH_DELAY_MS
+        return fallback_ms
 
     def _settings_dialog_visible(self) -> bool:
         dialog = self._settings_dialog
@@ -5126,9 +5475,9 @@ class TokenHudWindow:
             text=text,
             command=lambda: self._select_settings_tab(tab),
             bg=HUD_BG,
-            fg="#A9BCD2",
+            fg=_theme_secondary_text(HUD_BG),
             activebackground=HUD_HEADER_BG,
-            activeforeground=HUD_ACCENT,
+            activeforeground=_theme_accent_text(HUD_HEADER_BG),
             relief="flat",
             padx=9,
             pady=5,
@@ -5220,12 +5569,12 @@ class TokenHudWindow:
         drag_offset = {"x": 0, "y": 0}
 
         def start_drag(event: tk.Event[tk.Misc]) -> None:
-            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+            self._mark_click_priority()
             drag_offset["x"] = int(event.x_root) - dialog.winfo_x()
             drag_offset["y"] = int(event.y_root) - dialog.winfo_y()
 
         def move_drag(event: tk.Event[tk.Misc]) -> str:
-            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+            self._mark_pointer_priority()
             x = int(event.x_root) - drag_offset["x"]
             y = int(event.y_root) - drag_offset["y"]
             dialog.geometry(f"+{x}+{y}")
@@ -5248,6 +5597,7 @@ class TokenHudWindow:
         return (-1 if delta > 0 else 1) * max(1, abs(delta) // 120)
 
     def _scroll_settings_body(self, event: tk.Event[tk.Misc]) -> str | None:
+        self._mark_pointer_priority()
         canvas = self._settings_canvas
         if canvas is None or not canvas.winfo_exists():
             return None
@@ -5295,9 +5645,14 @@ class TokenHudWindow:
         self._settings_active_tab = active_tab
         for name, button in self._settings_tab_buttons.items():
             selected = name == active_tab
+            selected_bg = HUD_HEADER_BG if selected else HUD_BG
             button.configure(
-                bg=HUD_HEADER_BG if selected else HUD_BG,
-                fg=HUD_ACCENT if selected else "#A9BCD2",
+                bg=selected_bg,
+                fg=_theme_accent_text(selected_bg)
+                if selected
+                else _theme_secondary_text(selected_bg),
+                activebackground=HUD_HEADER_BG,
+                activeforeground=_theme_accent_text(HUD_HEADER_BG),
                 font=("Microsoft YaHei UI", 9, "bold" if selected else "normal"),
             )
         for child in self._settings_body_frame.winfo_children():
@@ -5320,6 +5675,8 @@ class TokenHudWindow:
                 self._settings_body_frame,
                 self._settings_actions_frame,
             )
+        self._bind_manual_priority_tree(self._settings_body_frame)
+        self._bind_manual_priority_tree(self._settings_actions_frame)
         self._bind_settings_scroll_tree(self._settings_body_frame)
 
     def _settings_field(
@@ -5347,15 +5704,12 @@ class TokenHudWindow:
             text=label,
             anchor="w",
             bg=HUD_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(fill="x")
         entry = tk.Entry(
             frame,
-            bg=HUD_PANEL_BG,
-            fg=HUD_TEXT,
-            insertbackground=HUD_TEXT,
-            relief="flat",
+            **_settings_entry_kwargs(HUD_BG),
         )
         entry.insert(0, str(value))
         entry.pack(fill="x", ipady=4)
@@ -5386,7 +5740,7 @@ class TokenHudWindow:
             text="周额度重置",
             anchor="w",
             bg=HUD_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(fill="x")
         weekly_controls = tk.Frame(weekly_frame, bg=HUD_BG)
@@ -5396,15 +5750,13 @@ class TokenHudWindow:
             values=["0 周一", "1 周二", "2 周三", "3 周四", "4 周五", "5 周六", "6 周日"],
             state="readonly",
             width=10,
+            style="CodexUsageHud.TCombobox",
         )
         weekday.set(f"{settings.weekly_reset_weekday} " + ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][settings.weekly_reset_weekday])
         weekday.pack(side="left", fill="x", expand=True, padx=(0, 6))
         weekly_time = tk.Entry(
             weekly_controls,
-            bg=HUD_PANEL_BG,
-            fg=HUD_TEXT,
-            insertbackground=HUD_TEXT,
-            relief="flat",
+            **_settings_entry_kwargs(HUD_BG),
         )
         weekly_time.insert(0, str(settings.weekly_reset_time))
         weekly_time.pack(side="left", fill="x", expand=True, ipady=4)
@@ -5418,7 +5770,7 @@ class TokenHudWindow:
             text="HUD 显示方案",
             anchor="w",
             bg=HUD_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(fill="x")
         mode = ttk.Combobox(
@@ -5429,6 +5781,7 @@ class TokenHudWindow:
                 "tk - 仅使用 Tk 窗口",
             ],
             state="readonly",
+            style="CodexUsageHud.TCombobox",
         )
         mode.set(
             {
@@ -5447,13 +5800,14 @@ class TokenHudWindow:
             text="会话气泡最大显示数（0 表示不启用）",
             anchor="w",
             bg=HUD_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(fill="x")
         bubble_limit = ttk.Combobox(
             bubble_frame,
             values=self._work_overlay_setting_values(),
             state="readonly",
+            style="CodexUsageHud.TCombobox",
         )
         bubble_limit.set(self._work_overlay_setting_text(settings.work_overlay_max_items))
         bubble_limit.pack(fill="x")
@@ -5482,17 +5836,14 @@ class TokenHudWindow:
             text="计费单价获取地址",
             anchor="w",
             bg=HUD_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(fill="x")
         pricing_controls = tk.Frame(pricing_frame, bg=HUD_BG)
         pricing_controls.pack(fill="x")
         pricing_entry = tk.Entry(
             pricing_controls,
-            bg=HUD_PANEL_BG,
-            fg=HUD_TEXT,
-            insertbackground=HUD_TEXT,
-            relief="flat",
+            **_settings_entry_kwargs(HUD_BG),
         )
         pricing_entry.insert(0, str(settings.pricing_url))
         pricing_entry.pack(side="left", fill="x", expand=True, ipady=4)
@@ -5505,11 +5856,7 @@ class TokenHudWindow:
                 self._settings_price_rows,
                 prices_body,
             ),
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            activebackground=HUD_DIVIDER,
-            activeforeground=HUD_TEXT,
-            relief="flat",
+            **_settings_secondary_button_kwargs(HUD_BG),
             padx=10,
             pady=4,
             cursor="hand2",
@@ -5522,7 +5869,7 @@ class TokenHudWindow:
             text="模型单价（USD / 1M tokens）",
             anchor="w",
             bg=HUD_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(fill="x")
         header = tk.Frame(price_table, bg=HUD_BG)
@@ -5534,7 +5881,7 @@ class TokenHudWindow:
                 text=text,
                 anchor="w",
                 bg=HUD_BG,
-                fg=HUD_MUTED,
+                fg=_theme_secondary_text(HUD_BG),
                 font=("Microsoft YaHei UI", 8, "bold"),
             ).grid(row=0, column=index, sticky="ew", padx=(0, 6))
         prices_body = tk.Frame(price_table, bg=HUD_BG)
@@ -5545,11 +5892,7 @@ class TokenHudWindow:
             price_table,
             text="添加模型",
             command=lambda: self._add_price_row(prices_body, self._settings_price_rows),
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            activebackground=HUD_DIVIDER,
-            activeforeground=HUD_TEXT,
-            relief="flat",
+            **_settings_secondary_button_kwargs(HUD_BG),
             padx=9,
             pady=3,
             cursor="hand2",
@@ -5562,9 +5905,9 @@ class TokenHudWindow:
             text="退出 HUD",
             command=self._confirm_full_exit,
             bg=HUD_BG,
-            fg="#A9BCD2",
+            fg=_theme_secondary_text(HUD_BG),
             activebackground=HUD_HEADER_BG,
-            activeforeground=HUD_TEXT,
+            activeforeground=_theme_primary_text(HUD_HEADER_BG),
             relief="flat",
             padx=4,
             pady=2,
@@ -5576,7 +5919,7 @@ class TokenHudWindow:
             anchor="e",
             justify="right",
             bg=HUD_BG,
-            fg="#A9BCD2",
+            fg=_theme_secondary_text(HUD_BG),
             font=("Microsoft YaHei UI", 8),
         ).pack(side="right")
 
@@ -5587,11 +5930,7 @@ class TokenHudWindow:
                 self._settings_entries,
                 self._settings_price_rows,
             ),
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            activebackground=HUD_DIVIDER,
-            activeforeground=HUD_TEXT,
-            relief="flat",
+            **_settings_secondary_button_kwargs(REQUEST_HEADER_BG),
             padx=9,
             pady=4,
         ).pack(side="left", padx=(0, 6))
@@ -5602,11 +5941,7 @@ class TokenHudWindow:
                 self._settings_entries,
                 self._settings_price_rows,
             ),
-            bg=HUD_ACCENT,
-            fg=HUD_BG,
-            activebackground="#FFE59A",
-            activeforeground=HUD_BG,
-            relief="flat",
+            **_settings_primary_button_kwargs(),
             padx=11,
             pady=4,
         ).pack(side="left")
@@ -5662,7 +5997,7 @@ class TokenHudWindow:
             justify="left",
             anchor="nw",
             bg=HUD_BG,
-            fg="#A9BCD2",
+            fg=_theme_secondary_text(HUD_BG),
             wraplength=680,
             font=("Microsoft YaHei UI", 8),
         ).pack(fill="x", pady=(8, 0))
@@ -5670,11 +6005,7 @@ class TokenHudWindow:
             actions,
             text="关闭",
             command=self._hide_settings_dialog,
-            bg=HUD_ACCENT,
-            fg=HUD_BG,
-            activebackground="#FFE59A",
-            activeforeground=HUD_BG,
-            relief="flat",
+            **_settings_primary_button_kwargs(),
             padx=11,
             pady=4,
         ).pack(side="left")
@@ -5704,11 +6035,7 @@ class TokenHudWindow:
             actions,
             text="检查更新",
             command=self._settings_check_update,
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            activebackground=HUD_DIVIDER,
-            activeforeground=HUD_TEXT,
-            relief="flat",
+            **_settings_secondary_button_kwargs(REQUEST_HEADER_BG),
             padx=9,
             pady=4,
         )
@@ -5717,11 +6044,7 @@ class TokenHudWindow:
             actions,
             text="安装更新",
             command=self._settings_install_update,
-            bg=HUD_ACCENT,
-            fg=HUD_BG,
-            activebackground="#FFE59A",
-            activeforeground=HUD_BG,
-            relief="flat",
+            **_settings_primary_button_kwargs(),
             padx=11,
             pady=4,
         )
@@ -5730,11 +6053,7 @@ class TokenHudWindow:
             actions,
             text="关闭",
             command=self._hide_settings_dialog,
-            bg="#2E3846",
-            fg=HUD_TEXT,
-            activebackground=HUD_DIVIDER,
-            activeforeground=HUD_TEXT,
-            relief="flat",
+            **_settings_secondary_button_kwargs(REQUEST_HEADER_BG),
             padx=9,
             pady=4,
         ).pack(side="left")
@@ -5909,7 +6228,7 @@ class TokenHudWindow:
                 text="codex-usage-hud",
                 anchor="w",
                 bg=HUD_PANEL_BG,
-                fg=HUD_ACCENT,
+                fg=_theme_accent_text(HUD_PANEL_BG),
                 font=("Microsoft YaHei UI", 9, "bold"),
             ).pack(fill="x")
             kicker_label = tk.Label(
@@ -5917,7 +6236,7 @@ class TokenHudWindow:
                 text=kicker,
                 anchor="w",
                 bg=HUD_PANEL_BG,
-                fg=HUD_MUTED,
+                fg=_theme_secondary_text(HUD_PANEL_BG),
                 font=("Microsoft YaHei UI", 9),
             )
             kicker_label.pack(fill="x", pady=(6, 0))
@@ -5928,7 +6247,7 @@ class TokenHudWindow:
                 anchor="w",
                 justify="left",
                 bg=HUD_PANEL_BG,
-                fg=HUD_TEXT,
+                fg=_theme_primary_text(HUD_PANEL_BG),
                 font=("Microsoft YaHei UI", 14, "bold"),
                 pady=3,
             )
@@ -5940,7 +6259,7 @@ class TokenHudWindow:
                 anchor="w",
                 justify="left",
                 bg=HUD_PANEL_BG,
-                fg="#B8C6D8",
+                fg=_theme_secondary_text(HUD_PANEL_BG),
                 font=("Microsoft YaHei UI", 10),
                 wraplength=324,
             )
@@ -5955,12 +6274,17 @@ class TokenHudWindow:
                 bd=0,
             )
             track.pack(fill="x", pady=(14, 0))
-            track.create_rectangle(0, 1, 324, 7, fill="#1A2430", outline="")
+            track.create_rectangle(0, 1, 324, 7, fill=_theme_control_surface(HUD_PANEL_BG), outline="")
             self._settings_loading_indicator = track.create_rectangle(
                 0, 1, 92, 7, fill=HUD_ACCENT, outline=""
             )
             self._settings_loading_glow = track.create_rectangle(
-                0, 1, 48, 7, fill="#FFE7A0", outline=""
+                0,
+                1,
+                48,
+                7,
+                fill=_theme_primary_button_active_bg(),
+                outline="",
             )
             self._settings_loading_track = track
             self._settings_loading_position = 0
@@ -6036,7 +6360,7 @@ class TokenHudWindow:
                 justify="left",
                 anchor="w",
                 bg=HUD_PANEL_BG,
-                fg="#FFB86B",
+                fg=_theme_warning_text(HUD_PANEL_BG),
                 wraplength=260,
                 font=("Microsoft YaHei UI", 8),
             ).pack(fill="x", pady=(8, 0))
@@ -6072,10 +6396,7 @@ class TokenHudWindow:
             row.columnconfigure(index, weight=2 if index == 0 else 1)
             entry = tk.Entry(
                 row,
-                bg=HUD_PANEL_BG,
-                fg=HUD_TEXT,
-                insertbackground=HUD_TEXT,
-                relief="flat",
+                **_settings_entry_kwargs(HUD_BG),
             )
             entry.insert(0, str(values[key]))
             entry.grid(row=0, column=index, sticky="ew", padx=(0, 6), ipady=4)
@@ -6111,7 +6432,9 @@ class TokenHudWindow:
             return
         self._settings_status_label.configure(
             text=message,
-            fg="#FFB86B" if kind == "error" else "#A9BCD2",
+            fg=_theme_warning_text(REQUEST_HEADER_BG)
+            if kind == "error"
+            else _theme_secondary_text(REQUEST_HEADER_BG),
         )
 
     def _selected_display_mode(self, entries: dict[str, SettingsEntry]) -> str:
@@ -6322,6 +6645,7 @@ class TokenHudWindow:
             self._build_top_expanded(frame)
         else:
             self._build_top_collapsed(frame)
+        self._bind_manual_priority_tree(self.root)
         self._render_top()
 
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
@@ -6367,7 +6691,7 @@ class TokenHudWindow:
             anchor="e",
             justify="right",
             bg=HUD_HEADER_BG,
-            fg=HUD_MUTED,
+            fg=_theme_secondary_text(HUD_HEADER_BG),
             font=("Microsoft YaHei UI", 8),
         )
         self.top_labels["session"].pack(side="left", fill="x", expand=True, padx=(12, 0))
@@ -6401,7 +6725,7 @@ class TokenHudWindow:
                 anchor="w",
                 justify="left",
                 bg=bg,
-                fg=HUD_MUTED,
+                fg=_theme_secondary_text(bg),
                 font=("Microsoft YaHei UI", 7, "bold"),
             ).pack(fill="x", pady=(0, 1))
 
@@ -6492,6 +6816,7 @@ class TokenHudWindow:
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         def scroll_top_body(event: tk.Event[tk.Misc]) -> str | None:
+            self._mark_pointer_priority()
             units = 0
             button = getattr(event, "num", None)
             if button == 4:
@@ -6529,7 +6854,7 @@ class TokenHudWindow:
         dynamic_label(
             "cumulative",
             left,
-            fg="#DDE7F2",
+            fg=_theme_secondary_text(HUD_BG),
             font=("Consolas", 9),
             pady=(0, 3),
         )
@@ -6542,7 +6867,7 @@ class TokenHudWindow:
         dynamic_label(
             "activity",
             left,
-            fg=HUD_BLUE,
+            fg=_theme_info_text(HUD_BG),
             font=("Microsoft YaHei UI", 8),
             pady=(0, 4),
         )
@@ -6551,7 +6876,7 @@ class TokenHudWindow:
         dynamic_label(
             "warnings",
             right,
-            fg="#FFB86B",
+            fg=_theme_warning_text(HUD_PANEL_BG),
             font=("Microsoft YaHei UI", 8),
             bg=HUD_PANEL_BG,
             pady=(0, 5),
@@ -6561,7 +6886,7 @@ class TokenHudWindow:
         dynamic_label(
             "slow",
             right,
-            fg="#DDE7F2",
+            fg=_theme_primary_text(HUD_PANEL_BG),
             font=("Microsoft YaHei UI", 8),
             bg=HUD_PANEL_BG,
             pady=(0, 4),
@@ -6569,7 +6894,7 @@ class TokenHudWindow:
         dynamic_label(
             "gap",
             right,
-            fg="#B9C2CC",
+            fg=_theme_secondary_text(HUD_PANEL_BG),
             font=("Microsoft YaHei UI", 8),
             bg=HUD_PANEL_BG,
             pady=(0, 0),
@@ -6579,7 +6904,7 @@ class TokenHudWindow:
         dynamic_label(
             "status",
             right,
-            fg="#A9BCD2",
+            fg=_theme_secondary_text(HUD_PANEL_BG),
             font=("Microsoft YaHei UI", 8),
             bg=HUD_PANEL_BG,
             pady=(0, 0),
@@ -6589,7 +6914,7 @@ class TokenHudWindow:
         dynamic_label(
             "legend",
             right,
-            fg="#C7D4E4",
+            fg=_theme_secondary_text(HUD_PANEL_BG),
             font=("Microsoft YaHei UI", 8),
             bg=HUD_PANEL_BG,
             pady=(0, 0),
@@ -6618,6 +6943,7 @@ class TokenHudWindow:
             self._build_request_expanded(frame)
         else:
             self._build_request_collapsed(frame)
+        self._bind_manual_priority_tree(self.request_root)
         self._render_request()
 
     def _build_request_collapsed(self, frame: tk.Frame) -> None:
@@ -6705,6 +7031,7 @@ class TokenHudWindow:
         self.request_text.configure(state="disabled")
 
     def _release_pointer(self, event: Any) -> str:
+        self._mark_click_priority()
         if self._press_at is None:
             return "break"
         dx = abs(event.x_root - self._press_at[0])
@@ -6722,6 +7049,7 @@ class TokenHudWindow:
         return "break"
 
     def _start_move(self, event: Any, target: str, window: tk.Tk | tk.Toplevel) -> str:
+        self._mark_click_priority()
         self._move_target = target
         self._drag_window = window
         self._drag_origin = (event.x_root, event.y_root)
@@ -6737,7 +7065,7 @@ class TokenHudWindow:
     def _move_window(self, event: Any) -> str:
         if self._drag_origin is None or self._drag_window is None:
             return "break"
-        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+        self._mark_pointer_priority()
         old_x, old_y = self._drag_origin
         dx = event.x_root - old_x
         dy = event.y_root - old_y
@@ -6759,7 +7087,7 @@ class TokenHudWindow:
         self._drag_window = None
         self._drag_origin = None
         if target and window is not None:
-            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+            self._mark_click_priority()
             self._remember_window_position(target, window, reason="move")
             self._save_settings()
         return "break"
@@ -6771,7 +7099,7 @@ class TokenHudWindow:
         window: tk.Tk | tk.Toplevel,
         edge: str,
     ) -> str:
-        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+        self._mark_click_priority()
         self._resize_target = target
         self._resize_window = window
         self._resize_edge = edge
@@ -6807,7 +7135,7 @@ class TokenHudWindow:
     def _resize_window_size(self, event: Any) -> str:
         if self._resize_window is None:
             return "break"
-        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+        self._mark_pointer_priority()
         dx = event.x_root - self._resize_start_x
         dy = event.y_root - self._resize_start_y
         expanded = (
@@ -6848,7 +7176,7 @@ class TokenHudWindow:
         self._resize_window = None
         self._resize_edge = ""
         if target and window is not None:
-            self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+            self._mark_click_priority()
             self._remember_window_position(target, window, reason="resize")
             self._remember_window_width(target, window, reason="resize")
             self._remember_window_height(target, window, reason="resize")
@@ -6857,13 +7185,13 @@ class TokenHudWindow:
         return "break"
 
     def toggle_top_expanded(self) -> None:
-        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+        self._mark_click_priority()
         self.top_expanded = not self.top_expanded
         self._apply_geometry()
         self._schedule_top_rebuild()
 
     def toggle_request_expanded(self) -> None:
-        self._mark_ui_interaction(duration_ms=HUD_INTERACTION_SETTLE_MS)
+        self._mark_click_priority()
         self.request_expanded = not self.request_expanded
         self._apply_geometry()
         self._schedule_request_rebuild()
@@ -6872,7 +7200,7 @@ class TokenHudWindow:
         if self._top_rebuild_job is not None:
             return
         try:
-            self._top_rebuild_job = self.root.after_idle(self._flush_top_rebuild)
+            self._top_rebuild_job = self.root.after(0, self._flush_top_rebuild)
         except tk.TclError:
             self._top_rebuild_job = None
 
@@ -6885,7 +7213,7 @@ class TokenHudWindow:
         if self._request_rebuild_job is not None:
             return
         try:
-            self._request_rebuild_job = self.root.after_idle(self._flush_request_rebuild)
+            self._request_rebuild_job = self.root.after(0, self._flush_request_rebuild)
         except tk.TclError:
             self._request_rebuild_job = None
 
@@ -6910,6 +7238,8 @@ class TokenHudWindow:
         if self._move_target or self._resize_target:
             return
         now = time.monotonic()
+        if self._manual_input_active(now):
+            return
         if self._ui_interaction_active(now):
             if self._attached and self._last_rect is not None:
                 self._apply_geometry()
@@ -7034,6 +7364,9 @@ class TokenHudWindow:
                 return
 
     def _next_follow_delay(self) -> int:
+        priority_delay = self._manual_input_refresh_delay(0)
+        if priority_delay:
+            return priority_delay
         if self._tombstoned:
             return self.tombstone_follow_ms
         if self._focus_state_active is False:
@@ -7042,14 +7375,18 @@ class TokenHudWindow:
 
     def should_refresh_snapshot(self) -> bool:
         """Return whether parser refresh work should run for the visible HUD."""
-        return not self._tombstoned
+        return not self._tombstoned and not self.should_defer_background_work()
+
+    def should_defer_background_work(self) -> bool:
+        """Return whether manual input should take priority over background work."""
+        return self._manual_input_active()
 
     def refresh_delay_ms(self, normal_delay_ms: int) -> int:
         """Throttle parser refreshes while the HUD is hidden in tombstone mode."""
         delay = max(100, int(normal_delay_ms))
         if self._tombstoned:
             return max(delay, FOLLOW_TOMBSTONE_MS)
-        return delay
+        return self._manual_input_refresh_delay(delay)
 
     def _apply_geometry(self) -> None:
         if self._attached and self._last_rect is not None:
@@ -7965,15 +8302,21 @@ class TokenHudWindow:
                     label.configure(text=_wrap_long_display_tokens(text))
                 if key == "slow":
                     copyable = _copyable_tool_command(snapshot) is not None
+                    label_bg = str(label.cget("bg"))
                     label.configure(
                         cursor="hand2" if copyable else "arrow",
-                        fg="#F3D27A" if copyable else "#DDE7F2",
+                        fg=_theme_warning_text(label_bg)
+                        if copyable
+                        else _theme_primary_text(label_bg),
                     )
                 if key == "gap":
                     copyable = _copyable_gap_detail(snapshot) is not None
+                    label_bg = str(label.cget("bg"))
                     label.configure(
                         cursor="hand2" if copyable else "arrow",
-                        fg="#BCD7FF" if copyable else "#B9C2CC",
+                        fg=_theme_info_text(label_bg)
+                        if copyable
+                        else _theme_secondary_text(label_bg),
                     )
                 if key == "warnings":
                     has_warning = bool(
@@ -7982,7 +8325,12 @@ class TokenHudWindow:
                         or snapshot.budget_error
                         or snapshot.budget_warnings
                     )
-                    label.configure(fg="#FFB86B" if has_warning else HUD_MUTED)
+                    label_bg = str(label.cget("bg"))
+                    label.configure(
+                        fg=_theme_warning_text(label_bg)
+                        if has_warning
+                        else _theme_secondary_text(label_bg)
+                    )
 
     def _render_request(self) -> None:
         snapshot = self._snapshot
@@ -7992,7 +8340,9 @@ class TokenHudWindow:
                 text = f"本次 Token 出错 | {snapshot.request.error}"
             self.request_label.configure(
                 text=text,
-                fg=HUD_ERROR if snapshot.request.error else HUD_ACCENT,
+                fg=_theme_error_text(REQUEST_HUD_BG)
+                if snapshot.request.error
+                else _theme_accent_text(REQUEST_HUD_BG),
             )
 
         if self.request_text is None:

@@ -1107,30 +1107,33 @@ class CodexThemeProbe:
         self._cache_at = 0.0
         self._failure_until = 0.0
 
+    def _persisted_snapshot(self, now: float | None = None) -> CodexThemeSnapshot | None:
+        snapshot = _persisted_theme_snapshot(self.config_path)
+        if snapshot is None:
+            return None
+        self._cache = snapshot
+        self._cache_at = time.monotonic() if now is None else now
+        self.last_status = "persisted"
+        return snapshot
+
     def snapshot(self, *, force: bool = False) -> CodexThemeSnapshot:
         now = time.monotonic()
         if not force and self._cache is not None and now - self._cache_at <= self.cache_seconds:
             self.last_status = "cache"
             return self._cache
         if not self.enabled:
-            snapshot = _persisted_theme_snapshot(self.config_path)
+            snapshot = self._persisted_snapshot(now)
             if snapshot is not None:
-                self._cache = snapshot
-                self._cache_at = now
-                self.last_status = "persisted"
                 return snapshot
             self.last_status = "disabled"
             return _fallback_snapshot()
         if not force and now < self._failure_until:
+            snapshot = self._persisted_snapshot(now)
+            if snapshot is not None:
+                return snapshot
             self.last_status = "cooldown"
             if self._cache is not None:
                 return self._cache
-            snapshot = _persisted_theme_snapshot(self.config_path)
-            if snapshot is not None:
-                self._cache = snapshot
-                self._cache_at = now
-                self.last_status = "persisted"
-                return snapshot
             return _fallback_snapshot()
         try:
             targets = list_targets(self.port, self.timeout_seconds)
@@ -1152,14 +1155,11 @@ class CodexThemeProbe:
             self.last_status = "failed"
             self.last_error = f"{type(exc).__name__}: {exc}"
             self._failure_until = now + self.failure_cooldown_seconds
+            snapshot = self._persisted_snapshot()
+            if snapshot is not None:
+                return snapshot
             if self._cache is not None:
                 return self._cache
-            snapshot = _persisted_theme_snapshot(self.config_path)
-            if snapshot is not None:
-                self._cache = snapshot
-                self._cache_at = time.monotonic()
-                self.last_status = "persisted"
-                return snapshot
             return _fallback_snapshot()
         self._cache = snapshot
         self._cache_at = time.monotonic()

@@ -86,12 +86,20 @@ def _compact_workdir_text(value: object, limit: int) -> str:
     return "..." + text[-max(0, limit - 3) :]
 
 
-def _workdir_leaf(value: object) -> str:
+def _workdir_parts(value: object) -> list[str]:
     text = str(value or "").strip().rstrip("\\/")
     if not text:
-        return ""
-    parts = [part for part in text.replace("/", "\\").split("\\") if part]
-    return parts[-1] if parts else text
+        return []
+    return [part for part in text.replace("/", "\\").split("\\") if part]
+
+
+def _workdir_leaf(value: object) -> str:
+    parts = _workdir_parts(value)
+    return parts[-1] if parts else ""
+
+
+def _workdir_display_name(item: Mapping[str, object]) -> str:
+    return _workdir_leaf(item.get("workdir")) or _workdir_leaf(item.get("workdirName"))
 
 
 def _item_is_completed(item: Mapping[str, object]) -> bool:
@@ -608,6 +616,14 @@ def _theme_hex_to_rgb(value: object, fallback: tuple[int, int, int]) -> tuple[in
         return fallback
 
 
+def _theme_rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return (
+        f"#{max(0, min(255, int(rgb[0]))):02x}"
+        f"{max(0, min(255, int(rgb[1]))):02x}"
+        f"{max(0, min(255, int(rgb[2]))):02x}"
+    )
+
+
 def _theme_mix(base: object, overlay: object, alpha: float, *, fallback: str) -> str:
     alpha = max(0.0, min(1.0, float(alpha)))
     base_rgb = _theme_hex_to_rgb(base, _theme_hex_to_rgb(fallback, (16, 22, 29)))
@@ -675,6 +691,42 @@ def _theme_emphasis_ink(
         "#111111",
         fallback=fallback,
     )
+
+
+def _theme_readable_color(
+    color: object,
+    background: object,
+    *,
+    fallback: str,
+    min_ratio: float = 4.5,
+) -> str:
+    background_hex = _theme_hex(background, "#10161d")
+    candidate = _theme_hex(color, fallback)
+    if _theme_contrast_ratio(background_hex, candidate) >= min_ratio:
+        return candidate
+
+    fallback_hex = _theme_hex(fallback, candidate)
+    candidate_rgb = _theme_hex_to_rgb(candidate, _theme_hex_to_rgb(fallback_hex, (255, 255, 255)))
+    fallback_rgb = _theme_hex_to_rgb(fallback_hex, candidate_rgb)
+    best = candidate
+    best_ratio = _theme_contrast_ratio(background_hex, candidate)
+    for ratio in (0.18, 0.32, 0.46, 0.60, 0.74, 0.88, 1.0):
+        mixed = _theme_rgb_to_hex(
+            (
+                int(round(candidate_rgb[0] + ((fallback_rgb[0] - candidate_rgb[0]) * ratio))),
+                int(round(candidate_rgb[1] + ((fallback_rgb[1] - candidate_rgb[1]) * ratio))),
+                int(round(candidate_rgb[2] + ((fallback_rgb[2] - candidate_rgb[2]) * ratio))),
+            )
+        )
+        mixed_ratio = _theme_contrast_ratio(background_hex, mixed)
+        if mixed_ratio > best_ratio:
+            best = mixed
+            best_ratio = mixed_ratio
+        if mixed_ratio >= min_ratio:
+            return mixed
+    high_contrast = _theme_emphasis_ink(background_hex, fallback=fallback_hex)
+    high_ratio = _theme_contrast_ratio(background_hex, high_contrast)
+    return high_contrast if high_ratio > best_ratio else best
 
 
 def _resolved_overlay_theme(theme_tokens: Mapping[str, object] | None) -> dict[str, str]:
@@ -773,35 +825,79 @@ def _completed_badge_palette(
     theme_tokens: Mapping[str, object] | None = None,
 ) -> dict[str, str]:
     theme = _resolved_overlay_theme(theme_tokens)
-    success = _theme_mix(theme["success"], theme["accent"], 0.12, fallback=theme["success"])
-    fill_start = _theme_mix(theme["surface"], success, 0.16, fallback=success)
-    fill_mid = _theme_mix(success, theme["accent"], 0.16, fallback=success)
+    text = theme["text"]
+    surface = theme["surface"]
+    panel = theme["panelSurface"]
+    request_panel = theme["requestPanelSurface"]
+    is_light = _theme_relative_luma(surface) >= _theme_relative_luma(text)
+    success = _theme_mix(theme["success"], theme["accent"], 0.10, fallback=theme["success"])
+    accent = _theme_mix(theme["accent"], theme["success"], 0.20, fallback=theme["accent"])
+    fill_start = _theme_mix(
+        panel,
+        accent,
+        0.05 if is_light else 0.10,
+        fallback=panel,
+    )
+    fill_mid = _theme_mix(
+        request_panel,
+        success,
+        0.10 if is_light else 0.16,
+        fallback=request_panel,
+    )
     fill_end = _theme_mix(
-        theme["requestPanelSurface"],
-        success,
-        0.62,
-        fallback=theme["requestPanelSurface"],
+        surface,
+        accent,
+        0.04 if is_light else 0.12,
+        fallback=surface,
     )
-    border = _theme_mix(theme["panelBorder"], success, 0.68, fallback=theme["panelBorder"])
-    primary_ink = _theme_emphasis_ink(fill_mid, fallback=theme["text"])
-    secondary_ink = _theme_mix(primary_ink, theme["accent"], 0.22, fallback=primary_ink)
-    elapsed_ink = _theme_mix(primary_ink, success, 0.10, fallback=primary_ink)
-    ring = _theme_mix(theme["accent"], success, 0.34, fallback=theme["accent"])
-    dashed_ring = _theme_mix(theme["accent"], primary_ink, 0.22, fallback=theme["accent"])
+    border = _theme_readable_color(
+        _theme_mix(theme["panelBorder"], accent, 0.52, fallback=theme["panelBorder"]),
+        fill_mid,
+        fallback=text,
+        min_ratio=1.8,
+    )
+    primary_ink = _theme_readable_color(
+        text,
+        fill_mid,
+        fallback=_theme_emphasis_ink(fill_mid, fallback=text),
+    )
+    secondary_ink = _theme_readable_color(theme["muted"], fill_mid, fallback=primary_ink)
+    check_text = _theme_readable_color(
+        _theme_mix(accent, text, 0.36 if is_light else 0.22, fallback=accent),
+        fill_mid,
+        fallback=primary_ink,
+    )
+    elapsed_ink = _theme_readable_color(
+        _theme_mix(theme["muted"], success, 0.14, fallback=theme["muted"]),
+        fill_mid,
+        fallback=primary_ink,
+    )
+    ring = _theme_readable_color(
+        _theme_mix(accent, success, 0.25, fallback=accent),
+        fill_mid,
+        fallback=text,
+        min_ratio=2.15,
+    )
+    dashed_ring = _theme_readable_color(
+        _theme_mix(ring, theme["muted"], 0.30, fallback=ring),
+        fill_mid,
+        fallback=text,
+        min_ratio=1.8,
+    )
     stat_box_fill = _theme_mix(
-        theme["requestPanelSurface"],
+        request_panel,
         success,
-        0.22,
-        fallback=theme["requestPanelSurface"],
+        0.07 if is_light else 0.13,
+        fallback=request_panel,
     )
-    stat_box_border = _theme_mix(
-        theme["panelBorder"],
-        success,
-        0.46,
-        fallback=theme["panelBorder"],
+    stat_box_border = _theme_readable_color(
+        _theme_mix(theme["panelBorder"], accent, 0.34, fallback=theme["panelBorder"]),
+        stat_box_fill,
+        fallback=primary_ink,
+        min_ratio=1.8,
     )
-    stat_value = _theme_emphasis_ink(stat_box_fill, fallback=primary_ink)
-    stat_label = _theme_mix(stat_value, success, 0.20, fallback=stat_value)
+    stat_value = _theme_readable_color(text, stat_box_fill, fallback=primary_ink)
+    stat_label = _theme_readable_color(theme["muted"], stat_box_fill, fallback=stat_value)
     return {
         "fillStart": fill_start,
         "fillMid": fill_mid,
@@ -811,7 +907,7 @@ def _completed_badge_palette(
         "dashedRing": dashed_ring,
         "titleText": primary_ink,
         "workdirText": secondary_ink,
-        "checkText": primary_ink,
+        "checkText": check_text,
         "elapsedText": elapsed_ink,
         "statBoxFill": stat_box_fill,
         "statBoxBorder": stat_box_border,
@@ -1265,10 +1361,19 @@ def run_work_overlay_helper_qt(
             self.setFocusPolicy(focus_policy.NoFocus)
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
-        def configure(self, item: Mapping[str, object], *, opacity: float, tooltip: str = "") -> None:
+        def configure(
+            self,
+            item: Mapping[str, object],
+            *,
+            opacity: float,
+            tooltip: str = "",
+            hover_color: str | None = None,
+        ) -> None:
             self._item = dict(item)
             self.setWindowOpacity(opacity)
             self.setToolTip(tooltip)
+            if hover_color is not None:
+                self._hover_color = QColor(hover_color)
             self.update()
 
         def enterEvent(self, event: object) -> None:
@@ -1429,9 +1534,7 @@ def run_work_overlay_helper_qt(
             painter.drawEllipse(end_rect.adjusted(17.0, 17.0, -17.0, -17.0))
 
             title = str(self._item.get("title") or "Codex 工作").strip()
-            workdir = str(self._item.get("workdirName") or "").strip()
-            if not workdir:
-                workdir = _workdir_leaf(self._item.get("workdir"))
+            workdir = _workdir_display_name(self._item)
             self._draw_arc_text(
                 painter,
                 title,
@@ -1488,10 +1591,10 @@ def run_work_overlay_helper_qt(
             for index, (label, value) in enumerate(stats):
                 box = QRectF(start_x + index * (box_width + spacing), y, box_width, box_height)
                 stat_border = QColor(palette["statBoxBorder"])
-                stat_border.setAlpha(168)
+                stat_border.setAlpha(220)
                 painter.setPen(QPen(stat_border, 0.8))
                 stat_fill = QColor(palette["statBoxFill"])
-                stat_fill.setAlpha(136)
+                stat_fill.setAlpha(235)
                 painter.setBrush(stat_fill)
                 painter.drawRoundedRect(box, 6.0, 6.0)
                 painter.setPen(QColor(palette["statValue"]))
@@ -2022,9 +2125,7 @@ def run_work_overlay_helper_qt(
             self._completed_hover_anchors.append(record["hover_anchor"])
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
             target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
-            workdir_text = str(item.get("workdirName") or "").strip()
-            if not workdir_text:
-                workdir_text = _workdir_leaf(item.get("workdir"))
+            workdir_text = _workdir_display_name(item)
             if workdir_text and (session_id or target_title):
                 self._workdir_anchors.append((record["workdir_anchor"], dict(item)))
             self._completed_check_anchors.append((record["check_anchor"], dict(item)))
@@ -2202,10 +2303,11 @@ def run_work_overlay_helper_qt(
                 "}"
             )
 
-            workdir_text = str(item.get("workdir") or "").strip()
+            workdir_text = _workdir_display_name(item)
+            full_workdir = str(item.get("workdir") or "").strip()
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
             target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
-            workdir_clickable = bool(workdir_text and (session_id or target_title))
+            workdir_clickable = bool(full_workdir and (session_id or target_title))
             status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
             footer_container = record["footer_container"]
             footer_container.setVisible(bool(status_text or workdir_text))
@@ -2229,7 +2331,7 @@ def run_work_overlay_helper_qt(
             workdir_label = record["workdir_label"]
             if workdir_text:
                 workdir_label.setText(_compact_workdir_text(workdir_text, 40))
-                workdir_label.setToolTip(workdir_text)
+                workdir_label.setToolTip(full_workdir or workdir_text)
                 workdir_label.setStyleSheet(
                     "QLabel {"
                     f"color: {theme['info'] if workdir_clickable else theme['requestMuted']};"
@@ -2666,12 +2768,13 @@ def run_work_overlay_helper_qt(
             for workdir_window in self._workdir_windows[len(self._workdir_anchors) :]:
                 workdir_window.hide()
 
+            completed_palette = _completed_badge_palette(self._theme_tokens)
             while len(self._completed_check_windows) < len(self._completed_check_anchors):
                 self._completed_check_windows.append(
                     ClickHotspotWindow(
                         self.dismiss_item,
                         circle=False,
-                        hover_color="#B9F7C9",
+                        hover_color=completed_palette["ring"],
                     )
                 )
             while len(self._completed_check_windows) > len(self._completed_check_anchors):
@@ -2684,7 +2787,12 @@ def run_work_overlay_helper_qt(
                     check_window.hide()
                     continue
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
-                check_window.configure(item, opacity=current_opacity, tooltip="关闭气泡")
+                check_window.configure(
+                    item,
+                    opacity=current_opacity,
+                    tooltip="关闭气泡",
+                    hover_color=completed_palette["ring"],
+                )
                 check_window.setGeometry(
                     anchor_top_left.x(),
                     anchor_top_left.y(),
