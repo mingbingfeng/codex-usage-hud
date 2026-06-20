@@ -119,18 +119,18 @@ HUD_MUTED = "#8492A6"
 HUD_ACCENT = "#F3D27A"
 HUD_BLUE = "#9CCBFF"
 HUD_ERROR = "#FF6B6B"
-HUD_PROGRESS_TRACK = "#111822"
-HUD_PROGRESS_TRACK_BORDER = "#314052"
-HUD_PROGRESS_TRACK_TEXT = "#657589"
+HUD_PROGRESS_TRACK = "#262C33"
+HUD_PROGRESS_TRACK_BORDER = "#3B4149"
+HUD_PROGRESS_TRACK_TEXT = "#C1C7D0"
 HUD_PROGRESS_CACHE = "#78B8FF"
 HUD_PROGRESS_CACHE_END = "#5EA7FF"
 HUD_PROGRESS_CACHE_TEXT = "#07131F"
 HUD_PROGRESS_DAY = "#F3D27A"
-HUD_PROGRESS_DAY_END = "#FFB86B"
-HUD_PROGRESS_DAY_TEXT = "#1A1305"
-HUD_PROGRESS_WEEK = "#FFC68D"
-HUD_PROGRESS_WEEK_END = "#FF8D5A"
-HUD_PROGRESS_WEEK_TEXT = "#1F1106"
+HUD_PROGRESS_DAY_END = "#F3D37F"
+HUD_PROGRESS_DAY_TEXT = "#111111"
+HUD_PROGRESS_WEEK = "#B5DD92"
+HUD_PROGRESS_WEEK_END = "#AEDE95"
+HUD_PROGRESS_WEEK_TEXT = "#111111"
 HUD_PROGRESS_OVERFLOW = "#FF875A"
 HUD_PROGRESS_OVERFLOW_HIGHLIGHT = "#FFD8BD"
 HUD_PROGRESS_OVERFLOW_ANCHOR = "#FF6B64"
@@ -3847,6 +3847,13 @@ def _session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
     return _format_rate_marker(ratio, estimated)
 
 
+def _top_session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
+    label = _session_cache_hit_rate_label(snapshot)
+    if label.startswith(CACHE_HIT_RATE_SYMBOL):
+        return label[len(CACHE_HIT_RATE_SYMBOL) :]
+    return label
+
+
 def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | None = None) -> str:
     total_tokens = int(snapshot.confirmed.cumulative_total or 0)
     total_cost = _session_cost(snapshot) if session_cost is None else session_cost
@@ -3865,7 +3872,7 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
         request_cost, _request_cost_estimated = _request_cost(snapshot)
         if request_cost is not None:
             total_cost = float(total_cost or 0.0) + float(request_cost)
-    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_session_cache_hit_rate_label(snapshot)}"
+    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
 
 
 def _top_cache_progress_label(snapshot: ParsedSession) -> str:

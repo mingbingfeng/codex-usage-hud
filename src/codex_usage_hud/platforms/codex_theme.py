@@ -168,6 +168,43 @@ def _surface_luma(value: object) -> float:
     return (channels[0] * 0.2126) + (channels[1] * 0.7152) + (channels[2] * 0.0722)
 
 
+def _contrast_ratio(left: object, right: object) -> float:
+    left_luma = _surface_luma(left)
+    right_luma = _surface_luma(right)
+    lighter = max(left_luma, right_luma)
+    darker = min(left_luma, right_luma)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _contrast_choice(
+    background: object,
+    primary: object,
+    secondary: object,
+    *,
+    fallback: str,
+) -> str:
+    primary_hex = _normalize_hex(primary, fallback)
+    secondary_hex = _normalize_hex(secondary, fallback)
+    if not primary_hex:
+        return secondary_hex or fallback
+    if not secondary_hex:
+        return primary_hex
+    primary_ratio = _contrast_ratio(background, primary_hex)
+    secondary_ratio = _contrast_ratio(background, secondary_hex)
+    if primary_ratio + 0.2 >= secondary_ratio:
+        return primary_hex
+    return secondary_hex
+
+
+def _fill_text_color(background: object, *, fallback: str) -> str:
+    return _contrast_choice(
+        background,
+        "#ffffff",
+        "#111111",
+        fallback=fallback,
+    )
+
+
 def _infer_variant(surface: object, ink: object) -> str:
     if _normalize_hex(surface) and _normalize_hex(ink):
         return "dark" if _surface_luma(surface) < _surface_luma(ink) else "light"
@@ -766,18 +803,24 @@ class HudThemeTokens:
         request_text = _mix_color(text, surface, 0.08 if normalized_variant == "dark" else 0.04, fallback=text)
         request_muted = _mix_color(text, surface, 0.50 if normalized_variant == "dark" else 0.58, fallback=text)
         warning = _mix_color(accent, error, 0.28 if normalized_variant == "dark" else 0.34, fallback=accent)
-        progress_track = _mix_color(surface, text, 0.08 if normalized_variant == "dark" else 0.05, fallback=surface)
-        progress_track_border = _mix_color(surface, text, 0.17 if normalized_variant == "dark" else 0.12, fallback=surface)
-        progress_track_text = _mix_color(text, surface, 0.56 if normalized_variant == "dark" else 0.60, fallback=text)
+        progress_track = _mix_color(surface, text, 0.10 if normalized_variant == "dark" else 0.06, fallback=surface)
+        progress_track_border = _mix_color(surface, text, 0.20 if normalized_variant == "dark" else 0.14, fallback=surface)
+        progress_track_text = _mix_color(text, surface, 0.18 if normalized_variant == "dark" else 0.32, fallback=text)
         progress_cache = _mix_color(accent, info, 0.35, fallback=accent)
         progress_cache_end = _mix_color(accent, info, 0.55, fallback=accent)
         progress_cache_text = _mix_color(surface, text, 0.12 if normalized_variant == "dark" else 0.86, fallback=text)
-        progress_day = accent
-        progress_day_end = _mix_color(accent, warning, 0.35, fallback=accent)
-        progress_day_text = _mix_color(surface, text, 0.12 if normalized_variant == "dark" else 0.88, fallback=text)
-        progress_week = _mix_color(accent, warning, 0.55, fallback=warning)
-        progress_week_end = _mix_color(warning, error, 0.28, fallback=warning)
-        progress_week_text = _mix_color(surface, text, 0.12 if normalized_variant == "dark" else 0.88, fallback=text)
+        progress_day = accent if normalized_variant == "dark" else _mix_color(accent, "#111111", 0.04, fallback=accent)
+        progress_day_end = _mix_color(progress_day, text, 0.04 if normalized_variant == "dark" else 0.06, fallback=progress_day)
+        progress_day_text = _fill_text_color(
+            _mix_color(progress_day, progress_day_end, 0.45, fallback=progress_day),
+            fallback=text,
+        )
+        progress_week = _mix_color(accent, success, 0.62 if normalized_variant == "dark" else 0.72, fallback=success)
+        progress_week_end = _mix_color(progress_week, success, 0.18, fallback=progress_week)
+        progress_week_text = _fill_text_color(
+            _mix_color(progress_week, progress_week_end, 0.45, fallback=progress_week),
+            fallback=text,
+        )
         progress_overflow = error
         progress_overflow_highlight = _mix_color(error, "#ffffff", 0.55, fallback=error)
         progress_overflow_anchor = _mix_color(error, warning, 0.22, fallback=error)

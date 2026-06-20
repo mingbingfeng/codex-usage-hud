@@ -25,7 +25,7 @@ from ..platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "14"
+RENDERER_HUD_VERSION = "16"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -73,7 +73,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "14";
+  const version = "16";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -163,18 +163,18 @@ RENDERER_HUD_SCRIPT = r"""
         --codex-usage-hud-request-panel-surface: #101821;
         --codex-usage-hud-request-text: #dce7f2;
         --codex-usage-hud-request-muted: #718095;
-        --codex-usage-hud-progress-track: #111822;
-        --codex-usage-hud-progress-track-border: #314052;
-        --codex-usage-hud-progress-track-text: #657589;
+        --codex-usage-hud-progress-track: #262c33;
+        --codex-usage-hud-progress-track-border: #3b4149;
+        --codex-usage-hud-progress-track-text: #c1c7d0;
         --codex-usage-hud-progress-cache: #9ccbff;
         --codex-usage-hud-progress-cache-end: #5ea7ff;
         --codex-usage-hud-progress-cache-text: #07131f;
         --codex-usage-hud-progress-day: #f3d27a;
-        --codex-usage-hud-progress-day-end: #ffb86b;
-        --codex-usage-hud-progress-day-text: #1a1305;
-        --codex-usage-hud-progress-week: #ffc68d;
-        --codex-usage-hud-progress-week-end: #ff8d5a;
-        --codex-usage-hud-progress-week-text: #1f1106;
+        --codex-usage-hud-progress-day-end: #f3d37f;
+        --codex-usage-hud-progress-day-text: #111111;
+        --codex-usage-hud-progress-week: #b5dd92;
+        --codex-usage-hud-progress-week-end: #aede95;
+        --codex-usage-hud-progress-week-text: #111111;
         --codex-usage-hud-progress-overflow: #ff875a;
         --codex-usage-hud-progress-overflow-highlight: #ffd8bd;
         --codex-usage-hud-progress-overflow-anchor: #ff6b64;
@@ -445,30 +445,26 @@ RENDERER_HUD_SCRIPT = r"""
         overflow: hidden;
         box-shadow: inset 0 1px 0 rgba(255,255,255,.04), inset 0 -8px 16px rgba(0,0,0,.16);
       }
-      #${rootId} .codex-usage-hud-progress-track-text,
-      #${rootId} .codex-usage-hud-progress-fill-text {
+      #${rootId} .codex-usage-hud-progress-track-text {
         position: absolute;
         inset: 0;
         display: flex;
         align-items: center;
-        gap: 6px;
         min-width: 0;
         padding: 0 11px;
         overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
         font-size: 12px;
         font-weight: 800;
         letter-spacing: 0;
       }
-      #${rootId} .codex-usage-hud-progress-label {
+      #${rootId} .codex-usage-hud-progress-text {
         min-width: 0;
         flex: 1 1 auto;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      #${rootId} .codex-usage-hud-progress-total {
+      #${rootId} .codex-usage-hud-progress-probe-text {
         flex: 0 0 auto;
         white-space: nowrap;
       }
@@ -476,24 +472,16 @@ RENDERER_HUD_SCRIPT = r"""
         box-sizing: border-box;
         display: flex;
         align-items: center;
-        gap: 6px;
         height: 0;
         overflow: hidden;
         padding: 0 11px;
         visibility: hidden;
-        white-space: nowrap;
         font-size: 12px;
         font-weight: 800;
         letter-spacing: 0;
         pointer-events: none;
       }
-      #${rootId} .codex-usage-hud-progress-size-probe .codex-usage-hud-progress-label {
-        flex: 0 0 auto;
-        overflow: visible;
-        text-overflow: clip;
-      }
-      #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-track-text,
-      #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-fill-text {
+      #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-track-text {
         padding: 0 10px;
         font-size: 11px;
       }
@@ -502,9 +490,9 @@ RENDERER_HUD_SCRIPT = r"""
         font-size: 11px;
       }
       #${rootId} .codex-usage-hud-progress-track-text {
-        z-index: 2;
-        color: #eef4fb;
-        text-shadow: 0 1px 2px rgba(0,0,0,.58), 0 0 4px rgba(0,0,0,.28);
+        z-index: 3;
+        color: #ffffff;
+        mix-blend-mode: difference;
         pointer-events: none;
       }
       #${rootId} .codex-usage-hud-progress-fill {
@@ -512,7 +500,7 @@ RENDERER_HUD_SCRIPT = r"""
         inset: 0 auto 0 0;
         min-width: 0;
         max-width: 100%;
-        z-index: 1;
+        z-index: 2;
         border-radius: inherit;
         overflow: hidden;
         pointer-events: none;
@@ -539,12 +527,10 @@ RENDERER_HUD_SCRIPT = r"""
         border-color: rgba(255,136,92,.18);
       }
       #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] .codex-usage-hud-progress-track-text,
-      #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] .codex-usage-hud-progress-fill-text,
       #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] .codex-usage-hud-progress-size-probe {
         padding-right: 28px;
       }
       #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-track-text,
-      #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-fill-text,
       #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-size-probe {
         padding-right: 108px;
       }
@@ -631,35 +617,20 @@ RENDERER_HUD_SCRIPT = r"""
         background: linear-gradient(90deg, #9ccbff, #5ea7ff);
         box-shadow: 0 10px 22px rgba(94,167,255,.18);
       }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill-text {
-        color: #07131f;
-      }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] {
         border-color: rgba(156,203,255,.14);
         background: linear-gradient(180deg, rgba(156,203,255,.07), rgba(255,255,255,0)), #111822;
       }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] .codex-usage-hud-progress-track-text {
-        color: #dde7f2;
-      }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill {
-        background: linear-gradient(90deg, #f3d27a, #ffb86b);
-        box-shadow: 0 10px 22px rgba(243,210,122,.18);
-      }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill-text {
-        color: #1a1305;
+        background: linear-gradient(90deg, var(--codex-usage-hud-progress-day), var(--codex-usage-hud-progress-day-end));
+        box-shadow: 0 10px 22px color-mix(in srgb, var(--codex-usage-hud-progress-day-end) 18%, transparent);
       }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill {
-        background: linear-gradient(90deg, #ffc68d, #ff8d5a);
-        box-shadow: 0 10px 22px rgba(255,141,90,.18);
-      }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill-text {
-        color: #1f1106;
+        background: linear-gradient(90deg, var(--codex-usage-hud-progress-week), var(--codex-usage-hud-progress-week-end));
+        box-shadow: 0 10px 22px color-mix(in srgb, var(--codex-usage-hud-progress-week-end) 18%, transparent);
       }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill {
         background: linear-gradient(90deg, #ff8a8a, #ff6b6b);
-      }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill-text {
-        color: #1a1012;
       }
       #${rootId} .codex-usage-hud-glyph {
         display: inline-grid;
@@ -792,8 +763,7 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-rail {
         height: 34px;
       }
-      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-track-text,
-      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-fill-text {
+      #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-track-text {
         padding: 0 13px;
         font-size: 12.5px;
       }
@@ -1248,35 +1218,20 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-progress-rail {
         border-color: var(--codex-usage-hud-progress-track-border);
         background: linear-gradient(180deg, rgba(255,255,255,.032), rgba(255,255,255,0)), var(--codex-usage-hud-progress-track);
-      }
-      #${rootId} .codex-usage-hud-progress-track-text {
-        color: var(--codex-usage-hud-progress-track-text);
+        isolation: isolate;
       }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] .codex-usage-hud-progress-fill,
       #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill {
         background: linear-gradient(90deg, var(--codex-usage-hud-progress-cache), var(--codex-usage-hud-progress-cache-end));
       }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="session"] .codex-usage-hud-progress-fill-text,
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill-text {
-        color: var(--codex-usage-hud-progress-cache-text);
-      }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill {
         background: linear-gradient(90deg, var(--codex-usage-hud-progress-day), var(--codex-usage-hud-progress-day-end));
-      }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="day"] .codex-usage-hud-progress-fill-text {
-        color: var(--codex-usage-hud-progress-day-text);
       }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill {
         background: linear-gradient(90deg, var(--codex-usage-hud-progress-week), var(--codex-usage-hud-progress-week-end));
       }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="week"] .codex-usage-hud-progress-fill-text {
-        color: var(--codex-usage-hud-progress-week-text);
-      }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill {
         background: linear-gradient(90deg, var(--codex-usage-hud-progress-overflow), var(--codex-usage-hud-error));
-      }
-      #${rootId} .codex-usage-hud-progress-rail[data-tone="error"] .codex-usage-hud-progress-fill-text {
-        color: var(--codex-usage-hud-progress-day-text);
       }
       #${rootId} .codex-usage-hud-progress-rail[data-overflow="true"] {
         border-color: var(--codex-usage-hud-progress-overflow-badge-edge);
@@ -1400,18 +1355,18 @@ RENDERER_HUD_SCRIPT = r"""
       requestPanelSurface: "#101821",
       requestText: "#dce7f2",
       requestMuted: "#718095",
-      progressTrack: "#111822",
-      progressTrackBorder: "#314052",
-      progressTrackText: "#657589",
+      progressTrack: "#262c33",
+      progressTrackBorder: "#3b4149",
+      progressTrackText: "#c1c7d0",
       progressCache: "#9ccbff",
       progressCacheEnd: "#5ea7ff",
       progressCacheText: "#07131f",
       progressDay: "#f3d27a",
-      progressDayEnd: "#ffb86b",
-      progressDayText: "#1a1305",
-      progressWeek: "#ffc68d",
-      progressWeekEnd: "#ff8d5a",
-      progressWeekText: "#1f1106",
+      progressDayEnd: "#f3d37f",
+      progressDayText: "#111111",
+      progressWeek: "#b5dd92",
+      progressWeekEnd: "#aede95",
+      progressWeekText: "#111111",
       progressOverflow: "#ff875a",
       progressOverflowHighlight: "#ffd8bd",
       progressOverflowAnchor: "#ff6b64",
@@ -3619,33 +3574,26 @@ RENDERER_HUD_SCRIPT = r"""
     const tooltip = overflowBadge ? `${fullText || label} | ${overflowBadge}` : fullText;
     rail.title = tooltip;
     rail.setAttribute("aria-label", tooltip);
-
-    function progressTextLayer(className, includeRightText = true) {
+    
+    function progressTextLayer(className, textClass = "codex-usage-hud-progress-text") {
       const layer = document.createElement("span");
       layer.className = className;
       layer.title = tooltip;
-      const labelNode = document.createElement("span");
-      labelNode.className = "codex-usage-hud-progress-label";
-      labelNode.textContent = label;
-      labelNode.title = tooltip;
-      layer.appendChild(labelNode);
-      if (includeRightText && rightText) {
-        const totalNode = document.createElement("span");
-        totalNode.className = "codex-usage-hud-progress-total";
-        totalNode.textContent = rightText;
-        totalNode.title = tooltip;
-        layer.appendChild(totalNode);
-      }
+      const textNode = document.createElement("span");
+      textNode.className = textClass;
+      textNode.textContent = fullText;
+      textNode.title = tooltip;
+      layer.appendChild(textNode);
       return layer;
     }
 
-    rail.appendChild(progressTextLayer("codex-usage-hud-progress-size-probe"));
-    rail.appendChild(progressTextLayer("codex-usage-hud-progress-track-text"));
+    rail.appendChild(progressTextLayer("codex-usage-hud-progress-size-probe", "codex-usage-hud-progress-probe-text"));
 
     const fill = document.createElement("span");
     fill.className = "codex-usage-hud-progress-fill";
     fill.style.width = `${Math.round(ratio * 1000) / 10}%`;
     rail.appendChild(fill);
+    rail.appendChild(progressTextLayer("codex-usage-hud-progress-track-text"));
     if (hasOverflow) {
       const overflow = document.createElement("span");
       overflow.className = "codex-usage-hud-progress-overflow";
@@ -4532,6 +4480,13 @@ def _session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
     return _format_rate_marker(ratio, estimated)
 
 
+def _top_session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
+    label = _session_cache_hit_rate_label(snapshot)
+    if label.startswith("◎"):
+        return label[1:]
+    return label
+
+
 def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | None = None) -> str:
     total_tokens = int(snapshot.confirmed.cumulative_total or 0)
     total_cost = _session_cost(snapshot) if session_cost is None else session_cost
@@ -4550,7 +4505,7 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
         request_cost, _request_cost_estimated = _request_cost(snapshot)
         if request_cost is not None:
             total_cost = float(total_cost or 0.0) + float(request_cost)
-    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_session_cache_hit_rate_label(snapshot)}"
+    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
 
 
 def _top_cache_progress_label(snapshot: ParsedSession) -> str:

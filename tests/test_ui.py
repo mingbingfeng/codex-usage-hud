@@ -23,6 +23,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 import codex_usage_hud.cli as cli_module
+import codex_usage_hud.ui.tk_hud as tk_hud_module
 from codex_usage_hud.cli import (
     AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
     ACTIVE_WORK_STALE_SECONDS,
@@ -172,6 +173,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _transition_rect_for_progress,
     _transition_required_height,
     _transition_slot_shift_progress,
+    _theme_contrast_ratio,
     _visible_overlay_items,
 )
 
@@ -751,7 +753,7 @@ class BudgetHelperTests(unittest.TestCase):
             )
             self.assertEqual(overlay.take_commands(), [])
 
-    def test_tk_work_overlay_command_pump_drains_commands_without_window_prep(self) -> None:
+    def test_tk_work_overlay_command_pump_prepares_window_before_switching_session(self) -> None:
         overlay = SimpleNamespace(
             take_commands=MagicMock(
                 return_value=[
@@ -777,7 +779,10 @@ class BudgetHelperTests(unittest.TestCase):
         )
         pump = _TkWorkOverlayCommandPump(overlay, session_controller)
 
-        with patch("codex_usage_hud.cli._prepare_codex_window_for_tk") as prepare_window:
+        with patch(
+            "codex_usage_hud.cli._prepare_codex_window_for_tk",
+            return_value=(True, "visible", "", 321),
+        ) as prepare_window:
             handled = pump.drain_once()
 
         self.assertEqual(handled, 1)
@@ -787,7 +792,55 @@ class BudgetHelperTests(unittest.TestCase):
             title="Thread One",
             workdir="",
         )
-        prepare_window.assert_not_called()
+        prepare_window.assert_called_once()
+
+    def test_current_session_overlay_command_refocuses_codex_after_already_active_result(self) -> None:
+        session_controller = SimpleNamespace(
+            activate_session=MagicMock(
+                return_value=SessionSwitchResult(
+                    ok=True,
+                    status="already-active",
+                    backend="cdp",
+                    requested_session_id="thread-1",
+                    requested_title="Thread One",
+                    active_session_id="thread-1",
+                    active_title="Thread One",
+                    matched_by="active-session-id",
+                )
+            )
+        )
+
+        with (
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                return_value=(True, "visible", "", 321),
+            ) as prepare_window,
+            patch(
+                "codex_usage_hud.cli._refocus_codex_window_after_current_session_click",
+                return_value=(True, "visible", "", 321),
+            ) as refocus_window,
+        ):
+            cli_module._handle_work_overlay_command(
+                {
+                    "action": "activateSession",
+                    "sessionId": "thread-1",
+                    "targetTitle": "Thread One",
+                    "current": True,
+                },
+                session_controller,
+                prepare_window=True,
+            )
+
+        session_controller.activate_session.assert_called_once_with(
+            session_id="thread-1",
+            title="Thread One",
+            workdir="",
+        )
+        prepare_window.assert_called_once_with(
+            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            launch_if_missing=True,
+        )
+        refocus_window.assert_called_once()
 
     def test_desktop_work_overlay_writes_state_with_atomic_json_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2113,6 +2166,23 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         self.assertEqual(transition_palette["border"], badge_palette["border"])
         self.assertEqual(transition_palette["markText"], badge_palette["checkText"])
 
+    def test_completed_badge_palette_keeps_readable_text_and_accent_ring(self) -> None:
+        light_theme = self._light_overlay_theme()
+        dark_theme = self._dark_overlay_theme()
+
+        for theme in (light_theme, dark_theme):
+            palette = _completed_badge_palette(theme)
+            self.assertGreaterEqual(
+                _theme_contrast_ratio(palette["fillMid"], palette["checkText"]),
+                4.5,
+            )
+            self.assertGreaterEqual(
+                _theme_contrast_ratio(palette["statBoxFill"], palette["statValue"]),
+                4.5,
+            )
+            self.assertNotEqual(palette["ring"], palette["dashedRing"])
+            self.assertNotEqual(palette["fillMid"], palette["fillEnd"])
+
     def test_find_completed_item_position_aligns_right_with_spacing(self) -> None:
         items = [
             {"id": "oldest", "status": "recent"},
@@ -2798,10 +2868,13 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.toggle_request_expanded()
             _flush_tk(window)
 
-            self.assertEqual(str(window.request_label.cget("bg")), HUD_HEADER_BG)
-            self.assertEqual(str(window.request_text.cget("bg")), HUD_PANEL_BG)
-            self.assertEqual(str(window.request_text.cget("fg")), HUD_TEXT)
-            self.assertEqual(window.request_text.tag_cget("normal", "foreground"), HUD_TEXT)
+            self.assertEqual(str(window.request_label.cget("bg")), tk_hud_module.REQUEST_HUD_HEADER_BG)
+            self.assertEqual(str(window.request_text.cget("bg")), tk_hud_module.REQUEST_HUD_PANEL_BG)
+            self.assertEqual(str(window.request_text.cget("fg")), tk_hud_module.REQUEST_HUD_TEXT)
+            self.assertEqual(
+                window.request_text.tag_cget("normal", "foreground"),
+                tk_hud_module.REQUEST_HUD_TEXT,
+            )
 
             labels = [
                 widget
@@ -2809,7 +2882,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 if isinstance(widget, tk.Label) and str(widget.cget("text")) == "轮次流水"
             ]
             self.assertEqual(len(labels), 1)
-            self.assertEqual(str(labels[0].cget("bg")), HUD_BG)
+            self.assertEqual(str(labels[0].cget("bg")), tk_hud_module.REQUEST_HUD_BG)
         finally:
             window._close()
 
@@ -3128,7 +3201,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.update_display(snapshot)
 
             self.assertIn("本会话 452k/", window.top_labels["bar"].cget("text"))
-            self.assertIn("/◎87%", window.top_labels["bar"].cget("text"))
+            self.assertIn("/87%", window.top_labels["bar"].cget("text"))
             self.assertIn("今日 41.1M/$39.31", window.top_labels["bar"].cget("text"))
             self.assertIn("本周 159.5M/$138.23", window.top_labels["bar"].cget("text"))
         finally:
@@ -3205,11 +3278,31 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertGreater(requested, 120)
             self.assertEqual(window.root.winfo_width(), requested)
             strip = window.top_labels["bar"]
-            for bar in strip._bars:
-                available = bar._canvas.winfo_width() - 22
+            self.assertFalse(strip._scrolling_enabled)
+            session_bar, *tail_bars = strip._bars
+            available = (
+                session_bar._canvas.winfo_width()
+                - ((session_bar._padding_x * 2) + session_bar._overflow_reserved_width() + 2)
+            )
+            self.assertEqual(
+                session_bar._fit_text(session_bar._metric.label, max(0, available)),
+                session_bar._metric.label,
+            )
+            for bar in tail_bars:
+                available = (
+                    bar._canvas.winfo_width()
+                    - ((bar._padding_x * 2) + bar._overflow_reserved_width() + 2)
+                )
                 if bar._metric.right_text:
                     available -= bar._font.measure(bar._metric.right_text) + 8
-                self.assertEqual(bar._fit_text(bar._metric.label, max(0, available)), bar._metric.label)
+                    self.assertGreaterEqual(
+                        bar._canvas.winfo_width(),
+                        bar._font.measure(bar._metric.right_text)
+                        + (bar._padding_x * 2)
+                        + bar._overflow_reserved_width()
+                        + 2,
+                    )
+                self.assertNotEqual(bar._fit_text(bar._metric.label, max(0, available)), "")
             window.root.geometry(f"{requested + 160}x{window.root.winfo_height()}+20+20")
             _flush_tk(window)
             widths = [bar.winfo_width() for bar in strip._bars]
@@ -3900,7 +3993,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             strip.pack(fill="both", expand=True)
             strip.set_metrics(
                 [
-                    TopHudProgressMetric(label="本会话 10.2M/$5.09/◎94%", ratio=0.25, fill=HUD_PROGRESS_DAY, fill_end=HUD_PROGRESS_DAY_END, fill_text=HUD_TEXT),
+                    TopHudProgressMetric(label="本会话 10.2M/$5.09/94%", ratio=0.25, fill=HUD_PROGRESS_DAY, fill_end=HUD_PROGRESS_DAY_END, fill_text=HUD_TEXT),
                     TopHudProgressMetric(label="今日 18.9M/$8.96", right_text="总 $100.00", ratio=0.35, fill=HUD_PROGRESS_DAY, fill_end=HUD_PROGRESS_DAY_END, fill_text=HUD_TEXT),
                     TopHudProgressMetric(label="本周 39.5M/$33.41", right_text="总 $400.00", ratio=0.42, fill=HUD_PROGRESS_DAY, fill_end=HUD_PROGRESS_DAY_END, fill_text=HUD_TEXT),
                 ]
@@ -4678,6 +4771,50 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(hwnd, 777)
         activate_app.assert_called_once()
 
+    def test_prepare_codex_window_waits_until_window_is_foreground_after_activation(self) -> None:
+        tracker = SimpleNamespace(
+            enabled=True,
+            get_window_snapshot=MagicMock(
+                side_effect=[
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=777,
+                    ),
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=777,
+                    ),
+                    SimpleNamespace(
+                        status="visible",
+                        reason="",
+                        hwnd=777,
+                    ),
+                ]
+            ),
+            is_active=MagicMock(side_effect=[False, False, True]),
+            activate_main_window=MagicMock(return_value=777),
+        )
+
+        with (
+            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
+            patch("codex_usage_hud.cli.time.sleep", return_value=None),
+        ):
+            ready, status, reason, hwnd = _prepare_codex_window_for_tk(
+                timeout_seconds=1.0,
+                poll_seconds=0.0,
+                launch_if_missing=False,
+            )
+
+        self.assertTrue(ready)
+        self.assertEqual(status, "visible")
+        self.assertEqual(reason, "")
+        self.assertEqual(hwnd, 777)
+        tracker.activate_main_window.assert_called_once()
+        self.assertEqual(tracker.is_active.call_count, 3)
+
     def test_prepare_codex_window_launches_tk_when_no_process_exists(self) -> None:
         tracker = SimpleNamespace(
             enabled=True,
@@ -4763,7 +4900,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_bridge.close.assert_called_once()
         fake_context.close.assert_called_once()
 
-    def test_run_renderer_hud_session_drains_work_overlay_commands_without_window_prep(self) -> None:
+    def test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep(self) -> None:
         fake_context = SimpleNamespace(
             settings_store=SimpleNamespace(path=Path("hud_settings.json")),
             user_config=UserConfig.defaults(),
@@ -4846,6 +4983,10 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "codex_usage_hud.cli._prepare_codex_window_for_renderer",
                 return_value=(True, "visible", "", 123),
             ) as prepare_window,
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                return_value=(True, "visible", "", 321),
+            ) as prepare_overlay_window,
             patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
             patch("codex_usage_hud.cli.build_snapshot", return_value=fake_snapshot),
             patch("codex_usage_hud.cli.time.sleep", side_effect=KeyboardInterrupt),
@@ -4865,6 +5006,10 @@ class DaemonLifecycleTests(unittest.TestCase):
             workdir="",
         )
         prepare_window.assert_called_once_with(
+            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            launch_if_missing=True,
+        )
+        prepare_overlay_window.assert_called_once_with(
             timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
             launch_if_missing=True,
         )

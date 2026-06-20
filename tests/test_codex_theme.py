@@ -63,6 +63,21 @@ class CodexThemeExportTests(unittest.TestCase):
         self.assertEqual(tokens.error, "#ff7e78")
         self.assertEqual(tokens.info, "#c2a1ff")
         self.assertEqual(tokens.request_surface.startswith("#"), True)
+        self.assertNotEqual(tokens.progress_day, tokens.progress_week)
+        self.assertGreaterEqual(
+            codex_theme._contrast_ratio(
+                codex_theme._mix_color(tokens.progress_day, tokens.progress_day_end, 0.45, fallback=tokens.progress_day),
+                tokens.progress_day_text,
+            ),
+            4.5,
+        )
+        self.assertGreaterEqual(
+            codex_theme._contrast_ratio(
+                codex_theme._mix_color(tokens.progress_week, tokens.progress_week_end, 0.45, fallback=tokens.progress_week),
+                tokens.progress_week_text,
+            ),
+            4.5,
+        )
 
 
 class CodexThemeSnapshotTests(unittest.TestCase):

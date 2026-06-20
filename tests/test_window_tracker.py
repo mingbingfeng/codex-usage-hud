@@ -297,5 +297,88 @@ class CodexWindowTrackerSelectionTests(unittest.TestCase):
         self.assertFalse(tracker.is_active(123, {456}))
 
 
+class CodexWindowTrackerActivationTests(unittest.TestCase):
+    @staticmethod
+    def _value(raw: object) -> int:
+        return int(getattr(raw, "value", raw) or 0)
+
+    def test_activate_window_restores_and_attaches_foreground_threads(self) -> None:
+        tracker = object.__new__(CodexWindowTracker)
+        calls: list[tuple[str, int, int, bool] | tuple[str, int, int] | tuple[str, int]] = []
+
+        def get_window_thread_process_id(hwnd: object, _: object) -> int:
+            hwnd_value = self._value(hwnd)
+            if hwnd_value == 700:
+                return 701
+            if hwnd_value == 123:
+                return 1230
+            return 0
+
+        def attach_thread_input(src: object, dst: object, attach: bool) -> int:
+            calls.append(("attach", self._value(src), self._value(dst), bool(attach)))
+            return 1
+
+        tracker.kernel32 = SimpleNamespace(GetCurrentThreadId=lambda: 500)
+        tracker.user32 = SimpleNamespace(
+            GetForegroundWindow=lambda: 700,
+            GetWindowThreadProcessId=get_window_thread_process_id,
+            AttachThreadInput=attach_thread_input,
+            ShowWindow=lambda hwnd, cmd: calls.append(("show", self._value(hwnd), int(cmd))) or 1,
+            BringWindowToTop=lambda hwnd: calls.append(("top", self._value(hwnd))) or 1,
+            SetActiveWindow=lambda hwnd: calls.append(("active", self._value(hwnd))) or hwnd,
+            SetForegroundWindow=lambda hwnd: calls.append(("foreground", self._value(hwnd))) or 1,
+            SetFocus=lambda hwnd: calls.append(("focus", self._value(hwnd))) or hwnd,
+        )
+
+        tracker._activate_window(123)
+
+        self.assertEqual(
+            calls,
+            [
+                ("attach", 500, 701, True),
+                ("attach", 500, 1230, True),
+                ("show", 123, 9),
+                ("top", 123),
+                ("active", 123),
+                ("foreground", 123),
+                ("focus", 123),
+                ("attach", 500, 1230, False),
+                ("attach", 500, 701, False),
+            ],
+        )
+
+    def test_activate_window_skips_redundant_thread_attach(self) -> None:
+        tracker = object.__new__(CodexWindowTracker)
+        calls: list[tuple[str, int, int, bool] | tuple[str, int, int] | tuple[str, int]] = []
+
+        tracker.kernel32 = SimpleNamespace(GetCurrentThreadId=lambda: 500)
+        tracker.user32 = SimpleNamespace(
+            GetForegroundWindow=lambda: 123,
+            GetWindowThreadProcessId=lambda hwnd, _: 500,
+            AttachThreadInput=lambda src, dst, attach: calls.append(
+                ("attach", self._value(src), self._value(dst), bool(attach))
+            )
+            or 1,
+            ShowWindow=lambda hwnd, cmd: calls.append(("show", self._value(hwnd), int(cmd))) or 1,
+            BringWindowToTop=lambda hwnd: calls.append(("top", self._value(hwnd))) or 1,
+            SetActiveWindow=lambda hwnd: calls.append(("active", self._value(hwnd))) or hwnd,
+            SetForegroundWindow=lambda hwnd: calls.append(("foreground", self._value(hwnd))) or 1,
+            SetFocus=lambda hwnd: calls.append(("focus", self._value(hwnd))) or hwnd,
+        )
+
+        tracker._activate_window(123)
+
+        self.assertEqual(
+            calls,
+            [
+                ("show", 123, 9),
+                ("top", 123),
+                ("active", 123),
+                ("foreground", 123),
+                ("focus", 123),
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

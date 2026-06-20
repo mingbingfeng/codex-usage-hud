@@ -664,6 +664,19 @@ def _theme_contrast_choice(
     return secondary_hex
 
 
+def _theme_emphasis_ink(
+    background: object,
+    *,
+    fallback: str,
+) -> str:
+    return _theme_contrast_choice(
+        background,
+        "#ffffff",
+        "#111111",
+        fallback=fallback,
+    )
+
+
 def _resolved_overlay_theme(theme_tokens: Mapping[str, object] | None) -> dict[str, str]:
     resolved = dict(DEFAULT_WORK_OVERLAY_THEME)
     if theme_tokens is None:
@@ -760,45 +773,35 @@ def _completed_badge_palette(
     theme_tokens: Mapping[str, object] | None = None,
 ) -> dict[str, str]:
     theme = _resolved_overlay_theme(theme_tokens)
-    success = _theme_mix(theme["success"], theme["accent"], 0.18, fallback=theme["success"])
-    fill_start = _theme_mix(success, theme["text"], 0.10, fallback=success)
-    fill_mid = _theme_mix(success, theme["accent"], 0.22, fallback=success)
+    success = _theme_mix(theme["success"], theme["accent"], 0.12, fallback=theme["success"])
+    fill_start = _theme_mix(theme["surface"], success, 0.16, fallback=success)
+    fill_mid = _theme_mix(success, theme["accent"], 0.16, fallback=success)
     fill_end = _theme_mix(
         theme["requestPanelSurface"],
         success,
-        0.54,
+        0.62,
         fallback=theme["requestPanelSurface"],
     )
     border = _theme_mix(theme["panelBorder"], success, 0.68, fallback=theme["panelBorder"])
-    primary_ink = _theme_contrast_choice(
-        fill_mid,
-        theme["text"],
-        theme["surface"],
-        fallback=theme["text"],
-    )
-    secondary_ink = _theme_mix(primary_ink, theme["info"], 0.34, fallback=primary_ink)
-    elapsed_ink = _theme_mix(primary_ink, fill_mid, 0.16, fallback=primary_ink)
-    ring = _theme_mix(primary_ink, success, 0.24, fallback=primary_ink)
-    dashed_ring = _theme_mix(primary_ink, success, 0.48, fallback=primary_ink)
+    primary_ink = _theme_emphasis_ink(fill_mid, fallback=theme["text"])
+    secondary_ink = _theme_mix(primary_ink, theme["accent"], 0.22, fallback=primary_ink)
+    elapsed_ink = _theme_mix(primary_ink, success, 0.10, fallback=primary_ink)
+    ring = _theme_mix(theme["accent"], success, 0.34, fallback=theme["accent"])
+    dashed_ring = _theme_mix(theme["accent"], primary_ink, 0.22, fallback=theme["accent"])
     stat_box_fill = _theme_mix(
         theme["requestPanelSurface"],
         success,
-        0.30,
+        0.22,
         fallback=theme["requestPanelSurface"],
     )
     stat_box_border = _theme_mix(
         theme["panelBorder"],
         success,
-        0.56,
+        0.46,
         fallback=theme["panelBorder"],
     )
-    stat_value = _theme_contrast_choice(
-        stat_box_fill,
-        theme["text"],
-        theme["surface"],
-        fallback=primary_ink,
-    )
-    stat_label = _theme_mix(stat_value, success, 0.28, fallback=stat_value)
+    stat_value = _theme_emphasis_ink(stat_box_fill, fallback=primary_ink)
+    stat_label = _theme_mix(stat_value, success, 0.20, fallback=stat_value)
     return {
         "fillStart": fill_start,
         "fillMid": fill_mid,

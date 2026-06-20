@@ -1121,12 +1121,50 @@ class CodexWindowTracker:
     def _activate_window(self, hwnd: int) -> None:
         sw_restore = 9
         hwnd_handle = wintypes.HWND(hwnd)
+        current_thread_id = 0
+        foreground_thread_id = 0
+        target_thread_id = 0
+        attached_threads: list[int] = []
         try:
+            current_thread_id = int(self.kernel32.GetCurrentThreadId() or 0)
+            foreground = int(self.user32.GetForegroundWindow() or 0)
+            if foreground:
+                foreground_thread_id = int(
+                    self.user32.GetWindowThreadProcessId(
+                        wintypes.HWND(foreground),
+                        None,
+                    )
+                    or 0
+                )
+            target_thread_id = int(
+                self.user32.GetWindowThreadProcessId(hwnd_handle, None) or 0
+            )
+            for thread_id in (foreground_thread_id, target_thread_id):
+                if not thread_id or thread_id == current_thread_id or thread_id in attached_threads:
+                    continue
+                if self.user32.AttachThreadInput(
+                    wintypes.DWORD(current_thread_id),
+                    wintypes.DWORD(thread_id),
+                    True,
+                ):
+                    attached_threads.append(thread_id)
             self.user32.ShowWindow(hwnd_handle, sw_restore)
             self.user32.BringWindowToTop(hwnd_handle)
+            self.user32.SetActiveWindow(hwnd_handle)
             self.user32.SetForegroundWindow(hwnd_handle)
+            self.user32.SetFocus(hwnd_handle)
         except Exception:
             return
+        finally:
+            for thread_id in reversed(attached_threads):
+                try:
+                    self.user32.AttachThreadInput(
+                        wintypes.DWORD(current_thread_id),
+                        wintypes.DWORD(thread_id),
+                        False,
+                    )
+                except Exception:
+                    continue
 
     def _landmarks(self, hwnd: int, window_rect: PhysicalRect) -> _Landmarks:
         if not self.enable_uia:

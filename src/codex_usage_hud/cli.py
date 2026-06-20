@@ -89,6 +89,7 @@ from .updater import (
 
 DEFAULT_POLL_MS = 500
 WORK_OVERLAY_COMMAND_POLL_MS = 60
+WORK_OVERLAY_CURRENT_SESSION_REFOCUS_DELAY_SECONDS = 0.12
 DEFAULT_SQLITE_LOG = "logs_2.sqlite"
 DEFAULT_STATE_DB = "state_5.sqlite"
 DEFAULT_SESSION_INDEX = "session_index.jsonl"
@@ -770,7 +771,7 @@ class _WorkOverlayCommandPump:
         handled = _handle_work_overlay_commands(
             self._work_overlay,
             self._session_controller,
-            prepare_window=False,
+            prepare_window=True,
         )
         if handled and self._command_event is not None:
             self._command_event.set()
@@ -1411,7 +1412,13 @@ def _prepare_codex_window_for_renderer(
             last_status = str(getattr(snapshot, "status", "") or "")
             last_reason = str(getattr(snapshot, "reason", "") or "")
             last_hwnd = int(getattr(snapshot, "hwnd", 0) or activated_hwnd)
-            if last_status == "visible":
+            activated_is_active = False
+            if last_hwnd and last_status == "visible":
+                try:
+                    activated_is_active = bool(tracker.is_active(last_hwnd))
+                except Exception:
+                    activated_is_active = False
+            if last_status == "visible" and activated_is_active:
                 return True, last_status, last_reason, last_hwnd
 
         if (
@@ -1504,7 +1511,13 @@ def _prepare_codex_window_for_tk(
             last_status = str(getattr(snapshot, "status", "") or "")
             last_reason = str(getattr(snapshot, "reason", "") or "")
             last_hwnd = int(getattr(snapshot, "hwnd", 0) or activated_hwnd)
-            if last_status == "visible":
+            activated_is_active = False
+            if last_hwnd and last_status == "visible":
+                try:
+                    activated_is_active = bool(tracker.is_active(last_hwnd))
+                except Exception:
+                    activated_is_active = False
+            if last_status == "visible" and activated_is_active:
                 return True, last_status, last_reason, last_hwnd
 
         if (
@@ -1542,6 +1555,15 @@ def _build_session_switch_controller(
     return SessionSwitchController(backends)
 
 
+def _refocus_codex_window_after_current_session_click() -> tuple[bool, str, str, int]:
+    time.sleep(WORK_OVERLAY_CURRENT_SESSION_REFOCUS_DELAY_SECONDS)
+    return _prepare_codex_window_for_tk(
+        timeout_seconds=min(RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS, 0.75),
+        poll_seconds=0.12,
+        launch_if_missing=True,
+    )
+
+
 def _handle_work_overlay_command(
     command: Mapping[str, object],
     session_controller: SessionSwitchController,
@@ -1551,6 +1573,7 @@ def _handle_work_overlay_command(
     action = str(command.get("action") or "").strip()
     if action != "activateSession":
         return
+    is_current = bool(command.get("current"))
     session_id = str(command.get("sessionId") or "").strip()
     target_title = str(command.get("targetTitle") or command.get("title") or "").strip()
     if not session_id and not target_title:
@@ -1585,6 +1608,17 @@ def _handle_work_overlay_command(
         result.matched_by or "-",
         result.message or "-",
     )
+    if prepare_window and (is_current or result.status == "already-active"):
+        window_ready, window_status, window_reason, window_hwnd = (
+            _refocus_codex_window_after_current_session_click()
+        )
+        _LOGGER.info(
+            "work_overlay_command_current_session_refocus ok=%s status=%s hwnd=%s reason=%s",
+            window_ready,
+            window_status,
+            window_hwnd,
+            window_reason or "-",
+        )
 
 
 def _handle_work_overlay_commands(
