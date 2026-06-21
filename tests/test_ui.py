@@ -2686,16 +2686,35 @@ class HudSettingsStoreTests(unittest.TestCase):
 
 
 class TokenHudWindowLifecycleTests(unittest.TestCase):
-    def test_top_rebuild_does_not_destroy_bottom_request_window(self) -> None:
+    def test_top_toggle_reuses_prebuilt_frames_and_keeps_request_window(self) -> None:
         window = TokenHudWindow()
         try:
             self.assertEqual(window.request_root.winfo_exists(), 1)
+            top_shell = window._top_shell
+            collapsed_frame = window._top_collapsed_frame
+            expanded_frame = window._top_expanded_frame
+            self.assertIsNotNone(top_shell)
+            self.assertIsNotNone(collapsed_frame)
+            self.assertIsNotNone(expanded_frame)
+            assert top_shell is not None
+            assert collapsed_frame is not None
+            assert expanded_frame is not None
 
             window.toggle_top_expanded()
             self.assertEqual(window.request_root.winfo_exists(), 1)
+            self.assertEqual(top_shell.winfo_exists(), 1)
+            self.assertEqual(collapsed_frame.winfo_exists(), 1)
+            self.assertEqual(expanded_frame.winfo_exists(), 1)
+            self.assertEqual(collapsed_frame.winfo_manager(), "place")
+            self.assertEqual(expanded_frame.winfo_manager(), "place")
 
             window.toggle_top_expanded()
             self.assertEqual(window.request_root.winfo_exists(), 1)
+            self.assertEqual(top_shell.winfo_exists(), 1)
+            self.assertEqual(collapsed_frame.winfo_exists(), 1)
+            self.assertEqual(expanded_frame.winfo_exists(), 1)
+            self.assertEqual(collapsed_frame.winfo_manager(), "place")
+            self.assertEqual(expanded_frame.winfo_manager(), "place")
         finally:
             window._close()
 
@@ -3114,22 +3133,49 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
-    def test_toggle_applies_geometry_after_idle_rebuild(self) -> None:
+    def test_toggle_shows_cached_top_panel_and_starts_animation_without_rebuild(self) -> None:
         window = TokenHudWindow()
         try:
             window._apply_geometry = MagicMock()
             window._rebuild_top_ui = MagicMock()
+            expanded_frame = window._top_expanded_frame
+            collapsed_frame = window._top_collapsed_frame
+            self.assertIsNotNone(expanded_frame)
+            self.assertIsNotNone(collapsed_frame)
+            assert expanded_frame is not None
+            assert collapsed_frame is not None
 
             window.toggle_top_expanded()
 
             window._apply_geometry.assert_not_called()
             window._rebuild_top_ui.assert_not_called()
-            self.assertIsNotNone(window._top_rebuild_job)
+            self.assertIsNone(window._top_rebuild_job)
+            self.assertTrue(window.top_expanded)
+            self.assertEqual(expanded_frame.winfo_manager(), "place")
+            self.assertEqual(collapsed_frame.winfo_manager(), "place")
+            self.assertTrue(window._top_animation_active())
+        finally:
+            window._close()
 
+    def test_collapsed_state_prewarms_expanded_core_fields(self) -> None:
+        window = TokenHudWindow()
+        try:
+            snapshot = ParsedSession(session_id="prewarm-expanded-core", status="live")
+            snapshot.confirmed.cumulative_total = 123_456
+            snapshot.confirmed.cumulative_input = 100_000
+            snapshot.confirmed.cumulative_cached = 80_000
+            snapshot.confirmed.cumulative_output = 23_456
+            snapshot.today_tokens = 123_456
+            snapshot.today_cost_usd = 1.23
+
+            window.update_display(snapshot)
+            self.assertFalse(window.top_expanded)
             _flush_tk(window)
 
-            window._rebuild_top_ui.assert_called_once_with()
-            self.assertGreaterEqual(window._apply_geometry.call_count, 1)
+            self.assertIsNone(window._top_core_prewarm_job)
+            self.assertEqual(window.top_labels["topSessionTokens"].cget("text"), "123k")
+            self.assertTrue(str(window.top_labels["topSessionCost"].cget("text")).startswith("$"))
+            self.assertEqual(window.top_labels["cache_progress"].cget("text"), "缓存命中 80%")
         finally:
             window._close()
 
@@ -3150,7 +3196,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.toggle_top_expanded()
 
             locator.anchor_geometry.assert_not_called()
-            self.assertTrue(window._ui_interaction_active())
+            self.assertTrue(window.top_expanded)
+            self.assertIsNone(window._top_rebuild_job)
         finally:
             window._close()
 
@@ -4263,8 +4310,6 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
             self.assertEqual(window.top_labels["topSessionInputTokens"].cget("text"), "1.4M")
             self.assertEqual(window.top_labels["topSessionCachedTokens"].cget("text"), "1.3M")
-            self.assertIn("...", window.top_labels["topSessionOutputTokens"].cget("text"))
-            self.assertIn("...", window.top_labels["topSessionReasoningTokens"].cget("text"))
 
             token_grid = window.top_labels["topSessionInputTokens"].master.master
             token_grid_right = token_grid.winfo_rootx() + token_grid.winfo_width()
@@ -4475,7 +4520,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             button_texts = {
                 str(widget.cget("text"))
                 for widget in _walk_widgets(window.root)
-                if isinstance(widget, tk.Button)
+                if isinstance(widget, tk.Button) and widget.winfo_ismapped()
             }
 
             self.assertNotIn("×", button_texts)
@@ -4627,6 +4672,24 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.refresh_delay_ms(1000),
             tk_hud_module.HUD_POINTER_REFRESH_DELAY_MS,
         )
+
+    def test_top_animation_temporarily_defers_refresh_work(self) -> None:
+        window = object.__new__(TokenHudWindow)
+        window._tombstoned = False
+        window._ui_interaction_hold_until = 0.0
+        window._click_priority_hold_until = 0.0
+        window._pointer_priority_hold_until = 0.0
+        window._top_animation_job = "animation"
+        window._top_animation_start = None
+
+        self.assertFalse(window.should_refresh_snapshot())
+        self.assertEqual(
+            window.refresh_delay_ms(100),
+            tk_hud_module.TOP_HUD_ANIMATION_REFRESH_DELAY_MS,
+        )
+
+        window._top_animation_job = None
+        self.assertTrue(window.should_refresh_snapshot())
 
     def test_click_rebuilds_are_scheduled_before_idle_work(self) -> None:
         window = object.__new__(TokenHudWindow)

@@ -34,7 +34,7 @@ from ..config import (
     warning_dismissed_today,
     write_json_object,
 )
-from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
+from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, WorkStatusItem, seconds_between
 from ..platforms.cdp_probe import cdp_port_from_env, list_targets, pick_page_target
 from ..platforms.codex_theme import CodexThemeProbe, HudThemeTokens
 from ..support_assets import support_qr_asset_paths
@@ -170,6 +170,10 @@ HUD_CLICK_PRIORITY_MS = 180
 HUD_CLICK_REFRESH_DELAY_MS = 50
 HUD_POINTER_PRIORITY_MS = 120
 HUD_POINTER_REFRESH_DELAY_MS = 75
+TOP_HUD_EXPAND_ANIMATION_MS = 190
+TOP_HUD_ANIMATION_FRAME_MS = 16
+TOP_HUD_ANIMATION_REFRESH_DELAY_MS = 220
+TOP_HUD_DEFERRED_RENDER_MS = 32
 
 
 def _hud_theme_signature(tokens: HudThemeTokens) -> tuple[tuple[str, object], ...]:
@@ -990,6 +994,38 @@ def _progress_fill_surface_transparency_rows(
                 transparent_pixels.append(x)
         rows.append(tuple(transparent_pixels))
     return tuple(rows)
+
+
+_HUD_PROGRESS_IMAGE_CACHE_LIMIT = 96
+_HUD_PROGRESS_IMAGE_CACHE: dict[tuple[object, ...], tk.PhotoImage] = {}
+_HUD_PROGRESS_IMAGE_CACHE_ORDER: list[tuple[object, ...]] = []
+
+
+def _hud_progress_cached_image(
+    master: tk.Misc,
+    key: tuple[object, ...],
+    *,
+    width: int,
+    height: int,
+    rows: tuple[str, ...],
+    transparent_rows: tuple[tuple[int, ...], ...] | None = None,
+) -> tk.PhotoImage:
+    cache_key = (id(master.tk),) + key
+    image = _HUD_PROGRESS_IMAGE_CACHE.get(cache_key)
+    if image is not None:
+        return image
+    image = tk.PhotoImage(master=master, width=width, height=height)
+    image.put(" ".join(rows), to=(0, 0))
+    if transparent_rows is not None and hasattr(image, "transparency_set"):
+        for y, transparent_pixels in enumerate(transparent_rows):
+            for x in transparent_pixels:
+                image.transparency_set(x, y, True)
+    _HUD_PROGRESS_IMAGE_CACHE[cache_key] = image
+    _HUD_PROGRESS_IMAGE_CACHE_ORDER.append(cache_key)
+    while len(_HUD_PROGRESS_IMAGE_CACHE_ORDER) > _HUD_PROGRESS_IMAGE_CACHE_LIMIT:
+        old_key = _HUD_PROGRESS_IMAGE_CACHE_ORDER.pop(0)
+        _HUD_PROGRESS_IMAGE_CACHE.pop(old_key, None)
+    return image
 
 
 @lru_cache(maxsize=32)
@@ -2366,7 +2402,6 @@ class TopHudProgressBar(tk.Frame):
         )
         track_image = self._track_surface_image
         if track_image is None or self._track_surface_key != track_key:
-            track_image = tk.PhotoImage(width=width, height=height)
             rows = _progress_track_surface_rows(
                 width=width,
                 height=height,
@@ -2375,7 +2410,13 @@ class TopHudProgressBar(tk.Frame):
                 border=HUD_PROGRESS_TRACK_BORDER,
                 radius=self._radius,
             )
-            track_image.put(" ".join(rows), to=(0, 0))
+            track_image = _hud_progress_cached_image(
+                self._canvas,
+                ("track",) + track_key,
+                width=width,
+                height=height,
+                rows=rows,
+            )
             self._track_surface_key = track_key
             self._track_surface_image = track_image
         self._canvas.create_image(0, 0, anchor="nw", image=track_image)
@@ -2398,7 +2439,6 @@ class TopHudProgressBar(tk.Frame):
         )
         fill_image = self._fill_surface_image
         if fill_image is None or self._fill_surface_key != fill_key:
-            fill_image = tk.PhotoImage(width=inner_width, height=inner_height)
             rows = _progress_fill_surface_rows(
                 width=inner_width,
                 height=inner_height,
@@ -2410,17 +2450,20 @@ class TopHudProgressBar(tk.Frame):
                 gloss=self._gloss,
                 radius=self._radius,
             )
-            fill_image.put(" ".join(rows), to=(0, 0))
-            if hasattr(fill_image, "transparency_set"):
-                transparent_rows = _progress_fill_surface_transparency_rows(
-                    width=inner_width,
-                    height=inner_height,
-                    fill_width=fill_inner_width,
-                    radius=self._radius,
-                )
-                for y, transparent_pixels in enumerate(transparent_rows):
-                    for x in transparent_pixels:
-                        fill_image.transparency_set(x, y, True)
+            transparent_rows = _progress_fill_surface_transparency_rows(
+                width=inner_width,
+                height=inner_height,
+                fill_width=fill_inner_width,
+                radius=self._radius,
+            )
+            fill_image = _hud_progress_cached_image(
+                self._canvas,
+                ("fill",) + fill_key,
+                width=inner_width,
+                height=inner_height,
+                rows=rows,
+                transparent_rows=transparent_rows,
+            )
             self._fill_surface_key = fill_key
             self._fill_surface_image = fill_image
         self._canvas.create_image(2, 2, anchor="nw", image=fill_image)
@@ -2818,6 +2861,8 @@ class RoundedHudShell(tk.Frame):
         self._image_key: tuple[int, int, int, str, str, str] | None = None
         self._region_key: tuple[int, int, int] | None = None
         self._region_retry_job: str | None = None
+        self._shape_updates_paused = False
+        self._paused_rect_region_key: tuple[int, int] | None = None
         self._background = tk.Label(
             self,
             bg=outside,
@@ -2840,9 +2885,40 @@ class RoundedHudShell(tk.Frame):
         self.bind("<Map>", self._handle_map, add="+")
         self.bind("<Destroy>", self._handle_destroy, add="+")
 
+    def set_shape_updates_paused(
+        self,
+        paused: bool,
+        *,
+        rect_size: tuple[int, int] | None = None,
+    ) -> None:
+        self._shape_updates_paused = bool(paused)
+        if paused:
+            try:
+                self._background.configure(image="", bg=self._bg)
+            except tk.TclError:
+                return
+            if rect_size is not None:
+                width, height = rect_size
+            else:
+                width = max(1, int(self.winfo_width() or 1))
+                height = max(1, int(self.winfo_height() or 1))
+            self._apply_rect_window_region(width, height)
+            return
+        self._paused_rect_region_key = None
+        try:
+            width = max(1, int(self.winfo_width() or 1))
+            height = max(1, int(self.winfo_height() or 1))
+        except tk.TclError:
+            return
+        self._draw_shell(width, height)
+        self._apply_window_region(width, height)
+        self._schedule_region_retry()
+
     def _handle_configure(self, event: tk.Event[tk.Misc]) -> None:
         width = max(1, int(getattr(event, "width", 0) or self.winfo_width()))
         height = max(1, int(getattr(event, "height", 0) or self.winfo_height()))
+        if self._shape_updates_paused:
+            return
         self._draw_shell(width, height)
         self._apply_window_region(width, height)
         self._schedule_region_retry()
@@ -2851,6 +2927,8 @@ class RoundedHudShell(tk.Frame):
         del event
         width = max(1, int(self.winfo_width() or 1))
         height = max(1, int(self.winfo_height() or 1))
+        if self._shape_updates_paused:
+            return
         self._draw_shell(width, height)
         self._apply_window_region(width, height)
         self._schedule_region_retry()
@@ -2902,6 +2980,43 @@ class RoundedHudShell(tk.Frame):
         self._image = image
         self._image_key = key
         self._background.configure(image=image)
+
+    def _apply_rect_window_region(self, width: int, height: int) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        width = max(1, int(width or 1))
+        height = max(1, int(height or 1))
+        key = (width, height)
+        if self._paused_rect_region_key == key:
+            return
+        region = None
+        api = None
+        try:
+            api = _win32_region_api()
+            if api is None:
+                return
+            toplevel = self.winfo_toplevel()
+            if not int(toplevel.winfo_exists()):
+                return
+            hwnd_value = int(toplevel.winfo_id() or 0)
+            hwnd = api.wintypes.HWND(hwnd_value)
+            if not hwnd_value or not api.user32.IsWindow(hwnd):
+                return
+            region = api.gdi32.CreateRectRgn(0, 0, width + 1, height + 1)
+            if not region:
+                return
+            if api.user32.SetWindowRgn(hwnd, region, True):
+                self._paused_rect_region_key = key
+                self._region_key = None
+                region = None
+        except Exception:
+            return
+        finally:
+            if region and api is not None:
+                try:
+                    api.gdi32.DeleteObject(region)
+                except Exception:
+                    pass
 
     def _apply_window_region(self, width: int, height: int) -> None:
         if not sys.platform.startswith("win"):
@@ -4813,7 +4928,7 @@ def _top_task_ordinal_parts(snapshot: ParsedSession) -> dict[str, str]:
     }
 
 
-def _top_session_parts(snapshot: ParsedSession) -> dict[str, object]:
+def _top_session_parts(snapshot: ParsedSession, *, include_deferred: bool = True) -> dict[str, object]:
     confirmed = snapshot.confirmed
     if snapshot.token_events > 0:
         average = confirmed.cumulative_total // max(1, snapshot.token_events)
@@ -4825,12 +4940,13 @@ def _top_session_parts(snapshot: ParsedSession) -> dict[str, object]:
         "sessionAverage": session_average,
         "sessionComposition": _top_session_composition(snapshot),
         "heavyRoundsSummary": "Top 3",
-        "heavyRounds": _top_heavy_rounds(snapshot),
         "sessionInputTokens": _token_value_text(confirmed.cumulative_input),
         "sessionCachedTokens": _token_value_text(confirmed.cumulative_cached),
         "sessionOutputTokens": _token_value_text(confirmed.cumulative_output),
         "sessionReasoningTokens": _token_value_text(confirmed.cumulative_reasoning),
     }
+    if include_deferred:
+        parts["heavyRounds"] = _top_heavy_rounds(snapshot)
     parts.update(_top_task_ordinal_parts(snapshot))
     return parts
 
@@ -5295,9 +5411,14 @@ def _top_activity_trail(snapshot: ParsedSession) -> list[dict[str, object]]:
     return _merge_activity_events(events)
 
 
-def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[str, object]:
+def _top_details(
+    snapshot: ParsedSession,
+    session_cost: float | None,
+    *,
+    include_deferred: bool = True,
+) -> dict[str, object]:
     confirmed = snapshot.confirmed
-    session_parts = _top_session_parts(snapshot)
+    session_parts = _top_session_parts(snapshot, include_deferred=include_deferred)
     activity_labels = _top_activity_labels(snapshot)
     task_started_key = snapshot.task_started_at.isoformat() if snapshot.task_started_at is not None else ""
     details: dict[str, object] = {
@@ -5318,14 +5439,169 @@ def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[st
         "activityGap": _top_activity_gap_value(snapshot),
         "activityLast": _top_activity_last(snapshot),
         "activityLastTooltip": _top_activity_last_tooltip(snapshot),
-        "activityTrail": _top_activity_trail(snapshot),
         "activityTrailContext": f"{snapshot.session_id}|{snapshot.task_index}|{task_started_key}",
         "slow": _top_slow_chip(snapshot),
         "gap": _top_gap_chip(snapshot),
     }
+    if include_deferred:
+        details["activityTrail"] = _top_activity_trail(snapshot)
     details.update(session_parts)
     details.update(activity_labels)
     return details
+
+
+def _datetime_signature(value: datetime | None) -> str:
+    return value.isoformat() if value is not None else ""
+
+
+def _round_signature(item: RequestRound) -> tuple[object, ...]:
+    return (
+        item.index,
+        item.status,
+        item.model,
+        item.input_tokens,
+        item.cached_tokens,
+        item.output_tokens,
+        item.reasoning_tokens,
+        item.total_tokens,
+        item.estimated,
+        item.cost_usd,
+        _datetime_signature(item.started_at),
+        _datetime_signature(item.completed_at),
+        item.activity_summary,
+        item.copy_text,
+    )
+
+
+def _tool_call_signature(value: ToolCallTiming | None) -> tuple[object, ...]:
+    if value is None:
+        return ()
+    return (
+        value.name,
+        _datetime_signature(value.start),
+        _datetime_signature(value.end),
+        value.output,
+    )
+
+
+def _gap_signature(value: Any | None) -> tuple[object, ...]:
+    if value is None:
+        return ()
+    return (
+        getattr(value, "category", ""),
+        getattr(value, "from_event", ""),
+        getattr(value, "to_event", ""),
+        _datetime_signature(getattr(value, "start", None)),
+        _datetime_signature(getattr(value, "end", None)),
+        getattr(value, "duration_seconds", None),
+    )
+
+
+def _active_work_signature(items: list[WorkStatusItem]) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        (
+            getattr(item, "id", ""),
+            getattr(item, "title", ""),
+            getattr(item, "status", ""),
+            getattr(item, "status_label", ""),
+            getattr(item, "detail", ""),
+            getattr(item, "round_index", 0),
+            getattr(item, "progress", ""),
+            getattr(item, "tokens_text", ""),
+            getattr(item, "cost_text", ""),
+            getattr(item, "cache_hit_text", ""),
+            bool(getattr(item, "current", False)),
+            _datetime_signature(getattr(item, "updated_at", None)),
+        )
+        for item in items
+    )
+
+
+def _top_details_signature(
+    snapshot: ParsedSession,
+    session_cost: float | None,
+    *,
+    include_deferred: bool = True,
+    warning_dismissed: bool = False,
+) -> tuple[object, ...]:
+    confirmed = snapshot.confirmed
+    request = snapshot.request
+    estimate = snapshot.estimate
+    activity = snapshot.activity
+    slow = snapshot.slow
+    deferred_rows: tuple[tuple[object, ...], ...] = ()
+    if include_deferred:
+        deferred_rows = tuple(_round_signature(item) for item in _session_round_rows(snapshot))
+    return (
+        snapshot.session_id,
+        snapshot.session_title,
+        snapshot.task_prompt,
+        snapshot.task_index,
+        snapshot.task_count,
+        snapshot.status,
+        snapshot.error,
+        snapshot.line_count,
+        snapshot.token_events,
+        _datetime_signature(snapshot.last_event_time),
+        _datetime_signature(snapshot.task_started_at),
+        _datetime_signature(snapshot.task_completed_at),
+        _datetime_signature(snapshot.task_aborted_at),
+        confirmed.cumulative_input,
+        confirmed.cumulative_cached,
+        confirmed.cumulative_output,
+        confirmed.cumulative_reasoning,
+        confirmed.cumulative_total,
+        confirmed.cumulative_cost_usd,
+        estimate.input_tokens,
+        estimate.output_tokens,
+        estimate.tool_tokens,
+        estimate.total_tokens,
+        _round_signature(
+            RequestRound(
+                index=request.round_index,
+                status=request.status,
+                model=request.model,
+                input_tokens=request.input_tokens,
+                cached_tokens=request.cached_tokens,
+                output_tokens=request.output_tokens,
+                reasoning_tokens=request.reasoning_tokens,
+                total_tokens=request.total_tokens,
+                estimated=request.estimated,
+                cost_usd=request.cost_usd,
+                started_at=request.started_at,
+                completed_at=request.completed_at,
+                activity_summary=request.error,
+                copy_text=request.response_id,
+            )
+        ),
+        activity.kind,
+        activity.detail,
+        _datetime_signature(activity.timestamp),
+        slow.slowest_user_wait,
+        slow.slowest_tool,
+        slow.longest_gap,
+        slow.current_gap,
+        slow.current_gap_active,
+        _tool_call_signature(slow.slowest_tool_call),
+        _gap_signature(slow.longest_gap_detail),
+        snapshot.today_tokens,
+        snapshot.today_cost_usd,
+        snapshot.week_tokens,
+        snapshot.week_cost_usd,
+        snapshot.week_before_today_tokens,
+        snapshot.week_before_today_cost_usd,
+        snapshot.week_adjustment_usd,
+        snapshot.daily_limit_usd,
+        snapshot.weekly_limit_usd,
+        _datetime_signature(snapshot.day_start),
+        _datetime_signature(snapshot.week_start),
+        tuple(snapshot.budget_warnings),
+        snapshot.budget_error,
+        session_cost,
+        warning_dismissed,
+        _active_work_signature(snapshot.active_work_items),
+        deferred_rows,
+    )
 
 
 class TokenHudWindow:
@@ -5388,6 +5664,7 @@ class TokenHudWindow:
         self.update_manager = update_manager
         self._update_state = AutoUpdateState(current_version=__version__)
         self._top_update_button: tk.Button | None = None
+        self._top_update_buttons: list[tk.Button] = []
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
         _HUD_GEOMETRY_LOGGER.info(
@@ -5468,7 +5745,22 @@ class TokenHudWindow:
         self._click_priority_hold_until = 0.0
         self._pointer_priority_hold_until = 0.0
         self._top_rebuild_job: str | None = None
+        self._top_core_prewarm_job: str | None = None
+        self._top_deferred_render_job: str | None = None
+        self._top_animation_job: str | None = None
+        self._top_animation_started_at = 0.0
+        self._top_animation_duration_ms = TOP_HUD_EXPAND_ANIMATION_MS
+        self._top_animation_start: tuple[int, int, int, int] | None = None
+        self._top_animation_end: tuple[int, int, int, int] | None = None
+        self._top_animation_suppress_deferred = False
+        self._top_shell: RoundedHudShell | None = None
+        self._top_collapsed_frame: tk.Frame | None = None
+        self._top_expanded_frame: tk.Frame | None = None
         self._request_rebuild_job: str | None = None
+        self._top_details_signature: tuple[object, ...] | None = None
+        self._top_core_prewarm_signature: tuple[object, ...] | None = None
+        self._top_deferred_signature: tuple[object, ...] | None = None
+        self._top_collapsed_signature: tuple[object, ...] | None = None
         self._top_activity_context = ""
         self._top_activity_visible_count = 4
         self._top_activity_signature: tuple[object, ...] | None = None
@@ -5870,6 +6162,7 @@ class TokenHudWindow:
         setattr(button, "_hud_handle", True)
         _HoverTip(button, self._update_tooltip_text)
         self._top_update_button = button
+        self._top_update_buttons.append(button)
         return button
 
     def _update_tooltip_text(self) -> str:
@@ -5887,10 +6180,22 @@ class TokenHudWindow:
             )
 
     def _render_update_button(self) -> None:
-        button = self._top_update_button
-        if button is None or not button.winfo_exists():
-            return
         state = self._update_state
+        buttons = list(self._top_update_buttons)
+        if self._top_update_button is not None and self._top_update_button not in buttons:
+            buttons.append(self._top_update_button)
+        live_buttons: list[tk.Button] = []
+        for button in buttons:
+            if button is None or not button.winfo_exists():
+                continue
+            live_buttons.append(button)
+        self._top_update_buttons = live_buttons
+        if live_buttons:
+            self._top_update_button = live_buttons[-1]
+        for button in live_buttons:
+            self._render_update_button_widget(button, state)
+
+    def _render_update_button_widget(self, button: tk.Button, state: AutoUpdateState) -> None:
         if not state.visible:
             if button.winfo_manager():
                 button.pack_forget()
@@ -7435,12 +7740,22 @@ class TokenHudWindow:
             messagebox.showerror("打开失败", str(exc), parent=self._settings_dialog)
 
     def _rebuild_top_ui(self) -> None:
+        self._cancel_top_core_prewarm()
+        self._cancel_top_deferred_render()
         for child in self.root.winfo_children():
             if child is getattr(self, "request_root", None):
                 continue
             child.destroy()
         self.top_labels.clear()
         self._top_update_button = None
+        self._top_update_buttons = []
+        self._top_shell = None
+        self._top_collapsed_frame = None
+        self._top_expanded_frame = None
+        self._top_details_signature = None
+        self._top_core_prewarm_signature = None
+        self._top_deferred_signature = None
+        self._top_collapsed_signature = None
         self._top_activity_signature = None
         self._top_heavy_rounds_signature = None
         outside_color = _window_outside_color()
@@ -7456,13 +7771,42 @@ class TokenHudWindow:
             pady=1,
         )
         shell.pack(fill="both", expand=True)
-        frame = shell.content
-        if self.top_expanded:
-            self._build_top_expanded(frame)
-        else:
-            self._build_top_collapsed(frame)
+        self._top_shell = shell
+        collapsed_frame = tk.Frame(shell.content, bg=HUD_BG)
+        expanded_frame = tk.Frame(shell.content, bg=HUD_BG)
+        self._top_collapsed_frame = collapsed_frame
+        self._top_expanded_frame = expanded_frame
+        self._build_top_collapsed(collapsed_frame)
+        self._build_top_expanded(expanded_frame)
+        expanded_frame.place(x=0, y=0, relwidth=1, relheight=1)
+        collapsed_frame.place(x=0, y=0, relwidth=1, relheight=1)
+        self._show_top_state(self.top_expanded)
         self._bind_manual_priority_tree(self.root)
         self._render_top()
+
+    def _show_top_state(self, expanded: bool) -> None:
+        collapsed = self._top_collapsed_frame
+        expanded_frame = self._top_expanded_frame
+        if collapsed is None or expanded_frame is None:
+            return
+        if expanded:
+            if not expanded_frame.winfo_manager():
+                expanded_frame.place(x=0, y=0, relwidth=1, relheight=1)
+            if not collapsed.winfo_manager():
+                collapsed.place(x=0, y=0, relwidth=1, relheight=1)
+            try:
+                expanded_frame.tkraise()
+            except tk.TclError:
+                pass
+            return
+        if not collapsed.winfo_manager():
+            collapsed.place(x=0, y=0, relwidth=1, relheight=1)
+        if not expanded_frame.winfo_manager():
+            expanded_frame.place(x=0, y=0, relwidth=1, relheight=1)
+        try:
+            collapsed.tkraise()
+        except tk.TclError:
+            pass
 
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
         controls = tk.Frame(frame, bg=HUD_BG)
@@ -8386,9 +8730,25 @@ class TokenHudWindow:
         return "break"
 
     def toggle_top_expanded(self) -> None:
-        self._mark_click_priority()
-        self.top_expanded = not self.top_expanded
-        self._schedule_top_rebuild()
+        self._mark_click_priority(
+            duration_ms=max(HUD_CLICK_PRIORITY_MS, TOP_HUD_ANIMATION_REFRESH_DELAY_MS)
+        )
+        target_expanded = not self.top_expanded
+        self._cancel_top_core_prewarm()
+        self._cancel_top_deferred_render()
+        self._cancel_top_animation()
+        start = self._current_top_geometry(target_expanded=target_expanded)
+        self.top_expanded = target_expanded
+        self._show_top_state(target_expanded)
+        self._invalidate_top_detail_cache()
+        self._top_animation_suppress_deferred = True
+        self._render_top()
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            return
+        end = self._target_top_geometry(target_expanded)
+        self._start_top_animation(start, end)
 
     def toggle_request_expanded(self) -> None:
         self._mark_click_priority()
@@ -8411,6 +8771,124 @@ class TokenHudWindow:
             self.root.update_idletasks()
         except tk.TclError:
             return
+        self._apply_geometry()
+
+    def _top_animation_active(self) -> bool:
+        return (
+            getattr(self, "_top_animation_job", None) is not None
+            or getattr(self, "_top_animation_start", None) is not None
+        )
+
+    def _cancel_top_animation(self) -> None:
+        job = self._top_animation_job
+        self._top_animation_job = None
+        self._top_animation_start = None
+        self._top_animation_end = None
+        self._top_animation_suppress_deferred = False
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        shell = self._top_shell
+        if shell is not None and shell.winfo_exists():
+            shell.set_shape_updates_paused(False)
+
+    def _current_top_geometry(self, *, target_expanded: bool) -> tuple[int, int, int, int]:
+        fallback = self._target_top_geometry(not target_expanded)
+        try:
+            width = int(self.root.winfo_width() or 0)
+            height = int(self.root.winfo_height() or 0)
+            if width <= 1 or height <= 1:
+                applied = self._last_applied_geometry.get("top")
+                if applied is not None:
+                    return applied
+                return fallback
+            return (
+                int(self.root.winfo_x()),
+                int(self.root.winfo_y()),
+                max(1, width),
+                max(1, height),
+            )
+        except tk.TclError:
+            return fallback
+
+    def _target_top_geometry(self, expanded: bool) -> tuple[int, int, int, int]:
+        if self._attached and self._last_rect is not None:
+            return self._attached_geometry("top", self._last_rect, expanded)
+        width, height = self._top_size_for(expanded)
+        if self._top_manual_position is not None:
+            x, y = self._top_manual_position
+        else:
+            try:
+                x = int(self.root.winfo_x())
+                y = int(self.root.winfo_y())
+            except tk.TclError:
+                screen_width = self.root.winfo_screenwidth()
+                x, y = max(20, screen_width - width - 40), 48
+        return (x, y, width, height)
+
+    def _start_top_animation(
+        self,
+        start: tuple[int, int, int, int],
+        end: tuple[int, int, int, int],
+    ) -> None:
+        if start == end:
+            self._settle_top_animation(end)
+            return
+        self._top_animation_started_at = time.monotonic()
+        self._top_animation_duration_ms = TOP_HUD_EXPAND_ANIMATION_MS
+        self._top_animation_start = start
+        self._top_animation_end = end
+        shell = self._top_shell
+        if shell is not None and shell.winfo_exists():
+            shell.set_shape_updates_paused(
+                True,
+                rect_size=(max(start[2], end[2]), max(start[3], end[3])),
+            )
+        self._animate_top_step()
+
+    @staticmethod
+    def _ease_out_cubic(progress: float) -> float:
+        clamped = max(0.0, min(1.0, progress))
+        return 1.0 - ((1.0 - clamped) ** 3)
+
+    def _animate_top_step(self) -> None:
+        start = self._top_animation_start
+        end = self._top_animation_end
+        if start is None or end is None:
+            return
+        elapsed_ms = (time.monotonic() - self._top_animation_started_at) * 1000.0
+        progress = elapsed_ms / max(1, self._top_animation_duration_ms)
+        eased = self._ease_out_cubic(progress)
+        geometry = tuple(
+            int(round(start_value + ((end_value - start_value) * eased)))
+            for start_value, end_value in zip(start, end)
+        )
+        self._apply_window_geometry("top", self.root, geometry)
+        if progress >= 1.0:
+            self._settle_top_animation(end)
+            return
+        try:
+            self._top_animation_job = self.root.after(
+                TOP_HUD_ANIMATION_FRAME_MS,
+                self._animate_top_step,
+            )
+        except tk.TclError:
+            self._settle_top_animation(end)
+
+    def _settle_top_animation(self, geometry: tuple[int, int, int, int]) -> None:
+        self._top_animation_job = None
+        self._top_animation_start = None
+        self._top_animation_end = None
+        self._top_animation_suppress_deferred = False
+        shell = self._top_shell
+        if shell is not None and shell.winfo_exists():
+            shell.set_shape_updates_paused(False)
+        self._apply_window_geometry("top", self.root, geometry)
+        self._invalidate_top_detail_cache()
+        self._render_top()
+        self._render_request()
         self._apply_geometry()
 
     def _schedule_request_rebuild(self) -> None:
@@ -8440,6 +8918,8 @@ class TokenHudWindow:
     def sync_codex_window(self) -> None:
         """Synchronize HUD visibility and geometry with the current Codex window."""
         if self._move_target or self._resize_target:
+            return
+        if self._top_animation_active():
             return
         now = time.monotonic()
         if self._manual_input_active(now):
@@ -8579,7 +9059,11 @@ class TokenHudWindow:
 
     def should_refresh_snapshot(self) -> bool:
         """Return whether parser refresh work should run for the visible HUD."""
-        return not self._tombstoned and not self.should_defer_background_work()
+        return (
+            not self._tombstoned
+            and not self._top_animation_active()
+            and not self.should_defer_background_work()
+        )
 
     def should_defer_background_work(self) -> bool:
         """Return whether manual input should take priority over background work."""
@@ -8588,11 +9072,15 @@ class TokenHudWindow:
     def refresh_delay_ms(self, normal_delay_ms: int) -> int:
         """Throttle parser refreshes while the HUD is hidden in tombstone mode."""
         delay = max(100, int(normal_delay_ms))
+        if self._top_animation_active():
+            return max(delay, TOP_HUD_ANIMATION_REFRESH_DELAY_MS)
         if self._tombstoned:
             return max(delay, FOLLOW_TOMBSTONE_MS)
         return self._manual_input_refresh_delay(delay)
 
     def _apply_geometry(self) -> None:
+        if self._top_animation_active():
+            return
         if self._attached and self._last_rect is not None:
             top = self._attached_geometry("top", self._last_rect, self.top_expanded)
             request = self._attached_geometry(
@@ -9089,7 +9577,9 @@ class TokenHudWindow:
         )
 
     def _top_size(self) -> tuple[int, int]:
-        expanded = self.top_expanded
+        return self._top_size_for(self.top_expanded)
+
+    def _top_size_for(self, expanded: bool) -> tuple[int, int]:
         auto_width = (
             self._top_collapsed_auto_width()
             if not expanded and not self.settings.top.collapsed_width_locked
@@ -9120,6 +9610,15 @@ class TokenHudWindow:
             self.root.update_idletasks()
         except tk.TclError:
             return None
+        collapsed = self._top_collapsed_frame
+        shell = self._top_shell
+        if isinstance(collapsed, tk.Frame) and shell is not None and shell.winfo_exists():
+            try:
+                content_width = max(1, int(collapsed.winfo_reqwidth() or 1))
+                shell.content.configure(width=content_width)
+                self.root.update_idletasks()
+            except tk.TclError:
+                return None
         return max(
             self._interactive_min_width("top", False),
             int(self.root.winfo_reqwidth()),
@@ -9287,6 +9786,7 @@ class TokenHudWindow:
         warnings_panel = self.top_labels.get("warnings_panel")
         if isinstance(warnings_panel, tk.Frame):
             warnings_panel.pack_forget()
+        self._invalidate_top_detail_cache()
         self._render_top()
         return "break"
 
@@ -9359,9 +9859,38 @@ class TokenHudWindow:
             _HoverTip(widget, lambda target=widget: str(getattr(target, "_hud_tooltip", "") or ""))
             setattr(widget, "_hud_copy_bound", True)
 
+    def _cancel_top_deferred_render(self) -> None:
+        job = self._top_deferred_render_job
+        self._top_deferred_render_job = None
+        if job is None:
+            return
+        try:
+            self.root.after_cancel(job)
+        except tk.TclError:
+            pass
+
+    def _cancel_top_core_prewarm(self) -> None:
+        job = getattr(self, "_top_core_prewarm_job", None)
+        self._top_core_prewarm_job = None
+        if job is None:
+            return
+        try:
+            self.root.after_cancel(job)
+        except tk.TclError:
+            pass
+
+    def _invalidate_top_detail_cache(self) -> None:
+        self._top_details_signature = None
+        self._top_core_prewarm_signature = None
+        self._top_deferred_signature = None
+        self._top_activity_signature = None
+        self._top_heavy_rounds_signature = None
+
     def _load_more_top_activity(self) -> None:
         self._top_activity_visible_count = max(4, self._top_activity_visible_count + 4)
         self._top_activity_scroll_to_bottom = True
+        self._top_deferred_signature = None
+        self._top_activity_signature = None
         self._render_top()
 
     def _close(self, event: object | None = None) -> str:
@@ -9387,6 +9916,9 @@ class TokenHudWindow:
             self._exit_reason = reason
         for job in (
             self._top_rebuild_job,
+            self._top_core_prewarm_job,
+            self._top_deferred_render_job,
+            self._top_animation_job,
             self._request_rebuild_job,
             self._settings_build_job,
             self._settings_prewarm_job,
@@ -9401,6 +9933,12 @@ class TokenHudWindow:
             except tk.TclError:
                 pass
         self._top_rebuild_job = None
+        self._top_core_prewarm_job = None
+        self._top_deferred_render_job = None
+        self._top_animation_job = None
+        self._top_animation_start = None
+        self._top_animation_end = None
+        self._top_animation_suppress_deferred = False
         self._request_rebuild_job = None
         self._settings_build_job = None
         self._settings_prewarm_job = None
@@ -9422,12 +9960,15 @@ class TokenHudWindow:
         update_state: AutoUpdateState | None = None,
     ) -> None:
         """Refresh both HUD windows with the latest parsed session snapshot."""
-        self._maybe_apply_live_theme()
+        if not self._top_animation_active():
+            self._maybe_apply_live_theme()
         self._snapshot = parsed_session
         if update_state is not None:
             self._update_state = update_state
             if self._settings_dialog_visible() and self._settings_active_tab == "about":
                 self._sync_about_update_controls()
+        if self._top_animation_active():
+            return
         self._log_budget_snapshot(parsed_session)
         self._render_top()
         self._render_request()
@@ -9583,13 +10124,22 @@ class TokenHudWindow:
             font = tkfont.Font(font=widget.cget("font"))
         except (tk.TclError, TypeError, ValueError):
             return _compact(text, 28)
+        percent_match = re.search(r"(~?\d+(?:\.\d+)?%)", text)
+        percent_text = percent_match.group(1) if percent_match is not None else ""
         if available <= 24:
+            if percent_text:
+                return percent_text
             return _compact(text, 6)
         if font.measure(text) <= available:
             return text
         short_text = text.replace("缓存命中", "命中", 1)
         if font.measure(short_text) <= available:
             return short_text
+        if percent_text:
+            percent_candidate = f"命中 {percent_text}"
+            if font.measure(percent_candidate) <= available:
+                return percent_candidate
+            return percent_text
         suffix = "..."
         suffix_width = font.measure(suffix)
         low = 0
@@ -9889,58 +10439,75 @@ class TokenHudWindow:
             except tk.TclError:
                 return
 
-    def _render_top(self) -> None:
-        snapshot = self._snapshot
-        session_cost = _session_cost(snapshot)
-        self._render_update_button()
-        title_label = self.top_labels.get("title")
-        if title_label is not None:
-            title_label.configure(text=_top_expanded_header_title(snapshot))
-        bar = self.top_labels.get("bar")
-        if bar is not None:
-            text = (
-                f"{_top_session_usage_summary(snapshot, session_cost)} | "
-                f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)} | "
-                f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)} | "
-                f"状态 {_budget_status(snapshot)}"
+    @staticmethod
+    def _top_metric_signature(metrics: list[TopHudProgressMetric]) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            (
+                metric.label,
+                metric.ratio,
+                metric.fill,
+                metric.fill_end,
+                metric.fill_text,
+                metric.track_text,
+                metric.right_text,
+                metric.overflow_ratio,
+                metric.overflow_badge,
             )
-            metrics = _top_collapsed_progress_metrics(snapshot)
-            if snapshot.error and snapshot.status in {"missing", "error"}:
-                text = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
-                metrics = [
-                    TopHudProgressMetric(
-                        label=text,
-                        ratio=1.0,
-                        fill=HUD_ERROR,
-                        fill_end=HUD_ERROR,
-                        fill_text="#1A1012",
-                    )
-                ]
+            for metric in metrics
+        )
+
+    def _render_top_collapsed(self, snapshot: ParsedSession, session_cost: float | None) -> None:
+        bar = self.top_labels.get("bar")
+        if not isinstance(bar, TopHudProgressStrip):
+            return
+        text = (
+            f"{_top_session_usage_summary(snapshot, session_cost)} | "
+            f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)} | "
+            f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)} | "
+            f"状态 {_budget_status(snapshot)}"
+        )
+        metrics = _top_collapsed_progress_metrics(snapshot)
+        if snapshot.error and snapshot.status in {"missing", "error"}:
+            text = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
+            metrics = [
+                TopHudProgressMetric(
+                    label=text,
+                    ratio=1.0,
+                    fill=HUD_ERROR,
+                    fill_end=HUD_ERROR,
+                    fill_text="#1A1012",
+                )
+            ]
+        signature = (text, self._top_metric_signature(metrics))
+        if signature != self._top_collapsed_signature:
             bar.configure(text=text, metrics=metrics)
+            self._top_collapsed_signature = signature
+        if not self.top_expanded:
             self._top_collapsed_width_override = (
                 self._measure_top_collapsed_auto_width()
                 if snapshot.status != "waiting"
                 else None
             )
             if (
-                not self.top_expanded
-                and not self._move_target
+                not self._move_target
                 and not self._resize_target
+                and not self._top_animation_active()
                 and hasattr(self, "request_root")
             ):
                 self._apply_geometry()
-            return
 
+    def _render_top_expanded_core(
+        self,
+        snapshot: ParsedSession,
+        details: dict[str, object],
+    ) -> None:
+        title_label = self.top_labels.get("title")
+        if title_label is not None:
+            title_label.configure(text=str(details.get("title") or TOP_EXPANDED_HEADER_FALLBACK))
         cache_progress = self.top_labels.get("cache_progress")
         if isinstance(cache_progress, TopHudProgressBar):
             cache_progress.configure(metric=_top_cache_progress_metric(snapshot))
 
-        details = _top_details(snapshot, session_cost)
-        if warning_dismissed_today(self.user_settings_store.path):
-            details["warnings"] = _format_notice(
-                snapshot,
-                include_budget_warnings=False,
-            )
         values = {
             "session": details.get("session", ""),
             "topSessionCost": details.get("sessionCost", ""),
@@ -10015,8 +10582,6 @@ class TokenHudWindow:
             else:
                 warnings_panel.pack_forget()
 
-        self._render_top_heavy_rounds(details)
-        self._render_top_activity_trail(details)
         tool_command = _copyable_tool_command(snapshot) or ""
         gap_detail = _copyable_gap_detail(snapshot) or ""
         top_slow = self.top_labels.get("topSlow")
@@ -10041,6 +10606,123 @@ class TokenHudWindow:
         activity_last = self.top_labels.get("topActivityLast")
         if activity_last is not None:
             setattr(activity_last, "_hud_tooltip", str(details.get("activityLastTooltip") or ""))
+
+    def _top_core_signature(
+        self,
+        snapshot: ParsedSession,
+        session_cost: float | None,
+        warning_hidden: bool,
+    ) -> tuple[object, ...]:
+        return _top_details_signature(
+            snapshot,
+            session_cost,
+            include_deferred=False,
+            warning_dismissed=warning_hidden,
+        )
+
+    def _schedule_top_core_prewarm(self, signature: tuple[object, ...]) -> None:
+        if self._top_core_prewarm_signature == signature or self._top_core_prewarm_job is not None:
+            return
+        try:
+            self._top_core_prewarm_job = self.root.after_idle(
+                lambda sig=signature: self._flush_top_core_prewarm(sig)
+            )
+        except tk.TclError:
+            self._top_core_prewarm_job = None
+
+    def _flush_top_core_prewarm(self, signature: tuple[object, ...]) -> None:
+        self._top_core_prewarm_job = None
+        if self.top_expanded:
+            return
+        snapshot = self._snapshot
+        session_cost = _session_cost(snapshot)
+        warning_hidden = warning_dismissed_today(self.user_settings_store.path)
+        current_signature = self._top_core_signature(snapshot, session_cost, warning_hidden)
+        if current_signature != signature:
+            self._schedule_top_core_prewarm(current_signature)
+            return
+        details = _top_details(snapshot, session_cost, include_deferred=False)
+        if warning_hidden:
+            details["warnings"] = _format_notice(
+                snapshot,
+                include_budget_warnings=False,
+            )
+        self._render_top_expanded_core(snapshot, details)
+        self._top_core_prewarm_signature = signature
+
+    def _schedule_top_deferred_render(self, signature: tuple[object, ...]) -> None:
+        if self._top_animation_active() or getattr(self, "_top_animation_suppress_deferred", False):
+            return
+        if self._top_deferred_signature == signature or self._top_deferred_render_job is not None:
+            return
+        try:
+            self._top_deferred_render_job = self.root.after_idle(
+                lambda sig=signature: self._flush_top_deferred_render(sig)
+            )
+        except tk.TclError:
+            self._top_deferred_render_job = None
+
+    def _flush_top_deferred_render(self, signature: tuple[object, ...]) -> None:
+        self._top_deferred_render_job = None
+        if not self.top_expanded or self._top_details_signature != signature:
+            return
+        snapshot = self._snapshot
+        session_cost = _session_cost(snapshot)
+        warning_hidden = warning_dismissed_today(self.user_settings_store.path)
+        current_signature = _top_details_signature(
+            snapshot,
+            session_cost,
+            include_deferred=True,
+            warning_dismissed=warning_hidden,
+        )
+        if current_signature != signature:
+            self._top_details_signature = None
+            self._render_top()
+            return
+        details = _top_details(snapshot, session_cost, include_deferred=True)
+        if warning_hidden:
+            details["warnings"] = _format_notice(
+                snapshot,
+                include_budget_warnings=False,
+            )
+        self._render_top_heavy_rounds(details)
+        self._render_top_activity_trail(details)
+        self._top_deferred_signature = signature
+
+    def _render_top(self) -> None:
+        snapshot = self._snapshot
+        session_cost = _session_cost(snapshot)
+        self._render_update_button()
+        self._render_top_collapsed(snapshot, session_cost)
+        if not self.top_expanded:
+            self._cancel_top_deferred_render()
+            warning_hidden = warning_dismissed_today(self.user_settings_store.path)
+            self._schedule_top_core_prewarm(
+                self._top_core_signature(snapshot, session_cost, warning_hidden)
+            )
+            return
+
+        warning_hidden = warning_dismissed_today(self.user_settings_store.path)
+        signature = _top_details_signature(
+            snapshot,
+            session_cost,
+            include_deferred=True,
+            warning_dismissed=warning_hidden,
+        )
+        if signature == self._top_details_signature:
+            self._schedule_top_deferred_render(signature)
+            return
+        self._top_details_signature = signature
+        self._top_deferred_signature = None
+        self._cancel_top_deferred_render()
+        details = _top_details(snapshot, session_cost, include_deferred=False)
+        if warning_hidden:
+            details["warnings"] = _format_notice(
+                snapshot,
+                include_budget_warnings=False,
+            )
+        self._render_top_expanded_core(snapshot, details)
+        self._schedule_top_deferred_render(signature)
 
     def _render_request(self) -> None:
         snapshot = self._snapshot
