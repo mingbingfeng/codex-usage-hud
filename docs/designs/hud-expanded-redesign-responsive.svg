@@ -1,0 +1,229 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1120" viewBox="0 0 1200 1120">
+  <defs>
+    <linearGradient id="pageBgR" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080B0F"/>
+      <stop offset="0.56" stop-color="#11161D"/>
+      <stop offset="1" stop-color="#090D11"/>
+    </linearGradient>
+    <linearGradient id="cacheFillR" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9CCBFF"/>
+      <stop offset="1" stop-color="#6F7CF6"/>
+    </linearGradient>
+    <linearGradient id="dayFillR" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F3D27A"/>
+      <stop offset="1" stop-color="#E9B75D"/>
+    </linearGradient>
+    <linearGradient id="weekFillR" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#B5DD92"/>
+      <stop offset="1" stop-color="#75C889"/>
+    </linearGradient>
+    <linearGradient id="warnFillR" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFCF9A"/>
+      <stop offset="0.65" stop-color="#FF875A"/>
+      <stop offset="1" stop-color="#FF5B64"/>
+    </linearGradient>
+    <filter id="shadowR" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <style>
+      .ui { font-family: "Microsoft YaHei UI", "Noto Sans CJK SC", "Segoe UI", sans-serif; }
+      .title { fill: #E8EEF7; font-size: 22px; font-weight: 700; }
+      .subtitle { fill: #8492A6; font-size: 13px; }
+      .label { fill: #A9B6C6; font-size: 12px; font-weight: 700; }
+      .muted { fill: #8492A6; font-size: 11px; }
+      .small { fill: #B8C6D8; font-size: 11px; }
+      .tiny { fill: #8492A6; font-size: 10px; }
+      .value { fill: #E8EEF7; font-size: 26px; font-weight: 800; }
+      .value2 { fill: #9CCBFF; font-size: 24px; font-weight: 800; }
+      .mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+      .chipText { fill: #DCE7F2; font-size: 11px; font-weight: 700; }
+      .sectionTitle { fill: #CBD8E8; font-size: 13px; font-weight: 800; }
+      .accent { fill: #F3D27A; }
+      .info { fill: #9CCBFF; }
+      .success { fill: #8FE3A1; }
+      .warning { fill: #FFB86B; }
+      .railText { fill: #FFFFFF; font-size: 12px; font-weight: 800; }
+      .railTextDark { fill: #111111; font-size: 12px; font-weight: 800; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="1120" fill="url(#pageBgR)"/>
+
+  <g class="ui">
+    <text x="54" y="48" class="title">顶部 HUD 展开态内容优化 · 响应宽度版</text>
+    <text x="54" y="72" class="subtitle">进度条保留现有胶囊轨道样式；宽度变窄时优先保留会话金额、额度进度、当前活动，解释性信息继续隐藏。</text>
+
+    <!-- Codex app background hint -->
+    <rect x="54" y="98" width="1092" height="540" rx="10" fill="#181818" stroke="#273241" stroke-opacity="0.55"/>
+    <rect x="54" y="98" width="1092" height="38" rx="10" fill="#202020"/>
+    <text x="76" y="123" class="muted">≡</text>
+    <text x="104" y="123" class="small" font-weight="700">Codex App</text>
+    <rect x="86" y="164" width="620" height="16" rx="4" fill="#2A2A2A" opacity="0.45"/>
+    <rect x="86" y="196" width="700" height="12" rx="3" fill="#2A2A2A" opacity="0.32"/>
+    <rect x="86" y="224" width="580" height="12" rx="3" fill="#2A2A2A" opacity="0.26"/>
+
+    <!-- Main wide HUD -->
+    <g filter="url(#shadowR)">
+      <rect x="166" y="126" width="868" height="416" rx="8" fill="#10161D" fill-opacity="0.96" stroke="#3A485A" stroke-opacity="0.65"/>
+      <rect x="166" y="126" width="868" height="42" rx="8" fill="#202833"/>
+      <line x1="166" y1="168" x2="1034" y2="168" stroke="#273241"/>
+      <text x="186" y="153" class="muted">≡</text>
+      <text x="214" y="153" class="label" fill="#E8EEF7">修复HUD展开热区位移</text>
+      <text x="422" y="153" class="muted">会话 bde06f8d03ba · 32 轮确认</text>
+      <rect x="828" y="134" width="152" height="26" rx="13" fill="#182537" stroke="#6F7CF6" stroke-opacity="0.34"/>
+      <rect x="828" y="134" width="141" height="26" rx="13" fill="url(#cacheFillR)" opacity="0.86"/>
+      <text x="850" y="151" class="chipText" fill="#07131F">缓存命中 93%</text>
+      <text x="1002" y="153" class="muted">⚙</text>
+
+      <!-- Session usage -->
+      <rect x="184" y="188" width="348" height="164" rx="8" fill="#141B24" stroke="#273241"/>
+      <text x="202" y="214" class="sectionTitle">本会话用量</text>
+      <text x="202" y="252" class="value mono">$3.08</text>
+      <text x="202" y="273" class="muted">会话金额</text>
+      <text x="340" y="252" class="value2 mono">2.95M</text>
+      <text x="342" y="273" class="muted">累计 tokens</text>
+      <rect x="440" y="228" width="74" height="26" rx="13" fill="#1C2330" stroke="#334153"/>
+      <text x="455" y="245" class="chipText">32 轮</text>
+      <rect x="202" y="292" width="312" height="32" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="216" y="312" class="small">当前请求</text>
+      <text x="292" y="312" class="info mono" font-size="12" font-weight="700">112k tokens</text>
+      <text x="396" y="312" class="accent mono" font-size="12" font-weight="700">估算 $0.088</text>
+      <rect x="202" y="333" width="70" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="214" y="351" class="muted">输入</text>
+      <text x="244" y="351" class="small mono">3.14M</text>
+      <rect x="278" y="333" width="70" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="290" y="351" class="muted">缓存</text>
+      <text x="320" y="351" class="small mono">2.92M</text>
+      <rect x="354" y="333" width="70" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="366" y="351" class="muted">输出</text>
+      <text x="396" y="351" class="small mono">13.5k</text>
+      <rect x="430" y="333" width="84" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="442" y="351" class="muted">推理</text>
+      <text x="472" y="351" class="small mono">5.2k</text>
+
+      <!-- Budget with unchanged rail style -->
+      <rect x="184" y="368" width="348" height="144" rx="8" fill="#141B24" stroke="#273241"/>
+      <text x="202" y="394" class="sectionTitle">额度进度</text>
+      <text x="466" y="394" class="muted">只看剩余</text>
+      <rect x="202" y="412" width="312" height="29" rx="14.5" fill="#262C33" stroke="#3B4149"/>
+      <rect x="202" y="412" width="82" height="29" rx="14.5" fill="url(#dayFillR)"/>
+      <text x="218" y="431" class="railText">今日 30.7M / $25.90</text>
+      <text x="402" y="431" class="railText">剩余 $74.10</text>
+      <rect x="202" y="462" width="312" height="29" rx="14.5" fill="#262C33" stroke="#3B4149"/>
+      <rect x="202" y="462" width="82" height="29" rx="14.5" fill="url(#weekFillR)"/>
+      <text x="218" y="481" class="railText">本周 156.5M / $103.65</text>
+      <text x="392" y="481" class="railText">剩余 $296.35</text>
+
+      <!-- Activity -->
+      <rect x="552" y="188" width="464" height="324" rx="8" fill="#141B24" stroke="#273241"/>
+      <text x="570" y="214" class="sectionTitle">当前活动</text>
+      <rect x="924" y="197" width="74" height="24" rx="12" fill="#241B10" stroke="#FFB86B" stroke-opacity="0.35"/>
+      <text x="938" y="213" class="warning" font-size="11" font-weight="800">工具执行中</text>
+      <rect x="570" y="232" width="428" height="58" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="588" y="254" class="small">正在执行</text>
+      <text x="662" y="254" class="info mono" font-size="13" font-weight="800">shell command</text>
+      <text x="588" y="276" class="muted">当前任务：received token count · 等待任务结束</text>
+      <rect x="570" y="306" width="132" height="50" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="588" y="328" class="muted">已运行</text>
+      <text x="588" y="347" class="accent mono" font-size="17" font-weight="800">12.4s</text>
+      <rect x="718" y="306" width="132" height="50" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="736" y="328" class="muted">等待确认</text>
+      <text x="736" y="347" class="warning mono" font-size="17" font-weight="800">24.6s</text>
+      <rect x="866" y="306" width="132" height="50" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="884" y="328" class="muted">最近事件</text>
+      <text x="884" y="347" class="small mono" font-size="15" font-weight="800">19:57:11</text>
+      <text x="570" y="386" class="label">活动轨迹</text>
+      <circle cx="580" cy="414" r="4" fill="#9CCBFF"/>
+      <line x1="580" y1="418" x2="580" y2="468" stroke="#334153"/>
+      <circle cx="580" cy="442" r="4" fill="#FFB86B"/>
+      <circle cx="580" cy="470" r="4" fill="#8492A6"/>
+      <text x="598" y="418" class="small mono">19:56:49</text>
+      <text x="668" y="418" class="small">发送本次模型请求</text>
+      <text x="598" y="446" class="small mono">19:57:03</text>
+      <text x="668" y="446" class="small">启动 shell command，解析 token 输出</text>
+      <text x="598" y="474" class="small mono">现在</text>
+      <text x="668" y="474" class="muted">等待工具返回；未触发额度或解析异常</text>
+    </g>
+
+    <text x="54" y="686" class="title" font-size="18">宽度变窄后的展示策略</text>
+    <text x="54" y="710" class="subtitle">核心规则：只改变信息密度与排列，不改变进度条组件本身；窄宽下先收起解释性/分解项，再合并活动轨迹。</text>
+
+    <!-- Medium width variant -->
+    <g filter="url(#shadowR)">
+      <rect x="54" y="736" width="620" height="286" rx="8" fill="#10161D" fill-opacity="0.96" stroke="#3A485A" stroke-opacity="0.65"/>
+      <rect x="54" y="736" width="620" height="38" rx="8" fill="#202833"/>
+      <line x1="54" y1="774" x2="674" y2="774" stroke="#273241"/>
+      <text x="74" y="760" class="muted">≡</text>
+      <text x="102" y="760" class="label" fill="#E8EEF7">中宽 620px</text>
+      <text x="218" y="760" class="muted">两列改为单列重点区块</text>
+      <rect x="526" y="744" width="112" height="22" rx="11" fill="#182537" stroke="#6F7CF6" stroke-opacity="0.34"/>
+      <rect x="526" y="744" width="104" height="22" rx="11" fill="url(#cacheFillR)" opacity="0.86"/>
+      <text x="546" y="759" class="chipText" font-size="10" fill="#07131F">缓存 93%</text>
+
+      <rect x="72" y="792" width="584" height="62" rx="7" fill="#141B24" stroke="#273241"/>
+      <text x="90" y="817" class="sectionTitle">本会话</text>
+      <text x="152" y="817" class="value mono" font-size="20">$3.08</text>
+      <text x="246" y="817" class="info mono" font-size="18" font-weight="800">2.95M tokens</text>
+      <text x="428" y="817" class="muted">32 轮确认</text>
+      <text x="90" y="842" class="small">当前请求 112k tokens · 估算 $0.088 · 缓存命中稳定</text>
+
+      <rect x="72" y="868" width="584" height="86" rx="7" fill="#141B24" stroke="#273241"/>
+      <text x="90" y="893" class="sectionTitle">额度</text>
+      <rect x="150" y="878" width="488" height="27" rx="13.5" fill="#262C33" stroke="#3B4149"/>
+      <rect x="150" y="878" width="128" height="27" rx="13.5" fill="url(#dayFillR)"/>
+      <text x="166" y="896" class="railText">今日 $25.90</text>
+      <text x="526" y="896" class="railText">剩 $74.10</text>
+      <rect x="150" y="916" width="488" height="27" rx="13.5" fill="#262C33" stroke="#3B4149"/>
+      <rect x="150" y="916" width="128" height="27" rx="13.5" fill="url(#weekFillR)"/>
+      <text x="166" y="934" class="railText">本周 $103.65</text>
+      <text x="516" y="934" class="railText">剩 $296.35</text>
+
+      <rect x="72" y="968" width="584" height="34" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="90" y="990" class="warning" font-size="12" font-weight="800">工具执行中</text>
+      <text x="174" y="990" class="small">shell command · 已运行 12.4s · 等待确认 24.6s</text>
+    </g>
+
+    <!-- Compact width variant -->
+    <g filter="url(#shadowR)">
+      <rect x="710" y="736" width="460" height="286" rx="8" fill="#10161D" fill-opacity="0.96" stroke="#3A485A" stroke-opacity="0.65"/>
+      <rect x="710" y="736" width="460" height="38" rx="8" fill="#202833"/>
+      <line x1="710" y1="774" x2="1170" y2="774" stroke="#273241"/>
+      <text x="730" y="760" class="muted">≡</text>
+      <text x="758" y="760" class="label" fill="#E8EEF7">窄宽 460px</text>
+      <text x="1006" y="760" class="muted">⚙</text>
+      <rect x="1030" y="744" width="112" height="22" rx="11" fill="#182537" stroke="#6F7CF6" stroke-opacity="0.34"/>
+      <rect x="1030" y="744" width="104" height="22" rx="11" fill="url(#cacheFillR)" opacity="0.86"/>
+      <text x="1050" y="759" class="chipText" font-size="10" fill="#07131F">缓存 93%</text>
+
+      <rect x="728" y="792" width="424" height="76" rx="7" fill="#141B24" stroke="#273241"/>
+      <text x="746" y="817" class="sectionTitle">本会话</text>
+      <text x="746" y="846" class="value mono" font-size="22">$3.08</text>
+      <text x="846" y="846" class="info mono" font-size="19" font-weight="800">2.95M</text>
+      <text x="936" y="846" class="muted">32 轮</text>
+      <text x="1004" y="846" class="accent mono" font-size="13" font-weight="800">$0.088 进行中</text>
+
+      <rect x="728" y="882" width="424" height="78" rx="7" fill="#141B24" stroke="#273241"/>
+      <text x="746" y="907" class="sectionTitle">额度</text>
+      <rect x="798" y="892" width="336" height="27" rx="13.5" fill="#262C33" stroke="#3B4149"/>
+      <rect x="798" y="892" width="88" height="27" rx="13.5" fill="url(#dayFillR)"/>
+      <text x="812" y="910" class="railText">今日 $25.90</text>
+      <text x="1046" y="910" class="railText">剩 $74.10</text>
+      <rect x="798" y="926" width="336" height="27" rx="13.5" fill="#262C33" stroke="#3B4149"/>
+      <rect x="798" y="926" width="88" height="27" rx="13.5" fill="url(#weekFillR)"/>
+      <text x="812" y="944" class="railText">本周 $103.65</text>
+      <text x="1036" y="944" class="railText">剩 $296</text>
+
+      <rect x="728" y="974" width="424" height="34" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="746" y="996" class="warning" font-size="12" font-weight="800">工具执行中</text>
+      <text x="830" y="996" class="small">shell · 12.4s · 等待确认 24.6s</text>
+    </g>
+
+    <!-- Warning strip rule -->
+    <text x="54" y="1068" class="label">预警条规则</text>
+    <text x="136" y="1068" class="muted">默认隐藏；触发后插入在 header 下方或当前活动上方，不挤占进度条高度。示例：</text>
+    <rect x="530" y="1044" width="430" height="34" rx="7" fill="#241810" stroke="#FF875A" stroke-opacity="0.52"/>
+    <circle cx="550" cy="1061" r="5" fill="#FFB86B"/>
+    <text x="566" y="1065" class="warning" font-size="12" font-weight="800">额度预警</text>
+    <text x="638" y="1065" class="small">今日已用 93% · 剩余 $7.00 · 超过 90% 阈值</text>
+  </g>
+</svg>

@@ -6963,7 +6963,10 @@ class TokenHudWindow:
     def _build_request_expanded(self, frame: tk.Frame) -> None:
         frame.configure(bg=REQUEST_HUD_BG, padx=8, pady=5)
         header = tk.Frame(frame, bg=REQUEST_HUD_HEADER_BG, padx=5, pady=2)
-        header.pack(fill="x", pady=(0, 4))
+        header.pack(side="bottom", fill="x", pady=(4, 0))
+        content = tk.Frame(frame, bg=REQUEST_HUD_BG)
+        content.pack(side="top", fill="both", expand=True)
+
         self._move_handle(header, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             header,
@@ -6976,7 +6979,7 @@ class TokenHudWindow:
         )
         self.request_label.pack(side="left", fill="x", expand=True)
 
-        list_header = tk.Frame(frame, bg=REQUEST_HUD_BG)
+        list_header = tk.Frame(content, bg=REQUEST_HUD_BG)
         list_header.pack(fill="x", pady=(0, 2))
         tk.Label(
             list_header,
@@ -6995,8 +6998,8 @@ class TokenHudWindow:
             font=("Microsoft YaHei UI", 7),
         ).pack(side="right")
 
-        body = tk.Frame(frame, bg=REQUEST_HUD_PANEL_BG, padx=0, pady=0)
-        body.pack(fill="x", expand=False)
+        body = tk.Frame(content, bg=REQUEST_HUD_PANEL_BG, padx=0, pady=0)
+        body.pack(fill="both", expand=True)
         scrollbar = HudScrollbar(
             body,
             track=REQUEST_HUD_PANEL_BG,
@@ -7027,7 +7030,7 @@ class TokenHudWindow:
         self.request_text.tag_configure("muted", foreground=REQUEST_HUD_MUTED)
         scrollbar.set_command(self.request_text.yview)
         scrollbar.pack(side="right", fill="y")
-        self.request_text.pack(side="left", fill="x", expand=True)
+        self.request_text.pack(side="left", fill="both", expand=True)
         self.request_text.configure(state="disabled")
 
     def _release_pointer(self, event: Any) -> str:

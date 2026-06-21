@@ -7,12 +7,13 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any
 
 from .. import __version__
 from ..config import UserConfig
-from ..core.parser import CostEstimator, ParsedSession, RequestRound
+from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
 from ..platforms.cdp_probe import (
     cdp_port_from_env,
     install_new_document_script,
@@ -25,7 +26,7 @@ from ..platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "16"
+RENDERER_HUD_VERSION = "17"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
@@ -73,7 +74,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "16";
+  const version = "17";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -252,7 +253,7 @@ RENDERER_HUD_SCRIPT = r"""
         display: grid;
       }
       #${rootId} .${requestClass} .codex-usage-hud-expanded-shell {
-        grid-template-rows: auto auto minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr) auto;
       }
       #${rootId} button {
         font: inherit;
@@ -450,6 +451,8 @@ RENDERER_HUD_SCRIPT = r"""
         inset: 0;
         display: flex;
         align-items: center;
+        justify-content: space-between;
+        gap: 8px;
         min-width: 0;
         padding: 0 11px;
         overflow: hidden;
@@ -460,6 +463,13 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-progress-text {
         min-width: 0;
         flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-progress-right-text {
+        flex: 0 0 auto;
+        max-width: 42%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -700,7 +710,8 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .${requestClass} .codex-usage-hud-panel-header {
         background: #151d27;
-        margin-bottom: 4px;
+        margin-top: 4px;
+        margin-bottom: 0;
       }
       #${rootId} .codex-usage-hud-title {
         min-width: 0;
@@ -728,18 +739,266 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-top-grid {
         display: grid;
-        grid-template-columns: minmax(320px, 1fr) minmax(230px, 37%);
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
         gap: 12px;
-        min-width: max(100%, 562px);
         min-height: 100%;
+        align-items: stretch;
       }
-      #${rootId} .codex-usage-hud-top-grid > :first-child {
-        min-width: 320px;
+      #${rootId} .${topClass} {
+        container-type: inline-size;
       }
-      #${rootId} .codex-usage-hud-top-side {
-        border-radius: 5px;
+      #${rootId} .codex-usage-hud-top-column {
+        min-width: 0;
+        min-height: 0;
+        height: 100%;
+        display: grid;
+        gap: 12px;
+        align-content: stretch;
+      }
+      #${rootId} .codex-usage-hud-top-column-left {
+        grid-template-rows: auto auto minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-top-column-right {
+        grid-template-rows: minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-top-card,
+      #${rootId} .codex-usage-hud-alert {
+        box-sizing: border-box;
+        min-width: 0;
+        border: 1px solid rgba(132, 146, 166, .16);
+        border-radius: 7px;
         background: #141b24;
-        padding: 5px 8px;
+        padding: 10px 12px;
+      }
+      #${rootId} .codex-usage-hud-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 18px;
+        margin-bottom: 9px;
+      }
+      #${rootId} .codex-usage-hud-card-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #dce7f2;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      #${rootId} .codex-usage-hud-card-actions {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        overflow: hidden;
+      }
+      #${rootId} .codex-usage-hud-chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 0;
+        min-height: 20px;
+        padding: 2px 9px;
+        border-radius: 999px;
+        border: 1px solid rgba(132, 146, 166, .20);
+        background: #1c2330;
+        color: #dce7f2;
+        font-size: 10.5px;
+        font-weight: 800;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-chip:empty {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-copy-chip {
+        max-width: 116px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        cursor: default;
+      }
+      #${rootId} .codex-usage-hud-copy-chip[data-copyable="true"] {
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-copy-chip[data-copyable="true"]:hover {
+        border-color: rgba(243, 210, 122, .34);
+        color: #f3d27a;
+      }
+      #${rootId} .codex-usage-hud-chip[data-tone="warning"] {
+        border-color: rgba(255, 184, 107, .34);
+        background: rgba(36, 27, 16, .88);
+        color: #ffb86b;
+      }
+      #${rootId} .codex-usage-hud-session-stats {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        align-items: stretch;
+      }
+      #${rootId} .codex-usage-hud-session-stat {
+        min-width: 0;
+        display: grid;
+        align-content: center;
+        min-height: 48px;
+      }
+      #${rootId} .codex-usage-hud-stat-value {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #e8eef7;
+        font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+        font-size: 24px;
+        font-weight: 800;
+        line-height: 1.08;
+      }
+      #${rootId} .codex-usage-hud-stat-value.info {
+        color: #9ccbff;
+      }
+      #${rootId} .codex-usage-hud-stat-value.cache {
+        color: #8fe3a1;
+      }
+      #${rootId} .codex-usage-hud-stat-label {
+        margin-top: 3px;
+        color: #8492a6;
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-session-insight {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        min-height: 32px;
+        margin-top: 11px;
+        padding: 5px 10px;
+        border: 1px solid rgba(132, 146, 166, .16);
+        border-radius: 6px;
+        background: #101821;
+      }
+      #${rootId} .codex-usage-hud-session-insight .codex-usage-hud-value:last-child {
+        text-align: right;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 5px;
+        margin-top: 7px;
+      }
+      #${rootId} .codex-usage-hud-session-composition {
+        min-width: 0;
+        display: block;
+        margin-top: 7px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #b8c6d8;
+        font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+        font-size: 10.5px;
+        line-height: 1.35;
+      }
+      #${rootId} .codex-usage-hud-session-composition:empty {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-heavy-rounds-card {
+        min-height: 150px;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-heavy-rounds {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: repeat(3, minmax(32px, 1fr));
+        align-content: start;
+        gap: 6px;
+        overflow: hidden;
+      }
+      #${rootId} .codex-usage-hud-heavy-rounds[data-empty="true"] {
+        align-content: stretch;
+      }
+      #${rootId} .codex-usage-hud-heavy-round {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border: 1px solid rgba(132, 146, 166, .16);
+        border-radius: 5px;
+        background: #101821;
+      }
+      #${rootId} .codex-usage-hud-heavy-round[data-placeholder="true"] {
+        grid-template-columns: minmax(0, 1fr);
+        align-content: center;
+        opacity: .72;
+      }
+      #${rootId} .codex-usage-hud-heavy-round[data-copyable="true"] {
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-heavy-round[data-copyable="true"]:hover {
+        border-color: rgba(243, 210, 122, .30);
+        background: rgba(243, 210, 122, .06);
+      }
+      #${rootId} .codex-usage-hud-heavy-round-title,
+      #${rootId} .codex-usage-hud-heavy-round-detail {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-heavy-round-title {
+        color: #f3d27a;
+        font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+        font-size: 10.5px;
+        font-weight: 800;
+      }
+      #${rootId} .codex-usage-hud-heavy-round-detail {
+        color: #8492a6;
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-token-chip {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 5px 7px;
+        border: 1px solid rgba(132, 146, 166, .16);
+        border-radius: 5px;
+        background: #101821;
+        color: #b8c6d8;
+        font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+        font-size: 10.5px;
+      }
+      #${rootId} .codex-usage-hud-token-chip span:first-child {
+        margin-right: 5px;
+        color: #718095;
+        font-family: "Microsoft YaHei UI", system-ui, sans-serif;
+      }
+      #${rootId} .codex-usage-hud-alert {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 9px;
+        align-items: center;
+        margin-bottom: 12px;
+        border-color: rgba(255, 135, 90, .46);
+        background: rgba(36, 24, 16, .90);
+      }
+      #${rootId} .codex-usage-hud-alert[hidden] {
+        display: none !important;
+      }
+      #${rootId} .codex-usage-hud-alert-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #ffb86b;
+      }
+      #${rootId} .codex-usage-hud-alert-title {
+        color: #ffb86b;
+        font-size: 11px;
+        font-weight: 800;
       }
       #${rootId} .codex-usage-hud-cache-pill {
         min-width: 0;
@@ -751,14 +1010,9 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-budget-rails {
         display: grid;
         gap: 7px;
-        margin-bottom: 5px;
       }
       #${rootId} .codex-usage-hud-budget-rails:empty {
         display: none;
-      }
-      #${rootId} .codex-usage-hud-budget-rails:not(:empty) + .codex-usage-hud-value {
-        color: #8492a6;
-        font-size: 10px;
       }
       #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-rail {
         height: 34px;
@@ -766,6 +1020,178 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-track-text {
         padding: 0 13px;
         font-size: 12.5px;
+      }
+      #${rootId} .codex-usage-hud-activity-card {
+        display: grid;
+        grid-template-rows: auto auto auto auto minmax(0, 1fr);
+        height: 100%;
+        min-height: 0;
+      }
+      #${rootId} .codex-usage-hud-activity-main {
+        box-sizing: border-box;
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+        margin-bottom: 8px;
+        padding: 10px 12px;
+        border: 1px solid rgba(132, 146, 166, .16);
+        border-radius: 6px;
+        background: #101821;
+      }
+      #${rootId} .codex-usage-hud-activity-main strong {
+        margin-right: 10px;
+        color: #9ccbff;
+        font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+        font-size: 12.5px;
+      }
+      #${rootId} .codex-usage-hud-activity-step {
+        box-sizing: border-box;
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+        margin-bottom: 12px;
+        padding: 8px 10px;
+        border: 1px solid rgba(132, 146, 166, .16);
+        border-radius: 6px;
+        background: #101821;
+      }
+      #${rootId} .codex-usage-hud-activity-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      #${rootId} .codex-usage-hud-activity-metric {
+        box-sizing: border-box;
+        min-width: 0;
+        padding: 8px 10px;
+        border: 1px solid rgba(132, 146, 166, .16);
+        border-radius: 6px;
+        background: #101821;
+      }
+      #${rootId} .codex-usage-hud-activity-metric .codex-usage-hud-value {
+        color: #f3d27a;
+        font-size: 15px;
+        font-weight: 800;
+      }
+      #${rootId} .codex-usage-hud-activity-trail {
+        display: grid;
+        grid-template-rows: auto auto auto;
+        gap: 8px;
+        min-width: 0;
+        min-height: 0;
+      }
+      #${rootId} .codex-usage-hud-activity-trail-head {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+      }
+      #${rootId} .codex-usage-hud-activity-trail .codex-usage-hud-value {
+        font-size: 10.5px;
+      }
+      #${rootId} .codex-usage-hud-activity-timeline {
+        min-width: 0;
+        min-height: calc(34px * 4 + 7px * 3);
+        height: calc(34px * 4 + 7px * 3);
+        max-height: calc(34px * 4 + 7px * 3);
+        display: grid;
+        grid-auto-rows: minmax(34px, auto);
+        align-content: start;
+        gap: 7px;
+        overflow-y: auto;
+        padding-right: 3px;
+        scrollbar-width: thin;
+        scrollbar-color: #273241 #101821;
+      }
+      #${rootId} .codex-usage-hud-activity-timeline[data-fill="spread"] {
+        align-content: start;
+      }
+      #${rootId} .codex-usage-hud-activity-load-more {
+        width: 100%;
+        height: 22px;
+        border: 1px solid rgba(132, 146, 166, .18);
+        border-radius: 5px;
+        background: rgba(156, 203, 255, .06);
+        color: #9ccbff;
+        font-size: 10.5px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-activity-load-more:disabled {
+        opacity: .58;
+        cursor: default;
+      }
+      #${rootId} .codex-usage-hud-activity-load-more:hover {
+        border-color: rgba(156, 203, 255, .36);
+        background: rgba(156, 203, 255, .10);
+      }
+      #${rootId} .codex-usage-hud-activity-load-more:disabled:hover {
+        border-color: rgba(132, 146, 166, .18);
+        background: rgba(156, 203, 255, .06);
+      }
+      #${rootId} .codex-usage-hud-activity-node {
+        position: relative;
+        display: grid;
+        grid-template-columns: 48px 10px minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+        min-width: 0;
+        min-height: 34px;
+      }
+      #${rootId} .codex-usage-hud-activity-node > span:last-child {
+        min-width: 0;
+        display: grid;
+        gap: 1px;
+      }
+      #${rootId} .codex-usage-hud-activity-node-time {
+        color: #718095;
+        font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+        font-size: 10px;
+        line-height: 1.4;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-activity-node-dot {
+        position: relative;
+        width: 7px;
+        height: 7px;
+        margin-top: 4px;
+        border-radius: 50%;
+        background: #9ccbff;
+        box-shadow: 0 0 0 3px rgba(156,203,255,.10);
+      }
+      #${rootId} .codex-usage-hud-activity-node:not(:last-child)::after {
+        content: "";
+        position: absolute;
+        top: 11px;
+        bottom: -15px;
+        left: 55px;
+        width: 1px;
+        background: rgba(132, 146, 166, .24);
+      }
+      #${rootId} .codex-usage-hud-activity-node[data-active="true"] .codex-usage-hud-activity-node-dot {
+        background: #f3d27a;
+        box-shadow: 0 0 0 3px rgba(243,210,122,.12);
+      }
+      #${rootId} .codex-usage-hud-activity-node-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #dce7f2;
+        font-size: 10.5px;
+        font-weight: 800;
+        line-height: 1.35;
+      }
+      #${rootId} .codex-usage-hud-activity-node-detail {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #8492a6;
+        font-size: 10px;
+        line-height: 1.35;
       }
       #${rootId} .codex-usage-hud-section {
         margin: 0 0 6px;
@@ -782,6 +1208,14 @@ RENDERER_HUD_SCRIPT = r"""
         color: #dde7f2;
         font-size: 11px;
         line-height: 1.45;
+      }
+      #${rootId} .codex-usage-hud-activity-main .codex-usage-hud-value,
+      #${rootId} .codex-usage-hud-activity-step .codex-usage-hud-value,
+      #${rootId} .codex-usage-hud-activity-metric .codex-usage-hud-value {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-value.mono {
         font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
@@ -1252,23 +1686,142 @@ RENDERER_HUD_SCRIPT = r"""
         background: linear-gradient(180deg, var(--codex-usage-hud-progress-overflow-highlight), var(--codex-usage-hud-error));
       }
       #${rootId} .codex-usage-hud-panel-header,
-      #${rootId} .codex-usage-hud-top-right,
       #${rootId} .codex-usage-hud-settings-tab.is-active,
       #${rootId} .codex-usage-hud-settings-loading-kicker {
         background: var(--codex-usage-hud-header-surface);
       }
-      #${rootId} .codex-usage-hud-top-right,
+      #${rootId} .codex-usage-hud-top-body {
+        scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);
+      }
+      #${rootId} .codex-usage-hud-top-card,
       #${rootId} .codex-usage-hud-settings-modal-shell,
       #${rootId} .codex-usage-hud-settings-shell {
         background: var(--codex-usage-hud-panel-surface);
       }
-      #${rootId} .codex-usage-hud-top-right,
+      #${rootId} .codex-usage-hud-top-card,
+      #${rootId} .codex-usage-hud-alert,
+      #${rootId} .codex-usage-hud-activity-main,
+      #${rootId} .codex-usage-hud-activity-step,
+      #${rootId} .codex-usage-hud-activity-metric,
+      #${rootId} .codex-usage-hud-session-insight,
+      #${rootId} .codex-usage-hud-token-chip,
+      #${rootId} .codex-usage-hud-heavy-round,
+      #${rootId} .codex-usage-hud-chip,
       #${rootId} .codex-usage-hud-settings-modal-shell,
       #${rootId} .codex-usage-hud-settings-shell,
       #${rootId} .codex-usage-hud-input,
       #${rootId} .codex-usage-hud-select,
       #${rootId} .codex-usage-hud-textarea {
         border-color: var(--codex-usage-hud-divider);
+      }
+      #${rootId} .codex-usage-hud-activity-main,
+      #${rootId} .codex-usage-hud-activity-step,
+      #${rootId} .codex-usage-hud-activity-metric,
+      #${rootId} .codex-usage-hud-session-insight,
+      #${rootId} .codex-usage-hud-heavy-round,
+      #${rootId} .codex-usage-hud-token-chip {
+        background: var(--codex-usage-hud-request-panel-surface);
+      }
+      #${rootId} .codex-usage-hud-card-title,
+      #${rootId} .codex-usage-hud-title,
+      #${rootId} .codex-usage-hud-stat-value,
+      #${rootId} .codex-usage-hud-activity-node-title,
+      #${rootId} .codex-usage-hud-value,
+      #${rootId} .codex-usage-hud-token-chip,
+      #${rootId} .codex-usage-hud-support,
+      #${rootId} .codex-usage-hud-support-qr-title {
+        color: var(--codex-usage-hud-text);
+      }
+      #${rootId} .codex-usage-hud-card-title {
+        color: var(--codex-usage-hud-request-text);
+      }
+      #${rootId} .codex-usage-hud-chip {
+        background: var(--codex-usage-hud-header-surface);
+        color: var(--codex-usage-hud-text);
+      }
+      #${rootId} .codex-usage-hud-chip[data-tone="warning"] {
+        border-color: var(--codex-usage-hud-warning);
+        background: color-mix(in srgb, var(--codex-usage-hud-warning) 14%, var(--codex-usage-hud-panel-surface));
+        color: var(--codex-usage-hud-warning);
+      }
+      #${rootId} .codex-usage-hud-copy-chip[data-copyable="true"]:hover,
+      #${rootId} .codex-usage-hud-heavy-round[data-copyable="true"]:hover,
+      #${rootId} .codex-usage-hud-value[data-copyable="true"]:hover {
+        border-color: var(--codex-usage-hud-accent);
+        background: color-mix(in srgb, var(--codex-usage-hud-accent) 10%, var(--codex-usage-hud-panel-surface));
+        color: var(--codex-usage-hud-accent);
+      }
+      #${rootId} .codex-usage-hud-stat-value.info,
+      #${rootId} .codex-usage-hud-value.blue,
+      #${rootId} .codex-usage-hud-activity-main strong,
+      #${rootId} .codex-usage-hud-activity-load-more {
+        color: var(--codex-usage-hud-info);
+      }
+      #${rootId} .codex-usage-hud-stat-value.cache,
+      #${rootId} .codex-usage-hud-value[data-copied="true"] {
+        color: var(--codex-usage-hud-success) !important;
+      }
+      #${rootId} .codex-usage-hud-stat-label,
+      #${rootId} .codex-usage-hud-section-title,
+      #${rootId} .codex-usage-hud-token-chip span:first-child,
+      #${rootId} .codex-usage-hud-heavy-round-detail,
+      #${rootId} .codex-usage-hud-activity-node-time,
+      #${rootId} .codex-usage-hud-activity-node-detail,
+      #${rootId} .codex-usage-hud-session-composition,
+      #${rootId} .codex-usage-hud-value.muted {
+        color: var(--codex-usage-hud-muted);
+      }
+      #${rootId} .codex-usage-hud-session-composition {
+        color: var(--codex-usage-hud-request-muted);
+      }
+      #${rootId} .codex-usage-hud-heavy-round-title,
+      #${rootId} .codex-usage-hud-activity-metric .codex-usage-hud-value,
+      #${rootId} .codex-usage-hud-value.accent,
+      #${rootId} .codex-usage-hud-value[data-copyable="true"][data-copy-field="slow"] {
+        color: var(--codex-usage-hud-accent);
+      }
+      #${rootId} .codex-usage-hud-value[data-copyable="true"][data-copy-field="gap"] {
+        color: var(--codex-usage-hud-info);
+      }
+      #${rootId} .codex-usage-hud-value.warn,
+      #${rootId} .codex-usage-hud-alert-title {
+        color: var(--codex-usage-hud-warning);
+      }
+      #${rootId} .codex-usage-hud-alert {
+        border-color: var(--codex-usage-hud-warning);
+        background: color-mix(in srgb, var(--codex-usage-hud-warning) 13%, var(--codex-usage-hud-panel-surface));
+      }
+      #${rootId} .codex-usage-hud-alert-dot {
+        background: var(--codex-usage-hud-warning);
+      }
+      #${rootId} .codex-usage-hud-activity-timeline {
+        scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-request-panel-surface);
+      }
+      #${rootId} .codex-usage-hud-activity-load-more {
+        border-color: var(--codex-usage-hud-divider);
+        background: color-mix(in srgb, var(--codex-usage-hud-info) 8%, var(--codex-usage-hud-panel-surface));
+      }
+      #${rootId} .codex-usage-hud-activity-load-more:hover {
+        border-color: var(--codex-usage-hud-info);
+        background: color-mix(in srgb, var(--codex-usage-hud-info) 12%, var(--codex-usage-hud-panel-surface));
+      }
+      #${rootId} .codex-usage-hud-activity-load-more:disabled:hover {
+        border-color: var(--codex-usage-hud-divider);
+        background: color-mix(in srgb, var(--codex-usage-hud-info) 8%, var(--codex-usage-hud-panel-surface));
+      }
+      #${rootId} .codex-usage-hud-activity-node-dot {
+        background: var(--codex-usage-hud-info);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-usage-hud-info) 14%, transparent);
+      }
+      #${rootId} .codex-usage-hud-activity-node:not(:last-child)::after {
+        background: var(--codex-usage-hud-divider);
+      }
+      #${rootId} .codex-usage-hud-activity-node[data-active="true"] .codex-usage-hud-activity-node-dot {
+        background: var(--codex-usage-hud-accent);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-usage-hud-accent) 16%, transparent);
+      }
+      #${rootId} .codex-usage-hud-divider {
+        background: var(--codex-usage-hud-divider);
       }
       #${rootId} .codex-usage-hud-request-list {
         background: var(--codex-usage-hud-request-panel-surface);
@@ -1305,10 +1858,46 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-field-caption {
         color: var(--codex-usage-hud-muted);
       }
-      @media (max-width: 760px) {
+      @container (max-width: 560px) {
         #${rootId} .codex-usage-hud-top-grid {
           grid-template-columns: minmax(0, 1fr);
         }
+        #${rootId} .codex-usage-hud-top-column {
+          height: auto;
+        }
+        #${rootId} .codex-usage-hud-top-column-left,
+        #${rootId} .codex-usage-hud-top-column-right {
+          grid-template-rows: auto;
+        }
+        #${rootId} .codex-usage-hud-activity-card {
+          min-height: auto;
+        }
+      }
+      @container (max-width: 440px) {
+        #${rootId} .codex-usage-hud-session-stats {
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-session-stats .codex-usage-hud-chip {
+          display: none;
+        }
+        #${rootId} .codex-usage-hud-token-breakdown {
+          display: none;
+        }
+        #${rootId} .codex-usage-hud-session-insight {
+          grid-template-columns: auto minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-session-insight .codex-usage-hud-value:last-child,
+        #${rootId} .codex-usage-hud-card-actions .codex-usage-hud-copy-chip {
+          display: none;
+        }
+        #${rootId} .codex-usage-hud-activity-metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-activity-metrics .codex-usage-hud-activity-metric:last-child {
+          display: none;
+        }
+      }
+      @media (max-width: 760px) {
         #${rootId} .codex-usage-hud-session-meta {
           display: none;
         }
@@ -1483,46 +2072,100 @@ RENDERER_HUD_SCRIPT = r"""
           <button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>
         </div>
         <div class="codex-usage-hud-top-body">
+          <div class="codex-usage-hud-alert" data-field-panel="topWarnings" hidden>
+            <span class="codex-usage-hud-alert-dot"></span>
+            <span class="codex-usage-hud-value warn" data-field="topWarnings"></span>
+            <span class="codex-usage-hud-alert-title">预警</span>
+          </div>
           <div class="codex-usage-hud-top-grid">
-            <div>
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-section-title">实时请求</div>
-                <div class="codex-usage-hud-value mono accent" data-field="topConfirmed"></div>
+            <div class="codex-usage-hud-top-column codex-usage-hud-top-column-left">
+              <section class="codex-usage-hud-top-card">
+                <div class="codex-usage-hud-card-head">
+                  <div class="codex-usage-hud-card-title">本会话用量</div>
+                  <div class="codex-usage-hud-card-actions">
+                    <div class="codex-usage-hud-chip" data-field="topSessionRounds"></div>
+                    <div class="codex-usage-hud-chip" data-field="topTaskOrdinalSession"></div>
+                  </div>
+                </div>
+                <div class="codex-usage-hud-session-stats">
+                  <div class="codex-usage-hud-session-stat">
+                    <div class="codex-usage-hud-stat-value" data-field="topSessionCost"></div>
+                    <div class="codex-usage-hud-stat-label">会话金额</div>
+                  </div>
+                  <div class="codex-usage-hud-session-stat">
+                    <div class="codex-usage-hud-stat-value info" data-field="topSessionTokens"></div>
+                    <div class="codex-usage-hud-stat-label">累计 tokens</div>
+                  </div>
+                </div>
+                <div class="codex-usage-hud-session-insight">
+                  <div class="codex-usage-hud-label">会话构成</div>
+                  <div class="codex-usage-hud-value mono blue" data-field="topSessionMix"></div>
+                  <div class="codex-usage-hud-value mono accent" data-field="topSessionAverage"></div>
+                </div>
+                <div class="codex-usage-hud-session-composition" data-field="topSessionComposition"></div>
+                <div class="codex-usage-hud-token-breakdown">
+                  <div class="codex-usage-hud-token-chip"><span>输入</span><b data-field="topSessionInputTokens"></b></div>
+                  <div class="codex-usage-hud-token-chip"><span>缓存</span><b data-field="topSessionCachedTokens"></b></div>
+                  <div class="codex-usage-hud-token-chip"><span>输出</span><b data-field="topSessionOutputTokens"></b></div>
+                  <div class="codex-usage-hud-token-chip"><span>推理</span><b data-field="topSessionReasoningTokens"></b></div>
+                </div>
               </section>
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-value mono" data-field="topCumulative"></div>
-              </section>
-              <div class="codex-usage-hud-divider"></div>
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-section-title">额度</div>
+              <section class="codex-usage-hud-top-card">
+                <div class="codex-usage-hud-card-head">
+                  <div class="codex-usage-hud-card-title">额度进度</div>
+                </div>
                 <div class="codex-usage-hud-budget-rails" data-field="topBudgetProgress"></div>
-                <div class="codex-usage-hud-value warn" data-field="topBudget"></div>
               </section>
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-section-title">当前活动</div>
-                <div class="codex-usage-hud-value blue" data-field="topActivity"></div>
+              <section class="codex-usage-hud-top-card codex-usage-hud-heavy-rounds-card">
+                <div class="codex-usage-hud-card-head">
+                  <div class="codex-usage-hud-card-title">高消耗轮次</div>
+                  <div class="codex-usage-hud-chip" data-field="topHeavyRoundsSummary"></div>
+                </div>
+                <div class="codex-usage-hud-heavy-rounds" data-field="topHeavyRounds"></div>
               </section>
             </div>
-            <div class="codex-usage-hud-top-side">
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-section-title">提醒</div>
-                <div class="codex-usage-hud-value warn" data-field="topWarnings"></div>
-              </section>
-              <div class="codex-usage-hud-divider"></div>
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-section-title">等待</div>
-                <div class="codex-usage-hud-value" data-field="topSlow"></div>
-                <div class="codex-usage-hud-value muted" data-field="topGap"></div>
-              </section>
-              <div class="codex-usage-hud-divider"></div>
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-section-title">状态</div>
-                <div class="codex-usage-hud-value muted" data-field="topStatus"></div>
-              </section>
-              <div class="codex-usage-hud-divider"></div>
-              <section class="codex-usage-hud-section">
-                <div class="codex-usage-hud-section-title">符号说明</div>
-                <div class="codex-usage-hud-value" data-field="topLegend"></div>
+            <div class="codex-usage-hud-top-column codex-usage-hud-top-column-right">
+              <section class="codex-usage-hud-top-card codex-usage-hud-activity-card">
+                <div class="codex-usage-hud-card-head">
+                  <div class="codex-usage-hud-card-title">当前活动</div>
+                  <div class="codex-usage-hud-card-actions">
+                    <div class="codex-usage-hud-chip" data-field="topTaskOrdinalActivity"></div>
+                    <div class="codex-usage-hud-chip" data-tone="warning" data-field="topActivityState"></div>
+                  </div>
+                </div>
+                <div class="codex-usage-hud-activity-step">
+                  <div class="codex-usage-hud-section-title" data-field="topCurrentTaskLabel">当前需求</div>
+                  <div class="codex-usage-hud-value" data-field="topCurrentTask"></div>
+                </div>
+                <div class="codex-usage-hud-activity-main">
+                  <div class="codex-usage-hud-section-title" data-field="topExecutingLabel">正在执行</div>
+                  <div class="codex-usage-hud-value blue" data-field="topExecuting"></div>
+                </div>
+                <div class="codex-usage-hud-activity-metrics">
+                  <div class="codex-usage-hud-activity-metric">
+                    <div class="codex-usage-hud-section-title" data-field="topActivityElapsedLabel">已运行</div>
+                    <div class="codex-usage-hud-value mono" data-field="topActivityElapsed"></div>
+                  </div>
+                  <div class="codex-usage-hud-activity-metric">
+                    <div class="codex-usage-hud-section-title" data-field="topActivityGapLabel">当前等待</div>
+                    <div class="codex-usage-hud-value mono" data-field="topActivityGap"></div>
+                  </div>
+                  <div class="codex-usage-hud-activity-metric">
+                    <div class="codex-usage-hud-section-title" data-field="topActivityLastLabel">需求轮次</div>
+                    <div class="codex-usage-hud-value mono" data-field="topActivityLast"></div>
+                  </div>
+                </div>
+                <div class="codex-usage-hud-activity-trail">
+                  <div class="codex-usage-hud-activity-trail-head">
+                    <div class="codex-usage-hud-section-title">活动轨迹</div>
+                    <div class="codex-usage-hud-card-actions">
+                      <div class="codex-usage-hud-chip codex-usage-hud-copy-chip" data-field="topSlow"></div>
+                      <div class="codex-usage-hud-chip codex-usage-hud-copy-chip" data-field="topGap"></div>
+                    </div>
+                  </div>
+                  <div class="codex-usage-hud-activity-timeline" data-field="topActivityTrail"></div>
+                  <button class="codex-usage-hud-activity-load-more" data-field="topActivityLoadMore" data-action="activity-load-more" type="button">查看更多</button>
+                </div>
               </section>
             </div>
           </div>
@@ -1535,12 +2178,12 @@ RENDERER_HUD_SCRIPT = r"""
   function requestExpandedMarkup() {
     return `
       <div class="codex-usage-hud-expanded-shell">
+        <div class="codex-usage-hud-request-subhead"><span>轮次流水</span><span>最新在上</span></div>
+        <div class="codex-usage-hud-request-list" data-field="requestRows"></div>
         <div class="codex-usage-hud-panel-header" data-action="toggle">
           <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
           <div class="codex-usage-hud-title codex-usage-hud-line" data-action="toggle" data-field="requestLineExpanded"></div>
         </div>
-        <div class="codex-usage-hud-request-subhead"><span>轮次流水</span><span>最新在上</span></div>
-        <div class="codex-usage-hud-request-list" data-field="requestRows"></div>
         ${requestExpandedResizeMarkup()}
       </div>
     `;
@@ -2342,6 +2985,17 @@ RENDERER_HUD_SCRIPT = r"""
       }
       const action = event.target?.closest?.("[data-action]");
       if (!action || !root.contains(action)) return;
+      if (action.dataset.action === "activity-load-more") {
+        event.preventDefault();
+        event.stopPropagation();
+        const list = root.querySelector('[data-field="topActivityTrail"]');
+        if (list) {
+          const current = Number(list.dataset.visibleCount || 4);
+          list.dataset.visibleCount = String(current + 4);
+        }
+        renderActivityTimeline(root, currentPayload()?.topDetails || {});
+        return;
+      }
       if (action.dataset.action === "settings-open") {
         event.preventDefault();
         event.stopPropagation();
@@ -3386,16 +4040,28 @@ RENDERER_HUD_SCRIPT = r"""
 
   function setText(root, field, value) {
     root.querySelectorAll(`[data-field="${field}"]`).forEach((node) => {
+      const text = String(value || "");
       if (node.classList.contains("codex-usage-hud-line")) {
+        node.title = text;
         if (field === "requestLine" || field === "requestLineExpanded") {
-          setAnimatedLineText(node, value);
+          setAnimatedLineText(node, text);
         } else {
           cancelNumericAnimation(node);
-          applyLineText(node, value);
+          applyLineText(node, text);
         }
         return;
       }
-      node.textContent = value || "";
+      node.textContent = text;
+      if (text) node.title = text;
+      else node.removeAttribute("title");
+    });
+  }
+
+  function setFieldTitle(root, field, value) {
+    const title = String(value || "");
+    root.querySelectorAll(`[data-field="${field}"]`).forEach((node) => {
+      if (title) node.title = title;
+      else if (!node.dataset.copyable) node.removeAttribute("title");
     });
   }
 
@@ -3579,6 +4245,18 @@ RENDERER_HUD_SCRIPT = r"""
       const layer = document.createElement("span");
       layer.className = className;
       layer.title = tooltip;
+      if (rightText && textClass === "codex-usage-hud-progress-text") {
+        const leftNode = document.createElement("span");
+        leftNode.className = textClass;
+        leftNode.textContent = label;
+        leftNode.title = tooltip;
+        const rightNode = document.createElement("span");
+        rightNode.className = "codex-usage-hud-progress-right-text";
+        rightNode.textContent = rightText;
+        rightNode.title = tooltip;
+        layer.append(leftNode, rightNode);
+        return layer;
+      }
       const textNode = document.createElement("span");
       textNode.className = textClass;
       textNode.textContent = fullText;
@@ -3633,26 +4311,187 @@ RENDERER_HUD_SCRIPT = r"""
     renderProgressList(root.querySelector('[data-field="topBudgetProgress"]'), progress.budget || []);
   }
 
+  function renderHeavyRounds(root, details) {
+    const list = root.querySelector('[data-field="topHeavyRounds"]');
+    if (!list) return;
+    list.replaceChildren();
+    const items = Array.isArray(details?.heavyRounds) ? details.heavyRounds.slice(0, 3) : [];
+    if (!items.length) {
+      list.dataset.empty = "true";
+      const placeholders = [
+        ["暂无会话高消耗轮次", "会话出现 token 确认后展示 Top 3"],
+        ["等待统计", "不会因新需求开始而清空"],
+        ["保持占位", "新轮次超过历史 Top 3 后刷新"],
+      ];
+      for (const [titleText, detailText] of placeholders) {
+        const empty = document.createElement("div");
+        empty.className = "codex-usage-hud-heavy-round";
+        empty.dataset.placeholder = "true";
+        empty.innerHTML = `
+          <span class="codex-usage-hud-heavy-round-title">${titleText}</span>
+          <span class="codex-usage-hud-heavy-round-detail">${detailText}</span>
+        `;
+        list.appendChild(empty);
+      }
+      return;
+    }
+    delete list.dataset.empty;
+    for (const item of items) {
+      const row = document.createElement("div");
+      row.className = "codex-usage-hud-heavy-round";
+      const tooltip = String(item.tooltip || [item.title, item.detail].filter(Boolean).join("  "));
+      if (tooltip) row.title = tooltip;
+      const copyText = String(item.copyText || "");
+      if (copyText) {
+        row.dataset.copyable = "true";
+        row.dataset.copyText = copyText;
+        row.dataset.copyTitle = tooltip ? `点击复制轮次内容\n${tooltip}` : "点击复制轮次内容";
+        row.dataset.copyField = "heavy";
+        row.title = row.dataset.copyTitle;
+      }
+      const title = document.createElement("span");
+      title.className = "codex-usage-hud-heavy-round-title";
+      title.textContent = String(item.title || "");
+      const detail = document.createElement("span");
+      detail.className = "codex-usage-hud-heavy-round-detail";
+      detail.textContent = String(item.detail || "");
+      if (tooltip) detail.title = tooltip;
+      row.append(title, detail);
+      list.appendChild(row);
+    }
+  }
+
+  function renderActivityTimeline(root, details) {
+    const list = root.querySelector('[data-field="topActivityTrail"]');
+    if (!list) return;
+    const previousScrollTop = list.scrollTop || 0;
+    const button = root.querySelector('[data-field="topActivityLoadMore"]');
+    const items = Array.isArray(details?.activityTrail) ? details.activityTrail : [];
+    const allItems = items.filter((item) => item && (item.title || item.detail || item.time));
+    const signature = allItems.map((item) => [item.time, item.title, item.detail, item.tooltip].join("|")).join(";");
+    const context = [
+      details?.taskOrdinal || "",
+      details?.currentTask || "",
+      details?.title || "",
+    ].join("|");
+    const contextChanged = list.dataset.context !== context;
+    if (contextChanged) {
+      list.dataset.context = context;
+      list.dataset.visibleCount = "4";
+      list.scrollTop = 0;
+    } else if (!list.dataset.visibleCount) {
+      list.dataset.visibleCount = "4";
+    }
+    list.dataset.signature = signature;
+    const visibleCount = Math.max(4, Number(list.dataset.visibleCount || 4));
+    const visibleItems = allItems.slice(0, visibleCount);
+    list.dataset.fill = visibleItems.length > 0 && visibleItems.length <= 4 ? "spread" : "dense";
+    list.replaceChildren();
+    if (button) {
+      button.hidden = false;
+      button.disabled = visibleItems.length >= allItems.length;
+      button.textContent = "查看更多";
+      button.title = visibleItems.length >= allItems.length ? "已显示全部活动轨迹" : "加载更早的活动轨迹";
+    }
+    if (!visibleItems.length) {
+      const empty = document.createElement("div");
+      empty.className = "codex-usage-hud-activity-node";
+      empty.title = "等待会话产生新活动";
+      empty.innerHTML = `
+        <span class="codex-usage-hud-activity-node-time">--:--</span>
+        <span class="codex-usage-hud-activity-node-dot"></span>
+        <span>
+          <span class="codex-usage-hud-activity-node-title">暂无时间节点</span>
+          <span class="codex-usage-hud-activity-node-detail">等待会话产生新活动</span>
+        </span>
+      `;
+      list.appendChild(empty);
+      return;
+    }
+    for (const item of visibleItems) {
+      const row = document.createElement("div");
+      row.className = "codex-usage-hud-activity-node";
+      row.dataset.active = String(!!item.active);
+      const tooltip = String(item.tooltip || [item.time, item.title, item.detail].filter(Boolean).join("  "));
+      if (tooltip) row.title = tooltip;
+      const time = document.createElement("span");
+      time.className = "codex-usage-hud-activity-node-time";
+      time.textContent = String(item.time || "--:--");
+      const dot = document.createElement("span");
+      dot.className = "codex-usage-hud-activity-node-dot";
+      const body = document.createElement("span");
+      const title = document.createElement("span");
+      title.className = "codex-usage-hud-activity-node-title";
+      title.textContent = String(item.title || "活动");
+      title.title = tooltip || title.textContent;
+      const detail = document.createElement("span");
+      detail.className = "codex-usage-hud-activity-node-detail";
+      detail.textContent = String(item.detail || "");
+      detail.title = tooltip || detail.textContent;
+      if (detail.textContent || tooltip) {
+        detail.dataset.copyable = "true";
+        detail.dataset.copyText = tooltip || detail.textContent;
+        detail.dataset.copyTitle = "点击复制轨迹详情";
+        detail.dataset.copyField = "trail";
+        detail.title = tooltip ? `点击复制轨迹详情\n${tooltip}` : "点击复制轨迹详情";
+      }
+      body.append(title, detail);
+      row.append(time, dot, body);
+      list.appendChild(row);
+    }
+    if (!contextChanged) {
+      list.scrollTop = previousScrollTop;
+    }
+  }
+
   function renderTopDetails(root, payload) {
     const details = payload?.topDetails || {};
     const copies = payload?.topCopies || {};
     const mapping = {
       topTitle: details.title || "Codex 会话 / 预算",
       topSession: details.session || "",
-      topConfirmed: details.confirmed || "",
-      topCumulative: details.cumulative || "",
-      topBudget: details.budget || "",
+      topSessionCost: details.sessionCost || "",
+      topSessionTokens: details.sessionTokens || "",
+      topSessionRounds: details.sessionRounds || "",
+      topTaskOrdinalSession: details.taskOrdinalSession || "",
+      topTaskOrdinalActivity: details.taskOrdinalActivity || "",
+      topCacheText: details.cacheText || "",
+      topSessionMix: details.sessionMix || "",
+      topSessionAverage: details.sessionAverage || "",
+      topSessionComposition: details.sessionComposition || "",
+      topHeavyRoundsSummary: details.heavyRoundsSummary || "",
+      topSessionInputTokens: details.sessionInputTokens || "",
+      topSessionCachedTokens: details.sessionCachedTokens || "",
+      topSessionOutputTokens: details.sessionOutputTokens || "",
+      topSessionReasoningTokens: details.sessionReasoningTokens || "",
       topWarnings: details.warnings || "",
-      topActivity: details.activity || "",
+      topExecutingLabel: details.executingLabel || "正在执行",
+      topExecuting: details.executing || "",
+      topCurrentTaskLabel: details.currentTaskLabel || "当前需求",
+      topCurrentTask: details.currentTask || "",
+      topActivityState: details.activityState || "",
+      topActivityElapsedLabel: details.activityElapsedLabel || "已运行",
+      topActivityElapsed: details.activityElapsed || "",
+      topActivityGapLabel: details.activityGapLabel || "当前等待",
+      topActivityGap: details.activityGap || "",
+      topActivityLastLabel: details.activityLastLabel || "需求轮次",
+      topActivityLast: details.activityLast || "",
       topSlow: details.slow || "",
       topGap: details.gap || "",
-      topStatus: details.status || "",
-      topLegend: details.legend || "",
     };
     for (const [field, value] of Object.entries(mapping)) setText(root, field, value);
+    setFieldTitle(root, "topActivityLast", details.activityLastTooltip || details.activityLast || "");
+    renderHeavyRounds(root, details);
+    renderActivityTimeline(root, details);
+    const hasWarnings = !!String(details.warnings || "").trim();
+    root.querySelectorAll('[data-field-panel="topWarnings"]').forEach((node) => {
+      node.hidden = !hasWarnings;
+    });
     renderTopProgress(root, payload || {});
     configureCopy(root, "topSlow", copies.slow || "", "点击复制最慢工具命令", "slow");
     configureCopy(root, "topGap", copies.gap || "", "点击复制最长等待详情", "gap");
+    configureCopy(root, "topCurrentTask", details.currentTask || "", `点击复制当前需求\n${details.currentTask || ""}`, "task");
+    configureCopy(root, "topExecuting", details.executing || "", `点击复制${details.executingLabel || "当前活动"}\n${details.executing || ""}`, "executing");
   }
 
   function markHudStale() {
@@ -3668,7 +4507,10 @@ RENDERER_HUD_SCRIPT = r"""
     setText(root, "requestLineExpanded", "后端未继续刷新，正在显示旧数据");
     setText(root, "topTitle", "HUD 更新暂停");
     setText(root, "topSession", title ? `上次显示 ${title}` : "");
-    setText(root, "topStatus", `后端 ${ageSeconds}s 未更新，当前内容可能不是所选会话`);
+    setText(root, "topWarnings", `后端 ${ageSeconds}s 未更新，当前内容可能不是所选会话`);
+    root.querySelectorAll('[data-field-panel="topWarnings"]').forEach((node) => {
+      node.hidden = false;
+    });
     renderTopProgress(root, { topProgress: {} });
     root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
       node.classList.add(warningClass);
@@ -3793,7 +4635,7 @@ class RendererHudPayload:
     last_event: str
     refreshed_at: str
     warning: bool = False
-    top_details: dict[str, str] = field(default_factory=dict)
+    top_details: dict[str, object] = field(default_factory=dict)
     top_progress: dict[str, object] = field(default_factory=dict)
     top_copies: dict[str, str] = field(default_factory=dict)
     request_rows: list[str] = field(default_factory=list)
@@ -4620,7 +5462,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         overflow_ratio=week_overflow,
     )
     budget_day = _top_progress_metric(
-        f"本日累计 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
+        f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
         right_text="" if day_overflow > 0.0 else _budget_limit_text(snapshot.daily_limit_usd),
@@ -4631,7 +5473,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         ),
     )
     budget_week = _top_progress_metric(
-        f"本周累计 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
+        f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
         right_text="" if week_overflow > 0.0 else _budget_limit_text(snapshot.weekly_limit_usd),
@@ -5007,27 +5849,11 @@ def _request_row_details(snapshot: ParsedSession) -> list[dict[str, object]]:
     return details
 
 
-def _format_budget_progress_meta(snapshot: ParsedSession) -> str:
-    parts = [
-        f"日窗起点 {_format_start(snapshot.day_start)}",
-        f"周窗起点 {_format_start(snapshot.week_start)}",
-    ]
-    if snapshot.week_before_today_cost_usd > 0:
-        parts.append(
-            "本周拆分  "
-            f"今日前 {_format_usage_money(snapshot.week_before_today_tokens, snapshot.week_before_today_cost_usd)}"
-            f" + 当前日窗 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}"
-        )
-    if snapshot.week_adjustment_usd > 0:
-        parts.append(f"人工补充 {_format_money(snapshot.week_adjustment_usd)}")
-    return "\n".join(parts)
-
-
 def _budget_warning_summary(snapshot: ParsedSession) -> str:
     if snapshot.budget_error:
         return snapshot.budget_error
     if not snapshot.budget_warnings:
-        return "提醒  暂无额度提醒"
+        return ""
     messages: list[str] = []
     for warning in snapshot.budget_warnings:
         if warning.startswith("日额度已用") and "超过 " in warning and snapshot.daily_limit_usd > 0:
@@ -5043,7 +5869,7 @@ def _budget_warning_summary(snapshot: ParsedSession) -> str:
             )
             continue
         messages.append(warning)
-    return "提醒  " + "；".join(messages)
+    return "预警  " + "；".join(messages)
 
 
 def _format_warnings(snapshot: ParsedSession) -> str:
@@ -5051,12 +5877,15 @@ def _format_warnings(snapshot: ParsedSession) -> str:
 
 
 def _format_notice(snapshot: ParsedSession) -> str:
+    parts: list[str] = []
     notice = _format_warnings(snapshot)
+    if notice:
+        parts.append(notice)
     if snapshot.error:
-        notice = f"{notice}  |  错误 {_compact(snapshot.error, 80)}"
+        parts.append(f"错误 {_compact(snapshot.error, 80)}")
     if snapshot.request.error:
-        notice = f"{notice}  |  请求 {_compact(snapshot.request.error, 80)}"
-    return notice
+        parts.append(f"请求 {_compact(snapshot.request.error, 80)}")
+    return "  |  ".join(parts)
 
 
 def _format_slow_panel(snapshot: ParsedSession) -> str:
@@ -5080,39 +5909,715 @@ def _format_gap_panel(snapshot: ParsedSession) -> str:
     )
 
 
-def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[str, str]:
+def _token_value_text(value: int | None, estimated: bool = False) -> str:
+    return f"{'~' if estimated else ''}{_short_num(value)}"
+
+
+def _cache_percent_text(snapshot: ParsedSession) -> str:
+    label = _top_session_cache_hit_rate_label(snapshot)
+    return label if label != "-" else "--"
+
+
+def _component_cost(
+    snapshot: ParsedSession,
+    *,
+    input_tokens: int = 0,
+    cached_tokens: int = 0,
+    output_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> float | None:
+    return _COST_ESTIMATOR.calculate(
+        snapshot.request.model,
+        input_tokens,
+        cached_tokens,
+        output_tokens,
+        reasoning_tokens,
+    )
+
+
+def _top_session_composition(snapshot: ParsedSession) -> str:
     confirmed = snapshot.confirmed
+    input_tokens = int(confirmed.cumulative_input or 0)
+    cached_tokens = max(0, min(int(confirmed.cumulative_cached or 0), input_tokens))
+    uncached_tokens = max(0, input_tokens - cached_tokens)
+    output_tokens = int(confirmed.cumulative_output or 0)
+    reasoning_tokens = int(confirmed.cumulative_reasoning or 0)
+    components = [
+        (
+            "↑↻",
+            cached_tokens,
+            _component_cost(snapshot, input_tokens=cached_tokens, cached_tokens=cached_tokens),
+        ),
+        (
+            "↑",
+            uncached_tokens,
+            _component_cost(snapshot, input_tokens=uncached_tokens),
+        ),
+        (
+            "↓",
+            output_tokens,
+            _component_cost(snapshot, output_tokens=output_tokens),
+        ),
+        (
+            "◇",
+            reasoning_tokens,
+            _component_cost(snapshot, reasoning_tokens=reasoning_tokens),
+        ),
+    ]
+    components = [item for item in components if item[1] > 0]
+    if not components:
+        return "暂无可分析的 token 构成"
+    cost_components = [(label, cost) for label, _tokens, cost in components if cost is not None]
+    if len(cost_components) == len(components):
+        return " + ".join(
+            f"{label} {_format_money(cost)}"
+            for label, cost in cost_components
+        )
+    return " + ".join(f"{label} {_short_num(tokens)}" for label, tokens, _cost in components)
+
+
+def _round_duration_text(item: RequestRound) -> str:
+    if item.started_at is None:
+        return "--"
+    finish = item.completed_at
+    if finish is None:
+        return _round_elapsed_text(item.started_at).strip()
+    return _duration_text(seconds_between(item.started_at, finish))
+
+
+def _round_cost_value(item: RequestRound, fallback_model: str) -> tuple[float | None, bool]:
+    cost = item.cost_usd
+    estimated = item.estimated or item.status == "running"
+    if cost is None:
+        cost = _COST_ESTIMATOR.calculate(
+            item.model or fallback_model,
+            item.input_tokens or 0,
+            item.cached_tokens or 0,
+            item.output_tokens or 0,
+            item.reasoning_tokens or 0,
+        )
+        estimated = True
+    return cost, estimated
+
+
+def _session_round_rows(snapshot: ParsedSession) -> list[RequestRound]:
+    rows = list(getattr(snapshot, "session_request_history", []) or [])
+    if rows:
+        return rows
+    return _task_rows(snapshot)
+
+
+def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, str]]:
+    rows = [
+        item
+        for item in _session_round_rows(snapshot)
+        if item.status != "waiting"
+        or item.total_tokens
+        or item.input_tokens
+        or item.output_tokens
+        or item.reasoning_tokens
+        or item.cost_usd
+    ]
+    ranked: list[tuple[float, int, RequestRound, float | None, bool]] = []
+    for item in rows:
+        cost, estimated = _round_cost_value(item, snapshot.request.model)
+        total = int(item.total_tokens or 0)
+        if total <= 0:
+            total = int(item.input_tokens or 0) + int(item.output_tokens or 0)
+        ranked.append((float(cost if cost is not None else -1.0), total, item, cost, estimated))
+    ranked.sort(key=lambda value: (value[0], value[1]), reverse=True)
+
+    details: list[dict[str, str]] = []
+    for _score_cost, total, item, cost, estimated in ranked[:3]:
+        duration = _round_duration_text(item)
+        breakdown = (
+            f"↑{_short_num(item.input_tokens)} "
+            f"↻{_short_num(item.cached_tokens)} "
+            f"↓{_short_num(item.output_tokens)} "
+            f"◇{_short_num(item.reasoning_tokens)}"
+        )
+        title = f"#{item.index} {_format_fixed_money(cost, estimated)} · ∑{_short_num(total)}"
+        detail = _compact(item.activity_summary or f"消耗构成：{breakdown}", 112)
+        copy_text = item.copy_text or (
+            f"轮次 #{item.index}\n"
+            f"金额 {_format_fixed_money(cost, estimated)}\n"
+            f"Tokens {total:,}\n"
+            f"{breakdown}"
+        )
+        details.append(
+            {
+                "title": title,
+                "detail": detail,
+                "copyText": copy_text,
+                "tooltip": (
+                    f"轮次 #{item.index} · {duration}\n"
+                    f"金额 {_format_fixed_money(cost, estimated)} · Tokens {total:,}\n"
+                    f"{detail}"
+                ),
+            }
+        )
+    return details
+
+
+def _top_task_ordinal(snapshot: ParsedSession) -> str:
+    count = int(getattr(snapshot, "task_count", 0) or 0)
+    index = int(getattr(snapshot, "task_index", 0) or 0)
+    if count <= 0:
+        return ""
+    if _top_task_finished(snapshot):
+        return f"共{count}次需求"
+    if index > 0:
+        return f"第{index}次需求"
+    return ""
+
+
+def _top_task_ordinal_parts(snapshot: ParsedSession) -> dict[str, str]:
+    value = _top_task_ordinal(snapshot)
+    if not value:
+        return {
+            "taskOrdinal": "",
+            "taskOrdinalSession": "",
+            "taskOrdinalActivity": "",
+        }
+    if _top_task_finished(snapshot):
+        return {
+            "taskOrdinal": value,
+            "taskOrdinalSession": value,
+            "taskOrdinalActivity": "",
+        }
     return {
+        "taskOrdinal": value,
+        "taskOrdinalSession": "",
+        "taskOrdinalActivity": value,
+    }
+
+
+def _top_session_parts(snapshot: ParsedSession) -> dict[str, str]:
+    confirmed = snapshot.confirmed
+    if snapshot.token_events > 0:
+        average = confirmed.cumulative_total // max(1, snapshot.token_events)
+        session_average = f"均值 {_short_num(average)} /轮"
+    else:
+        session_average = "均值 n/a"
+    parts = {
+        "sessionMix": _top_cache_progress_label(snapshot),
+        "sessionAverage": session_average,
+        "sessionComposition": _top_session_composition(snapshot),
+        "heavyRoundsSummary": "Top 3",
+        "heavyRounds": _top_heavy_rounds(snapshot),
+        "sessionInputTokens": _token_value_text(confirmed.cumulative_input),
+        "sessionCachedTokens": _token_value_text(confirmed.cumulative_cached),
+        "sessionOutputTokens": _token_value_text(confirmed.cumulative_output),
+        "sessionReasoningTokens": _token_value_text(confirmed.cumulative_reasoning),
+    }
+    parts.update(_top_task_ordinal_parts(snapshot))
+    return parts
+
+
+def _top_current_work_item(snapshot: ParsedSession) -> Any | None:
+    for item in snapshot.active_work_items:
+        if getattr(item, "current", False):
+            return item
+    return snapshot.active_work_items[0] if snapshot.active_work_items else None
+
+
+def _top_task_finished(snapshot: ParsedSession) -> bool:
+    return (
+        (snapshot.task_completed_at is not None or snapshot.task_aborted_at is not None)
+        and snapshot.request.status != "running"
+        and not snapshot.slow.current_gap_active
+    )
+
+
+def _top_task_aborted(snapshot: ParsedSession) -> bool:
+    return (
+        snapshot.task_aborted_at is not None
+        and (snapshot.task_completed_at is None or snapshot.task_aborted_at >= snapshot.task_completed_at)
+    )
+
+
+def _top_activity_state(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return "已中止" if _top_task_aborted(snapshot) else "已完成"
+    item = _top_current_work_item(snapshot)
+    if item is not None:
+        label = getattr(item, "status_label", "") or getattr(item, "status_text", "") or getattr(item, "status", "")
+        if label:
+            return _compact(label, 18)
+    if snapshot.request.error or snapshot.error:
+        return "异常"
+    if snapshot.slow.current_gap_active:
+        return "等待中"
+    if snapshot.request.status == "running":
+        return "请求中"
+    activity = _activity_label(snapshot.activity.kind)
+    if activity not in {"空闲", "Token确认"}:
+        return activity
+    return _request_status_label(snapshot.request.status or snapshot.status)
+
+
+def _top_activity_main(snapshot: ParsedSession, *, limit: int = 118) -> str:
+    activity = _activity_label(snapshot.activity.kind)
+    detail = _compact(snapshot.activity.detail, limit)
+    if not detail:
+        detail = _request_status_label(snapshot.request.status or snapshot.status)
+    return f"{activity}：{detail}"
+
+
+def _top_executing_text(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        summary = _compact(snapshot.last_output.detail, 160)
+        if summary:
+            return summary
+        if _top_task_aborted(snapshot):
+            return "任务已中止"
+        return _top_activity_main(snapshot)
+    item = _top_current_work_item(snapshot)
+    if item is not None:
+        label = getattr(item, "status_label", "") or _top_activity_state(snapshot)
+        detail = (
+            getattr(item, "status_text", "")
+            or getattr(item, "detail", "")
+            or getattr(item, "last_text", "")
+            or getattr(item, "progress", "")
+        )
+        if detail:
+            return f"{label}：{_compact(detail, 108)}"
+        return _compact(label, 108)
+    return _top_activity_main(snapshot)
+
+
+def _top_current_task(snapshot: ParsedSession) -> str:
+    prompt = _compact(getattr(snapshot, "task_prompt", ""), 180)
+    if prompt:
+        return prompt
+    item = _top_current_work_item(snapshot)
+    if item is not None:
+        title = (
+            getattr(item, "title", "")
+            or getattr(item, "target_title", "")
+            or getattr(item, "workdir_name", "")
+        )
+        if title:
+            return _compact(title, 128)
+    if snapshot.session_title:
+        return _compact(snapshot.session_title, 128)
+    return f"会话 {snapshot.session_id[-12:]}"
+
+
+def _top_activity_labels(snapshot: ParsedSession) -> dict[str, str]:
+    if _top_task_finished(snapshot):
+        return {
+            "executingLabel": "任务中止" if _top_task_aborted(snapshot) else "完成任务",
+            "currentTaskLabel": "当前需求",
+            "activityElapsedLabel": "已处理",
+            "activityGapLabel": "处理轮次",
+            "activityLastLabel": "处理花费",
+        }
+    return {
+        "executingLabel": "正在执行",
+        "currentTaskLabel": "当前需求",
+        "activityElapsedLabel": "已运行",
+        "activityGapLabel": "当前等待",
+        "activityLastLabel": "需求轮次",
+    }
+
+
+def _task_finished_at(snapshot: ParsedSession) -> datetime | None:
+    if snapshot.task_aborted_at is not None:
+        return snapshot.task_aborted_at
+    return snapshot.task_completed_at
+
+
+def _top_activity_elapsed(snapshot: ParsedSession) -> str:
+    item = _top_current_work_item(snapshot)
+    started_at = None
+    if item is not None:
+        started_at = (
+            getattr(item, "started_at", None)
+            or getattr(item, "task_started_at", None)
+            or getattr(item, "session_started_at", None)
+        )
+    started_at = started_at or snapshot.request.started_at or snapshot.task_started_at or snapshot.session_started_at
+    if _top_task_finished(snapshot):
+        duration = _running_duration(started_at, _task_finished_at(snapshot), snapshot.refreshed_at)
+        return _duration_text(duration)
+    return _round_elapsed_text(started_at).strip()
+
+
+def _task_round_count(snapshot: ParsedSession) -> int:
+    rows = _task_rows(snapshot)
+    count = 0
+    for item in rows:
+        if item.status == "waiting" and not (
+            item.total_tokens
+            or item.input_tokens
+            or item.output_tokens
+            or item.reasoning_tokens
+            or item.cost_usd
+        ):
+            continue
+        count += 1
+    return count
+
+
+def _task_cache_hit_rate_label(snapshot: ParsedSession, rows: list[RequestRound]) -> str:
+    input_tokens = sum(int(item.input_tokens or 0) for item in rows)
+    if input_tokens <= 0:
+        return "--"
+    cached_tokens = sum(int(item.cached_tokens or 0) for item in rows)
+    cached_tokens = max(0, min(cached_tokens, input_tokens))
+    estimated = any(item.estimated or item.status == "running" for item in rows)
+    label = _format_rate_marker(cached_tokens / max(1, input_tokens), estimated)
+    return label[1:] if label.startswith("◎") else label
+
+
+def _top_task_spend_text(snapshot: ParsedSession) -> str:
+    rows = _task_rows(snapshot)
+    (
+        _input_tokens,
+        _cached_tokens,
+        _output_tokens,
+        _reasoning_tokens,
+        total_tokens,
+        cost,
+        estimated,
+    ) = _task_total(snapshot)
+    return (
+        f"{_short_num(total_tokens)}Tokens/"
+        f"{_format_fixed_money(cost, estimated)}/"
+        f"{_task_cache_hit_rate_label(snapshot, rows)}"
+    )
+
+
+def _top_task_spend_money_text(snapshot: ParsedSession) -> str:
+    (
+        _input_tokens,
+        _cached_tokens,
+        _output_tokens,
+        _reasoning_tokens,
+        _total_tokens,
+        cost,
+        estimated,
+    ) = _task_total(snapshot)
+    return _format_fixed_money(cost, estimated)
+
+
+def _top_activity_gap_value(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return f"{_task_round_count(snapshot)}轮"
+    return snapshot.slow.current_gap
+
+
+def _top_activity_last(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return _top_task_spend_money_text(snapshot)
+    return f"{_task_round_count(snapshot)}轮"
+
+
+def _top_activity_last_tooltip(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return _top_task_spend_text(snapshot)
+    return f"本次需求已产生 {_task_round_count(snapshot)} 轮"
+
+
+def _duration_text(seconds: float | None) -> str:
+    if seconds is None:
+        return "--"
+    amount = max(0.0, float(seconds))
+    if amount < 60:
+        return f"{amount:.1f}s"
+    minutes = int(amount // 60)
+    seconds_left = int(amount % 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds_left}s"
+    hours = minutes // 60
+    minutes_left = minutes % 60
+    return f"{hours}h{minutes_left}m"
+
+
+def _running_duration(start: datetime | None, end: datetime | None, now: datetime) -> float | None:
+    if start is None:
+        return None
+    finish = end or now.astimezone(start.tzinfo) if start.tzinfo is not None else end or now.replace(tzinfo=None)
+    return max(0.0, (finish - start).total_seconds())
+
+
+def _first_duration_fragment(value: str) -> str:
+    match = re.search(r"\d+(?:\.\d+)?s|\d+m\d+s|\d+h\d+m", value or "")
+    return match.group(0) if match else "--"
+
+
+def _top_slow_chip(snapshot: ParsedSession) -> str:
+    call = snapshot.slow.slowest_tool_call
+    if call is not None:
+        duration = _duration_text(_running_duration(call.start, call.end, snapshot.refreshed_at))
+        return _compact(f"最慢工具:{duration}", 28)
+    if snapshot.slow.slowest_tool and not snapshot.slow.slowest_tool.startswith("无"):
+        return _compact(f"最慢工具:{_first_duration_fragment(snapshot.slow.slowest_tool)}", 28)
+    return "最慢工具:--"
+
+
+def _top_gap_chip(snapshot: ParsedSession) -> str:
+    detail = snapshot.slow.longest_gap_detail
+    if detail is not None:
+        return _compact(f"最长等待:{_duration_text(detail.duration_seconds)}", 28)
+    if snapshot.slow.longest_gap and not snapshot.slow.longest_gap.startswith("无"):
+        return _compact(f"最长等待:{_first_duration_fragment(snapshot.slow.longest_gap)}", 28)
+    return "最长等待:--"
+
+
+def _timeline_time(value: datetime | None) -> str:
+    if value is None:
+        return "--:--"
+    return value.astimezone().strftime("%H:%M:%S")
+
+
+def _tool_call_arguments_summary(call: ToolCallTiming) -> str:
+    raw_args = (call.args or "").strip()
+    if not raw_args:
+        return ""
+    try:
+        payload = json.loads(raw_args)
+    except json.JSONDecodeError:
+        return _compact(raw_args, 96)
+    if isinstance(payload, dict):
+        for key in ("command", "query", "q", "url", "path"):
+            value = payload.get(key)
+            if value:
+                return _compact(value, 96)
+    return _compact(raw_args, 96)
+
+
+def _tool_call_timeline_detail(call: ToolCallTiming, duration: str) -> str:
+    args = _tool_call_arguments_summary(call)
+    if args:
+        return f"{duration} {call.name} · {args}"
+    return f"{duration} {call.name}"
+
+
+def _is_token_confirm_event(title: str, detail: str) -> bool:
+    return title == "Token确认" or "received token_count" in detail
+
+
+def _merge_activity_events(
+    events: list[tuple[datetime, int, dict[str, object]]],
+) -> list[dict[str, object]]:
+    grouped: dict[str, list[tuple[datetime, int, dict[str, object]]]] = {}
+    for event in events:
+        moment = event[0]
+        key = moment.astimezone().replace(microsecond=0).isoformat()
+        grouped.setdefault(key, []).append(event)
+
+    merged: list[tuple[datetime, int, dict[str, object], bool]] = []
+    for group in grouped.values():
+        group.sort(key=lambda item: item[1])
+        moment = max(item[0] for item in group)
+        order = max(item[1] for item in group)
+        group_titles = [str(item[2].get("title") or "") for item in group]
+        suppress_request_complete = "请求完成" in group_titles and any(
+            title in group_titles for title in ("任务完成", "任务中止")
+        )
+        suppress_round_title = any(title in group_titles for title in ("任务完成", "任务中止"))
+        meaningful_titles: list[str] = []
+        token_titles: list[str] = []
+        details: list[str] = []
+        tooltip_lines: list[str] = []
+        active = False
+        has_meaningful = False
+        for _moment, _order, item in group:
+            title = str(item.get("title") or "")
+            detail = str(item.get("detail") or "")
+            token_confirm = _is_token_confirm_event(title, detail)
+            if suppress_request_complete and title == "请求完成":
+                active = active or bool(item.get("active"))
+                continue
+            if suppress_round_title and title.startswith("轮次 #"):
+                active = active or bool(item.get("active"))
+                continue
+            title_bucket = token_titles if token_confirm else meaningful_titles
+            if title and title not in title_bucket:
+                title_bucket.append(title)
+            has_meaningful = has_meaningful or not token_confirm
+            if detail and not token_confirm and detail not in details:
+                details.append(detail)
+            tooltip = str(item.get("tooltip") or "").strip()
+            if tooltip and not token_confirm and tooltip not in tooltip_lines:
+                tooltip_lines.append(tooltip)
+            active = active or bool(item.get("active"))
+
+        titles = meaningful_titles + token_titles
+        title_text = "，".join(titles) if titles else "活动"
+        detail_text = "；".join(details)
+        tooltip = "\n".join(tooltip_lines) if tooltip_lines else title_text
+        merged.append(
+            (
+                moment,
+                order,
+                {
+                    "time": _timeline_time(moment),
+                    "title": _compact(title_text, 40),
+                    "detail": _compact(detail_text, 96),
+                    "tooltip": _compact(f"{_timeline_time(moment)}  {title_text}\n{tooltip}", 320),
+                    "active": active,
+                },
+                has_meaningful,
+            )
+        )
+
+    meaningful = [item for item in merged if item[3]]
+    if meaningful:
+        merged = meaningful
+    merged.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in merged]
+
+
+def _activity_round_detail(item: RequestRound, fallback_model: str) -> str:
+    cost, estimated = _round_cost_value(item, fallback_model)
+    total = int(item.total_tokens or 0)
+    if total <= 0:
+        total = int(item.input_tokens or 0) + int(item.output_tokens or 0)
+    parts = [
+        _format_fixed_money(cost, estimated),
+        f"∑{_short_num(total)}",
+    ]
+    summary = _compact(item.activity_summary, 64)
+    if summary:
+        parts.append(summary)
+    else:
+        parts.append(
+            " ".join(
+                [
+                    f"↑{_short_num(item.input_tokens)}",
+                    f"↻{_short_num(item.cached_tokens)}",
+                    f"↓{_short_num(item.output_tokens)}",
+                    f"◇{_short_num(item.reasoning_tokens)}",
+                ]
+            )
+        )
+    return " · ".join(parts)
+
+
+def _top_activity_trail(snapshot: ParsedSession) -> list[dict[str, object]]:
+    now = snapshot.refreshed_at or datetime.now().astimezone()
+    events: list[tuple[datetime, int, dict[str, object]]] = []
+    seen: set[tuple[str, str, str]] = set()
+    order = 0
+    row_times = [
+        moment
+        for item in _task_rows(snapshot)
+        for moment in (item.started_at, item.completed_at)
+        if moment is not None
+    ]
+    task_start = snapshot.task_started_at or (min(row_times) if row_times else None)
+
+    def add(moment: datetime | None, title: str, detail: str, *, active: bool = False) -> None:
+        nonlocal order
+        if moment is None:
+            return
+        if task_start is not None:
+            current = moment.astimezone(task_start.tzinfo) if task_start.tzinfo else moment.replace(tzinfo=None)
+            start = task_start if task_start.tzinfo else task_start.replace(tzinfo=None)
+            if current < start:
+                return
+        key = (moment.astimezone().isoformat(), title, detail)
+        if key in seen:
+            return
+        seen.add(key)
+        order += 1
+        events.append(
+            (
+                moment,
+                order,
+                {
+                    "time": _timeline_time(moment),
+                    "title": _compact(title, 26),
+                    "detail": _compact(detail, 72),
+                    "tooltip": _compact(f"{_timeline_time(moment)}  {title}  {detail}", 260),
+                    "active": active,
+                },
+            )
+        )
+
+    add(snapshot.task_started_at, "任务开始", _top_current_task(snapshot))
+    for item in _task_rows(snapshot):
+        moment = item.completed_at or item.started_at
+        if moment is None:
+            continue
+        title = f"轮次 #{item.index}"
+        active = item.status == "running" and item.completed_at is None
+        add(
+            moment,
+            title,
+            _activity_round_detail(item, snapshot.request.model),
+            active=active,
+        )
+    add(
+        snapshot.request.started_at,
+        "请求开始",
+        snapshot.request.model or _request_status_label(snapshot.request.status),
+        active=snapshot.request.status == "running" and snapshot.request.completed_at is None,
+    )
+    call = snapshot.slow.slowest_tool_call
+    if call is not None:
+        duration = _duration_text(_running_duration(call.start, call.end, now))
+        add(
+            call.start,
+            "工具调用",
+            _tool_call_timeline_detail(call, duration),
+            active=call.end is None,
+        )
+        completion_detail = _tool_call_timeline_detail(call, duration)
+        if call.output:
+            completion_detail = f"{completion_detail} · 返回 {_compact(call.output, 80)}"
+        add(call.end, "工具完成", completion_detail)
+    gap = snapshot.slow.longest_gap_detail
+    if gap is not None:
+        label = _gap_label(gap.category)
+        add(gap.start, "等待开始", f"{label}：{gap.from_event}")
+        add(gap.end, "等待结束", f"{_duration_text(gap.duration_seconds)} {label}：{gap.to_event}")
+    add(snapshot.activity.timestamp, _activity_label(snapshot.activity.kind), snapshot.activity.detail, active=True)
+    add(snapshot.request.completed_at, "请求完成", snapshot.request.model or "模型请求")
+    add(snapshot.task_completed_at, "任务完成", _top_current_task(snapshot))
+    add(snapshot.task_aborted_at, "任务中止", _top_current_task(snapshot))
+    recent_detail = _top_activity_main(snapshot, limit=72)
+    if "received token_count" not in recent_detail:
+        add(snapshot.last_event_time, "最近事件", recent_detail)
+    if not events:
+        add(snapshot.refreshed_at, "刷新", "等待会话产生新活动")
+
+    return _merge_activity_events(events)
+
+
+def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[str, object]:
+    confirmed = snapshot.confirmed
+    session_parts = _top_session_parts(snapshot)
+    activity_labels = _top_activity_labels(snapshot)
+    details = {
         "title": _top_expanded_header_title(snapshot),
         "session": (
             f"会话 {snapshot.session_id[-12:]} | "
             f"行 {snapshot.line_count} | 确认 {snapshot.token_events}"
         ),
-        "confirmed": "本次请求  " + _request_counter(snapshot),
-        "cumulative": (
-            "累计确认  "
-            f"总 {confirmed.cumulative_total:,}   "
-            f"输入 {confirmed.cumulative_input:,}   "
-            f"缓存 {confirmed.cumulative_cached:,}   "
-            f"缓存率 {_session_cache_hit_rate_label(snapshot)}\n"
-            f"输出 {confirmed.cumulative_output:,}   "
-            f"推理 {confirmed.cumulative_reasoning:,}   "
-            f"金额 {_format_money(session_cost)}"
-        ),
-        "budget": _format_budget_progress_meta(snapshot),
+        "sessionCost": _format_money(session_cost),
+        "sessionTokens": _short_num(confirmed.cumulative_total),
+        "sessionRounds": f"{snapshot.token_events} 轮确认",
+        "cacheText": _top_cache_progress_label(snapshot),
         "warnings": _format_notice(snapshot),
-        "activity": (
-            f"{_activity_label(snapshot.activity.kind)}："
-            f"{_compact(snapshot.activity.detail, 135)}"
-        ),
-        "legend": TOKEN_LEGEND_TEXT,
-        "slow": _format_slow_panel(snapshot),
-        "gap": _format_gap_panel(snapshot),
-        "status": (
-            f"{_budget_status(snapshot)}\n"
-            f"最后 {_format_time(snapshot.last_event_time)}  刷新 {_format_time(snapshot.refreshed_at)}"
-        ),
+        "executing": _top_executing_text(snapshot),
+        "currentTask": _top_current_task(snapshot),
+        "activityState": _top_activity_state(snapshot),
+        "activityElapsed": _top_activity_elapsed(snapshot),
+        "activityGap": _top_activity_gap_value(snapshot),
+        "activityLast": _top_activity_last(snapshot),
+        "activityLastTooltip": _top_activity_last_tooltip(snapshot),
+        "activityTrail": _top_activity_trail(snapshot),
+        "slow": _top_slow_chip(snapshot),
+        "gap": _top_gap_chip(snapshot),
     }
+    details.update(session_parts)
+    details.update(activity_labels)
+    return details
 
 
 __all__ = [

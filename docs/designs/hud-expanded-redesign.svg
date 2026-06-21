@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="780" viewBox="0 0 1120 780">
+  <defs>
+    <linearGradient id="pageBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080B0F"/>
+      <stop offset="0.55" stop-color="#11161D"/>
+      <stop offset="1" stop-color="#090D11"/>
+    </linearGradient>
+    <linearGradient id="cacheFill" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9CCBFF"/>
+      <stop offset="1" stop-color="#6F7CF6"/>
+    </linearGradient>
+    <linearGradient id="dayFill" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F3D27A"/>
+      <stop offset="1" stop-color="#E9B75D"/>
+    </linearGradient>
+    <linearGradient id="weekFill" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#B5DD92"/>
+      <stop offset="1" stop-color="#75C889"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <style>
+      .ui { font-family: "Microsoft YaHei UI", "Noto Sans CJK SC", "Segoe UI", sans-serif; }
+      .title { fill: #E8EEF7; font-size: 22px; font-weight: 700; }
+      .subtitle { fill: #8492A6; font-size: 13px; }
+      .label { fill: #A9B6C6; font-size: 12px; font-weight: 700; }
+      .muted { fill: #8492A6; font-size: 11px; }
+      .small { fill: #B8C6D8; font-size: 11px; }
+      .value { fill: #E8EEF7; font-size: 26px; font-weight: 800; }
+      .value2 { fill: #9CCBFF; font-size: 24px; font-weight: 800; }
+      .mono { font-family: "Cascadia Mono", "Consolas", monospace; }
+      .chipText { fill: #DCE7F2; font-size: 11px; font-weight: 700; }
+      .sectionTitle { fill: #CBD8E8; font-size: 13px; font-weight: 800; }
+      .accent { fill: #F3D27A; }
+      .info { fill: #9CCBFF; }
+      .success { fill: #8FE3A1; }
+      .warning { fill: #FFB86B; }
+    </style>
+  </defs>
+
+  <rect width="1120" height="780" fill="url(#pageBg)"/>
+
+  <g class="ui">
+    <text x="54" y="48" class="title">顶部 HUD 展开态内容优化</text>
+    <text x="54" y="72" class="subtitle">默认态只展示用户决策需要的信息：本会话用量、额度进度、当前活动。提醒、状态栏、符号说明默认不占位。</text>
+
+    <!-- Codex app background hint -->
+    <rect x="54" y="98" width="1012" height="560" rx="10" fill="#181818" stroke="#273241" stroke-opacity="0.55"/>
+    <rect x="54" y="98" width="1012" height="38" rx="10" fill="#202020"/>
+    <text x="76" y="123" class="muted">≡</text>
+    <text x="104" y="123" class="small" font-weight="700">Codex App</text>
+    <rect x="86" y="164" width="620" height="16" rx="4" fill="#2A2A2A" opacity="0.45"/>
+    <rect x="86" y="196" width="700" height="12" rx="3" fill="#2A2A2A" opacity="0.32"/>
+    <rect x="86" y="224" width="580" height="12" rx="3" fill="#2A2A2A" opacity="0.26"/>
+    <rect x="86" y="252" width="660" height="12" rx="3" fill="#2A2A2A" opacity="0.22"/>
+
+    <!-- Main HUD -->
+    <g filter="url(#shadow)">
+      <rect x="126" y="126" width="868" height="416" rx="8" fill="#10161D" fill-opacity="0.96" stroke="#3A485A" stroke-opacity="0.65"/>
+      <rect x="126" y="126" width="868" height="42" rx="8" fill="#202833"/>
+      <line x1="126" y1="168" x2="994" y2="168" stroke="#273241"/>
+      <text x="146" y="153" class="muted">≡</text>
+      <text x="174" y="153" class="label" fill="#E8EEF7">修复HUD展开热区位移</text>
+      <text x="382" y="153" class="muted">会话 bde06f8d03ba · 32 轮确认</text>
+      <rect x="788" y="134" width="152" height="26" rx="13" fill="#182537" stroke="#6F7CF6" stroke-opacity="0.34"/>
+      <rect x="788" y="134" width="141" height="26" rx="13" fill="url(#cacheFill)" opacity="0.86"/>
+      <text x="810" y="151" class="chipText" fill="#07131F">缓存命中 93%</text>
+      <text x="962" y="153" class="muted">⚙</text>
+
+      <!-- Session usage card -->
+      <rect x="144" y="188" width="348" height="164" rx="8" fill="#141B24" stroke="#273241"/>
+      <text x="162" y="214" class="sectionTitle">本会话用量</text>
+      <text x="162" y="252" class="value mono">$3.08</text>
+      <text x="162" y="273" class="muted">本会话金额</text>
+      <text x="300" y="252" class="value2 mono">2.95M</text>
+      <text x="302" y="273" class="muted">累计 tokens</text>
+      <rect x="400" y="228" width="74" height="26" rx="13" fill="#1C2330" stroke="#334153"/>
+      <text x="415" y="245" class="chipText">32 轮</text>
+      <rect x="162" y="292" width="312" height="32" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="176" y="312" class="small">当前请求</text>
+      <text x="252" y="312" class="info mono" font-size="12" font-weight="700">112k tokens</text>
+      <text x="356" y="312" class="accent mono" font-size="12" font-weight="700">估算 $0.088</text>
+      <rect x="162" y="333" width="70" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="174" y="351" class="muted">输入</text>
+      <text x="204" y="351" class="small mono">3.14M</text>
+      <rect x="238" y="333" width="70" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="250" y="351" class="muted">缓存</text>
+      <text x="280" y="351" class="small mono">2.92M</text>
+      <rect x="314" y="333" width="70" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="326" y="351" class="muted">输出</text>
+      <text x="356" y="351" class="small mono">13.5k</text>
+      <rect x="390" y="333" width="84" height="28" rx="6" fill="#101821" stroke="#273241"/>
+      <text x="402" y="351" class="muted">推理</text>
+      <text x="432" y="351" class="small mono">5.2k</text>
+
+      <!-- Budget card -->
+      <rect x="144" y="368" width="348" height="144" rx="8" fill="#141B24" stroke="#273241"/>
+      <text x="162" y="394" class="sectionTitle">额度进度</text>
+      <text x="426" y="394" class="muted">只看剩余</text>
+      <text x="162" y="424" class="label">今日</text>
+      <text x="214" y="424" class="small mono">30.7M / $25.90</text>
+      <text x="383" y="424" class="success mono" font-size="11" font-weight="700">剩余 $74.10</text>
+      <rect x="162" y="436" width="312" height="12" rx="6" fill="#262C33" stroke="#3B4149"/>
+      <rect x="162" y="436" width="81" height="12" rx="6" fill="url(#dayFill)"/>
+      <text x="452" y="448" class="muted mono" font-size="10">26%</text>
+      <text x="162" y="478" class="label">本周</text>
+      <text x="214" y="478" class="small mono">156.5M / $103.65</text>
+      <text x="377" y="478" class="success mono" font-size="11" font-weight="700">剩余 $296.35</text>
+      <rect x="162" y="490" width="312" height="12" rx="6" fill="#262C33" stroke="#3B4149"/>
+      <rect x="162" y="490" width="81" height="12" rx="6" fill="url(#weekFill)"/>
+      <text x="452" y="502" class="muted mono" font-size="10">26%</text>
+
+      <!-- Activity card -->
+      <rect x="512" y="188" width="464" height="324" rx="8" fill="#141B24" stroke="#273241"/>
+      <text x="530" y="214" class="sectionTitle">当前活动</text>
+      <rect x="884" y="197" width="74" height="24" rx="12" fill="#241B10" stroke="#FFB86B" stroke-opacity="0.35"/>
+      <text x="898" y="213" class="warning" font-size="11" font-weight="800">工具执行中</text>
+      <rect x="530" y="232" width="428" height="58" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="548" y="254" class="small">正在执行</text>
+      <text x="622" y="254" class="info mono" font-size="13" font-weight="800">shell command</text>
+      <text x="548" y="276" class="muted">当前任务：received token count · 等待任务结束</text>
+      <rect x="530" y="306" width="132" height="50" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="548" y="328" class="muted">已运行</text>
+      <text x="548" y="347" class="accent mono" font-size="17" font-weight="800">12.4s</text>
+      <rect x="678" y="306" width="132" height="50" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="696" y="328" class="muted">等待确认</text>
+      <text x="696" y="347" class="warning mono" font-size="17" font-weight="800">24.6s</text>
+      <rect x="826" y="306" width="132" height="50" rx="7" fill="#101821" stroke="#273241"/>
+      <text x="844" y="328" class="muted">最近事件</text>
+      <text x="844" y="347" class="small mono" font-size="15" font-weight="800">19:57:11</text>
+      <text x="530" y="386" class="label">活动轨迹</text>
+      <circle cx="540" cy="414" r="4" fill="#9CCBFF"/>
+      <line x1="540" y1="418" x2="540" y2="468" stroke="#334153"/>
+      <circle cx="540" cy="442" r="4" fill="#FFB86B"/>
+      <circle cx="540" cy="470" r="4" fill="#8492A6"/>
+      <text x="558" y="418" class="small mono">19:56:49</text>
+      <text x="628" y="418" class="small">发送本次模型请求</text>
+      <text x="558" y="446" class="small mono">19:57:03</text>
+      <text x="628" y="446" class="small">启动 shell command，解析 token 输出</text>
+      <text x="558" y="474" class="small mono">现在</text>
+      <text x="628" y="474" class="muted">等待工具返回；未触发额度或解析异常</text>
+    </g>
+
+    <!-- Warning state sample -->
+    <text x="126" y="592" class="label">预警触发态插入示例</text>
+    <text x="260" y="592" class="muted">正常状态下整条隐藏；只有额度阈值、请求错误、解析错误时出现。</text>
+    <g filter="url(#shadow)">
+      <rect x="126" y="610" width="868" height="74" rx="8" fill="#10161D" fill-opacity="0.96" stroke="#3A485A" stroke-opacity="0.65"/>
+      <rect x="144" y="628" width="832" height="38" rx="7" fill="#241810" stroke="#FF875A" stroke-opacity="0.52"/>
+      <circle cx="164" cy="647" r="5" fill="#FFB86B"/>
+      <text x="180" y="651" class="warning" font-size="13" font-weight="800">额度预警</text>
+      <text x="262" y="651" class="small">今日已用 93% · 剩余 $7.00 · 已超过 90% 阈值</text>
+      <text x="806" y="651" class="muted">触发后置顶显示</text>
+    </g>
+  </g>
+</svg>

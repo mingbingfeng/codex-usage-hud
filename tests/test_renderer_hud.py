@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.core.parser import (
+    Activity,
     ConfirmedTokens,
     GapTiming,
     ParsedSession,
@@ -71,6 +72,8 @@ class RendererHudPayloadTests(unittest.TestCase):
             selection_source="cdp:Live Renderer Thread",
             refreshed_at=datetime(2026, 6, 5, 13, 10, 11).astimezone(),
             last_event_time=datetime(2026, 6, 5, 13, 10, 1).astimezone(),
+            task_index=3,
+            task_count=3,
             confirmed=ConfirmedTokens(
                 cumulative_total=12345,
                 cumulative_input=10000,
@@ -163,11 +166,11 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(collapsed_progress[1]["rightText"], "总 $100.00")
         self.assertEqual(collapsed_progress[2]["rightText"], "总 $400.00")
         self.assertEqual(top_progress["cache"]["label"], "缓存命中 ~61%")
-        self.assertEqual(top_progress["budget"][0]["label"], "本日累计 50k/$0.500")
+        self.assertEqual(top_progress["budget"][0]["label"], "今日 50k/$0.500")
         self.assertEqual(top_progress["budget"][0]["rightText"], "总 $100.00")
         self.assertNotIn("overflowRatio", top_progress["budget"][0])
         self.assertNotIn("overflowBadge", top_progress["budget"][0])
-        self.assertEqual(top_progress["budget"][1]["label"], "本周累计 200k/$1.50")
+        self.assertEqual(top_progress["budget"][1]["label"], "本周 200k/$1.50")
         self.assertEqual(top_progress["budget"][1]["rightText"], "总 $400.00")
         request_line = str(payload["requestLine"])
         self.assertIn("↑~1,200", request_line)
@@ -194,7 +197,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(payload["theme"]["tokens"]["accent"], "#339cff")
         self.assertIn("updateState", payload)
         self.assertEqual(payload["appVersion"], "1.0.2")
-        self.assertIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("本会话用量", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("符号说明", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("只看剩余", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("applyTheme(root, nextPayload)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("--codex-usage-hud-surface", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-update-button", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -302,8 +308,33 @@ class RendererHudPayloadTests(unittest.TestCase):
             renderer_hud.RENDERER_HUD_SCRIPT,
         )
         self.assertIn("codex-usage-hud-budget-rails", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("grid-template-columns: minmax(320px, 1fr) minmax(230px, 37%);", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("min-width: max(100%, 562px);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("container-type: inline-size;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("@container (max-width: 560px)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("@container (max-width: 440px)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-activity-timeline", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-field="topActivityLoadMore"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("list.appendChild(button)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("height: calc(34px * 4 + 7px * 3);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("grid-auto-rows: minmax(34px, auto);", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("bottom: -15px;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("list.dataset.context !== context", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const previousScrollTop = list.scrollTop || 0;", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("if (!contextChanged)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("list.dataset.signature !== signature", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("grid-template-rows: repeat(3, minmax(32px, 1fr));", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("暂无会话高消耗轮次", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertLess(
+            renderer_hud.RENDERER_HUD_SCRIPT.index('data-field="topTaskOrdinalSession"'),
+            renderer_hud.RENDERER_HUD_SCRIPT.index("当前活动"),
+        )
+        self.assertGreater(
+            renderer_hud.RENDERER_HUD_SCRIPT.index('data-field="topTaskOrdinalActivity"'),
+            renderer_hud.RENDERER_HUD_SCRIPT.index("当前活动"),
+        )
+        self.assertIn("codex-usage-hud-copy-chip", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("正在执行", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("当前需求", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("interpolateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("canAnimateNumericText", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("FileEditViewWindowHelp", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -313,7 +344,16 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("manualTopRect", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("footerGapSlot", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codexUsageHudPanelState:v5", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("grid-template-rows: auto auto minmax(0, 1fr)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("grid-template-rows: auto minmax(0, 1fr) auto", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertLess(
+            renderer_hud.RENDERER_HUD_SCRIPT.index(
+                '<div class="codex-usage-hud-request-list" data-field="requestRows"></div>'
+            ),
+            renderer_hud.RENDERER_HUD_SCRIPT.index(
+                '<div class="codex-usage-hud-panel-header" data-action="toggle">',
+                renderer_hud.RENDERER_HUD_SCRIPT.index("function requestExpandedMarkup()"),
+            ),
+        )
         self.assertNotIn("Σ", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="reset"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("↯", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -323,8 +363,32 @@ class RendererHudPayloadTests(unittest.TestCase):
         top_details = payload["topDetails"]
         self.assertIsInstance(top_details, dict)
         self.assertEqual(top_details["title"], "Live Renderer Thread")
-        self.assertIn("本次请求", str(top_details["confirmed"]))
-        self.assertIn("日窗起点", str(top_details["budget"]))
+        self.assertEqual(top_details["sessionCost"], "$0.123")
+        self.assertEqual(top_details["sessionTokens"], "12k")
+        self.assertEqual(top_details["taskOrdinal"], "第3次需求")
+        self.assertEqual(top_details["taskOrdinalSession"], "")
+        self.assertEqual(top_details["taskOrdinalActivity"], "第3次需求")
+        self.assertEqual(top_details["sessionMix"], "缓存命中 ~61%")
+        self.assertEqual(top_details["sessionAverage"], "均值 n/a")
+        self.assertIn("↑↻ $", top_details["sessionComposition"])
+        self.assertNotIn("=", top_details["sessionComposition"])
+        self.assertNotIn("\n", top_details["sessionComposition"])
+        self.assertFalse(str(top_details["sessionComposition"]).startswith("$"))
+        self.assertIn("heavyRounds", top_details)
+        self.assertEqual(top_details["activityLastLabel"], "需求轮次")
+        self.assertEqual(top_details["activityLast"], "1轮")
+        self.assertEqual(top_details["sessionInputTokens"], "10k")
+        self.assertEqual(top_details["sessionCachedTokens"], "6,000")
+        self.assertEqual(top_details["sessionOutputTokens"], "2,345")
+        self.assertEqual(top_details["sessionReasoningTokens"], "0")
+        self.assertEqual(top_details["warnings"], "")
+        self.assertEqual(top_details["currentTask"], "Live Renderer Thread")
+        self.assertIsInstance(top_details["activityTrail"], list)
+        self.assertTrue(top_details["activityTrail"])
+        self.assertNotIn("budget", top_details)
+        self.assertNotIn("legend", top_details)
+        self.assertNotIn("requestTokens", top_details)
+        self.assertNotIn("requestCost", top_details)
         self.assertTrue(payload["requestRows"])
         request_row = str(payload["requestRows"][0])
         self.assertLess(request_row.index("↑1,200"), request_row.index("◎~67%"))
@@ -364,6 +428,55 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertAlmostEqual(budget_week["overflowRatio"], 0.28, places=3)
         self.assertEqual(budget_week["overflowBadge"], "+28% / +$28.00")
 
+    def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('const version = "17";', script)
+        self.assertIn(
+            "scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);",
+            script,
+        )
+        self.assertIn(
+            "#${rootId} .codex-usage-hud-activity-main,\n"
+            "      #${rootId} .codex-usage-hud-activity-step,\n"
+            "      #${rootId} .codex-usage-hud-activity-metric,\n"
+            "      #${rootId} .codex-usage-hud-session-insight,\n"
+            "      #${rootId} .codex-usage-hud-heavy-round,\n"
+            "      #${rootId} .codex-usage-hud-token-chip {\n"
+            "        background: var(--codex-usage-hud-request-panel-surface);",
+            script,
+        )
+        self.assertIn(
+            "#${rootId} .codex-usage-hud-chip {\n"
+            "        background: var(--codex-usage-hud-header-surface);\n"
+            "        color: var(--codex-usage-hud-text);",
+            script,
+        )
+        self.assertIn(
+            "#${rootId} .codex-usage-hud-stat-label,\n"
+            "      #${rootId} .codex-usage-hud-section-title,\n"
+            "      #${rootId} .codex-usage-hud-token-chip span:first-child,\n"
+            "      #${rootId} .codex-usage-hud-heavy-round-detail,\n"
+            "      #${rootId} .codex-usage-hud-activity-node-time,\n"
+            "      #${rootId} .codex-usage-hud-activity-node-detail,\n"
+            "      #${rootId} .codex-usage-hud-session-composition,\n"
+            "      #${rootId} .codex-usage-hud-value.muted {\n"
+            "        color: var(--codex-usage-hud-muted);",
+            script,
+        )
+        self.assertIn(
+            "background: color-mix(in srgb, var(--codex-usage-hud-warning) 13%, var(--codex-usage-hud-panel-surface));",
+            script,
+        )
+        self.assertIn(
+            "box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-usage-hud-accent) 16%, transparent);",
+            script,
+        )
+        self.assertGreater(
+            script.rfind("background: var(--codex-usage-hud-request-panel-surface);"),
+            script.index("background: #101821;"),
+        )
+
     def test_payload_warning_summary_uses_ratio_and_threshold_only(self) -> None:
         now = datetime(2026, 6, 5, 13, 10, 11).astimezone()
         snapshot = ParsedSession(
@@ -382,7 +495,7 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         payload = payload_from_snapshot(snapshot).to_json()
 
-        self.assertEqual(payload["topDetails"]["warnings"], "提醒  日已用 70%，超过 50% 阈值；周已用 52%，超过 50% 阈值")
+        self.assertEqual(payload["topDetails"]["warnings"], "预警  日已用 70%，超过 50% 阈值；周已用 52%，超过 50% 阈值")
 
     def test_error_snapshot_uses_single_collapsed_top_progress_rail(self) -> None:
         snapshot = ParsedSession(status="missing", error="session file unavailable")
@@ -450,6 +563,8 @@ class RendererHudPayloadTests(unittest.TestCase):
                     args='{"command":"git status","timeout_ms":1000}',
                     start=started_at,
                     start_line=3,
+                    end=completed_at,
+                    end_line=4,
                 ),
                 longest_gap_detail=GapTiming(
                     start=started_at,
@@ -498,6 +613,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(payload["topCopies"]["slow"], "git status")
         self.assertIn("类型: 模型思考", payload["topCopies"]["gap"])
         self.assertIn("行号: 10 -> 11", payload["topCopies"]["gap"])
+        top_details = payload["topDetails"]
+        self.assertEqual(top_details["slow"], "最慢工具:5.0s")
+        self.assertEqual(top_details["gap"], "最长等待:5.0s")
+        trail_titles = [str(item["title"]) for item in top_details["activityTrail"]]
+        self.assertTrue(any("工具调用" in title for title in trail_titles))
+        self.assertTrue(any("等待结束" in title for title in trail_titles))
+        self.assertIn("shell_command", str(top_details["activityTrail"]))
         details = payload["requestRowDetails"]
         self.assertEqual(details[0]["prefix"].strip(), "#2 ~$0.020")
         self.assertTrue(details[0]["running"])
@@ -505,6 +627,236 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertTrue(str(details[0]["startedAt"]))
         self.assertFalse(details[1]["running"])
         self.assertEqual(details[1]["time"], "13:00:05")
+
+    def test_activity_trail_uses_current_rounds_and_filters_old_tool_events(self) -> None:
+        task_started_at = datetime(2026, 6, 5, 9, 9, 0).astimezone()
+        old_started_at = datetime(2026, 6, 4, 22, 38, 4).astimezone()
+        old_completed_at = datetime(2026, 6, 4, 22, 38, 24).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-abcdef123456",
+            session_title="Live Renderer Thread",
+            status="parsed",
+            task_started_at=task_started_at,
+            request=RequestTokens(status="confirmed", model="gpt-5.5"),
+            slow=SlowSummary(
+                slowest_tool_call=ToolCallTiming(
+                    call_id="old",
+                    name="shell_command",
+                    args='{"command":"python -m unittest old"}',
+                    start=old_started_at,
+                    start_line=3,
+                    end=old_completed_at,
+                    end_line=4,
+                )
+            ),
+        )
+        snapshot.request_history = [
+            RequestRound(
+                index=index,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=100 + index,
+                cached_tokens=10,
+                output_tokens=20,
+                reasoning_tokens=0,
+                total_tokens=120 + index,
+                estimated=False,
+                cost_usd=0.001,
+                started_at=task_started_at,
+                completed_at=datetime(2026, 6, 5, 9, 9, index).astimezone(),
+                activity_summary=f"输入：当前需求第 {index} 轮",
+                copy_text=f"输入：当前需求第 {index} 轮",
+            )
+            for index in range(1, 30)
+        ]
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        trail = payload["topDetails"]["activityTrail"]
+        round_nodes = [item for item in trail if str(item["title"]).startswith("轮次 #")]
+        self.assertEqual(len(round_nodes), 29)
+        self.assertNotIn("22:38", str(trail))
+        self.assertIn("当前需求第 29 轮", str(trail[0]))
+
+    def test_payload_formats_heavy_rounds_as_copyable_single_line_reason(self) -> None:
+        started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()
+        completed_at = datetime(2026, 6, 5, 13, 0, 31).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-abcdef123456",
+            session_title="Live Renderer Thread",
+            status="parsed",
+            request=RequestTokens(status="confirmed", model="gpt-5.5"),
+        )
+        snapshot.session_request_history = [
+            RequestRound(
+                index=28,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=208000,
+                cached_tokens=3840,
+                output_tokens=1232,
+                reasoning_tokens=0,
+                total_tokens=210000,
+                estimated=False,
+                cost_usd=1.06,
+                started_at=started_at,
+                completed_at=completed_at,
+                activity_summary="输入：分析一个很大的日志文件",
+                copy_text="输入：\n分析一个很大的日志文件",
+            ),
+            RequestRound(
+                index=7,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=20,
+                cached_tokens=0,
+                output_tokens=10,
+                reasoning_tokens=0,
+                total_tokens=30,
+                estimated=False,
+                cost_usd=0.01,
+            ),
+        ]
+        snapshot.request_history = [
+            RequestRound(
+                index=1,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=10,
+                cached_tokens=0,
+                output_tokens=5,
+                reasoning_tokens=0,
+                total_tokens=15,
+                estimated=False,
+                cost_usd=0.005,
+            )
+        ]
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        heavy = payload["topDetails"]["heavyRounds"][0]
+        self.assertEqual(heavy["title"], "#28 $1.06 · ∑210k")
+        self.assertEqual(heavy["detail"], "输入：分析一个很大的日志文件")
+        self.assertIn("分析一个很大的日志文件", heavy["copyText"])
+        self.assertNotIn("gpt-5.5", heavy["detail"])
+        self.assertNotIn("已确认", heavy["detail"])
+
+    def test_payload_switches_activity_card_to_completed_task_stats(self) -> None:
+        started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()
+        completed_at = datetime(2026, 6, 5, 13, 0, 42).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-abcdef123456",
+            session_title="Live Renderer Thread",
+            status="parsed",
+            task_prompt="把右侧活动面板改成完成态统计",
+            task_index=4,
+            task_count=4,
+            task_started_at=started_at,
+            task_completed_at=completed_at,
+            last_output=Activity(
+                kind="agent",
+                detail="已完成 HUD 布局和统计字段调整。",
+                timestamp=completed_at,
+            ),
+            request=RequestTokens(status="confirmed", model="gpt-5.5"),
+        )
+        snapshot.request_history = [
+            RequestRound(
+                index=1,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=100,
+                cached_tokens=80,
+                output_tokens=20,
+                reasoning_tokens=0,
+                total_tokens=120,
+                estimated=False,
+                cost_usd=0.001,
+                started_at=started_at,
+                completed_at=completed_at,
+            ),
+            RequestRound(
+                index=2,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=50,
+                cached_tokens=40,
+                output_tokens=10,
+                reasoning_tokens=0,
+                total_tokens=60,
+                estimated=False,
+                cost_usd=0.002,
+                started_at=started_at,
+                completed_at=completed_at,
+            ),
+        ]
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        top_details = payload["topDetails"]
+        self.assertEqual(top_details["executingLabel"], "完成任务")
+        self.assertEqual(top_details["taskOrdinal"], "共4次需求")
+        self.assertEqual(top_details["taskOrdinalSession"], "共4次需求")
+        self.assertEqual(top_details["taskOrdinalActivity"], "")
+        self.assertEqual(top_details["executing"], "已完成 HUD 布局和统计字段调整。")
+        self.assertEqual(top_details["currentTaskLabel"], "当前需求")
+        self.assertEqual(top_details["currentTask"], "把右侧活动面板改成完成态统计")
+        self.assertEqual(top_details["activityElapsedLabel"], "已处理")
+        self.assertEqual(top_details["activityElapsed"], "42.0s")
+        self.assertEqual(top_details["activityGapLabel"], "处理轮次")
+        self.assertEqual(top_details["activityGap"], "2轮")
+        self.assertEqual(top_details["activityLastLabel"], "处理花费")
+        self.assertEqual(top_details["activityLast"], "$0.003")
+        self.assertEqual(top_details["activityLastTooltip"], "180Tokens/$0.003/80%")
+
+    def test_payload_merges_same_second_activity_nodes_and_suppresses_token_details(self) -> None:
+        started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()
+        completed_at = datetime(2026, 6, 5, 13, 0, 42).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-abcdef123456",
+            session_title="Live Renderer Thread",
+            status="parsed",
+            task_prompt="完成右侧活动轨迹合并",
+            task_started_at=started_at,
+            task_completed_at=completed_at,
+            last_event_time=completed_at,
+            activity=Activity(
+                kind="confirmed",
+                detail="received token_count",
+                timestamp=completed_at,
+            ),
+            request=RequestTokens(
+                status="confirmed",
+                model="gpt-5.5",
+                completed_at=completed_at,
+            ),
+        )
+        snapshot.request_history = [
+            RequestRound(
+                index=1,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=100,
+                cached_tokens=80,
+                output_tokens=20,
+                reasoning_tokens=0,
+                total_tokens=120,
+                estimated=False,
+                cost_usd=0.001,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+        ]
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        trail = payload["topDetails"]["activityTrail"]
+        self.assertGreaterEqual(len(trail), 1)
+        newest = trail[0]
+        self.assertEqual(newest["title"], "任务完成，Token确认")
+        self.assertEqual(newest["detail"], "完成右侧活动轨迹合并")
+        self.assertNotIn("请求完成", str(newest))
+        self.assertNotIn("received token_count", str(newest))
 
     def test_renderer_script_resizes_request_panel_from_fixed_bottom(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT

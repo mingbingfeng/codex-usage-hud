@@ -211,6 +211,134 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual([item.input_tokens for item in rounds], [20, 30])
         self.assertEqual([item.index for item in rounds], [1, 2])
 
+    def test_parse_records_keeps_session_request_history_across_tasks(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "turn_context", {"model": "gpt-5.5"}),
+            record("2026-05-28T00:00:01Z", "event_msg", {"type": "task_started"}),
+            token_count("2026-05-28T00:00:02Z", 20, 5, 6, 1, 26, 26),
+            record("2026-05-28T00:00:03Z", "event_msg", {"type": "task_complete"}),
+            record("2026-05-28T00:00:04Z", "event_msg", {"type": "task_started"}),
+            token_count("2026-05-28T00:00:05Z", 30, 7, 9, 2, 39, 65),
+            record("2026-05-28T00:00:06Z", "event_msg", {"type": "task_complete"}),
+            record("2026-05-28T00:00:07Z", "event_msg", {"type": "task_started"}),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        snapshot = parser.parse_records(records)
+
+        self.assertEqual(len(snapshot.session_request_history), 2)
+        self.assertEqual([item.input_tokens for item in snapshot.session_request_history], [20, 30])
+        self.assertEqual([item.index for item in snapshot.session_request_history], [1, 2])
+
+    def test_parse_records_extracts_prompt_for_latest_task(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "session_meta", {"id": "session-a"}),
+            record(
+                "2026-05-28T00:00:01Z",
+                "event_msg",
+                {"type": "user_message", "message": "旧需求"},
+            ),
+            record("2026-05-28T00:00:02Z", "event_msg", {"type": "task_started"}),
+            record("2026-05-28T00:00:03Z", "event_msg", {"type": "task_complete"}),
+            record(
+                "2026-05-28T00:00:04Z",
+                "event_msg",
+                {"type": "user_message", "message": "优化右侧完成态统计"},
+            ),
+            record("2026-05-28T00:00:05Z", "event_msg", {"type": "task_started"}),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        snapshot = parser.parse_records(records)
+
+        self.assertEqual(snapshot.task_prompt, "优化右侧完成态统计")
+        self.assertEqual(snapshot.task_index, 2)
+        self.assertEqual(snapshot.task_count, 2)
+
+    def test_token_rounds_capture_activity_summary_for_heavy_rounds(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "turn_context", {"model": "gpt-5.5"}),
+            record("2026-05-28T00:00:01Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:02Z",
+                "event_msg",
+                {"type": "user_message", "message": "分析一个很大的日志文件"},
+            ),
+            token_count("2026-05-28T00:00:03Z", 200, 20, 5, 0, 205, 205),
+            record(
+                "2026-05-28T00:00:04Z",
+                "response_item",
+                {"type": "message", "content": [{"text": "输出了很长的分析结果"}]},
+            ),
+            token_count("2026-05-28T00:00:05Z", 10, 0, 220, 0, 230, 435),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        task_index, _ = parser.latest_task_started(records)
+        rounds = parser.token_rounds_since_task(records, task_index)
+
+        self.assertEqual(rounds[0].activity_summary, "输入：分析一个很大的日志文件")
+        self.assertIn("分析一个很大的日志文件", rounds[0].copy_text)
+        self.assertEqual(rounds[1].activity_summary, "输出：输出了很长的分析结果")
+        self.assertIn("输出了很长的分析结果", rounds[1].copy_text)
+
+    def test_slow_summary_ignores_tool_calls_before_latest_task(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:01Z",
+                "response_item",
+                {
+                    "type": "function_call",
+                    "call_id": "old",
+                    "name": "shell_command",
+                    "arguments": '{"command":"old"}',
+                },
+            ),
+            record(
+                "2026-05-28T00:00:21Z",
+                "response_item",
+                {"type": "function_call_output", "call_id": "old", "output": "old output"},
+            ),
+            record("2026-05-28T00:00:22Z", "event_msg", {"type": "task_complete"}),
+            record("2026-05-28T00:01:00Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:01:01Z",
+                "response_item",
+                {
+                    "type": "function_call",
+                    "call_id": "new",
+                    "name": "shell_command",
+                    "arguments": '{"command":"new"}',
+                },
+            ),
+            record(
+                "2026-05-28T00:01:03Z",
+                "response_item",
+                {"type": "function_call_output", "call_id": "new", "output": "new output"},
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        summary = parser.slow_summary(records, records[-1]["_dt"])
+
+        self.assertIsNotNone(summary.slowest_tool_call)
+        assert summary.slowest_tool_call is not None
+        self.assertEqual(summary.slowest_tool_call.call_id, "new")
+        self.assertNotIn("20.0s", summary.slowest_tool)
+
     def test_parse_records_falls_back_to_jsonl_when_sse_errors(self) -> None:
         parser = JsonlSessionParser()
         records = [

@@ -2765,6 +2765,25 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
+    def test_request_expanded_toggle_strip_stays_below_rows(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_request_expanded()
+            _flush_tk(window)
+
+            self.assertIsNotNone(window.request_text)
+            assert window.request_text is not None
+            self.assertGreater(
+                window.request_label.winfo_rooty(),
+                window.request_text.winfo_rooty(),
+            )
+            self.assertGreaterEqual(
+                window.request_label.winfo_rooty(),
+                window.request_text.winfo_rooty() + window.request_text.winfo_height() - 2,
+            )
+        finally:
+            window._close()
+
     def test_tk_hud_shells_use_square_outer_corners(self) -> None:
         try:
             window = TokenHudWindow()

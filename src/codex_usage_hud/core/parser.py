@@ -293,6 +293,8 @@ class RequestRound:
     cost_usd: float | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    activity_summary: str = ""
+    copy_text: str = ""
 
 
 @dataclass
@@ -419,6 +421,9 @@ class ParsedSession:
     session_path: Path | None = None
     session_id: str = "n/a"
     session_title: str = ""
+    task_prompt: str = ""
+    task_index: int = 0
+    task_count: int = 0
     cwd: str = ""
     status: str = "starting"
     error: str = ""
@@ -430,6 +435,7 @@ class ParsedSession:
     estimate: EstimateTokens = field(default_factory=EstimateTokens)
     request: RequestTokens = field(default_factory=RequestTokens)
     request_history: list[RequestRound] = field(default_factory=list)
+    session_request_history: list[RequestRound] = field(default_factory=list)
     activity: Activity = field(default_factory=Activity)
     last_output: Activity = field(default_factory=Activity)
     slow: SlowSummary = field(default_factory=SlowSummary)
@@ -550,6 +556,11 @@ class JsonlSessionParser:
 
         task_started_index, task_started_at = self.latest_task_started(records)
         parsed.task_started_at = task_started_at
+        parsed.task_prompt = self.latest_task_prompt(records, task_started_index)
+        parsed.task_index, parsed.task_count = self.task_ordinal(
+            records,
+            task_started_index,
+        )
         parsed.task_completed_at = self.latest_task_completed_after(
             records,
             task_started_index,
@@ -557,6 +568,9 @@ class JsonlSessionParser:
         parsed.task_aborted_at = self.latest_task_aborted_after(
             records,
             task_started_index,
+        )
+        parsed.session_request_history = self.reindex_rounds(
+            self.token_rounds_since_task(records, None)
         )
         jsonl_rounds = self.token_rounds_since_task(records, task_started_index)
         parsed.request = self.build_request_tokens(
@@ -633,6 +647,77 @@ class JsonlSessionParser:
             ):
                 return index, record.get("_dt")
         return None, None
+
+    def latest_task_prompt(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+    ) -> str:
+        """Return the user message that started the currently visible task."""
+        if not records:
+            return ""
+
+        start_index = 0 if task_started_index is None else task_started_index
+
+        for record in reversed(records[start_index:]):
+            payload = record.get("payload") or {}
+            if (
+                record.get("type") == "event_msg"
+                and isinstance(payload, Mapping)
+                and payload.get("type") == "user_message"
+            ):
+                text = compact_text(payload.get("message"), 260)
+                if text:
+                    return text
+
+        if task_started_index is None:
+            return ""
+
+        for record in reversed(records[:task_started_index]):
+            payload = record.get("payload") or {}
+            if not isinstance(payload, Mapping):
+                continue
+            if (
+                record.get("type") == "event_msg"
+                and payload.get("type") == "user_message"
+            ):
+                text = compact_text(payload.get("message"), 260)
+                if text:
+                    return text
+            if (
+                record.get("type") == "event_msg"
+                and payload.get("type") in {"task_complete", "turn_aborted", "task_started"}
+            ):
+                break
+        return ""
+
+    def task_ordinal(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+    ) -> tuple[int, int]:
+        """Return the current task number and total known tasks in the session."""
+        task_start_indices: list[int] = []
+        user_message_indices: list[int] = []
+        for index, record in enumerate(records):
+            payload = record.get("payload") or {}
+            if record.get("type") != "event_msg" or not isinstance(payload, Mapping):
+                continue
+            payload_type = payload.get("type")
+            if payload_type == "task_started":
+                task_start_indices.append(index)
+            elif payload_type == "user_message" and compact_text(payload.get("message"), 8):
+                user_message_indices.append(index)
+
+        if task_start_indices:
+            if task_started_index is None:
+                return len(task_start_indices), len(task_start_indices)
+            current = sum(1 for index in task_start_indices if index <= task_started_index)
+            return current, len(task_start_indices)
+
+        if user_message_indices:
+            return len(user_message_indices), len(user_message_indices)
+        return 0, 0
 
     def latest_task_completed_after(
         self,
@@ -775,7 +860,7 @@ class JsonlSessionParser:
         last_cumulative_seen: int | None = None
         seen_usage_keys: set[tuple[Any, ...]] = set()
 
-        for record in records:
+        for index, record in enumerate(records):
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
                 continue
@@ -922,6 +1007,73 @@ class JsonlSessionParser:
         estimate.source = ", ".join(sources[-4:]) if sources else "no pending estimate"
         return estimate
 
+    def round_activity_entry(
+        self,
+        record_type: Any,
+        payload_type: Any,
+        payload: Mapping[str, Any],
+    ) -> tuple[str, str, str] | None:
+        """Return (side, label, text) for content that explains one request round."""
+        if record_type == "event_msg" and payload_type == "user_message":
+            text = str(payload.get("message") or "").strip()
+            return ("input", "输入", text) if text else None
+        if record_type == "event_msg" and payload_type == "agent_message":
+            text = str(payload.get("message") or "").strip()
+            return ("output", "输出", text) if text else None
+        if record_type == "response_item" and payload_type == "message":
+            if is_turn_aborted_message(payload):
+                return None
+            role = response_message_role(payload)
+            if role and role != "assistant":
+                return None
+            text = message_text(payload).strip()
+            return ("output", "输出", text) if text else None
+        if record_type == "response_item" and payload_type == "function_call":
+            name = str(payload.get("name") or "工具调用").strip()
+            args = str(payload.get("arguments") or "").strip()
+            text = f"{name} {args}".strip()
+            return ("output", "工具调用", text) if text else None
+        if record_type == "response_item" and payload_type == "function_call_output":
+            text = str(payload.get("output") or "").strip()
+            return ("input", "工具返回", text) if text else None
+        if record_type == "response_item" and payload_type == "reasoning":
+            text = reasoning_text(payload).strip()
+            return ("output", "推理", text) if text else None
+        return None
+
+    def round_activity_summary(
+        self,
+        entries: Sequence[tuple[str, str, str]],
+        input_tokens: int,
+        cached_tokens: int,
+        output_tokens: int,
+        reasoning_tokens: int,
+    ) -> tuple[str, str]:
+        """Choose display and copy text for a request round."""
+        input_entries = [item for item in entries if item[0] == "input"]
+        output_entries = [item for item in entries if item[0] == "output"]
+        output_weight = int(output_tokens or 0) + int(reasoning_tokens or 0)
+        input_weight = max(0, int(input_tokens or 0) - int(cached_tokens or 0))
+        preferred: tuple[str, str, str] | None = None
+        if output_weight >= input_weight and output_entries:
+            preferred = output_entries[-1]
+        elif input_entries:
+            preferred = input_entries[-1]
+        elif output_entries:
+            preferred = output_entries[-1]
+
+        if preferred is None:
+            breakdown = (
+                f"输入 {int(input_tokens or 0):,}，缓存 {int(cached_tokens or 0):,}，"
+                f"输出 {int(output_tokens or 0):,}，推理 {int(reasoning_tokens or 0):,}"
+            )
+            return f"消耗集中在 {breakdown}", breakdown
+
+        _side, label, text = preferred
+        display = f"{label}：{compact_text(text, 92)}"
+        copy_text = text if len(text) <= 6000 else text[:5997] + "..."
+        return display, f"{label}：\n{copy_text}"
+
     def token_rounds_since_task(
         self, records: Sequence[Mapping[str, Any]], task_started_index: int | None
     ) -> list[RequestRound]:
@@ -939,6 +1091,7 @@ class JsonlSessionParser:
 
         last_cumulative_total: int | None = None
         seen_usage_keys: set[tuple[Any, ...]] = set()
+        round_activity_entries: list[tuple[str, str, str]] = []
         round_started_at = (
             records[task_started_index].get("_dt")
             if task_started_index is not None
@@ -957,6 +1110,9 @@ class JsonlSessionParser:
             if round_started_at is None:
                 round_started_at = timestamp
             if record_type != "event_msg" or payload.get("type") != "token_count":
+                entry = self.round_activity_entry(record_type, payload.get("type"), payload)
+                if entry is not None:
+                    round_activity_entries.append(entry)
                 continue
 
             info = payload.get("info") or {}
@@ -977,11 +1133,19 @@ class JsonlSessionParser:
             cumulative_total = _as_int(cumulative.get("total_tokens"))
             if not (input_tokens or output_tokens or reasoning_tokens):
                 continue
+            activity_summary, copy_text = self.round_activity_summary(
+                round_activity_entries,
+                input_tokens,
+                cached_tokens,
+                output_tokens,
+                reasoning_tokens,
+            )
             if cumulative_total:
                 if (
                     last_cumulative_total is not None
                     and cumulative_total <= last_cumulative_total
                 ):
+                    round_activity_entries = []
                     continue
                 last_cumulative_total = cumulative_total
             else:
@@ -995,6 +1159,7 @@ class JsonlSessionParser:
                     timestamp,
                 )
                 if usage_key in seen_usage_keys:
+                    round_activity_entries = []
                     continue
                 seen_usage_keys.add(usage_key)
 
@@ -1018,9 +1183,12 @@ class JsonlSessionParser:
                     ),
                     started_at=round_started_at,
                     completed_at=timestamp,
+                    activity_summary=activity_summary,
+                    copy_text=copy_text,
                 )
             )
             round_started_at = timestamp
+            round_activity_entries = []
         return rounds
 
     def latest_activity(self, records: Sequence[Mapping[str, Any]]) -> Activity:
@@ -1153,7 +1321,9 @@ class JsonlSessionParser:
                     )
                 )
 
-        for record in records:
+        for index, record in enumerate(records):
+            if index < latest_task_start_index:
+                continue
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
                 continue
@@ -1379,6 +1549,8 @@ class JsonlSessionParser:
         output_tokens = request.output_tokens
         total_tokens = request.total_tokens
         cost_usd = request.cost_usd
+        activity_summary = ""
+        copy_text = ""
 
         if snapshot is not None and request.status == "running" and request.estimated:
             if input_tokens is None:
@@ -1405,6 +1577,16 @@ class JsonlSessionParser:
                     output_tokens or 0,
                     request.reasoning_tokens or 0,
                 )
+            if snapshot.activity.detail:
+                activity_label = {
+                    "user": "输入",
+                    "agent": "输出",
+                    "assistant": "输出",
+                    "tool call": "工具调用",
+                    "tool output": "工具返回",
+                }.get(snapshot.activity.kind, "活动")
+                activity_summary = f"{activity_label}：{compact_text(snapshot.activity.detail, 92)}"
+                copy_text = f"{activity_label}：\n{snapshot.activity.detail}"
 
         return RequestRound(
             index=request.round_index,
@@ -1419,6 +1601,8 @@ class JsonlSessionParser:
             cost_usd=cost_usd,
             started_at=request.started_at,
             completed_at=request.completed_at,
+            activity_summary=activity_summary,
+            copy_text=copy_text,
         )
 
     def reindex_rounds(self, rounds: Sequence[RequestRound]) -> list[RequestRound]:
