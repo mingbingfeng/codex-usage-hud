@@ -69,7 +69,7 @@ from .platforms.base import BasePlatform
 from .platforms.cdp_probe import cdp_port_from_env
 from .platforms.codex_theme import CodexThemeProbe
 from .settings_bridge import SettingsBridgeServer
-from .ui import TokenHudWindow
+from .ui import QtHudWindow, TokenHudWindow
 from .ui.renderer_hud import (
     RendererHudClient,
     remove_renderer_hud_from_pages,
@@ -109,6 +109,7 @@ RENDERER_HUD_UNAVAILABLE = 20
 HUD_SWITCH_TO_TK = 30
 HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
+HUD_SWITCH_TO_QT = 33
 RENDERER_CDP_TIMEOUT_SECONDS = 1.0
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
 RENDERER_INITIAL_TIMEOUT_SECONDS = 2.0
@@ -125,6 +126,7 @@ CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
 CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
 DAEMON_STARTUP_WAIT = "wait"
 DAEMON_STARTUP_RENDERER = "renderer"
+DAEMON_STARTUP_QT = "qt"
 DAEMON_STARTUP_TK = "tk"
 DAEMON_STARTUP_CANCEL = "cancel"
 LOADING_FEEDBACK_STALE_SECONDS = 20.0
@@ -1096,8 +1098,34 @@ def _clone_args_with_renderer_preference(
     return cloned
 
 
+def _clone_args_with_display_mode(
+    args: argparse.Namespace,
+    mode: str,
+) -> argparse.Namespace:
+    normalized = effective_display_mode(mode)
+    cloned = argparse.Namespace(**vars(args))
+    cloned.hud_mode = normalized
+    cloned.runtime_hud_mode = normalized
+    cloned.standalone_hud_mode = normalized if normalized in {"qt", "tk"} else None
+    cloned.renderer_hud = normalized == "renderer"
+    return cloned
+
+
 def _runtime_display_mode(value: object) -> str:
     return effective_display_mode(value)
+
+
+def _initial_runtime_display_mode(args: argparse.Namespace) -> str:
+    explicit_mode = getattr(args, "hud_mode", None)
+    if explicit_mode:
+        return effective_display_mode(explicit_mode)
+    runtime_mode = getattr(args, "runtime_hud_mode", None)
+    if runtime_mode:
+        return effective_display_mode(runtime_mode)
+    standalone_mode = getattr(args, "standalone_hud_mode", None)
+    if standalone_mode in {"qt", "tk"}:
+        return str(standalone_mode)
+    return "renderer" if bool(getattr(args, "renderer_hud", False)) else "tk"
 
 
 def _stop_codex_processes(*, timeout_seconds: float = 8.0) -> bool:
@@ -1151,9 +1179,9 @@ def _prompt_missing_codex_startup() -> str:
         "未检测到 Codex App。\n\n"
         "请选择本次启动方式：\n\n"
         "是：启动 Codex App（调试/CDP 模式），并将 HUD 注入到 Codex 界面里。\n"
-        "否：启动 Codex App（普通模式），同时打开独立 Tk HUD 窗口。\n"
+        "否：启动 Codex App（普通模式），同时打开独立 Qt HUD 窗口。\n"
         "取消：退出 HUD。\n\n"
-        "Renderer 注入需要 Codex 暴露本地调试端口；Tk 模式可作为独立窗口使用。"
+        "Renderer 注入需要 Codex 暴露本地调试端口；Qt 模式可作为独立窗口使用，Tk 会保留为最终兜底。"
         "\n\n如 Windows 阻止直接启动，HUD 会请求一次权限确认。"
     )
     title = "Codex App 未启动"
@@ -1176,7 +1204,7 @@ def _prompt_missing_codex_startup() -> str:
         if int(result or 0) == IDYES:
             return DAEMON_STARTUP_RENDERER
         if int(result or 0) == IDNO:
-            return DAEMON_STARTUP_TK
+            return DAEMON_STARTUP_QT
         if int(result or 0) == IDCANCEL:
             return DAEMON_STARTUP_CANCEL
     except Exception as exc:
@@ -1197,7 +1225,7 @@ def _daemon_startup_decision(
     mode = _prompt_missing_codex_startup()
     return DaemonStartupDecision(
         mode,
-        launch_codex=mode in {DAEMON_STARTUP_RENDERER, DAEMON_STARTUP_TK},
+        launch_codex=mode in {DAEMON_STARTUP_RENDERER, DAEMON_STARTUP_QT, DAEMON_STARTUP_TK},
     )
 
 
@@ -1448,13 +1476,13 @@ def _prepare_codex_window_for_renderer(
         time.sleep(max(0.01, float(poll_seconds)))
 
 
-def _prepare_codex_window_for_tk(
+def _prepare_codex_window_for_standalone(
     *,
     timeout_seconds: float,
     poll_seconds: float = 0.25,
     launch_if_missing: bool = False,
 ) -> tuple[bool, str, str, int]:
-    """Best-effort restore/focus of Codex before opening the standalone Tk HUD."""
+    """Best-effort restore/focus of Codex before opening a standalone HUD."""
     if not sys.platform.startswith("win"):
         return True, "unsupported", "", 0
     try:
@@ -1493,7 +1521,7 @@ def _prepare_codex_window_for_tk(
             activation_attempted = True
             activated = _activate_running_codex_app()
             _LOGGER.info(
-                "tk_codex_shell_activation_requested activated=%s status=%s hwnd=%s reason=%s",
+                "standalone_codex_shell_activation_requested activated=%s status=%s hwnd=%s reason=%s",
                 activated,
                 last_status,
                 last_hwnd,
@@ -1529,7 +1557,7 @@ def _prepare_codex_window_for_tk(
             launch_attempted = True
             launched = launch_codex_app(debugger=False)
             _LOGGER.info(
-                "tk_codex_window_restore_requested launched=%s status=%s hwnd=%s reason=%s",
+                "standalone_codex_window_restore_requested launched=%s status=%s hwnd=%s reason=%s",
                 launched,
                 last_status,
                 last_hwnd,
@@ -1539,6 +1567,20 @@ def _prepare_codex_window_for_tk(
         if time.monotonic() >= deadline:
             return False, last_status, last_reason, last_hwnd
         time.sleep(max(0.01, float(poll_seconds)))
+
+
+def _prepare_codex_window_for_tk(
+    *,
+    timeout_seconds: float,
+    poll_seconds: float = 0.25,
+    launch_if_missing: bool = False,
+) -> tuple[bool, str, str, int]:
+    """Compatibility wrapper for older tests and integrations."""
+    return _prepare_codex_window_for_standalone(
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        launch_if_missing=launch_if_missing,
+    )
 
 
 def _build_session_switch_controller(
@@ -2895,7 +2937,11 @@ def _handle_renderer_settings_command(
                 (
                     "已保存到本地配置；预算和价格会自动刷新。"
                     if next_runtime_mode == "renderer"
-                    else "已保存到本地配置；当前会话仍保持 Renderer，Tk 方案会在下次切换或重启后生效。"
+                    else (
+                        "已保存到本地配置；当前会话仍保持 Renderer，Qt 方案会在下次切换或重启后生效。"
+                        if next_runtime_mode == "qt"
+                        else "已保存到本地配置；当前会话仍保持 Renderer，Tk 方案会在下次切换或重启后生效。"
+                    )
                 ),
             )
         if action == "applyDisplayMode":
@@ -2905,6 +2951,11 @@ def _handle_renderer_settings_command(
             )
             _save_renderer_user_config(context, config)
             next_runtime_mode = _runtime_display_mode(config.display_mode)
+            if next_runtime_mode == "qt":
+                return _renderer_settings_status(
+                    "正在切换到 Qt 独立窗口。",
+                    switch_mode="qt",
+                )
             if next_runtime_mode == "tk":
                 return _renderer_settings_status(
                     "正在切换到 Tk 独立窗口。",
@@ -3329,7 +3380,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compact",
         action="store_true",
-        help="Use compact output mode for CLI snapshots and the Tkinter HUD.",
+        help="Use compact output mode for CLI snapshots and standalone HUDs.",
     )
     parser.set_defaults(renderer_hud=None)
     parser.add_argument(
@@ -3338,8 +3389,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Prefer the renderer-injected HUD when Codex exposes a local CDP "
-            "target, falling back to the Tk HUD otherwise. Enabled by default."
+            "target, falling back to Qt and then Tk otherwise. Enabled by default."
         ),
+    )
+    parser.add_argument(
+        "--qt-hud",
+        dest="hud_mode",
+        action="store_const",
+        const="qt",
+        help="Force the Qt standalone HUD and skip renderer injection.",
     )
     parser.add_argument(
         "--tk-hud",
@@ -3350,10 +3408,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--hud-mode",
-        choices=["auto", "renderer", "tk"],
+        choices=["auto", "renderer", "qt", "tk"],
         help=(
             "Override the configured HUD display mode for this run. "
-            "auto and renderer both try renderer injection first; tk skips injection."
+            "auto tries renderer, then Qt, then Tk; qt and tk skip renderer injection."
         ),
     )
     parser.add_argument(
@@ -3518,14 +3576,23 @@ def run_hud_session(
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
-    """Run one HUD session, preferring renderer injection with Tk fallback."""
-    session_args = _clone_args_with_renderer_preference(
-        args,
-        getattr(args, "renderer_hud", False),
-    )
+    """Run one HUD session, preferring renderer, then Qt, with Tk as final fallback."""
+    runtime_mode = _initial_runtime_display_mode(args)
+    session_args = _clone_args_with_display_mode(args, runtime_mode)
     launched_codex_for_renderer = False
+
+    def switch_to(mode: str, *, title: str, message: str) -> None:
+        nonlocal runtime_mode, session_args, loading_feedback
+        runtime_mode = effective_display_mode(mode)
+        loading_feedback = _create_loading_feedback(
+            session_args,
+            title=title,
+            message=message,
+        ).start()
+        session_args = _clone_args_with_display_mode(session_args, runtime_mode)
+
     while True:
-        if getattr(session_args, "renderer_hud", False):
+        if runtime_mode == "renderer":
             renderer_exit = run_renderer_hud_session(
                 session_args,
                 lock_already_held=lock_already_held,
@@ -3535,19 +3602,76 @@ def run_hud_session(
             )
             launched_codex_for_renderer = False
             loading_feedback = None
+            if renderer_exit == HUD_SWITCH_TO_QT:
+                switch_to(
+                    "qt",
+                    title="正在切换到 Qt HUD",
+                    message="正在关闭内嵌 HUD 并打开独立的 Qt 悬浮窗...",
+                )
+                continue
             if renderer_exit == HUD_SWITCH_TO_TK:
-                loading_feedback = _create_loading_feedback(
-                    session_args,
+                switch_to(
+                    "tk",
                     title="正在切换到 Tk HUD",
                     message="正在关闭内嵌 HUD 并打开独立的 Tk 悬浮窗...",
-                ).start()
-                session_args = _clone_args_with_renderer_preference(session_args, False)
+                )
                 continue
             if renderer_exit != RENDERER_HUD_UNAVAILABLE:
                 return renderer_exit
-            _LOGGER.info("renderer_hud_unavailable falling_back=tk")
-            session_args = _clone_args_with_renderer_preference(session_args, False)
+            _LOGGER.info("renderer_hud_unavailable falling_back=qt")
+            switch_to(
+                "qt",
+                title="正在启动 Qt HUD",
+                message="Renderer 暂不可用，正在打开独立的 Qt 悬浮窗...",
+            )
             continue
+
+        if runtime_mode == "qt":
+            qt_exit = run_qt_hud_session(
+                session_args,
+                lock_already_held=lock_already_held,
+                hide_until_attached=hide_until_attached,
+                daemon_manager=daemon_manager,
+                loading_feedback=loading_feedback,
+            )
+            loading_feedback = None
+            if qt_exit == HUD_SWITCH_TO_TK:
+                switch_to(
+                    "tk",
+                    title="正在切换到 Tk HUD",
+                    message="Qt HUD 暂不可用，正在打开最终兜底的 Tk 悬浮窗...",
+                )
+                continue
+            if qt_exit == HUD_SWITCH_TO_RENDERER:
+                runtime_mode = "renderer"
+                session_args = _clone_args_with_display_mode(session_args, "renderer")
+                continue
+            if qt_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
+                if loading_feedback is None:
+                    loading_feedback = _create_loading_feedback(
+                        session_args,
+                        title="正在切换到 Renderer HUD",
+                        message="正在以调试模式重启 Codex App...",
+                    ).start()
+                else:
+                    loading_feedback.update(
+                        title="正在切换到 Renderer HUD",
+                        message="正在以调试模式重启 Codex App...",
+                    )
+                if not _restart_codex_for_renderer():
+                    loading_feedback.close()
+                    _eprint("codex-usage-hud: unable to restart Codex App in debugger mode.")
+                    switch_to(
+                        "tk",
+                        title="正在切换到 Tk HUD",
+                        message="Renderer 切换失败，正在打开最终兜底的 Tk 悬浮窗...",
+                    )
+                    continue
+                runtime_mode = "renderer"
+                session_args = _clone_args_with_display_mode(session_args, "renderer")
+                launched_codex_for_renderer = True
+                continue
+            return qt_exit
 
         tk_exit = run_tk_hud_session(
             session_args,
@@ -3557,8 +3681,16 @@ def run_hud_session(
             loading_feedback=loading_feedback,
         )
         loading_feedback = None
+        if tk_exit == HUD_SWITCH_TO_QT:
+            switch_to(
+                "qt",
+                title="正在切换到 Qt HUD",
+                message="正在关闭 Tk HUD 并打开独立的 Qt 悬浮窗...",
+            )
+            continue
         if tk_exit == HUD_SWITCH_TO_RENDERER:
-            session_args = _clone_args_with_renderer_preference(session_args, True)
+            runtime_mode = "renderer"
+            session_args = _clone_args_with_display_mode(session_args, "renderer")
             continue
         if tk_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
             if loading_feedback is None:
@@ -3575,9 +3707,11 @@ def run_hud_session(
             if not _restart_codex_for_renderer():
                 loading_feedback.close()
                 _eprint("codex-usage-hud: unable to restart Codex App in debugger mode.")
-                session_args = _clone_args_with_renderer_preference(session_args, False)
+                runtime_mode = "tk"
+                session_args = _clone_args_with_display_mode(session_args, "tk")
                 continue
-            session_args = _clone_args_with_renderer_preference(session_args, True)
+            runtime_mode = "renderer"
+            session_args = _clone_args_with_display_mode(session_args, "renderer")
             launched_codex_for_renderer = True
             continue
         return tk_exit
@@ -3789,6 +3923,10 @@ def run_renderer_hud_session(
                         )
                         update_state = update_manager.status().to_dict()
                     mode_switch = str(settings_command_status.get("switchMode") or "").strip()
+                    if mode_switch == "qt":
+                        local_loading.close()
+                        _LOGGER.info("renderer_hud_switch_requested mode=qt")
+                        return HUD_SWITCH_TO_QT
                     if mode_switch == "tk":
                         local_loading.close()
                         _LOGGER.info("renderer_hud_switch_requested mode=tk")
@@ -3962,7 +4100,10 @@ def _run_tk_window_session(
         window.run()
         if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
             return DAEMON_RESTART_REQUESTED
-        if getattr(window, "mode_switch_request", "") == "renderer":
+        mode_switch = str(getattr(window, "mode_switch_request", "") or "")
+        if mode_switch == "qt":
+            return HUD_SWITCH_TO_QT
+        if mode_switch == "renderer":
             if getattr(window, "restart_codex_for_renderer", False):
                 return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
             return HUD_SWITCH_TO_RENDERER
@@ -3974,6 +4115,191 @@ def _run_tk_window_session(
         snapshot_pump.close()
         if close_context:
             context.close()
+
+
+def _run_qt_window_session(
+    context: RuntimeContext,
+    args: argparse.Namespace,
+    *,
+    daemon_manager: CodexDaemonManager | None = None,
+    existing_window: QtHudWindow | None = None,
+    close_context: bool = True,
+    update_manager: AutoUpdateManager | None = None,
+) -> int:
+    try:
+        from PySide6.QtCore import QTimer
+    except Exception as exc:
+        _eprint(f"codex-usage-hud: unable to import Qt timer: {exc}")
+        if close_context:
+            context.close()
+        return HUD_SWITCH_TO_TK
+
+    snapshot_pump = _TkSnapshotPump(context)
+    work_overlay = DesktopWorkOverlay(
+        item_limit=_work_overlay_item_limit_for_context(context),
+    )
+    command_pump: _WorkOverlayCommandPump | None = None
+    refresh_timer: Any | None = None
+    daemon_timer: Any | None = None
+    session_controller = _build_session_switch_controller(
+        getattr(context, "platform", get_current_platform()),
+        prefer_native_search=True,
+    )
+    try:
+        try:
+            window = existing_window or QtHudWindow(
+                compact=bool(getattr(args, "compact", False)),
+                hide_until_attached=False,
+                tombstone_follow_ms=(
+                    100 if daemon_manager is not None else 500
+                ),
+                user_settings_store=getattr(context, "settings_store", None),
+                update_manager=update_manager,
+            )
+        except Exception as exc:
+            _eprint(f"codex-usage-hud: unable to open Qt HUD; falling back to Tk: {exc}")
+            return HUD_SWITCH_TO_TK
+        command_pump = _WorkOverlayCommandPump(work_overlay, session_controller)
+        command_pump.start()
+        latest_snapshot = ParsedSession(status="waiting")
+        refresh_timer = QTimer()
+        refresh_timer.setSingleShot(True)
+
+        def schedule_refresh(delay_ms: int) -> None:
+            try:
+                refresh_timer.start(max(80, int(delay_ms)))
+            except Exception:
+                return
+
+        def refresh() -> None:
+            nonlocal latest_snapshot
+            defer_background_work = bool(
+                getattr(window, "should_defer_background_work", lambda: False)()
+            )
+            if not defer_background_work:
+                overlay_item_limit = _work_overlay_item_limit_for_context(context)
+                refresh_snapshot = window.should_refresh_snapshot()
+                if refresh_snapshot or overlay_item_limit > 0:
+                    snapshot = snapshot_pump.take_latest()
+                    if snapshot is not None:
+                        latest_snapshot = snapshot
+                    snapshot_pump.request_refresh()
+                if refresh_snapshot:
+                    window.update_display(
+                        latest_snapshot,
+                        update_state=update_manager.tick() if update_manager is not None else None,
+                    )
+                work_overlay.configure(
+                    item_limit=overlay_item_limit,
+                )
+                work_overlay.update(latest_snapshot.active_work_items)
+            schedule_refresh(window.refresh_delay_ms(context.poll_ms))
+
+        refresh_timer.timeout.connect(refresh)
+
+        if daemon_manager is not None:
+            daemon_timer = QTimer()
+
+            def daemon_watchdog() -> None:
+                try:
+                    if not daemon_manager.codex_is_running():
+                        _LOGGER.info("daemon_codex_exited")
+                        window.close("daemon_codex_exited")
+                        return
+                except ProcessListenerError as exc:
+                    _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
+                    return
+
+            daemon_timer.timeout.connect(daemon_watchdog)
+            daemon_timer.start(daemon_manager.poll_ms)
+
+        refresh()
+        window.run()
+        if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
+            return DAEMON_RESTART_REQUESTED
+        mode_switch = str(getattr(window, "mode_switch_request", "") or "")
+        if mode_switch == "tk":
+            return HUD_SWITCH_TO_TK
+        if mode_switch == "renderer":
+            if getattr(window, "restart_codex_for_renderer", False):
+                return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
+            return HUD_SWITCH_TO_RENDERER
+        return 0
+    finally:
+        if refresh_timer is not None:
+            try:
+                refresh_timer.stop()
+            except Exception:
+                pass
+        if daemon_timer is not None:
+            try:
+                daemon_timer.stop()
+            except Exception:
+                pass
+        if command_pump is not None:
+            command_pump.close()
+        work_overlay.close()
+        snapshot_pump.close()
+        if close_context:
+            context.close()
+
+
+def run_qt_hud_session(
+    args: argparse.Namespace,
+    *,
+    lock_already_held: bool = False,
+    hide_until_attached: bool = False,
+    daemon_manager: CodexDaemonManager | None = None,
+    loading_feedback: HudLoadingFeedback | None = None,
+) -> int:
+    """Run one Qt HUD session, falling back to Tk when Qt is unavailable."""
+    lock_context = nullcontext() if lock_already_held else HudInstanceLock()
+    try:
+        with lock_context:
+            context = build_runtime_context(args)
+            update_manager = AutoUpdateManager(current_version=__version__)
+            try:
+                remove_renderer_hud_from_pages(
+                    timeout_seconds=min(RENDERER_CDP_TIMEOUT_SECONDS, 0.5),
+                )
+                _prepare_codex_window_for_standalone(
+                    timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+                    launch_if_missing=True,
+                )
+                try:
+                    window = QtHudWindow(
+                        compact=bool(getattr(args, "compact", False)),
+                        hide_until_attached=hide_until_attached,
+                        tombstone_follow_ms=(
+                            100 if daemon_manager is not None else 500
+                        ),
+                        user_settings_store=getattr(context, "settings_store", None),
+                        update_manager=update_manager,
+                    )
+                except Exception as exc:
+                    _LOGGER.info("qt_hud_unavailable fallback=tk error=%s", exc)
+                    _eprint(
+                        f"codex-usage-hud: unable to open Qt HUD; falling back to Tk: {exc}"
+                    )
+                    return HUD_SWITCH_TO_TK
+                if loading_feedback is not None:
+                    loading_feedback.close()
+                return _run_qt_window_session(
+                    context,
+                    args,
+                    daemon_manager=daemon_manager,
+                    existing_window=window,
+                    close_context=False,
+                    update_manager=update_manager,
+                )
+            finally:
+                if loading_feedback is not None:
+                    loading_feedback.close()
+                update_manager.close()
+                context.close()
+    except HudAlreadyRunningError as exc:
+        _eprint(f"codex-usage-hud: {exc}")
+        return 2
 
 
 def run_tk_hud_session(
@@ -4038,7 +4364,7 @@ def run_daemon(args: argparse.Namespace) -> int:
     _attach_cli_logger_to_daemon_log()
     hide_console_window()
     manager = CodexDaemonManager(poll_ms=args.daemon_poll_ms)
-    preferred_renderer = bool(getattr(args, "renderer_hud", False))
+    preferred_runtime_mode = _initial_runtime_display_mode(args)
     try:
         with HudInstanceLock():
             try:
@@ -4060,9 +4386,18 @@ def run_daemon(args: argparse.Namespace) -> int:
                 if startup.launch_codex:
                     launch_codex_app(debugger=False)
                 _LOGGER.info("daemon_startup_tk_selected")
-                preferred_renderer = False
                 return run_hud_session(
-                    _clone_args_with_renderer_preference(args, False),
+                    _clone_args_with_display_mode(args, "tk"),
+                    lock_already_held=True,
+                    hide_until_attached=False,
+                    daemon_manager=manager,
+                )
+            if startup.mode == DAEMON_STARTUP_QT:
+                if startup.launch_codex:
+                    launch_codex_app(debugger=False)
+                _LOGGER.info("daemon_startup_qt_selected")
+                return run_hud_session(
+                    _clone_args_with_display_mode(args, "qt"),
                     lock_already_held=True,
                     hide_until_attached=False,
                     daemon_manager=manager,
@@ -4077,7 +4412,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                 launch_codex_app(debugger=True)
                 _LOGGER.info("daemon_startup_renderer_selected")
             if startup.mode == DAEMON_STARTUP_RENDERER:
-                preferred_renderer = True
+                preferred_runtime_mode = "renderer"
             force_renderer_retry = startup.mode == DAEMON_STARTUP_RENDERER
 
             while True:
@@ -4101,15 +4436,19 @@ def run_daemon(args: argparse.Namespace) -> int:
                     )
                 else:
                     exit_code = run_hud_session(
-                        _clone_args_with_renderer_preference(args, preferred_renderer),
+                        _clone_args_with_display_mode(args, preferred_runtime_mode),
                         lock_already_held=True,
                         hide_until_attached=True,
                         daemon_manager=manager,
                         loading_feedback=startup_loading,
                     )
                 startup_loading = None
+                if exit_code == HUD_SWITCH_TO_QT:
+                    preferred_runtime_mode = "qt"
+                    force_renderer_retry = False
+                    continue
                 if exit_code == HUD_SWITCH_TO_TK:
-                    preferred_renderer = False
+                    preferred_runtime_mode = "tk"
                     force_renderer_retry = False
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
@@ -4145,7 +4484,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         configured_mode = normalize_display_mode(
             args.hud_mode or UserConfigStore().load().display_mode
         )
-        args.renderer_hud = configured_mode != "tk"
+        runtime_mode = effective_display_mode(configured_mode)
+        args.runtime_hud_mode = runtime_mode
+        args.standalone_hud_mode = runtime_mode if runtime_mode in {"qt", "tk"} else None
+        args.renderer_hud = runtime_mode == "renderer"
+    elif getattr(args, "hud_mode", None):
+        runtime_mode = effective_display_mode(args.hud_mode)
+        args.runtime_hud_mode = runtime_mode
+        args.standalone_hud_mode = runtime_mode if runtime_mode in {"qt", "tk"} else None
+        args.renderer_hud = runtime_mode == "renderer"
+    else:
+        args.runtime_hud_mode = "renderer" if args.renderer_hud else "tk"
+        args.standalone_hud_mode = "tk" if not args.renderer_hud else None
     if args.stop:
         print(stop_running_hud())
         return 0

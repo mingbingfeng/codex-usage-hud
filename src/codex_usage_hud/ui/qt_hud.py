@@ -1,0 +1,2333 @@
+"""PySide6 standalone HUD used between renderer injection and Tk fallback."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
+import json
+import sys
+import time
+from typing import Any
+
+from .. import __version__
+from ..config import (
+    UserConfig,
+    UserConfigStore,
+    dismiss_warning_for_today,
+    effective_display_mode,
+    fetch_model_prices,
+)
+from ..core import ParsedSession
+from ..platforms.codex_theme import CodexThemeProbe
+from ..support_assets import support_qr_asset_paths
+from ..updater import check_for_update, download_update_asset, format_update_info, launch_installer
+from .renderer_hud import RendererHudPayload, _renderer_theme_payload, payload_from_snapshot
+from .tk_hud import (
+    CodexWindowLocator,
+    HudSettingsStore,
+    REQUEST_ANCHOR_BOTTOM,
+    WindowRect,
+    _visual_anchor_geometry,
+)
+
+QT_HUD_TOP_WIDTH = 520
+QT_HUD_REQUEST_WIDTH = 380
+QT_HUD_TOP_COLLAPSED_HEIGHT = 36
+QT_HUD_TOP_EXPANDED_HEIGHT = 390
+QT_HUD_REQUEST_COLLAPSED_HEIGHT = 32
+QT_HUD_REQUEST_EXPANDED_HEIGHT = 180
+QT_HUD_MARGIN = 16
+QT_HUD_ANIMATION_MS = 180
+QT_HUD_INTERACTION_IDLE_MS = 240
+QT_HUD_TOP_STACK_WIDTH = 560
+QT_THEME_DEFAULTS: dict[str, str] = {
+    "surface": "#10161D",
+    "panelSurface": "#141B24",
+    "panelBorder": "#3A485A",
+    "headerSurface": "#202833",
+    "divider": "#273241",
+    "text": "#DCE7F2",
+    "muted": "#8D9AAD",
+    "accent": "#F3D27A",
+    "info": "#9CCBFF",
+    "warning": "#FFB86B",
+    "error": "#FF6B6B",
+    "success": "#8FE3A1",
+    "requestSurface": "#0B1016",
+    "requestHeaderSurface": "#151D27",
+    "requestPanelSurface": "#F6FAFF",
+    "requestText": "#4D6075",
+    "requestMuted": "#718095",
+    "progressTrack": "#202832",
+    "progressTrackBorder": "#3B4654",
+    "progressTrackText": "#E9F1F8",
+    "progressCache": "#5EA7FF",
+    "progressDay": "#F3D27A",
+    "progressWeek": "#B5DD92",
+    "progressOverflow": "#FF875A",
+}
+
+try:  # pragma: no cover - exercised through QtHudWindow construction.
+    from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
+    from PySide6.QtGui import QColor, QFont, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
+    from PySide6.QtWidgets import (
+        QApplication,
+        QComboBox,
+        QDialog,
+        QFrame,
+        QGridLayout,
+        QHeaderView,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QMessageBox,
+        QPushButton,
+        QScrollArea,
+        QSizeGrip,
+        QStackedLayout,
+        QTabWidget,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+
+    _QT_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - depends on optional GUI runtime.
+    QApplication = None  # type: ignore[assignment]
+    _QT_IMPORT_ERROR = exc
+
+
+def _compact(value: object, limit: int = 140) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _metric_signature(metrics: Sequence[Mapping[str, object]]) -> str:
+    return json.dumps(list(metrics), ensure_ascii=False, sort_keys=True)
+
+
+if QApplication is not None:
+
+    class _HudLabel(QLabel):
+        def __init__(
+            self,
+            text: str = "",
+            *,
+            role: str = "body",
+            wrap: bool = False,
+        ) -> None:
+            super().__init__(text)
+            self.setObjectName(f"qtHudLabel-{role}")
+            self.setWordWrap(wrap)
+            self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+            self._copy_text = ""
+
+        def set_elided_text(self, value: object, *, limit: int = 220) -> None:
+            text = _compact(value, limit)
+            metrics = self.fontMetrics()
+            width = max(40, self.width() or self.sizeHint().width() or 120)
+            self.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, width))
+            self.setToolTip(text)
+
+        def set_copy_text(self, value: object, *, tooltip: str = "") -> None:
+            text = str(value or "").strip()
+            self._copy_text = text
+            if text:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.setToolTip(tooltip or f"点击复制\n{text}")
+            else:
+                self.unsetCursor()
+
+        def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+            if event.button() == Qt.MouseButton.LeftButton and self._copy_text:
+                QApplication.clipboard().setText(self._copy_text)
+                event.accept()
+                return
+            super().mousePressEvent(event)
+
+
+    class _HudSizeGrip(QSizeGrip):
+        def __init__(self, parent: QWidget, on_resize_finished: Callable[[], None]) -> None:
+            super().__init__(parent)
+            self._on_resize_finished = on_resize_finished
+            self._pressed = False
+
+        def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+            self._pressed = True
+            super().mousePressEvent(event)
+
+        def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+            was_pressed = self._pressed
+            self._pressed = False
+            super().mouseReleaseEvent(event)
+            if was_pressed:
+                QTimer.singleShot(0, self._on_resize_finished)
+
+
+    class _ProgressRail(QWidget):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setMinimumHeight(18)
+            self.setMaximumHeight(20)
+            self._metric: dict[str, object] = {}
+            self._theme: dict[str, str] = dict(QT_THEME_DEFAULTS)
+
+        def set_metric(self, metric: Mapping[str, object] | None) -> None:
+            self._metric = dict(metric or {})
+            self.setVisible(bool(self._metric))
+            self.update()
+
+        def set_theme(self, tokens: Mapping[str, str]) -> None:
+            self._theme.update({str(key): str(value) for key, value in tokens.items()})
+            self.update()
+
+        def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+            del event
+            if not self._metric:
+                return
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = self.rect().adjusted(0, 1, 0, -1)
+            radius = 7
+            painter.setPen(QPen(QColor(self._theme.get("progressTrackBorder", "#3B4654")), 1))
+            painter.setBrush(QColor(self._theme.get("progressTrack", "#202832")))
+            painter.drawRoundedRect(rect, radius, radius)
+
+            tone = str(self._metric.get("tone") or "session")
+            colors = {
+                "cache": self._theme.get("progressCache", "#5EA7FF"),
+                "session": self._theme.get("info", "#9CCBFF"),
+                "day": self._theme.get("progressDay", "#F3D27A"),
+                "week": self._theme.get("progressWeek", "#B5DD92"),
+                "error": self._theme.get("error", "#FF6B6B"),
+            }
+            fill_color = QColor(colors.get(tone, "#9CCBFF"))
+            ratio = max(0.0, min(1.0, float(self._metric.get("ratio") or 0.0)))
+            fill_width = max(0, int(rect.width() * ratio))
+            if fill_width > 0:
+                fill_rect = QRect(rect.left(), rect.top(), fill_width, rect.height())
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(fill_color)
+                painter.drawRoundedRect(fill_rect, radius, radius)
+
+            overflow_ratio = max(0.0, min(1.0, float(self._metric.get("overflowRatio") or 0.0)))
+            if overflow_ratio > 0.0:
+                overflow_left = rect.left() + int(rect.width() * (1.0 - overflow_ratio))
+                overflow_rect = QRect(
+                    overflow_left,
+                    rect.top(),
+                    max(3, rect.right() - overflow_left),
+                    rect.height(),
+                )
+                painter.setBrush(QColor(self._theme.get("progressOverflow", "#FF875A")))
+                painter.drawRoundedRect(overflow_rect, radius, radius)
+
+            text = str(self._metric.get("label") or "")
+            right_text = str(self._metric.get("rightText") or self._metric.get("overflowBadge") or "")
+            painter.setPen(QColor(self._theme.get("progressTrackText", "#E9F1F8")))
+            font = QFont(self.font())
+            font.setPointSize(max(8, font.pointSize()))
+            painter.setFont(font)
+            left_text = self.fontMetrics().elidedText(
+                text,
+                Qt.TextElideMode.ElideRight,
+                max(30, rect.width() - 76),
+            )
+            painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter, left_text)
+            if right_text:
+                painter.drawText(
+                    rect.adjusted(8, 0, -8, 0),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    right_text,
+                )
+
+
+    class _PanelWindow(QWidget):
+        def __init__(
+            self,
+            *,
+            target: str,
+            width: int,
+            collapsed_height: int,
+            expanded_height: int,
+            on_interaction: Callable[[], None],
+            on_geometry_changed: Callable[[str, "_PanelWindow", str], None] | None = None,
+            grow_from_bottom: bool = False,
+        ) -> None:
+            super().__init__()
+            self._target = str(target)
+            self._collapsed_height = int(collapsed_height)
+            self._expanded_height = int(expanded_height)
+            self._grow_from_bottom = bool(grow_from_bottom)
+            self._expanded = False
+            self._drag_origin: QPoint | None = None
+            self._drag_window_origin: QPoint | None = None
+            self._dragging = False
+            self._manual_positioned = False
+            self._on_interaction = on_interaction
+            self._on_geometry_changed = on_geometry_changed
+            self._animation: QPropertyAnimation | None = None
+            self._stack = QStackedLayout()
+
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+                | Qt.WindowType.Tool
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.setMouseTracking(True)
+            self.setMinimumWidth(min(width, 320))
+            self.resize(width, self._collapsed_height)
+            self.setFixedHeight(self._collapsed_height)
+            self.setWindowOpacity(0.96)
+
+            root_layout = QVBoxLayout(self)
+            root_layout.setContentsMargins(0, 0, 0, 0)
+            self.shell = QFrame()
+            self.shell.setObjectName("qtHudShell")
+            self.shell.setFrameShape(QFrame.Shape.NoFrame)
+            root_layout.addWidget(self.shell)
+            shell_layout = QVBoxLayout(self.shell)
+            shell_layout.setContentsMargins(10, 4, 10, 4)
+            shell_layout.addLayout(self._stack)
+            self._grip = _HudSizeGrip(self.shell, self._resize_finished)
+            self._grip.setFixedSize(14, 14)
+
+        @property
+        def expanded(self) -> bool:
+            return self._expanded
+
+        def set_pages(self, collapsed: QWidget, expanded: QWidget) -> None:
+            self._stack.addWidget(collapsed)
+            self._stack.addWidget(expanded)
+            self._stack.setCurrentIndex(0)
+
+        def toggle_expanded(self) -> None:
+            self.set_expanded(not self._expanded)
+
+        def set_expanded(self, expanded: bool) -> None:
+            expanded = bool(expanded)
+            if expanded == self._expanded and self.height() == self._target_height(expanded):
+                return
+            self._on_interaction()
+            self._expanded = expanded
+            self._stack.setCurrentIndex(1 if expanded else 0)
+            self.setMinimumHeight(1)
+            self.setMaximumHeight(16777215)
+            start = self.geometry()
+            target_height = self._target_height(expanded)
+            target_y = start.bottom() - target_height + 1 if self._grow_from_bottom else start.y()
+            target = QRect(start.x(), target_y, start.width(), target_height)
+            if self._animation is not None:
+                self._animation.stop()
+            self._animation = QPropertyAnimation(self, b"geometry")
+            self._animation.setDuration(QT_HUD_ANIMATION_MS)
+            self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._animation.setStartValue(start)
+            self._animation.setEndValue(target)
+            self._animation.finished.connect(lambda expanded=expanded: self._settle_height(expanded))
+            self._animation.start()
+
+        def _target_height(self, expanded: bool) -> int:
+            return self._expanded_height if expanded else self._collapsed_height
+
+        def _settle_height(self, expanded: bool) -> None:
+            if expanded:
+                self.setMinimumHeight(self._expanded_height)
+                self.setMaximumHeight(16777215)
+            else:
+                self.setFixedHeight(self._collapsed_height)
+
+        def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._on_interaction()
+                self._drag_origin = event.globalPosition().toPoint()
+                self._drag_window_origin = self.pos()
+                self._dragging = False
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+            if self._drag_origin is not None and self._drag_window_origin is not None:
+                delta = event.globalPosition().toPoint() - self._drag_origin
+                if abs(delta.x()) > 3 or abs(delta.y()) > 3:
+                    self._dragging = True
+                    self.move(self._drag_window_origin + delta)
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+            if event.button() == Qt.MouseButton.LeftButton:
+                clicked = not self._dragging
+                if self._dragging:
+                    self._manual_positioned = True
+                    self._emit_geometry_changed("move")
+                self._drag_origin = None
+                self._drag_window_origin = None
+                self._dragging = False
+                if clicked:
+                    self.toggle_expanded()
+            super().mouseReleaseEvent(event)
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802
+            super().resizeEvent(event)
+            self._grip.move(
+                max(0, self.shell.width() - self._grip.width() - 2),
+                max(0, self.shell.height() - self._grip.height() - 2),
+            )
+
+        def _resize_finished(self) -> None:
+            self._on_interaction()
+            self._emit_geometry_changed("resize")
+
+        def _emit_geometry_changed(self, reason: str) -> None:
+            if self._on_geometry_changed is not None:
+                self._on_geometry_changed(self._target, self, reason)
+
+
+    class _TopPanel(_PanelWindow):
+        def __init__(
+            self,
+            *,
+            width: int = QT_HUD_TOP_WIDTH,
+            expanded_height: int = QT_HUD_TOP_EXPANDED_HEIGHT,
+            on_settings: Callable[[], None],
+            on_update_action: Callable[[], None],
+            on_dismiss_warnings: Callable[[], None],
+            on_interaction: Callable[[], None],
+            on_geometry_changed: Callable[[str, _PanelWindow, str], None] | None = None,
+        ) -> None:
+            super().__init__(
+                target="top",
+                width=width,
+                collapsed_height=QT_HUD_TOP_COLLAPSED_HEIGHT,
+                expanded_height=expanded_height,
+                on_interaction=on_interaction,
+                on_geometry_changed=on_geometry_changed,
+            )
+            self._on_settings = on_settings
+            self._on_update_action = on_update_action
+            self._on_dismiss_warnings = on_dismiss_warnings
+            self._collapsed_progress: list[_ProgressRail] = []
+            self._budget_progress: list[_ProgressRail] = []
+            self._heavy_rows: list[tuple[_HudLabel, _HudLabel]] = []
+            self._activity_rows: list[tuple[_HudLabel, _HudLabel, _HudLabel]] = []
+            self._activity_signature = ""
+            self._activity_trail: list[Mapping[str, object]] = []
+            self._activity_visible_count = 4
+            self._top_grid: QGridLayout | None = None
+            self._top_left: QFrame | None = None
+            self._top_right: QFrame | None = None
+            self._top_layout_stacked: bool | None = None
+            self._build()
+
+        def _build(self) -> None:
+            collapsed = QFrame()
+            collapsed.setObjectName("qtHudTopCollapsed")
+            collapsed_layout = QHBoxLayout(collapsed)
+            collapsed_layout.setContentsMargins(0, 0, 0, 0)
+            collapsed_layout.setSpacing(8)
+            handle = _HudLabel("⋮⋮", role="handle")
+            handle.setFixedWidth(22)
+            collapsed_layout.addWidget(handle)
+            for _ in range(3):
+                rail = _ProgressRail()
+                rail.setFixedWidth(90)
+                collapsed_layout.addWidget(rail)
+                self._collapsed_progress.append(rail)
+            self.top_line = _HudLabel("正在启动 HUD...", role="strong")
+            collapsed_layout.addWidget(self.top_line, 1)
+            collapsed_settings = QPushButton("Settings")
+            collapsed_settings.setObjectName("qtHudSecondaryButton")
+            collapsed_settings.clicked.connect(self._on_settings)
+            collapsed_layout.addWidget(collapsed_settings)
+
+            expanded = QFrame()
+            expanded_layout = QVBoxLayout(expanded)
+            expanded_layout.setContentsMargins(0, 0, 0, 0)
+            expanded_layout.setSpacing(8)
+
+            header_frame = QFrame()
+            header_frame.setObjectName("qtHudPanelHeader")
+            header = QHBoxLayout(header_frame)
+            header.setContentsMargins(6, 3, 6, 3)
+            header.setSpacing(6)
+            header.addWidget(_HudLabel("⋮⋮", role="handle"))
+            self.update_button = QPushButton("↓")
+            self.update_button.setObjectName("qtHudIconButton")
+            self.update_button.setVisible(False)
+            self.update_button.clicked.connect(self._on_update_action)
+            header.addWidget(self.update_button)
+            self.title = _HudLabel("Codex Usage HUD", role="title")
+            self.title.setMinimumHeight(24)
+            header.addWidget(self.title, 1)
+            self.session_meta = _HudLabel("", role="muted")
+            self.session_meta.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            header.addWidget(self.session_meta, 1)
+            self.cache_progress = _ProgressRail()
+            self.cache_progress.setFixedWidth(170)
+            header.addWidget(self.cache_progress)
+            self.settings_button = QPushButton("Settings")
+            self.settings_button.setObjectName("qtHudSecondaryButton")
+            self.settings_button.clicked.connect(self._on_settings)
+            header.addWidget(self.settings_button)
+            expanded_layout.addWidget(header_frame)
+
+            self.warning_panel = QFrame()
+            self.warning_panel.setObjectName("qtHudWarningPanel")
+            warning_layout = QHBoxLayout(self.warning_panel)
+            warning_layout.setContentsMargins(8, 5, 8, 5)
+            warning_layout.setSpacing(8)
+            warning_layout.addWidget(_HudLabel("●", role="warning-dot"))
+            warning_layout.addWidget(_HudLabel("预警", role="warning-title"))
+            self.warning = _HudLabel("", role="warning", wrap=True)
+            warning_layout.addWidget(self.warning, 1)
+            self.warning_close = QPushButton("×")
+            self.warning_close.setObjectName("qtHudIconButton")
+            self.warning_close.setToolTip("今天不再显示")
+            self.warning_close.clicked.connect(self._on_dismiss_warnings)
+            warning_layout.addWidget(self.warning_close)
+            self.warning_panel.setVisible(False)
+            expanded_layout.addWidget(self.warning_panel)
+
+            body_scroll = QScrollArea()
+            body_scroll.setWidgetResizable(True)
+            body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            body_scroll.setObjectName("qtHudTopBodyScroll")
+            body = QFrame()
+            body.setObjectName("qtHudTopBody")
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 4, 0)
+            body_layout.setSpacing(8)
+            top_grid = QGridLayout()
+            top_grid.setHorizontalSpacing(10)
+            top_grid.setVerticalSpacing(10)
+            left = QFrame()
+            right = QFrame()
+            left_layout = QVBoxLayout(left)
+            right_layout = QVBoxLayout(right)
+            for column_layout in (left_layout, right_layout):
+                column_layout.setContentsMargins(0, 0, 0, 0)
+                column_layout.setSpacing(8)
+            top_grid.addWidget(left, 0, 0)
+            top_grid.addWidget(right, 0, 1)
+            top_grid.setColumnStretch(0, 1)
+            top_grid.setColumnStretch(1, 1)
+            self._top_grid = top_grid
+            self._top_left = left
+            self._top_right = right
+            body_layout.addLayout(top_grid)
+
+            session_body, session_actions = self._card(left_layout, "本会话用量")
+            self.task_ordinal_session = self._chip(session_actions)
+            self.session_rounds = self._chip(session_actions)
+            stats = QGridLayout()
+            stats.setHorizontalSpacing(8)
+            self.session_cost = self._metric_box(stats, 0, 0, "会话金额", role="metric")
+            self.session_tokens = self._metric_box(stats, 0, 1, "累计 tokens", role="metric-info")
+            session_body.addLayout(stats)
+            insight = QFrame()
+            insight.setObjectName("qtHudInset")
+            insight_layout = QGridLayout(insight)
+            insight_layout.setContentsMargins(8, 6, 8, 6)
+            insight_layout.setHorizontalSpacing(8)
+            insight_layout.addWidget(_HudLabel("会话构成", role="caption"), 0, 0)
+            self.session_mix = _HudLabel("", role="mono-blue")
+            self.session_average = _HudLabel("", role="mono-accent")
+            insight_layout.addWidget(self.session_mix, 0, 1)
+            insight_layout.addWidget(self.session_average, 0, 2)
+            insight_layout.setColumnStretch(2, 1)
+            session_body.addWidget(insight)
+            self.session_composition = _HudLabel("", role="muted")
+            session_body.addWidget(self.session_composition)
+            token_grid = QGridLayout()
+            token_grid.setHorizontalSpacing(6)
+            self.session_input_tokens = self._token_chip(token_grid, 0, "输入")
+            self.session_cached_tokens = self._token_chip(token_grid, 1, "缓存")
+            self.session_output_tokens = self._token_chip(token_grid, 2, "输出")
+            self.session_reasoning_tokens = self._token_chip(token_grid, 3, "推理")
+            session_body.addLayout(token_grid)
+
+            budget_body, _budget_actions = self._card(left_layout, "额度进度")
+            for _ in range(2):
+                rail = _ProgressRail()
+                budget_body.addWidget(rail)
+                self._budget_progress.append(rail)
+
+            heavy_body, heavy_actions = self._card(left_layout, "高消耗轮次")
+            self.heavy_summary = self._chip(heavy_actions)
+            for _ in range(3):
+                row = QFrame()
+                row.setObjectName("qtHudHeavyRow")
+                row_layout = QVBoxLayout(row)
+                row_layout.setContentsMargins(8, 5, 8, 5)
+                row_layout.setSpacing(1)
+                title = _HudLabel("", role="strong")
+                detail = _HudLabel("", role="muted")
+                row_layout.addWidget(title)
+                row_layout.addWidget(detail)
+                heavy_body.addWidget(row)
+                self._heavy_rows.append((title, detail))
+            left_layout.addStretch(1)
+
+            activity_body, activity_actions = self._card(right_layout, "当前活动")
+            self.activity_state = self._chip(activity_actions, warning=True)
+            self.task_ordinal_activity = self._chip(activity_actions)
+            self.current_task_label = _HudLabel("当前需求", role="caption")
+            self.current_task = self._inset_value(activity_body, self.current_task_label)
+            self.executing_label = _HudLabel("正在执行", role="caption")
+            self.executing = self._inset_value(activity_body, self.executing_label, role="mono-blue")
+            metric_grid = QGridLayout()
+            metric_grid.setHorizontalSpacing(6)
+            self.activity_elapsed_label, self.activity_elapsed = self._activity_metric(metric_grid, 0)
+            self.activity_gap_label, self.activity_gap = self._activity_metric(metric_grid, 1)
+            self.activity_last_label, self.activity_last = self._activity_metric(metric_grid, 2)
+            activity_body.addLayout(metric_grid)
+            trail_head = QHBoxLayout()
+            trail_head.addWidget(_HudLabel("活动轨迹", role="caption"), 1)
+            self.gap_chip = self._chip(trail_head)
+            self.slow_chip = self._chip(trail_head)
+            activity_body.addLayout(trail_head)
+            self.trail_container = QFrame()
+            self.trail_container.setObjectName("qtHudTimeline")
+            self.trail_layout = QVBoxLayout(self.trail_container)
+            self.trail_layout.setContentsMargins(4, 4, 4, 4)
+            self.trail_layout.setSpacing(3)
+            for _ in range(4):
+                self._add_activity_row()
+            activity_body.addWidget(self.trail_container, 1)
+            self.load_more = QPushButton("查看更多")
+            self.load_more.setObjectName("qtHudSecondaryButton")
+            self.load_more.clicked.connect(self._load_more_activity)
+            activity_body.addWidget(self.load_more)
+            right_layout.addStretch(1)
+
+            body_scroll.setWidget(body)
+            expanded_layout.addWidget(body_scroll, 1)
+            self.set_pages(collapsed, expanded)
+            self._sync_responsive_layout()
+
+        def _card(self, parent: QVBoxLayout, title: str) -> tuple[QVBoxLayout, QHBoxLayout]:
+            card = QFrame()
+            card.setObjectName("qtHudTopCard")
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(9, 7, 9, 8)
+            layout.setSpacing(7)
+            head = QHBoxLayout()
+            head.addWidget(_HudLabel(title, role="card-title"), 1)
+            actions = QHBoxLayout()
+            actions.setSpacing(5)
+            head.addLayout(actions)
+            layout.addLayout(head)
+            body = QVBoxLayout()
+            body.setSpacing(7)
+            layout.addLayout(body)
+            parent.addWidget(card)
+            return body, actions
+
+        def _chip(self, parent: QHBoxLayout, *, warning: bool = False) -> _HudLabel:
+            label = _HudLabel("", role="chip-warning" if warning else "chip")
+            label.setObjectName("qtHudChipWarning" if warning else "qtHudChip")
+            label.setVisible(False)
+            parent.addWidget(label)
+            return label
+
+        def _metric_box(
+            self,
+            grid: QGridLayout,
+            row: int,
+            column: int,
+            label: str,
+            *,
+            role: str = "strong",
+        ) -> _HudLabel:
+            box = QFrame()
+            box.setObjectName("qtHudMetricBox")
+            layout = QVBoxLayout(box)
+            layout.setContentsMargins(8, 5, 8, 5)
+            layout.setSpacing(1)
+            caption = _HudLabel(label, role="caption")
+            value = _HudLabel("--", role=role)
+            layout.addWidget(caption)
+            layout.addWidget(value)
+            grid.addWidget(box, row, column)
+            return value
+
+        def _token_chip(self, grid: QGridLayout, column: int, label: str) -> _HudLabel:
+            box = QFrame()
+            box.setObjectName("qtHudTokenChip")
+            layout = QHBoxLayout(box)
+            layout.setContentsMargins(5, 3, 5, 3)
+            layout.setSpacing(4)
+            layout.addWidget(_HudLabel(label, role="caption"))
+            value = _HudLabel("", role="strong")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            layout.addWidget(value, 1)
+            grid.addWidget(box, 0, column)
+            grid.setColumnStretch(column, 1)
+            return value
+
+        def _inset_value(
+            self,
+            parent: QVBoxLayout,
+            label: _HudLabel,
+            *,
+            role: str = "body",
+        ) -> _HudLabel:
+            box = QFrame()
+            box.setObjectName("qtHudInset")
+            layout = QVBoxLayout(box)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(2)
+            layout.addWidget(label)
+            value = _HudLabel("", role=role)
+            layout.addWidget(value)
+            parent.addWidget(box)
+            return value
+
+        def _activity_metric(
+            self,
+            grid: QGridLayout,
+            column: int,
+        ) -> tuple[_HudLabel, _HudLabel]:
+            box = QFrame()
+            box.setObjectName("qtHudInset")
+            layout = QVBoxLayout(box)
+            layout.setContentsMargins(7, 5, 7, 5)
+            layout.setSpacing(2)
+            label = _HudLabel("", role="caption")
+            value = _HudLabel("", role="mono-accent")
+            layout.addWidget(label)
+            layout.addWidget(value)
+            grid.addWidget(box, 0, column)
+            grid.setColumnStretch(column, 1)
+            return label, value
+
+        def _add_activity_row(self) -> None:
+            row = QFrame()
+            row.setObjectName("qtHudActivityRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(4, 1, 4, 1)
+            row_layout.setSpacing(6)
+            time_label = _HudLabel("", role="muted")
+            time_label.setFixedWidth(56)
+            title_label = _HudLabel("", role="body")
+            detail_label = _HudLabel("", role="muted")
+            row_layout.addWidget(time_label)
+            row_layout.addWidget(title_label)
+            row_layout.addWidget(detail_label, 1)
+            self.trail_layout.addWidget(row)
+            self._activity_rows.append((time_label, title_label, detail_label))
+
+        def _ensure_activity_row_count(self, count: int) -> None:
+            while len(self._activity_rows) < count:
+                self._add_activity_row()
+
+        def update_payload(self, payload: Mapping[str, object]) -> None:
+            self.top_line.set_elided_text(payload.get("topLine"), limit=260)
+            details = payload.get("topDetails") if isinstance(payload.get("topDetails"), Mapping) else {}
+            progress = payload.get("topProgress") if isinstance(payload.get("topProgress"), Mapping) else {}
+            copies = payload.get("topCopies") if isinstance(payload.get("topCopies"), Mapping) else {}
+
+            self.title.set_elided_text(details.get("title"), limit=120)
+            self.session_meta.set_elided_text(details.get("session"), limit=120)
+            self.session_tokens.setText(str(details.get("sessionTokens") or "--"))
+            self.session_cost.setText(str(details.get("sessionCost") or "--"))
+            self.session_rounds.set_elided_text(details.get("sessionRounds"), limit=32)
+            self.session_rounds.setVisible(bool(str(details.get("sessionRounds") or "").strip()))
+            self.task_ordinal_session.set_elided_text(details.get("taskOrdinalSession"), limit=32)
+            self.task_ordinal_session.setVisible(bool(str(details.get("taskOrdinalSession") or "").strip()))
+            self.session_mix.set_elided_text(details.get("sessionMix"), limit=60)
+            self.session_average.set_elided_text(details.get("sessionAverage"), limit=60)
+            self.session_composition.set_elided_text(details.get("sessionComposition"), limit=120)
+            self.session_input_tokens.setText(str(details.get("sessionInputTokens") or "--"))
+            self.session_cached_tokens.setText(str(details.get("sessionCachedTokens") or "--"))
+            self.session_output_tokens.setText(str(details.get("sessionOutputTokens") or "--"))
+            self.session_reasoning_tokens.setText(str(details.get("sessionReasoningTokens") or "--"))
+            self.heavy_summary.set_elided_text(details.get("heavyRoundsSummary"), limit=32)
+            self.heavy_summary.setVisible(bool(str(details.get("heavyRoundsSummary") or "").strip()))
+            self._update_heavy_rounds(details.get("heavyRounds"))
+            self.activity_state.set_elided_text(details.get("activityState"), limit=30)
+            self.activity_state.setVisible(bool(str(details.get("activityState") or "").strip()))
+            self.task_ordinal_activity.set_elided_text(details.get("taskOrdinalActivity"), limit=32)
+            self.task_ordinal_activity.setVisible(bool(str(details.get("taskOrdinalActivity") or "").strip()))
+            self.current_task_label.setText(str(details.get("currentTaskLabel") or "当前需求"))
+            self.executing_label.setText(str(details.get("executingLabel") or "正在执行"))
+            self.current_task.set_elided_text(details.get("currentTask"), limit=130)
+            self.current_task.set_copy_text(details.get("currentTask"))
+            self.executing.set_elided_text(details.get("executing"), limit=130)
+            self.executing.set_copy_text(details.get("executing"))
+            self.activity_elapsed_label.setText(str(details.get("activityElapsedLabel") or "已运行"))
+            self.activity_elapsed.setText(str(details.get("activityElapsed") or "--"))
+            self.activity_gap_label.setText(str(details.get("activityGapLabel") or "当前等待"))
+            self.activity_gap.set_elided_text(details.get("activityGap"), limit=40)
+            self.activity_last_label.setText(str(details.get("activityLastLabel") or "需求轮次"))
+            self.activity_last.set_elided_text(details.get("activityLast"), limit=44)
+            self.slow_chip.set_elided_text(details.get("slow"), limit=48)
+            self.slow_chip.setVisible(bool(str(details.get("slow") or "").strip()))
+            self.slow_chip.set_copy_text(copies.get("slow"))
+            self.gap_chip.set_elided_text(details.get("gap"), limit=48)
+            self.gap_chip.setVisible(bool(str(details.get("gap") or "").strip()))
+            self.gap_chip.set_copy_text(copies.get("gap"))
+            warning = str(details.get("warnings") or "").strip()
+            self.warning.setText(warning)
+            self.warning_panel.setVisible(bool(warning))
+
+            collapsed_metrics = [
+                item for item in progress.get("collapsed", []) if isinstance(item, Mapping)
+            ]
+            for index, rail in enumerate(self._collapsed_progress):
+                rail.set_metric(collapsed_metrics[index] if index < len(collapsed_metrics) else None)
+            cache_metric = progress.get("cache")
+            self.cache_progress.set_metric(cache_metric if isinstance(cache_metric, Mapping) else None)
+            budget_metrics = [
+                item for item in progress.get("budget", []) if isinstance(item, Mapping)
+            ]
+            for index, rail in enumerate(self._budget_progress):
+                rail.set_metric(budget_metrics[index] if index < len(budget_metrics) else None)
+            self._update_activity_trail(details.get("activityTrail"))
+            update_state = payload.get("updateState")
+            self._render_update_button(update_state if isinstance(update_state, Mapping) else {})
+            self._sync_responsive_layout()
+
+        def hide_warning(self) -> None:
+            self.warning.setText("")
+            self.warning_panel.setVisible(False)
+
+        def _render_update_button(self, state: Mapping[str, object]) -> None:
+            visible = bool(state.get("visible"))
+            self.update_button.setVisible(visible)
+            if not visible:
+                return
+            icon = str(state.get("icon") or "")
+            phase = str(state.get("phase") or "")
+            glyph = "⇪" if icon == "install" else "↓"
+            self.update_button.setText(glyph)
+            self.update_button.setProperty("phase", phase)
+            tooltip = str(state.get("title") or state.get("message") or "")
+            self.update_button.setToolTip(tooltip)
+            self.update_button.style().unpolish(self.update_button)
+            self.update_button.style().polish(self.update_button)
+
+        def _update_heavy_rounds(self, items: object) -> None:
+            rounds = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
+            placeholders = [
+                ("暂无会话高消耗轮次", "会话出现 token 确认后展示 Top 3"),
+                ("等待统计", "不会因新需求开始而清空"),
+                ("保持占位", "新轮次超过历史 Top 3 后刷新"),
+            ]
+            for index, labels in enumerate(self._heavy_rows):
+                title_label, detail_label = labels
+                if index < len(rounds):
+                    item = rounds[index]
+                    title_label.set_elided_text(item.get("title"), limit=42)
+                    detail_label.set_elided_text(item.get("detail"), limit=90)
+                    copy_text = str(item.get("copyText") or item.get("tooltip") or "")
+                    tooltip = str(item.get("tooltip") or copy_text)
+                    title_label.parentWidget().setToolTip(tooltip)
+                    title_label.set_copy_text(copy_text, tooltip="点击复制轮次内容")
+                    detail_label.set_copy_text(copy_text, tooltip="点击复制轮次内容")
+                else:
+                    title, detail = placeholders[index]
+                    title_label.setText(title)
+                    detail_label.setText(detail)
+                    title_label.parentWidget().setToolTip("")
+                    title_label.set_copy_text("")
+                    detail_label.set_copy_text("")
+
+        def _update_activity_trail(self, items: object) -> None:
+            trail = [item for item in items if isinstance(item, Mapping)] if isinstance(items, list) else []
+            signature = _metric_signature(trail)
+            if signature != self._activity_signature:
+                self._activity_visible_count = 4
+                self._activity_signature = signature
+                self._activity_trail = trail
+            self._render_activity_trail()
+
+        def _load_more_activity(self) -> None:
+            self._activity_visible_count += 4
+            self._render_activity_trail()
+
+        def _render_activity_trail(self) -> None:
+            trail = self._activity_trail
+            if trail:
+                visible_count = min(len(trail), max(4, self._activity_visible_count))
+                visible_items = trail[:visible_count]
+            else:
+                visible_items = [
+                    {"time": "--:--", "title": "暂无时间节点", "detail": "等待会话产生新活动"}
+                ]
+                visible_count = 1
+            self._ensure_activity_row_count(visible_count)
+            for index, labels in enumerate(self._activity_rows):
+                time_label, title_label, detail_label = labels
+                if index < visible_count:
+                    item = visible_items[index]
+                    time_label.parentWidget().setVisible(True)
+                    time_label.setText(str(item.get("time") or ""))
+                    title_label.set_elided_text(item.get("title") or "", limit=28)
+                    detail_label.set_elided_text(item.get("detail") or "", limit=100)
+                    tooltip = str(item.get("tooltip") or "  ".join(
+                        str(item.get(key) or "") for key in ("time", "title", "detail")
+                    ).strip())
+                    detail_label.set_copy_text(tooltip, tooltip="点击复制轨迹详情")
+                else:
+                    time_label.parentWidget().setVisible(False)
+                    detail_label.set_copy_text("")
+            has_more = bool(trail) and visible_count < len(trail)
+            self.load_more.setEnabled(has_more)
+            self.load_more.setText("查看更多" if has_more else "已显示全部")
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802
+            super().resizeEvent(event)
+            self._sync_responsive_layout()
+
+        def _sync_responsive_layout(self) -> None:
+            width = max(1, self.width())
+            compact_header = width <= 760
+            if hasattr(self, "session_meta"):
+                self.session_meta.setVisible(not compact_header)
+            if hasattr(self, "cache_progress"):
+                self.cache_progress.setVisible(not compact_header)
+            grid = self._top_grid
+            left = self._top_left
+            right = self._top_right
+            if grid is None or left is None or right is None:
+                return
+            stacked = width < QT_HUD_TOP_STACK_WIDTH
+            if stacked == self._top_layout_stacked:
+                return
+            self._top_layout_stacked = stacked
+            if stacked:
+                grid.addWidget(left, 0, 0)
+                grid.addWidget(right, 1, 0)
+                grid.setColumnStretch(0, 1)
+                grid.setColumnStretch(1, 0)
+                grid.setRowStretch(0, 0)
+                grid.setRowStretch(1, 0)
+                return
+            grid.addWidget(left, 0, 0)
+            grid.addWidget(right, 0, 1)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            grid.setRowStretch(0, 1)
+            grid.setRowStretch(1, 0)
+
+        def apply_theme(self, tokens: Mapping[str, str]) -> None:
+            for rail in self.findChildren(_ProgressRail):
+                rail.set_theme(tokens)
+
+
+    class _RequestRow(QFrame):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setObjectName("qtHudRequestRowFrame")
+            self.setMinimumHeight(24)
+            self._started_at: datetime | None = None
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(8, 2, 8, 2)
+            layout.setSpacing(0)
+            self.prefix = _HudLabel("", role="request")
+            self.prefix.setMinimumWidth(94)
+            self.time = _HudLabel("", role="request-time")
+            self.time.setFixedWidth(68)
+            self.suffix = _HudLabel("", role="request")
+            layout.addWidget(self.prefix)
+            layout.addWidget(self.time)
+            layout.addWidget(self.suffix, 1)
+
+        def set_detail(self, item: Mapping[str, object] | str, *, latest: bool) -> None:
+            self.setProperty("latest", "true" if latest else "false")
+            self._started_at = None
+            if isinstance(item, Mapping):
+                prefix = str(item.get("prefix") or "")
+                time_text = str(item.get("time") or "")
+                suffix = str(item.get("suffix") or "")
+                fallback = str(item.get("text") or "").strip()
+                if not prefix and not suffix:
+                    prefix, time_text, suffix = fallback, "", ""
+                tooltip = str(item.get("text") or f"{prefix}{time_text}{suffix}").strip()
+                if latest and item.get("running") and item.get("startedAt"):
+                    try:
+                        self._started_at = datetime.fromisoformat(str(item.get("startedAt")))
+                    except ValueError:
+                        self._started_at = None
+            else:
+                prefix, time_text, suffix = str(item), "", ""
+                tooltip = str(item)
+            self.prefix.set_elided_text(prefix, limit=48)
+            self.time.setText(time_text)
+            self.suffix.set_elided_text(suffix, limit=120)
+            self.setToolTip(tooltip)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.refresh_running_time()
+
+        def refresh_running_time(self) -> None:
+            if self._started_at is None:
+                return
+            now = datetime.now(self._started_at.tzinfo) if self._started_at.tzinfo else datetime.now()
+            elapsed = max(0, int((now - self._started_at).total_seconds()))
+            self.time.setText(f"{elapsed}s".rjust(8))
+
+
+    class _RequestPanel(_PanelWindow):
+        def __init__(
+            self,
+            *,
+            width: int = QT_HUD_REQUEST_WIDTH,
+            expanded_height: int = QT_HUD_REQUEST_EXPANDED_HEIGHT,
+            on_interaction: Callable[[], None],
+            on_geometry_changed: Callable[[str, _PanelWindow, str], None] | None = None,
+        ) -> None:
+            super().__init__(
+                target="request",
+                width=width,
+                collapsed_height=QT_HUD_REQUEST_COLLAPSED_HEIGHT,
+                expanded_height=expanded_height,
+                on_interaction=on_interaction,
+                on_geometry_changed=on_geometry_changed,
+                grow_from_bottom=True,
+            )
+            self._row_labels: list[_RequestRow] = []
+            self._row_signature = ""
+            self._build()
+
+        def _build(self) -> None:
+            collapsed = QFrame()
+            collapsed.setObjectName("qtHudRequestCollapsed")
+            collapsed_layout = QHBoxLayout(collapsed)
+            collapsed_layout.setContentsMargins(0, 0, 0, 0)
+            collapsed_layout.setSpacing(6)
+            handle = _HudLabel("⋮⋮", role="handle")
+            handle.setFixedWidth(22)
+            collapsed_layout.addWidget(handle)
+            self.request_line = _HudLabel("等待请求...", role="strong")
+            collapsed_layout.addWidget(self.request_line, 1)
+
+            expanded = QFrame()
+            expanded_layout = QVBoxLayout(expanded)
+            expanded_layout.setContentsMargins(0, 0, 0, 0)
+            expanded_layout.setSpacing(6)
+            subhead = QFrame()
+            subhead.setObjectName("qtHudRequestSubhead")
+            subhead_layout = QHBoxLayout(subhead)
+            subhead_layout.setContentsMargins(2, 0, 2, 0)
+            subhead_layout.addWidget(_HudLabel("轮次流水", role="caption"), 1)
+            latest_label = _HudLabel("最新在上", role="caption")
+            latest_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            subhead_layout.addWidget(latest_label)
+            expanded_layout.addWidget(subhead)
+
+            list_shell = QFrame()
+            list_shell.setObjectName("qtHudRequestListShell")
+            list_layout = QVBoxLayout(list_shell)
+            list_layout.setContentsMargins(0, 0, 0, 0)
+            self.rows_widget = QFrame()
+            self.rows_layout = QVBoxLayout(self.rows_widget)
+            self.rows_layout.setContentsMargins(4, 4, 4, 4)
+            self.rows_layout.setSpacing(1)
+            self.request_scroll = QScrollArea()
+            self.request_scroll.setWidgetResizable(True)
+            self.request_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.request_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.request_scroll.setObjectName("qtHudRequestScroll")
+            self.request_scroll.setWidget(self.rows_widget)
+            list_layout.addWidget(self.request_scroll)
+            expanded_layout.addWidget(list_shell, 1)
+
+            header = QFrame()
+            header.setObjectName("qtHudRequestExpandedHeader")
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(6, 3, 6, 3)
+            header_layout.setSpacing(6)
+            header_layout.addWidget(_HudLabel("⋮⋮", role="handle"))
+            self.request_title = _HudLabel("最近模型请求轮次", role="strong")
+            header_layout.addWidget(self.request_title, 1)
+            expanded_layout.addWidget(header)
+            self.set_pages(collapsed, expanded)
+
+        def update_payload(self, payload: Mapping[str, object]) -> None:
+            status = str(payload.get("requestStatus") or "waiting")
+            warning = bool(payload.get("warning"))
+            state = "error" if status == "error" else "warning" if warning else ""
+            for widget in (self.request_line, self.request_title):
+                widget.setProperty("state", state)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+            self.request_line.set_elided_text(payload.get("requestLine"), limit=160)
+            self.request_title.set_elided_text(
+                payload.get("requestLine") or "最近模型请求轮次",
+                limit=170,
+            )
+            details = [
+                item
+                for item in payload.get("requestRowDetails", [])
+                if isinstance(item, Mapping)
+            ] if isinstance(payload.get("requestRowDetails"), list) else []
+            fallback_rows = [
+                str(item)
+                for item in payload.get("requestRows", [])
+                if str(item or "").strip()
+            ] if isinstance(payload.get("requestRows"), list) else []
+            rows: list[Mapping[str, object] | str] = details[:30] or fallback_rows[:30]
+            if not rows:
+                rows = ["本次请求(等待) $0.0000 ↑- ◎- ↓- ◇- ↻- ∑-"]
+            signature = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+            if signature == self._row_signature:
+                self._refresh_running_rows()
+                return
+            self._row_signature = signature
+            scroll_bar = self.request_scroll.verticalScrollBar()
+            previous_top = scroll_bar.value()
+            should_follow_head = previous_top <= 2
+            self._ensure_row_count(max(1, len(rows)))
+            visible_rows = rows[: len(self._row_labels)]
+            for index, label in enumerate(self._row_labels):
+                if index < len(visible_rows):
+                    label.set_detail(visible_rows[index], latest=index == 0)
+                    label.setVisible(True)
+                else:
+                    label.setVisible(False)
+            if should_follow_head:
+                scroll_bar.setValue(0)
+            else:
+                scroll_bar.setValue(previous_top)
+            self._refresh_running_rows()
+
+        def _ensure_row_count(self, count: int) -> None:
+            while len(self._row_labels) < count:
+                label = _RequestRow()
+                self.rows_layout.addWidget(label)
+                self._row_labels.append(label)
+            while len(self._row_labels) > count:
+                label = self._row_labels.pop()
+                label.setParent(None)
+                label.deleteLater()
+
+        def _refresh_running_rows(self) -> None:
+            for row in self._row_labels:
+                row.refresh_running_time()
+
+
+    class _SettingsDialog(QDialog):
+        def __init__(self, window: "_QtHudWindowImpl") -> None:
+            super().__init__(window.top_window)
+            self._window = window
+            self.setWindowTitle("codex-usage-hud 设置")
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+            self.setMinimumSize(760, 560)
+            self.resize(780, 580)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+            header = QHBoxLayout()
+            title = _HudLabel(f"codex-usage-hud v{__version__}", role="title")
+            header.addWidget(title, 1)
+            close_top = QPushButton("×")
+            close_top.setObjectName("qtHudIconButton")
+            close_top.clicked.connect(self.close)
+            header.addWidget(close_top)
+            layout.addLayout(header)
+
+            self.tabs = QTabWidget()
+            self.tabs.setObjectName("qtHudSettingsTabs")
+            self.tabs.addTab(self._build_settings_tab(), "设置")
+            self.tabs.addTab(self._build_support_tab(), "请作者喝咖啡")
+            self.tabs.addTab(self._build_about_tab(), "版本更新")
+            self.tabs.currentChanged.connect(self._sync_action_visibility)
+            layout.addWidget(self.tabs, 1)
+
+            footer = QHBoxLayout()
+            self.status = _HudLabel("设置将保存到本地配置文件", role="muted", wrap=True)
+            footer.addWidget(self.status, 1)
+            self.export_button = QPushButton("导出 JSON")
+            self.save_button = QPushButton("保存")
+            self.apply_button = QPushButton("立即切换")
+            self.check_update_button = QPushButton("检查更新")
+            self.install_update_button = QPushButton("安装更新")
+            self.close_button = QPushButton("关闭")
+            self.export_button.clicked.connect(self._export_json)
+            self.save_button.clicked.connect(self._save_only)
+            self.apply_button.clicked.connect(self._apply_now)
+            self.check_update_button.clicked.connect(self._check_update)
+            self.install_update_button.clicked.connect(self._install_update)
+            self.close_button.clicked.connect(self.close)
+            for button in (
+                self.export_button,
+                self.save_button,
+                self.apply_button,
+                self.check_update_button,
+                self.install_update_button,
+                self.close_button,
+            ):
+                footer.addWidget(button)
+            layout.addLayout(footer)
+            self.setStyleSheet(_qt_stylesheet(window._theme_tokens))
+            self._sync_action_visibility()
+
+        def _build_settings_tab(self) -> QWidget:
+            outer = QWidget()
+            outer.setObjectName("qtHudSettingsPage")
+            outer_layout = QVBoxLayout(outer)
+            outer_layout.setContentsMargins(0, 0, 0, 0)
+            scroll = QScrollArea()
+            scroll.setObjectName("qtHudSettingsScroll")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            body = QFrame()
+            body.setObjectName("qtHudSettingsBody")
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 0, 4, 0)
+            body_layout.setSpacing(10)
+            form = QGridLayout()
+            form.setHorizontalSpacing(8)
+            form.setVerticalSpacing(8)
+            self.display_mode = QComboBox()
+            self.display_mode.addItem("自动：Renderer -> Qt -> Tk", "auto")
+            self.display_mode.addItem("Renderer 内嵌 HUD", "renderer")
+            self.display_mode.addItem("Qt 独立窗口", "qt")
+            self.display_mode.addItem("Tk 独立窗口", "tk")
+            configured = self._window.user_settings.display_mode
+            index = max(0, self.display_mode.findData(configured))
+            self.display_mode.setCurrentIndex(index)
+            self.daily_budget = QLineEdit(f"{self._window.user_settings.daily_budget_usd:g}")
+            self.weekly_budget = QLineEdit(f"{self._window.user_settings.weekly_budget_usd:g}")
+            self.daily_reset = QLineEdit(str(self._window.user_settings.daily_reset_time))
+            self.weekly_reset = QLineEdit(str(self._window.user_settings.weekly_reset_time))
+            self.weekday = QComboBox()
+            for value, label in enumerate(["周一", "周二", "周三", "周四", "周五", "周六", "周日"]):
+                self.weekday.addItem(label, value)
+            self.weekday.setCurrentIndex(max(0, min(6, int(self._window.user_settings.weekly_reset_weekday))))
+            self.work_overlay_max_items = QLineEdit(str(self._window.user_settings.work_overlay_max_items))
+            self.pricing_url = QLineEdit(str(self._window.user_settings.pricing_url or ""))
+            self.thresholds = QLineEdit(
+                ",".join(f"{item:g}" for item in self._window.user_settings.budget_thresholds)
+            )
+            self.weekly_adjustment = QLineEdit(f"{self._window.user_settings.weekly_adjustment_usd:g}")
+            self._add_field(form, 0, 0, "显示模式", self.display_mode)
+            self._add_field(form, 1, 0, "日额度 USD", self.daily_budget)
+            self._add_field(form, 1, 1, "周额度 USD", self.weekly_budget)
+            self._add_field(form, 2, 0, "日重置 HH:MM", self.daily_reset)
+            self._add_field(form, 2, 1, "周重置 HH:MM", self.weekly_reset)
+            self._add_field(form, 3, 0, "周起始日", self.weekday)
+            self._add_field(form, 3, 1, "气泡最大数", self.work_overlay_max_items)
+            self._add_field(form, 4, 0, "提醒阈值", self.thresholds)
+            self._add_field(form, 4, 1, "本周补充已使用额度 USD", self.weekly_adjustment)
+            body_layout.addLayout(form)
+
+            pricing_box = QFrame()
+            pricing_box.setObjectName("qtHudMetricBox")
+            pricing_layout = QVBoxLayout(pricing_box)
+            pricing_layout.setContentsMargins(8, 6, 8, 8)
+            pricing_layout.setSpacing(6)
+            pricing_layout.addWidget(_HudLabel("计费单价获取地址", role="caption"))
+            pricing_row = QHBoxLayout()
+            pricing_row.addWidget(self.pricing_url, 1)
+            fetch_button = QPushButton("拉取")
+            fetch_button.clicked.connect(self._fetch_prices)
+            pricing_row.addWidget(fetch_button)
+            pricing_layout.addLayout(pricing_row)
+            body_layout.addWidget(pricing_box)
+
+            price_box = QFrame()
+            price_box.setObjectName("qtHudMetricBox")
+            price_layout = QVBoxLayout(price_box)
+            price_layout.setContentsMargins(8, 6, 8, 8)
+            price_layout.setSpacing(6)
+            price_layout.addWidget(_HudLabel("模型单价（USD / 1M tokens）", role="caption"))
+            self.price_table = QTableWidget(0, 5)
+            self.price_table.setObjectName("qtHudPriceTable")
+            self.price_table.setHorizontalHeaderLabels(["模型", "输入", "缓存", "输出", "推理"])
+            self.price_table.verticalHeader().setVisible(False)
+            self.price_table.setAlternatingRowColors(True)
+            header = self.price_table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            for index in range(1, 5):
+                header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
+            self._replace_price_rows(self._window.user_settings.model_prices)
+            price_layout.addWidget(self.price_table)
+            add_model = QPushButton("添加模型")
+            add_model.clicked.connect(lambda: self._append_price_row("future-model", {}))
+            price_layout.addWidget(add_model, alignment=Qt.AlignmentFlag.AlignLeft)
+            body_layout.addWidget(price_box)
+
+            foot = QFrame()
+            foot_layout = QHBoxLayout(foot)
+            foot_layout.setContentsMargins(0, 0, 0, 0)
+            exit_button = QPushButton("退出 HUD")
+            exit_button.clicked.connect(self._confirm_exit)
+            foot_layout.addWidget(exit_button)
+            path_label = _HudLabel(f"配置文件：{self._window.user_settings_store.path}", role="muted")
+            path_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            foot_layout.addWidget(path_label, 1)
+            body_layout.addWidget(foot)
+            scroll.setWidget(body)
+            outer_layout.addWidget(scroll)
+            return outer
+
+        def _build_support_tab(self) -> QWidget:
+            tab = QWidget()
+            tab.setObjectName("qtHudSettingsPage")
+            layout = QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(10)
+            layout.addWidget(
+                _HudLabel(
+                    "如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。",
+                    role="body",
+                    wrap=True,
+                )
+            )
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(10)
+            for index, item in enumerate(support_qr_asset_paths()):
+                card = QFrame()
+                card.setObjectName("qtHudMetricBox")
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(10, 8, 10, 10)
+                card_layout.setSpacing(6)
+                card_layout.addWidget(
+                    _HudLabel(f"{item['label']}  {item['hint']}", role="strong")
+                )
+                image = QLabel()
+                image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                pixmap = QPixmap(str(item["path"]))
+                if not pixmap.isNull():
+                    image.setPixmap(
+                        pixmap.scaled(
+                            180,
+                            180,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+                else:
+                    image.setText("赞赏码资源未加载")
+                card_layout.addWidget(image)
+                grid.addWidget(card, index // 2, index % 2)
+            layout.addLayout(grid)
+            layout.addWidget(
+                _HudLabel(
+                    f"项目链接：{self._window.user_settings.support_url}\n"
+                    f"当前配置文件：{self._window.user_settings_store.path}",
+                    role="muted",
+                    wrap=True,
+                )
+            )
+            layout.addStretch(1)
+            return tab
+
+        def _build_about_tab(self) -> QWidget:
+            tab = QWidget()
+            tab.setObjectName("qtHudSettingsPage")
+            layout = QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(10)
+            lines = [
+                f"当前版本：v{__version__}",
+                "更新源：GitHub Releases / mingbingfeng/codex-usage-hud",
+                "Windows 安装包：codex-usage-hud-v*-windows-x64-setup.exe",
+                "自动更新会下载最新版安装包并启动安装器；安装器会先关闭正在运行的 HUD，再替换本地文件。",
+                f"当前配置文件：{self._window.user_settings_store.path}",
+            ]
+            layout.addWidget(_HudLabel("\n".join(lines), role="body", wrap=True))
+            self.update_state_label = _HudLabel("", role="muted", wrap=True)
+            layout.addWidget(self.update_state_label)
+            self._refresh_update_state_label()
+            layout.addStretch(1)
+            return tab
+
+        def _sync_action_visibility(self, *_args: object) -> None:
+            active = self.tabs.currentIndex()
+            is_settings = active == 0
+            is_about = active == 2
+            self.export_button.setVisible(is_settings)
+            self.save_button.setVisible(is_settings)
+            self.apply_button.setVisible(is_settings)
+            self.check_update_button.setVisible(is_about)
+            self.install_update_button.setVisible(is_about)
+            self.close_button.setVisible(not is_settings)
+            if active == 1:
+                self.status.setText("赞赏码资源来自本地打包文件")
+            elif is_about:
+                self.status.setText("可检查 GitHub Release 并启动 Windows 安装器")
+                self._refresh_update_state_label()
+            else:
+                self.status.setText("设置将保存到本地配置文件")
+
+        def _add_field(
+            self,
+            form: QGridLayout,
+            row: int,
+            column: int,
+            label: str,
+            widget: QWidget,
+            *,
+            column_span: int = 1,
+        ) -> None:
+            box = QFrame()
+            box.setObjectName("qtHudMetricBox")
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(8, 6, 8, 6)
+            box_layout.setSpacing(4)
+            box_layout.addWidget(_HudLabel(label, role="caption"))
+            box_layout.addWidget(widget)
+            form.addWidget(box, row, column, 1, column_span)
+
+        def _selected_mode(self) -> str:
+            return str(self.display_mode.currentData() or "auto")
+
+        def _append_price_row(self, model: str, values: Mapping[str, object]) -> None:
+            row = self.price_table.rowCount()
+            self.price_table.insertRow(row)
+            keys = ["model", "input", "cached_input", "output", "reasoning"]
+            for column, key in enumerate(keys):
+                text = model if key == "model" else str(values.get(key) or 0)
+                self.price_table.setItem(row, column, QTableWidgetItem(text))
+
+        def _replace_price_rows(self, prices: Mapping[str, object]) -> None:
+            self.price_table.setRowCount(0)
+            for model, price in sorted(prices.items()):
+                values = price.to_dict() if hasattr(price, "to_dict") else dict(price or {})
+                self._append_price_row(str(model), values)
+
+        def _price_payload(self) -> dict[str, dict[str, object]]:
+            payload: dict[str, dict[str, object]] = {}
+            keys = ["input", "cached_input", "output", "reasoning"]
+            for row in range(self.price_table.rowCount()):
+                model_item = self.price_table.item(row, 0)
+                model = model_item.text().strip() if model_item is not None else ""
+                if not model:
+                    continue
+                values: dict[str, object] = {}
+                for offset, key in enumerate(keys, start=1):
+                    item = self.price_table.item(row, offset)
+                    values[key] = item.text().strip() if item is not None else "0"
+                payload[model] = values
+            return payload
+
+        def _save_config(self) -> UserConfig:
+            current = self._window.user_settings_store.load()
+            merged = current.to_dict()
+            merged.update(
+                {
+                    "display_mode": self._selected_mode(),
+                    "daily_budget_usd": self.daily_budget.text(),
+                    "weekly_budget_usd": self.weekly_budget.text(),
+                    "daily_reset_time": self.daily_reset.text(),
+                    "weekly_reset_weekday": self.weekday.currentData(),
+                    "weekly_reset_time": self.weekly_reset.text(),
+                    "work_overlay_max_items": self.work_overlay_max_items.text(),
+                    "pricing_url": self.pricing_url.text(),
+                    "budget_thresholds": self.thresholds.text(),
+                    "weekly_adjustment_usd": self.weekly_adjustment.text(),
+                    "model_prices": self._price_payload(),
+                }
+            )
+            config = UserConfig.from_dict(merged)
+            self._window.user_settings_store.save(config)
+            self._window.user_settings = config
+            return config
+
+        def _save_only(self) -> None:
+            config = self._save_config()
+            self.status.setText(f"已保存为 {config.display_mode}，当前窗口继续运行。")
+
+        def _apply_now(self) -> None:
+            config = self._save_config()
+            target = effective_display_mode(config.display_mode)
+            if target == self._window.active_display_mode:
+                self.status.setText("当前已经处于所选显示模式。")
+                return
+            self._window.request_mode_switch(target)
+
+        def _fetch_prices(self) -> None:
+            url = self.pricing_url.text().strip()
+            try:
+                fetched = fetch_model_prices(url)
+                config = self._save_config().with_price_updates(fetched, pricing_url=url)
+                self._window.user_settings_store.save(config)
+            except (OSError, ValueError) as exc:
+                self.status.setText(f"拉取失败：{exc}")
+                return
+            self._window.user_settings = config
+            self._replace_price_rows(config.model_prices)
+            self.status.setText(f"已拉取并保存 {len(fetched)} 个模型价格。")
+
+        def _export_json(self) -> None:
+            try:
+                config = self._save_config()
+                payload = json.dumps({"user": config.to_dict()}, indent=2, ensure_ascii=False)
+                QApplication.clipboard().setText(payload)
+            except (OSError, ValueError) as exc:
+                self.status.setText(f"导出失败：{exc}")
+                return
+            self.status.setText("设置 JSON 已复制到剪贴板。")
+
+        def _confirm_exit(self) -> None:
+            answer = QMessageBox.question(
+                self,
+                "退出 HUD",
+                "这会完全退出 HUD，并停止后台守护进程（如果当前正在运行）。\n\n是否继续？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.status.setText("已取消退出。")
+                return
+            self.status.setText("正在退出 HUD...")
+            self._window.close("settings_exit")
+
+        def _refresh_update_state_label(self) -> None:
+            state_text = ""
+            manager = self._window.update_manager
+            if manager is not None and hasattr(manager, "status"):
+                try:
+                    state = manager.status()
+                    state_text = getattr(state, "title", "") or getattr(state, "message", "")
+                except Exception:
+                    state_text = ""
+            self.update_state_label.setText(state_text or "尚未检查更新。")
+
+        def _check_update(self) -> None:
+            manager = self._window.update_manager
+            if manager is not None and hasattr(manager, "request_check"):
+                state = manager.request_check(auto_download=False)
+                self.status.setText(getattr(state, "message", "") or "正在检查更新...")
+                self._refresh_update_state_label()
+                return
+            info = check_for_update(current_version=__version__)
+            self.status.setText(format_update_info(info))
+            self.update_state_label.setText(format_update_info(info))
+
+        def _install_update(self) -> None:
+            manager = self._window.update_manager
+            if manager is not None and hasattr(manager, "request_install"):
+                state = manager.request_install()
+                self.status.setText(getattr(state, "message", "") or "正在准备安装更新...")
+                self._refresh_update_state_label()
+                return
+            info = check_for_update(current_version=__version__)
+            if info.error or not info.available:
+                message = format_update_info(info)
+                self.status.setText(message)
+                self.update_state_label.setText(message)
+                return
+            try:
+                installer = download_update_asset(info)
+                launch_installer(installer)
+            except Exception as exc:
+                self.status.setText(f"安装更新失败：{exc}")
+                return
+            self.status.setText(f"已启动 {installer.name}，安装器会先关闭当前 HUD。")
+
+
+    class _QtHudWindowImpl:
+        active_display_mode = "qt"
+
+        def __init__(
+            self,
+            *,
+            compact: bool = False,
+            hide_until_attached: bool = False,
+            tombstone_follow_ms: int = 500,
+            user_settings_store: UserConfigStore | None = None,
+            hud_settings_store: HudSettingsStore | None = None,
+            update_manager: Any | None = None,
+        ) -> None:
+            del compact
+            self.app = QApplication.instance() or QApplication(sys.argv[:1])
+            self.app.setQuitOnLastWindowClosed(False)
+            self.user_settings_store = user_settings_store or UserConfigStore()
+            self.user_settings = self.user_settings_store.load()
+            self.settings_store = hud_settings_store or HudSettingsStore()
+            self.settings = self.settings_store.load()
+            self.update_manager = update_manager
+            self.hide_until_attached = bool(hide_until_attached)
+            self.tombstone_follow_ms = max(50, int(tombstone_follow_ms))
+            self._attached = False
+            self._last_rect: WindowRect | None = None
+            self.locator = CodexWindowLocator()
+            try:
+                self.locator.set_dpi_aware()
+            except Exception:
+                pass
+            self.exit_reason = ""
+            self._mode_switch_request = ""
+            self._restart_codex_for_renderer = False
+            self._latest_payload: RendererHudPayload | None = None
+            self._last_snapshot: ParsedSession | None = None
+            self._last_update_state: dict[str, object] = {}
+            self._last_anchor_metrics: dict[str, tuple[int, int, int, int, str]] = {}
+            self._theme_tokens: dict[str, str] = dict(QT_THEME_DEFAULTS)
+            self._theme_signature = ""
+            self._theme_probe = CodexThemeProbe(
+                timeout_seconds=0.08,
+                cache_seconds=0.8,
+                failure_cooldown_seconds=5.0,
+            )
+            self._interaction_block_until = 0.0
+            self._settings_dialog: _SettingsDialog | None = None
+            self.top_window = _TopPanel(
+                width=self._panel_width("top"),
+                expanded_height=self._panel_expanded_height("top"),
+                on_settings=self.open_settings,
+                on_update_action=self._handle_update_action,
+                on_dismiss_warnings=self._dismiss_warnings_today,
+                on_interaction=self._mark_interaction,
+                on_geometry_changed=self._remember_panel_geometry,
+            )
+            self.request_window = _RequestPanel(
+                width=self._panel_width("request"),
+                expanded_height=self._panel_expanded_height("request"),
+                on_interaction=self._mark_interaction,
+                on_geometry_changed=self._remember_panel_geometry,
+            )
+            self._apply_theme_tokens(self._theme_tokens)
+            self._place_windows()
+            if self._should_show_hud():
+                self.top_window.show()
+                self.request_window.show()
+            self._clock_timer = QTimer()
+            self._clock_timer.timeout.connect(self._refresh_latest_payload)
+            self._clock_timer.start(1000)
+
+        @property
+        def mode_switch_request(self) -> str:
+            return self._mode_switch_request
+
+        @property
+        def restart_codex_for_renderer(self) -> bool:
+            return self._restart_codex_for_renderer
+
+        def should_defer_background_work(self) -> bool:
+            return False
+
+        def should_refresh_snapshot(self) -> bool:
+            return time.monotonic() >= self._interaction_block_until
+
+        def refresh_delay_ms(self, normal_delay_ms: int) -> int:
+            if self.hide_until_attached and not self._attached:
+                return self.tombstone_follow_ms
+            if time.monotonic() < self._interaction_block_until:
+                return max(160, int(normal_delay_ms))
+            return max(100, int(normal_delay_ms))
+
+        def update_display(
+            self,
+            snapshot: ParsedSession,
+            *,
+            update_state: Any | None = None,
+        ) -> None:
+            if update_state is None and self.update_manager is not None and hasattr(self.update_manager, "status"):
+                try:
+                    update_state = self.update_manager.status()
+                except Exception:
+                    update_state = None
+            update_payload = (
+                update_state.to_dict()
+                if hasattr(update_state, "to_dict")
+                else dict(update_state or {})
+                if isinstance(update_state, Mapping)
+                else {}
+            )
+            self._last_snapshot = snapshot
+            self._last_update_state = dict(update_payload)
+            self._latest_payload = self._payload_from_snapshot(snapshot, update_payload)
+            self._follow_codex_window()
+            self._apply_payload(self._latest_payload.to_json())
+            if self._should_show_hud() and not self.top_window.isVisible():
+                self.top_window.show()
+            if self._should_show_hud() and not self.request_window.isVisible():
+                self.request_window.show()
+
+        def _payload_from_snapshot(
+            self,
+            snapshot: ParsedSession,
+            update_payload: Mapping[str, object] | None = None,
+        ) -> RendererHudPayload:
+            theme_snapshot = self._theme_probe.snapshot()
+            return payload_from_snapshot(
+                snapshot,
+                settings=self.user_settings,
+                active_display_mode=self.active_display_mode,
+                settings_path=self.user_settings_store.path,
+                theme=_renderer_theme_payload(theme_snapshot),
+                update_state=dict(update_payload or {}),
+            )
+
+        def run(self) -> None:
+            if self._should_show_hud() and not self.top_window.isVisible():
+                self.top_window.show()
+            if self._should_show_hud() and not self.request_window.isVisible():
+                self.request_window.show()
+            self.app.exec()
+
+        def close(self, reason: str = "") -> None:
+            if reason and not self.exit_reason:
+                self.exit_reason = reason
+            if self._settings_dialog is not None:
+                self._settings_dialog.close()
+            self.top_window.close()
+            self.request_window.close()
+            self.app.quit()
+
+        def open_settings(self) -> None:
+            self._mark_interaction()
+            if self._settings_dialog is None:
+                self._settings_dialog = _SettingsDialog(self)
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+
+        def request_mode_switch(self, target: str) -> None:
+            self._mode_switch_request = target
+            self._restart_codex_for_renderer = target == "renderer"
+            self.close("display_mode_switch")
+
+        def _handle_update_action(self) -> None:
+            self._mark_interaction()
+            manager = self.update_manager
+            if manager is None or not hasattr(manager, "handle_click"):
+                return
+            try:
+                state = manager.handle_click()
+            except Exception:
+                return
+            payload = state.to_dict() if hasattr(state, "to_dict") else dict(state or {}) if isinstance(state, Mapping) else {}
+            self.top_window._render_update_button(payload)
+            if self._settings_dialog is not None:
+                message = str(payload.get("message") or payload.get("title") or "")
+                if message:
+                    self._settings_dialog.status.setText(message)
+                self._settings_dialog._refresh_update_state_label()
+
+        def _dismiss_warnings_today(self) -> None:
+            self._mark_interaction()
+            try:
+                dismiss_warning_for_today(self.user_settings_store.path)
+            except OSError:
+                return
+            if self._last_snapshot is not None:
+                self._latest_payload = self._payload_from_snapshot(
+                    self._last_snapshot,
+                    self._last_update_state,
+                )
+            self.top_window.hide_warning()
+
+        def _apply_payload(self, payload: Mapping[str, object]) -> None:
+            self._apply_payload_theme(payload)
+            self.top_window.update_payload(payload)
+            self.request_window.update_payload(payload)
+
+        def _apply_payload_theme(self, payload: Mapping[str, object]) -> None:
+            theme = payload.get("theme") if isinstance(payload.get("theme"), Mapping) else {}
+            tokens = theme.get("tokens") if isinstance(theme, Mapping) and isinstance(theme.get("tokens"), Mapping) else {}
+            if not isinstance(tokens, Mapping):
+                return
+            next_tokens = dict(QT_THEME_DEFAULTS)
+            next_tokens.update({str(key): str(value) for key, value in tokens.items()})
+            self._apply_theme_tokens(next_tokens)
+
+        def _apply_theme_tokens(self, tokens: Mapping[str, str]) -> None:
+            normalized = dict(QT_THEME_DEFAULTS)
+            normalized.update({str(key): str(value) for key, value in tokens.items()})
+            signature = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+            if signature == self._theme_signature:
+                return
+            self._theme_signature = signature
+            self._theme_tokens = normalized
+            stylesheet = _qt_stylesheet(normalized)
+            self.top_window.setStyleSheet(stylesheet)
+            self.request_window.setStyleSheet(stylesheet)
+            self.top_window.apply_theme(normalized)
+            if self._settings_dialog is not None:
+                self._settings_dialog.setStyleSheet(stylesheet)
+
+        def _refresh_latest_payload(self) -> None:
+            self._follow_codex_window()
+            if self._latest_payload is not None:
+                self._apply_payload(self._latest_payload.to_json())
+            if self._should_show_hud():
+                if not self.top_window.isVisible():
+                    self.top_window.show()
+                if not self.request_window.isVisible():
+                    self.request_window.show()
+
+        def _mark_interaction(self) -> None:
+            self._interaction_block_until = time.monotonic() + (
+                QT_HUD_INTERACTION_IDLE_MS / 1000.0
+            )
+
+        def _placement(self, target: str) -> Any:
+            return self.settings.top if target == "top" else self.settings.request
+
+        def _panel_width(self, target: str) -> int:
+            default = QT_HUD_TOP_WIDTH if target == "top" else QT_HUD_REQUEST_WIDTH
+            placement = self._placement(target)
+            return max(120, int(placement.width or default))
+
+        def _panel_expanded_height(self, target: str) -> int:
+            default = (
+                QT_HUD_TOP_EXPANDED_HEIGHT
+                if target == "top"
+                else QT_HUD_REQUEST_EXPANDED_HEIGHT
+            )
+            minimum = 240 if target == "top" else 120
+            placement = self._placement(target)
+            return max(minimum, int(placement.height or default))
+
+        def _attached_anchor_geometry(
+            self,
+            target: str,
+            rect: WindowRect,
+            expanded: bool,
+        ) -> tuple[int, int, int, int]:
+            x, y, width, default_height = _visual_anchor_geometry(target, rect, expanded)
+            panel = self.top_window if target == "top" else self.request_window
+            height = panel._target_height(expanded)
+            if target != "top" and height != default_height:
+                y -= height - default_height
+            source = "qt-visual"
+            anchor_left = x
+            anchor_top = y
+            anchor_width = width
+            anchor_height = default_height
+            try:
+                native_anchor = self.locator.anchor_geometry(target, rect, height)
+            except Exception:
+                native_anchor = None
+            if native_anchor is not None:
+                x = int(native_anchor.default_x)
+                y = int(native_anchor.default_y)
+                width = int(native_anchor.default_width)
+                source = str(native_anchor.source or "native")
+                anchor_left = int(native_anchor.left)
+                anchor_top = int(native_anchor.top)
+                anchor_width = int(native_anchor.width)
+                anchor_height = int(native_anchor.height)
+            self._last_anchor_metrics[target] = (
+                anchor_left,
+                anchor_top,
+                max(1, anchor_width),
+                max(1, anchor_height),
+                source,
+            )
+            return x, y, max(1, width), height
+
+        def _anchor_metrics(
+            self,
+            target: str,
+            rect: WindowRect,
+            expanded: bool,
+        ) -> tuple[int, int, int, int, str]:
+            cached = self._last_anchor_metrics.get(target)
+            if cached is not None:
+                return cached
+            self._attached_anchor_geometry(target, rect, expanded)
+            return self._last_anchor_metrics[target]
+
+        def _attached_panel_width(
+            self,
+            target: str,
+            anchor_width: int,
+            anchor_source: str,
+        ) -> int:
+            placement = self._placement(target)
+            if (
+                placement.width_ratio is not None
+                and (
+                    placement.anchor_source is None
+                    or placement.anchor_source == anchor_source
+                )
+            ):
+                return max(120, int(round(max(1, anchor_width) * placement.width_ratio)))
+            if placement.width:
+                return max(120, int(placement.width))
+            return max(120, int(anchor_width))
+
+        def _remember_panel_geometry(
+            self,
+            target: str,
+            panel: _PanelWindow,
+            reason: str,
+        ) -> None:
+            placement = self._placement(target)
+            if reason == "move":
+                placement.absolute_x = int(panel.x())
+                placement.absolute_y = int(panel.y())
+                if self._attached and self._last_rect is not None:
+                    rect = self._last_rect
+                    anchor_x, anchor_y, anchor_width, anchor_height, anchor_source = self._anchor_metrics(
+                        target,
+                        rect,
+                        panel.expanded,
+                    )
+                    placement.relative_x = int(panel.x()) - rect.left
+                    placement.relative_x_ratio = placement.relative_x / max(1, rect.width)
+                    placement.anchor_x_ratio = (int(panel.x()) - anchor_x) / max(1, anchor_width)
+                    placement.anchor_source = anchor_source
+                    if target == "top":
+                        placement.relative_y = int(panel.y()) - rect.top
+                        placement.relative_y_ratio = placement.relative_y / max(1, rect.height)
+                        placement.relative_bottom = None
+                        placement.relative_bottom_ratio = None
+                        placement.anchor_y_ratio = (int(panel.y()) - anchor_y) / max(1, anchor_height)
+                    else:
+                        bottom = int(panel.y()) + int(panel.height())
+                        placement.relative_y = None
+                        placement.relative_y_ratio = None
+                        placement.relative_bottom = rect.bottom - bottom
+                        placement.relative_bottom_ratio = placement.relative_bottom / max(1, rect.height)
+                        placement.anchor_y_ratio = (bottom - anchor_y) / max(1, anchor_height)
+                else:
+                    placement.relative_x = None
+                    placement.relative_y = None
+                    placement.relative_bottom = None
+                    placement.relative_x_ratio = None
+                    placement.relative_y_ratio = None
+                    placement.relative_bottom_ratio = None
+                    placement.anchor_x_ratio = None
+                    placement.anchor_y_ratio = None
+                    placement.anchor_source = None
+            elif reason == "resize":
+                placement.width = max(120, int(panel.width()))
+                if target == "top" and not panel.expanded:
+                    placement.collapsed_width_locked = True
+                if self._attached and self._last_rect is not None:
+                    _anchor_x, _anchor_y, anchor_width, _anchor_height, anchor_source = self._anchor_metrics(
+                        target,
+                        self._last_rect,
+                        panel.expanded,
+                    )
+                    placement.width_ratio = placement.width / max(1, anchor_width)
+                    placement.anchor_source = anchor_source
+                else:
+                    placement.width_ratio = None
+                if panel.expanded:
+                    minimum = 240 if target == "top" else 120
+                    placement.height = max(minimum, int(panel.height()))
+            self.settings_store.save(self.settings)
+
+        def _place_windows(self) -> None:
+            top_saved = (
+                self.settings.top.absolute_x is not None
+                and self.settings.top.absolute_y is not None
+            )
+            request_saved = (
+                self.settings.request.absolute_x is not None
+                and self.settings.request.absolute_y is not None
+            )
+            top_placement = self.settings.top
+            if top_saved:
+                self.top_window.move(
+                    int(top_placement.absolute_x),
+                    int(top_placement.absolute_y),
+                )
+                self.top_window._manual_positioned = True
+            request_placement = self.settings.request
+            if request_saved:
+                self.request_window.move(
+                    int(request_placement.absolute_x),
+                    int(request_placement.absolute_y),
+                )
+                self.request_window._manual_positioned = True
+            if (not top_saved or not request_saved) and self._follow_codex_window():
+                return
+
+            screen = self.app.primaryScreen()
+            geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1280, 720)
+            if not top_saved:
+                top_x = geometry.left() + max(0, (geometry.width() - self.top_window.width()) // 2)
+                top_y = geometry.top() + QT_HUD_MARGIN
+                self.top_window.move(top_x, top_y)
+            if not request_saved:
+                req_x = geometry.right() - self.request_window.width() - QT_HUD_MARGIN
+                req_y = geometry.bottom() - self.request_window.height() - QT_HUD_MARGIN
+                self.request_window.move(max(geometry.left(), req_x), max(geometry.top(), req_y))
+
+        def _should_show_hud(self) -> bool:
+            return not self.hide_until_attached or self._attached
+
+        def _follow_codex_window(self) -> bool:
+            try:
+                rect = self.locator.find()
+            except Exception:
+                rect = None
+            if rect is None or getattr(rect, "minimized", False):
+                return False
+            self.attach_to_rect(rect)
+            return True
+
+        def attach_to_rect(self, rect: WindowRect) -> None:
+            self._attached = True
+            self._last_rect = rect
+            if not self.top_window._manual_positioned:
+                top_x, top_y, top_width, _top_height = self._attached_anchor_geometry(
+                    "top",
+                    rect,
+                    self.top_window.expanded,
+                )
+                _anchor_x, _anchor_y, _anchor_width, _anchor_height, top_source = self._anchor_metrics(
+                    "top",
+                    rect,
+                    self.top_window.expanded,
+                )
+                self.top_window.resize(
+                    self._attached_panel_width("top", top_width, top_source),
+                    self.top_window.height(),
+                )
+                self.top_window.move(top_x, top_y)
+            if not self.request_window._manual_positioned:
+                req_x, req_y, req_width, _req_height = self._attached_anchor_geometry(
+                    "request",
+                    rect,
+                    self.request_window.expanded,
+                )
+                _anchor_x, _anchor_y, _anchor_width, _anchor_height, request_source = self._anchor_metrics(
+                    "request",
+                    rect,
+                    self.request_window.expanded,
+                )
+                self.request_window.resize(
+                    self._attached_panel_width("request", req_width, request_source),
+                    self.request_window.height(),
+                )
+                req_x = min(req_x, rect.right - self.request_window.width() - QT_HUD_MARGIN)
+                req_x = max(rect.left + QT_HUD_MARGIN, req_x)
+                req_y = max(rect.top + QT_HUD_MARGIN, req_y)
+                self.request_window.move(req_x, req_y)
+            if self._should_show_hud():
+                if not self.top_window.isVisible():
+                    self.top_window.show()
+                if not self.request_window.isVisible():
+                    self.request_window.show()
+
+
+def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
+    theme = dict(QT_THEME_DEFAULTS)
+    theme.update({str(key): str(value) for key, value in dict(tokens or {}).items()})
+    css = """
+    QWidget {
+        font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+        font-size: 12px;
+        color: #DCE7F2;
+    }
+    QFrame#qtHudShell {
+        background: rgba(16, 22, 29, 236);
+        border: 1px solid #2C3745;
+        border-radius: 8px;
+    }
+    QFrame#qtHudPanelHeader,
+    QFrame#qtHudRequestExpandedHeader {
+        background: rgba(24, 33, 43, 220);
+        border: 1px solid rgba(255, 255, 255, 20);
+        border-radius: 6px;
+    }
+    QFrame#qtHudWarningPanel {
+        background: rgba(127, 62, 58, 170);
+        border: 1px solid #FF875A;
+        border-radius: 7px;
+    }
+    QFrame#qtHudTopCard,
+    QFrame#qtHudMetricBox,
+    QFrame#qtHudInset,
+    QFrame#qtHudTokenChip,
+    QFrame#qtHudHeavyRow,
+    QFrame#qtHudActivityRow {
+        background: rgba(255, 255, 255, 18);
+        border: 1px solid rgba(255, 255, 255, 24);
+        border-radius: 7px;
+        padding: 4px;
+    }
+    QFrame#qtHudRequestListShell {
+        background: rgba(246, 250, 255, 238);
+        border: 1px solid rgba(197, 210, 224, 230);
+        border-radius: 3px;
+    }
+    QFrame#qtHudRequestRowFrame {
+        background: transparent;
+        border: 0;
+        border-bottom: 1px solid rgba(197, 210, 224, 120);
+    }
+    QFrame#qtHudRequestRowFrame[latest="true"] {
+        background: rgba(94, 167, 255, 36);
+    }
+    QLabel#qtHudLabel-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: #F2F6FA;
+    }
+    QLabel#qtHudLabel-card-title {
+        font-size: 12px;
+        font-weight: 600;
+        color: #F2F6FA;
+    }
+    QLabel#qtHudLabel-strong {
+        font-weight: 600;
+        color: #F2F6FA;
+    }
+    QLabel#qtHudLabel-metric {
+        font-size: 20px;
+        font-weight: 700;
+        color: #F2F6FA;
+    }
+    QLabel#qtHudLabel-metric-info {
+        font-size: 20px;
+        font-weight: 700;
+        color: #9CCBFF;
+    }
+    QLabel#qtHudLabel-chip,
+    QLabel#qtHudLabel-chip-warning,
+    QLabel#qtHudChip,
+    QLabel#qtHudChipWarning {
+        background: rgba(28, 38, 50, 230);
+        border: 1px solid #334254;
+        border-radius: 6px;
+        padding: 2px 7px;
+        font-weight: 600;
+        color: #DCE7F2;
+    }
+    QLabel#qtHudLabel-chip-warning,
+    QLabel#qtHudChipWarning {
+        color: #FFD6B0;
+        border-color: #FF875A;
+        background: rgba(91, 49, 44, 200);
+    }
+    QLabel#qtHudLabel-handle {
+        color: #8D9AAD;
+        font-weight: 700;
+    }
+    QLabel#qtHudLabel-mono-blue {
+        font-family: Consolas, "Cascadia Mono", monospace;
+        color: #9CCBFF;
+        font-weight: 600;
+    }
+    QLabel#qtHudLabel-mono-accent {
+        font-family: Consolas, "Cascadia Mono", monospace;
+        color: #F3D27A;
+        font-weight: 600;
+    }
+    QLabel#qtHudLabel-request,
+    QLabel#qtHudLabel-request-time {
+        font-family: Consolas, "Cascadia Mono", monospace;
+        color: #4D6075;
+        font-size: 11px;
+    }
+    QLabel#qtHudLabel-request-time {
+        color: #2A7ABD;
+        font-weight: 600;
+    }
+    QLabel#qtHudLabel-muted, QLabel#qtHudLabel-caption {
+        color: #8D9AAD;
+    }
+    QLabel#qtHudLabel-warning {
+        color: #FFD6B0;
+        background: transparent;
+        border: 0;
+        padding: 0;
+    }
+    QLabel#qtHudLabel-warning-dot,
+    QLabel#qtHudLabel-warning-title {
+        color: #FFD6B0;
+        font-weight: 700;
+    }
+    QLabel#qtHudLabel-strong[state="warning"],
+    QLabel#qtHudLabel-title[state="warning"] {
+        color: #F3D27A;
+    }
+    QLabel#qtHudLabel-strong[state="error"],
+    QLabel#qtHudLabel-title[state="error"] {
+        color: #FF7A7A;
+    }
+    QPushButton {
+        color: #DCE7F2;
+        background: #1C2632;
+        border: 1px solid #334254;
+        border-radius: 6px;
+        padding: 5px 10px;
+    }
+    QPushButton:hover {
+        border-color: #5EA7FF;
+        background: #223044;
+    }
+    QPushButton#qtHudIconButton {
+        min-width: 24px;
+        max-width: 28px;
+        padding: 3px;
+        font-weight: 700;
+    }
+    QPushButton#qtHudIconButton[phase="ready"] {
+        color: #B5DD92;
+        border-color: #B5DD92;
+    }
+    QPushButton#qtHudIconButton[phase="paused"],
+    QPushButton#qtHudIconButton[phase="error"] {
+        color: #FFD6B0;
+        border-color: #FF875A;
+    }
+    QComboBox {
+        color: #DCE7F2;
+        background: #111820;
+        border: 1px solid #334254;
+        border-radius: 6px;
+        padding: 5px;
+    }
+    QLineEdit {
+        color: #DCE7F2;
+        background: #111820;
+        border: 1px solid #334254;
+        border-radius: 6px;
+        padding: 5px;
+        selection-background-color: #2E6DA8;
+    }
+    QLineEdit:focus {
+        border-color: #5EA7FF;
+    }
+    QDialog {
+        background: #10161D;
+    }
+    QScrollArea,
+    QScrollArea QWidget#qtHudTopBody,
+    QWidget#qtHudSettingsPage,
+    QFrame#qtHudSettingsBody,
+    QScrollArea#qtHudSettingsScroll,
+    QScrollArea#qtHudSettingsScroll QWidget {
+        background: transparent;
+    }
+    QScrollArea#qtHudSettingsScroll > QWidget,
+    QWidget#qtHudSettingsPage,
+    QFrame#qtHudSettingsBody {
+        background: #10161D;
+    }
+    QTabWidget::pane {
+        border: 1px solid #2C3745;
+        border-radius: 7px;
+        background: #10161D;
+        padding: 8px;
+    }
+    QTabBar::tab {
+        color: #9AA8BA;
+        background: #17202A;
+        border: 1px solid #2C3745;
+        border-bottom: 0;
+        padding: 7px 12px;
+        margin-right: 4px;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
+    }
+    QTabBar::tab:selected {
+        color: #F2F6FA;
+        background: #1D2A38;
+        border-color: #5EA7FF;
+    }
+    QTableWidget {
+        color: #DCE7F2;
+        background: #111820;
+        alternate-background-color: #151E28;
+        gridline-color: #2C3745;
+        border: 1px solid #2C3745;
+        border-radius: 6px;
+    }
+    QHeaderView::section {
+        color: #9AA8BA;
+        background: #17202A;
+        border: 0;
+        border-right: 1px solid #2C3745;
+        padding: 5px;
+        font-weight: 600;
+    }
+    QScrollBar:vertical {
+        background: rgba(255, 255, 255, 10);
+        width: 8px;
+        margin: 0;
+        border-radius: 4px;
+    }
+    QScrollBar::handle:vertical {
+        background: #3B4654;
+        min-height: 24px;
+        border-radius: 4px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: #5EA7FF;
+    }
+    QScrollBar::add-line:vertical,
+    QScrollBar::sub-line:vertical {
+        height: 0;
+        border: 0;
+    }
+    QScrollBar:horizontal {
+        height: 0;
+        background: transparent;
+    }
+    """
+    replacements = {
+        "#10161D": theme["surface"],
+        "#10161d": theme["surface"],
+        "#141B24": theme["panelSurface"],
+        "#2C3745": theme["panelBorder"],
+        "#3A485A": theme["panelBorder"],
+        "#202833": theme["headerSurface"],
+        "#273241": theme["divider"],
+        "#DCE7F2": theme["text"],
+        "#F2F6FA": theme["text"],
+        "#E9F1F8": theme["progressTrackText"],
+        "#8D9AAD": theme["muted"],
+        "#9AA8BA": theme["muted"],
+        "#F3D27A": theme["accent"],
+        "#9CCBFF": theme["info"],
+        "#5EA7FF": theme["progressCache"],
+        "#FFB86B": theme["warning"],
+        "#FFD6B0": theme["warning"],
+        "#FF875A": theme["progressOverflow"],
+        "#FF7A7A": theme["error"],
+        "#FF6B6B": theme["error"],
+        "#B5DD92": theme["success"],
+        "#4D6075": theme["requestText"],
+        "#718095": theme["requestMuted"],
+        "#3B4654": theme["progressTrackBorder"],
+        "#202832": theme["progressTrack"],
+        "#1C2632": theme["headerSurface"],
+        "#111820": theme["requestSurface"],
+        "#151E28": theme["requestHeaderSurface"],
+        "#17202A": theme["requestHeaderSurface"],
+        "#1D2A38": theme["headerSurface"],
+        "#334254": theme["panelBorder"],
+    }
+    for source, target in replacements.items():
+        css = css.replace(source, str(target))
+    return css
+
+
+class QtHudWindow:
+    """Lazy public wrapper so importing the package does not require Qt to start."""
+
+    def __init__(
+        self,
+        *,
+        compact: bool = False,
+        hide_until_attached: bool = False,
+        tombstone_follow_ms: int = 500,
+        user_settings_store: UserConfigStore | None = None,
+        hud_settings_store: HudSettingsStore | None = None,
+        update_manager: Any | None = None,
+    ) -> None:
+        if QApplication is None:
+            raise RuntimeError(f"PySide6 is required for Qt HUD: {_QT_IMPORT_ERROR}")
+        self._impl = _QtHudWindowImpl(
+            compact=compact,
+            hide_until_attached=hide_until_attached,
+            tombstone_follow_ms=tombstone_follow_ms,
+            user_settings_store=user_settings_store,
+            hud_settings_store=hud_settings_store,
+            update_manager=update_manager,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._impl, name)
+
+
+__all__ = ["QtHudWindow"]

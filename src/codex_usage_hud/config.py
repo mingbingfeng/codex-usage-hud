@@ -26,7 +26,7 @@ DEFAULT_DAILY_RESET_TIME = "10:00"
 DEFAULT_WEEKLY_RESET_WEEKDAY = 3
 DEFAULT_WEEKLY_RESET_TIME = "10:00"
 DEFAULT_DISPLAY_MODE = "auto"
-VALID_DISPLAY_MODES = {"auto", "renderer", "tk"}
+VALID_DISPLAY_MODES = {"auto", "renderer", "qt", "tk"}
 DEFAULT_SUPPORT_URL = "https://github.com/mingbingfeng/codex-usage-hud"
 DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
 JSON_WRITE_REPLACE_RETRIES = 8
@@ -444,6 +444,8 @@ def normalize_display_mode(value: Any) -> str:
     mode = str(value or DEFAULT_DISPLAY_MODE).strip().lower().replace("-", "_")
     if mode in {"inject", "injection", "renderer_hud"}:
         mode = "renderer"
+    if mode in {"qt_hud", "pyside", "pyside6"}:
+        mode = "qt"
     if mode in {"tkinter", "tk_hud"}:
         mode = "tk"
     return mode if mode in VALID_DISPLAY_MODES else DEFAULT_DISPLAY_MODE
@@ -451,7 +453,8 @@ def normalize_display_mode(value: Any) -> str:
 
 def effective_display_mode(value: Any) -> str:
     """Collapse a configured display preference into the active HUD surface."""
-    return "tk" if normalize_display_mode(value) == "tk" else "renderer"
+    mode = normalize_display_mode(value)
+    return mode if mode in {"renderer", "qt", "tk"} else "renderer"
 
 
 def normalize_work_overlay_max_items(

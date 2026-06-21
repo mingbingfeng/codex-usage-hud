@@ -7,7 +7,7 @@
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
 
-`codex-usage-hud` 是面向 Codex App 的本地实时用量 HUD。它读取本机 Codex JSONL / SQLite 日志，在 Codex 界面或 Tk fallback 窗口里显示当前会话 token、缓存命中率、实时金额、日/周预算和等待状态，不上传任何会话内容。
+`codex-usage-hud` 是面向 Codex App 的本地实时用量 HUD。它读取本机 Codex JSONL / SQLite 日志，在 Codex 界面、Qt 独立窗口或最终兜底的 Tk 窗口里显示当前会话 token、缓存命中率、实时金额、日/周预算和等待状态，不上传任何会话内容。
 
 ## 快速使用
 
@@ -17,7 +17,7 @@
 
 安装后会有几个入口：
 
-- `Codex Usage HUD`：后台 daemon 入口；如果 Codex App 未启动，会提示选择 Renderer 注入或 Tk 模式，并按所选模式拉起 Codex App。开机自启动入口会保持静默等待。
+- `Codex Usage HUD`：后台 daemon 入口；如果 Codex App 未启动，会提示选择 Renderer 注入或 Qt 独立窗口，并按所选模式拉起 Codex App；Tk 模式保留为最终兜底。开机自启动入口会保持静默等待。
 - `Stop Codex Usage HUD`：关闭正在运行的 HUD。
 - `Check for Updates`：检查 GitHub Release 是否有新安装包。
 
@@ -52,8 +52,8 @@ codex-hud --update
 ## 主要功能
 
 - Renderer 注入优先：Codex 暴露本地 CDP target 时，HUD 直接显示在 Codex App 内部。
-- Tk fallback：CDP 不可用时自动回退到本地 Tk HUD。
-- Codex 主题跟随：Renderer 模式优先跟随 live 主题；无 CDP 时，Tk / overlay 会读取 Codex App 已保存的主题设置，继续区分浅色/深色并尽量复用自定义配色。
+- Qt fallback + Tk 最终兜底：CDP 不可用时自动回退到本地 Qt HUD；Qt 不可用或显式选择 `tk` 时使用 Tk HUD。
+- Codex 主题跟随：Renderer 模式优先跟随 live 主题；无 CDP 时，Qt / Tk / overlay 会读取 Codex App 已保存的主题设置，继续区分浅色/深色并尽量复用自定义配色。
 - 实时 token 与金额：输入、缓存输入、输出、推理、合计、缓存率和实时 USD 估算同屏展示。
 - 日/周预算：自定义日额度、周额度、刷新时间、周起始日和提醒阈值。
 - 工作状态观察：显示当前活动、最长等待、最慢工具和请求轮次流水。
@@ -141,7 +141,8 @@ src/codex_usage_hud/
   cli.py                 CLI、daemon、更新命令入口
   daemon.py              Windows Codex 进程监听
   ui/renderer_hud.py     Codex renderer 注入 HUD
-  ui/tk_hud.py           Tk fallback HUD
+  ui/qt_hud.py           Qt 独立 fallback HUD
+  ui/tk_hud.py           Tk 最终兜底 HUD
   updater.py             GitHub Release 更新检测与安装器启动
 tools/
   build_exe.py           PyInstaller 单文件 exe 构建

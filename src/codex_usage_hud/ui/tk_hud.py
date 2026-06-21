@@ -6559,9 +6559,10 @@ class TokenHudWindow:
         if isinstance(mode, ttk.Combobox):
             mode.set(
                 {
-                    "renderer": "renderer - 优先 renderer 注入，失败回退 Tk",
-                    "tk": "tk - 仅使用 Tk 窗口",
-                }.get(settings.display_mode, "auto - 优先 renderer 注入，失败回退 Tk")
+                    "renderer": "renderer - Renderer 内嵌 HUD",
+                    "qt": "qt - Qt 独立窗口",
+                    "tk": "tk - Tk 独立窗口",
+                }.get(settings.display_mode, "auto - Renderer -> Qt -> Tk")
             )
         if self._settings_prices_body is not None:
             self._replace_price_rows(
@@ -6895,18 +6896,20 @@ class TokenHudWindow:
         mode = ttk.Combobox(
             mode_frame,
             values=[
-                "auto - 优先 renderer 注入，失败回退 Tk",
-                "renderer - 优先 renderer 注入，失败回退 Tk",
-                "tk - 仅使用 Tk 窗口",
+                "auto - Renderer -> Qt -> Tk",
+                "renderer - Renderer 内嵌 HUD",
+                "qt - Qt 独立窗口",
+                "tk - Tk 独立窗口",
             ],
             state="readonly",
             style="CodexUsageHud.TCombobox",
         )
         mode.set(
             {
-                "renderer": "renderer - 优先 renderer 注入，失败回退 Tk",
-                "tk": "tk - 仅使用 Tk 窗口",
-            }.get(self._active_display_mode(), "renderer - 优先 renderer 注入，失败回退 Tk")
+                "renderer": "renderer - Renderer 内嵌 HUD",
+                "qt": "qt - Qt 独立窗口",
+                "tk": "tk - Tk 独立窗口",
+            }.get(self._active_display_mode(), "tk - Tk 独立窗口")
         )
         mode.pack(fill="x")
         mode.bind("<<ComboboxSelected>>", self._on_display_mode_selected, add="+")
@@ -7590,6 +7593,14 @@ class TokenHudWindow:
             if messagebox.askyesno(title, message, parent=self._settings_dialog):
                 self._apply_display_mode_selection(restart_codex=not debugger_available)
                 return
+        elif target_mode == "qt":
+            message = (
+                "准备切换到 Qt 独立窗口。HUD 会关闭当前 Tk 窗口，并打开新的 Qt 悬浮窗。"
+                "\n\n是否现在应用？"
+            )
+            if messagebox.askyesno("立即切换到 Qt", message, parent=self._settings_dialog):
+                self._apply_display_mode_selection(restart_codex=False)
+                return
         else:
             message = (
                 "准备切换到 Tk 独立窗口。HUD 会立即从 Codex 内嵌显示切换为桌面悬浮窗，当前统计会继续保留。"
@@ -7671,7 +7682,11 @@ class TokenHudWindow:
         self._set_settings_status(
             "已保存到本地配置；预算和价格会自动刷新。"
             if next_runtime_mode == self._active_display_mode()
-            else "已保存到本地配置；当前会话仍保持 Tk，Renderer 方案会在下次切换或启动时生效。"
+            else (
+                "已保存到本地配置；当前会话仍保持 Tk，Qt 方案会在下次切换或启动时生效。"
+                if next_runtime_mode == "qt"
+                else "已保存到本地配置；当前会话仍保持 Tk，Renderer 方案会在下次切换或启动时生效。"
+            )
         )
 
     def _settings_fetch_prices(

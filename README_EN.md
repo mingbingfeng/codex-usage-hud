@@ -7,7 +7,7 @@
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
 
-`codex-usage-hud` is a local real-time usage HUD for Codex App. It reads local Codex JSONL / SQLite logs and shows session tokens, cache hit rate, live cost, day/week budgets, and waiting status inside Codex or the Tk fallback window. It does not upload conversation content.
+`codex-usage-hud` is a local real-time usage HUD for Codex App. It reads local Codex JSONL / SQLite logs and shows session tokens, cache hit rate, live cost, day/week budgets, and waiting status inside Codex, in the Qt standalone window, or in the final Tk fallback window. It does not upload conversation content.
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ Download the latest Windows installer from [GitHub Releases](https://github.com/
 
 After installation, Start Menu shortcuts are available:
 
-- `Codex Usage HUD`: daemon entry; when Codex App is not running, it prompts for Renderer injection or Tk mode and starts Codex App accordingly. Login startup entries keep waiting silently.
+- `Codex Usage HUD`: daemon entry; when Codex App is not running, it prompts for Renderer injection or the Qt standalone window and starts Codex App accordingly. Tk remains available as the final fallback. Login startup entries keep waiting silently.
 - `Stop Codex Usage HUD`: stops the running HUD.
 - `Check for Updates`: checks GitHub Releases for a newer installer.
 
@@ -52,8 +52,8 @@ If this HUD saves you time while checking token usage and cost, you can support 
 ## Main Features
 
 - Renderer-first HUD: when Codex exposes a local CDP target, the HUD renders inside Codex App.
-- Tk fallback: when CDP is unavailable, the local Tk HUD remains available.
-- Codex theme sync: Renderer mode follows the live Codex App theme first; without CDP, Tk and overlay fall back to the saved Codex theme settings so light/dark mode and most custom chrome colors still carry over.
+- Qt fallback + final Tk fallback: when CDP is unavailable, the local Qt HUD opens; when Qt is unavailable or `tk` is selected explicitly, the Tk HUD remains available.
+- Codex theme sync: Renderer mode follows the live Codex App theme first; without CDP, Qt, Tk, and overlay fall back to the saved Codex theme settings so light/dark mode and most custom chrome colors still carry over.
 - Real-time tokens and cost: input, cached input, output, reasoning, total, cache hit rate, and live USD estimate.
 - Day/week budgets: custom limits, reset time, weekly reset day, thresholds, and manual weekly adjustment.
 - Work status visibility: current activity, longest wait, slowest tool, and request timeline.
@@ -142,7 +142,8 @@ src/codex_usage_hud/
   cli.py                 CLI, daemon, and update command entry
   daemon.py              Windows Codex process listener
   ui/renderer_hud.py     Codex renderer-injected HUD
-  ui/tk_hud.py           Tk fallback HUD
+  ui/qt_hud.py           Qt standalone fallback HUD
+  ui/tk_hud.py           Final Tk fallback HUD
   updater.py             GitHub Release update check and installer launch
 tools/
   build_exe.py           PyInstaller single-file exe build

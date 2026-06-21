@@ -2262,11 +2262,14 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function activeDisplayMode() {
-    return String(currentPayload()?.activeDisplayMode || "renderer") === "tk" ? "tk" : "renderer";
+    const mode = String(currentPayload()?.activeDisplayMode || "renderer");
+    return mode === "qt" || mode === "tk" ? mode : "renderer";
   }
 
   function effectiveRuntimeMode(displayMode) {
-    return String(displayMode || "auto") === "tk" ? "tk" : "renderer";
+    const mode = String(displayMode || "auto");
+    if (mode === "qt" || mode === "tk") return mode;
+    return "renderer";
   }
 
   function settingsBridgeUrl() {
@@ -2381,7 +2384,10 @@ RENDERER_HUD_SCRIPT = r"""
 
   function settingsPanelHtml(settings, bridge, path) {
     const currentMode = activeDisplayMode();
-    const selectedDisplayMode = currentMode === "tk" ? "tk" : "renderer";
+    const configuredDisplayMode = String(settings.display_mode || "auto");
+    const selectedDisplayMode = ["auto", "renderer", "qt", "tk"].includes(configuredDisplayMode)
+      ? configuredDisplayMode
+      : currentMode;
     const overlaySelectableMax = workOverlaySelectableMax();
     const overlayValue = Math.min(
       overlaySelectableMax,
@@ -2417,9 +2423,10 @@ RENDERER_HUD_SCRIPT = r"""
         <div class="codex-usage-hud-settings-field">
           <label>HUD 显示方案</label>
           <select data-setting-key="display_mode" data-configured-display-mode="${escapeHtml(settings.display_mode)}" data-active-display-mode="${currentMode}" data-touched="false">
-            <option value="auto" ${selectedDisplayMode === "auto" ? "selected" : ""}>自动：优先 renderer 注入，失败回退 Tk</option>
-            <option value="renderer" ${selectedDisplayMode === "renderer" ? "selected" : ""}>优先 renderer 注入，失败回退 Tk</option>
-            <option value="tk" ${selectedDisplayMode === "tk" ? "selected" : ""}>Tk 窗口</option>
+            <option value="auto" ${selectedDisplayMode === "auto" ? "selected" : ""}>自动：Renderer -> Qt -> Tk</option>
+            <option value="renderer" ${selectedDisplayMode === "renderer" ? "selected" : ""}>Renderer 内嵌 HUD</option>
+            <option value="qt" ${selectedDisplayMode === "qt" ? "selected" : ""}>Qt 独立窗口</option>
+            <option value="tk" ${selectedDisplayMode === "tk" ? "selected" : ""}>Tk 独立窗口</option>
           </select>
         </div>
         <div class="codex-usage-hud-settings-field">
@@ -2751,12 +2758,13 @@ RENDERER_HUD_SCRIPT = r"""
   function applyDisplayModeFromModal() {
     const settings = collectSettingsForm();
     const nextMode = effectiveRuntimeMode(settings.display_mode);
+    const standaloneLabel = nextMode === "qt" ? "Qt" : "Tk";
     openSettingsLoading({
       kicker: "正在切换",
-      title: nextMode === "tk" ? "正在切换到 Tk 独立窗口" : "正在切换到 Renderer 内嵌 HUD",
-      body: nextMode === "tk"
-        ? "HUD 正在关闭当前内嵌面板，并启动独立的 Tk 悬浮窗。通常只需 1 到 3 秒。"
-        : "HUD 正在切回 Codex 内嵌显示。通常只需 1 到 3 秒。",
+      title: nextMode === "renderer" ? "正在切换到 Renderer 内嵌 HUD" : `正在切换到 ${standaloneLabel} 独立窗口`,
+      body: nextMode === "renderer"
+        ? "HUD 正在切回 Codex 内嵌显示。通常只需 1 到 3 秒。"
+        : `HUD 正在关闭当前内嵌面板，并启动独立的 ${standaloneLabel} 悬浮窗。通常只需 1 到 3 秒。`,
     });
     submitSettingsCommand(
       { action: "applyDisplayMode", settings },
@@ -2823,13 +2831,14 @@ RENDERER_HUD_SCRIPT = r"""
       closeSettingsConfirm();
       return;
     }
-    if (nextMode === "tk") {
+    if (nextMode === "qt" || nextMode === "tk") {
+      const standaloneLabel = nextMode === "qt" ? "Qt" : "Tk";
       setSettingsRestartVisible(false);
-      setSettingsStatus("已选择 Tk 方案。请确认是现在切换，还是只把它保存为下次默认值。");
+      setSettingsStatus(`已选择 ${standaloneLabel} 方案。请确认是现在切换，还是只把它保存为下次默认值。`);
       openSettingsConfirm({
         kicker: "切换显示方案",
-        title: "立即切换到 Tk 独立窗口？",
-        body: "当前 HUD 正显示在 Codex 窗口里。\n\n立即切换后，会关闭当前内嵌 HUD，并打开独立的 Tk 悬浮窗。\n\n如果你只是想修改下次启动时的默认方案，可以点“仅保存为默认”。",
+        title: `立即切换到 ${standaloneLabel} 独立窗口？`,
+        body: `当前 HUD 正显示在 Codex 窗口里。\n\n立即切换后，会关闭当前内嵌 HUD，并打开独立的 ${standaloneLabel} 悬浮窗。\n\n如果你只是想修改下次启动时的默认方案，可以点“仅保存为默认”。`,
       });
       return;
     }

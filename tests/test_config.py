@@ -18,7 +18,9 @@ if str(SRC_ROOT) not in sys.path:
 from codex_usage_hud.config import (
     UserConfig,
     UserConfigStore,
+    effective_display_mode,
     extract_model_prices,
+    normalize_display_mode,
     write_json_object,
 )
 from codex_usage_hud.cli import current_budget_windows
@@ -83,6 +85,17 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(config.work_overlay_max_items, 0)
         self.assertNotIn("work_overlay_enabled", config.to_dict())
         self.assertEqual(config.to_dict()["work_overlay_max_items"], 0)
+
+    def test_display_mode_keeps_qt_and_tk_as_valid_modes(self) -> None:
+        self.assertEqual(normalize_display_mode("qt"), "qt")
+        self.assertEqual(normalize_display_mode("pyside6"), "qt")
+        self.assertEqual(normalize_display_mode("tk"), "tk")
+        self.assertEqual(normalize_display_mode("tkinter"), "tk")
+        self.assertEqual(normalize_display_mode("unknown"), "auto")
+        self.assertEqual(effective_display_mode("auto"), "renderer")
+        self.assertEqual(effective_display_mode("renderer"), "renderer")
+        self.assertEqual(effective_display_mode("qt"), "qt")
+        self.assertEqual(effective_display_mode("tk"), "tk")
 
     def test_budget_windows_use_user_reset_day_and_time(self) -> None:
         config = UserConfig.defaults()

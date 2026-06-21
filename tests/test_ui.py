@@ -24,10 +24,12 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 import codex_usage_hud.cli as cli_module
+import codex_usage_hud.ui.qt_hud as qt_hud_module
 import codex_usage_hud.ui.tk_hud as tk_hud_module
 from codex_usage_hud.cli import (
     AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
     ACTIVE_WORK_STALE_SECONDS,
+    DAEMON_STARTUP_QT,
     DAEMON_STARTUP_RENDERER,
     DAEMON_STARTUP_TK,
     DAEMON_RESTART_REQUESTED,
@@ -37,6 +39,7 @@ from codex_usage_hud.cli import (
     HudInstanceLock,
     HUD_SWITCH_TO_RENDERER,
     HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
+    HUD_SWITCH_TO_QT,
     HUD_SWITCH_TO_TK,
     RENDERER_HUD_UNAVAILABLE,
     RENDERER_UPDATE_FAILURE_LIMIT,
@@ -60,6 +63,7 @@ from codex_usage_hud.cli import (
     main,
     parse_thresholds,
     run_renderer_hud_session,
+    run_qt_hud_session,
     snapshot_to_text,
     run_daemon,
     run_hud_session,
@@ -84,7 +88,8 @@ from codex_usage_hud.config import (
     warning_dismissed_today,
 )
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
-from codex_usage_hud.platforms.codex_theme import CodexThemeExport, HudThemeTokens
+from codex_usage_hud.platforms.codex_theme import CodexThemeExport, CodexThemeSnapshot, HudThemeTokens
+from codex_usage_hud.ui import QtHudWindow
 from codex_usage_hud.ui.renderer_hud import payload_from_snapshot
 from codex_usage_hud.core.parser import (
     Activity,
@@ -2685,6 +2690,641 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertEqual(raw["top"]["width"], 320)
 
 
+class QtHudWindowLifecycleTests(unittest.TestCase):
+    def test_qt_hud_window_updates_closes_and_keeps_core_widgets(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+            from PySide6.QtWidgets import QLabel
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+                store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "geometry_settings.json")
+                hud_store.save(HudSettings.empty())
+                class _FakeUpdateState:
+                    def __init__(self, message: str = "可安装更新") -> None:
+                        self.message = message
+
+                    def to_dict(self) -> dict[str, object]:
+                        return {
+                            "visible": True,
+                            "icon": "install",
+                            "phase": "ready",
+                            "title": self.message,
+                            "message": self.message,
+                        }
+
+                class _FakeUpdateManager:
+                    def __init__(self) -> None:
+                        self.clicks = 0
+
+                    def status(self) -> _FakeUpdateState:
+                        return _FakeUpdateState()
+
+                    def handle_click(self) -> _FakeUpdateState:
+                        self.clicks += 1
+                        return _FakeUpdateState("已启动安装器")
+
+                update_manager = _FakeUpdateManager()
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=store,
+                        hud_settings_store=hud_store,
+                        update_manager=update_manager,
+                    )
+                try:
+                    self.assertEqual(window.top_window.width(), qt_hud_module.QT_HUD_TOP_WIDTH)
+                    self.assertEqual(window.top_window.height(), qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                    self.assertEqual(window.request_window.width(), qt_hud_module.QT_HUD_REQUEST_WIDTH)
+                    self.assertEqual(window.request_window.height(), qt_hud_module.QT_HUD_REQUEST_COLLAPSED_HEIGHT)
+                    top_stack = window.top_window._stack
+                    collapsed = top_stack.widget(0)
+                    expanded = top_stack.widget(1)
+                    window.update_display(
+                        ParsedSession(
+                            session_id="qt-test-session",
+                            session_title="Qt HUD test",
+                            status="parsed",
+                            line_count=12,
+                            token_events=2,
+                            today_tokens=100,
+                            week_tokens=200,
+                            daily_limit_usd=100.0,
+                            weekly_limit_usd=400.0,
+                        )
+                    )
+                    window.attach_to_rect(WindowRect(left=100, top=120, right=1100, bottom=920))
+                    _top_x, _top_y, top_anchor_width, _top_height = _visual_anchor_geometry(
+                        "top",
+                        WindowRect(left=100, top=120, right=1100, bottom=920),
+                        False,
+                    )
+                    self.assertGreaterEqual(window.top_window.x(), 100)
+                    self.assertEqual(window.top_window.width(), top_anchor_width)
+                    self.assertLess(window.request_window.y(), 920)
+                    window.top_window.set_expanded(True)
+
+                    self.assertTrue(window.top_window.isVisible())
+                    self.assertTrue(window.request_window.isVisible())
+                    self.assertIs(top_stack.widget(0), collapsed)
+                    self.assertIs(top_stack.widget(1), expanded)
+                    self.assertGreaterEqual(window.top_window.width(), qt_hud_module.QT_HUD_TOP_STACK_WIDTH)
+                    top_grid = window.top_window._top_grid
+                    top_right = window.top_window._top_right
+                    self.assertIsNotNone(top_grid)
+                    self.assertIsNotNone(top_right)
+                    assert top_grid is not None
+                    assert top_right is not None
+                    _row_span, _column_span = 0, 0
+                    row, column, _row_span, _column_span = top_grid.getItemPosition(
+                        top_grid.indexOf(top_right)
+                    )
+                    self.assertEqual((row, column), (0, 1))
+                    self.assertFalse(window.top_window.session_meta.isVisible())
+                    self.assertFalse(window.top_window.cache_progress.isVisible())
+                    self.assertEqual(window.mode_switch_request, "")
+                    request_bottom = window.request_window.geometry().bottom()
+                    window.request_window.set_expanded(True)
+                    self.assertIsNotNone(window.request_window._animation)
+                    assert window.request_window._animation is not None
+                    request_target = window.request_window._animation.endValue()
+                    self.assertEqual(request_target.bottom(), request_bottom)
+                    self.assertEqual(request_target.height(), qt_hud_module.QT_HUD_REQUEST_EXPANDED_HEIGHT)
+                    window.request_window.update_payload(
+                        {
+                            "requestLine": "请求流水 | confirmed | gpt-5.5",
+                            "requestStatus": "error",
+                            "requestRowDetails": [
+                                {
+                                    "text": "#92 $0.152 19:10:17 ↑241k ◎100% ↓702 ◇286 ↻241k ∑242k",
+                                    "prefix": "#92 $0.152 ",
+                                    "time": "19:10:17",
+                                    "suffix": " ↑241k ◎100% ↓702 ◇286 ↻241k ∑242k",
+                                    "running": True,
+                                    "startedAt": (datetime.now() - timedelta(seconds=7)).isoformat(),
+                                }
+                            ],
+                        }
+                    )
+                    self.assertEqual(window.request_window.request_line.property("state"), "error")
+                    self.assertTrue(window.request_window._row_labels[0].time.text().strip().endswith("s"))
+                    request_labels = [
+                        label.text()
+                        for label in window.request_window.findChildren(QLabel)
+                    ]
+                    self.assertIn("轮次流水", request_labels)
+                    self.assertIn("最新在上", request_labels)
+                    self.assertTrue(any(label.strip().endswith("s") for label in request_labels))
+                    window.top_window.update_payload(
+                        {
+                            "topLine": "更新计划保留tk模式",
+                            "topDetails": {
+                                "title": "更新计划保留tk模式",
+                                "session": "会话 85adaf5e5dab | 行 651 | 确认 15",
+                                "sessionCost": "$11.66",
+                                "sessionTokens": "15.3M",
+                                "sessionRounds": "15 轮确认",
+                                "sessionMix": "缓存命中 97%",
+                                "sessionAverage": "均值 1.0M /轮",
+                                "sessionComposition": "输入 / 缓存 / 输出 / 推理",
+                                "sessionInputTokens": "241k",
+                                "sessionCachedTokens": "241k",
+                                "sessionOutputTokens": "702",
+                                "sessionReasoningTokens": "286",
+                                "warnings": "日额度已超过 80% 阈值",
+                                "heavyRoundsSummary": "Top 3",
+                                "heavyRounds": [
+                                    {"title": "#92 $0.152 · ∑242k", "detail": "消耗构成"}
+                                ],
+                                "currentTaskLabel": "当前需求",
+                                "currentTask": "更新计划保留tk模式",
+                                "executingLabel": "正在执行",
+                                "executing": "python -m unittest",
+                                "activityState": "已完成",
+                                "activityElapsedLabel": "已运行",
+                                "activityElapsed": "34m25s",
+                                "activityGapLabel": "当前等待",
+                                "activityGap": "92轮",
+                                "activityLastLabel": "需求轮次",
+                                "activityLast": "15",
+                                "slow": "最慢工具",
+                                "gap": "最长等待",
+                                "activityTrail": [
+                                    {
+                                        "time": "19:10:17",
+                                        "title": "任务",
+                                        "detail": "更新计划保留tk模式",
+                                    },
+                                    {"time": "19:09:49", "title": "轮次", "detail": "$0.123 · ∑241k"},
+                                    {"time": "19:09:33", "title": "工具调用", "detail": "shell_command"},
+                                    {"time": "19:09:23", "title": "工具完成", "detail": "Exit code: 0"},
+                                    {"time": "19:08:56", "title": "轮次", "detail": "$0.168 · ∑240k"},
+                                ],
+                            },
+                            "topCopies": {
+                                "slow": "python -m unittest",
+                                "gap": "等待详情",
+                            },
+                            "updateState": _FakeUpdateState().to_dict(),
+                            "topProgress": {
+                                "collapsed": [
+                                    {"label": "本会话 15.3M", "ratio": 0.6, "tone": "session"}
+                                ],
+                                "cache": {"label": "缓存命中 97%", "ratio": 0.97, "tone": "cache"},
+                                "budget": [
+                                    {"label": "今日 $10.99/$100", "ratio": 0.11, "tone": "day"},
+                                    {"label": "本周 $296.6/$400", "ratio": 0.74, "tone": "week"},
+                                ],
+                            },
+                        }
+                    )
+                    self.assertEqual(window.top_window.session_cost.text(), "$11.66")
+                    self.assertEqual(window.top_window.session_input_tokens.text(), "241k")
+                    self.assertEqual(window.top_window.activity_elapsed.text(), "34m25s")
+                    self.assertEqual(window.top_window.current_task._copy_text, "更新计划保留tk模式")
+                    self.assertEqual(window.top_window.slow_chip._copy_text, "python -m unittest")
+                    self.assertTrue(window.top_window.update_button.isVisible())
+                    self.assertEqual(window.top_window.update_button.text(), "⇪")
+                    window.top_window.update_button.click()
+                    self.assertEqual(update_manager.clicks, 1)
+                    self.assertIn("已启动安装器", window.top_window.update_button.toolTip())
+                    self.assertTrue(window.top_window.warning_panel.isVisible())
+                    window.top_window.warning_close.click()
+                    self.assertFalse(window.top_window.warning_panel.isVisible())
+                    self.assertTrue(warning_dismissed_today(store.path))
+                    self.assertTrue(window.top_window.load_more.isEnabled())
+                    window.top_window.load_more.click()
+                    self.assertEqual(window.top_window.load_more.text(), "已显示全部")
+                    window.open_settings()
+                    dialog = window._settings_dialog
+                    self.assertIsNotNone(dialog)
+                    assert dialog is not None
+                    self.assertEqual(dialog.tabs.count(), 3)
+                    self.assertEqual(dialog.tabs.tabText(0), "设置")
+                    self.assertEqual(dialog.tabs.tabText(1), "请作者喝咖啡")
+                    self.assertEqual(dialog.tabs.tabText(2), "版本更新")
+                    self.assertGreater(dialog.price_table.rowCount(), 0)
+                    dialog.daily_budget.setText("12.5")
+                    dialog.work_overlay_max_items.setText("3")
+                    dialog._save_only()
+                    saved = store.load()
+                    self.assertEqual(saved.daily_budget_usd, 12.5)
+                    self.assertEqual(saved.work_overlay_max_items, 3)
+                    tk_index = dialog.display_mode.findData("tk")
+                    self.assertGreaterEqual(tk_index, 0)
+                    dialog.display_mode.setCurrentIndex(tk_index)
+                    dialog._apply_now()
+                    switched = store.load()
+                    self.assertEqual(switched.display_mode, "tk")
+                    self.assertEqual(window.mode_switch_request, "tk")
+                    self.assertEqual(window.exit_reason, "display_mode_switch")
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_warning_dismissal_survives_cached_payload_refresh(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+                store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "geometry_settings.json")
+                hud_store.save(HudSettings.empty())
+                window = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    snapshot = ParsedSession(
+                        session_id="qt-dismiss-warning",
+                        status="parsed",
+                        today_cost_usd=52.0,
+                        daily_limit_usd=100.0,
+                        budget_warnings=[
+                            "日额度已用 52.00/100 USD (52%)，超过 50% 阈值"
+                        ],
+                    )
+                    window.update_display(snapshot)
+                    window.attach_to_rect(WindowRect(left=100, top=120, right=1100, bottom=920))
+                    window.top_window.set_expanded(True)
+
+                    self.assertTrue(window.top_window.warning_panel.isVisible())
+                    window.top_window.warning_close.click()
+                    self.assertFalse(window.top_window.warning_panel.isVisible())
+                    self.assertTrue(warning_dismissed_today(store.path))
+
+                    window._refresh_latest_payload()
+
+                    self.assertFalse(window.top_window.warning_panel.isVisible())
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_hud_reuses_and_saves_shared_geometry_settings(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(
+                    HudSettings(
+                        top=WindowPlacement(
+                            absolute_x=123,
+                            absolute_y=145,
+                            width=640,
+                            height=455,
+                        ),
+                        request=WindowPlacement(
+                            absolute_x=321,
+                            absolute_y=654,
+                            width=430,
+                            height=205,
+                        ),
+                    )
+                )
+                window = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=user_store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    self.assertEqual(window.top_window.width(), 640)
+                    self.assertEqual(window.top_window._expanded_height, 455)
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (123, 145))
+                    self.assertTrue(window.top_window._manual_positioned)
+                    self.assertEqual(window.request_window.width(), 430)
+                    self.assertEqual(window.request_window._expanded_height, 205)
+                    self.assertEqual(
+                        (window.request_window.x(), window.request_window.y()),
+                        (321, 654),
+                    )
+                    self.assertTrue(window.request_window._manual_positioned)
+
+                    window.top_window.move(222, 244)
+                    window._remember_panel_geometry("top", window.top_window, "move")
+                    moved = hud_store.load()
+                    self.assertEqual(moved.top.absolute_x, 222)
+                    self.assertEqual(moved.top.absolute_y, 244)
+
+                    window.request_window._expanded = True
+                    window.request_window.setMinimumHeight(1)
+                    window.request_window.setMaximumHeight(16777215)
+                    window.request_window.resize(460, 230)
+                    window._remember_panel_geometry("request", window.request_window, "resize")
+                    resized = hud_store.load()
+                    self.assertEqual(resized.request.width, 460)
+                    self.assertEqual(resized.request.height, 230)
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_attached_resize_saves_and_restores_width_ratio(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1100, bottom=920)
+                _anchor_x, _anchor_y, anchor_width, _anchor_height = _visual_anchor_geometry(
+                    "top",
+                    rect,
+                    False,
+                )
+                window = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=user_store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    window.attach_to_rect(rect)
+                    target_width = max(120, anchor_width // 2)
+                    window.top_window.resize(target_width, window.top_window.height())
+                    window._remember_panel_geometry("top", window.top_window, "resize")
+                    saved = hud_store.load()
+                    self.assertEqual(saved.top.width, target_width)
+                    self.assertAlmostEqual(
+                        saved.top.width_ratio or 0.0,
+                        target_width / anchor_width,
+                        places=5,
+                    )
+                    self.assertEqual(saved.top.anchor_source, "qt-visual")
+                finally:
+                    window.close("test")
+
+                wider = WindowRect(left=100, top=120, right=1500, bottom=920)
+                _x, _y, wider_anchor_width, _height = _visual_anchor_geometry(
+                    "top",
+                    wider,
+                    False,
+                )
+                restored = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=user_store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    restored.attach_to_rect(wider)
+                    expected_width = max(
+                        120,
+                        int(round(wider_anchor_width * (target_width / anchor_width))),
+                    )
+                    self.assertEqual(restored.top_window.width(), expected_width)
+                finally:
+                    restored.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_attached_geometry_prefers_locator_anchor(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                native_anchor = SimpleNamespace(
+                    left=220,
+                    top=130,
+                    right=920,
+                    bottom=178,
+                    default_x=220,
+                    default_y=136,
+                    default_width=700,
+                    source="cdp:title",
+                    width=700,
+                    height=48,
+                )
+
+                def _anchor_geometry(target: str, rect: WindowRect, hud_height: int) -> object | None:
+                    del rect, hud_height
+                    return native_anchor if target == "top" else None
+
+                window._impl.locator = SimpleNamespace(anchor_geometry=_anchor_geometry)
+                try:
+                    window.attach_to_rect(WindowRect(left=100, top=120, right=1100, bottom=920))
+
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (220, 136))
+                    self.assertEqual(window.top_window.width(), 700)
+
+                    window.top_window.resize(350, window.top_window.height())
+                    window._remember_panel_geometry("top", window.top_window, "resize")
+                    saved = hud_store.load()
+                    self.assertEqual(saved.top.anchor_source, "cdp:title")
+                    self.assertAlmostEqual(saved.top.width_ratio or 0.0, 0.5)
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_hud_applies_renderer_theme_tokens(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                window = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=user_store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    window._apply_payload(
+                        {
+                            "topLine": "theme test",
+                            "requestLine": "request theme test",
+                            "topProgress": {
+                                "collapsed": [
+                                    {"label": "今日", "ratio": 0.5, "tone": "day"}
+                                ],
+                                "budget": [
+                                    {"label": "本周", "ratio": 0.25, "tone": "week"}
+                                ],
+                            },
+                            "theme": {
+                                "variant": "dark",
+                                "tokens": {
+                                    "surface": "#010203",
+                                    "panelSurface": "#111213",
+                                    "panelBorder": "#212223",
+                                    "headerSurface": "#313233",
+                                    "text": "#414243",
+                                    "muted": "#515253",
+                                    "accent": "#616263",
+                                    "info": "#717273",
+                                    "progressTrack": "#818283",
+                                    "progressTrackBorder": "#919293",
+                                    "progressTrackText": "#A1A2A3",
+                                    "progressDay": "#B1B2B3",
+                                    "progressWeek": "#C1C2C3",
+                                    "progressCache": "#D1D2D3",
+                                },
+                            },
+                        }
+                    )
+
+                    self.assertIn("#010203", window.top_window.styleSheet())
+                    self.assertIn("#414243", window.request_window.styleSheet())
+                    self.assertEqual(
+                        window.top_window._collapsed_progress[0]._theme["progressDay"],
+                        "#B1B2B3",
+                    )
+                    self.assertEqual(
+                        window.top_window._budget_progress[0]._theme["progressWeek"],
+                        "#C1C2C3",
+                    )
+                    window.open_settings()
+                    dialog = window._settings_dialog
+                    self.assertIsNotNone(dialog)
+                    assert dialog is not None
+                    self.assertIn("#010203", dialog.styleSheet())
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_update_display_injects_codex_theme_payload(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                snapshot = CodexThemeSnapshot.from_probe_result(
+                    {
+                        "mode": "dark",
+                        "effectiveVariant": "dark",
+                        "darkCodeThemeId": "linear",
+                        "darkTheme": {
+                            "accent": "#112233",
+                            "contrast": 60,
+                            "fonts": {"code": None, "ui": "Inter"},
+                            "ink": "#f1f2f3",
+                            "opaqueWindows": True,
+                            "semanticColors": {
+                                "diffAdded": "#334455",
+                                "diffRemoved": "#556677",
+                                "skill": "#778899",
+                            },
+                            "surface": "#020304",
+                        },
+                    },
+                    source="persisted",
+                )
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                expected_tokens = snapshot.hud_tokens.to_dict()
+                window = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=user_store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    window._impl._theme_probe = SimpleNamespace(snapshot=lambda: snapshot)
+                    window.update_display(
+                        ParsedSession(
+                            session_id="qt-theme-probe",
+                            session_title="Qt theme probe",
+                            status="parsed",
+                            line_count=4,
+                        )
+                    )
+
+                    self.assertEqual(window._theme_tokens["surface"], expected_tokens["surface"])
+                    self.assertEqual(window._theme_tokens["accent"], expected_tokens["accent"])
+                    self.assertIn(str(expected_tokens["surface"]), window.top_window.styleSheet())
+                    self.assertEqual(
+                        window.top_window._collapsed_progress[0]._theme["progressDay"],
+                        expected_tokens["progressDay"],
+                    )
+                    self.assertEqual(
+                        window._latest_payload.to_json()["theme"]["source"],
+                        "persisted",
+                    )
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+
 class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_top_toggle_reuses_prebuilt_frames_and_keeps_request_window(self) -> None:
         window = TokenHudWindow()
@@ -2761,6 +3401,9 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertIn("保存", button_texts)
             self.assertIn("退出 HUD", button_texts)
             self.assertIn("display_mode", window._settings_entries)
+            display_mode = window._settings_entries["display_mode"]
+            self.assertIsInstance(display_mode, ttk.Combobox)
+            self.assertIn("qt - Qt 独立窗口", display_mode.cget("values"))
             self.assertIn("work_overlay_max_items", window._settings_entries)
             self.assertNotIn("support_url", window._settings_entries)
             self.assertTrue(window._settings_price_rows)
@@ -4074,7 +4717,11 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._close()
 
     def test_top_expanded_body_wraps_and_scrolls_long_content(self) -> None:
-        window = TokenHudWindow()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        window = TokenHudWindow(
+            user_settings_store=UserConfigStore(Path(temp_dir.name) / "hud_settings.json")
+        )
         try:
             window.toggle_top_expanded()
             _flush_tk(window)
@@ -4880,6 +5527,32 @@ class DaemonLifecycleTests(unittest.TestCase):
         restart_requested.set.assert_not_called()
         exit_requested.set.assert_not_called()
 
+    def test_renderer_apply_display_mode_requests_qt_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            store.save(UserConfig.defaults())
+            context = SimpleNamespace(
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                reload_user_config=MagicMock(),
+            )
+            restart_requested = MagicMock()
+            exit_requested = MagicMock()
+
+            status = _handle_renderer_settings_command(
+                {"action": "applyDisplayMode", "settings": {"display_mode": "qt"}},
+                context,
+                restart_requested,
+                exit_requested,
+            )
+            saved = store.load()
+
+        self.assertEqual(saved.display_mode, "qt")
+        self.assertEqual(status["switchMode"], "qt")
+        self.assertFalse(status["restartVisible"])
+        restart_requested.set.assert_not_called()
+        exit_requested.set.assert_not_called()
+
     def test_renderer_apply_display_mode_requests_tk_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
@@ -5053,6 +5726,28 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_window.update_display.assert_called_once()
         fake_context.close.assert_called_once()
 
+    def test_run_qt_hud_session_falls_back_to_tk_when_qt_window_fails(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            settings_store=SimpleNamespace(path=Path("hud_settings.json")),
+        )
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch("codex_usage_hud.cli.remove_renderer_hud_from_pages", return_value=0),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_standalone",
+                return_value=(True, "visible", "", 123),
+            ),
+            patch("codex_usage_hud.cli.QtHudWindow", side_effect=RuntimeError("no qt")),
+        ):
+            exit_code = run_qt_hud_session(args, lock_already_held=True)
+
+        self.assertEqual(exit_code, HUD_SWITCH_TO_TK)
+        fake_context.close.assert_called_once()
+
     def test_main_defaults_to_renderer_first_from_auto_config(self) -> None:
         config = UserConfig.defaults()
 
@@ -5066,6 +5761,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         args = run_session.call_args.args[0]
         self.assertTrue(args.renderer_hud)
+        self.assertEqual(args.runtime_hud_mode, "renderer")
 
     def test_hud_mode_renderer_overrides_tk_config_for_renderer_first(self) -> None:
         config = UserConfig.defaults()
@@ -5081,6 +5777,39 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         args = run_session.call_args.args[0]
         self.assertTrue(args.renderer_hud)
+        self.assertEqual(args.runtime_hud_mode, "renderer")
+
+    def test_qt_config_skips_renderer_path(self) -> None:
+        config = UserConfig.defaults()
+        config.display_mode = "qt"
+
+        with (
+            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
+            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+        ):
+            store_class.return_value.load.return_value = config
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 0)
+        args = run_session.call_args.args[0]
+        self.assertFalse(args.renderer_hud)
+        self.assertEqual(args.runtime_hud_mode, "qt")
+
+    def test_qt_hud_flag_forces_qt_runtime_mode(self) -> None:
+        config = UserConfig.defaults()
+
+        with (
+            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
+            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+        ):
+            store_class.return_value.load.return_value = config
+            exit_code = main(["--qt-hud"])
+
+        self.assertEqual(exit_code, 0)
+        args = run_session.call_args.args[0]
+        self.assertFalse(args.renderer_hud)
+        self.assertEqual(args.hud_mode, "qt")
+        self.assertEqual(args.runtime_hud_mode, "qt")
 
     def test_tk_config_skips_renderer_path(self) -> None:
         config = UserConfig.defaults()
@@ -5096,8 +5825,9 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         args = run_session.call_args.args[0]
         self.assertFalse(args.renderer_hud)
+        self.assertEqual(args.runtime_hud_mode, "tk")
 
-    def test_renderer_first_falls_back_to_tk_when_injection_unavailable(self) -> None:
+    def test_renderer_first_falls_back_to_qt_when_injection_unavailable(self) -> None:
         args = SimpleNamespace(renderer_hud=True)
 
         with (
@@ -5105,12 +5835,33 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "codex_usage_hud.cli.run_renderer_hud_session",
                 return_value=RENDERER_HUD_UNAVAILABLE,
             ) as renderer_session,
+            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
             patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
         ):
             exit_code = run_hud_session(args)
 
         self.assertEqual(exit_code, 0)
         renderer_session.assert_called_once()
+        qt_session.assert_called_once()
+        tk_session.assert_not_called()
+        qt_args = qt_session.call_args.args[0]
+        self.assertEqual(qt_args.runtime_hud_mode, "qt")
+
+    def test_qt_fallback_uses_tk_when_qt_unavailable(self) -> None:
+        args = SimpleNamespace(renderer_hud=True)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_renderer_hud_session",
+                return_value=RENDERER_HUD_UNAVAILABLE,
+            ),
+            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=HUD_SWITCH_TO_TK) as qt_session,
+            patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        qt_session.assert_called_once()
         tk_session.assert_called_once()
 
     def test_run_hud_session_switches_from_renderer_to_tk(self) -> None:
@@ -5130,6 +5881,26 @@ class DaemonLifecycleTests(unittest.TestCase):
         tk_session.assert_called_once()
         tk_args = tk_session.call_args.args[0]
         self.assertFalse(tk_args.renderer_hud)
+        self.assertEqual(tk_args.runtime_hud_mode, "tk")
+
+    def test_run_hud_session_switches_from_renderer_to_qt(self) -> None:
+        args = SimpleNamespace(renderer_hud=True)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_renderer_hud_session",
+                return_value=HUD_SWITCH_TO_QT,
+            ) as renderer_session,
+            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        renderer_session.assert_called_once()
+        qt_session.assert_called_once()
+        qt_args = qt_session.call_args.args[0]
+        self.assertFalse(qt_args.renderer_hud)
+        self.assertEqual(qt_args.runtime_hud_mode, "qt")
 
     def test_run_hud_session_switches_from_tk_to_renderer(self) -> None:
         args = SimpleNamespace(renderer_hud=False)
@@ -6068,6 +6839,43 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertFalse(tk_args.renderer_hud)
         self.assertEqual(tk_session.call_args.kwargs["lock_already_held"], True)
         self.assertEqual(tk_session.call_args.kwargs["hide_until_attached"], False)
+
+    def test_run_daemon_qt_choice_launches_codex_normally_and_opens_qt(self) -> None:
+        fake_manager = SimpleNamespace(
+            poll_ms=250,
+            wait_for_codex=MagicMock(),
+        )
+        args = SimpleNamespace(daemon_poll_ms=250)
+        lock_instance = MagicMock()
+        lock_instance.__enter__.return_value = lock_instance
+        lock_instance.__exit__.return_value = False
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging", return_value=None),
+            patch("codex_usage_hud.cli.hide_console_window", return_value=None),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=fake_manager),
+            patch("codex_usage_hud.cli.HudInstanceLock", return_value=lock_instance),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=SimpleNamespace(
+                    mode=DAEMON_STARTUP_QT,
+                    launch_codex=True,
+                ),
+            ),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch,
+            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, 0)
+        launch.assert_called_once_with(debugger=False)
+        fake_manager.wait_for_codex.assert_not_called()
+        qt_session.assert_called_once()
+        qt_args = qt_session.call_args.args[0]
+        self.assertFalse(qt_args.renderer_hud)
+        self.assertEqual(qt_args.runtime_hud_mode, "qt")
+        self.assertEqual(qt_session.call_args.kwargs["lock_already_held"], True)
+        self.assertEqual(qt_session.call_args.kwargs["hide_until_attached"], False)
 
     def test_launch_codex_app_debugger_uses_remote_debugging_with_uac_fallback(self) -> None:
         executable = Path(r"C:\Program Files\WindowsApps\OpenAI.Codex\app\Codex.exe")
