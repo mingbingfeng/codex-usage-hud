@@ -28,6 +28,7 @@ from .config import (
     DEFAULT_WEEKLY_BUDGET_USD,
     UserConfig,
     UserConfigStore,
+    dismiss_warning_for_today,
     effective_display_mode,
     fetch_model_prices,
     normalize_display_mode,
@@ -2986,6 +2987,17 @@ def _handle_renderer_settings_command(
             return _renderer_settings_status(
                 state.message or state.title or "更新操作已提交。",
                 kind="error" if state.error else "",
+            )
+        if action == "dismissWarningsToday":
+            settings_path = getattr(getattr(context, "settings_store", None), "path", None)
+            if settings_path is None:
+                return _renderer_settings_status(
+                    "无法保存预警关闭状态：配置路径不可用。",
+                    kind="error",
+                )
+            dismiss_warning_for_today(settings_path)
+            return _renderer_settings_status(
+                "今天不再显示预算预警。",
             )
         return _renderer_settings_status(
             f"无法处理未知设置命令：{action or 'empty'}",

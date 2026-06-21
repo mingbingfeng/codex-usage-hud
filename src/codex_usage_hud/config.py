@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,8 @@ from .core.calculator import MODEL_PRICES
 
 HUD_SETTINGS_FILENAME = "hud_settings.json"
 USER_CONFIG_KEY = "user"
+RUNTIME_STATE_KEY = "runtime"
+WARNING_DISMISSED_DATE_KEY = "warning_dismissed_date"
 DEFAULT_DAILY_BUDGET_USD = 100.0
 DEFAULT_WEEKLY_BUDGET_USD = 400.0
 DEFAULT_BUDGET_THRESHOLDS = (0.5, 0.8, 0.9, 1.0)
@@ -283,6 +286,42 @@ def write_json_object(path: Path, value: Mapping[str, Any]) -> None:
         raise last_error
 
 
+def local_date_key(now: datetime | None = None) -> str:
+    """Return the local calendar date used for per-day UI state."""
+    current = (now or datetime.now()).astimezone()
+    return current.date().isoformat()
+
+
+def warning_dismissed_today(
+    path: Path | str | None = None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether the expanded warning banner is dismissed for today."""
+    settings_path = Path(path) if path is not None else default_settings_path()
+    raw = read_json_object(settings_path)
+    runtime = raw.get(RUNTIME_STATE_KEY)
+    if not isinstance(runtime, Mapping):
+        return False
+    return str(runtime.get(WARNING_DISMISSED_DATE_KEY) or "") == local_date_key(now)
+
+
+def dismiss_warning_for_today(
+    path: Path | str | None = None,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Persist that the expanded warning banner should stay hidden today."""
+    settings_path = Path(path) if path is not None else default_settings_path()
+    raw = read_json_object(settings_path)
+    runtime = raw.get(RUNTIME_STATE_KEY)
+    if not isinstance(runtime, dict):
+        runtime = {}
+    runtime[WARNING_DISMISSED_DATE_KEY] = local_date_key(now)
+    raw[RUNTIME_STATE_KEY] = runtime
+    write_json_object(settings_path, raw)
+
+
 def parse_thresholds(
     value: Any,
     default: list[float] | tuple[float, ...] | None = None,
@@ -510,19 +549,24 @@ __all__ = [
     "DEFAULT_WORK_OVERLAY_MAX_ITEMS",
     "HUD_SETTINGS_FILENAME",
     "ModelPrice",
+    "RUNTIME_STATE_KEY",
     "USER_CONFIG_KEY",
     "UserConfig",
     "UserConfigStore",
+    "WARNING_DISMISSED_DATE_KEY",
     "default_model_prices",
     "default_settings_path",
+    "dismiss_warning_for_today",
     "effective_display_mode",
     "extract_model_prices",
     "fetch_model_prices",
+    "local_date_key",
     "normalize_display_mode",
     "normalize_model_prices",
     "normalize_work_overlay_max_items",
     "parse_thresholds",
     "read_json_object",
     "time_parts",
+    "warning_dismissed_today",
     "write_json_object",
 ]

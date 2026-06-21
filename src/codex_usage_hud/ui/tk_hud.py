@@ -26,13 +26,15 @@ from ..config import (
     UserConfig,
     UserConfigStore,
     default_settings_path as shared_default_settings_path,
+    dismiss_warning_for_today,
     effective_display_mode,
     fetch_model_prices,
     parse_thresholds as parse_config_thresholds,
     read_json_object,
+    warning_dismissed_today,
     write_json_object,
 )
-from ..core.parser import CostEstimator, ParsedSession, RequestRound
+from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
 from ..platforms.cdp_probe import cdp_port_from_env, list_targets, pick_page_target
 from ..platforms.codex_theme import CodexThemeProbe, HudThemeTokens
 from ..support_assets import support_qr_asset_paths
@@ -65,6 +67,11 @@ TOP_ANCHOR_RIGHT_MIN = 172
 TOP_ANCHOR_MIN_WIDTH = 320
 TOP_EXPANDED_STACK_WIDTH = 560
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
+TOP_ACTIVITY_TRAIL_ROW_HEIGHT = 38
+TOP_ACTIVITY_TRAIL_ROW_GAP = 0
+TOP_ACTIVITY_TRAIL_VIEWPORT_HEIGHT = (
+    TOP_ACTIVITY_TRAIL_ROW_HEIGHT * 4 + TOP_ACTIVITY_TRAIL_ROW_GAP * 3
+)
 CACHE_HIT_RATE_SYMBOL = "◎"
 TOKEN_LEGEND_TEXT = (
     "↑ 输入  ↻ 缓存  ↓ 输出\n"
@@ -118,7 +125,9 @@ HUD_TEXT = "#E8EEF7"
 HUD_MUTED = "#8492A6"
 HUD_ACCENT = "#F3D27A"
 HUD_BLUE = "#9CCBFF"
+HUD_WARNING = "#FFB86B"
 HUD_ERROR = "#FF6B6B"
+HUD_SUCCESS = "#8FE3A1"
 HUD_PROGRESS_TRACK = "#262C33"
 HUD_PROGRESS_TRACK_BORDER = "#3B4149"
 HUD_PROGRESS_TRACK_TEXT = "#C1C7D0"
@@ -177,7 +186,9 @@ def _apply_hud_theme_tokens(tokens: HudThemeTokens) -> tuple[tuple[str, object],
     global HUD_MUTED
     global HUD_ACCENT
     global HUD_BLUE
+    global HUD_WARNING
     global HUD_ERROR
+    global HUD_SUCCESS
     global HUD_PROGRESS_TRACK
     global HUD_PROGRESS_TRACK_BORDER
     global HUD_PROGRESS_TRACK_TEXT
@@ -217,7 +228,9 @@ def _apply_hud_theme_tokens(tokens: HudThemeTokens) -> tuple[tuple[str, object],
     HUD_MUTED = tokens.muted
     HUD_ACCENT = tokens.accent
     HUD_BLUE = tokens.info
+    HUD_WARNING = tokens.warning
     HUD_ERROR = tokens.error
+    HUD_SUCCESS = tokens.success
     HUD_PROGRESS_TRACK = tokens.progress_track
     HUD_PROGRESS_TRACK_BORDER = tokens.progress_track_border
     HUD_PROGRESS_TRACK_TEXT = tokens.progress_track_text
@@ -438,6 +451,17 @@ def _theme_hover_surface(background: object) -> str:
     )
 
 
+def _theme_tint_surface(color: object, background: object = "", alpha: float = 0.12) -> str:
+    bg = str(background or HUD_BG)
+    return _rgb_to_hex(
+        _mix_rgb(
+            _hex_to_rgb(bg, (16, 22, 29)),
+            _hex_to_rgb(str(color or HUD_ACCENT), (243, 210, 122)),
+            alpha,
+        )
+    )
+
+
 def _theme_primary_text(background: object = "") -> str:
     return _readable_theme_color(HUD_TEXT, background or HUD_BG, fallback=HUD_TEXT)
 
@@ -455,11 +479,15 @@ def _theme_info_text(background: object = "") -> str:
 
 
 def _theme_warning_text(background: object = "") -> str:
-    return _readable_theme_color("#FFB86B", background or HUD_BG, fallback=HUD_TEXT)
+    return _readable_theme_color(HUD_WARNING, background or HUD_BG, fallback=HUD_TEXT)
 
 
 def _theme_error_text(background: object = "") -> str:
     return _readable_theme_color(HUD_ERROR, background or HUD_BG, fallback=HUD_TEXT)
+
+
+def _theme_success_text(background: object = "") -> str:
+    return _readable_theme_color(HUD_SUCCESS, background or HUD_BG, fallback=HUD_TEXT)
 
 
 def _theme_control_surface(background: object = "") -> str:
@@ -2681,12 +2709,13 @@ class TopHudBudgetProgress(tk.Frame):
     """Expanded budget area rendered as day/week text-in-progress rails."""
 
     def __init__(self, master: tk.Misc, **kwargs: Any) -> None:
-        super().__init__(master, bg=HUD_BG, **kwargs)
+        bg = str(kwargs.pop("bg", HUD_PANEL_BG))
+        super().__init__(master, bg=bg, **kwargs)
         self._text = ""
         self._day = TopHudProgressBar(
             self,
             height=36,
-            bg=HUD_BG,
+            bg=bg,
             font=("Microsoft YaHei UI", 9, "bold"),
             padding_x=14,
             radius=HUD_PROGRESS_RADIUS,
@@ -2694,7 +2723,7 @@ class TopHudBudgetProgress(tk.Frame):
         self._week = TopHudProgressBar(
             self,
             height=36,
-            bg=HUD_BG,
+            bg=bg,
             font=("Microsoft YaHei UI", 9, "bold"),
             padding_x=14,
             radius=HUD_PROGRESS_RADIUS,
@@ -2704,14 +2733,13 @@ class TopHudBudgetProgress(tk.Frame):
             text="",
             anchor="w",
             justify="left",
-            bg=HUD_BG,
-            fg=_theme_secondary_text(HUD_BG),
+            bg=bg,
+            fg=_theme_secondary_text(bg),
             font=("Microsoft YaHei UI", 7),
             wraplength=360,
         )
-        self._day.pack(fill="x", pady=(0, 6))
-        self._week.pack(fill="x", pady=(0, 5))
-        self._meta.pack(fill="x")
+        self._day.pack(fill="x", pady=(0, 7))
+        self._week.pack(fill="x")
         self.bind("<Configure>", self._sync_meta_wrap, add="+")
 
     def cget(self, key: str) -> Any:
@@ -2735,7 +2763,7 @@ class TopHudBudgetProgress(tk.Frame):
             self.set_metrics(list(metrics), meta=str(meta or ""))
         elif text is not None:
             self._text = str(text or "")
-            self._meta.configure(text=self._text)
+            self._set_meta_text(self._text)
         return result
 
     def set_metrics(self, metrics: list[TopHudProgressMetric], *, meta: str = "") -> None:
@@ -2746,7 +2774,16 @@ class TopHudBudgetProgress(tk.Frame):
         self._text = "\n".join(metric.label for metric in metrics if metric.label)
         if meta:
             self._text = f"{self._text}\n{meta}" if self._text else meta
-        self._meta.configure(text=meta)
+        self._set_meta_text(meta)
+
+    def _set_meta_text(self, text: str) -> None:
+        text = str(text or "")
+        self._meta.configure(text=text)
+        if text:
+            if not self._meta.winfo_manager():
+                self._meta.pack(fill="x", pady=(6, 0))
+        else:
+            self._meta.pack_forget()
 
     def _sync_meta_wrap(self, event: tk.Event[tk.Misc]) -> None:
         width = max(120, int(getattr(event, "width", 360) or 360) - 4)
@@ -4253,11 +4290,15 @@ def _top_budget_progress_meta(snapshot: ParsedSession) -> str:
     return "  |  ".join(parts)
 
 
-def _budget_warning_summary(snapshot: ParsedSession) -> str:
+def _budget_warning_summary(
+    snapshot: ParsedSession,
+    *,
+    include_budget_warnings: bool = True,
+) -> str:
     if snapshot.budget_error:
         return snapshot.budget_error
-    if not snapshot.budget_warnings:
-        return "提醒  暂无额度提醒"
+    if not include_budget_warnings or not snapshot.budget_warnings:
+        return ""
     messages: list[str] = []
     for warning in snapshot.budget_warnings:
         if warning.startswith("日额度已用") and "超过 " in warning and snapshot.daily_limit_usd > 0:
@@ -4273,7 +4314,37 @@ def _budget_warning_summary(snapshot: ParsedSession) -> str:
             )
             continue
         messages.append(warning)
-    return "提醒  " + "；".join(messages)
+    return "预警  " + "；".join(messages)
+
+
+def _format_warnings(
+    snapshot: ParsedSession,
+    *,
+    include_budget_warnings: bool = True,
+) -> str:
+    return _budget_warning_summary(
+        snapshot,
+        include_budget_warnings=include_budget_warnings,
+    )
+
+
+def _format_notice(
+    snapshot: ParsedSession,
+    *,
+    include_budget_warnings: bool = True,
+) -> str:
+    parts: list[str] = []
+    notice = _format_warnings(
+        snapshot,
+        include_budget_warnings=include_budget_warnings,
+    )
+    if notice:
+        parts.append(notice)
+    if snapshot.error:
+        parts.append(f"错误 {_compact(snapshot.error, 80)}")
+    if snapshot.request.error:
+        parts.append(f"请求 {_compact(snapshot.request.error, 80)}")
+    return "  |  ".join(parts)
 
 
 def _round_cache_hit_rate_label(item: RequestRound) -> str:
@@ -4552,6 +4623,711 @@ def _round_entry_widths(
     return index_width, money_width, total_width
 
 
+def _token_value_text(value: int | None, estimated: bool = False) -> str:
+    return f"{'~' if estimated else ''}{_short_num(value)}"
+
+
+def _component_cost(
+    snapshot: ParsedSession,
+    *,
+    input_tokens: int = 0,
+    cached_tokens: int = 0,
+    output_tokens: int = 0,
+    reasoning_tokens: int = 0,
+) -> float | None:
+    return _COST_ESTIMATOR.calculate(
+        snapshot.request.model,
+        input_tokens,
+        cached_tokens,
+        output_tokens,
+        reasoning_tokens,
+    )
+
+
+def _top_session_composition(snapshot: ParsedSession) -> str:
+    confirmed = snapshot.confirmed
+    input_tokens = int(confirmed.cumulative_input or 0)
+    cached_tokens = max(0, min(int(confirmed.cumulative_cached or 0), input_tokens))
+    uncached_tokens = max(0, input_tokens - cached_tokens)
+    output_tokens = int(confirmed.cumulative_output or 0)
+    reasoning_tokens = int(confirmed.cumulative_reasoning or 0)
+    components = [
+        (
+            "↑↻",
+            cached_tokens,
+            _component_cost(snapshot, input_tokens=cached_tokens, cached_tokens=cached_tokens),
+        ),
+        (
+            "↑",
+            uncached_tokens,
+            _component_cost(snapshot, input_tokens=uncached_tokens),
+        ),
+        (
+            "↓",
+            output_tokens,
+            _component_cost(snapshot, output_tokens=output_tokens),
+        ),
+        (
+            "◇",
+            reasoning_tokens,
+            _component_cost(snapshot, reasoning_tokens=reasoning_tokens),
+        ),
+    ]
+    components = [item for item in components if item[1] > 0]
+    if not components:
+        return "暂无可分析的 token 构成"
+    cost_components = [(label, cost) for label, _tokens, cost in components if cost is not None]
+    if len(cost_components) == len(components):
+        return " + ".join(f"{label} {_format_money(cost)}" for label, cost in cost_components)
+    return " + ".join(f"{label} {_short_num(tokens)}" for label, tokens, _cost in components)
+
+
+def _duration_text(seconds: float | None) -> str:
+    if seconds is None:
+        return "--"
+    amount = max(0.0, float(seconds))
+    if amount < 60:
+        return f"{amount:.1f}s"
+    minutes = int(amount // 60)
+    seconds_left = int(amount % 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds_left}s"
+    hours = minutes // 60
+    minutes_left = minutes % 60
+    return f"{hours}h{minutes_left}m"
+
+
+def _round_duration_text(item: RequestRound) -> str:
+    if item.started_at is None:
+        return "--"
+    finish = item.completed_at
+    if finish is None:
+        return _round_elapsed_text(item.started_at).strip()
+    return _duration_text(seconds_between(item.started_at, finish))
+
+
+def _round_cost_value(item: RequestRound, fallback_model: str) -> tuple[float | None, bool]:
+    cost = item.cost_usd
+    estimated = item.estimated or item.status == "running"
+    if cost is None:
+        cost = _COST_ESTIMATOR.calculate(
+            item.model or fallback_model,
+            item.input_tokens or 0,
+            item.cached_tokens or 0,
+            item.output_tokens or 0,
+            item.reasoning_tokens or 0,
+        )
+        estimated = True
+    return cost, estimated
+
+
+def _session_round_rows(snapshot: ParsedSession) -> list[RequestRound]:
+    rows = list(getattr(snapshot, "session_request_history", []) or [])
+    if rows:
+        return rows
+    return _task_rows(snapshot)
+
+
+def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, str]]:
+    rows = [
+        item
+        for item in _session_round_rows(snapshot)
+        if item.status != "waiting"
+        or item.total_tokens
+        or item.input_tokens
+        or item.output_tokens
+        or item.reasoning_tokens
+        or item.cost_usd
+    ]
+    ranked: list[tuple[float, int, RequestRound, float | None, bool]] = []
+    for item in rows:
+        cost, estimated = _round_cost_value(item, snapshot.request.model)
+        total = int(item.total_tokens or 0)
+        if total <= 0:
+            total = int(item.input_tokens or 0) + int(item.output_tokens or 0)
+        ranked.append((float(cost if cost is not None else -1.0), total, item, cost, estimated))
+    ranked.sort(key=lambda value: (value[0], value[1]), reverse=True)
+
+    details: list[dict[str, str]] = []
+    for _score_cost, total, item, cost, estimated in ranked[:3]:
+        duration = _round_duration_text(item)
+        breakdown = (
+            f"↑{_short_num(item.input_tokens)} "
+            f"↻{_short_num(item.cached_tokens)} "
+            f"↓{_short_num(item.output_tokens)} "
+            f"◇{_short_num(item.reasoning_tokens)}"
+        )
+        title = f"#{item.index} {_format_fixed_money(cost, estimated)} · ∑{_short_num(total)}"
+        detail = _compact(item.activity_summary or f"消耗构成：{breakdown}", 112)
+        copy_text = item.copy_text or (
+            f"轮次 #{item.index}\n"
+            f"金额 {_format_fixed_money(cost, estimated)}\n"
+            f"Tokens {total:,}\n"
+            f"{breakdown}"
+        )
+        details.append(
+            {
+                "title": title,
+                "detail": detail,
+                "copyText": copy_text,
+                "tooltip": (
+                    f"轮次 #{item.index} · {duration}\n"
+                    f"金额 {_format_fixed_money(cost, estimated)} · Tokens {total:,}\n"
+                    f"{detail}"
+                ),
+            }
+        )
+    return details
+
+
+def _top_task_ordinal(snapshot: ParsedSession) -> str:
+    count = int(getattr(snapshot, "task_count", 0) or 0)
+    index = int(getattr(snapshot, "task_index", 0) or 0)
+    if count <= 0:
+        return ""
+    if _top_task_finished(snapshot):
+        return f"共{count}次需求"
+    if index > 0:
+        return f"第{index}次需求"
+    return ""
+
+
+def _top_task_ordinal_parts(snapshot: ParsedSession) -> dict[str, str]:
+    value = _top_task_ordinal(snapshot)
+    if not value:
+        return {
+            "taskOrdinal": "",
+            "taskOrdinalSession": "",
+            "taskOrdinalActivity": "",
+        }
+    if _top_task_finished(snapshot):
+        return {
+            "taskOrdinal": value,
+            "taskOrdinalSession": value,
+            "taskOrdinalActivity": "",
+        }
+    return {
+        "taskOrdinal": value,
+        "taskOrdinalSession": "",
+        "taskOrdinalActivity": value,
+    }
+
+
+def _top_session_parts(snapshot: ParsedSession) -> dict[str, object]:
+    confirmed = snapshot.confirmed
+    if snapshot.token_events > 0:
+        average = confirmed.cumulative_total // max(1, snapshot.token_events)
+        session_average = f"均值 {_short_num(average)} /轮"
+    else:
+        session_average = "均值 n/a"
+    parts: dict[str, object] = {
+        "sessionMix": _top_cache_progress_label(snapshot),
+        "sessionAverage": session_average,
+        "sessionComposition": _top_session_composition(snapshot),
+        "heavyRoundsSummary": "Top 3",
+        "heavyRounds": _top_heavy_rounds(snapshot),
+        "sessionInputTokens": _token_value_text(confirmed.cumulative_input),
+        "sessionCachedTokens": _token_value_text(confirmed.cumulative_cached),
+        "sessionOutputTokens": _token_value_text(confirmed.cumulative_output),
+        "sessionReasoningTokens": _token_value_text(confirmed.cumulative_reasoning),
+    }
+    parts.update(_top_task_ordinal_parts(snapshot))
+    return parts
+
+
+def _top_current_work_item(snapshot: ParsedSession) -> Any | None:
+    for item in snapshot.active_work_items:
+        if getattr(item, "current", False):
+            return item
+    return snapshot.active_work_items[0] if snapshot.active_work_items else None
+
+
+def _top_task_finished(snapshot: ParsedSession) -> bool:
+    return (
+        (snapshot.task_completed_at is not None or snapshot.task_aborted_at is not None)
+        and snapshot.request.status != "running"
+        and not snapshot.slow.current_gap_active
+    )
+
+
+def _top_task_aborted(snapshot: ParsedSession) -> bool:
+    return (
+        snapshot.task_aborted_at is not None
+        and (snapshot.task_completed_at is None or snapshot.task_aborted_at >= snapshot.task_completed_at)
+    )
+
+
+def _top_activity_state(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return "已中止" if _top_task_aborted(snapshot) else "已完成"
+    item = _top_current_work_item(snapshot)
+    if item is not None:
+        label = getattr(item, "status_label", "") or getattr(item, "status_text", "") or getattr(item, "status", "")
+        if label:
+            return _compact(label, 18)
+    if snapshot.request.error or snapshot.error:
+        return "异常"
+    if snapshot.slow.current_gap_active:
+        return "等待中"
+    if snapshot.request.status == "running":
+        return "请求中"
+    activity = _activity_label(snapshot.activity.kind)
+    if activity not in {"空闲", "Token确认"}:
+        return activity
+    return _request_status_label(snapshot.request.status or snapshot.status)
+
+
+def _top_activity_main(snapshot: ParsedSession, *, limit: int = 118) -> str:
+    activity = _activity_label(snapshot.activity.kind)
+    detail = _compact(snapshot.activity.detail, limit)
+    if not detail:
+        detail = _request_status_label(snapshot.request.status or snapshot.status)
+    return f"{activity}：{detail}"
+
+
+def _top_executing_text(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        summary = _compact(snapshot.last_output.detail, 160)
+        if summary:
+            return summary
+        if _top_task_aborted(snapshot):
+            return "任务已中止"
+        return _top_activity_main(snapshot)
+    item = _top_current_work_item(snapshot)
+    if item is not None:
+        label = getattr(item, "status_label", "") or _top_activity_state(snapshot)
+        detail = (
+            getattr(item, "status_text", "")
+            or getattr(item, "detail", "")
+            or getattr(item, "last_text", "")
+            or getattr(item, "progress", "")
+        )
+        if detail:
+            return f"{label}：{_compact(detail, 108)}"
+        return _compact(label, 108)
+    return _top_activity_main(snapshot)
+
+
+def _top_current_task(snapshot: ParsedSession) -> str:
+    prompt = _compact(getattr(snapshot, "task_prompt", ""), 180)
+    if prompt:
+        return prompt
+    item = _top_current_work_item(snapshot)
+    if item is not None:
+        title = (
+            getattr(item, "title", "")
+            or getattr(item, "target_title", "")
+            or getattr(item, "workdir_name", "")
+        )
+        if title:
+            return _compact(title, 128)
+    if snapshot.session_title:
+        return _compact(snapshot.session_title, 128)
+    return f"会话 {snapshot.session_id[-12:]}"
+
+
+def _top_activity_labels(snapshot: ParsedSession) -> dict[str, str]:
+    if _top_task_finished(snapshot):
+        return {
+            "executingLabel": "任务中止" if _top_task_aborted(snapshot) else "完成任务",
+            "currentTaskLabel": "当前需求",
+            "activityElapsedLabel": "已处理",
+            "activityGapLabel": "处理轮次",
+            "activityLastLabel": "处理花费",
+        }
+    return {
+        "executingLabel": "正在执行",
+        "currentTaskLabel": "当前需求",
+        "activityElapsedLabel": "已运行",
+        "activityGapLabel": "当前等待",
+        "activityLastLabel": "需求轮次",
+    }
+
+
+def _task_finished_at(snapshot: ParsedSession) -> datetime | None:
+    if snapshot.task_aborted_at is not None:
+        return snapshot.task_aborted_at
+    return snapshot.task_completed_at
+
+
+def _running_duration(start: datetime | None, end: datetime | None, now: datetime) -> float | None:
+    if start is None:
+        return None
+    finish = end or now.astimezone(start.tzinfo) if start.tzinfo is not None else end or now.replace(tzinfo=None)
+    return max(0.0, (finish - start).total_seconds())
+
+
+def _top_activity_elapsed(snapshot: ParsedSession) -> str:
+    item = _top_current_work_item(snapshot)
+    started_at = None
+    if item is not None:
+        started_at = (
+            getattr(item, "started_at", None)
+            or getattr(item, "task_started_at", None)
+            or getattr(item, "session_started_at", None)
+        )
+    started_at = started_at or snapshot.request.started_at or snapshot.task_started_at or snapshot.session_started_at
+    if _top_task_finished(snapshot):
+        duration = _running_duration(started_at, _task_finished_at(snapshot), snapshot.refreshed_at)
+        return _duration_text(duration)
+    return _round_elapsed_text(started_at).strip()
+
+
+def _task_round_count(snapshot: ParsedSession) -> int:
+    rows = _task_rows(snapshot)
+    count = 0
+    for item in rows:
+        if item.status == "waiting" and not (
+            item.total_tokens
+            or item.input_tokens
+            or item.output_tokens
+            or item.reasoning_tokens
+            or item.cost_usd
+        ):
+            continue
+        count += 1
+    return count
+
+
+def _task_cache_hit_rate_label(snapshot: ParsedSession, rows: list[RequestRound]) -> str:
+    input_tokens = sum(int(item.input_tokens or 0) for item in rows)
+    if input_tokens <= 0:
+        return "--"
+    cached_tokens = sum(int(item.cached_tokens or 0) for item in rows)
+    cached_tokens = max(0, min(cached_tokens, input_tokens))
+    estimated = any(item.estimated or item.status == "running" for item in rows)
+    label = _format_rate_marker(cached_tokens / max(1, input_tokens), estimated)
+    return label[1:] if label.startswith(CACHE_HIT_RATE_SYMBOL) else label
+
+
+def _top_task_spend_text(snapshot: ParsedSession) -> str:
+    rows = _task_rows(snapshot)
+    (
+        _input_tokens,
+        _cached_tokens,
+        _output_tokens,
+        _reasoning_tokens,
+        total_tokens,
+        cost,
+        estimated,
+    ) = _task_total(snapshot)
+    return (
+        f"{_short_num(total_tokens)}Tokens/"
+        f"{_format_fixed_money(cost, estimated)}/"
+        f"{_task_cache_hit_rate_label(snapshot, rows)}"
+    )
+
+
+def _top_task_spend_money_text(snapshot: ParsedSession) -> str:
+    (
+        _input_tokens,
+        _cached_tokens,
+        _output_tokens,
+        _reasoning_tokens,
+        _total_tokens,
+        cost,
+        estimated,
+    ) = _task_total(snapshot)
+    return _format_fixed_money(cost, estimated)
+
+
+def _top_activity_gap_value(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return f"{_task_round_count(snapshot)}轮"
+    return snapshot.slow.current_gap
+
+
+def _top_activity_last(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return _top_task_spend_money_text(snapshot)
+    return f"{_task_round_count(snapshot)}轮"
+
+
+def _top_activity_last_tooltip(snapshot: ParsedSession) -> str:
+    if _top_task_finished(snapshot):
+        return _top_task_spend_text(snapshot)
+    return f"本次需求已产生 {_task_round_count(snapshot)} 轮"
+
+
+def _first_duration_fragment(value: str) -> str:
+    match = re.search(r"\d+(?:\.\d+)?s|\d+m\d+s|\d+h\d+m", value or "")
+    return match.group(0) if match else "--"
+
+
+def _top_slow_chip(snapshot: ParsedSession) -> str:
+    call = snapshot.slow.slowest_tool_call
+    if call is not None:
+        duration = _duration_text(_running_duration(call.start, call.end, snapshot.refreshed_at))
+        return _compact(f"最慢工具:{duration}", 28)
+    if snapshot.slow.slowest_tool and not snapshot.slow.slowest_tool.startswith("无"):
+        return _compact(f"最慢工具:{_first_duration_fragment(snapshot.slow.slowest_tool)}", 28)
+    return "最慢工具:--"
+
+
+def _top_gap_chip(snapshot: ParsedSession) -> str:
+    detail = snapshot.slow.longest_gap_detail
+    if detail is not None:
+        return _compact(f"最长等待:{_duration_text(detail.duration_seconds)}", 28)
+    if snapshot.slow.longest_gap and not snapshot.slow.longest_gap.startswith("无"):
+        return _compact(f"最长等待:{_first_duration_fragment(snapshot.slow.longest_gap)}", 28)
+    return "最长等待:--"
+
+
+def _timeline_time(value: datetime | None) -> str:
+    if value is None:
+        return "--:--"
+    return value.astimezone().strftime("%H:%M:%S")
+
+
+def _tool_call_arguments_summary(call: ToolCallTiming) -> str:
+    raw_args = (call.args or "").strip()
+    if not raw_args:
+        return ""
+    try:
+        payload = json.loads(raw_args)
+    except json.JSONDecodeError:
+        return _compact(raw_args, 96)
+    if isinstance(payload, dict):
+        for key in ("command", "query", "q", "url", "path"):
+            value = payload.get(key)
+            if value:
+                return _compact(value, 96)
+    return _compact(raw_args, 96)
+
+
+def _tool_call_timeline_detail(call: ToolCallTiming, duration: str) -> str:
+    args = _tool_call_arguments_summary(call)
+    if args:
+        return f"{duration} {call.name} · {args}"
+    return f"{duration} {call.name}"
+
+
+def _is_token_confirm_event(title: str, detail: str) -> bool:
+    return title == "Token确认" or "received token_count" in detail
+
+
+def _merge_activity_events(
+    events: list[tuple[datetime, int, dict[str, object]]],
+) -> list[dict[str, object]]:
+    grouped: dict[str, list[tuple[datetime, int, dict[str, object]]]] = {}
+    for event in events:
+        moment = event[0]
+        key = moment.astimezone().replace(microsecond=0).isoformat()
+        grouped.setdefault(key, []).append(event)
+
+    merged: list[tuple[datetime, int, dict[str, object], bool]] = []
+    for group in grouped.values():
+        group.sort(key=lambda item: item[1])
+        moment = max(item[0] for item in group)
+        order = max(item[1] for item in group)
+        group_titles = [str(item[2].get("title") or "") for item in group]
+        suppress_request_complete = "请求完成" in group_titles and any(
+            title in group_titles for title in ("任务完成", "任务中止")
+        )
+        suppress_round_title = any(title in group_titles for title in ("任务完成", "任务中止"))
+        meaningful_titles: list[str] = []
+        token_titles: list[str] = []
+        details: list[str] = []
+        tooltip_lines: list[str] = []
+        active = False
+        has_meaningful = False
+        for _moment, _order, item in group:
+            title = str(item.get("title") or "")
+            detail = str(item.get("detail") or "")
+            token_confirm = _is_token_confirm_event(title, detail)
+            if suppress_request_complete and title == "请求完成":
+                active = active or bool(item.get("active"))
+                continue
+            if suppress_round_title and title.startswith("轮次 #"):
+                active = active or bool(item.get("active"))
+                continue
+            title_bucket = token_titles if token_confirm else meaningful_titles
+            if title and title not in title_bucket:
+                title_bucket.append(title)
+            has_meaningful = has_meaningful or not token_confirm
+            if detail and not token_confirm and detail not in details:
+                details.append(detail)
+            tooltip = str(item.get("tooltip") or "").strip()
+            if tooltip and not token_confirm and tooltip not in tooltip_lines:
+                tooltip_lines.append(tooltip)
+            active = active or bool(item.get("active"))
+
+        titles = meaningful_titles + token_titles
+        title_text = "，".join(titles) if titles else "活动"
+        detail_text = "；".join(details)
+        tooltip = "\n".join(tooltip_lines) if tooltip_lines else title_text
+        merged.append(
+            (
+                moment,
+                order,
+                {
+                    "time": _timeline_time(moment),
+                    "title": _compact(title_text, 40),
+                    "detail": _compact(detail_text, 96),
+                    "tooltip": _compact(f"{_timeline_time(moment)}  {title_text}\n{tooltip}", 320),
+                    "active": active,
+                },
+                has_meaningful,
+            )
+        )
+
+    meaningful = [item for item in merged if item[3]]
+    if meaningful:
+        merged = meaningful
+    merged.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in merged]
+
+
+def _activity_round_detail(item: RequestRound, fallback_model: str) -> str:
+    cost, estimated = _round_cost_value(item, fallback_model)
+    total = int(item.total_tokens or 0)
+    if total <= 0:
+        total = int(item.input_tokens or 0) + int(item.output_tokens or 0)
+    parts = [
+        _format_fixed_money(cost, estimated),
+        f"∑{_short_num(total)}",
+    ]
+    summary = _compact(item.activity_summary, 64)
+    if summary:
+        parts.append(summary)
+    else:
+        parts.append(
+            " ".join(
+                [
+                    f"↑{_short_num(item.input_tokens)}",
+                    f"↻{_short_num(item.cached_tokens)}",
+                    f"↓{_short_num(item.output_tokens)}",
+                    f"◇{_short_num(item.reasoning_tokens)}",
+                ]
+            )
+        )
+    return " · ".join(parts)
+
+
+def _top_activity_trail(snapshot: ParsedSession) -> list[dict[str, object]]:
+    now = snapshot.refreshed_at or datetime.now().astimezone()
+    events: list[tuple[datetime, int, dict[str, object]]] = []
+    seen: set[tuple[str, str, str]] = set()
+    order = 0
+    row_times = [
+        moment
+        for item in _task_rows(snapshot)
+        for moment in (item.started_at, item.completed_at)
+        if moment is not None
+    ]
+    task_start = snapshot.task_started_at or (min(row_times) if row_times else None)
+
+    def add(moment: datetime | None, title: str, detail: str, *, active: bool = False) -> None:
+        nonlocal order
+        if moment is None:
+            return
+        if task_start is not None:
+            current = moment.astimezone(task_start.tzinfo) if task_start.tzinfo else moment.replace(tzinfo=None)
+            start = task_start if task_start.tzinfo else task_start.replace(tzinfo=None)
+            if current < start:
+                return
+        key = (moment.astimezone().isoformat(), title, detail)
+        if key in seen:
+            return
+        seen.add(key)
+        order += 1
+        events.append(
+            (
+                moment,
+                order,
+                {
+                    "time": _timeline_time(moment),
+                    "title": _compact(title, 26),
+                    "detail": _compact(detail, 72),
+                    "tooltip": _compact(f"{_timeline_time(moment)}  {title}  {detail}", 260),
+                    "active": active,
+                },
+            )
+        )
+
+    add(snapshot.task_started_at, "任务开始", _top_current_task(snapshot))
+    for item in _task_rows(snapshot):
+        moment = item.completed_at or item.started_at
+        if moment is None:
+            continue
+        title = f"轮次 #{item.index}"
+        active = item.status == "running" and item.completed_at is None
+        add(
+            moment,
+            title,
+            _activity_round_detail(item, snapshot.request.model),
+            active=active,
+        )
+    add(
+        snapshot.request.started_at,
+        "请求开始",
+        snapshot.request.model or _request_status_label(snapshot.request.status),
+        active=snapshot.request.status == "running" and snapshot.request.completed_at is None,
+    )
+    call = snapshot.slow.slowest_tool_call
+    if call is not None:
+        duration = _duration_text(_running_duration(call.start, call.end, now))
+        add(
+            call.start,
+            "工具调用",
+            _tool_call_timeline_detail(call, duration),
+            active=call.end is None,
+        )
+        completion_detail = _tool_call_timeline_detail(call, duration)
+        if call.output:
+            completion_detail = f"{completion_detail} · 返回 {_compact(call.output, 80)}"
+        add(call.end, "工具完成", completion_detail)
+    gap = snapshot.slow.longest_gap_detail
+    if gap is not None:
+        label = _gap_label(gap.category)
+        add(gap.start, "等待开始", f"{label}：{gap.from_event}")
+        add(gap.end, "等待结束", f"{_duration_text(gap.duration_seconds)} {label}：{gap.to_event}")
+    add(snapshot.activity.timestamp, _activity_label(snapshot.activity.kind), snapshot.activity.detail, active=True)
+    add(snapshot.request.completed_at, "请求完成", snapshot.request.model or "模型请求")
+    add(snapshot.task_completed_at, "任务完成", _top_current_task(snapshot))
+    add(snapshot.task_aborted_at, "任务中止", _top_current_task(snapshot))
+    recent_detail = _top_activity_main(snapshot, limit=72)
+    if "received token_count" not in recent_detail:
+        add(snapshot.last_event_time, "最近事件", recent_detail)
+    if not events:
+        add(snapshot.refreshed_at, "刷新", "等待会话产生新活动")
+
+    return _merge_activity_events(events)
+
+
+def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[str, object]:
+    confirmed = snapshot.confirmed
+    session_parts = _top_session_parts(snapshot)
+    activity_labels = _top_activity_labels(snapshot)
+    task_started_key = snapshot.task_started_at.isoformat() if snapshot.task_started_at is not None else ""
+    details: dict[str, object] = {
+        "title": _top_expanded_header_title(snapshot),
+        "session": (
+            f"会话 {snapshot.session_id[-12:]} | "
+            f"行 {snapshot.line_count} | 确认 {snapshot.token_events}"
+        ),
+        "sessionCost": _format_money(session_cost),
+        "sessionTokens": _short_num(confirmed.cumulative_total),
+        "sessionRounds": f"{snapshot.token_events} 轮确认",
+        "cacheText": _top_cache_progress_label(snapshot),
+        "warnings": _format_notice(snapshot),
+        "executing": _top_executing_text(snapshot),
+        "currentTask": _top_current_task(snapshot),
+        "activityState": _top_activity_state(snapshot),
+        "activityElapsed": _top_activity_elapsed(snapshot),
+        "activityGap": _top_activity_gap_value(snapshot),
+        "activityLast": _top_activity_last(snapshot),
+        "activityLastTooltip": _top_activity_last_tooltip(snapshot),
+        "activityTrail": _top_activity_trail(snapshot),
+        "activityTrailContext": f"{snapshot.session_id}|{snapshot.task_index}|{task_started_key}",
+        "slow": _top_slow_chip(snapshot),
+        "gap": _top_gap_chip(snapshot),
+    }
+    details.update(session_parts)
+    details.update(activity_labels)
+    return details
+
+
 class TokenHudWindow:
     """Two-window HUD: top session/budget bar and bottom request bar."""
 
@@ -4693,6 +5469,13 @@ class TokenHudWindow:
         self._pointer_priority_hold_until = 0.0
         self._top_rebuild_job: str | None = None
         self._request_rebuild_job: str | None = None
+        self._top_activity_context = ""
+        self._top_activity_visible_count = 4
+        self._top_activity_signature: tuple[object, ...] | None = None
+        self._top_heavy_rounds_signature: tuple[object, ...] | None = None
+        self._top_activity_scroll_to_bottom = False
+        self._top_scroll_handler: Callable[[tk.Event[tk.Misc]], str | None] | None = None
+        self._top_activity_scroll_handler: Callable[[tk.Event[tk.Misc]], str | None] | None = None
         self._follow_job: str | None = None
         self._theme_probe = CodexThemeProbe(
             timeout_seconds=0.08,
@@ -4717,7 +5500,7 @@ class TokenHudWindow:
         self.request_root.bind("<Escape>", self._close)
         self._bind_window_interactions(self.request_root, "request")
         self._rebuild_request_ui()
-        self._set_alpha(self.root, 0.94)
+        self._set_alpha(self.root, 1.0)
         self._set_alpha(self.request_root, 0.74)
         self._apply_free_defaults()
         self._schedule_settings_dialog_prewarm()
@@ -4833,6 +5616,37 @@ class TokenHudWindow:
             return
         for child in children:
             self._bind_manual_priority_tree(child)
+
+    def _bind_top_scroll_tree(
+        self,
+        widget: tk.Misc,
+        *,
+        handler: Callable[[tk.Event[tk.Misc]], str | None] | None = None,
+        mode: str = "top",
+        skip_inner: bool = True,
+    ) -> None:
+        scroll_handler = handler or self._top_scroll_handler
+        if scroll_handler is None:
+            return
+        try:
+            if skip_inner and bool(getattr(widget, "_hud_inner_scroll", False)):
+                return
+            bound_attr = f"_hud_{mode}_scroll_bound"
+            if not bool(getattr(widget, bound_attr, False)):
+                widget.bind("<MouseWheel>", scroll_handler, add="+")
+                widget.bind("<Button-4>", scroll_handler, add="+")
+                widget.bind("<Button-5>", scroll_handler, add="+")
+                setattr(widget, bound_attr, True)
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            self._bind_top_scroll_tree(
+                child,
+                handler=scroll_handler,
+                mode=mode,
+                skip_inner=skip_inner,
+            )
 
     @staticmethod
     def _point_in_hit_rect(
@@ -6627,6 +7441,8 @@ class TokenHudWindow:
             child.destroy()
         self.top_labels.clear()
         self._top_update_button = None
+        self._top_activity_signature = None
+        self._top_heavy_rounds_signature = None
         outside_color = _window_outside_color()
         self.root.configure(bg=outside_color)
         self._configure_transparent_window(self.root, outside_color)
@@ -6659,6 +7475,7 @@ class TokenHudWindow:
 
     def _build_top_expanded(self, frame: tk.Frame) -> None:
         header = tk.Frame(frame, bg=HUD_HEADER_BG, padx=6, pady=3)
+        header.configure(cursor="hand2")
         header.pack(fill="x", pady=(0, 7))
         controls = tk.Frame(header, bg=HUD_HEADER_BG)
         controls.pack(side="left", padx=(0, 4))
@@ -6676,16 +7493,18 @@ class TokenHudWindow:
         )
         cache_progress.pack(side="right", fill="y", padx=(8, 4))
         self.top_labels["cache_progress"] = cache_progress
-        self.top_labels["title"] = tk.Label(
+        title_label = tk.Label(
             header,
             text=TOP_EXPANDED_HEADER_FALLBACK,
             anchor="w",
             bg=HUD_HEADER_BG,
             fg=HUD_TEXT,
             font=("Microsoft YaHei UI", 9, "bold"),
+            cursor="hand2",
         )
-        self.top_labels["title"].pack(side="left")
-        self.top_labels["session"] = tk.Label(
+        title_label.pack(side="left")
+        self.top_labels["title"] = title_label
+        session_label = tk.Label(
             header,
             text="",
             anchor="e",
@@ -6693,8 +7512,10 @@ class TokenHudWindow:
             bg=HUD_HEADER_BG,
             fg=_theme_secondary_text(HUD_HEADER_BG),
             font=("Microsoft YaHei UI", 8),
+            cursor="hand2",
         )
-        self.top_labels["session"].pack(side="left", fill="x", expand=True, padx=(12, 0))
+        session_label.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        self.top_labels["session"] = session_label
 
         body = tk.Frame(frame, bg=HUD_BG)
         body.pack(fill="both", expand=True)
@@ -6715,11 +7536,59 @@ class TokenHudWindow:
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
+        self.top_labels["top_body_canvas"] = canvas
         content = tk.Frame(canvas, bg=HUD_BG)
         content_window = canvas.create_window((0, 0), window=content, anchor="nw")
 
-        def section(parent: tk.Misc, text: str, *, bg: str = HUD_BG) -> None:
-            tk.Label(
+        def sync_label_wrap(widget: tk.Label, minimum: int = 96) -> None:
+            try:
+                parent_width = widget.master.winfo_width() if widget.master is not None else 0
+                label_width = widget.winfo_width()
+                widths = [value for value in (label_width, parent_width) if int(value) > 0]
+                available_width = min(widths) if widths else max(label_width, parent_width, 0)
+                wraplength = max(minimum, int(available_width) - 4)
+                current = int(float(str(widget.cget("wraplength"))))
+            except (tk.TclError, TypeError, ValueError):
+                return
+            if current != wraplength:
+                widget.configure(wraplength=wraplength)
+
+        def dynamic_label(
+            key: str,
+            parent: tk.Misc,
+            *,
+            bg: str,
+            fg: str,
+            font: tuple[str, int] | tuple[str, int, str],
+            anchor: str = "w",
+            justify: str = "left",
+            wrap: bool = True,
+            pack: bool = True,
+            pady: tuple[int, int] = (0, 0),
+            padx: tuple[int, int] = (0, 0),
+        ) -> tk.Label:
+            label = tk.Label(
+                parent,
+                text="",
+                anchor=anchor,
+                justify=justify,
+                bg=bg,
+                fg=fg,
+                font=font,
+                wraplength=220 if wrap else 0,
+            )
+            if not wrap:
+                label.configure(width=1)
+            if wrap:
+                label.bind("<Configure>", lambda _event, widget=label: sync_label_wrap(widget), add="+")
+                parent.bind("<Configure>", lambda _event, widget=label: sync_label_wrap(widget), add="+")
+            if pack:
+                label.pack(fill="x", pady=pady, padx=padx)
+            self.top_labels[key] = label
+            return label
+
+        def section_title(parent: tk.Misc, text: str, *, bg: str) -> tk.Label:
+            label = tk.Label(
                 parent,
                 text=text,
                 anchor="w",
@@ -6727,83 +7596,102 @@ class TokenHudWindow:
                 bg=bg,
                 fg=_theme_secondary_text(bg),
                 font=("Microsoft YaHei UI", 7, "bold"),
-            ).pack(fill="x", pady=(0, 1))
+            )
+            label.pack(fill="x", pady=(0, 2))
+            return label
 
-        def divider(parent: tk.Misc, *, bg: str = HUD_BG) -> None:
-            del bg
-            tk.Frame(parent, bg=HUD_DIVIDER, height=1).pack(fill="x", pady=(4, 5))
-
-        def dynamic_label(
-            key: str,
-            parent: tk.Misc,
-            *,
-            fg: str,
-            font: tuple[str, int] | tuple[str, int, str],
-            bg: str = HUD_BG,
-            pady: tuple[int, int] = (0, 3),
-        ) -> tk.Label:
+        def chip(parent: tk.Misc, key: str, *, warning: bool = False) -> tk.Label:
+            if warning:
+                bg = _theme_tint_surface(HUD_WARNING, HUD_PANEL_BG, 0.14)
+                fg = _theme_warning_text(bg)
+                border = HUD_WARNING
+            else:
+                bg = HUD_HEADER_BG
+                fg = _theme_primary_text(bg)
+                border = HUD_DIVIDER
             label = tk.Label(
                 parent,
                 text="",
-                anchor="w",
-                justify="left",
+                anchor="center",
+                justify="center",
                 bg=bg,
                 fg=fg,
-                font=font,
-                wraplength=300,
+                font=("Microsoft YaHei UI", 7, "bold"),
+                padx=8,
+                pady=2,
+                highlightbackground=border,
+                highlightcolor=border,
+                highlightthickness=1,
             )
-
-            def sync_label_wrap(_event: tk.Event[tk.Misc], widget: tk.Label = label) -> None:
-                widget.update_idletasks()
-                parent_width = widget.master.winfo_width() if widget.master is not None else 0
-                label_width = widget.winfo_width()
-                widths = [value for value in (label_width, parent_width) if int(value) > 0]
-                available_width = min(widths) if widths else max(label_width, parent_width, 0)
-                wraplength = max(96, int(available_width) - 4)
-                try:
-                    current = int(float(str(widget.cget("wraplength"))))
-                except (tk.TclError, TypeError, ValueError):
-                    current = -1
-                if current != wraplength:
-                    widget.configure(wraplength=wraplength)
-
-            label.bind("<Configure>", sync_label_wrap, add="+")
-            if parent is not None:
-                parent.bind("<Configure>", sync_label_wrap, add="+")
-            if key == "slow":
-                setattr(label, "_hud_handle", True)
-                label.bind("<Button-1>", self._copy_slowest_tool_command)
-            if key == "gap":
-                setattr(label, "_hud_handle", True)
-                label.bind("<Button-1>", self._copy_longest_gap_detail)
-            label.pack(fill="x", pady=pady)
+            pack_kwargs: dict[str, object] = {"side": "right", "padx": (6, 0)}
+            label.pack(**pack_kwargs)
+            setattr(label, "_hud_chip", True)
+            setattr(label, "_hud_pack_kwargs", pack_kwargs)
             self.top_labels[key] = label
             return label
 
-        left = tk.Frame(content, bg=HUD_BG)
-        right = tk.Frame(content, bg=HUD_PANEL_BG, padx=8, pady=5)
+        def card(parent: tk.Misc, title: str) -> tuple[tk.Frame, tk.Frame, tk.Frame]:
+            outer = tk.Frame(
+                parent,
+                bg=HUD_PANEL_BG,
+                padx=10,
+                pady=9,
+                highlightbackground=HUD_DIVIDER,
+                highlightthickness=1,
+            )
+            outer.pack(fill="both", expand=False, pady=(0, 10))
+            head = tk.Frame(outer, bg=HUD_PANEL_BG)
+            head.pack(fill="x", pady=(0, 8))
+            tk.Label(
+                head,
+                text=title,
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=_theme_primary_text(HUD_PANEL_BG),
+                font=("Microsoft YaHei UI", 8, "bold"),
+            ).pack(side="left", fill="x", expand=True)
+            actions = tk.Frame(head, bg=HUD_PANEL_BG)
+            actions.pack(side="right")
+            return outer, outer, actions
+
+        def inset(parent: tk.Misc, *, pady: tuple[int, int] = (0, 8)) -> tk.Frame:
+            box = tk.Frame(
+                parent,
+                bg=REQUEST_PANEL_BG,
+                padx=9,
+                pady=7,
+                highlightbackground=HUD_DIVIDER,
+                highlightthickness=1,
+            )
+            box.pack(fill="x", pady=pady)
+            return box
 
         def arrange_top_content(width: int) -> None:
+            grid = self.top_labels.get("top_grid")
+            left = self.top_labels.get("top_left_column")
+            right = self.top_labels.get("top_right_column")
+            if not isinstance(grid, tk.Frame) or not isinstance(left, tk.Frame) or not isinstance(right, tk.Frame):
+                return
             for column in range(2):
-                content.columnconfigure(column, weight=0, minsize=0)
-            content.rowconfigure(0, weight=0)
-            content.rowconfigure(1, weight=0)
+                grid.columnconfigure(column, weight=0, minsize=0, uniform="")
+            grid.rowconfigure(0, weight=0)
+            grid.rowconfigure(1, weight=0)
             if width < TOP_EXPANDED_STACK_WIDTH:
                 right.configure(width=1)
                 right.grid_propagate(True)
+                left.grid_propagate(True)
                 left.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
                 right.grid(row=1, column=0, sticky="ew", padx=0, pady=(7, 0))
-                content.columnconfigure(0, weight=1, minsize=max(1, width))
+                grid.columnconfigure(0, weight=1, minsize=0, uniform="")
                 return
-            side_width = min(260, max(230, int(width * 0.37)))
-            left_width = max(1, width - side_width - 12)
             left.grid(row=0, column=0, sticky="nsew", padx=(0, 12), pady=0)
             right.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
-            content.columnconfigure(0, weight=1, minsize=left_width)
-            content.columnconfigure(1, weight=0, minsize=side_width)
-            content.rowconfigure(0, weight=1)
-            right.configure(width=side_width)
-            right.grid_propagate(False)
+            grid.columnconfigure(0, weight=1, minsize=0, uniform="top_expanded_columns")
+            grid.columnconfigure(1, weight=1, minsize=0, uniform="top_expanded_columns")
+            grid.rowconfigure(0, weight=1)
+            left.grid_propagate(False)
+            right.configure(width=1)
+            right.grid_propagate(True)
 
         def sync_top_scroll_region(event: tk.Event[tk.Misc]) -> None:
             del event
@@ -6832,94 +7720,404 @@ class TokenHudWindow:
                 return "break"
             return None
 
-        def bind_top_scroll(widget: tk.Misc) -> None:
-            widget.bind("<MouseWheel>", scroll_top_body, add="+")
-            widget.bind("<Button-4>", scroll_top_body, add="+")
-            widget.bind("<Button-5>", scroll_top_body, add="+")
-            for child in widget.winfo_children():
-                bind_top_scroll(child)
+        self._top_scroll_handler = scroll_top_body
 
         canvas.bind("<Configure>", sync_top_canvas_width)
         content.bind("<Configure>", sync_top_scroll_region)
-        arrange_top_content(600)
 
-        section(left, "实时请求")
-        dynamic_label(
-            "confirmed",
-            left,
-            fg=HUD_ACCENT,
-            font=("Consolas", 11, "bold"),
-            pady=(0, 3),
+        warning_bg = _theme_tint_surface(HUD_WARNING, HUD_PANEL_BG, 0.13)
+        alert = tk.Frame(
+            content,
+            bg=warning_bg,
+            padx=10,
+            pady=7,
+            highlightbackground=HUD_WARNING,
+            highlightthickness=1,
         )
-        dynamic_label(
-            "cumulative",
-            left,
-            fg=_theme_secondary_text(HUD_BG),
-            font=("Consolas", 9),
-            pady=(0, 3),
-        )
-        divider(left)
-        section(left, "额度")
-        budget_progress = TopHudBudgetProgress(left)
-        budget_progress.pack(fill="x", pady=(0, 5))
-        self.top_labels["budget"] = budget_progress
-        section(left, "当前活动")
-        dynamic_label(
-            "activity",
-            left,
-            fg=_theme_info_text(HUD_BG),
-            font=("Microsoft YaHei UI", 8),
-            pady=(0, 4),
-        )
-
-        section(right, "提醒", bg=HUD_PANEL_BG)
+        alert.columnconfigure(2, weight=1, minsize=0)
+        tk.Label(
+            alert,
+            text="●",
+            bg=str(alert.cget("bg")),
+            fg=_theme_warning_text(alert.cget("bg")),
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        tk.Label(
+            alert,
+            text="预警",
+            bg=str(alert.cget("bg")),
+            fg=_theme_warning_text(alert.cget("bg")),
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).grid(row=0, column=1, sticky="w", padx=(0, 10))
         dynamic_label(
             "warnings",
-            right,
-            fg=_theme_warning_text(HUD_PANEL_BG),
-            font=("Microsoft YaHei UI", 8),
-            bg=HUD_PANEL_BG,
-            pady=(0, 5),
+            alert,
+            bg=str(alert.cget("bg")),
+            fg=_theme_warning_text(alert.cget("bg")),
+            font=("Microsoft YaHei UI", 8, "bold"),
+            pack=False,
+        ).grid(row=0, column=2, sticky="ew")
+        close_warning = tk.Button(
+            alert,
+            text="×",
+            command=self._dismiss_top_warnings_today,
+            bg=str(alert.cget("bg")),
+            fg=_theme_warning_text(alert.cget("bg")),
+            activebackground=_theme_hover_surface(alert.cget("bg")),
+            activeforeground=_theme_warning_text(alert.cget("bg")),
+            bd=0,
+            highlightthickness=0,
+            padx=6,
+            pady=0,
+            relief="flat",
+            cursor="hand2",
+            takefocus=False,
+            font=("Microsoft YaHei UI", 10, "bold"),
         )
-        divider(right, bg=HUD_PANEL_BG)
-        section(right, "等待", bg=HUD_PANEL_BG)
-        dynamic_label(
-            "slow",
-            right,
-            fg=_theme_primary_text(HUD_PANEL_BG),
+        close_warning.grid(row=0, column=3, sticky="e", padx=(10, 0))
+        self.top_labels["warnings_panel"] = alert
+        self.top_labels["warnings_close"] = close_warning
+
+        grid = tk.Frame(content, bg=HUD_BG)
+        grid.pack(fill="both", expand=True)
+        left = tk.Frame(grid, bg=HUD_BG)
+        right = tk.Frame(grid, bg=HUD_BG)
+        self.top_labels["top_grid"] = grid
+        self.top_labels["top_left_column"] = left
+        self.top_labels["top_right_column"] = right
+
+        session_card, session_body, session_actions = card(left, "本会话用量")
+        chip(session_actions, "topTaskOrdinalSession")
+        chip(session_actions, "topSessionRounds")
+        stats = tk.Frame(session_body, bg=HUD_PANEL_BG)
+        stats.pack(fill="x")
+        for index, (key, label_text, fg) in enumerate(
+            (
+                ("topSessionCost", "会话金额", _theme_primary_text(HUD_PANEL_BG)),
+                ("topSessionTokens", "累计 tokens", _theme_info_text(HUD_PANEL_BG)),
+            )
+        ):
+            stat = tk.Frame(stats, bg=HUD_PANEL_BG)
+            stat.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 8, 0))
+            stats.columnconfigure(index, weight=1, uniform="top_session_stats")
+            dynamic_label(
+                key,
+                stat,
+                bg=HUD_PANEL_BG,
+                fg=fg,
+                font=("Consolas", 18, "bold"),
+                wrap=False,
+            )
+            tk.Label(
+                stat,
+                text=label_text,
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=_theme_secondary_text(HUD_PANEL_BG),
+                font=("Microsoft YaHei UI", 7),
+            ).pack(fill="x", pady=(2, 0))
+
+        insight = inset(session_body, pady=(10, 6))
+        insight.rowconfigure(0, minsize=18)
+        insight.columnconfigure(0, weight=0, minsize=0)
+        insight.columnconfigure(1, weight=0, minsize=0)
+        insight.columnconfigure(2, weight=1, minsize=0)
+        insight_title = tk.Label(
+            insight,
+            text="会话构成",
+            bg=REQUEST_PANEL_BG,
+            fg=_theme_secondary_text(REQUEST_PANEL_BG),
             font=("Microsoft YaHei UI", 8),
-            bg=HUD_PANEL_BG,
-            pady=(0, 4),
         )
+        insight_title.grid(row=0, column=0, sticky="nsw")
+        self.top_labels["topSessionInsight"] = insight
+        self.top_labels["topSessionInsightTitle"] = insight_title
+        mix_label = dynamic_label(
+            "topSessionMix",
+            insight,
+            bg=REQUEST_PANEL_BG,
+            fg=_theme_info_text(REQUEST_PANEL_BG),
+            font=("Consolas", 8, "bold"),
+            anchor="w",
+            justify="left",
+            wrap=False,
+            pack=False,
+        )
+        mix_label.configure(width=0)
+        mix_label.grid(row=0, column=1, sticky="nsw", padx=(10, 0))
+        average_label = dynamic_label(
+            "topSessionAverage",
+            insight,
+            bg=REQUEST_PANEL_BG,
+            fg=_theme_accent_text(REQUEST_PANEL_BG),
+            font=("Consolas", 8, "bold"),
+            anchor="e",
+            justify="right",
+            wrap=False,
+            pack=False,
+        )
+        average_label.configure(width=0)
+        average_label.grid(row=0, column=2, sticky="nse", padx=(10, 0))
         dynamic_label(
-            "gap",
-            right,
+            "topSessionComposition",
+            session_body,
+            bg=HUD_PANEL_BG,
             fg=_theme_secondary_text(HUD_PANEL_BG),
-            font=("Microsoft YaHei UI", 8),
-            bg=HUD_PANEL_BG,
-            pady=(0, 0),
+            font=("Consolas", 8),
+            wrap=False,
+            pady=(0, 6),
         )
-        divider(right, bg=HUD_PANEL_BG)
-        section(right, "状态", bg=HUD_PANEL_BG)
+        token_grid = tk.Frame(session_body, bg=HUD_PANEL_BG)
+        token_grid.pack(fill="x")
+        for index, (label_text, key) in enumerate(
+            (
+                ("输入", "topSessionInputTokens"),
+                ("缓存", "topSessionCachedTokens"),
+                ("输出", "topSessionOutputTokens"),
+                ("推理", "topSessionReasoningTokens"),
+            )
+        ):
+            token = tk.Frame(
+                token_grid,
+                bg=REQUEST_PANEL_BG,
+                height=24,
+                padx=4,
+                pady=4,
+                highlightbackground=HUD_DIVIDER,
+                highlightthickness=1,
+            )
+            token.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 5, 0))
+            token.grid_propagate(False)
+            token_grid.columnconfigure(index, weight=1, minsize=0, uniform="top_token_grid")
+            token.columnconfigure(0, weight=0, minsize=0)
+            token.columnconfigure(1, weight=1, minsize=0)
+            token.rowconfigure(0, minsize=16)
+            tk.Label(
+                token,
+                text=label_text,
+                anchor="w",
+                bg=REQUEST_PANEL_BG,
+                fg=_theme_secondary_text(REQUEST_PANEL_BG),
+                font=("Microsoft YaHei UI", 7),
+            ).grid(row=0, column=0, sticky="nsw", padx=(0, 3))
+            value_label = dynamic_label(
+                key,
+                token,
+                bg=REQUEST_PANEL_BG,
+                fg=_theme_primary_text(REQUEST_PANEL_BG),
+                font=("Consolas", 8, "bold"),
+                anchor="e",
+                justify="right",
+                wrap=False,
+                pack=False,
+            )
+            value_label.configure(width=1)
+            value_label.grid(row=0, column=1, sticky="nsew")
+            value_label.bind(
+                "<Configure>",
+                lambda _event, widget=value_label: self._sync_top_token_value(widget),
+                add="+",
+            )
+
+        budget_card, budget_body, _budget_actions = card(left, "额度进度")
+        budget_progress = TopHudBudgetProgress(budget_body)
+        budget_progress.pack(fill="x")
+        self.top_labels["budget"] = budget_progress
+
+        heavy_card, heavy_body, heavy_actions = card(left, "高消耗轮次")
+        heavy_card.pack_configure(fill="both", expand=True, pady=(0, 0))
+        self.top_labels["topHeavyCard"] = heavy_card
+        chip(heavy_actions, "topHeavyRoundsSummary")
+        heavy_list = tk.Frame(heavy_body, bg=HUD_PANEL_BG)
+        heavy_list.pack(fill="both", expand=True)
+        self.top_labels["topHeavyRounds"] = heavy_list
+
+        activity_card, activity_body, activity_actions = card(right, "当前活动")
+        activity_card.pack_configure(fill="both", expand=True, pady=(0, 0))
+        self.top_labels["topActivityCard"] = activity_card
+        chip(activity_actions, "topActivityState", warning=True)
+        chip(activity_actions, "topTaskOrdinalActivity")
+        step = inset(activity_body, pady=(0, 8))
         dynamic_label(
-            "status",
-            right,
-            fg=_theme_secondary_text(HUD_PANEL_BG),
-            font=("Microsoft YaHei UI", 8),
-            bg=HUD_PANEL_BG,
-            pady=(0, 0),
+            "topCurrentTaskLabel",
+            step,
+            bg=REQUEST_PANEL_BG,
+            fg=_theme_secondary_text(REQUEST_PANEL_BG),
+            font=("Microsoft YaHei UI", 7, "bold"),
+            wrap=False,
+            pady=(0, 2),
         )
-        divider(right, bg=HUD_PANEL_BG)
-        section(right, "符号说明", bg=HUD_PANEL_BG)
         dynamic_label(
-            "legend",
-            right,
-            fg=_theme_secondary_text(HUD_PANEL_BG),
+            "topCurrentTask",
+            step,
+            bg=REQUEST_PANEL_BG,
+            fg=_theme_primary_text(REQUEST_PANEL_BG),
             font=("Microsoft YaHei UI", 8),
-            bg=HUD_PANEL_BG,
-            pady=(0, 0),
+            wrap=False,
+        ).configure(height=1)
+        executing = inset(activity_body, pady=(0, 8))
+        dynamic_label(
+            "topExecutingLabel",
+            executing,
+            bg=REQUEST_PANEL_BG,
+            fg=_theme_secondary_text(REQUEST_PANEL_BG),
+            font=("Microsoft YaHei UI", 7, "bold"),
+            wrap=False,
+            pady=(0, 2),
         )
-        bind_top_scroll(content)
+        dynamic_label(
+            "topExecuting",
+            executing,
+            bg=REQUEST_PANEL_BG,
+            fg=_theme_info_text(REQUEST_PANEL_BG),
+            font=("Microsoft YaHei UI", 8),
+            wrap=False,
+        ).configure(height=1)
+        metric_grid = tk.Frame(activity_body, bg=HUD_PANEL_BG)
+        metric_grid.pack(fill="x", pady=(0, 8))
+        for index, (label_key, value_key) in enumerate(
+            (
+                ("topActivityElapsedLabel", "topActivityElapsed"),
+                ("topActivityGapLabel", "topActivityGap"),
+                ("topActivityLastLabel", "topActivityLast"),
+            )
+        ):
+            metric = tk.Frame(
+                metric_grid,
+                bg=REQUEST_PANEL_BG,
+                padx=8,
+                pady=7,
+                highlightbackground=HUD_DIVIDER,
+                highlightthickness=1,
+            )
+            metric.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 7, 0))
+            metric_grid.columnconfigure(index, weight=1, uniform="top_activity_metrics")
+            dynamic_label(
+                label_key,
+                metric,
+                bg=REQUEST_PANEL_BG,
+                fg=_theme_secondary_text(REQUEST_PANEL_BG),
+                font=("Microsoft YaHei UI", 7, "bold"),
+                wrap=False,
+                pady=(0, 2),
+            )
+            dynamic_label(
+                value_key,
+                metric,
+                bg=REQUEST_PANEL_BG,
+                fg=_theme_accent_text(REQUEST_PANEL_BG),
+                font=("Consolas", 11, "bold"),
+                wrap=False,
+            )
+
+        trail_head = tk.Frame(activity_body, bg=HUD_PANEL_BG)
+        trail_head.pack(fill="x", pady=(0, 6))
+        section_title(trail_head, "活动轨迹", bg=HUD_PANEL_BG).pack(side="left", fill="x", expand=True)
+        trail_actions = tk.Frame(trail_head, bg=HUD_PANEL_BG)
+        trail_actions.pack(side="right")
+        chip(trail_actions, "topGap")
+        chip(trail_actions, "topSlow")
+        timeline_shell = tk.Frame(
+            activity_body,
+            bg=HUD_PANEL_BG,
+            height=TOP_ACTIVITY_TRAIL_VIEWPORT_HEIGHT,
+        )
+        timeline_shell.pack(fill="both", expand=True)
+        timeline_shell.pack_propagate(False)
+        setattr(timeline_shell, "_hud_inner_scroll", True)
+        timeline_canvas = tk.Canvas(
+            timeline_shell,
+            bg=HUD_PANEL_BG,
+            height=TOP_ACTIVITY_TRAIL_VIEWPORT_HEIGHT,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        setattr(timeline_canvas, "_hud_activity_trail_canvas", True)
+        setattr(timeline_canvas, "_hud_inner_scroll", True)
+        trail_scrollbar = HudScrollbar(
+            timeline_shell,
+            command=timeline_canvas.yview,
+            track=HUD_PANEL_BG,
+            thumb=HUD_DIVIDER,
+            thumb_hover=HUD_PANEL_BORDER,
+            width=8,
+        )
+        timeline_canvas.configure(yscrollcommand=trail_scrollbar.set)
+        trail_scrollbar.pack(side="right", fill="y")
+        timeline_canvas.pack(side="left", fill="both", expand=True)
+        timeline = tk.Frame(timeline_canvas, bg=HUD_PANEL_BG)
+        setattr(timeline, "_hud_inner_scroll", True)
+        timeline_window = timeline_canvas.create_window((0, 0), window=timeline, anchor="nw")
+        setattr(timeline_canvas, "_hud_content_window", timeline_window)
+
+        def sync_trail_scroll_region(event: tk.Event[tk.Misc]) -> None:
+            del event
+            timeline_canvas.configure(scrollregion=timeline_canvas.bbox("all"))
+
+        def sync_trail_canvas_width(event: tk.Event[tk.Misc]) -> None:
+            width = max(1, int(event.width))
+            timeline_canvas.itemconfigure(timeline_window, width=width)
+            timeline_canvas.configure(scrollregion=timeline_canvas.bbox("all"))
+
+        def scroll_activity_trail(event: tk.Event[tk.Misc]) -> str | None:
+            self._mark_pointer_priority()
+            units = 0
+            button = getattr(event, "num", None)
+            if button == 4:
+                units = -3
+            elif button == 5:
+                units = 3
+            else:
+                delta = int(getattr(event, "delta", 0) or 0)
+                if delta:
+                    units = (-1 if delta > 0 else 1) * max(1, abs(delta) // 120)
+            if units:
+                try:
+                    yview = timeline_canvas.yview()
+                except tk.TclError:
+                    yview = (0.0, 1.0)
+                at_top = not yview or yview[0] <= 0.001
+                at_bottom = bool(yview) and yview[1] >= 0.999
+                if (units < 0 and at_top) or (units > 0 and at_bottom):
+                    parent_handler = self._top_scroll_handler
+                    if parent_handler is not None:
+                        return parent_handler(event)
+                    return None
+                timeline_canvas.yview_scroll(units, "units")
+                return "break"
+            return None
+
+        self._top_activity_scroll_handler = scroll_activity_trail
+        timeline_canvas.bind("<Configure>", sync_trail_canvas_width)
+        timeline.bind("<Configure>", sync_trail_scroll_region)
+        self._bind_top_scroll_tree(
+            timeline_shell,
+            handler=scroll_activity_trail,
+            mode="activity",
+            skip_inner=False,
+        )
+        self.top_labels["topActivityTrailViewport"] = timeline_shell
+        self.top_labels["topActivityTrailCanvas"] = timeline_canvas
+        self.top_labels["topActivityTrail"] = timeline
+        load_more = tk.Button(
+            activity_body,
+            text="查看更多",
+            command=self._load_more_top_activity,
+            bg=_theme_tint_surface(HUD_BLUE, HUD_PANEL_BG, 0.08),
+            fg=_theme_info_text(_theme_tint_surface(HUD_BLUE, HUD_PANEL_BG, 0.08)),
+            activebackground=_theme_tint_surface(HUD_BLUE, HUD_PANEL_BG, 0.12),
+            activeforeground=_theme_info_text(_theme_tint_surface(HUD_BLUE, HUD_PANEL_BG, 0.12)),
+            highlightbackground=HUD_DIVIDER,
+            highlightcolor=HUD_BLUE,
+            highlightthickness=1,
+            relief="flat",
+            font=("Microsoft YaHei UI", 7, "bold"),
+        )
+        load_more.pack(fill="x", pady=(7, 0))
+        self.top_labels["topActivityLoadMore"] = load_more
+
+        arrange_top_content(600)
+        self._bind_top_scroll_tree(content, mode="top")
 
     def _rebuild_request_ui(self) -> None:
         for child in self.request_root.winfo_children():
@@ -7190,7 +8388,6 @@ class TokenHudWindow:
     def toggle_top_expanded(self) -> None:
         self._mark_click_priority()
         self.top_expanded = not self.top_expanded
-        self._apply_geometry()
         self._schedule_top_rebuild()
 
     def toggle_request_expanded(self) -> None:
@@ -7210,6 +8407,10 @@ class TokenHudWindow:
     def _flush_top_rebuild(self) -> None:
         self._top_rebuild_job = None
         self._rebuild_top_ui()
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            return
         self._apply_geometry()
 
     def _schedule_request_rebuild(self) -> None:
@@ -7267,7 +8468,7 @@ class TokenHudWindow:
             return
         self._exit_tombstone("attached")
         self._apply_focus_state(True)
-        self._set_alpha(self.root, 0.94)
+        self._set_alpha(self.root, 1.0)
         self._set_alpha(self.request_root, 0.94 if self.request_expanded else 0.74)
         self._apply_geometry()
 
@@ -7276,7 +8477,7 @@ class TokenHudWindow:
         self._attached = False
         self._last_rect = None
         self._apply_focus_state(True)
-        self._set_alpha(self.root, 0.90)
+        self._set_alpha(self.root, 1.0)
         self._set_alpha(self.request_root, 0.76 if not self.request_expanded else 0.90)
         if self._top_manual_position is None or self._request_manual_position is None:
             self._apply_free_defaults()
@@ -8078,6 +9279,17 @@ class TokenHudWindow:
     def _save_settings(self) -> None:
         self.settings_store.save(self.settings)
 
+    def _dismiss_top_warnings_today(self) -> str:
+        try:
+            dismiss_warning_for_today(self.user_settings_store.path)
+        except OSError:
+            return "break"
+        warnings_panel = self.top_labels.get("warnings_panel")
+        if isinstance(warnings_panel, tk.Frame):
+            warnings_panel.pack_forget()
+        self._render_top()
+        return "break"
+
     def _hud_hwnds(self) -> set[int]:
         hwnds: set[int] = set()
         windows: list[tk.Tk | tk.Toplevel] = [self.root, self.request_root]
@@ -8120,6 +9332,37 @@ class TokenHudWindow:
         except tk.TclError:
             return "break"
         return "break"
+
+    def _copy_top_widget_payload(self, event: object | None = None) -> str:
+        widget = getattr(event, "widget", None)
+        payload = str(getattr(widget, "_hud_copy_text", "") or "")
+        if not payload:
+            return ""
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(payload)
+        except tk.TclError:
+            return "break"
+        return "break"
+
+    def _configure_top_copyable(self, widget: tk.Misc, payload: str, tooltip: str = "") -> None:
+        payload = str(payload or "")
+        setattr(widget, "_hud_handle", bool(payload))
+        setattr(widget, "_hud_copy_text", payload)
+        setattr(widget, "_hud_tooltip", tooltip or payload)
+        try:
+            widget.configure(cursor="hand2" if payload else "arrow")
+        except tk.TclError:
+            pass
+        if not bool(getattr(widget, "_hud_copy_bound", False)):
+            widget.bind("<Button-1>", self._copy_top_widget_payload, add="+")
+            _HoverTip(widget, lambda target=widget: str(getattr(target, "_hud_tooltip", "") or ""))
+            setattr(widget, "_hud_copy_bound", True)
+
+    def _load_more_top_activity(self) -> None:
+        self._top_activity_visible_count = max(4, self._top_activity_visible_count + 4)
+        self._top_activity_scroll_to_bottom = True
+        self._render_top()
 
     def _close(self, event: object | None = None) -> str:
         del event
@@ -8212,9 +9455,442 @@ class TokenHudWindow:
             week_start,
         )
 
+    def _set_top_text(self, key: str, value: object, *, tooltip: str = "") -> None:
+        widget = self.top_labels.get(key)
+        if widget is None:
+            return
+        text = str(value or "")
+        if isinstance(widget, (tk.Label, tk.Button)):
+            widget.configure(text=text)
+            if bool(getattr(widget, "_hud_chip", False)):
+                if text:
+                    if not widget.winfo_manager():
+                        pack_kwargs = getattr(widget, "_hud_pack_kwargs", None)
+                        if isinstance(pack_kwargs, dict):
+                            widget.pack(**pack_kwargs)
+                        else:
+                            widget.pack(side="right", padx=(6, 0))
+                else:
+                    widget.pack_forget()
+            if key in {
+                "topSessionRounds",
+                "topTaskOrdinalSession",
+                "topTaskOrdinalActivity",
+                "topActivityState",
+                "topHeavyRoundsSummary",
+                "topSlow",
+                "topGap",
+            }:
+                widget.configure(padx=8 if text else 0, pady=2 if text else 0)
+            if tooltip:
+                setattr(widget, "_hud_tooltip", tooltip)
+
+    def _top_single_line_text(self, widget: tk.Misc | None, value: object, *, limit: int = 88) -> str:
+        text = " ".join(str(value or "").split())
+        if not text:
+            return ""
+        if not isinstance(widget, tk.Label):
+            return _compact(text, limit)
+        try:
+            available = int(widget.winfo_width() or 0)
+            if available <= 24 and widget.master is not None:
+                available = int(widget.master.winfo_width() or 0)
+            available = max(1, available - 6)
+            font = tkfont.Font(font=widget.cget("font"))
+        except (tk.TclError, TypeError, ValueError):
+            return _compact(text, limit)
+        if available <= 24:
+            return _compact(text, limit)
+        if font.measure(text) <= available:
+            return text
+        suffix = "..."
+        suffix_width = font.measure(suffix)
+        low = 0
+        high = len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if font.measure(text[:mid]) + suffix_width <= available:
+                low = mid
+            else:
+                high = mid - 1
+        return text[: max(0, low)] + suffix
+
+    def _top_elide_to_width(self, widget: tk.Misc | None, value: object, *, limit: int = 12) -> str:
+        text = " ".join(str(value or "").split())
+        if not text:
+            return ""
+        if not isinstance(widget, tk.Label):
+            return _compact(text, limit)
+        try:
+            available = int(widget.winfo_width() or 0) - 2
+            if available <= 8 and widget.master is not None:
+                available = int(widget.master.winfo_width() or 0) - int(widget.winfo_x() or 0) - 7
+            font = tkfont.Font(font=widget.cget("font"))
+        except (tk.TclError, TypeError, ValueError):
+            return _compact(text, limit)
+        available = max(1, available)
+        if font.measure(text) <= available:
+            return text
+        suffix = "..."
+        suffix_width = font.measure(suffix)
+        if available <= suffix_width:
+            return "." if available >= font.measure(".") else ""
+        low = 0
+        high = len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if font.measure(text[:mid]) + suffix_width <= available:
+                low = mid
+            else:
+                high = mid - 1
+        return text[: max(0, low)] + suffix
+
+    def _top_token_value_text(self, widget: tk.Misc | None, value: object) -> str:
+        return self._top_elide_to_width(widget, value, limit=8)
+
+    def _sync_top_token_value(self, widget: tk.Misc) -> None:
+        if not isinstance(widget, tk.Label):
+            return
+        raw = getattr(widget, "_hud_raw_text", None)
+        if raw is None:
+            return
+        text = self._top_token_value_text(widget, raw)
+        try:
+            if str(widget.cget("text")) != text:
+                widget.configure(text=text)
+        except tk.TclError:
+            return
+
+    def _top_session_mix_text(self, value: object, average_text: object) -> str:
+        widget = self.top_labels.get("topSessionMix")
+        text = " ".join(str(value or "").split())
+        if not text:
+            return ""
+        if not isinstance(widget, tk.Label):
+            return _compact(text, 28)
+        try:
+            available = int(widget.winfo_width() or 0)
+            parent = self.top_labels.get("topSessionInsight")
+            title = self.top_labels.get("topSessionInsightTitle")
+            average = self.top_labels.get("topSessionAverage")
+            if available <= 24 and isinstance(parent, tk.Misc):
+                parent_width = int(parent.winfo_width() or parent.winfo_reqwidth() or 0)
+                title_width = int(title.winfo_reqwidth() if isinstance(title, tk.Misc) else 56)
+                average_font = tkfont.Font(font=average.cget("font")) if isinstance(average, tk.Label) else tkfont.Font(font=widget.cget("font"))
+                average_width = average_font.measure(str(average_text or "")) + 12
+                available = parent_width - title_width - average_width - 28
+            available = max(1, available - 4)
+            font = tkfont.Font(font=widget.cget("font"))
+        except (tk.TclError, TypeError, ValueError):
+            return _compact(text, 28)
+        if available <= 24:
+            return _compact(text, 6)
+        if font.measure(text) <= available:
+            return text
+        short_text = text.replace("缓存命中", "命中", 1)
+        if font.measure(short_text) <= available:
+            return short_text
+        suffix = "..."
+        suffix_width = font.measure(suffix)
+        low = 0
+        high = len(short_text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if font.measure(short_text[:mid]) + suffix_width <= available:
+                low = mid
+            else:
+                high = mid - 1
+        return short_text[: max(0, low)] + suffix
+
+    def _render_top_heavy_rounds(self, details: dict[str, object]) -> None:
+        container = self.top_labels.get("topHeavyRounds")
+        if not isinstance(container, tk.Frame):
+            return
+        items = [item for item in details.get("heavyRounds", []) or [] if isinstance(item, dict)][:3]
+        if not items:
+            items = [
+                {
+                    "title": "暂无会话高消耗轮次",
+                    "detail": "会话出现 token 确认后展示 Top 3",
+                    "placeholder": True,
+                },
+                {
+                    "title": "等待统计",
+                    "detail": "不会因新需求开始而清空",
+                    "placeholder": True,
+                },
+                {
+                    "title": "保持占位",
+                    "detail": "新轮次超过历史 Top 3 后刷新",
+                    "placeholder": True,
+                },
+            ]
+        signature = tuple(
+            (
+                str(item.get("title") or ""),
+                str(item.get("detail") or ""),
+                str(item.get("tooltip") or ""),
+                str(item.get("copyText") or ""),
+            )
+            for item in items
+        )
+        if signature == self._top_heavy_rounds_signature:
+            return
+        self._top_heavy_rounds_signature = signature
+        for child in container.winfo_children():
+            child.destroy()
+        for item in items:
+            row = tk.Frame(
+                container,
+                bg=REQUEST_PANEL_BG,
+                padx=7,
+                pady=5,
+                highlightbackground=HUD_DIVIDER,
+                highlightthickness=1,
+            )
+            row.pack(fill="x", pady=(0, 6))
+            title = tk.Label(
+                row,
+                text=str(item.get("title") or ""),
+                anchor="w",
+                bg=REQUEST_PANEL_BG,
+                fg=_theme_accent_text(REQUEST_PANEL_BG),
+                font=("Consolas", 8, "bold"),
+            )
+            title.pack(side="left", padx=(0, 8))
+            detail = tk.Label(
+                row,
+                text=str(item.get("detail") or ""),
+                anchor="w",
+                bg=REQUEST_PANEL_BG,
+                fg=_theme_secondary_text(REQUEST_PANEL_BG),
+                font=("Microsoft YaHei UI", 7),
+            )
+            detail.pack(side="left", fill="x", expand=True)
+            tooltip = str(item.get("tooltip") or "")
+            copy_text = str(item.get("copyText") or "")
+            if tooltip:
+                setattr(row, "_hud_tooltip", tooltip)
+                _HoverTip(row, lambda target=row: str(getattr(target, "_hud_tooltip", "") or ""))
+            if copy_text:
+                for widget in (row, title, detail):
+                    self._configure_top_copyable(widget, copy_text, tooltip or copy_text)
+            self._bind_top_scroll_tree(row, mode="top")
+
+    def _render_top_activity_trail(self, details: dict[str, object]) -> None:
+        container = self.top_labels.get("topActivityTrail")
+        if not isinstance(container, tk.Frame):
+            return
+        button = self.top_labels.get("topActivityLoadMore")
+        canvas = self.top_labels.get("topActivityTrailCanvas")
+        previous_yview: tuple[float, float] | None = None
+        if isinstance(canvas, tk.Canvas):
+            try:
+                previous_yview = canvas.yview()
+            except tk.TclError:
+                previous_yview = None
+        items = [
+            item
+            for item in details.get("activityTrail", []) or []
+            if isinstance(item, dict) and (item.get("title") or item.get("detail") or item.get("time"))
+        ]
+        context = str(
+            details.get("activityTrailContext")
+            or "|".join(str(details.get(key) or "") for key in ("taskOrdinal", "title"))
+        )
+        context_changed = context != self._top_activity_context
+        if context != self._top_activity_context:
+            self._top_activity_context = context
+            self._top_activity_visible_count = 4
+        visible_count = max(4, int(self._top_activity_visible_count or 4))
+        visible_items = items[:visible_count]
+        if not visible_items:
+            visible_items = [
+                {
+                    "time": "--:--",
+                    "title": "暂无时间节点",
+                    "detail": "等待会话产生新活动",
+                    "tooltip": "等待会话产生新活动",
+                }
+            ]
+        signature = (
+            context,
+            visible_count,
+            tuple(
+                (
+                    str(item.get("time") or "--:--"),
+                    str(item.get("title") or "活动"),
+                    str(item.get("detail") or ""),
+                    str(item.get("tooltip") or ""),
+                    bool(item.get("active")),
+                )
+                for item in visible_items
+            ),
+        )
+        if isinstance(button, tk.Button):
+            all_visible = len(items) <= visible_count
+            button.configure(
+                state=tk.DISABLED if all_visible else tk.NORMAL,
+                text="查看更多",
+            )
+        if signature == self._top_activity_signature:
+            return
+        self._top_activity_signature = signature
+
+        def draw_marker(marker: tk.Canvas, index: int, total: int, active: bool) -> None:
+            marker.delete("all")
+            try:
+                width = max(24, int(marker.winfo_width() or 0), int(marker.winfo_reqwidth() or 0))
+            except tk.TclError:
+                width = 24
+            height = TOP_ACTIVITY_TRAIL_ROW_HEIGHT
+            center_x = width // 2
+            center_y = height // 2
+            radius = 4
+            line_color = HUD_DIVIDER
+            dot_fill = HUD_ACCENT if active else HUD_BLUE
+            if total > 1:
+                if index > 0:
+                    marker.create_line(
+                        center_x,
+                        -1,
+                        center_x,
+                        center_y - radius - 1,
+                        fill=line_color,
+                        width=2,
+                    )
+                if index < total - 1:
+                    marker.create_line(
+                        center_x,
+                        center_y + radius + 1,
+                        center_x,
+                        height + 1,
+                        fill=line_color,
+                        width=2,
+                    )
+            marker.create_oval(
+                center_x - radius,
+                center_y - radius,
+                center_x + radius,
+                center_y + radius,
+                fill=dot_fill,
+                outline="",
+            )
+
+        def create_row() -> tk.Frame:
+            row = tk.Frame(container, bg=HUD_PANEL_BG, height=TOP_ACTIVITY_TRAIL_ROW_HEIGHT)
+            row.pack(fill="x")
+            row.pack_propagate(False)
+            time_label = tk.Label(
+                row,
+                text="--:--",
+                width=8,
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=_theme_secondary_text(HUD_PANEL_BG),
+                font=("Consolas", 7),
+            )
+            time_label.pack(side="left")
+            marker = tk.Canvas(
+                row,
+                width=24,
+                height=TOP_ACTIVITY_TRAIL_ROW_HEIGHT,
+                bg=HUD_PANEL_BG,
+                highlightthickness=0,
+                borderwidth=0,
+            )
+            setattr(marker, "_hud_activity_marker_canvas", True)
+            marker.pack(side="left", fill="y", padx=(0, 8))
+            text_box = tk.Frame(row, bg=HUD_PANEL_BG)
+            text_box.pack(side="left", fill="x", expand=True)
+            title = tk.Label(
+                text_box,
+                text="活动",
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=_theme_primary_text(HUD_PANEL_BG),
+                font=("Microsoft YaHei UI", 7, "bold"),
+                width=1,
+            )
+            title.pack(fill="x")
+            detail = tk.Label(
+                text_box,
+                text="",
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=_theme_secondary_text(HUD_PANEL_BG),
+                font=("Microsoft YaHei UI", 7),
+                width=1,
+            )
+            detail.pack(fill="x")
+            setattr(row, "_hud_activity_widgets", (time_label, marker, title, detail))
+            handler = self._top_activity_scroll_handler
+            if handler is not None:
+                for widget in (row, time_label, marker, text_box, title, detail):
+                    widget.bind("<MouseWheel>", handler)
+                    widget.bind("<Button-4>", handler)
+                    widget.bind("<Button-5>", handler)
+                    setattr(widget, "_hud_activity_scroll_bound", True)
+            return row
+
+        rows = [
+            child
+            for child in container.winfo_children()
+            if isinstance(child, tk.Frame)
+        ]
+        while len(rows) < len(visible_items):
+            rows.append(create_row())
+        for row in rows[len(visible_items) :]:
+            row.destroy()
+        rows = rows[: len(visible_items)]
+
+        total_rows = len(visible_items)
+        for index, (row, item) in enumerate(zip(rows, visible_items)):
+            widgets = getattr(row, "_hud_activity_widgets", None)
+            if not isinstance(widgets, tuple) or len(widgets) != 4:
+                row.destroy()
+                row = create_row()
+                widgets = getattr(row, "_hud_activity_widgets", None)
+            if not isinstance(widgets, tuple) or len(widgets) != 4:
+                continue
+            row.pack_configure(pady=(0, TOP_ACTIVITY_TRAIL_ROW_GAP if index < total_rows - 1 else 0))
+            time_label, marker, title, detail = widgets
+            time_label.configure(text=str(item.get("time") or "--:--"))
+            if isinstance(marker, tk.Canvas):
+                draw_marker(marker, index, total_rows, bool(item.get("active")))
+            title.configure(text=str(item.get("title") or "活动"))
+            detail.configure(text=str(item.get("detail") or ""))
+            tooltip = str(item.get("tooltip") or "")
+            self._configure_top_copyable(
+                detail,
+                tooltip,
+                f"点击复制轨迹详情\n{tooltip}" if tooltip else "",
+            )
+            handler = self._top_activity_scroll_handler
+            if handler is not None:
+                for widget in (row, time_label, marker, title, detail):
+                    widget.bind("<MouseWheel>", handler)
+                    widget.bind("<Button-4>", handler)
+                    widget.bind("<Button-5>", handler)
+                    setattr(widget, "_hud_activity_scroll_bound", True)
+
+        if isinstance(canvas, tk.Canvas) and previous_yview is not None:
+            previous_top, previous_bottom = previous_yview
+            force_bottom = self._top_activity_scroll_to_bottom
+            self._top_activity_scroll_to_bottom = False
+            try:
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.yview_moveto(
+                    0.0
+                    if context_changed
+                    else (1.0 if force_bottom or previous_bottom >= 0.98 else previous_top)
+                )
+            except tk.TclError:
+                return
+
     def _render_top(self) -> None:
         snapshot = self._snapshot
-        confirmed = snapshot.confirmed
         session_cost = _session_cost(snapshot)
         self._render_update_button()
         title_label = self.top_labels.get("title")
@@ -8259,81 +9935,112 @@ class TokenHudWindow:
         if isinstance(cache_progress, TopHudProgressBar):
             cache_progress.configure(metric=_top_cache_progress_metric(snapshot))
 
+        details = _top_details(snapshot, session_cost)
+        if warning_dismissed_today(self.user_settings_store.path):
+            details["warnings"] = _format_notice(
+                snapshot,
+                include_budget_warnings=False,
+            )
         values = {
-            "session": (
-                f"会话 {snapshot.session_id[-12:]} | "
-                f"行 {snapshot.line_count} | 确认 {snapshot.token_events}"
-            ),
-            "confirmed": (
-                "本次请求  "
-                f"{_request_counter(snapshot)}"
-            ),
-            "cumulative": (
-                "累计确认  "
-                f"总 {confirmed.cumulative_total:,}   "
-                f"输入 {confirmed.cumulative_input:,}   "
-                f"缓存 {confirmed.cumulative_cached:,}   "
-                f"命中 {_session_cache_hit_rate_label(snapshot)}\n"
-                f"输出 {confirmed.cumulative_output:,}   "
-                f"推理 {confirmed.cumulative_reasoning:,}   "
-                f"金额 {_format_money(session_cost)}"
-            ),
-            "budget": _top_budget_progress_meta(snapshot),
-            "warnings": self._format_notice(snapshot),
-            "activity": (
-                f"{_activity_label(snapshot.activity.kind)}："
-                f"{_compact(snapshot.activity.detail, 135)}"
-            ),
-            "legend": TOKEN_LEGEND_TEXT,
-            "slow": self._format_slow_panel(snapshot),
-            "gap": self._format_gap_panel(snapshot),
-            "status": (
-                f"{_budget_status(snapshot)}\n"
-                f"最后 {_format_time(snapshot.last_event_time)}  刷新 {_format_time(snapshot.refreshed_at)}"
-            ),
+            "session": details.get("session", ""),
+            "topSessionCost": details.get("sessionCost", ""),
+            "topSessionTokens": details.get("sessionTokens", ""),
+            "topSessionRounds": details.get("sessionRounds", ""),
+            "topTaskOrdinalSession": details.get("taskOrdinalSession", ""),
+            "topTaskOrdinalActivity": details.get("taskOrdinalActivity", ""),
+            "topSessionMix": details.get("sessionMix", ""),
+            "topSessionAverage": details.get("sessionAverage", ""),
+            "topSessionComposition": details.get("sessionComposition", ""),
+            "topSessionInputTokens": details.get("sessionInputTokens", ""),
+            "topSessionCachedTokens": details.get("sessionCachedTokens", ""),
+            "topSessionOutputTokens": details.get("sessionOutputTokens", ""),
+            "topSessionReasoningTokens": details.get("sessionReasoningTokens", ""),
+            "topHeavyRoundsSummary": details.get("heavyRoundsSummary", ""),
+            "warnings": details.get("warnings", ""),
+            "topCurrentTaskLabel": details.get("currentTaskLabel", "当前需求"),
+            "topCurrentTask": details.get("currentTask", ""),
+            "topExecutingLabel": details.get("executingLabel", "正在执行"),
+            "topExecuting": details.get("executing", ""),
+            "topActivityState": details.get("activityState", ""),
+            "topActivityElapsedLabel": details.get("activityElapsedLabel", "已运行"),
+            "topActivityElapsed": details.get("activityElapsed", ""),
+            "topActivityGapLabel": details.get("activityGapLabel", "当前等待"),
+            "topActivityGap": details.get("activityGap", ""),
+            "topActivityLastLabel": details.get("activityLastLabel", "需求轮次"),
+            "topActivityLast": details.get("activityLast", ""),
+            "topSlow": details.get("slow", ""),
+            "topGap": details.get("gap", ""),
+        }
+        token_value_keys = {
+            "topSessionInputTokens",
+            "topSessionCachedTokens",
+            "topSessionOutputTokens",
+            "topSessionReasoningTokens",
         }
         for key, text in values.items():
-            label = self.top_labels.get(key)
-            if label is not None:
-                if key == "budget" and isinstance(label, TopHudBudgetProgress):
-                    label.configure(
-                        text=_wrap_long_display_tokens(text),
-                        metrics=_top_budget_progress_metrics(snapshot),
-                        meta=_top_budget_progress_meta(snapshot),
-                    )
-                else:
-                    label.configure(text=_wrap_long_display_tokens(text))
-                if key == "slow":
-                    copyable = _copyable_tool_command(snapshot) is not None
-                    label_bg = str(label.cget("bg"))
-                    label.configure(
-                        cursor="hand2" if copyable else "arrow",
-                        fg=_theme_warning_text(label_bg)
-                        if copyable
-                        else _theme_primary_text(label_bg),
-                    )
-                if key == "gap":
-                    copyable = _copyable_gap_detail(snapshot) is not None
-                    label_bg = str(label.cget("bg"))
-                    label.configure(
-                        cursor="hand2" if copyable else "arrow",
-                        fg=_theme_info_text(label_bg)
-                        if copyable
-                        else _theme_secondary_text(label_bg),
-                    )
-                if key == "warnings":
-                    has_warning = bool(
-                        snapshot.error
-                        or snapshot.request.error
-                        or snapshot.budget_error
-                        or snapshot.budget_warnings
-                    )
-                    label_bg = str(label.cget("bg"))
-                    label.configure(
-                        fg=_theme_warning_text(label_bg)
-                        if has_warning
-                        else _theme_secondary_text(label_bg)
-                    )
+            widget = self.top_labels.get(key)
+            if key in token_value_keys and isinstance(widget, tk.Label):
+                setattr(widget, "_hud_raw_text", str(text or ""))
+            display_text = (
+                self._top_session_mix_text(text, details.get("sessionAverage", ""))
+                if key == "topSessionMix"
+                else
+                self._top_token_value_text(widget, text)
+                if key in token_value_keys
+                else
+                self._top_single_line_text(widget, text)
+                if key in {"topCurrentTask", "topExecuting"}
+                else _wrap_long_display_tokens(text)
+            )
+            self._set_top_text(key, display_text)
+
+        budget = self.top_labels.get("budget")
+        if isinstance(budget, TopHudBudgetProgress):
+            budget.configure(
+                text=_top_budget_progress_meta(snapshot),
+                metrics=_top_budget_progress_metrics(snapshot),
+                meta="",
+            )
+
+        warnings = str(details.get("warnings") or "").strip()
+        warnings_panel = self.top_labels.get("warnings_panel")
+        grid = self.top_labels.get("top_grid")
+        if isinstance(warnings_panel, tk.Frame):
+            if warnings:
+                if not warnings_panel.winfo_manager():
+                    pack_kwargs: dict[str, object] = {"fill": "x", "pady": (0, 12)}
+                    if isinstance(grid, tk.Frame):
+                        pack_kwargs["before"] = grid
+                    warnings_panel.pack(**pack_kwargs)
+            else:
+                warnings_panel.pack_forget()
+
+        self._render_top_heavy_rounds(details)
+        self._render_top_activity_trail(details)
+        tool_command = _copyable_tool_command(snapshot) or ""
+        gap_detail = _copyable_gap_detail(snapshot) or ""
+        top_slow = self.top_labels.get("topSlow")
+        if top_slow is not None:
+            self._configure_top_copyable(top_slow, tool_command, "点击复制最慢工具命令")
+        top_gap = self.top_labels.get("topGap")
+        if top_gap is not None:
+            self._configure_top_copyable(top_gap, gap_detail, "点击复制最长等待详情")
+        current_task = self.top_labels.get("topCurrentTask")
+        if current_task is not None:
+            task_text = str(details.get("currentTask") or "")
+            self._configure_top_copyable(current_task, task_text, f"点击复制当前需求\n{task_text}")
+        executing = self.top_labels.get("topExecuting")
+        if executing is not None:
+            executing_text = str(details.get("executing") or "")
+            executing_label = str(details.get("executingLabel") or "当前活动")
+            self._configure_top_copyable(
+                executing,
+                executing_text,
+                f"点击复制{executing_label}\n{executing_text}",
+            )
+        activity_last = self.top_labels.get("topActivityLast")
+        if activity_last is not None:
+            setattr(activity_last, "_hud_tooltip", str(details.get("activityLastTooltip") or ""))
 
     def _render_request(self) -> None:
         snapshot = self._snapshot
@@ -8388,13 +10095,20 @@ class TokenHudWindow:
         self.request_text.yview_moveto(0.0 if should_follow_head else previous_top)
 
     def _format_warnings(self, snapshot: ParsedSession) -> str:
-        return _budget_warning_summary(snapshot)
+        return _format_warnings(
+            snapshot,
+            include_budget_warnings=not warning_dismissed_today(
+                self.user_settings_store.path
+            ),
+        )
 
     def _format_notice(self, snapshot: ParsedSession) -> str:
-        notice = self._format_warnings(snapshot)
-        if snapshot.error:
-            notice = f"{notice}  |  错误 {_compact(snapshot.error, 80)}"
-        return notice
+        return _format_notice(
+            snapshot,
+            include_budget_warnings=not warning_dismissed_today(
+                self.user_settings_store.path
+            ),
+        )
 
     def _format_slow_panel(self, snapshot: ParsedSession) -> str:
         return "\n".join(

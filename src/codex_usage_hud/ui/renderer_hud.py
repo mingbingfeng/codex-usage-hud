@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from .. import __version__
-from ..config import UserConfig
+from ..config import UserConfig, warning_dismissed_today
 from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
 from ..platforms.cdp_probe import (
     cdp_port_from_env,
@@ -979,10 +979,11 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-alert {
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto;
-        gap: 9px;
+        grid-template-columns: auto auto minmax(0, 1fr) auto;
+        gap: 8px;
         align-items: center;
         margin-bottom: 12px;
+        padding: 8px 10px;
         border-color: rgba(255, 135, 90, .46);
         background: rgba(36, 24, 16, .90);
       }
@@ -999,6 +1000,30 @@ RENDERER_HUD_SCRIPT = r"""
         color: #ffb86b;
         font-size: 11px;
         font-weight: 800;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-alert [data-field="topWarnings"] {
+        min-width: 0;
+        line-height: 1.35;
+      }
+      #${rootId} .codex-usage-hud-alert-close {
+        width: 22px;
+        height: 22px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: #ffb86b;
+        font-family: "Microsoft YaHei UI", system-ui, sans-serif;
+        font-size: 16px;
+        font-weight: 800;
+        line-height: 1;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-alert-close:hover {
+        background: rgba(255, 184, 107, .12);
       }
       #${rootId} .codex-usage-hud-cache-pill {
         min-width: 0;
@@ -1784,7 +1809,8 @@ RENDERER_HUD_SCRIPT = r"""
         color: var(--codex-usage-hud-info);
       }
       #${rootId} .codex-usage-hud-value.warn,
-      #${rootId} .codex-usage-hud-alert-title {
+      #${rootId} .codex-usage-hud-alert-title,
+      #${rootId} .codex-usage-hud-alert-close {
         color: var(--codex-usage-hud-warning);
       }
       #${rootId} .codex-usage-hud-alert {
@@ -1793,6 +1819,9 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-alert-dot {
         background: var(--codex-usage-hud-warning);
+      }
+      #${rootId} .codex-usage-hud-alert-close:hover {
+        background: color-mix(in srgb, var(--codex-usage-hud-warning) 12%, transparent);
       }
       #${rootId} .codex-usage-hud-activity-timeline {
         scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-request-panel-surface);
@@ -2074,8 +2103,9 @@ RENDERER_HUD_SCRIPT = r"""
         <div class="codex-usage-hud-top-body">
           <div class="codex-usage-hud-alert" data-field-panel="topWarnings" hidden>
             <span class="codex-usage-hud-alert-dot"></span>
-            <span class="codex-usage-hud-value warn" data-field="topWarnings"></span>
             <span class="codex-usage-hud-alert-title">预警</span>
+            <span class="codex-usage-hud-value warn" data-field="topWarnings"></span>
+            <button class="codex-usage-hud-alert-close" data-action="dismiss-warnings-today" type="button" title="今天不再显示" aria-label="今天不再显示预警">×</button>
           </div>
           <div class="codex-usage-hud-top-grid">
             <div class="codex-usage-hud-top-column codex-usage-hud-top-column-left">
@@ -2872,6 +2902,20 @@ RENDERER_HUD_SCRIPT = r"""
     );
   }
 
+  function dismissWarningsToday() {
+    const root = document.getElementById(rootId);
+    if (root) {
+      setText(root, "topWarnings", "");
+      root.querySelectorAll('[data-field-panel="topWarnings"]').forEach((node) => {
+        node.hidden = true;
+      });
+    }
+    submitSettingsCommand(
+      { action: "dismissWarningsToday" },
+      "今天不再显示预算预警。"
+    );
+  }
+
   function exportSettingsFromModal() {
     const settings = collectSettingsForm();
     const data = JSON.stringify({ user: settings }, null, 2);
@@ -3093,6 +3137,12 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         void runUpdateAction();
+        return;
+      }
+      if (action.dataset.action === "dismiss-warnings-today") {
+        event.preventDefault();
+        event.stopPropagation();
+        dismissWarningsToday();
         return;
       }
       if (action.dataset.action === "settings-export") {
@@ -4986,6 +5036,15 @@ def payload_from_snapshot(
     work_overlay_selectable_max: int = 6,
 ) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
+    warnings_dismissed = (
+        warning_dismissed_today(settings_path) if settings_path is not None else False
+    )
+    top_details = _top_details(snapshot, session_cost)
+    if warnings_dismissed:
+        top_details["warnings"] = _format_notice(
+            snapshot,
+            include_budget_warnings=False,
+        )
     top_line = (
         f"{_top_session_usage_summary(snapshot, session_cost)} | "
         f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)} | "
@@ -5016,9 +5075,9 @@ def payload_from_snapshot(
             snapshot.error
             or snapshot.request.error
             or snapshot.budget_error
-            or snapshot.budget_warnings
+            or (snapshot.budget_warnings and not warnings_dismissed)
         ),
-        top_details=_top_details(snapshot, session_cost),
+        top_details=top_details,
         top_progress=top_progress,
         top_copies=_top_copy_texts(snapshot),
         request_rows=_request_rows(snapshot),
@@ -5849,10 +5908,14 @@ def _request_row_details(snapshot: ParsedSession) -> list[dict[str, object]]:
     return details
 
 
-def _budget_warning_summary(snapshot: ParsedSession) -> str:
+def _budget_warning_summary(
+    snapshot: ParsedSession,
+    *,
+    include_budget_warnings: bool = True,
+) -> str:
     if snapshot.budget_error:
         return snapshot.budget_error
-    if not snapshot.budget_warnings:
+    if not include_budget_warnings or not snapshot.budget_warnings:
         return ""
     messages: list[str] = []
     for warning in snapshot.budget_warnings:
@@ -5872,13 +5935,27 @@ def _budget_warning_summary(snapshot: ParsedSession) -> str:
     return "预警  " + "；".join(messages)
 
 
-def _format_warnings(snapshot: ParsedSession) -> str:
-    return _budget_warning_summary(snapshot)
+def _format_warnings(
+    snapshot: ParsedSession,
+    *,
+    include_budget_warnings: bool = True,
+) -> str:
+    return _budget_warning_summary(
+        snapshot,
+        include_budget_warnings=include_budget_warnings,
+    )
 
 
-def _format_notice(snapshot: ParsedSession) -> str:
+def _format_notice(
+    snapshot: ParsedSession,
+    *,
+    include_budget_warnings: bool = True,
+) -> str:
     parts: list[str] = []
-    notice = _format_warnings(snapshot)
+    notice = _format_warnings(
+        snapshot,
+        include_budget_warnings=include_budget_warnings,
+    )
     if notice:
         parts.append(notice)
     if snapshot.error:

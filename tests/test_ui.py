@@ -77,9 +77,15 @@ from codex_usage_hud.platforms.session_switch import (
     SessionSwitchRequest,
     SessionSwitchResult,
 )
-from codex_usage_hud.config import UserConfig, UserConfigStore
+from codex_usage_hud.config import (
+    UserConfig,
+    UserConfigStore,
+    dismiss_warning_for_today,
+    warning_dismissed_today,
+)
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.platforms.codex_theme import CodexThemeExport, HudThemeTokens
+from codex_usage_hud.ui.renderer_hud import payload_from_snapshot
 from codex_usage_hud.core.parser import (
     Activity,
     GapTiming,
@@ -103,6 +109,7 @@ from codex_usage_hud.ui.tk_hud import (
     HUD_CDP_DOM_ENV,
     SETTINGS_DIALOG_HEIGHT,
     SETTINGS_DIALOG_WIDTH,
+    TOP_ACTIVITY_TRAIL_VIEWPORT_HEIGHT,
     TOP_DOCK_EXPANDED_HEIGHT,
     TOP_DOCK_HEIGHT,
     TOP_DOCK_LEFT,
@@ -444,7 +451,7 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(
             _budget_warning_summary(snapshot),
-            "提醒  日已用 70%，超过 50% 阈值；周已用 52%，超过 50% 阈值",
+            "预警  日已用 70%，超过 50% 阈值；周已用 52%，超过 50% 阈值",
         )
 
     def test_usage_summary_cache_invalidates_when_budget_window_changes(self) -> None:
@@ -2652,6 +2659,31 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertIn('"weekly_adjustment_usd": 7.5', raw)
         self.assertIn('"future"', raw)
 
+    def test_warning_dismissal_preserves_existing_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text(
+                '{"user":{"daily_budget_usd":12.5},"top":{"width":320}}',
+                encoding="utf-8",
+            )
+
+            dismiss_warning_for_today(path, now=datetime(2026, 6, 21, 12, 0))
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            dismissed_same_day = warning_dismissed_today(
+                path,
+                now=datetime(2026, 6, 21, 23, 59),
+            )
+            dismissed_next_day = warning_dismissed_today(
+                path,
+                now=datetime(2026, 6, 22, 0, 1),
+            )
+
+        self.assertTrue(dismissed_same_day)
+        self.assertFalse(dismissed_next_day)
+        self.assertEqual(raw["runtime"]["warning_dismissed_date"], "2026-06-21")
+        self.assertEqual(raw["user"]["daily_budget_usd"], 12.5)
+        self.assertEqual(raw["top"]["width"], 320)
+
 
 class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_top_rebuild_does_not_destroy_bottom_request_window(self) -> None:
@@ -2756,7 +2788,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             window.toggle_request_expanded()
-            _flush_tk(window)
+            _flush_tk(window, iterations=5)
 
             widgets = _walk_widgets(window.request_root)
 
@@ -2769,16 +2801,26 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             window.toggle_request_expanded()
-            _flush_tk(window)
+            _flush_tk(window, iterations=5)
 
             self.assertIsNotNone(window.request_text)
             assert window.request_text is not None
-            self.assertGreater(
+            request_label_y = max(
                 window.request_label.winfo_rooty(),
+                window.request_label.master.winfo_rooty(),
+            )
+            if request_label_y <= 0:
+                request_label_y = (
+                    window.request_root.winfo_rooty()
+                    + window.request_root.winfo_height()
+                    - window.request_label.winfo_height()
+                )
+            self.assertGreater(
+                request_label_y,
                 window.request_text.winfo_rooty(),
             )
             self.assertGreaterEqual(
-                window.request_label.winfo_rooty(),
+                request_label_y,
                 window.request_text.winfo_rooty() + window.request_text.winfo_height() - 2,
             )
         finally:
@@ -3072,7 +3114,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
-    def test_toggle_applies_geometry_before_idle_rebuild(self) -> None:
+    def test_toggle_applies_geometry_after_idle_rebuild(self) -> None:
         window = TokenHudWindow()
         try:
             window._apply_geometry = MagicMock()
@@ -3080,14 +3122,14 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
             window.toggle_top_expanded()
 
-            window._apply_geometry.assert_called_once_with()
+            window._apply_geometry.assert_not_called()
             window._rebuild_top_ui.assert_not_called()
             self.assertIsNotNone(window._top_rebuild_job)
 
             _flush_tk(window)
 
             window._rebuild_top_ui.assert_called_once_with()
-            self.assertGreaterEqual(window._apply_geometry.call_count, 2)
+            self.assertGreaterEqual(window._apply_geometry.call_count, 1)
         finally:
             window._close()
 
@@ -4022,11 +4064,34 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             snapshot.request.total_tokens = 43_000
             snapshot.request.cost_usd = 0.004
             snapshot.request.estimated = True
+            snapshot.task_index = 1
+            snapshot.task_count = 1
+            snapshot.task_started_at = now - timedelta(minutes=12)
+            snapshot.request.started_at = now - timedelta(minutes=1)
+            snapshot.request_history = [
+                RequestRound(
+                    index=index,
+                    status="completed",
+                    model="gpt-5.5",
+                    input_tokens=10_000 + index,
+                    cached_tokens=8_000,
+                    output_tokens=1_200,
+                    reasoning_tokens=300,
+                    total_tokens=11_500 + index,
+                    estimated=False,
+                    cost_usd=0.05 + index / 100,
+                    started_at=now - timedelta(minutes=8 - index),
+                    completed_at=now - timedelta(minutes=8 - index, seconds=-20),
+                    activity_summary=f"轨迹节点 {index}",
+                )
+                for index in range(1, 7)
+            ]
             snapshot.activity.kind = "agent"
             snapshot.activity.detail = (
                 "我现在提交这次发布资产，提交说明会按仓库的 Lore 协议来写，"
                 "这是一段足够长的当前活动内容，用来证明布局不会吞掉信息。"
             )
+            snapshot.activity.timestamp = now
             snapshot.slow.slowest_tool = (
                 "2.6s shell_command: pytest tests/test_ui.py --very-long-option-name "
                 "with extra diagnostic context"
@@ -4045,6 +4110,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 if isinstance(widget, tk.Canvas) and widget.winfo_toplevel() == window.root
                 and not getattr(widget, "_hud_progress_canvas", False)
                 and not getattr(widget, "_hud_scrollbar", False)
+                and not getattr(widget, "_hud_activity_trail_canvas", False)
+                and not getattr(widget, "_hud_activity_marker_canvas", False)
             ]
             self.assertEqual(len(canvases), 1)
             canvas = canvases[0]
@@ -4052,32 +4119,327 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
             self.assertIsNotNone(scroll_region)
             self.assertGreater(scroll_region[3], canvas.winfo_height())
-            self.assertEqual(window.top_labels["legend"].cget("text"), TOKEN_LEGEND_TEXT)
-            self.assertIn("命中 ◎87%", window.top_labels["cumulative"].cget("text"))
+            self.assertEqual(window.top_labels["topSessionCost"].cget("text"), "$1.62")
+            self.assertEqual(window.top_labels["topSessionTokens"].cget("text"), "452k")
+            self.assertIn("87%", window.top_labels["topSessionMix"].cget("text"))
             self.assertIn("缓存命中 87%", window.top_labels["cache_progress"].cget("text"))
+            self.assertEqual(window.top_labels["topSessionInputTokens"].cget("text"), "430k")
+            self.assertEqual(window.top_labels["topSessionCachedTokens"].cget("text"), "374k")
+            for key in (
+                "topSessionInputTokens",
+                "topSessionCachedTokens",
+                "topSessionOutputTokens",
+                "topSessionReasoningTokens",
+            ):
+                label = window.top_labels[key]
+                self.assertEqual(label.winfo_manager(), "grid")
+                text_width = int(
+                    window.root.tk.call(
+                        "font",
+                        "measure",
+                        label.cget("font"),
+                        label.cget("text"),
+                    )
+                )
+                self.assertGreaterEqual(label.winfo_width(), text_width)
             self.assertIn("◎87%", window.request_label.cget("text"))
             self.assertEqual(
                 window.top_labels["warnings"].cget("text"),
-                "提醒  日已用 39%，超过 50% 阈值",
+                "预警  日已用 39%，超过 50% 阈值",
             )
-            for key in ("budget", "activity", "warnings", "legend", "slow", "gap", "status"):
+            self.assertEqual(
+                window.top_labels["budget"].cget("bg"),
+                window.top_labels["budget"].master.cget("bg"),
+            )
+            self.assertLessEqual(
+                window.top_labels["topSessionMix"].winfo_rootx()
+                + window.top_labels["topSessionMix"].winfo_width(),
+                window.top_labels["topSessionAverage"].winfo_rootx(),
+            )
+            self.assertEqual(int(float(str(window.top_labels["topSessionAverage"].cget("width")))), 0)
+            self.assertIn("/轮", window.top_labels["topSessionAverage"].cget("text"))
+            for key in ("warnings",):
                 label = window.top_labels[key]
                 wraplength = int(float(str(label.cget("wraplength"))))
                 self.assertGreaterEqual(wraplength, 96)
                 self.assertLessEqual(wraplength, max(96, label.winfo_width()))
+            self.assertEqual(int(float(str(window.top_labels["topCurrentTask"].cget("wraplength")))), 0)
+            self.assertEqual(int(float(str(window.top_labels["topCurrentTask"].cget("height")))), 1)
+            self.assertNotIn("\n", window.top_labels["topCurrentTask"].cget("text"))
+            self.assertEqual(int(float(str(window.top_labels["topExecuting"].cget("wraplength")))), 0)
+            self.assertEqual(int(float(str(window.top_labels["topExecuting"].cget("height")))), 1)
+            self.assertNotIn("\n", window.top_labels["topExecuting"].cget("text"))
             self.assertLess(
                 window.top_labels["warnings"].winfo_rooty(),
-                window.top_labels["slow"].winfo_rooty(),
+                window.top_labels["topCurrentTask"].winfo_rooty(),
             )
-            self.assertGreater(
-                window.top_labels["legend"].winfo_rooty(),
-                window.top_labels["status"].winfo_rooty(),
+            self.assertGreaterEqual(len(window.top_labels["topHeavyRounds"].winfo_children()), 1)
+            self.assertGreaterEqual(len(window.top_labels["topActivityTrail"].winfo_children()), 1)
+            trail_viewport = window.top_labels["topActivityTrailViewport"]
+            trail_canvas = window.top_labels["topActivityTrailCanvas"]
+            self.assertGreaterEqual(trail_viewport.winfo_height(), TOP_ACTIVITY_TRAIL_VIEWPORT_HEIGHT)
+            self.assertEqual(len(window.top_labels["topActivityTrail"].winfo_children()), 4)
+            first_activity_row = window.top_labels["topActivityTrail"].winfo_children()[0]
+            _time_label, marker, title_label, detail_label = getattr(first_activity_row, "_hud_activity_widgets")
+            marker_items = marker.find_all()
+            oval_items = [item for item in marker_items if marker.type(item) == "oval"]
+            self.assertTrue(oval_items)
+            x1, y1, x2, y2 = marker.coords(oval_items[0])
+            self.assertGreater(x1, 0)
+            self.assertGreater(y1, 0)
+            self.assertLess(x2, marker.winfo_width())
+            self.assertLess(y2, marker.winfo_height())
+            outer_scroll_region_before_load_more = canvas.bbox("all")
+
+            window._load_more_top_activity()
+            window.root.update_idletasks()
+
+            self.assertGreaterEqual(trail_viewport.winfo_height(), TOP_ACTIVITY_TRAIL_VIEWPORT_HEIGHT)
+            self.assertEqual(canvas.bbox("all"), outer_scroll_region_before_load_more)
+            self.assertGreater(len(window.top_labels["topActivityTrail"].winfo_children()), 4)
+            self.assertGreater(trail_canvas.bbox("all")[3], trail_canvas.winfo_height())
+            self.assertGreaterEqual(window._top_activity_visible_count, 8)
+            self.assertTrue(str(title_label.bind("<MouseWheel>")))
+            self.assertTrue(str(detail_label.bind("<MouseWheel>")))
+            parent_scroll = MagicMock(return_value="parent-scroll")
+            window._top_scroll_handler = parent_scroll
+            trail_canvas.yview_moveto(0.0)
+            self.assertEqual(
+                window._top_activity_scroll_handler(SimpleNamespace(delta=120, num=None)),
+                "parent-scroll",
             )
+            trail_canvas.yview_moveto(1.0)
+            self.assertEqual(
+                window._top_activity_scroll_handler(SimpleNamespace(delta=-120, num=None)),
+                "parent-scroll",
+            )
+            self.assertEqual(parent_scroll.call_count, 2)
+
+            snapshot.activity.detail = "新的活动轨迹到达后保持已展开数量"
+            snapshot.activity.timestamp = now + timedelta(seconds=1)
+            snapshot.last_event_time = now + timedelta(seconds=1)
+            window.update_display(snapshot)
+            window.root.update_idletasks()
+            self.assertGreaterEqual(window._top_activity_visible_count, 8)
 
             before = canvas.yview()
             canvas.yview_moveto(1.0)
             after = canvas.yview()
             self.assertGreater(after[0], before[0])
+            trail_children = tuple(window.top_labels["topActivityTrail"].winfo_children())
+            window.update_display(snapshot)
+            window.root.update_idletasks()
+            self.assertEqual(
+                trail_children,
+                tuple(window.top_labels["topActivityTrail"].winfo_children()),
+            )
+            self.assertGreaterEqual(canvas.yview()[0], after[0] - 0.02)
+        finally:
+            window._close()
+
+    def test_top_session_composition_elides_narrow_token_values(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            _flush_tk(window)
+            window.root.geometry(f"320x{TOP_DOCK_EXPANDED_HEIGHT}+20+20")
+            now = datetime(2026, 6, 21, 12, 0, 0).astimezone()
+            snapshot = ParsedSession(
+                session_id="narrow-token-layout",
+                status="live",
+                refreshed_at=now,
+                last_event_time=now,
+                token_events=4,
+            )
+            snapshot.confirmed.cumulative_input = 1_400_000
+            snapshot.confirmed.cumulative_cached = 1_300_000
+            snapshot.confirmed.cumulative_output = 9_303
+            snapshot.confirmed.cumulative_reasoning = 3_742
+            snapshot.confirmed.cumulative_total = 1_413_045
+
+            window.update_display(snapshot)
+            for _ in range(4):
+                window.root.update_idletasks()
+
+            self.assertEqual(window.top_labels["topSessionInputTokens"].cget("text"), "1.4M")
+            self.assertEqual(window.top_labels["topSessionCachedTokens"].cget("text"), "1.3M")
+            self.assertIn("...", window.top_labels["topSessionOutputTokens"].cget("text"))
+            self.assertIn("...", window.top_labels["topSessionReasoningTokens"].cget("text"))
+
+            token_grid = window.top_labels["topSessionInputTokens"].master.master
+            token_grid_right = token_grid.winfo_rootx() + token_grid.winfo_width()
+            for key in (
+                "topSessionInputTokens",
+                "topSessionCachedTokens",
+                "topSessionOutputTokens",
+                "topSessionReasoningTokens",
+            ):
+                label = window.top_labels[key]
+                token = label.master
+                token_right = token.winfo_rootx() + token.winfo_width()
+                self.assertLessEqual(token_right, token_grid_right)
+                text_width = int(
+                    window.root.tk.call(
+                        "font",
+                        "measure",
+                        label.cget("font"),
+                        label.cget("text"),
+                    )
+                )
+                self.assertLessEqual(text_width, label.winfo_width())
+
+            title = window.top_labels["topSessionInsightTitle"]
+            mix = window.top_labels["topSessionMix"]
+            average = window.top_labels["topSessionAverage"]
+            title_right = title.winfo_rootx() + title.winfo_width()
+            self.assertGreaterEqual(mix.winfo_rootx(), title_right)
+            self.assertLessEqual(mix.winfo_rootx() - title_right, 14)
+            self.assertLess(mix.winfo_rootx() + mix.winfo_width(), average.winfo_rootx())
+        finally:
+            window._close()
+
+    def test_top_expanded_redesign_uses_live_theme_tokens(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            _flush_tk(window)
+            themed_export = CodexThemeExport.from_share_string(
+                'codex-theme-v1:{"codeThemeId":"github","theme":{"accent":"#0969da",'
+                '"contrast":40,"fonts":{"code":null,"ui":null},"ink":"#1f2328",'
+                '"opaqueWindows":false,"semanticColors":{"diffAdded":"#1a7f37",'
+                '"diffRemoved":"#cf222e","skill":"#8250df"},"surface":"#ffffff"},'
+                '"variant":"light"}'
+            )
+            tokens = HudThemeTokens.from_theme(themed_export)
+            window._theme_probe = SimpleNamespace(
+                snapshot=lambda: SimpleNamespace(
+                    source="persisted",
+                    hud_tokens=tokens,
+                )
+            )
+            snapshot = ParsedSession(
+                session_id="theme-top-expanded",
+                budget_warnings=["日额度已用 80.00/100 USD (80%)，超过 80% 阈值"],
+            )
+
+            window.update_display(snapshot)
+            window.root.update_idletasks()
+
+            self.assertEqual(tk_hud_module.HUD_WARNING.lower(), str(tokens.warning).lower())
+            self.assertNotEqual(tk_hud_module.HUD_WARNING.lower(), "#ffb86b")
+            warning_bg = tk_hud_module._theme_tint_surface(
+                tk_hud_module.HUD_WARNING,
+                tk_hud_module.HUD_PANEL_BG,
+                0.13,
+            )
+            warning_chip_bg = tk_hud_module._theme_tint_surface(
+                tk_hud_module.HUD_WARNING,
+                tk_hud_module.HUD_PANEL_BG,
+                0.14,
+            )
+            self.assertEqual(str(window.top_labels["warnings_panel"].cget("bg")).lower(), warning_bg)
+            self.assertEqual(str(window.top_labels["topActivityState"].cget("bg")).lower(), warning_chip_bg)
+            self.assertEqual(
+                str(window.top_labels["topActivityState"].cget("highlightbackground")).lower(),
+                tk_hud_module.HUD_WARNING.lower(),
+            )
+            self.assertEqual(
+                str(window.top_labels["topSessionInsight"].cget("bg")).lower(),
+                tk_hud_module.REQUEST_PANEL_BG.lower(),
+            )
+            self.assertEqual(
+                str(window.top_labels["topActivityLoadMore"].cget("bg")).lower(),
+                tk_hud_module._theme_tint_surface(
+                    tk_hud_module.HUD_BLUE,
+                    tk_hud_module.HUD_PANEL_BG,
+                    0.08,
+                ),
+            )
+            heavy_row = window.top_labels["topHeavyRounds"].winfo_children()[0]
+            self.assertEqual(str(heavy_row.cget("bg")).lower(), tk_hud_module.REQUEST_PANEL_BG.lower())
+
+            window._render_top_activity_trail(
+                {
+                    "activityTrailContext": "theme-token-colors",
+                    "activityTrail": [
+                        {
+                            "time": "12:02",
+                            "title": "正在执行",
+                            "detail": "主题色节点",
+                            "tooltip": "正在执行",
+                            "active": True,
+                        },
+                        {
+                            "time": "12:01",
+                            "title": "准备",
+                            "detail": "普通节点",
+                            "tooltip": "准备",
+                        },
+                    ],
+                }
+            )
+            window.root.update_idletasks()
+            first_marker = getattr(window.top_labels["topActivityTrail"].winfo_children()[0], "_hud_activity_widgets")[1]
+            marker_items = first_marker.find_all()
+            line_items = [item for item in marker_items if first_marker.type(item) == "line"]
+            oval_items = [item for item in marker_items if first_marker.type(item) == "oval"]
+            self.assertTrue(line_items)
+            self.assertTrue(oval_items)
+            self.assertEqual(first_marker.itemcget(line_items[0], "fill").lower(), tk_hud_module.HUD_DIVIDER.lower())
+            self.assertEqual(first_marker.itemcget(oval_items[-1], "fill").lower(), tk_hud_module.HUD_ACCENT.lower())
+        finally:
+            window._close()
+
+    def test_top_expanded_columns_align_on_wide_layout(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            _flush_tk(window)
+            window.root.geometry(f"720x{TOP_DOCK_EXPANDED_HEIGHT}+20+20")
+            window.update_display(ParsedSession(session_id="wide-layout"))
+            window.root.update_idletasks()
+
+            heavy_card = window.top_labels["topHeavyCard"]
+            activity_card = window.top_labels["topActivityCard"]
+            heavy_bottom = heavy_card.winfo_rooty() + heavy_card.winfo_height()
+            activity_bottom = activity_card.winfo_rooty() + activity_card.winfo_height()
+            self.assertLessEqual(abs(heavy_bottom - activity_bottom), 1)
+        finally:
+            window._close()
+
+    def test_top_activity_trail_draws_connector_for_two_nodes(self) -> None:
+        window = TokenHudWindow()
+        try:
+            window.toggle_top_expanded()
+            _flush_tk(window)
+
+            window._render_top_activity_trail(
+                {
+                    "activityTrailContext": "two-node-test",
+                    "activityTrail": [
+                        {
+                            "time": "12:01",
+                            "title": "第一步",
+                            "detail": "准备",
+                            "tooltip": "第一步",
+                        },
+                        {
+                            "time": "12:02",
+                            "title": "第二步",
+                            "detail": "执行",
+                            "tooltip": "第二步",
+                        },
+                    ],
+                }
+            )
+            window.root.update_idletasks()
+
+            rows = window.top_labels["topActivityTrail"].winfo_children()
+            self.assertEqual(len(rows), 2)
+            first_marker = getattr(rows[0], "_hud_activity_widgets")[1]
+            second_marker = getattr(rows[1], "_hud_activity_widgets")[1]
+            self.assertIn("line", [first_marker.type(item) for item in first_marker.find_all()])
+            self.assertIn("line", [second_marker.type(item) for item in second_marker.find_all()])
         finally:
             window._close()
 
@@ -4093,6 +4455,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 window.top_labels["title"].cget("text"),
                 "Ship the live session switch check",
             )
+            self.assertFalse(window.top_labels["topTaskOrdinalActivity"].winfo_manager())
 
             snapshot.session_title = ""
             window.update_display(snapshot)
@@ -4503,6 +4866,49 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn("后台守护进程", status["message"])
         restart_requested.set.assert_not_called()
         exit_requested.set.assert_called_once_with()
+
+    def test_renderer_dismiss_warnings_command_persists_today(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            store.save(UserConfig.defaults())
+            context = SimpleNamespace(
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                reload_user_config=MagicMock(),
+            )
+            restart_requested = MagicMock()
+            exit_requested = MagicMock()
+
+            status = _handle_renderer_settings_command(
+                {"action": "dismissWarningsToday"},
+                context,
+                restart_requested,
+                exit_requested,
+            )
+            dismissed = warning_dismissed_today(store.path)
+
+        self.assertEqual(status["kind"], "")
+        self.assertIn("今天不再显示", status["message"])
+        self.assertTrue(dismissed)
+        context.reload_user_config.assert_not_called()
+        restart_requested.set.assert_not_called()
+        exit_requested.set.assert_not_called()
+
+    def test_renderer_payload_suppresses_dismissed_budget_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            dismiss_warning_for_today(path)
+            snapshot = ParsedSession(
+                session_id="dismissed-renderer-warning",
+                budget_warnings=["日额度已用 52.00/100 USD (52%)，超过 50% 阈值"],
+                today_cost_usd=52.0,
+                daily_limit_usd=100.0,
+            )
+
+            payload = payload_from_snapshot(snapshot, settings_path=path)
+
+        self.assertEqual(payload.top_details["warnings"], "")
+        self.assertFalse(payload.warning)
 
     def test_renderer_check_update_uses_async_update_manager(self) -> None:
         context = SimpleNamespace(settings_store=None, settings_mtime=None, reload_user_config=None)
