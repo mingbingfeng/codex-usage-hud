@@ -55,8 +55,8 @@ QT_THEME_DEFAULTS: dict[str, str] = {
     "success": "#8FE3A1",
     "requestSurface": "#0B1016",
     "requestHeaderSurface": "#151D27",
-    "requestPanelSurface": "#F6FAFF",
-    "requestText": "#4D6075",
+    "requestPanelSurface": "#101821",
+    "requestText": "#DCE7F2",
     "requestMuted": "#718095",
     "progressTrack": "#202832",
     "progressTrackBorder": "#3B4654",
@@ -69,7 +69,7 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
     from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
-    from PySide6.QtGui import QColor, QFont, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
+    from PySide6.QtGui import QColor, QFont, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QComboBox,
@@ -80,10 +80,12 @@ try:  # pragma: no cover - exercised through QtHudWindow construction.
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QLayout,
         QMessageBox,
         QPushButton,
         QScrollArea,
         QSizeGrip,
+        QSizePolicy,
         QStackedLayout,
         QTabWidget,
         QTableWidget,
@@ -178,7 +180,15 @@ if QApplication is not None:
         def set_metric(self, metric: Mapping[str, object] | None) -> None:
             self._metric = dict(metric or {})
             self.setVisible(bool(self._metric))
+            self.setToolTip(self._tooltip())
             self.update()
+
+        def _tooltip(self) -> str:
+            label = str(self._metric.get("label") or "")
+            right_text = str(self._metric.get("rightText") or "")
+            overflow_badge = str(self._metric.get("overflowBadge") or "")
+            full_text = f"{label} / {right_text}" if right_text else label
+            return f"{full_text} | {overflow_badge}" if overflow_badge else full_text
 
         def set_theme(self, tokens: Mapping[str, str]) -> None:
             self._theme.update({str(key): str(value) for key, value in tokens.items()})
@@ -191,57 +201,118 @@ if QApplication is not None:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = self.rect().adjusted(0, 1, 0, -1)
-            radius = 7
+            radius = rect.height() // 2
+            track = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
+            track.setColorAt(0.0, QColor(255, 255, 255, 10))
+            track.setColorAt(1.0, QColor(self._theme.get("progressTrack", "#202832")))
             painter.setPen(QPen(QColor(self._theme.get("progressTrackBorder", "#3B4654")), 1))
-            painter.setBrush(QColor(self._theme.get("progressTrack", "#202832")))
+            painter.setBrush(track)
             painter.drawRoundedRect(rect, radius, radius)
 
             tone = str(self._metric.get("tone") or "session")
             colors = {
-                "cache": self._theme.get("progressCache", "#5EA7FF"),
-                "session": self._theme.get("info", "#9CCBFF"),
-                "day": self._theme.get("progressDay", "#F3D27A"),
-                "week": self._theme.get("progressWeek", "#B5DD92"),
-                "error": self._theme.get("error", "#FF6B6B"),
+                "cache": (self._theme.get("info", "#9CCBFF"), self._theme.get("progressCache", "#5EA7FF")),
+                "session": (self._theme.get("info", "#9CCBFF"), self._theme.get("progressCache", "#5EA7FF")),
+                "day": (self._theme.get("progressDay", "#F3D27A"), self._theme.get("progressDay", "#F3D27A")),
+                "week": (self._theme.get("progressWeek", "#B5DD92"), self._theme.get("success", "#8FE3A1")),
+                "error": (self._theme.get("warning", "#FFB86B"), self._theme.get("error", "#FF6B6B")),
             }
-            fill_color = QColor(colors.get(tone, "#9CCBFF"))
+            start_color, end_color = colors.get(tone, ("#9CCBFF", "#5EA7FF"))
+            fill = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.top())
+            fill.setColorAt(0.0, QColor(start_color))
+            fill.setColorAt(1.0, QColor(end_color))
             ratio = max(0.0, min(1.0, float(self._metric.get("ratio") or 0.0)))
             fill_width = max(0, int(rect.width() * ratio))
             if fill_width > 0:
                 fill_rect = QRect(rect.left(), rect.top(), fill_width, rect.height())
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(fill_color)
+                painter.setBrush(fill)
+                painter.drawRoundedRect(fill_rect, radius, radius)
+                gloss = QLinearGradient(fill_rect.left(), fill_rect.top(), fill_rect.left(), fill_rect.bottom())
+                gloss.setColorAt(0.0, QColor(255, 255, 255, 66))
+                gloss.setColorAt(0.45, QColor(255, 255, 255, 18))
+                gloss.setColorAt(1.0, QColor(255, 255, 255, 0))
+                painter.setBrush(gloss)
                 painter.drawRoundedRect(fill_rect, radius, radius)
 
             overflow_ratio = max(0.0, min(1.0, float(self._metric.get("overflowRatio") or 0.0)))
+            overflow_badge = str(self._metric.get("overflowBadge") or "")
             if overflow_ratio > 0.0:
+                painter.setPen(QPen(QColor(self._theme.get("progressOverflow", "#FF875A")), 1))
                 overflow_left = rect.left() + int(rect.width() * (1.0 - overflow_ratio))
                 overflow_rect = QRect(
                     overflow_left,
-                    rect.top(),
-                    max(3, rect.right() - overflow_left),
-                    rect.height(),
+                    rect.top() + 4,
+                    max(10, rect.right() - overflow_left - 5),
+                    max(7, rect.height() - 8),
+                )
+                overflow = QLinearGradient(overflow_rect.left(), overflow_rect.top(), overflow_rect.right(), overflow_rect.top())
+                overflow.setColorAt(0.0, QColor(255, 207, 170))
+                overflow.setColorAt(0.65, QColor(self._theme.get("progressOverflow", "#FF875A")))
+                overflow.setColorAt(1.0, QColor(self._theme.get("error", "#FF6B6B")))
+                painter.setBrush(overflow)
+                painter.drawRoundedRect(overflow_rect, overflow_rect.height() // 2, overflow_rect.height() // 2)
+                anchor_size = min(16, max(10, rect.height() - 4))
+                anchor_rect = QRect(
+                    rect.right() - anchor_size - 4,
+                    rect.center().y() - anchor_size // 2,
+                    anchor_size,
+                    anchor_size,
                 )
                 painter.setBrush(QColor(self._theme.get("progressOverflow", "#FF875A")))
-                painter.drawRoundedRect(overflow_rect, radius, radius)
+                painter.setPen(QPen(QColor(255, 255, 255, 80), 1))
+                painter.drawEllipse(anchor_rect)
 
             text = str(self._metric.get("label") or "")
-            right_text = str(self._metric.get("rightText") or self._metric.get("overflowBadge") or "")
+            right_text = str(self._metric.get("rightText") or "")
             painter.setPen(QColor(self._theme.get("progressTrackText", "#E9F1F8")))
             font = QFont(self.font())
             font.setPointSize(max(8, font.pointSize()))
+            font.setBold(True)
             painter.setFont(font)
-            left_text = self.fontMetrics().elidedText(
+            metrics = painter.fontMetrics()
+            badge_width = 0
+            if overflow_badge:
+                badge_width = min(max(64, metrics.horizontalAdvance(overflow_badge) + 24), max(72, rect.width() // 2))
+                badge_rect = QRect(
+                    rect.right() - badge_width - 8,
+                    rect.top() + max(1, (rect.height() - 22) // 2),
+                    badge_width,
+                    min(22, rect.height() - 2),
+                )
+                painter.setPen(QPen(QColor(self._theme.get("progressOverflow", "#FF875A")), 1))
+                painter.setBrush(QColor(255, 95, 92, 34))
+                painter.drawRoundedRect(badge_rect, badge_rect.height() // 2, badge_rect.height() // 2)
+                painter.setPen(QColor(255, 215, 202))
+                dot_size = 6
+                dot_rect = QRect(
+                    badge_rect.left() + 9,
+                    badge_rect.center().y() - dot_size // 2,
+                    dot_size,
+                    dot_size,
+                )
+                painter.setBrush(QColor(self._theme.get("progressOverflow", "#FF875A")))
+                painter.drawEllipse(dot_rect)
+                painter.drawText(
+                    badge_rect.adjusted(20, 0, -8, 0),
+                    Qt.AlignmentFlag.AlignVCenter,
+                    metrics.elidedText(overflow_badge, Qt.TextElideMode.ElideRight, badge_width - 30),
+                )
+
+            painter.setPen(QColor(self._theme.get("progressTrackText", "#E9F1F8")))
+            text_rect = rect.adjusted(10, 0, -(10 + badge_width), 0)
+            right_width = min(max(42, metrics.horizontalAdvance(right_text) + 8), max(42, text_rect.width() // 2)) if right_text else 0
+            left_text = metrics.elidedText(
                 text,
                 Qt.TextElideMode.ElideRight,
-                max(30, rect.width() - 76),
+                max(30, text_rect.width() - right_width - 8),
             )
-            painter.drawText(rect.adjusted(8, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter, left_text)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, left_text)
             if right_text:
                 painter.drawText(
-                    rect.adjusted(8, 0, -8, 0),
+                    text_rect,
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    right_text,
+                    metrics.elidedText(right_text, Qt.TextElideMode.ElideRight, right_width),
                 )
 
 
@@ -336,8 +407,7 @@ if QApplication is not None:
 
         def _settle_height(self, expanded: bool) -> None:
             if expanded:
-                self.setMinimumHeight(self._expanded_height)
-                self.setMaximumHeight(16777215)
+                self.setFixedHeight(self._expanded_height)
             else:
                 self.setFixedHeight(self._collapsed_height)
 
@@ -444,7 +514,9 @@ if QApplication is not None:
             collapsed_layout.addWidget(collapsed_settings)
 
             expanded = QFrame()
+            expanded.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
             expanded_layout = QVBoxLayout(expanded)
+            expanded_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
             expanded_layout.setContentsMargins(0, 0, 0, 0)
             expanded_layout.setSpacing(8)
 
@@ -493,24 +565,28 @@ if QApplication is not None:
 
             body_scroll = QScrollArea()
             body_scroll.setWidgetResizable(True)
+            body_scroll.setMinimumHeight(0)
+            body_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
             body_scroll.setFrameShape(QFrame.Shape.NoFrame)
             body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             body_scroll.setObjectName("qtHudTopBodyScroll")
             body = QFrame()
             body.setObjectName("qtHudTopBody")
+            body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
             body_layout = QVBoxLayout(body)
+            body_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
             body_layout.setContentsMargins(0, 0, 4, 0)
             body_layout.setSpacing(8)
             top_grid = QGridLayout()
             top_grid.setHorizontalSpacing(10)
-            top_grid.setVerticalSpacing(10)
+            top_grid.setVerticalSpacing(8)
             left = QFrame()
             right = QFrame()
             left_layout = QVBoxLayout(left)
             right_layout = QVBoxLayout(right)
             for column_layout in (left_layout, right_layout):
                 column_layout.setContentsMargins(0, 0, 0, 0)
-                column_layout.setSpacing(8)
+                column_layout.setSpacing(6)
             top_grid.addWidget(left, 0, 0)
             top_grid.addWidget(right, 0, 1)
             top_grid.setColumnStretch(0, 1)
@@ -581,6 +657,7 @@ if QApplication is not None:
             self.executing = self._inset_value(activity_body, self.executing_label, role="mono-blue")
             metric_grid = QGridLayout()
             metric_grid.setHorizontalSpacing(6)
+            metric_grid.setVerticalSpacing(0)
             self.activity_elapsed_label, self.activity_elapsed = self._activity_metric(metric_grid, 0)
             self.activity_gap_label, self.activity_gap = self._activity_metric(metric_grid, 1)
             self.activity_last_label, self.activity_last = self._activity_metric(metric_grid, 2)
@@ -593,8 +670,8 @@ if QApplication is not None:
             self.trail_container = QFrame()
             self.trail_container.setObjectName("qtHudTimeline")
             self.trail_layout = QVBoxLayout(self.trail_container)
-            self.trail_layout.setContentsMargins(4, 4, 4, 4)
-            self.trail_layout.setSpacing(3)
+            self.trail_layout.setContentsMargins(3, 3, 3, 3)
+            self.trail_layout.setSpacing(2)
             for _ in range(4):
                 self._add_activity_row()
             activity_body.addWidget(self.trail_container, 1)
@@ -613,8 +690,8 @@ if QApplication is not None:
             card = QFrame()
             card.setObjectName("qtHudTopCard")
             layout = QVBoxLayout(card)
-            layout.setContentsMargins(9, 7, 9, 8)
-            layout.setSpacing(7)
+            layout.setContentsMargins(8, 6, 8, 7)
+            layout.setSpacing(6)
             head = QHBoxLayout()
             head.addWidget(_HudLabel(title, role="card-title"), 1)
             actions = QHBoxLayout()
@@ -622,7 +699,7 @@ if QApplication is not None:
             head.addLayout(actions)
             layout.addLayout(head)
             body = QVBoxLayout()
-            body.setSpacing(7)
+            body.setSpacing(6)
             layout.addLayout(body)
             parent.addWidget(card)
             return body, actions
@@ -695,8 +772,8 @@ if QApplication is not None:
             box = QFrame()
             box.setObjectName("qtHudInset")
             layout = QVBoxLayout(box)
-            layout.setContentsMargins(7, 5, 7, 5)
-            layout.setSpacing(2)
+            layout.setContentsMargins(6, 4, 6, 4)
+            layout.setSpacing(1)
             label = _HudLabel("", role="caption")
             value = _HudLabel("", role="mono-accent")
             layout.addWidget(label)
@@ -709,12 +786,12 @@ if QApplication is not None:
             row = QFrame()
             row.setObjectName("qtHudActivityRow")
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(4, 1, 4, 1)
-            row_layout.setSpacing(6)
+            row_layout.setContentsMargins(4, 0, 4, 0)
+            row_layout.setSpacing(5)
             time_label = _HudLabel("", role="muted")
-            time_label.setFixedWidth(56)
-            title_label = _HudLabel("", role="body")
-            detail_label = _HudLabel("", role="muted")
+            time_label.setFixedWidth(52)
+            title_label = _HudLabel("", role="activity-title")
+            detail_label = _HudLabel("", role="activity-detail")
             row_layout.addWidget(time_label)
             row_layout.addWidget(title_label)
             row_layout.addWidget(detail_label, 1)
@@ -924,15 +1001,16 @@ if QApplication is not None:
         def __init__(self) -> None:
             super().__init__()
             self.setObjectName("qtHudRequestRowFrame")
-            self.setMinimumHeight(24)
+            self.setMinimumHeight(18)
+            self.setMaximumHeight(24)
             self._started_at: datetime | None = None
             layout = QHBoxLayout(self)
-            layout.setContentsMargins(8, 2, 8, 2)
+            layout.setContentsMargins(4, 0, 4, 0)
             layout.setSpacing(0)
             self.prefix = _HudLabel("", role="request")
-            self.prefix.setMinimumWidth(94)
+            self.prefix.setMinimumWidth(86)
             self.time = _HudLabel("", role="request-time")
-            self.time.setFixedWidth(68)
+            self.time.setFixedWidth(62)
             self.suffix = _HudLabel("", role="request")
             layout.addWidget(self.prefix)
             layout.addWidget(self.time)
@@ -1010,11 +1088,12 @@ if QApplication is not None:
             expanded = QFrame()
             expanded_layout = QVBoxLayout(expanded)
             expanded_layout.setContentsMargins(0, 0, 0, 0)
-            expanded_layout.setSpacing(6)
+            expanded_layout.setSpacing(4)
             subhead = QFrame()
             subhead.setObjectName("qtHudRequestSubhead")
             subhead_layout = QHBoxLayout(subhead)
             subhead_layout.setContentsMargins(2, 0, 2, 0)
+            subhead_layout.setSpacing(6)
             subhead_layout.addWidget(_HudLabel("轮次流水", role="caption"), 1)
             latest_label = _HudLabel("最新在上", role="caption")
             latest_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1027,12 +1106,13 @@ if QApplication is not None:
             list_layout.setContentsMargins(0, 0, 0, 0)
             self.rows_widget = QFrame()
             self.rows_layout = QVBoxLayout(self.rows_widget)
-            self.rows_layout.setContentsMargins(4, 4, 4, 4)
-            self.rows_layout.setSpacing(1)
+            self.rows_layout.setContentsMargins(4, 3, 2, 3)
+            self.rows_layout.setSpacing(0)
             self.request_scroll = QScrollArea()
             self.request_scroll.setWidgetResizable(True)
             self.request_scroll.setFrameShape(QFrame.Shape.NoFrame)
             self.request_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.request_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.request_scroll.setObjectName("qtHudRequestScroll")
             self.request_scroll.setWidget(self.rows_widget)
             list_layout.addWidget(self.request_scroll)
@@ -1121,16 +1201,27 @@ if QApplication is not None:
             self.setMinimumSize(760, 560)
             self.resize(780, 580)
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(14, 14, 14, 14)
-            layout.setSpacing(10)
-            header = QHBoxLayout()
-            title = _HudLabel(f"codex-usage-hud v{__version__}", role="title")
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+            shell = QFrame()
+            shell.setObjectName("qtHudSettingsDialog")
+            shell_layout = QVBoxLayout(shell)
+            shell_layout.setContentsMargins(0, 0, 0, 0)
+            shell_layout.setSpacing(0)
+            layout.addWidget(shell)
+
+            header_frame = QFrame()
+            header_frame.setObjectName("qtHudSettingsHead")
+            header = QHBoxLayout(header_frame)
+            header.setContentsMargins(12, 10, 12, 10)
+            header.setSpacing(10)
+            title = _HudLabel(f"codex-usage-hud v{__version__}", role="settings-title")
             header.addWidget(title, 1)
             close_top = QPushButton("×")
             close_top.setObjectName("qtHudIconButton")
             close_top.clicked.connect(self.close)
             header.addWidget(close_top)
-            layout.addLayout(header)
+            shell_layout.addWidget(header_frame)
 
             self.tabs = QTabWidget()
             self.tabs.setObjectName("qtHudSettingsTabs")
@@ -1138,10 +1229,14 @@ if QApplication is not None:
             self.tabs.addTab(self._build_support_tab(), "请作者喝咖啡")
             self.tabs.addTab(self._build_about_tab(), "版本更新")
             self.tabs.currentChanged.connect(self._sync_action_visibility)
-            layout.addWidget(self.tabs, 1)
+            shell_layout.addWidget(self.tabs, 1)
 
-            footer = QHBoxLayout()
-            self.status = _HudLabel("设置将保存到本地配置文件", role="muted", wrap=True)
+            footer_frame = QFrame()
+            footer_frame.setObjectName("qtHudSettingsActions")
+            footer = QHBoxLayout(footer_frame)
+            footer.setContentsMargins(12, 10, 12, 10)
+            footer.setSpacing(8)
+            self.status = _HudLabel("设置将保存到本地配置文件", role="settings-status", wrap=True)
             footer.addWidget(self.status, 1)
             self.export_button = QPushButton("导出 JSON")
             self.save_button = QPushButton("保存")
@@ -1155,6 +1250,9 @@ if QApplication is not None:
             self.check_update_button.clicked.connect(self._check_update)
             self.install_update_button.clicked.connect(self._install_update)
             self.close_button.clicked.connect(self.close)
+            self.save_button.setProperty("primary", "true")
+            self.install_update_button.setProperty("primary", "true")
+            self.close_button.setProperty("primary", "true")
             for button in (
                 self.export_button,
                 self.save_button,
@@ -1163,8 +1261,9 @@ if QApplication is not None:
                 self.install_update_button,
                 self.close_button,
             ):
+                button.setObjectName("qtHudSettingsAction")
                 footer.addWidget(button)
-            layout.addLayout(footer)
+            shell_layout.addWidget(footer_frame)
             self.setStyleSheet(_qt_stylesheet(window._theme_tokens))
             self._sync_action_visibility()
 
@@ -2021,6 +2120,24 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         border: 1px solid #2C3745;
         border-radius: 8px;
     }
+    QFrame#qtHudSettingsDialog {
+        background: #10161D;
+        border: 1px solid rgba(140, 153, 174, 72);
+        border-radius: 8px;
+    }
+    QFrame#qtHudSettingsHead,
+    QFrame#qtHudSettingsActions {
+        background: #151D27;
+        border: 0;
+    }
+    QFrame#qtHudSettingsHead {
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+    }
+    QFrame#qtHudSettingsActions {
+        border-bottom-left-radius: 8px;
+        border-bottom-right-radius: 8px;
+    }
     QFrame#qtHudPanelHeader,
     QFrame#qtHudRequestExpandedHeader {
         background: rgba(24, 33, 43, 220);
@@ -2043,23 +2160,37 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         border-radius: 7px;
         padding: 4px;
     }
+    QFrame#qtHudRequestListShell,
+    QScrollArea#qtHudRequestScroll,
+    QScrollArea#qtHudRequestScroll > QWidget,
+    QScrollArea#qtHudRequestScroll QWidget {
+        background: #101821;
+    }
     QFrame#qtHudRequestListShell {
-        background: rgba(246, 250, 255, 238);
-        border: 1px solid rgba(197, 210, 224, 230);
-        border-radius: 3px;
+        border: 1px solid rgba(39, 50, 65, 210);
+        border-radius: 4px;
     }
     QFrame#qtHudRequestRowFrame {
         background: transparent;
         border: 0;
-        border-bottom: 1px solid rgba(197, 210, 224, 120);
     }
-    QFrame#qtHudRequestRowFrame[latest="true"] {
-        background: rgba(94, 167, 255, 36);
+    QFrame#qtHudRequestRowFrame[latest="true"] QLabel#qtHudLabel-request,
+    QFrame#qtHudRequestRowFrame[latest="true"] QLabel#qtHudLabel-request-time {
+        color: #F3D27A;
     }
     QLabel#qtHudLabel-title {
         font-size: 15px;
         font-weight: 600;
         color: #F2F6FA;
+    }
+    QLabel#qtHudLabel-settings-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #F2F6FA;
+    }
+    QLabel#qtHudLabel-settings-status {
+        color: #A9BCD2;
+        font-size: 11px;
     }
     QLabel#qtHudLabel-card-title {
         font-size: 12px;
@@ -2114,12 +2245,22 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QLabel#qtHudLabel-request,
     QLabel#qtHudLabel-request-time {
         font-family: Consolas, "Cascadia Mono", monospace;
-        color: #4D6075;
+        color: #DCE7F2;
         font-size: 11px;
+        line-height: 145%;
     }
     QLabel#qtHudLabel-request-time {
-        color: #2A7ABD;
+        color: #9CCBFF;
         font-weight: 600;
+    }
+    QLabel#qtHudLabel-activity-title {
+        color: #DCE7F2;
+        font-size: 10.5px;
+        font-weight: 800;
+    }
+    QLabel#qtHudLabel-activity-detail {
+        color: #8D9AAD;
+        font-size: 10px;
     }
     QLabel#qtHudLabel-muted, QLabel#qtHudLabel-caption {
         color: #8D9AAD;
@@ -2169,6 +2310,18 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         color: #FFD6B0;
         border-color: #FF875A;
     }
+    QPushButton#qtHudSettingsAction {
+        border: 0;
+        border-radius: 5px;
+        background: #2E3846;
+        min-height: 28px;
+        padding: 4px 9px;
+    }
+    QPushButton#qtHudSettingsAction[primary="true"] {
+        color: #10161D;
+        background: #F3D27A;
+        font-weight: 700;
+    }
     QComboBox {
         color: #DCE7F2;
         background: #111820;
@@ -2204,25 +2357,26 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         background: #10161D;
     }
     QTabWidget::pane {
-        border: 1px solid #2C3745;
-        border-radius: 7px;
+        border: 0;
+        border-top: 1px solid #202833;
+        border-bottom: 1px solid #202833;
         background: #10161D;
-        padding: 8px;
+        padding: 12px;
+    }
+    QTabBar {
+        background: #10161D;
     }
     QTabBar::tab {
-        color: #9AA8BA;
-        background: #17202A;
-        border: 1px solid #2C3745;
-        border-bottom: 0;
-        padding: 7px 12px;
-        margin-right: 4px;
-        border-top-left-radius: 6px;
-        border-top-right-radius: 6px;
+        color: #A9BCD2;
+        background: transparent;
+        border: 0;
+        border-radius: 5px;
+        padding: 5px 9px;
+        margin: 8px 0 8px 6px;
     }
     QTabBar::tab:selected {
-        color: #F2F6FA;
-        background: #1D2A38;
-        border-color: #5EA7FF;
+        color: #F3D27A;
+        background: #202833;
     }
     QTableWidget {
         color: #DCE7F2;

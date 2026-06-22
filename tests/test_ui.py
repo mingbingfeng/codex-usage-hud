@@ -2694,7 +2694,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
     def test_qt_hud_window_updates_closes_and_keeps_core_widgets(self) -> None:
         try:
             import PySide6  # noqa: F401
-            from PySide6.QtWidgets import QLabel
+            from PySide6.QtWidgets import QLabel, QFrame
         except Exception as exc:
             self.skipTest(f"PySide6 unavailable: {exc}")
 
@@ -2821,6 +2821,12 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertIn("轮次流水", request_labels)
                     self.assertIn("最新在上", request_labels)
                     self.assertTrue(any(label.strip().endswith("s") for label in request_labels))
+                    self.assertLessEqual(window.request_window._row_labels[0].maximumHeight(), 24)
+                    self.assertEqual(window.request_window.rows_layout.spacing(), 0)
+                    self.assertEqual(
+                        window.request_window.request_scroll.verticalScrollBarPolicy(),
+                        qt_hud_module.Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+                    )
                     window.top_window.update_payload(
                         {
                             "topLine": "更新计划保留tk模式",
@@ -2876,10 +2882,22 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                                 "collapsed": [
                                     {"label": "本会话 15.3M", "ratio": 0.6, "tone": "session"}
                                 ],
-                                "cache": {"label": "缓存命中 97%", "ratio": 0.97, "tone": "cache"},
+                                "cache": {
+                                    "label": "缓存命中 97%",
+                                    "rightText": "15.3M",
+                                    "ratio": 0.97,
+                                    "tone": "cache",
+                                },
                                 "budget": [
                                     {"label": "今日 $10.99/$100", "ratio": 0.11, "tone": "day"},
-                                    {"label": "本周 $296.6/$400", "ratio": 0.74, "tone": "week"},
+                                    {
+                                        "label": "本周 $296.6/$400",
+                                        "rightText": "$296.6",
+                                        "overflowBadge": "超出 14%",
+                                        "overflowRatio": 0.14,
+                                        "ratio": 1.0,
+                                        "tone": "week",
+                                    },
                                 ],
                             },
                         }
@@ -2887,6 +2905,10 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertEqual(window.top_window.session_cost.text(), "$11.66")
                     self.assertEqual(window.top_window.session_input_tokens.text(), "241k")
                     self.assertEqual(window.top_window.activity_elapsed.text(), "34m25s")
+                    self.assertIn("15.3M", window.top_window.cache_progress.toolTip())
+                    self.assertIn("超出 14%", window.top_window._budget_progress[1].toolTip())
+                    self.assertEqual(window.top_window._activity_rows[0][1].objectName(), "qtHudLabel-activity-title")
+                    self.assertEqual(window.top_window._activity_rows[0][2].objectName(), "qtHudLabel-activity-detail")
                     self.assertEqual(window.top_window.current_task._copy_text, "更新计划保留tk模式")
                     self.assertEqual(window.top_window.slow_chip._copy_text, "python -m unittest")
                     self.assertTrue(window.top_window.update_button.isVisible())
@@ -2909,6 +2931,11 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertEqual(dialog.tabs.tabText(0), "设置")
                     self.assertEqual(dialog.tabs.tabText(1), "请作者喝咖啡")
                     self.assertEqual(dialog.tabs.tabText(2), "版本更新")
+                    frame_names = {frame.objectName() for frame in dialog.findChildren(QFrame)}
+                    self.assertIn("qtHudSettingsDialog", frame_names)
+                    self.assertIn("qtHudSettingsHead", frame_names)
+                    self.assertIn("qtHudSettingsActions", frame_names)
+                    self.assertEqual(dialog.save_button.property("primary"), "true")
                     self.assertGreater(dialog.price_table.rowCount(), 0)
                     dialog.daily_budget.setText("12.5")
                     dialog.work_overlay_max_items.setText("3")
