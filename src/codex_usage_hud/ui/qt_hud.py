@@ -29,6 +29,7 @@ from .tk_hud import (
     WindowRect,
     _visual_anchor_geometry,
 )
+from .work_overlay_qt import work_overlay_max_items_for_screen_height
 
 QT_HUD_TOP_WIDTH = 520
 QT_HUD_REQUEST_WIDTH = 380
@@ -593,6 +594,7 @@ if QApplication is not None:
             self._resize_start_geometry: QRect | None = None
             self._resizing = False
             self._manual_positioned = False
+            self._collapsed_geometry: QRect | None = None
             self._on_interaction = on_interaction
             self._on_geometry_changed = on_geometry_changed
             self._animation: QPropertyAnimation | None = None
@@ -654,9 +656,22 @@ if QApplication is not None:
             self.setMinimumHeight(1)
             self.setMaximumHeight(16777215)
             start = self.geometry()
+            if expanded:
+                self._collapsed_geometry = QRect(start)
             target_height = self._target_height(expanded)
-            target_y = start.bottom() - target_height + 1 if self._grow_from_bottom else start.y()
-            target = QRect(start.x(), target_y, start.width(), target_height)
+            if self._grow_from_bottom:
+                if expanded:
+                    collapsed = self._collapsed_geometry or start
+                    target_y = collapsed.y() - (target_height - self._collapsed_height)
+                    target = QRect(collapsed.x(), target_y, start.width(), target_height)
+                else:
+                    collapsed = self._collapsed_geometry
+                    if collapsed is not None:
+                        target = QRect(start.x(), collapsed.y(), start.width(), self._collapsed_height)
+                    else:
+                        target = QRect(start.x(), start.bottom() - target_height + 1, start.width(), target_height)
+            else:
+                target = QRect(start.x(), start.y(), start.width(), target_height)
             if self._animation is not None:
                 self._animation.stop()
             self._animation = QPropertyAnimation(self, b"geometry")
@@ -675,6 +690,7 @@ if QApplication is not None:
                 self.setFixedHeight(self._expanded_height)
             else:
                 self.setFixedHeight(self._collapsed_height)
+                self._collapsed_geometry = None
 
         def geometry_interaction_active(self) -> bool:
             if self._drag_origin is not None or self._dragging or self._resizing:
@@ -692,6 +708,8 @@ if QApplication is not None:
             width = max(1, int(self.width()))
             height = max(1, int(self.height()))
             edge = QT_RESIZE_EDGE_HIT_SIZE
+            if self._grow_from_bottom and self._expanded and 2 <= x < max(2, width - 2) and 0 <= y < edge:
+                return "top"
             if not (2 <= y < max(2, height - 2)):
                 return ""
             if 2 <= x < 2 + edge:
@@ -700,10 +718,15 @@ if QApplication is not None:
                 return "right"
             return ""
 
+        def _minimum_expanded_height(self) -> int:
+            return 240 if self._target == "top" else 120
+
         @staticmethod
         def _resize_cursor(edge: str) -> Qt.CursorShape:
             if edge in {"left", "right"}:
                 return Qt.CursorShape.SizeHorCursor
+            if edge == "top":
+                return Qt.CursorShape.SizeVerCursor
             return Qt.CursorShape.ArrowCursor
 
         def _install_resize_cursor_tracking(self, widget: QWidget) -> None:
@@ -745,6 +768,9 @@ if QApplication is not None:
 
         def _start_edge_resize(self, edge: str, global_position: QPoint) -> None:
             self._on_interaction()
+            if edge == "top":
+                self.setMinimumHeight(1)
+                self.setMaximumHeight(16777215)
             self._resize_edge = edge
             self._resize_origin = global_position
             self._resize_start_geometry = self.geometry()
@@ -763,16 +789,25 @@ if QApplication is not None:
                 geometry.setWidth(new_width)
             elif self._resize_edge == "right":
                 geometry.setWidth(max(minimum_width, self._resize_start_geometry.width() + delta.x()))
+            elif self._resize_edge == "top":
+                minimum_height = self._minimum_expanded_height() if self._expanded else self._collapsed_height
+                new_height = max(minimum_height, self._resize_start_geometry.height() - delta.y())
+                geometry.setY(self._resize_start_geometry.bottom() - new_height + 1)
+                geometry.setHeight(new_height)
             else:
                 return False
             self.setGeometry(geometry)
             return True
 
         def _finish_edge_resize(self, position: QPoint) -> None:
+            was_top_resize = self._resize_edge == "top"
             self._resizing = False
             self._resize_edge = ""
             self._resize_origin = None
             self._resize_start_geometry = None
+            if was_top_resize and self._expanded:
+                self._expanded_height = max(self._minimum_expanded_height(), int(self.height()))
+                self.setFixedHeight(self._expanded_height)
             self._emit_geometry_changed("resize")
             self._sync_resize_cursor(position)
 
@@ -805,15 +840,17 @@ if QApplication is not None:
 
         def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
             if event.button() == Qt.MouseButton.LeftButton:
-                edge = self._resize_edge_at(event.position().toPoint())
+                position = event.position().toPoint()
+                edge = self._resize_edge_at(position)
                 if edge:
                     self._start_edge_resize(edge, event.globalPosition().toPoint())
                     event.accept()
                     return
-                self._on_interaction()
-                self._drag_origin = event.globalPosition().toPoint()
-                self._drag_window_origin = self.pos()
-                self._dragging = False
+                if self._should_start_drag_from_click(position):
+                    self._on_interaction()
+                    self._drag_origin = event.globalPosition().toPoint()
+                    self._drag_window_origin = self.pos()
+                    self._dragging = False
             super().mousePressEvent(event)
 
         def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -846,15 +883,19 @@ if QApplication is not None:
                     self.toggle_expanded()
             super().mouseReleaseEvent(event)
 
-        def _should_toggle_from_click(self, position: QPoint) -> bool:
-            if not self._expanded:
-                return True
+        def _panel_header_at(self, position: QPoint) -> QWidget | None:
             child = self.childAt(position)
             while child is not None and child is not self:
-                if child.objectName() == "qtHudPanelHeader":
-                    return True
+                if child.objectName() in {"qtHudPanelHeader", "qtHudRequestExpandedHeader"}:
+                    return child
                 child = child.parentWidget()
-            return False
+            return None
+
+        def _should_start_drag_from_click(self, position: QPoint) -> bool:
+            return not self._expanded or self._panel_header_at(position) is not None
+
+        def _should_toggle_from_click(self, position: QPoint) -> bool:
+            return not self._expanded or self._panel_header_at(position) is not None
 
         def leaveEvent(self, event: Any) -> None:  # noqa: N802
             if not self._resizing:
@@ -1506,9 +1547,11 @@ if QApplication is not None:
             layout.setContentsMargins(4, 0, 4, 0)
             layout.setSpacing(0)
             self.prefix = _HudLabel("", role="request")
-            self.prefix.setMinimumWidth(86)
+            self.prefix.setFixedWidth(104)
+            self.prefix.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
             self.time = _HudLabel("", role="request-time")
             self.time.setFixedWidth(62)
+            self.time.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Minimum)
             self.suffix = _HudLabel("", role="request")
             layout.addWidget(self.prefix)
             layout.addWidget(self.time)
@@ -1690,10 +1733,16 @@ if QApplication is not None:
         def __init__(self, window: "_QtHudWindowImpl") -> None:
             super().__init__(window.top_window)
             self._window = window
+            self._title_drag_origin: QPoint | None = None
+            self._title_drag_window_origin: QPoint | None = None
             self.setWindowTitle("codex-usage-hud 设置")
-            self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-            self.setMinimumSize(760, 560)
-            self.resize(780, 580)
+            self.setWindowFlags(
+                Qt.WindowType.Dialog
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.WindowStaysOnTopHint
+            )
+            self.setMinimumSize(760, 600)
+            self.resize(780, 620)
             layout = QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(0)
@@ -1716,6 +1765,9 @@ if QApplication is not None:
             close_top.clicked.connect(self.close)
             header.addWidget(close_top)
             shell_layout.addWidget(header_frame)
+            for drag_widget in (header_frame, title):
+                drag_widget.installEventFilter(self)
+                drag_widget.setCursor(Qt.CursorShape.SizeAllCursor)
 
             self.tabs = QTabWidget()
             self.tabs.setObjectName("qtHudSettingsTabs")
@@ -1734,13 +1786,11 @@ if QApplication is not None:
             footer.addWidget(self.status, 1)
             self.export_button = QPushButton("导出 JSON")
             self.save_button = QPushButton("保存")
-            self.apply_button = QPushButton("立即切换")
             self.check_update_button = QPushButton("检查更新")
             self.install_update_button = QPushButton("安装更新")
             self.close_button = QPushButton("关闭")
             self.export_button.clicked.connect(self._export_json)
             self.save_button.clicked.connect(self._save_only)
-            self.apply_button.clicked.connect(self._apply_now)
             self.check_update_button.clicked.connect(self._check_update)
             self.install_update_button.clicked.connect(self._install_update)
             self.close_button.clicked.connect(self.close)
@@ -1750,7 +1800,6 @@ if QApplication is not None:
             for button in (
                 self.export_button,
                 self.save_button,
-                self.apply_button,
                 self.check_update_button,
                 self.install_update_button,
                 self.close_button,
@@ -1760,6 +1809,27 @@ if QApplication is not None:
             shell_layout.addWidget(footer_frame)
             self.setStyleSheet(_qt_stylesheet(window._theme_tokens))
             self._sync_action_visibility()
+
+        def eventFilter(self, watched: object, event: QEvent) -> bool:  # noqa: N802
+            if isinstance(watched, QWidget):
+                event_type = event.type()
+                if isinstance(event, QMouseEvent):
+                    if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                        self._title_drag_origin = event.globalPosition().toPoint()
+                        self._title_drag_window_origin = self.pos()
+                        event.accept()
+                        return True
+                    if event_type == QEvent.Type.MouseMove and self._title_drag_origin is not None and self._title_drag_window_origin is not None:
+                        delta = event.globalPosition().toPoint() - self._title_drag_origin
+                        self.move(self._title_drag_window_origin + delta)
+                        event.accept()
+                        return True
+                    if event_type == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                        self._title_drag_origin = None
+                        self._title_drag_window_origin = None
+                        event.accept()
+                        return True
+            return super().eventFilter(watched, event)
 
         def _build_settings_tab(self) -> QWidget:
             outer = QWidget()
@@ -1784,9 +1854,11 @@ if QApplication is not None:
             self.display_mode.addItem("Renderer 内嵌 HUD", "renderer")
             self.display_mode.addItem("Qt 独立窗口", "qt")
             self.display_mode.addItem("Tk 独立窗口", "tk")
-            configured = self._window.user_settings.display_mode
-            index = max(0, self.display_mode.findData(configured))
+            self._configured_display_mode = str(self._window.user_settings.display_mode)
+            self._display_mode_touched = False
+            index = max(0, self.display_mode.findData(self._window.active_display_mode))
             self.display_mode.setCurrentIndex(index)
+            self.display_mode.currentIndexChanged.connect(self._on_display_mode_selected)
             self.daily_budget = QLineEdit(f"{self._window.user_settings.daily_budget_usd:g}")
             self.weekly_budget = QLineEdit(f"{self._window.user_settings.weekly_budget_usd:g}")
             self.daily_reset = QLineEdit(str(self._window.user_settings.daily_reset_time))
@@ -1795,36 +1867,48 @@ if QApplication is not None:
             for value, label in enumerate(["周一", "周二", "周三", "周四", "周五", "周六", "周日"]):
                 self.weekday.addItem(label, value)
             self.weekday.setCurrentIndex(max(0, min(6, int(self._window.user_settings.weekly_reset_weekday))))
-            self.work_overlay_max_items = QLineEdit(str(self._window.user_settings.work_overlay_max_items))
+            self.work_overlay_max_items = QComboBox()
+            for value in self._work_overlay_setting_values():
+                label = f"{value} - 不启用" if value == 0 else str(value)
+                self.work_overlay_max_items.addItem(label, value)
+            overlay_index = max(
+                0,
+                self.work_overlay_max_items.findData(
+                    self._work_overlay_setting_value(self._window.user_settings.work_overlay_max_items)
+                ),
+            )
+            self.work_overlay_max_items.setCurrentIndex(overlay_index)
             self.pricing_url = QLineEdit(str(self._window.user_settings.pricing_url or ""))
             self.thresholds = QLineEdit(
                 ",".join(f"{item:g}" for item in self._window.user_settings.budget_thresholds)
             )
             self.weekly_adjustment = QLineEdit(f"{self._window.user_settings.weekly_adjustment_usd:g}")
-            self._add_field(form, 0, 0, "显示模式", self.display_mode)
-            self._add_field(form, 1, 0, "日额度 USD", self.daily_budget)
-            self._add_field(form, 1, 1, "周额度 USD", self.weekly_budget)
-            self._add_field(form, 2, 0, "日重置 HH:MM", self.daily_reset)
-            self._add_field(form, 2, 1, "周重置 HH:MM", self.weekly_reset)
-            self._add_field(form, 3, 0, "周起始日", self.weekday)
-            self._add_field(form, 3, 1, "气泡最大数", self.work_overlay_max_items)
-            self._add_field(form, 4, 0, "提醒阈值", self.thresholds)
-            self._add_field(form, 4, 1, "本周补充已使用额度 USD", self.weekly_adjustment)
-            body_layout.addLayout(form)
+            weekly_reset_controls = QWidget()
+            weekly_reset_layout = QHBoxLayout(weekly_reset_controls)
+            weekly_reset_layout.setContentsMargins(0, 0, 0, 0)
+            weekly_reset_layout.setSpacing(6)
+            weekly_reset_layout.addWidget(self.weekday, 1)
+            weekly_reset_layout.addWidget(self.weekly_reset, 1)
 
-            pricing_box = QFrame()
-            pricing_box.setObjectName("qtHudMetricBox")
-            pricing_layout = QVBoxLayout(pricing_box)
-            pricing_layout.setContentsMargins(8, 6, 8, 8)
-            pricing_layout.setSpacing(6)
-            pricing_layout.addWidget(_HudLabel("计费单价获取地址", role="caption"))
-            pricing_row = QHBoxLayout()
-            pricing_row.addWidget(self.pricing_url, 1)
+            pricing_controls = QWidget()
+            pricing_layout = QHBoxLayout(pricing_controls)
+            pricing_layout.setContentsMargins(0, 0, 0, 0)
+            pricing_layout.setSpacing(8)
+            pricing_layout.addWidget(self.pricing_url, 1)
             fetch_button = QPushButton("拉取")
             fetch_button.clicked.connect(self._fetch_prices)
-            pricing_row.addWidget(fetch_button)
-            pricing_layout.addLayout(pricing_row)
-            body_layout.addWidget(pricing_box)
+            pricing_layout.addWidget(fetch_button)
+
+            self._add_field(form, 0, 0, "日额度 USD", self.daily_budget)
+            self._add_field(form, 0, 1, "周额度 USD", self.weekly_budget)
+            self._add_field(form, 1, 0, "日额度重置时间", self.daily_reset)
+            self._add_field(form, 1, 1, "周额度重置", weekly_reset_controls)
+            self._add_field(form, 2, 0, "HUD 显示方案", self.display_mode)
+            self._add_field(form, 2, 1, "会话气泡最大显示数（0 表示不启用）", self.work_overlay_max_items)
+            self._add_field(form, 3, 0, "超额提醒阈值", self.thresholds)
+            self._add_field(form, 3, 1, "本周补充已使用额度 USD", self.weekly_adjustment)
+            self._add_field(form, 4, 0, "计费单价获取地址", pricing_controls, column_span=2)
+            body_layout.addLayout(form)
 
             price_box = QFrame()
             price_box.setObjectName("qtHudMetricBox")
@@ -1834,19 +1918,22 @@ if QApplication is not None:
             price_layout.addWidget(_HudLabel("模型单价（USD / 1M tokens）", role="caption"))
             self.price_table = QTableWidget(0, 5)
             self.price_table.setObjectName("qtHudPriceTable")
+            self.price_table.setMinimumHeight(190)
+            self.price_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.price_table.setHorizontalHeaderLabels(["模型", "输入", "缓存", "输出", "推理"])
             self.price_table.verticalHeader().setVisible(False)
             self.price_table.setAlternatingRowColors(True)
+            self.price_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             header = self.price_table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
             for index in range(1, 5):
                 header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
             self._replace_price_rows(self._window.user_settings.model_prices)
-            price_layout.addWidget(self.price_table)
+            price_layout.addWidget(self.price_table, 1)
             add_model = QPushButton("添加模型")
             add_model.clicked.connect(lambda: self._append_price_row("future-model", {}))
             price_layout.addWidget(add_model, alignment=Qt.AlignmentFlag.AlignLeft)
-            body_layout.addWidget(price_box)
+            body_layout.addWidget(price_box, 1)
 
             foot = QFrame()
             foot_layout = QHBoxLayout(foot)
@@ -1867,41 +1954,52 @@ if QApplication is not None:
             tab.setObjectName("qtHudSettingsPage")
             layout = QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(10)
+            layout.setSpacing(12)
             layout.addWidget(
                 _HudLabel(
                     "如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。",
-                    role="body",
+                    role="muted",
                     wrap=True,
                 )
             )
             grid = QGridLayout()
-            grid.setHorizontalSpacing(10)
-            grid.setVerticalSpacing(10)
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(12)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
             for index, item in enumerate(support_qr_asset_paths()):
                 card = QFrame()
-                card.setObjectName("qtHudMetricBox")
+                card.setObjectName("qtHudSupportQrCard")
+                card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
                 card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(10, 8, 10, 10)
-                card_layout.setSpacing(6)
-                card_layout.addWidget(
-                    _HudLabel(f"{item['label']}  {item['hint']}", role="strong")
-                )
+                card_layout.setContentsMargins(10, 10, 10, 10)
+                card_layout.setSpacing(8)
+                title_row = QHBoxLayout()
+                title_row.setContentsMargins(0, 0, 0, 0)
+                title_row.setSpacing(8)
+                title_row.addWidget(_HudLabel(str(item["label"]), role="strong"), 1)
+                hint = _HudLabel(str(item["hint"]), role="caption")
+                hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                title_row.addWidget(hint)
+                card_layout.addLayout(title_row)
                 image = QLabel()
+                image.setObjectName("qtHudSupportQrImage")
                 image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                image.setMinimumSize(260, 260)
+                image.setMaximumSize(260, 360)
                 pixmap = QPixmap(str(item["path"]))
                 if not pixmap.isNull():
                     image.setPixmap(
                         pixmap.scaled(
-                            180,
-                            180,
+                            260,
+                            360,
                             Qt.AspectRatioMode.KeepAspectRatio,
                             Qt.TransformationMode.SmoothTransformation,
                         )
                     )
                 else:
                     image.setText("赞赏码资源未加载")
-                card_layout.addWidget(image)
+                card_layout.addWidget(image, 0, Qt.AlignmentFlag.AlignHCenter)
                 grid.addWidget(card, index // 2, index % 2)
             layout.addLayout(grid)
             layout.addWidget(
@@ -1941,7 +2039,6 @@ if QApplication is not None:
             is_about = active == 2
             self.export_button.setVisible(is_settings)
             self.save_button.setVisible(is_settings)
-            self.apply_button.setVisible(is_settings)
             self.check_update_button.setVisible(is_about)
             self.install_update_button.setVisible(is_about)
             self.close_button.setVisible(not is_settings)
@@ -1973,7 +2070,30 @@ if QApplication is not None:
             form.addWidget(box, row, column, 1, column_span)
 
         def _selected_mode(self) -> str:
+            if not self._display_mode_touched:
+                return str(self._configured_display_mode or self._window.user_settings.display_mode)
             return str(self.display_mode.currentData() or "auto")
+
+        def _work_overlay_selectable_max(self) -> int:
+            screen = QApplication.primaryScreen()
+            height = screen.size().height() if screen is not None else 1080
+            return work_overlay_max_items_for_screen_height(int(height))
+
+        def _work_overlay_setting_value(self, count: object) -> int:
+            try:
+                value = int(count)
+            except (TypeError, ValueError):
+                value = 0
+            return min(self._work_overlay_selectable_max(), max(0, value))
+
+        def _work_overlay_setting_values(self) -> list[int]:
+            return list(range(0, self._work_overlay_selectable_max() + 1))
+
+        def _selected_work_overlay_max_items(self) -> int:
+            data = self.work_overlay_max_items.currentData()
+            if data is None:
+                return self._work_overlay_setting_value(self.work_overlay_max_items.currentText().split(" ", 1)[0])
+            return self._work_overlay_setting_value(data)
 
         def _append_price_row(self, model: str, values: Mapping[str, object]) -> None:
             row = self.price_table.rowCount()
@@ -1988,6 +2108,16 @@ if QApplication is not None:
             for model, price in sorted(prices.items()):
                 values = price.to_dict() if hasattr(price, "to_dict") else dict(price or {})
                 self._append_price_row(str(model), values)
+            if self.price_table.rowCount() > 4:
+                self.price_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self._sync_price_table_height()
+
+        def _sync_price_table_height(self) -> None:
+            header_height = self.price_table.horizontalHeader().height()
+            row_height = self.price_table.verticalHeader().defaultSectionSize()
+            visible_rows = min(max(1, self.price_table.rowCount()), 4)
+            frame = self.price_table.frameWidth() * 2
+            self.price_table.setFixedHeight(header_height + (row_height * visible_rows) + frame + 4)
 
         def _price_payload(self) -> dict[str, dict[str, object]]:
             payload: dict[str, dict[str, object]] = {}
@@ -2015,7 +2145,7 @@ if QApplication is not None:
                     "daily_reset_time": self.daily_reset.text(),
                     "weekly_reset_weekday": self.weekday.currentData(),
                     "weekly_reset_time": self.weekly_reset.text(),
-                    "work_overlay_max_items": self.work_overlay_max_items.text(),
+                    "work_overlay_max_items": self._selected_work_overlay_max_items(),
                     "pricing_url": self.pricing_url.text(),
                     "budget_thresholds": self.thresholds.text(),
                     "weekly_adjustment_usd": self.weekly_adjustment.text(),
@@ -2029,15 +2159,27 @@ if QApplication is not None:
 
         def _save_only(self) -> None:
             config = self._save_config()
-            self.status.setText(f"已保存为 {config.display_mode}，当前窗口继续运行。")
-
-        def _apply_now(self) -> None:
-            config = self._save_config()
             target = effective_display_mode(config.display_mode)
+            self.status.setText(
+                "已保存到本地配置；预算和价格会自动刷新。"
+                if target == self._window.active_display_mode
+                else f"已保存到本地配置；当前会话仍保持 Qt，{target} 方案会在下次切换或启动时生效。"
+            )
+
+        def _on_display_mode_selected(self, _index: int) -> None:
+            self._display_mode_touched = True
+            selected_mode = self._selected_mode()
+            target = effective_display_mode(selected_mode)
             if target == self._window.active_display_mode:
-                self.status.setText("当前已经处于所选显示模式。")
+                self.status.setText(
+                    "当前显示方案无需立即切换；点击保存后会写入新的启动偏好。"
+                    if selected_mode != self._window.user_settings.display_mode
+                    else "当前已经处于所选显示模式。"
+                )
                 return
-            self._window.request_mode_switch(target)
+            config = self._save_config()
+            self.status.setText("正在应用新的 HUD 显示方案...")
+            self._window.request_mode_switch(effective_display_mode(config.display_mode))
 
         def _fetch_prices(self) -> None:
             url = self.pricing_url.text().strip()
@@ -2268,10 +2410,18 @@ if QApplication is not None:
         def close(self, reason: str = "") -> None:
             if reason and not self.exit_reason:
                 self.exit_reason = reason
+            for timer in (getattr(self, "_clock_timer", None), getattr(self, "_follow_timer", None)):
+                if timer is not None:
+                    timer.stop()
             if self._settings_dialog is not None:
                 self._settings_dialog.close()
-            self.top_window.close()
-            self.request_window.close()
+                self._settings_dialog.deleteLater()
+                self._settings_dialog = None
+            for window in (self.top_window, self.request_window):
+                window.hide()
+                window.close()
+                window.deleteLater()
+            self.app.processEvents()
             self.app.quit()
 
         def open_settings(self) -> None:
@@ -2388,8 +2538,6 @@ if QApplication is not None:
             x, y, width, default_height = _visual_anchor_geometry(target, rect, expanded)
             panel = self.top_window if target == "top" else self.request_window
             height = panel._target_height(expanded)
-            if target != "top" and height != default_height:
-                y -= height - default_height
             source = "qt-visual"
             anchor_left = x
             anchor_top = y
@@ -2475,7 +2623,16 @@ if QApplication is not None:
             rect: WindowRect,
             expanded: bool,
         ) -> tuple[int, int, int, int]:
-            x, y, anchor_width, height = self._attached_anchor_geometry(target, rect, expanded)
+            panel = self.top_window if target == "top" else self.request_window
+            anchor_expanded = expanded if target == "top" else False
+            x, y, anchor_width, _anchor_height_value = self._attached_anchor_geometry(
+                target,
+                rect,
+                anchor_expanded,
+            )
+            height = panel._target_height(expanded)
+            if target != "top" and expanded:
+                y -= max(0, height - panel._collapsed_height)
             (
                 anchor_x,
                 anchor_y,
@@ -2485,7 +2642,7 @@ if QApplication is not None:
             ) = self._anchor_metrics(
                 target,
                 rect,
-                expanded,
+                anchor_expanded,
             )
             placement = self._placement(target)
             width = self._attached_panel_width(target, anchor_width, anchor_source)
@@ -2506,10 +2663,15 @@ if QApplication is not None:
                     else:
                         y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
                 else:
-                    bottom = anchor_y + int(
-                        round(anchor_height * float(placement.anchor_y_ratio))
-                    )
-                    y = bottom - height
+                    if placement.relative_bottom_ratio is not None:
+                        bottom = int(round(rect.height * placement.relative_bottom_ratio))
+                        y = rect.bottom - bottom - height
+                    elif placement.relative_y_ratio is not None:
+                        collapsed_y = rect.top + int(round(rect.height * placement.relative_y_ratio))
+                        y = collapsed_y - max(0, height - panel._collapsed_height)
+                    else:
+                        collapsed_y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
+                        y = collapsed_y - max(0, height - panel._collapsed_height)
             elif target == "top":
                 if placement.relative_x_ratio is not None and placement.relative_y_ratio is not None:
                     x = rect.left + int(round(rect.width * placement.relative_x_ratio))
@@ -2554,12 +2716,12 @@ if QApplication is not None:
                         placement.relative_bottom_ratio = None
                         placement.anchor_y_ratio = (int(panel.y()) - anchor_y) / max(1, anchor_height)
                     else:
+                        placement.relative_y = int(panel.y()) - rect.top
+                        placement.relative_y_ratio = placement.relative_y / max(1, rect.height)
                         bottom = int(panel.y()) + int(panel.height())
-                        placement.relative_y = None
-                        placement.relative_y_ratio = None
                         placement.relative_bottom = rect.bottom - bottom
                         placement.relative_bottom_ratio = placement.relative_bottom / max(1, rect.height)
-                        placement.anchor_y_ratio = (bottom - anchor_y) / max(1, anchor_height)
+                        placement.anchor_y_ratio = (int(panel.y()) - anchor_y) / max(1, anchor_height)
                 else:
                     placement.relative_x = None
                     placement.relative_y = None
@@ -2585,8 +2747,7 @@ if QApplication is not None:
                 else:
                     placement.width_ratio = None
                 if panel.expanded:
-                    minimum = 240 if target == "top" else 120
-                    placement.height = max(minimum, int(panel.height()))
+                    placement.height = max(panel._minimum_expanded_height(), int(panel.height()))
             self.settings_store.save(self.settings)
 
         def _place_windows(self) -> None:
@@ -2752,8 +2913,8 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     }
     QFrame#qtHudSettingsDialog {
         background: #10161D;
-        border: 1px solid rgba(140, 153, 174, 72);
-        border-radius: 8px;
+        border: 0;
+        border-radius: 0;
     }
     QFrame#qtHudSettingsHead,
     QFrame#qtHudSettingsActions {
@@ -2761,12 +2922,12 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         border: 0;
     }
     QFrame#qtHudSettingsHead {
-        border-top-left-radius: 8px;
-        border-top-right-radius: 8px;
+        border-top-left-radius: 0;
+        border-top-right-radius: 0;
     }
     QFrame#qtHudSettingsActions {
-        border-bottom-left-radius: 8px;
-        border-bottom-right-radius: 8px;
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
     }
     QFrame#qtHudPanelHeader,
     QFrame#qtHudRequestExpandedHeader {
@@ -2783,11 +2944,16 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QFrame#qtHudMetricBox,
     QFrame#qtHudInset,
     QFrame#qtHudTokenChip,
-    QFrame#qtHudHeavyRow {
+    QFrame#qtHudHeavyRow,
+    QFrame#qtHudSupportQrCard {
         background: rgba(255, 255, 255, 18);
         border: 1px solid rgba(255, 255, 255, 24);
         border-radius: 7px;
         padding: 4px;
+    }
+    QLabel#qtHudSupportQrImage {
+        background: #FFFFFF;
+        border-radius: 6px;
     }
     QFrame#qtHudRequestListShell,
     QScrollArea#qtHudRequestScroll,

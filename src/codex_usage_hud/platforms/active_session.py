@@ -132,9 +132,9 @@ class RealtimeSessionWatcher:
         current = threading.current_thread()
         for thread in list(self._threads):
             if thread is not current and thread.is_alive():
-                thread.join(timeout=0.5)
-        self._threads.clear()
-        self.primary_thread = None
+                thread.join(timeout=2.0)
+        self._threads = [thread for thread in self._threads if thread.is_alive()]
+        self.primary_thread = None if not self._threads else self.primary_thread
 
     def _start_thread(
         self,
@@ -313,7 +313,7 @@ class ActiveSessionTracker:
         thread = self._thread
         self._thread = None
         if thread is not None and thread.is_alive():
-            thread.join(timeout=0.5)
+            thread.join(timeout=2.0)
 
     def wait_for_title(self, timeout_ms: int = 1200) -> None:
         """Give the background title probe a short chance to produce an initial title."""

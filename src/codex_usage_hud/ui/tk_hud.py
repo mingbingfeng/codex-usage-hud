@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import gc
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -4637,12 +4638,12 @@ def _request_total_line(snapshot: ParsedSession) -> str:
     return " ".join(
         [
             _format_fixed_money(cost, estimated),
-            f"∑{_fixed_token_total(total_tokens)}",
             f"↑{'~' if estimated else ''}{_short_num(input_tokens)}",
-            f"↻{'~' if estimated else ''}{_short_num(cached_tokens)}",
             _session_cache_hit_rate_label(snapshot),
             f"↓{'~' if estimated else ''}{_short_num(output_tokens)}",
             f"◇{'~' if estimated else ''}{_short_num(reasoning_tokens)}",
+            f"↻{'~' if estimated else ''}{_short_num(cached_tokens)}",
+            f"∑{_fixed_token_total(total_tokens)}",
         ]
     )
 
@@ -4707,11 +4708,10 @@ def _round_entry(
     if total_width is not None:
         total_text = total_text.rjust(total_width)
     return (
-        f"#{index_text} {money_text} "
-        f"∑{total_text} {time_text} "
-        f"↑{_short_num(item.input_tokens)} ↻{_short_num(item.cached_tokens)} "
-        f"{_round_cache_hit_rate_label(item)} "
-        f"↓{_short_num(item.output_tokens)} ◇{_short_num(item.reasoning_tokens)}"
+        f"#{index_text} {money_text} {time_text} "
+        f"↑{_short_num(item.input_tokens)} {_round_cache_hit_rate_label(item)} "
+        f"↓{_short_num(item.output_tokens)} ◇{_short_num(item.reasoning_tokens)} "
+        f"↻{_short_num(item.cached_tokens)} ∑{total_text}"
     )
 
 
@@ -9970,20 +9970,57 @@ class TokenHudWindow:
             self.root.destroy()
         except tk.TclError:
             pass
+        self._clear_tk_widget_references()
+        gc.collect()
 
     def _release_tk_image_references(self) -> None:
-        """Drop PhotoImage references while the Tk interpreter is still alive."""
+        """Drop Tcl-owned resources while the Tk interpreter is still alive."""
         self._settings_support_images = []
         _HUD_PROGRESS_IMAGE_CACHE.clear()
         _HUD_PROGRESS_IMAGE_CACHE_ORDER.clear()
+
+        def release_image(image: object) -> None:
+            name = getattr(image, "name", None)
+            tk_app = getattr(image, "tk", None)
+            if name and tk_app is not None:
+                try:
+                    tk_app.call("image", "delete", name)
+                except Exception:
+                    pass
+            try:
+                setattr(image, "name", None)
+            except Exception:
+                pass
+
+        def release_font(font: object) -> None:
+            if not isinstance(font, tkfont.Font):
+                return
+            try:
+                if getattr(font, "delete_font", False):
+                    try:
+                        font._call("font", "delete", font.name)
+                    except Exception:
+                        pass
+                    font.delete_font = False
+            except Exception:
+                pass
 
         def clear_widget_images(widget: tk.Misc) -> None:
             for attribute in ("_track_surface_image", "_fill_surface_image", "_image"):
                 if hasattr(widget, attribute):
                     try:
+                        value = getattr(widget, attribute)
+                        if value is not None:
+                            release_image(value)
                         setattr(widget, attribute, None)
                     except Exception:
                         pass
+            if hasattr(widget, "_font"):
+                try:
+                    release_font(getattr(widget, "_font"))
+                    setattr(widget, "_font", None)
+                except Exception:
+                    pass
             try:
                 children = list(widget.winfo_children())
             except tk.TclError:
@@ -9993,6 +10030,34 @@ class TokenHudWindow:
 
         for window in (self.root, self.request_root):
             clear_widget_images(window)
+
+    def _clear_tk_widget_references(self) -> None:
+        self._settings_dialog = None
+        self._settings_entries.clear()
+        self._settings_price_rows.clear()
+        self._settings_body_frame = None
+        self._settings_actions_frame = None
+        self._settings_status_label = None
+        self._settings_tab_buttons.clear()
+        self._settings_canvas = None
+        self._settings_prices_body = None
+        self._settings_update_check_button = None
+        self._settings_update_install_button = None
+        self._settings_loading_layer = None
+        self._settings_loading_kicker_label = None
+        self._settings_loading_title_label = None
+        self._settings_loading_body_label = None
+        self._settings_loading_track = None
+        self._top_update_button = None
+        self._top_update_buttons.clear()
+        self._drag_window = None
+        self._resize_window = None
+        self._top_shell = None
+        self._top_collapsed_frame = None
+        self._top_expanded_frame = None
+        self.top_labels.clear()
+        self.request_label = None
+        self.request_text = None
 
     def update_display(
         self,

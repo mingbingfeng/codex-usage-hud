@@ -2455,7 +2455,7 @@ class AutoScrollHelpersTests(unittest.TestCase):
         self.assertIn("类型: 模型思考", detail)
         self.assertIn("结束事件: reasoning:先看入口和数据流", detail)
 
-    def test_request_total_line_starts_with_aligned_money_and_total(self) -> None:
+    def test_request_total_line_matches_renderer_token_order(self) -> None:
         snapshot = ParsedSession()
         snapshot.request.input_tokens = 194_000
         snapshot.request.cached_tokens = 93_000
@@ -2465,7 +2465,13 @@ class AutoScrollHelpersTests(unittest.TestCase):
         snapshot.request.cost_usd = 0.094
         snapshot.request.estimated = False
 
-        self.assertTrue(_request_total_line(snapshot).startswith("$0.094 ∑295k"))
+        line = _request_total_line(snapshot)
+
+        self.assertTrue(line.startswith("$0.094 ↑194k"))
+        self.assertLess(line.index("↑194k"), line.index("◎48%"))
+        self.assertLess(line.index("◎48%"), line.index("↓852"))
+        self.assertLess(line.index("↻93k"), line.index("∑295k"))
+        self.assertTrue(line.endswith("↻93k ∑295k"))
 
     def test_request_total_line_includes_session_cache_hit_rate(self) -> None:
         snapshot = ParsedSession()
@@ -2479,7 +2485,7 @@ class AutoScrollHelpersTests(unittest.TestCase):
 
         self.assertIn("◎48%", _request_total_line(snapshot))
 
-    def test_round_entry_puts_natural_sequence_money_and_total_first(self) -> None:
+    def test_round_entry_matches_renderer_token_order(self) -> None:
         item = RequestRound(
             index=33,
             status="confirmed",
@@ -2494,7 +2500,13 @@ class AutoScrollHelpersTests(unittest.TestCase):
             started_at=datetime(2026, 5, 28, 20, 36, 26).astimezone(),
         )
 
-        self.assertTrue(_round_entry(item, "gpt-5.4").startswith("#33 $0.094 ∑295k"))
+        entry = _round_entry(item, "gpt-5.4")
+
+        self.assertTrue(entry.startswith("#33 $0.094 20:36:26 ↑194k"))
+        self.assertLess(entry.index("↑194k"), entry.index("◎48%"))
+        self.assertLess(entry.index("◎48%"), entry.index("↓852"))
+        self.assertLess(entry.index("↻93k"), entry.index("∑295k"))
+        self.assertTrue(entry.endswith("↻93k ∑295k"))
 
     def test_round_entry_includes_round_cache_hit_rate(self) -> None:
         item = RequestRound(
@@ -2590,8 +2602,10 @@ class AutoScrollHelpersTests(unittest.TestCase):
         first = _round_entry(rows[0], "gpt-5.4", index_width=widths[0], money_width=widths[1], total_width=widths[2])
         second = _round_entry(rows[1], "gpt-5.4", index_width=widths[0], money_width=widths[1], total_width=widths[2])
 
-        self.assertTrue(first.startswith("#  9 $0.100 ∑2,000"))
-        self.assertTrue(second.startswith("#128 $12.34 ∑ 1.2M"))
+        self.assertTrue(first.startswith("#  9 $0.100 --:--:-- ↑1,000"))
+        self.assertTrue(first.endswith("↻0 ∑2,000"))
+        self.assertTrue(second.startswith("#128 $12.34 --:--:-- ↑1.0M"))
+        self.assertTrue(second.endswith("↻0 ∑ 1.2M"))
 
 
 class HudSettingsStoreTests(unittest.TestCase):
@@ -2800,13 +2814,39 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertFalse(window.top_window.session_meta.isVisible())
                     self.assertFalse(window.top_window.cache_progress.isVisible())
                     self.assertEqual(window.mode_switch_request, "")
+                    request_collapsed_y = window.request_window.y()
                     request_bottom = window.request_window.geometry().bottom()
+                    request_header = window.request_window.findChild(QFrame, "qtHudRequestExpandedHeader")
+                    self.assertIsNotNone(request_header)
+                    assert request_header is not None
                     window.request_window.set_expanded(True)
                     self.assertIsNotNone(window.request_window._animation)
                     assert window.request_window._animation is not None
                     request_target = window.request_window._animation.endValue()
-                    self.assertEqual(request_target.bottom(), request_bottom)
+                    self.assertEqual(
+                        request_target.y(),
+                        request_collapsed_y
+                        - (
+                            qt_hud_module.QT_HUD_REQUEST_EXPANDED_HEIGHT
+                            - qt_hud_module.QT_HUD_REQUEST_COLLAPSED_HEIGHT
+                        ),
+                    )
                     self.assertEqual(request_target.height(), qt_hud_module.QT_HUD_REQUEST_EXPANDED_HEIGHT)
+                    header_point = request_header.mapTo(window.request_window, request_header.rect().center())
+                    request_content_point = window.request_window.request_scroll.mapTo(
+                        window.request_window,
+                        window.request_window.request_scroll.rect().center(),
+                    )
+                    self.assertTrue(window.request_window._should_toggle_from_click(header_point))
+                    self.assertTrue(window.request_window._should_start_drag_from_click(header_point))
+                    self.assertFalse(window.request_window._should_toggle_from_click(request_content_point))
+                    self.assertFalse(window.request_window._should_start_drag_from_click(request_content_point))
+                    window.request_window.set_expanded(False)
+                    assert window.request_window._animation is not None
+                    request_collapsed_target = window.request_window._animation.endValue()
+                    self.assertEqual(request_collapsed_target.y(), request_collapsed_y)
+                    self.assertEqual(request_collapsed_target.bottom(), request_bottom)
+                    window.request_window.set_expanded(True)
                     window.request_window.update_payload(
                         {
                             "requestLine": "请求流水 | confirmed | gpt-5.5",
@@ -2944,13 +2984,16 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                         window.top_window.current_task.rect().center(),
                     )
                     self.assertTrue(window.top_window._should_toggle_from_click(header_point))
+                    self.assertTrue(window.top_window._should_start_drag_from_click(header_point))
                     self.assertFalse(window.top_window._should_toggle_from_click(content_point))
+                    self.assertFalse(window.top_window._should_start_drag_from_click(content_point))
                     expected_trail_height = (
                         qt_hud_module.QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT
                         * qt_hud_module.QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS
                         + 6
                     )
-                    self.assertEqual(window.top_window.trail_scroll.height(), expected_trail_height)
+                    self.assertEqual(window.top_window.trail_scroll.minimumHeight(), expected_trail_height)
+                    self.assertGreaterEqual(window.top_window.trail_scroll.height(), expected_trail_height)
                     self.assertEqual(window.top_window.gap_chip.height(), 22)
                     self.assertEqual(window.top_window.slow_chip.height(), 22)
                     right_height_before_more = top_right.height()
@@ -3004,10 +3047,44 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertIn("qtHudSettingsDialog", frame_names)
                     self.assertIn("qtHudSettingsHead", frame_names)
                     self.assertIn("qtHudSettingsActions", frame_names)
+                    dialog.tabs.setCurrentIndex(1)
+                    support_cards = dialog.findChildren(QFrame, "qtHudSupportQrCard")
+                    self.assertGreaterEqual(len(support_cards), 1)
+                    support_image = dialog.findChild(QLabel, "qtHudSupportQrImage")
+                    self.assertIsNotNone(support_image)
+                    assert support_image is not None
+                    self.assertGreaterEqual(support_image.minimumWidth(), 260)
+                    self.assertGreaterEqual(support_image.maximumHeight(), 360)
+                    dialog.tabs.setCurrentIndex(0)
+                    self.assertTrue(dialog.windowFlags() & qt_hud_module.Qt.WindowType.FramelessWindowHint)
                     self.assertEqual(dialog.save_button.property("primary"), "true")
+                    action_texts = [button.text() for button in dialog.findChildren(QPushButton)]
+                    self.assertNotIn("立即切换", action_texts)
                     self.assertGreater(dialog.price_table.rowCount(), 0)
+                    max_price_height = (
+                        dialog.price_table.horizontalHeader().height()
+                        + (dialog.price_table.verticalHeader().defaultSectionSize() * min(dialog.price_table.rowCount(), 4))
+                        + (dialog.price_table.frameWidth() * 2)
+                        + 14
+                    )
+                    self.assertLessEqual(dialog.price_table.height(), max_price_height)
+                    self.assertGreater(dialog.price_table.height(), dialog.price_table.horizontalHeader().height())
+                    self.assertEqual(
+                        dialog.price_table.verticalScrollBarPolicy(),
+                        qt_hud_module.Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+                    )
+                    self.assertEqual(dialog.display_mode.currentData(), "qt")
+                    self.assertEqual(dialog.display_mode.parentWidget().layout().itemAt(0).widget().text(), "HUD 显示方案")
+                    self.assertEqual(dialog.daily_budget.parentWidget().layout().itemAt(0).widget().text(), "日额度 USD")
+                    self.assertEqual(dialog.weekly_reset.parentWidget().parentWidget().layout().itemAt(0).widget().text(), "周额度重置")
+                    self.assertEqual(dialog.pricing_url.parentWidget().parentWidget().layout().itemAt(0).widget().text(), "计费单价获取地址")
                     dialog.daily_budget.setText("12.5")
-                    dialog.work_overlay_max_items.setText("3")
+                    self.assertGreaterEqual(dialog.work_overlay_max_items.count(), 2)
+                    self.assertEqual(dialog.work_overlay_max_items.itemData(0), 0)
+                    self.assertIn("不启用", dialog.work_overlay_max_items.itemText(0))
+                    overlay_index = dialog.work_overlay_max_items.findData(3)
+                    self.assertGreaterEqual(overlay_index, 0)
+                    dialog.work_overlay_max_items.setCurrentIndex(overlay_index)
                     dialog._save_only()
                     saved = store.load()
                     self.assertEqual(saved.daily_budget_usd, 12.5)
@@ -3015,7 +3092,6 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     tk_index = dialog.display_mode.findData("tk")
                     self.assertGreaterEqual(tk_index, 0)
                     dialog.display_mode.setCurrentIndex(tk_index)
-                    dialog._apply_now()
                     switched = store.load()
                     self.assertEqual(switched.display_mode, "tk")
                     self.assertEqual(window.mode_switch_request, "tk")

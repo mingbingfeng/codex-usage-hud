@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+import gc
 import json
 import logging
 import os
@@ -2741,6 +2742,7 @@ class RuntimeContext:
         """Release any background helpers created for the runtime context."""
         if self.active_session_tracker is not None:
             self.active_session_tracker.close()
+            self.active_session_tracker = None
 
     def reload_user_config(self) -> None:
         """Reload user config and reset cost caches when pricing changes."""
@@ -4043,6 +4045,7 @@ def _run_tk_window_session(
         getattr(context, "platform", get_current_platform()),
         prefer_native_search=True,
     )
+    window: TokenHudWindow | None = None
     try:
         try:
             window = existing_window or TokenHudWindow(
@@ -4111,6 +4114,8 @@ def _run_tk_window_session(
         if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
             return DAEMON_RESTART_REQUESTED
         mode_switch = str(getattr(window, "mode_switch_request", "") or "")
+        if mode_switch:
+            context.close()
         if mode_switch == "qt":
             return HUD_SWITCH_TO_QT
         if mode_switch == "renderer":
@@ -4123,6 +4128,8 @@ def _run_tk_window_session(
             command_pump.close()
         work_overlay.close()
         snapshot_pump.close()
+        window = None
+        gc.collect()
         if close_context:
             context.close()
 
@@ -4229,6 +4236,8 @@ def _run_qt_window_session(
         if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
             return DAEMON_RESTART_REQUESTED
         mode_switch = str(getattr(window, "mode_switch_request", "") or "")
+        if mode_switch:
+            context.close()
         if mode_switch == "tk":
             return HUD_SWITCH_TO_TK
         if mode_switch == "renderer":
