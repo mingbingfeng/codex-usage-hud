@@ -24,7 +24,14 @@ from codex_usage_hud.ui.qt_hud import QT_HUD_ANIMATION_MS, QtHudWindow
 import codex_usage_hud.ui.qt_hud as qt_hud_module
 from codex_usage_hud.ui.tk_hud import HudSettings, HudSettingsStore, WindowRect
 
-ASSETS = ROOT / ".codex_delegate" / "reports" / "qt-renderer-side-by-side-implement-2-assets"
+def _assets_dir() -> Path:
+    override = os.environ.get("CODEX_USAGE_HUD_VISUAL_ASSETS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return ROOT / ".codex_delegate" / "reports" / "qt-renderer-side-by-side-implement-2-assets"
+
+
+ASSETS = _assets_dir()
 
 
 STATE_NAMES = {
