@@ -371,13 +371,10 @@ if QApplication is not None:
 
         def set_state(self, index: int, total: int, active: bool) -> None:
             total = max(1, int(total))
-            center_x = self.width() // 2
-            center_y = self.height() // 2
-            self._top_line.setVisible(total > 1 and int(index) > 0)
-            self._bottom_line.setVisible(total > 1 and int(index) < total - 1)
-            self._top_line.setGeometry(center_x - 1, -1, 2, max(0, center_y - 5))
-            self._bottom_line.setGeometry(center_x - 1, center_y + 5, 2, self.height() - center_y - 4)
-            self._dot.move(center_x - 4, center_y - 4)
+            del index, total
+            self._top_line.setVisible(False)
+            self._bottom_line.setVisible(False)
+            self._sync_geometry()
             self._dot.setProperty("active", "true" if active else "false")
             self._dot.style().unpolish(self._dot)
             self._dot.style().polish(self._dot)
@@ -385,9 +382,13 @@ if QApplication is not None:
         def _sync_geometry(self) -> None:
             center_x = self.width() // 2
             center_y = self.height() // 2
-            self._top_line.setGeometry(center_x - 1, -1, 2, max(0, center_y - 5))
-            self._bottom_line.setGeometry(center_x - 1, center_y + 5, 2, self.height() - center_y - 4)
-            self._dot.move(center_x - 4, center_y - 4)
+            dot_radius = self._dot.height() // 2
+            line_gap = 1
+            top_bottom = max(0, center_y - dot_radius - line_gap)
+            bottom_top = min(self.height(), center_y + dot_radius + line_gap)
+            self._top_line.setGeometry(center_x - 1, 0, 2, top_bottom)
+            self._bottom_line.setGeometry(center_x - 1, bottom_top, 2, max(0, self.height() - bottom_top))
+            self._dot.move(center_x - dot_radius, center_y - dot_radius)
 
 
     class _TopCollapsedProgressStrip(QWidget):
@@ -607,12 +608,14 @@ if QApplication is not None:
             self.setMinimumWidth(min(width, 320))
             self.resize(width, self._collapsed_height)
             self.setFixedHeight(self._collapsed_height)
-            self.setWindowOpacity(0.96)
+            self._sync_window_opacity()
 
             root_layout = QVBoxLayout(self)
             root_layout.setContentsMargins(0, 0, 0, 0)
             self.shell = QFrame()
             self.shell.setObjectName("qtHudShell")
+            self.shell.setProperty("target", self._target)
+            self.shell.setProperty("expanded", "false")
             self.shell.setFrameShape(QFrame.Shape.NoFrame)
             root_layout.addWidget(self.shell)
             shell_layout = QVBoxLayout(self.shell)
@@ -621,6 +624,9 @@ if QApplication is not None:
             self._grip = _HudSizeGrip(self.shell, self._resize_finished)
             self._grip.setFixedSize(14, 14)
             self._install_resize_cursor_tracking(self)
+
+        def _sync_window_opacity(self) -> None:
+            self.setWindowOpacity(1.0 if self._target == "top" and self._expanded else 0.96)
 
         @property
         def expanded(self) -> bool:
@@ -640,6 +646,10 @@ if QApplication is not None:
                 return
             self._on_interaction()
             self._expanded = expanded
+            self.shell.setProperty("expanded", "true" if expanded else "false")
+            self.shell.style().unpolish(self.shell)
+            self.shell.style().polish(self.shell)
+            self._sync_window_opacity()
             self._stack.setCurrentIndex(1 if expanded else 0)
             self.setMinimumHeight(1)
             self.setMaximumHeight(16777215)
@@ -1079,31 +1089,38 @@ if QApplication is not None:
             self.activity_last_label, self.activity_last = self._activity_metric(metric_grid, 2)
             activity_body.addLayout(metric_grid)
             trail_head = QHBoxLayout()
+            trail_head.setContentsMargins(0, 0, 0, 0)
+            trail_head.setSpacing(5)
             trail_head.addWidget(_HudLabel("活动轨迹", role="caption"), 1)
             self.gap_chip = self._chip(trail_head)
             self.slow_chip = self._chip(trail_head)
             activity_body.addLayout(trail_head)
+            activity_body.setSpacing(4)
             self.trail_scroll = QScrollArea()
             self.trail_scroll.setObjectName("qtHudActivityTrailScroll")
-            self.trail_scroll.setWidgetResizable(True)
+            self.trail_scroll.setWidgetResizable(False)
             self.trail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.trail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            self.trail_scroll.setFixedHeight(
+            self.trail_scroll.setMinimumHeight(
                 QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT * QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS + 6
             )
             self.trail_container = QFrame()
             self.trail_container.setObjectName("qtHudTimeline")
+            self.trail_line = QFrame(self.trail_container)
+            self.trail_line.setObjectName("qtHudActivityTrailLine")
+            self.trail_line.lower()
             self.trail_layout = QVBoxLayout(self.trail_container)
             self.trail_layout.setContentsMargins(3, 3, 3, 3)
             self.trail_layout.setSpacing(0)
             for _ in range(QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS):
                 self._add_activity_row()
             self.trail_scroll.setWidget(self.trail_container)
-            activity_body.addWidget(self.trail_scroll)
+            activity_body.addWidget(self.trail_scroll, 1)
             self.load_more = QPushButton("查看更多")
             self.load_more.setObjectName("qtHudSecondaryButton")
             self.load_more.clicked.connect(self._load_more_activity)
             activity_body.addWidget(self.load_more)
+            activity_body.addStretch(0)
 
             body_scroll.setWidget(body)
             expanded_layout.addWidget(body_scroll, 1)
@@ -1238,6 +1255,7 @@ if QApplication is not None:
             row_layout.addWidget(time_label)
             row_layout.addWidget(marker)
             row_layout.addWidget(text_box, 1)
+            marker.raise_()
             self.trail_layout.addWidget(row)
             self._activity_rows.append((time_label, marker, title_label, detail_label))
 
@@ -1397,16 +1415,40 @@ if QApplication is not None:
                 else:
                     time_label.parentWidget().setVisible(False)
                     detail_label.set_copy_text("")
-            self.trail_container.setMinimumHeight(
-                visible_count * QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT + 6
-            )
+            timeline_height = visible_count * QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT + 6
+            self.trail_container.setMinimumHeight(timeline_height)
+            self.trail_container.resize(max(1, self.trail_scroll.viewport().width()), timeline_height)
+            self._sync_activity_trail_line(visible_count)
             has_more = bool(trail) and visible_count < len(trail)
             self.load_more.setEnabled(has_more)
             self.load_more.setText("查看更多" if has_more else "已显示全部")
 
         def resizeEvent(self, event: Any) -> None:  # noqa: N802
             super().resizeEvent(event)
+            if hasattr(self, "trail_scroll") and hasattr(self, "trail_line"):
+                self.trail_container.resize(
+                    max(1, self.trail_scroll.viewport().width()),
+                    max(1, self.trail_container.minimumHeight()),
+                )
+                self._sync_activity_trail_line(
+                    max(1, min(len(self._activity_trail), max(4, self._activity_visible_count)))
+                    if self._activity_trail
+                    else 1
+                )
             self._sync_responsive_layout()
+
+        def _sync_activity_trail_line(self, visible_count: int) -> None:
+            if not hasattr(self, "trail_line"):
+                return
+            if visible_count <= 1:
+                self.trail_line.setVisible(False)
+                return
+            marker_x = 3 + 52 + 12
+            first_center_y = 3 + (QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT // 2)
+            last_center_y = 3 + ((visible_count - 1) * QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT) + (QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT // 2)
+            self.trail_line.setVisible(True)
+            self.trail_line.setGeometry(marker_x - 1, first_center_y, 2, max(1, last_center_y - first_center_y))
+            self.trail_line.lower()
 
         def _sync_responsive_layout(self) -> None:
             width = max(1, self.width())
@@ -2705,6 +2747,9 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         border: 1px solid #2C3745;
         border-radius: 8px;
     }
+    QFrame#qtHudShell[target="top"][expanded="true"] {
+        background: #10161D;
+    }
     QFrame#qtHudSettingsDialog {
         background: #10161D;
         border: 1px solid rgba(140, 153, 174, 72);
@@ -2777,16 +2822,23 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         border: 0;
         padding: 0;
     }
-    QFrame#qtHudActivityMarkerLine {
-        background: #2C3745;
+    QFrame#qtHudActivityTrailLine,
+    QScrollArea#qtHudActivityTrailScroll QFrame#qtHudActivityTrailLine,
+    QFrame#qtHudActivityMarkerLine,
+    QScrollArea#qtHudActivityTrailScroll QFrame#qtHudActivityMarkerLine {
+        background: #4D6075;
         border: 0;
+        padding: 0;
     }
-    QFrame#qtHudActivityMarkerDot {
+    QFrame#qtHudActivityMarkerDot,
+    QScrollArea#qtHudActivityTrailScroll QFrame#qtHudActivityMarkerDot {
         background: #5EA7FF;
-        border: 0;
+        border: 1px solid #101821;
         border-radius: 4px;
+        padding: 0;
     }
-    QFrame#qtHudActivityMarkerDot[active="true"] {
+    QFrame#qtHudActivityMarkerDot[active="true"],
+    QScrollArea#qtHudActivityTrailScroll QFrame#qtHudActivityMarkerDot[active="true"] {
         background: #F3D27A;
     }
     QLabel#qtHudLabel-title {
