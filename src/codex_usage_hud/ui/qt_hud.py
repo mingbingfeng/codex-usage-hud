@@ -39,7 +39,9 @@ QT_HUD_REQUEST_EXPANDED_HEIGHT = 180
 QT_HUD_MARGIN = 16
 QT_HUD_ANIMATION_MS = 180
 QT_HUD_INTERACTION_IDLE_MS = 240
-QT_HUD_TOP_STACK_WIDTH = 560
+QT_HUD_TOP_STACK_WIDTH = 420
+QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT = 38
+QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS = 4
 QT_HUD_FOLLOW_MS = 120
 QT_COLLAPSED_PROGRESS_MARQUEE_START_PAUSE_MS = 1500
 QT_COLLAPSED_PROGRESS_MARQUEE_END_PAUSE_MS = 1500
@@ -131,6 +133,15 @@ if QApplication is not None:
         ) -> None:
             super().__init__(text)
             self.setObjectName(f"qtHudLabel-{role}")
+            self.setMinimumWidth(0)
+            self.setMinimumHeight(max(12, self.fontMetrics().height()))
+            compressible_roles = {"body", "muted", "mono-blue", "activity-detail", "request"}
+            horizontal_policy = (
+                QSizePolicy.Policy.Ignored
+                if role in compressible_roles
+                else QSizePolicy.Policy.Minimum
+            )
+            self.setSizePolicy(horizontal_policy, QSizePolicy.Policy.Minimum)
             self.setWordWrap(wrap)
             self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
             self._copy_text = ""
@@ -339,6 +350,44 @@ if QApplication is not None:
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     metrics.elidedText(right_text, Qt.TextElideMode.ElideRight, right_width),
                 )
+
+
+    class _ActivityMarker(QWidget):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setFixedSize(24, 38)
+            self._top_line = QFrame(self)
+            self._top_line.setObjectName("qtHudActivityMarkerLine")
+            self._bottom_line = QFrame(self)
+            self._bottom_line.setObjectName("qtHudActivityMarkerLine")
+            self._dot = QFrame(self)
+            self._dot.setObjectName("qtHudActivityMarkerDot")
+            self._dot.setFixedSize(8, 8)
+            self._sync_geometry()
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802
+            super().resizeEvent(event)
+            self._sync_geometry()
+
+        def set_state(self, index: int, total: int, active: bool) -> None:
+            total = max(1, int(total))
+            center_x = self.width() // 2
+            center_y = self.height() // 2
+            self._top_line.setVisible(total > 1 and int(index) > 0)
+            self._bottom_line.setVisible(total > 1 and int(index) < total - 1)
+            self._top_line.setGeometry(center_x - 1, -1, 2, max(0, center_y - 5))
+            self._bottom_line.setGeometry(center_x - 1, center_y + 5, 2, self.height() - center_y - 4)
+            self._dot.move(center_x - 4, center_y - 4)
+            self._dot.setProperty("active", "true" if active else "false")
+            self._dot.style().unpolish(self._dot)
+            self._dot.style().polish(self._dot)
+
+        def _sync_geometry(self) -> None:
+            center_x = self.width() // 2
+            center_y = self.height() // 2
+            self._top_line.setGeometry(center_x - 1, -1, 2, max(0, center_y - 5))
+            self._bottom_line.setGeometry(center_x - 1, center_y + 5, 2, self.height() - center_y - 4)
+            self._dot.move(center_x - 4, center_y - 4)
 
 
     class _TopCollapsedProgressStrip(QWidget):
@@ -783,9 +832,19 @@ if QApplication is not None:
                 self._drag_origin = None
                 self._drag_window_origin = None
                 self._dragging = False
-                if clicked:
+                if clicked and self._should_toggle_from_click(event.position().toPoint()):
                     self.toggle_expanded()
             super().mouseReleaseEvent(event)
+
+        def _should_toggle_from_click(self, position: QPoint) -> bool:
+            if not self._expanded:
+                return True
+            child = self.childAt(position)
+            while child is not None and child is not self:
+                if child.objectName() == "qtHudPanelHeader":
+                    return True
+                child = child.parentWidget()
+            return False
 
         def leaveEvent(self, event: Any) -> None:  # noqa: N802
             if not self._resizing:
@@ -835,10 +894,11 @@ if QApplication is not None:
             self._collapsed_strip: _TopCollapsedProgressStrip | None = None
             self._budget_progress: list[_ProgressRail] = []
             self._heavy_rows: list[tuple[_HudLabel, _HudLabel]] = []
-            self._activity_rows: list[tuple[_HudLabel, _HudLabel, _HudLabel]] = []
+            self._activity_rows: list[tuple[_HudLabel, _ActivityMarker, _HudLabel, _HudLabel]] = []
             self._activity_signature = ""
             self._activity_trail: list[Mapping[str, object]] = []
             self._activity_visible_count = 4
+            self._top_body: QFrame | None = None
             self._top_grid: QGridLayout | None = None
             self._top_left: QFrame | None = None
             self._top_right: QFrame | None = None
@@ -919,7 +979,8 @@ if QApplication is not None:
             body_scroll.setObjectName("qtHudTopBodyScroll")
             body = QFrame()
             body.setObjectName("qtHudTopBody")
-            body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+            body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            self._top_body = body
             body_layout = QVBoxLayout(body)
             body_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
             body_layout.setContentsMargins(0, 0, 4, 0)
@@ -929,6 +990,9 @@ if QApplication is not None:
             top_grid.setVerticalSpacing(8)
             left = QFrame()
             right = QFrame()
+            for column in (left, right):
+                column.setMinimumWidth(0)
+                column.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             left_layout = QVBoxLayout(left)
             right_layout = QVBoxLayout(right)
             for column_layout in (left_layout, right_layout):
@@ -943,7 +1007,7 @@ if QApplication is not None:
             self._top_right = right
             body_layout.addLayout(top_grid)
 
-            session_body, session_actions = self._card(left_layout, "本会话用量")
+            _session_card, session_body, session_actions = self._card(left_layout, "本会话用量")
             self.task_ordinal_session = self._chip(session_actions)
             self.session_rounds = self._chip(session_actions)
             stats = QGridLayout()
@@ -953,49 +1017,54 @@ if QApplication is not None:
             session_body.addLayout(stats)
             insight = QFrame()
             insight.setObjectName("qtHudInset")
-            insight_layout = QGridLayout(insight)
+            insight.setMinimumHeight(34)
+            insight_layout = QHBoxLayout(insight)
             insight_layout.setContentsMargins(8, 6, 8, 6)
-            insight_layout.setHorizontalSpacing(8)
-            insight_layout.addWidget(_HudLabel("会话构成", role="caption"), 0, 0)
+            insight_layout.setSpacing(8)
+            insight_layout.addWidget(_HudLabel("会话构成", role="caption"))
             self.session_mix = _HudLabel("", role="mono-blue")
+            self.session_mix.setMinimumWidth(82)
             self.session_average = _HudLabel("", role="mono-accent")
-            insight_layout.addWidget(self.session_mix, 0, 1)
-            insight_layout.addWidget(self.session_average, 0, 2)
-            insight_layout.setColumnStretch(2, 1)
+            self.session_average.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            insight_layout.addWidget(self.session_mix)
+            insight_layout.addWidget(self.session_average, 1)
             session_body.addWidget(insight)
             self.session_composition = _HudLabel("", role="muted")
             session_body.addWidget(self.session_composition)
             token_grid = QGridLayout()
             token_grid.setHorizontalSpacing(6)
-            self.session_input_tokens = self._token_chip(token_grid, 0, "输入")
-            self.session_cached_tokens = self._token_chip(token_grid, 1, "缓存")
-            self.session_output_tokens = self._token_chip(token_grid, 2, "输出")
-            self.session_reasoning_tokens = self._token_chip(token_grid, 3, "推理")
+            token_grid.setVerticalSpacing(6)
+            self.session_input_tokens = self._token_chip(token_grid, 0, 0, "输入")
+            self.session_cached_tokens = self._token_chip(token_grid, 0, 1, "缓存")
+            self.session_output_tokens = self._token_chip(token_grid, 1, 0, "输出")
+            self.session_reasoning_tokens = self._token_chip(token_grid, 1, 1, "推理")
             session_body.addLayout(token_grid)
 
-            budget_body, _budget_actions = self._card(left_layout, "额度进度")
+            _budget_card, budget_body, _budget_actions = self._card(left_layout, "额度进度")
             for _ in range(2):
                 rail = _ProgressRail()
                 budget_body.addWidget(rail)
                 self._budget_progress.append(rail)
 
-            heavy_body, heavy_actions = self._card(left_layout, "高消耗轮次")
+            heavy_card, heavy_body, heavy_actions = self._card(left_layout, "高消耗轮次")
+            heavy_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
             self.heavy_summary = self._chip(heavy_actions)
             for _ in range(3):
                 row = QFrame()
                 row.setObjectName("qtHudHeavyRow")
-                row_layout = QVBoxLayout(row)
+                row.setMinimumHeight(28)
+                row_layout = QHBoxLayout(row)
                 row_layout.setContentsMargins(8, 5, 8, 5)
-                row_layout.setSpacing(1)
+                row_layout.setSpacing(8)
                 title = _HudLabel("", role="strong")
                 detail = _HudLabel("", role="muted")
                 row_layout.addWidget(title)
-                row_layout.addWidget(detail)
+                row_layout.addWidget(detail, 1)
                 heavy_body.addWidget(row)
                 self._heavy_rows.append((title, detail))
-            left_layout.addStretch(1)
 
-            activity_body, activity_actions = self._card(right_layout, "当前活动")
+            activity_card, activity_body, activity_actions = self._card(right_layout, "当前活动")
+            activity_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
             self.activity_state = self._chip(activity_actions, warning=True)
             self.task_ordinal_activity = self._chip(activity_actions)
             self.current_task_label = _HudLabel("当前需求", role="caption")
@@ -1014,26 +1083,34 @@ if QApplication is not None:
             self.gap_chip = self._chip(trail_head)
             self.slow_chip = self._chip(trail_head)
             activity_body.addLayout(trail_head)
+            self.trail_scroll = QScrollArea()
+            self.trail_scroll.setObjectName("qtHudActivityTrailScroll")
+            self.trail_scroll.setWidgetResizable(True)
+            self.trail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.trail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.trail_scroll.setFixedHeight(
+                QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT * QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS + 6
+            )
             self.trail_container = QFrame()
             self.trail_container.setObjectName("qtHudTimeline")
             self.trail_layout = QVBoxLayout(self.trail_container)
             self.trail_layout.setContentsMargins(3, 3, 3, 3)
-            self.trail_layout.setSpacing(2)
-            for _ in range(4):
+            self.trail_layout.setSpacing(0)
+            for _ in range(QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS):
                 self._add_activity_row()
-            activity_body.addWidget(self.trail_container, 1)
+            self.trail_scroll.setWidget(self.trail_container)
+            activity_body.addWidget(self.trail_scroll)
             self.load_more = QPushButton("查看更多")
             self.load_more.setObjectName("qtHudSecondaryButton")
             self.load_more.clicked.connect(self._load_more_activity)
             activity_body.addWidget(self.load_more)
-            right_layout.addStretch(1)
 
             body_scroll.setWidget(body)
             expanded_layout.addWidget(body_scroll, 1)
             self.set_pages(collapsed, expanded)
             self._sync_responsive_layout()
 
-        def _card(self, parent: QVBoxLayout, title: str) -> tuple[QVBoxLayout, QHBoxLayout]:
+        def _card(self, parent: QVBoxLayout, title: str) -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
             card = QFrame()
             card.setObjectName("qtHudTopCard")
             layout = QVBoxLayout(card)
@@ -1049,13 +1126,16 @@ if QApplication is not None:
             body.setSpacing(6)
             layout.addLayout(body)
             parent.addWidget(card)
-            return body, actions
+            return card, body, actions
 
         def _chip(self, parent: QHBoxLayout, *, warning: bool = False) -> _HudLabel:
             label = _HudLabel("", role="chip-warning" if warning else "chip")
             label.setObjectName("qtHudChipWarning" if warning else "qtHudChip")
+            label.setMinimumWidth(24)
+            label.setFixedHeight(22)
+            label.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
             label.setVisible(False)
-            parent.addWidget(label)
+            parent.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
             return label
 
         def _metric_box(
@@ -1069,6 +1149,7 @@ if QApplication is not None:
         ) -> _HudLabel:
             box = QFrame()
             box.setObjectName("qtHudMetricBox")
+            box.setMinimumHeight(50)
             layout = QVBoxLayout(box)
             layout.setContentsMargins(8, 5, 8, 5)
             layout.setSpacing(1)
@@ -1079,17 +1160,19 @@ if QApplication is not None:
             grid.addWidget(box, row, column)
             return value
 
-        def _token_chip(self, grid: QGridLayout, column: int, label: str) -> _HudLabel:
+        def _token_chip(self, grid: QGridLayout, row: int, column: int, label: str) -> _HudLabel:
             box = QFrame()
             box.setObjectName("qtHudTokenChip")
+            box.setMinimumHeight(24)
             layout = QHBoxLayout(box)
             layout.setContentsMargins(5, 3, 5, 3)
             layout.setSpacing(4)
             layout.addWidget(_HudLabel(label, role="caption"))
             value = _HudLabel("", role="strong")
+            value.setMinimumWidth(52)
             value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             layout.addWidget(value, 1)
-            grid.addWidget(box, 0, column)
+            grid.addWidget(box, row, column)
             grid.setColumnStretch(column, 1)
             return value
 
@@ -1102,6 +1185,7 @@ if QApplication is not None:
         ) -> _HudLabel:
             box = QFrame()
             box.setObjectName("qtHudInset")
+            box.setMinimumHeight(44)
             layout = QVBoxLayout(box)
             layout.setContentsMargins(8, 6, 8, 6)
             layout.setSpacing(2)
@@ -1118,6 +1202,7 @@ if QApplication is not None:
         ) -> tuple[_HudLabel, _HudLabel]:
             box = QFrame()
             box.setObjectName("qtHudInset")
+            box.setMinimumHeight(42)
             layout = QVBoxLayout(box)
             layout.setContentsMargins(6, 4, 6, 4)
             layout.setSpacing(1)
@@ -1132,18 +1217,29 @@ if QApplication is not None:
         def _add_activity_row(self) -> None:
             row = QFrame()
             row.setObjectName("qtHudActivityRow")
+            row.setFixedHeight(QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(4, 0, 4, 0)
-            row_layout.setSpacing(5)
-            time_label = _HudLabel("", role="muted")
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(0)
+            time_label = _HudLabel("", role="activity-time")
             time_label.setFixedWidth(52)
+            marker = _ActivityMarker()
+            text_box = QFrame()
+            text_box.setObjectName("qtHudActivityTextBox")
+            text_layout = QVBoxLayout(text_box)
+            text_layout.setContentsMargins(8, 4, 0, 3)
+            text_layout.setSpacing(0)
             title_label = _HudLabel("", role="activity-title")
+            title_label.setFixedHeight(15)
             detail_label = _HudLabel("", role="activity-detail")
+            detail_label.setFixedHeight(15)
+            text_layout.addWidget(title_label)
+            text_layout.addWidget(detail_label)
             row_layout.addWidget(time_label)
-            row_layout.addWidget(title_label)
-            row_layout.addWidget(detail_label, 1)
+            row_layout.addWidget(marker)
+            row_layout.addWidget(text_box, 1)
             self.trail_layout.addWidget(row)
-            self._activity_rows.append((time_label, title_label, detail_label))
+            self._activity_rows.append((time_label, marker, title_label, detail_label))
 
         def _ensure_activity_row_count(self, count: int) -> None:
             while len(self._activity_rows) < count:
@@ -1163,7 +1259,7 @@ if QApplication is not None:
             self.task_ordinal_session.set_elided_text(details.get("taskOrdinalSession"), limit=32)
             self.task_ordinal_session.setVisible(bool(str(details.get("taskOrdinalSession") or "").strip()))
             self.session_mix.set_elided_text(details.get("sessionMix"), limit=60)
-            self.session_average.set_elided_text(details.get("sessionAverage"), limit=60)
+            self.session_average.set_elided_text(details.get("sessionAverage"), limit=40)
             self.session_composition.set_elided_text(details.get("sessionComposition"), limit=120)
             self.session_input_tokens.setText(str(details.get("sessionInputTokens") or "--"))
             self.session_cached_tokens.setText(str(details.get("sessionCachedTokens") or "--"))
@@ -1214,6 +1310,7 @@ if QApplication is not None:
             update_state = payload.get("updateState")
             self._render_update_button(update_state if isinstance(update_state, Mapping) else {})
             self._sync_responsive_layout()
+            self._sync_top_body_height()
 
         def hide_warning(self) -> None:
             self.warning.setText("")
@@ -1285,11 +1382,12 @@ if QApplication is not None:
                 visible_count = 1
             self._ensure_activity_row_count(visible_count)
             for index, labels in enumerate(self._activity_rows):
-                time_label, title_label, detail_label = labels
+                time_label, marker, title_label, detail_label = labels
                 if index < visible_count:
                     item = visible_items[index]
                     time_label.parentWidget().setVisible(True)
                     time_label.setText(str(item.get("time") or ""))
+                    marker.set_state(index, visible_count, bool(item.get("active")))
                     title_label.set_elided_text(item.get("title") or "", limit=28)
                     detail_label.set_elided_text(item.get("detail") or "", limit=100)
                     tooltip = str(item.get("tooltip") or "  ".join(
@@ -1299,6 +1397,9 @@ if QApplication is not None:
                 else:
                     time_label.parentWidget().setVisible(False)
                     detail_label.set_copy_text("")
+            self.trail_container.setMinimumHeight(
+                visible_count * QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT + 6
+            )
             has_more = bool(trail) and visible_count < len(trail)
             self.load_more.setEnabled(has_more)
             self.load_more.setText("查看更多" if has_more else "已显示全部")
@@ -1330,6 +1431,7 @@ if QApplication is not None:
                 grid.setColumnStretch(1, 0)
                 grid.setRowStretch(0, 0)
                 grid.setRowStretch(1, 0)
+                self._sync_top_body_height()
                 return
             grid.addWidget(left, 0, 0)
             grid.addWidget(right, 0, 1)
@@ -1337,6 +1439,14 @@ if QApplication is not None:
             grid.setColumnStretch(1, 1)
             grid.setRowStretch(0, 1)
             grid.setRowStretch(1, 0)
+            self._sync_top_body_height()
+
+        def _sync_top_body_height(self) -> None:
+            body = self._top_body
+            if body is None:
+                return
+            body.adjustSize()
+            body.setMinimumHeight(max(1, body.sizeHint().height()))
 
         def apply_theme(self, tokens: Mapping[str, str]) -> None:
             for rail in self.findChildren(_ProgressRail):
@@ -2628,8 +2738,7 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QFrame#qtHudMetricBox,
     QFrame#qtHudInset,
     QFrame#qtHudTokenChip,
-    QFrame#qtHudHeavyRow,
-    QFrame#qtHudActivityRow {
+    QFrame#qtHudHeavyRow {
         background: rgba(255, 255, 255, 18);
         border: 1px solid rgba(255, 255, 255, 24);
         border-radius: 7px;
@@ -2652,6 +2761,33 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QFrame#qtHudRequestRowFrame[latest="true"] QLabel#qtHudLabel-request,
     QFrame#qtHudRequestRowFrame[latest="true"] QLabel#qtHudLabel-request-time {
         color: #F3D27A;
+    }
+    QScrollArea#qtHudActivityTrailScroll {
+        background: rgba(16, 24, 33, 190);
+        border: 1px solid rgba(255, 255, 255, 18);
+        border-radius: 6px;
+        padding: 0;
+    }
+    QScrollArea#qtHudActivityTrailScroll > QWidget,
+    QScrollArea#qtHudActivityTrailScroll QWidget,
+    QFrame#qtHudTimeline,
+    QFrame#qtHudActivityRow,
+    QFrame#qtHudActivityTextBox {
+        background: transparent;
+        border: 0;
+        padding: 0;
+    }
+    QFrame#qtHudActivityMarkerLine {
+        background: #2C3745;
+        border: 0;
+    }
+    QFrame#qtHudActivityMarkerDot {
+        background: #5EA7FF;
+        border: 0;
+        border-radius: 4px;
+    }
+    QFrame#qtHudActivityMarkerDot[active="true"] {
+        background: #F3D27A;
     }
     QLabel#qtHudLabel-title {
         font-size: 15px;
@@ -2728,14 +2864,19 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         color: #9CCBFF;
         font-weight: 600;
     }
+    QLabel#qtHudLabel-activity-time {
+        font-family: Consolas, "Cascadia Mono", monospace;
+        color: #8D9AAD;
+        font-size: 9px;
+    }
     QLabel#qtHudLabel-activity-title {
         color: #DCE7F2;
-        font-size: 10.5px;
+        font-size: 9px;
         font-weight: 800;
     }
     QLabel#qtHudLabel-activity-detail {
         color: #8D9AAD;
-        font-size: 10px;
+        font-size: 9px;
     }
     QLabel#qtHudLabel-muted, QLabel#qtHudLabel-caption {
         color: #8D9AAD;

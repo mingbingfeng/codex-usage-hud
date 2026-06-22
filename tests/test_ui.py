@@ -2776,16 +2776,27 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertIs(top_stack.widget(1), expanded)
                     self.assertGreaterEqual(window.top_window.width(), qt_hud_module.QT_HUD_TOP_STACK_WIDTH)
                     top_grid = window.top_window._top_grid
+                    top_left = window.top_window._top_left
                     top_right = window.top_window._top_right
                     self.assertIsNotNone(top_grid)
+                    self.assertIsNotNone(top_left)
                     self.assertIsNotNone(top_right)
                     assert top_grid is not None
+                    assert top_left is not None
                     assert top_right is not None
                     _row_span, _column_span = 0, 0
+                    left_row, left_column, _row_span, _column_span = top_grid.getItemPosition(
+                        top_grid.indexOf(top_left)
+                    )
                     row, column, _row_span, _column_span = top_grid.getItemPosition(
                         top_grid.indexOf(top_right)
                     )
+                    self.assertEqual((left_row, left_column), (0, 0))
                     self.assertEqual((row, column), (0, 1))
+                    self.assertLessEqual(top_left.geometry().right(), top_right.geometry().left())
+                    self.assertLessEqual(top_right.geometry().right(), window.top_window.width())
+                    self.assertGreater(top_left.width(), 0)
+                    self.assertGreater(top_right.width(), 0)
                     self.assertFalse(window.top_window.session_meta.isVisible())
                     self.assertFalse(window.top_window.cache_progress.isVisible())
                     self.assertEqual(window.mode_switch_request, "")
@@ -2910,11 +2921,57 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     )
                     self.assertEqual(window.top_window.session_cost.text(), "$11.66")
                     self.assertEqual(window.top_window.session_input_tokens.text(), "241k")
+                    self.assertEqual(window.top_window.session_cached_tokens.text(), "241k")
+                    self.assertEqual(window.top_window.session_output_tokens.text(), "702")
+                    self.assertEqual(window.top_window.session_reasoning_tokens.text(), "286")
+                    self.assertGreaterEqual(window.top_window.session_input_tokens.width(), 52)
                     self.assertEqual(window.top_window.activity_elapsed.text(), "34m25s")
+                    self.assertTrue(window.top_window.current_task.isVisible())
+                    self.assertTrue(window.top_window.executing.isVisible())
+                    self.assertIn("更新计划保留tk模式", window.top_window.current_task.text())
+                    self.assertIn("python -m unittest", window.top_window.executing.text())
                     self.assertIn("15.3M", window.top_window.cache_progress.toolTip())
                     self.assertIn("超出 14%", window.top_window._budget_progress[1].toolTip())
-                    self.assertEqual(window.top_window._activity_rows[0][1].objectName(), "qtHudLabel-activity-title")
-                    self.assertEqual(window.top_window._activity_rows[0][2].objectName(), "qtHudLabel-activity-detail")
+                    self.assertEqual(window.top_window._activity_rows[0][1].width(), 24)
+                    self.assertEqual(window.top_window._activity_rows[0][2].objectName(), "qtHudLabel-activity-title")
+                    self.assertEqual(window.top_window._activity_rows[0][3].objectName(), "qtHudLabel-activity-detail")
+                    header = window.top_window.findChild(QFrame, "qtHudPanelHeader")
+                    self.assertIsNotNone(header)
+                    assert header is not None
+                    header_point = header.mapTo(window.top_window, header.rect().center())
+                    content_point = window.top_window.current_task.mapTo(
+                        window.top_window,
+                        window.top_window.current_task.rect().center(),
+                    )
+                    self.assertTrue(window.top_window._should_toggle_from_click(header_point))
+                    self.assertFalse(window.top_window._should_toggle_from_click(content_point))
+                    expected_trail_height = (
+                        qt_hud_module.QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT
+                        * qt_hud_module.QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS
+                        + 6
+                    )
+                    self.assertEqual(window.top_window.trail_scroll.height(), expected_trail_height)
+                    self.assertEqual(window.top_window.gap_chip.height(), 22)
+                    self.assertEqual(window.top_window.slow_chip.height(), 22)
+                    right_height_before_more = top_right.height()
+                    trail_scroll_height_before_more = window.top_window.trail_scroll.height()
+                    trail_container_height_before_more = window.top_window.trail_container.minimumHeight()
+                    for time_label, marker, title_label, detail_label in window.top_window._activity_rows[:4]:
+                        self.assertEqual(time_label.objectName(), "qtHudLabel-activity-time")
+                        self.assertEqual(marker.size().toTuple(), (24, 38))
+                        self.assertEqual(marker.parentWidget().height(), 38)
+                        title_bottom = title_label.mapTo(window.top_window, title_label.rect().bottomLeft()).y()
+                        detail_top = detail_label.mapTo(window.top_window, detail_label.rect().topLeft()).y()
+                        self.assertLess(title_bottom, detail_top)
+                    self.assertTrue(window.top_window.load_more.isEnabled())
+                    window.top_window.load_more.click()
+                    self.assertEqual(window.top_window.trail_scroll.height(), trail_scroll_height_before_more)
+                    self.assertEqual(top_right.height(), right_height_before_more)
+                    self.assertGreater(
+                        window.top_window.trail_container.minimumHeight(),
+                        trail_container_height_before_more,
+                    )
+                    self.assertEqual(window.top_window.load_more.text(), "已显示全部")
                     self.assertEqual(window.top_window.current_task._copy_text, "更新计划保留tk模式")
                     self.assertEqual(window.top_window.slow_chip._copy_text, "python -m unittest")
                     self.assertTrue(window.top_window.update_button.isVisible())
@@ -2935,9 +2992,6 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     window.top_window.warning_close.click()
                     self.assertFalse(window.top_window.warning_panel.isVisible())
                     self.assertTrue(warning_dismissed_today(store.path))
-                    self.assertTrue(window.top_window.load_more.isEnabled())
-                    window.top_window.load_more.click()
-                    self.assertEqual(window.top_window.load_more.text(), "已显示全部")
                     window.open_settings()
                     dialog = window._settings_dialog
                     self.assertIsNotNone(dialog)
@@ -2968,6 +3022,65 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertEqual(window.exit_reason, "display_mode_switch")
                 finally:
                     window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_top_expanded_layout_stacks_only_when_extremely_narrow(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            panel = qt_hud_module._TopPanel(
+                on_settings=lambda: None,
+                on_update_action=lambda: None,
+                on_dismiss_warnings=lambda: None,
+                on_interaction=lambda: None,
+            )
+            try:
+                panel.resize(qt_hud_module.QT_HUD_TOP_WIDTH, qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                panel.show()
+                app.processEvents()
+
+                grid = panel._top_grid
+                left = panel._top_left
+                right = panel._top_right
+                self.assertIsNotNone(grid)
+                self.assertIsNotNone(left)
+                self.assertIsNotNone(right)
+                assert grid is not None
+                assert left is not None
+                assert right is not None
+                _row_span, _column_span = 0, 0
+                left_row, left_column, _row_span, _column_span = grid.getItemPosition(
+                    grid.indexOf(left)
+                )
+                right_row, right_column, _row_span, _column_span = grid.getItemPosition(
+                    grid.indexOf(right)
+                )
+                self.assertEqual((left_row, left_column), (0, 0))
+                self.assertEqual((right_row, right_column), (0, 1))
+
+                panel.resize(qt_hud_module.QT_HUD_TOP_STACK_WIDTH - 1, qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                app.processEvents()
+
+                left_row, left_column, _row_span, _column_span = grid.getItemPosition(
+                    grid.indexOf(left)
+                )
+                right_row, right_column, _row_span, _column_span = grid.getItemPosition(
+                    grid.indexOf(right)
+                )
+                self.assertEqual((left_row, left_column), (0, 0))
+                self.assertEqual((right_row, right_column), (1, 0))
+            finally:
+                panel.close()
         finally:
             if previous_platform is None:
                 os.environ.pop("QT_QPA_PLATFORM", None)
