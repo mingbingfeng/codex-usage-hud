@@ -40,6 +40,14 @@ QT_HUD_MARGIN = 16
 QT_HUD_ANIMATION_MS = 180
 QT_HUD_INTERACTION_IDLE_MS = 240
 QT_HUD_TOP_STACK_WIDTH = 560
+QT_HUD_FOLLOW_MS = 120
+QT_COLLAPSED_PROGRESS_MARQUEE_START_PAUSE_MS = 1500
+QT_COLLAPSED_PROGRESS_MARQUEE_END_PAUSE_MS = 1500
+QT_COLLAPSED_PROGRESS_MARQUEE_STEP_PX = 1
+QT_COLLAPSED_PROGRESS_MARQUEE_INTERVAL_MS = 30
+QT_COLLAPSED_PROGRESS_TAIL_PEEK_WIDTH = 40
+QT_COLLAPSED_PROGRESS_RAIL_HEIGHT = 20
+QT_RESIZE_EDGE_HIT_SIZE = 8
 QT_THEME_DEFAULTS: dict[str, str] = {
     "surface": "#10161D",
     "panelSurface": "#141B24",
@@ -68,8 +76,8 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 }
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
-    from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
-    from PySide6.QtGui import QColor, QFont, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
+    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
+    from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QComboBox,
@@ -194,6 +202,23 @@ if QApplication is not None:
             self._theme.update({str(key): str(value) for key, value in tokens.items()})
             self.update()
 
+        def preferred_width(self) -> int:
+            font = QFont(self.font())
+            font.setPointSize(max(8, font.pointSize()))
+            font.setBold(True)
+            metrics = QFontMetrics(font)
+            label = str(self._metric.get("label") or "")
+            right_text = str(self._metric.get("rightText") or "")
+            overflow_badge = str(self._metric.get("overflowBadge") or "")
+            right_width = max(42, metrics.horizontalAdvance(right_text) + 8) if right_text else 0
+            text_gap = 8
+            overflow_width = 0
+            if overflow_badge:
+                overflow_width = max(64, metrics.horizontalAdvance(overflow_badge) + 24)
+            elif float(self._metric.get("overflowRatio") or 0.0) > 0.0:
+                overflow_width = 24
+            return metrics.horizontalAdvance(label) + right_width + text_gap + overflow_width + 20
+
         def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
             del event
             if not self._metric:
@@ -316,6 +341,182 @@ if QApplication is not None:
                 )
 
 
+    class _TopCollapsedProgressStrip(QWidget):
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setMinimumHeight(24)
+            self.setMaximumHeight(28)
+            self._base_widths = (72, 68, 76)
+            self._column_gap = 7
+            self._scroll_x = 0.0
+            self._scroll_min_x = 0.0
+            self._scroll_max_x = 0.0
+            self._scroll_direction = -1
+            self._scrolling_enabled = False
+            self._layout_signature = ""
+            self._metrics: list[dict[str, object]] = []
+            self._timer = QTimer(self)
+            self._timer.setSingleShot(True)
+            self._timer.timeout.connect(self._scroll_step)
+            self._content = QWidget(self)
+            self._content.setObjectName("qtHudTopCollapsedProgressContent")
+            self._rails: list[_ProgressRail] = []
+            for index in range(3):
+                rail = _ProgressRail(self._content)
+                rail.setGeometry(0, 0, self._base_widths[index], 24)
+                self._rails.append(rail)
+
+        @property
+        def rails(self) -> list[_ProgressRail]:
+            return self._rails
+
+        @property
+        def scrolling_enabled(self) -> bool:
+            return self._scrolling_enabled
+
+        def set_metrics(self, metrics: Sequence[Mapping[str, object]]) -> None:
+            self._metrics = [dict(item) for item in metrics[:3]]
+            for index, rail in enumerate(self._rails):
+                rail.set_metric(self._metrics[index] if index < len(self._metrics) else None)
+            self._layout_for_current_metrics()
+
+        def set_theme(self, tokens: Mapping[str, str]) -> None:
+            for rail in self._rails:
+                rail.set_theme(tokens)
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802
+            super().resizeEvent(event)
+            self._layout_for_current_metrics()
+
+        def hideEvent(self, event: Any) -> None:  # noqa: N802
+            super().hideEvent(event)
+            self._stop_scrolling()
+
+        def _visible_count(self) -> int:
+            return sum(1 for rail in self._rails if rail.isVisible())
+
+        def _available_width(self) -> int:
+            return max(1, int(self.width()))
+
+        def _rail_height(self) -> int:
+            return max(18, min(QT_COLLAPSED_PROGRESS_RAIL_HEIGHT, max(1, int(self.height()))))
+
+        def _rail_y(self) -> int:
+            return max(0, (int(self.height()) - self._rail_height()) // 2)
+
+        def _preferred_widths(self) -> list[int]:
+            return [
+                max(self._base_widths[index], rail.preferred_width())
+                for index, rail in enumerate(self._rails)
+                if rail.isVisible()
+            ]
+
+        def _should_scroll(self, widths: Sequence[int], available_width: int) -> bool:
+            if len(widths) <= 1:
+                return False
+            gap = max(0, self._column_gap)
+            required = sum(max(0, int(width)) for width in widths) + gap * (len(widths) - 1)
+            if required <= max(1, int(available_width)) + 1:
+                return False
+            remaining_after_session = max(0, int(available_width) - int(widths[0]) - (gap * (len(widths) - 1)))
+            tail_share = remaining_after_session / max(1, len(widths) - 1)
+            return tail_share <= QT_COLLAPSED_PROGRESS_TAIL_PEEK_WIDTH
+
+        def _layout_for_current_metrics(self) -> None:
+            if self._visible_count() <= 1:
+                self._layout_single_metric()
+                return
+            self._layout_multi_metric()
+
+        def _layout_multi_metric(self) -> None:
+            widths = self._preferred_widths()
+            if len(widths) < 2:
+                self._layout_single_metric()
+                return
+            available_width = self._available_width()
+            gap_total = self._column_gap * max(0, len(widths) - 1)
+            required_width = sum(widths) + gap_total
+            should_scroll = self._should_scroll(widths, available_width)
+            if should_scroll:
+                column_widths = widths
+                content_width = required_width
+            else:
+                tail_count = len(widths) - 1
+                tail_width = max(1, (available_width - widths[0] - gap_total) // tail_count)
+                column_widths = [widths[0]] + [tail_width] * tail_count
+                content_width = available_width
+            self._position_rails(column_widths)
+            self._content.setGeometry(int(round(self._scroll_x)), 0, max(1, content_width), self.height())
+            if not should_scroll:
+                self._layout_signature = ""
+                self._stop_scrolling()
+                return
+            signature = f"{','.join(str(width) for width in widths)}|{required_width}|{available_width}"
+            if self._layout_signature != signature or not self._scrolling_enabled:
+                self._layout_signature = signature
+                self._start_scrolling(required_width, available_width)
+
+        def _layout_single_metric(self) -> None:
+            available_width = self._available_width()
+            first_width = max(self._base_widths[0], self._rails[0].preferred_width()) if self._rails[0].isVisible() else available_width
+            self._rails[0].setGeometry(0, self._rail_y(), max(first_width, available_width), self._rail_height())
+            self._rails[0].setVisible(bool(self._metrics))
+            for rail in self._rails[1:]:
+                rail.setVisible(False)
+            self._content.setGeometry(0, 0, available_width, self.height())
+            self._layout_signature = ""
+            self._stop_scrolling()
+
+        def _position_rails(self, widths: Sequence[int]) -> None:
+            x = 0
+            visible_index = 0
+            for rail in self._rails:
+                if not rail.isVisible():
+                    continue
+                width = int(widths[visible_index])
+                rail.setGeometry(x, self._rail_y(), width, self._rail_height())
+                x += width + self._column_gap
+                visible_index += 1
+
+        def _set_content_offset(self, x: float) -> None:
+            self._scroll_x = float(x)
+            self._content.move(int(round(self._scroll_x)), 0)
+
+        def _stop_scrolling(self) -> None:
+            self._scrolling_enabled = False
+            self._timer.stop()
+            self._set_content_offset(0.0)
+
+        def _start_scrolling(self, required_width: int, available_width: int) -> None:
+            overflow = max(0, int(required_width) - int(available_width))
+            if overflow <= 0 or not self.isVisible():
+                self._stop_scrolling()
+                return
+            self._scrolling_enabled = True
+            self._scroll_max_x = 0.0
+            self._scroll_min_x = float(-overflow)
+            self._scroll_direction = -1
+            self._set_content_offset(self._scroll_max_x)
+            self._timer.start(QT_COLLAPSED_PROGRESS_MARQUEE_START_PAUSE_MS)
+
+        def _scroll_step(self) -> None:
+            if not self.isVisible() or not self._scrolling_enabled:
+                return
+            next_x = self._scroll_x + (QT_COLLAPSED_PROGRESS_MARQUEE_STEP_PX * self._scroll_direction)
+            if self._scroll_direction < 0 and next_x <= self._scroll_min_x:
+                self._set_content_offset(self._scroll_min_x)
+                self._scroll_direction = 1
+                self._timer.start(QT_COLLAPSED_PROGRESS_MARQUEE_END_PAUSE_MS)
+                return
+            if self._scroll_direction > 0 and next_x >= self._scroll_max_x:
+                self._set_content_offset(self._scroll_max_x)
+                self._scroll_direction = -1
+                self._timer.start(QT_COLLAPSED_PROGRESS_MARQUEE_START_PAUSE_MS)
+                return
+            self._set_content_offset(next_x)
+            self._timer.start(QT_COLLAPSED_PROGRESS_MARQUEE_INTERVAL_MS)
+
+
     class _PanelWindow(QWidget):
         def __init__(
             self,
@@ -337,6 +538,10 @@ if QApplication is not None:
             self._drag_origin: QPoint | None = None
             self._drag_window_origin: QPoint | None = None
             self._dragging = False
+            self._resize_edge = ""
+            self._resize_origin: QPoint | None = None
+            self._resize_start_geometry: QRect | None = None
+            self._resizing = False
             self._manual_positioned = False
             self._on_interaction = on_interaction
             self._on_geometry_changed = on_geometry_changed
@@ -366,6 +571,7 @@ if QApplication is not None:
             shell_layout.addLayout(self._stack)
             self._grip = _HudSizeGrip(self.shell, self._resize_finished)
             self._grip.setFixedSize(14, 14)
+            self._install_resize_cursor_tracking(self)
 
         @property
         def expanded(self) -> bool:
@@ -411,8 +617,140 @@ if QApplication is not None:
             else:
                 self.setFixedHeight(self._collapsed_height)
 
+        def geometry_interaction_active(self) -> bool:
+            if self._drag_origin is not None or self._dragging or self._resizing:
+                return True
+            if bool(getattr(self._grip, "_pressed", False)):
+                return True
+            return (
+                self._animation is not None
+                and self._animation.state() == QAbstractAnimation.State.Running
+            )
+
+        def _resize_edge_at(self, position: QPoint) -> str:
+            x = int(position.x())
+            y = int(position.y())
+            width = max(1, int(self.width()))
+            height = max(1, int(self.height()))
+            edge = QT_RESIZE_EDGE_HIT_SIZE
+            if not (2 <= y < max(2, height - 2)):
+                return ""
+            if 2 <= x < 2 + edge:
+                return "left"
+            if max(2, width - edge) <= x < max(2, width - 2):
+                return "right"
+            return ""
+
+        @staticmethod
+        def _resize_cursor(edge: str) -> Qt.CursorShape:
+            if edge in {"left", "right"}:
+                return Qt.CursorShape.SizeHorCursor
+            return Qt.CursorShape.ArrowCursor
+
+        def _install_resize_cursor_tracking(self, widget: QWidget) -> None:
+            if not bool(widget.property("qtHudResizeCursorTracking")):
+                widget.setProperty("qtHudResizeCursorTracking", True)
+                widget.setMouseTracking(True)
+                widget.installEventFilter(self)
+            for child in widget.findChildren(QWidget):
+                self._install_resize_cursor_tracking(child)
+
+        def _sync_resize_cursor(self, position: QPoint) -> None:
+            if self._resizing:
+                return
+            edge = self._resize_edge_at(position)
+            self._apply_resize_cursor(edge)
+
+        def _sync_resize_cursor_from_widget(self, widget: QWidget, position: QPoint) -> None:
+            if self._resizing:
+                return
+            edge = self._resize_edge_at(widget.mapTo(self, position))
+            self._apply_resize_cursor(edge, widget)
+
+        def _apply_resize_cursor(self, edge: str, widget: QWidget | None = None) -> None:
+            cursor = self._resize_cursor(edge)
+            self.setCursor(cursor)
+            if widget is None:
+                return
+            if edge:
+                widget.setCursor(cursor)
+                widget.setProperty("qtHudResizeCursorOverride", True)
+            elif bool(widget.property("qtHudResizeCursorOverride")):
+                widget.unsetCursor()
+                widget.setProperty("qtHudResizeCursorOverride", False)
+
+        def _clear_resize_cursor_override(self, widget: QWidget) -> None:
+            if bool(widget.property("qtHudResizeCursorOverride")):
+                widget.unsetCursor()
+                widget.setProperty("qtHudResizeCursorOverride", False)
+
+        def _start_edge_resize(self, edge: str, global_position: QPoint) -> None:
+            self._on_interaction()
+            self._resize_edge = edge
+            self._resize_origin = global_position
+            self._resize_start_geometry = self.geometry()
+            self._resizing = True
+            self.setCursor(self._resize_cursor(edge))
+
+        def _apply_edge_resize(self, global_position: QPoint) -> bool:
+            if not self._resizing or self._resize_origin is None or self._resize_start_geometry is None:
+                return False
+            delta = global_position - self._resize_origin
+            minimum_width = max(120, int(self.minimumWidth()))
+            geometry = QRect(self._resize_start_geometry)
+            if self._resize_edge == "left":
+                new_width = max(minimum_width, self._resize_start_geometry.width() - delta.x())
+                geometry.setX(self._resize_start_geometry.right() - new_width + 1)
+                geometry.setWidth(new_width)
+            elif self._resize_edge == "right":
+                geometry.setWidth(max(minimum_width, self._resize_start_geometry.width() + delta.x()))
+            else:
+                return False
+            self.setGeometry(geometry)
+            return True
+
+        def _finish_edge_resize(self, position: QPoint) -> None:
+            self._resizing = False
+            self._resize_edge = ""
+            self._resize_origin = None
+            self._resize_start_geometry = None
+            self._emit_geometry_changed("resize")
+            self._sync_resize_cursor(position)
+
+        def eventFilter(self, watched: object, event: QEvent) -> bool:  # noqa: N802
+            if isinstance(watched, QWidget):
+                event_type = event.type()
+                if event_type == QEvent.Type.ChildAdded:
+                    self._install_resize_cursor_tracking(watched)
+                elif isinstance(event, QMouseEvent):
+                    position = watched.mapTo(self, event.position().toPoint())
+                    if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                        edge = self._resize_edge_at(position)
+                        if edge:
+                            self._start_edge_resize(edge, event.globalPosition().toPoint())
+                            event.accept()
+                            return True
+                    if event_type == QEvent.Type.MouseMove:
+                        if self._apply_edge_resize(event.globalPosition().toPoint()):
+                            event.accept()
+                            return True
+                        self._sync_resize_cursor_from_widget(watched, event.position().toPoint())
+                    if event_type == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self._resizing:
+                        self._finish_edge_resize(position)
+                        event.accept()
+                        return True
+                if event_type == QEvent.Type.Leave and not self._resizing:
+                    self._clear_resize_cursor_override(watched)
+                    self.unsetCursor()
+            return super().eventFilter(watched, event)
+
         def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
             if event.button() == Qt.MouseButton.LeftButton:
+                edge = self._resize_edge_at(event.position().toPoint())
+                if edge:
+                    self._start_edge_resize(edge, event.globalPosition().toPoint())
+                    event.accept()
+                    return
                 self._on_interaction()
                 self._drag_origin = event.globalPosition().toPoint()
                 self._drag_window_origin = self.pos()
@@ -420,15 +758,24 @@ if QApplication is not None:
             super().mousePressEvent(event)
 
         def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+            if self._apply_edge_resize(event.globalPosition().toPoint()):
+                event.accept()
+                return
             if self._drag_origin is not None and self._drag_window_origin is not None:
                 delta = event.globalPosition().toPoint() - self._drag_origin
                 if abs(delta.x()) > 3 or abs(delta.y()) > 3:
                     self._dragging = True
                     self.move(self._drag_window_origin + delta)
+            else:
+                self._sync_resize_cursor(event.position().toPoint())
             super().mouseMoveEvent(event)
 
         def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
             if event.button() == Qt.MouseButton.LeftButton:
+                if self._resizing:
+                    self._finish_edge_resize(event.position().toPoint())
+                    event.accept()
+                    return
                 clicked = not self._dragging
                 if self._dragging:
                     self._manual_positioned = True
@@ -439,6 +786,11 @@ if QApplication is not None:
                 if clicked:
                     self.toggle_expanded()
             super().mouseReleaseEvent(event)
+
+        def leaveEvent(self, event: Any) -> None:  # noqa: N802
+            if not self._resizing:
+                self.unsetCursor()
+            super().leaveEvent(event)
 
         def resizeEvent(self, event: Any) -> None:  # noqa: N802
             super().resizeEvent(event)
@@ -480,6 +832,7 @@ if QApplication is not None:
             self._on_update_action = on_update_action
             self._on_dismiss_warnings = on_dismiss_warnings
             self._collapsed_progress: list[_ProgressRail] = []
+            self._collapsed_strip: _TopCollapsedProgressStrip | None = None
             self._budget_progress: list[_ProgressRail] = []
             self._heavy_rows: list[tuple[_HudLabel, _HudLabel]] = []
             self._activity_rows: list[tuple[_HudLabel, _HudLabel, _HudLabel]] = []
@@ -498,18 +851,12 @@ if QApplication is not None:
             collapsed_layout = QHBoxLayout(collapsed)
             collapsed_layout.setContentsMargins(0, 0, 0, 0)
             collapsed_layout.setSpacing(8)
-            handle = _HudLabel("⋮⋮", role="handle")
-            handle.setFixedWidth(22)
-            collapsed_layout.addWidget(handle)
-            for _ in range(3):
-                rail = _ProgressRail()
-                rail.setFixedWidth(90)
-                collapsed_layout.addWidget(rail)
-                self._collapsed_progress.append(rail)
-            self.top_line = _HudLabel("正在启动 HUD...", role="strong")
-            collapsed_layout.addWidget(self.top_line, 1)
-            collapsed_settings = QPushButton("Settings")
-            collapsed_settings.setObjectName("qtHudSecondaryButton")
+            self._collapsed_strip = _TopCollapsedProgressStrip()
+            collapsed_layout.addWidget(self._collapsed_strip, 1, Qt.AlignmentFlag.AlignVCenter)
+            self._collapsed_progress = self._collapsed_strip.rails
+            collapsed_settings = QPushButton("⚙")
+            collapsed_settings.setObjectName("qtHudIconButton")
+            collapsed_settings.setToolTip("设置")
             collapsed_settings.clicked.connect(self._on_settings)
             collapsed_layout.addWidget(collapsed_settings)
 
@@ -525,7 +872,6 @@ if QApplication is not None:
             header = QHBoxLayout(header_frame)
             header.setContentsMargins(6, 3, 6, 3)
             header.setSpacing(6)
-            header.addWidget(_HudLabel("⋮⋮", role="handle"))
             self.update_button = QPushButton("↓")
             self.update_button.setObjectName("qtHudIconButton")
             self.update_button.setVisible(False)
@@ -540,8 +886,9 @@ if QApplication is not None:
             self.cache_progress = _ProgressRail()
             self.cache_progress.setFixedWidth(170)
             header.addWidget(self.cache_progress)
-            self.settings_button = QPushButton("Settings")
-            self.settings_button.setObjectName("qtHudSecondaryButton")
+            self.settings_button = QPushButton("⚙")
+            self.settings_button.setObjectName("qtHudIconButton")
+            self.settings_button.setToolTip("设置")
             self.settings_button.clicked.connect(self._on_settings)
             header.addWidget(self.settings_button)
             expanded_layout.addWidget(header_frame)
@@ -803,7 +1150,6 @@ if QApplication is not None:
                 self._add_activity_row()
 
         def update_payload(self, payload: Mapping[str, object]) -> None:
-            self.top_line.set_elided_text(payload.get("topLine"), limit=260)
             details = payload.get("topDetails") if isinstance(payload.get("topDetails"), Mapping) else {}
             progress = payload.get("topProgress") if isinstance(payload.get("topProgress"), Mapping) else {}
             copies = payload.get("topCopies") if isinstance(payload.get("topCopies"), Mapping) else {}
@@ -855,8 +1201,8 @@ if QApplication is not None:
             collapsed_metrics = [
                 item for item in progress.get("collapsed", []) if isinstance(item, Mapping)
             ]
-            for index, rail in enumerate(self._collapsed_progress):
-                rail.set_metric(collapsed_metrics[index] if index < len(collapsed_metrics) else None)
+            if self._collapsed_strip is not None:
+                self._collapsed_strip.set_metrics(collapsed_metrics)
             cache_metric = progress.get("cache")
             self.cache_progress.set_metric(cache_metric if isinstance(cache_metric, Mapping) else None)
             budget_metrics = [
@@ -1079,9 +1425,6 @@ if QApplication is not None:
             collapsed_layout = QHBoxLayout(collapsed)
             collapsed_layout.setContentsMargins(0, 0, 0, 0)
             collapsed_layout.setSpacing(6)
-            handle = _HudLabel("⋮⋮", role="handle")
-            handle.setFixedWidth(22)
-            collapsed_layout.addWidget(handle)
             self.request_line = _HudLabel("等待请求...", role="strong")
             collapsed_layout.addWidget(self.request_line, 1)
 
@@ -1123,7 +1466,6 @@ if QApplication is not None:
             header_layout = QHBoxLayout(header)
             header_layout.setContentsMargins(6, 3, 6, 3)
             header_layout.setSpacing(6)
-            header_layout.addWidget(_HudLabel("⋮⋮", role="handle"))
             self.request_title = _HudLabel("最近模型请求轮次", role="strong")
             header_layout.addWidget(self.request_title, 1)
             expanded_layout.addWidget(header)
@@ -1649,6 +1991,7 @@ if QApplication is not None:
             self.tombstone_follow_ms = max(50, int(tombstone_follow_ms))
             self._attached = False
             self._last_rect: WindowRect | None = None
+            self._hud_hidden_by_follow = False
             self.locator = CodexWindowLocator()
             try:
                 self.locator.set_dpi_aware()
@@ -1693,6 +2036,11 @@ if QApplication is not None:
             self._clock_timer = QTimer()
             self._clock_timer.timeout.connect(self._refresh_latest_payload)
             self._clock_timer.start(1000)
+            self._follow_timer = QTimer()
+            self._follow_timer.timeout.connect(self._follow_codex_window)
+            self._follow_timer.start(
+                max(50, min(QT_HUD_FOLLOW_MS, self.tombstone_follow_ms))
+            )
 
         @property
         def mode_switch_request(self) -> str:
@@ -1948,6 +2296,84 @@ if QApplication is not None:
                 return max(120, int(placement.width))
             return max(120, int(anchor_width))
 
+        def _has_saved_attached_position(self, target: str, anchor_source: str) -> bool:
+            placement = self._placement(target)
+            if (
+                placement.anchor_x_ratio is not None
+                and placement.anchor_y_ratio is not None
+                and (
+                    placement.anchor_source is None
+                    or placement.anchor_source == anchor_source
+                )
+            ):
+                return True
+            if target == "top":
+                return (
+                    placement.relative_x_ratio is not None
+                    and placement.relative_y_ratio is not None
+                )
+            return (
+                placement.relative_x_ratio is not None
+                and placement.relative_bottom_ratio is not None
+            )
+
+        def _attached_panel_geometry(
+            self,
+            target: str,
+            rect: WindowRect,
+            expanded: bool,
+        ) -> tuple[int, int, int, int]:
+            x, y, anchor_width, height = self._attached_anchor_geometry(target, rect, expanded)
+            (
+                anchor_x,
+                anchor_y,
+                anchor_metric_width,
+                anchor_height,
+                anchor_source,
+            ) = self._anchor_metrics(
+                target,
+                rect,
+                expanded,
+            )
+            placement = self._placement(target)
+            width = self._attached_panel_width(target, anchor_width, anchor_source)
+            if (
+                placement.anchor_x_ratio is not None
+                and placement.anchor_y_ratio is not None
+                and (
+                    placement.anchor_source is None
+                    or placement.anchor_source == anchor_source
+                )
+            ):
+                x = anchor_x + int(
+                    round(anchor_metric_width * float(placement.anchor_x_ratio))
+                )
+                if target == "top":
+                    if expanded and placement.relative_y_ratio is not None:
+                        y = rect.top + int(round(rect.height * placement.relative_y_ratio))
+                    else:
+                        y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
+                else:
+                    bottom = anchor_y + int(
+                        round(anchor_height * float(placement.anchor_y_ratio))
+                    )
+                    y = bottom - height
+            elif target == "top":
+                if placement.relative_x_ratio is not None and placement.relative_y_ratio is not None:
+                    x = rect.left + int(round(rect.width * placement.relative_x_ratio))
+                    y = rect.top + int(round(rect.height * placement.relative_y_ratio))
+            elif placement.relative_x_ratio is not None and placement.relative_bottom_ratio is not None:
+                x = rect.left + int(round(rect.width * placement.relative_x_ratio))
+                bottom = int(round(rect.height * placement.relative_bottom_ratio))
+                y = rect.bottom - bottom - height
+            min_x = rect.left + QT_HUD_MARGIN
+            max_x = max(min_x, rect.right - width - QT_HUD_MARGIN)
+            min_y = rect.top + QT_HUD_MARGIN
+            max_y = max(min_y, rect.bottom - height - QT_HUD_MARGIN)
+            x = max(min_x, min(x, max_x))
+            y = max(min_y, min(y, max_y))
+            return x, y, width, height
+
         def _remember_panel_geometry(
             self,
             target: str,
@@ -2049,56 +2475,105 @@ if QApplication is not None:
                 self.request_window.move(max(geometry.left(), req_x), max(geometry.top(), req_y))
 
         def _should_show_hud(self) -> bool:
-            return not self.hide_until_attached or self._attached
+            return (not self.hide_until_attached or self._attached) and not self._hud_hidden_by_follow
+
+        def _geometry_interaction_active(self) -> bool:
+            return (
+                time.monotonic() < self._interaction_block_until
+                or self.top_window.geometry_interaction_active()
+                or self.request_window.geometry_interaction_active()
+            )
 
         def _follow_codex_window(self) -> bool:
+            if self._geometry_interaction_active():
+                return self._attached
             try:
                 rect = self.locator.find()
             except Exception:
                 rect = None
-            if rect is None or getattr(rect, "minimized", False):
+            if rect is None:
+                if self.hide_until_attached:
+                    self._hide_for_follow()
+                    self._attached = False
+                    self._last_rect = None
+                else:
+                    self._enter_free_mode()
+                return False
+            if getattr(rect, "minimized", False):
+                self._hide_for_follow()
+                self._attached = False
+                self._last_rect = rect
+                return False
+            try:
+                active = self.locator.is_active(rect, self._hud_hwnds())
+            except Exception:
+                active = True
+            if not active:
+                self._attached = True
+                self._last_rect = rect
+                self._hide_for_follow()
                 return False
             self.attach_to_rect(rect)
             return True
 
+        def _hud_hwnds(self) -> set[int]:
+            hwnds: set[int] = set()
+            windows: list[QWidget] = [self.top_window, self.request_window]
+            if self._settings_dialog is not None:
+                windows.append(self._settings_dialog)
+            for window in windows:
+                try:
+                    hwnd = int(window.winId())
+                except Exception:
+                    continue
+                if hwnd:
+                    hwnds.add(hwnd)
+            return hwnds
+
+        def _hide_for_follow(self) -> None:
+            self.top_window.hide()
+            self.request_window.hide()
+            self._hud_hidden_by_follow = True
+
+        def _enter_free_mode(self) -> None:
+            self._attached = False
+            self._last_rect = None
+            self._hud_hidden_by_follow = False
+            if self._should_show_hud():
+                if not self.top_window.isVisible():
+                    self.top_window.show()
+                if not self.request_window.isVisible():
+                    self.request_window.show()
+
         def attach_to_rect(self, rect: WindowRect) -> None:
             self._attached = True
             self._last_rect = rect
-            if not self.top_window._manual_positioned:
-                top_x, top_y, top_width, _top_height = self._attached_anchor_geometry(
-                    "top",
+            self._last_anchor_metrics.clear()
+            for target, panel in (("top", self.top_window), ("request", self.request_window)):
+                (
+                    _anchor_x,
+                    _anchor_y,
+                    _anchor_width,
+                    _anchor_height,
+                    anchor_source,
+                ) = self._anchor_metrics(
+                    target,
                     rect,
-                    self.top_window.expanded,
+                    panel.expanded,
                 )
-                _anchor_x, _anchor_y, _anchor_width, _anchor_height, top_source = self._anchor_metrics(
-                    "top",
-                    rect,
-                    self.top_window.expanded,
+                should_follow = (not panel._manual_positioned) or self._has_saved_attached_position(
+                    target,
+                    anchor_source,
                 )
-                self.top_window.resize(
-                    self._attached_panel_width("top", top_width, top_source),
-                    self.top_window.height(),
-                )
-                self.top_window.move(top_x, top_y)
-            if not self.request_window._manual_positioned:
-                req_x, req_y, req_width, _req_height = self._attached_anchor_geometry(
-                    "request",
-                    rect,
-                    self.request_window.expanded,
-                )
-                _anchor_x, _anchor_y, _anchor_width, _anchor_height, request_source = self._anchor_metrics(
-                    "request",
-                    rect,
-                    self.request_window.expanded,
-                )
-                self.request_window.resize(
-                    self._attached_panel_width("request", req_width, request_source),
-                    self.request_window.height(),
-                )
-                req_x = min(req_x, rect.right - self.request_window.width() - QT_HUD_MARGIN)
-                req_x = max(rect.left + QT_HUD_MARGIN, req_x)
-                req_y = max(rect.top + QT_HUD_MARGIN, req_y)
-                self.request_window.move(req_x, req_y)
+                if should_follow:
+                    x, y, width, _height = self._attached_panel_geometry(
+                        target,
+                        rect,
+                        panel.expanded,
+                    )
+                    panel.resize(width, panel.height())
+                    panel.move(x, y)
+            self._hud_hidden_by_follow = False
             if self._should_show_hud():
                 if not self.top_window.isVisible():
                     self.top_window.show()

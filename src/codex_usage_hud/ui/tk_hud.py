@@ -5816,26 +5816,6 @@ class TokenHudWindow:
         if self._attached and self._last_rect is not None:
             self._apply_geometry()
 
-    def _move_handle(self, parent: tk.Misc, target: str, window: tk.Tk | tk.Toplevel) -> tk.Label:
-        parent_bg = str(parent.cget("bg"))
-        label = tk.Label(
-            parent,
-            text="≡",
-            bg=parent_bg,
-            fg=_theme_secondary_text(parent_bg),
-            font=("Consolas", 10, "bold"),
-            cursor="fleur",
-            width=2,
-        )
-        setattr(label, "_hud_handle", True)
-        label.bind(
-            "<ButtonPress-1>",
-            lambda event, t=target, w=window: self._start_move(event, t, w),
-        )
-        label.bind("<B1-Motion>", self._move_window)
-        label.bind("<ButtonRelease-1>", self._finish_move)
-        return label
-
     @staticmethod
     def _configure_transparent_window(
         window: tk.Tk | tk.Toplevel,
@@ -6045,7 +6025,10 @@ class TokenHudWindow:
     def _blocks_window_interaction(widget: object) -> bool:
         return bool(
             getattr(widget, "_hud_handle", False)
-            or isinstance(widget, (tk.Button, tk.Text, HudScrollbar, tk.Scrollbar))
+            or isinstance(
+                widget,
+                (tk.Button, tk.Text, tk.Entry, ttk.Combobox, HudScrollbar, tk.Scrollbar),
+            )
         )
 
     def _set_window_cursor(self, window: tk.Tk | tk.Toplevel, cursor: str) -> None:
@@ -6105,9 +6088,19 @@ class TokenHudWindow:
         window: tk.Tk | tk.Toplevel,
     ) -> str | None:
         self._mark_pointer_priority()
-        del target
         if self._resize_window is window:
             return self._resize_window_size(event)
+        if self._drag_window is window:
+            return self._move_window(event)
+        if self._press_at is None or self._press_target != target:
+            return None
+        dx = abs(event.x_root - self._press_at[0])
+        dy = abs(event.y_root - self._press_at[1])
+        if dx > 4 or dy > 4:
+            self._move_target = target
+            self._drag_window = window
+            self._drag_origin = self._press_at
+            return self._move_window(event)
         return None
 
     def _handle_window_release(
@@ -6122,6 +6115,8 @@ class TokenHudWindow:
             result = self._finish_resize(event)
             self._set_window_cursor(window, "")
             return result
+        if self._drag_window is window:
+            return self._finish_move(event)
         return self._release_pointer(event)
 
     def _settings_button(self, parent: tk.Misc) -> tk.Button:
@@ -7826,8 +7821,7 @@ class TokenHudWindow:
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
         controls = tk.Frame(frame, bg=HUD_BG)
         controls.pack(side="left", padx=(0, 4))
-        self._move_handle(controls, "top", self.root).pack(side="left")
-        self._update_button(controls).pack(side="left", padx=(4, 0))
+        self._update_button(controls).pack(side="left")
         self._settings_button(frame).pack(side="right", padx=(4, 0))
         self.top_labels["bar"] = TopHudProgressStrip(frame)
         self.top_labels["bar"].pack(side="left", fill="both", expand=True)
@@ -7838,8 +7832,7 @@ class TokenHudWindow:
         header.pack(fill="x", pady=(0, 7))
         controls = tk.Frame(header, bg=HUD_HEADER_BG)
         controls.pack(side="left", padx=(0, 4))
-        self._move_handle(controls, "top", self.root).pack(side="left")
-        self._update_button(controls).pack(side="left", padx=(4, 0))
+        self._update_button(controls).pack(side="left")
         self._settings_button(header).pack(side="right", padx=(4, 0))
         cache_progress = TopHudProgressBar(
             header,
@@ -8505,7 +8498,6 @@ class TokenHudWindow:
 
     def _build_request_collapsed(self, frame: tk.Frame) -> None:
         frame.configure(bg=REQUEST_HUD_BG, padx=8, pady=4)
-        self._move_handle(frame, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             frame,
             text="↑- ↻- ↓- ◇- ∑- $0.0000",
@@ -8524,7 +8516,6 @@ class TokenHudWindow:
         content = tk.Frame(frame, bg=REQUEST_HUD_BG)
         content.pack(side="top", fill="both", expand=True)
 
-        self._move_handle(header, "request", self.request_root).pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             header,
             text="最近模型请求轮次",
@@ -8646,8 +8637,18 @@ class TokenHudWindow:
         self._move_target = ""
         self._drag_window = None
         self._drag_origin = None
+        self._press_at = None
+        self._press_target = ""
         if target and window is not None:
             self._mark_click_priority()
+            try:
+                window.update_idletasks()
+            except tk.TclError:
+                pass
+            if target == "top":
+                self._top_manual_position = (window.winfo_x(), window.winfo_y())
+            elif target == "request":
+                self._request_manual_position = (window.winfo_x(), window.winfo_y())
             self._remember_window_position(target, window, reason="move")
             self._save_settings()
         return "break"
@@ -9960,6 +9961,7 @@ class TokenHudWindow:
         self._settings_loading_anim_job = None
         self._settings_update_poll_job = None
         self._follow_job = None
+        self._release_tk_image_references()
         try:
             self.request_root.destroy()
         except tk.TclError:
@@ -9968,6 +9970,29 @@ class TokenHudWindow:
             self.root.destroy()
         except tk.TclError:
             pass
+
+    def _release_tk_image_references(self) -> None:
+        """Drop PhotoImage references while the Tk interpreter is still alive."""
+        self._settings_support_images = []
+        _HUD_PROGRESS_IMAGE_CACHE.clear()
+        _HUD_PROGRESS_IMAGE_CACHE_ORDER.clear()
+
+        def clear_widget_images(widget: tk.Misc) -> None:
+            for attribute in ("_track_surface_image", "_fill_surface_image", "_image"):
+                if hasattr(widget, attribute):
+                    try:
+                        setattr(widget, attribute, None)
+                    except Exception:
+                        pass
+            try:
+                children = list(widget.winfo_children())
+            except tk.TclError:
+                return
+            for child in children:
+                clear_widget_images(child)
+
+        for window in (self.root, self.request_root):
+            clear_widget_images(window)
 
     def update_display(
         self,

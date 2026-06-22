@@ -2694,7 +2694,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
     def test_qt_hud_window_updates_closes_and_keeps_core_widgets(self) -> None:
         try:
             import PySide6  # noqa: F401
-            from PySide6.QtWidgets import QLabel, QFrame
+            from PySide6.QtWidgets import QLabel, QFrame, QPushButton
         except Exception as exc:
             self.skipTest(f"PySide6 unavailable: {exc}")
 
@@ -2814,10 +2814,16 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     )
                     self.assertEqual(window.request_window.request_line.property("state"), "error")
                     self.assertTrue(window.request_window._row_labels[0].time.text().strip().endswith("s"))
+                    top_labels = [
+                        label.text()
+                        for label in window.top_window.findChildren(QLabel)
+                    ]
                     request_labels = [
                         label.text()
                         for label in window.request_window.findChildren(QLabel)
                     ]
+                    self.assertNotIn("⋮⋮", top_labels)
+                    self.assertNotIn("⋮⋮", request_labels)
                     self.assertIn("轮次流水", request_labels)
                     self.assertIn("最新在上", request_labels)
                     self.assertTrue(any(label.strip().endswith("s") for label in request_labels))
@@ -2913,6 +2919,15 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertEqual(window.top_window.slow_chip._copy_text, "python -m unittest")
                     self.assertTrue(window.top_window.update_button.isVisible())
                     self.assertEqual(window.top_window.update_button.text(), "⇪")
+                    settings_buttons = [
+                        button
+                        for button in window.top_window.findChildren(QPushButton)
+                        if button.toolTip() == "设置"
+                    ]
+                    self.assertGreaterEqual(len(settings_buttons), 2)
+                    self.assertTrue(all(button.text() != "Settings" for button in settings_buttons))
+                    self.assertTrue(all(button.text() == "⚙" for button in settings_buttons))
+                    self.assertFalse(any(label.text() == "更新计划保留tk模式" for label in collapsed.findChildren(QLabel)))
                     window.top_window.update_button.click()
                     self.assertEqual(update_manager.clicks, 1)
                     self.assertIn("已启动安装器", window.top_window.update_button.toolTip())
@@ -2953,6 +2968,66 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertEqual(window.exit_reason, "display_mode_switch")
                 finally:
                     window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_top_collapsed_progress_strip_matches_tk_layout_threshold(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            strip = qt_hud_module._TopCollapsedProgressStrip()
+            try:
+                strip.show()
+                first_label = "本会话 3.8M/$3.70/97%"
+                metrics = [
+                    {"label": first_label, "ratio": 0.25, "tone": "session"},
+                    {"label": "今日 18.9M/$8.96", "rightText": "总 $100.00", "ratio": 0.35, "tone": "day"},
+                    {"label": "本周 39.5M/$33.41", "rightText": "总 $400.00", "ratio": 0.42, "tone": "week"},
+                ]
+                strip.resize(507, 28)
+                strip.set_metrics(metrics)
+                app.processEvents()
+
+                self.assertFalse(strip.scrolling_enabled)
+                first_width = strip.rails[0].preferred_width()
+                expected_tail_width = (507 - first_width - 14) // 2
+                self.assertEqual(strip.rails[0].width(), first_width)
+                self.assertEqual(strip.rails[1].width(), strip.rails[2].width())
+                self.assertEqual(strip.rails[1].width(), expected_tail_width)
+                self.assertEqual(strip.rails[0].height(), qt_hud_module.QT_COLLAPSED_PROGRESS_RAIL_HEIGHT)
+                self.assertEqual(strip.rails[0].y(), (strip.height() - strip.rails[0].height()) // 2)
+                font = qt_hud_module.QFont(strip.rails[0].font())
+                font.setPointSize(max(8, font.pointSize()))
+                font.setBold(True)
+                font_metrics = qt_hud_module.QFontMetrics(font)
+                self.assertEqual(
+                    font_metrics.elidedText(
+                        first_label,
+                        qt_hud_module.Qt.TextElideMode.ElideRight,
+                        strip.rails[0].width() - 28,
+                    ),
+                    first_label,
+                )
+
+                narrow_width = strip.rails[0].preferred_width() + 14 + 80
+                strip.resize(narrow_width, 28)
+                strip.set_metrics(metrics)
+                app.processEvents()
+
+                self.assertTrue(strip.scrolling_enabled)
+                self.assertLess(strip._scroll_min_x, 0.0)
+                self.assertGreater(strip.rails[0].width(), 72)
+            finally:
+                strip.close()
         finally:
             if previous_platform is None:
                 os.environ.pop("QT_QPA_PLATFORM", None)
@@ -3077,6 +3152,245 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_top_panel_detects_side_border_resize_edges(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            panel = qt_hud_module._TopPanel(
+                on_settings=lambda: None,
+                on_update_action=lambda: None,
+                on_dismiss_warnings=lambda: None,
+                on_interaction=lambda: None,
+            )
+            try:
+                panel.resize(520, qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                panel.show()
+                app.processEvents()
+
+                self.assertEqual(panel._resize_edge_at(qt_hud_module.QPoint(3, 18)), "left")
+                self.assertEqual(panel._resize_edge_at(qt_hud_module.QPoint(516, 18)), "right")
+                self.assertEqual(panel._resize_edge_at(qt_hud_module.QPoint(260, 18)), "")
+            finally:
+                panel.close()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_top_panel_border_hover_updates_cursor_from_shell_and_child(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QMouseEvent
+            from PySide6.QtWidgets import QLabel
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            changes: list[tuple[str, str, int]] = []
+            panel = qt_hud_module._TopPanel(
+                on_settings=lambda: None,
+                on_update_action=lambda: None,
+                on_dismiss_warnings=lambda: None,
+                on_interaction=lambda: None,
+                on_geometry_changed=lambda target, widget, reason: changes.append(
+                    (target, reason, widget.width())
+                ),
+            )
+            try:
+                panel.resize(520, qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                child = QLabel("child", panel.shell)
+                child.setGeometry(512, 8, 8, 20)
+                child.show()
+                panel.show()
+                app.processEvents()
+
+                shell_point = panel.shell.mapFrom(panel, qt_hud_module.QPoint(516, 18))
+                shell_event = QMouseEvent(
+                    qt_hud_module.QEvent.Type.MouseMove,
+                    QPointF(shell_point),
+                    QPointF(panel.shell.mapToGlobal(shell_point)),
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                )
+                qt_hud_module.QApplication.sendEvent(panel.shell, shell_event)
+                self.assertEqual(panel.cursor().shape(), qt_hud_module.Qt.CursorShape.SizeHorCursor)
+                self.assertEqual(panel.shell.cursor().shape(), qt_hud_module.Qt.CursorShape.SizeHorCursor)
+
+                center_point = panel.shell.mapFrom(panel, qt_hud_module.QPoint(260, 18))
+                center_event = QMouseEvent(
+                    qt_hud_module.QEvent.Type.MouseMove,
+                    QPointF(center_point),
+                    QPointF(panel.shell.mapToGlobal(center_point)),
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                )
+                qt_hud_module.QApplication.sendEvent(panel.shell, center_event)
+                self.assertEqual(panel.cursor().shape(), qt_hud_module.Qt.CursorShape.ArrowCursor)
+                self.assertEqual(panel.shell.cursor().shape(), qt_hud_module.Qt.CursorShape.ArrowCursor)
+
+                child_point = child.mapFrom(panel, qt_hud_module.QPoint(516, 18))
+                child_event = QMouseEvent(
+                    qt_hud_module.QEvent.Type.MouseMove,
+                    QPointF(child_point),
+                    QPointF(child.mapToGlobal(child_point)),
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                )
+                qt_hud_module.QApplication.sendEvent(child, child_event)
+                self.assertEqual(panel.cursor().shape(), qt_hud_module.Qt.CursorShape.SizeHorCursor)
+                self.assertEqual(child.cursor().shape(), qt_hud_module.Qt.CursorShape.SizeHorCursor)
+
+                child_press = QMouseEvent(
+                    qt_hud_module.QEvent.Type.MouseButtonPress,
+                    QPointF(child_point),
+                    QPointF(child.mapToGlobal(child_point)),
+                    qt_hud_module.Qt.MouseButton.LeftButton,
+                    qt_hud_module.Qt.MouseButton.LeftButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                )
+                qt_hud_module.QApplication.sendEvent(child, child_press)
+                child_move_point = child.mapFrom(panel, qt_hud_module.QPoint(556, 18))
+                child_move = QMouseEvent(
+                    qt_hud_module.QEvent.Type.MouseMove,
+                    QPointF(child_move_point),
+                    QPointF(child.mapToGlobal(child_move_point)),
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.MouseButton.LeftButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                )
+                qt_hud_module.QApplication.sendEvent(child, child_move)
+                child_release = QMouseEvent(
+                    qt_hud_module.QEvent.Type.MouseButtonRelease,
+                    QPointF(child_move_point),
+                    QPointF(child.mapToGlobal(child_move_point)),
+                    qt_hud_module.Qt.MouseButton.LeftButton,
+                    qt_hud_module.Qt.MouseButton.NoButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                )
+                qt_hud_module.QApplication.sendEvent(child, child_release)
+
+                self.assertEqual(panel.width(), 560)
+                self.assertIn(("top", "resize", 560), changes)
+            finally:
+                panel.close()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_top_collapsed_progress_strip_is_vertically_centered(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            panel = qt_hud_module._TopPanel(
+                on_settings=lambda: None,
+                on_update_action=lambda: None,
+                on_dismiss_warnings=lambda: None,
+                on_interaction=lambda: None,
+            )
+            try:
+                panel.resize(520, qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                panel.show()
+                panel.update_payload(
+                    {
+                        "topProgress": {
+                            "collapsed": [
+                                {"label": "本会话 3.8M/$3.70/97%", "ratio": 0.25, "tone": "session"},
+                                {"label": "今日 62.7M/$85.00", "ratio": 0.85, "tone": "day"},
+                                {"label": "本周 62.7M/$425.00", "ratio": 0.42, "tone": "week"},
+                            ]
+                        }
+                    }
+                )
+                app.processEvents()
+
+                strip = panel._collapsed_strip
+                self.assertIsNotNone(strip)
+                assert strip is not None
+                strip_y = strip.mapTo(panel, qt_hud_module.QPoint(0, 0)).y()
+                self.assertEqual(strip_y, (qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT - strip.height()) // 2)
+                self.assertEqual(strip.rails[0].height(), qt_hud_module.QT_COLLAPSED_PROGRESS_RAIL_HEIGHT)
+                self.assertEqual(strip.rails[0].y(), (strip.height() - strip.rails[0].height()) // 2)
+            finally:
+                panel.close()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_top_panel_right_border_drag_resizes_and_reports_geometry(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+            from PySide6.QtTest import QTest
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            changes: list[tuple[str, str, int]] = []
+            panel = qt_hud_module._TopPanel(
+                on_settings=lambda: None,
+                on_update_action=lambda: None,
+                on_dismiss_warnings=lambda: None,
+                on_interaction=lambda: None,
+                on_geometry_changed=lambda target, widget, reason: changes.append(
+                    (target, reason, widget.width())
+                ),
+            )
+            try:
+                panel.resize(520, qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                panel.show()
+                app.processEvents()
+
+                QTest.mousePress(
+                    panel,
+                    qt_hud_module.Qt.MouseButton.LeftButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                    qt_hud_module.QPoint(516, 18),
+                )
+                QTest.mouseMove(panel, qt_hud_module.QPoint(556, 18))
+                QTest.mouseRelease(
+                    panel,
+                    qt_hud_module.Qt.MouseButton.LeftButton,
+                    qt_hud_module.Qt.KeyboardModifier.NoModifier,
+                    qt_hud_module.QPoint(556, 18),
+                )
+                app.processEvents()
+
+                self.assertEqual(panel.width(), 560)
+                self.assertIn(("top", "resize", 560), changes)
+            finally:
+                panel.close()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_attached_resize_saves_and_restores_width_ratio(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -3138,6 +3452,368 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertEqual(restored.top_window.width(), expected_width)
                 finally:
                     restored.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_attached_windows_follow_moved_codex_rect(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1100, bottom=920)
+                moved = WindowRect(left=180, top=170, right=1180, bottom=970)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", side_effect=[rect, moved]):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                    try:
+                        self.assertTrue(window._follow_timer.isActive())
+
+                        window._follow_codex_window()
+
+                        expected_top = window._attached_panel_geometry("top", moved, False)
+                        expected_request = window._attached_panel_geometry("request", moved, False)
+                        self.assertEqual(
+                            (window.top_window.x(), window.top_window.y(), window.top_window.width()),
+                            (expected_top[0], expected_top[1], expected_top[2]),
+                        )
+                        self.assertEqual(
+                            (window.request_window.x(), window.request_window.y(), window.request_window.width()),
+                            (expected_request[0], expected_request[1], expected_request[2]),
+                        )
+                    finally:
+                        window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_follow_skips_while_top_panel_is_being_dragged(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1100, bottom=920)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=rect) as find:
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                    try:
+                        window.top_window.move(444, 255)
+                        window.top_window._drag_origin = qt_hud_module.QPoint(0, 0)
+                        window.top_window._drag_window_origin = window.top_window.pos()
+                        window.top_window._dragging = True
+
+                        self.assertTrue(window._follow_codex_window())
+
+                        self.assertEqual((window.top_window.x(), window.top_window.y()), (444, 255))
+                        self.assertEqual(find.call_count, 1)
+                    finally:
+                        window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_attached_saved_relative_position_follows_moved_rect(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1100, bottom=920)
+                moved = WindowRect(left=160, top=150, right=1160, bottom=950)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    window.attach_to_rect(rect)
+                    window.top_window.move(rect.left + 240, rect.top + 90)
+                    window._remember_panel_geometry("top", window.top_window, "move")
+                    saved_top = hud_store.load().top
+                    self.assertIsNotNone(saved_top.anchor_x_ratio)
+                    window.top_window._manual_positioned = True
+
+                    window.attach_to_rect(moved)
+
+                    expected_x = moved.left + int(round(moved.width * float(saved_top.relative_x_ratio or 0.0)))
+                    expected_y = moved.top + int(round(moved.height * float(saved_top.relative_y_ratio or 0.0)))
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (expected_x, expected_y))
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_top_expanded_saved_anchor_uses_window_relative_y(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                rect = WindowRect(left=100, top=100, right=1100, bottom=900)
+                anchor = HudAnchor(
+                    left=260,
+                    top=150,
+                    right=820,
+                    bottom=150 + qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT,
+                    default_x=260,
+                    default_y=150,
+                    default_width=560,
+                    source="test-title",
+                )
+                settings = HudSettings.empty()
+                settings.top.anchor_x_ratio = 0.0
+                settings.top.anchor_y_ratio = 1.0
+                settings.top.anchor_source = "test-title"
+                settings.top.relative_x_ratio = (anchor.left - rect.left) / max(1, rect.width)
+                settings.top.relative_y_ratio = (anchor.top - rect.top) / max(1, rect.height)
+                hud_store.save(settings)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=False,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    window.locator = SimpleNamespace(
+                        anchor_geometry=lambda target, _rect, _height: anchor if target == "top" else None,
+                        find=lambda: rect,
+                        is_active=lambda _rect, _hwnds: True,
+                    )
+
+                    _x, y, _width, _height = window._attached_panel_geometry("top", rect, True)
+
+                    self.assertEqual(y, anchor.top)
+                    self.assertNotEqual(y, anchor.bottom)
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_hides_and_restores_with_codex_visibility(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                visible = WindowRect(left=100, top=120, right=1100, bottom=920)
+                minimized = WindowRect(left=100, top=120, right=1100, bottom=920, minimized=True)
+                with patch.object(
+                    qt_hud_module.CodexWindowLocator,
+                    "find",
+                    side_effect=[visible, None, minimized, visible],
+                ):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                    try:
+                        self.assertTrue(window.top_window.isVisible())
+                        self.assertTrue(window.request_window.isVisible())
+
+                        window._follow_codex_window()
+                        self.assertFalse(window.top_window.isVisible())
+                        self.assertFalse(window.request_window.isVisible())
+                        self.assertFalse(window._attached)
+
+                        window._follow_codex_window()
+                        self.assertFalse(window.top_window.isVisible())
+                        self.assertFalse(window.request_window.isVisible())
+
+                        window._follow_codex_window()
+                        self.assertTrue(window.top_window.isVisible())
+                        self.assertTrue(window.request_window.isVisible())
+                        self.assertTrue(window._attached)
+                    finally:
+                        window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_hides_and_restores_when_codex_is_inactive(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                visible = WindowRect(left=100, top=120, right=1100, bottom=920, hwnd=321)
+                with (
+                    patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=visible),
+                    patch.object(
+                        qt_hud_module.CodexWindowLocator,
+                        "is_active",
+                        side_effect=[True, False, True],
+                    ) as is_active,
+                ):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                    try:
+                        self.assertTrue(window.top_window.isVisible())
+                        self.assertTrue(window.request_window.isVisible())
+
+                        self.assertFalse(window._follow_codex_window())
+                        self.assertFalse(window.top_window.isVisible())
+                        self.assertFalse(window.request_window.isVisible())
+                        self.assertTrue(window._attached)
+
+                        self.assertTrue(window._follow_codex_window())
+                        self.assertTrue(window.top_window.isVisible())
+                        self.assertTrue(window.request_window.isVisible())
+                        self.assertGreaterEqual(is_active.call_count, 3)
+                    finally:
+                        window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_free_positioning_survives_missing_codex(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=False,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                    try:
+                        window.top_window.move(222, 244)
+                        window.request_window.move(333, 444)
+
+                        window._follow_codex_window()
+                        window._refresh_latest_payload()
+
+                        self.assertTrue(window.top_window.isVisible())
+                        self.assertTrue(window.request_window.isVisible())
+                        self.assertEqual((window.top_window.x(), window.top_window.y()), (222, 244))
+                        self.assertEqual((window.request_window.x(), window.request_window.y()), (333, 444))
+                    finally:
+                        window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_free_positioning_survives_missing_codex_after_attach(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=False,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                    try:
+                        window.attach_to_rect(WindowRect(left=100, top=120, right=1100, bottom=920))
+                        window.top_window.move(222, 244)
+                        window.request_window.move(333, 444)
+
+                        window._follow_codex_window()
+
+                        self.assertFalse(window._attached)
+                        self.assertTrue(window.top_window.isVisible())
+                        self.assertTrue(window.request_window.isVisible())
+                        self.assertEqual((window.top_window.x(), window.top_window.y()), (222, 244))
+                        self.assertEqual((window.request_window.x(), window.request_window.y()), (333, 444))
+                    finally:
+                        window.close("test")
         finally:
             if previous_platform is None:
                 os.environ.pop("QT_QPA_PLATFORM", None)
@@ -4410,6 +5086,81 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertAlmostEqual(window.settings.top.width_ratio or 0.0, 0.5)
             self.assertAlmostEqual(window.settings.top.anchor_x_ratio or 0.0, 0.2)
             self.assertAlmostEqual(window.settings.top.anchor_y_ratio or 0.0, 12 / 46)
+        finally:
+            window._close()
+
+    def test_tk_whole_panel_drag_moves_window_and_preserves_click_toggle(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _stop_background_jobs(window)
+            window.root.geometry("400x36+100+80")
+            _flush_tk(window)
+            window._save_settings = MagicMock()
+            press = SimpleNamespace(widget=window.root, x_root=180, y_root=95)
+            drag = SimpleNamespace(widget=window.root, x_root=210, y_root=112)
+            release = SimpleNamespace(widget=window.root, x_root=210, y_root=112)
+
+            self.assertIsNone(window._handle_window_press(press, "top", window.root))
+            self.assertEqual(window._handle_window_drag(drag, "top", window.root), "break")
+            self.assertEqual(window._handle_window_release(release, "top", window.root), "break")
+            _flush_tk(window)
+
+            self.assertEqual((window.root.winfo_x(), window.root.winfo_y()), (130, 97))
+            self.assertEqual(window._top_manual_position, (130, 97))
+            self.assertFalse(window.top_expanded)
+            window._save_settings.assert_called_once_with()
+
+            click = SimpleNamespace(widget=window.root, x_root=200, y_root=100)
+            self.assertIsNone(window._handle_window_press(click, "top", window.root))
+            self.assertEqual(window._handle_window_release(click, "top", window.root), "break")
+            self.assertTrue(window.top_expanded)
+        finally:
+            window._close()
+
+    def test_tk_whole_panel_drag_moves_request_window_and_saves_position(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _stop_background_jobs(window)
+            window.request_root.geometry("380x32+100+140")
+            _flush_tk(window)
+            window._save_settings = MagicMock()
+            press = SimpleNamespace(widget=window.request_root, x_root=220, y_root=156)
+            drag = SimpleNamespace(widget=window.request_root, x_root=255, y_root=174)
+            release = SimpleNamespace(widget=window.request_root, x_root=255, y_root=174)
+
+            self.assertIsNone(window._handle_window_press(press, "request", window.request_root))
+            self.assertEqual(window._handle_window_drag(drag, "request", window.request_root), "break")
+            self.assertEqual(window._handle_window_release(release, "request", window.request_root), "break")
+            _flush_tk(window)
+
+            self.assertEqual((window.request_root.winfo_x(), window.request_root.winfo_y()), (135, 158))
+            self.assertEqual(window._request_manual_position, (135, 158))
+            self.assertEqual(window.settings.request.absolute_x, 135)
+            self.assertEqual(window.settings.request.absolute_y, 158)
+            window._save_settings.assert_called_once_with()
+        finally:
+            window._close()
+
+    def test_tk_whole_panel_drag_ignores_interactive_controls_and_resize_edges(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _stop_background_jobs(window)
+            window.root.geometry("400x36+100+80")
+            _flush_tk(window)
+            button = tk.Button(window.root)
+            press = SimpleNamespace(widget=button, x_root=180, y_root=95)
+            drag = SimpleNamespace(widget=button, x_root=220, y_root=120)
+
+            self.assertIsNone(window._handle_window_press(press, "top", window.root))
+            self.assertIsNone(window._handle_window_drag(drag, "top", window.root))
+            self.assertEqual((window.root.winfo_x(), window.root.winfo_y()), (100, 80))
+            self.assertIsNone(window._drag_window)
+
+            edge_press = SimpleNamespace(widget=window.root, x_root=103, y_root=95)
+            with patch.object(window, "_start_resize", return_value="break") as start_resize:
+                self.assertEqual(window._handle_window_press(edge_press, "top", window.root), "break")
+            start_resize.assert_called_once()
+            self.assertIsNone(window._drag_window)
         finally:
             window._close()
 
@@ -5774,6 +6525,35 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, HUD_SWITCH_TO_TK)
         fake_context.close.assert_called_once()
+
+    def test_cli_import_does_not_eagerly_import_qt_hud(self) -> None:
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(SRC_ROOT)
+            if not existing_pythonpath
+            else str(SRC_ROOT) + os.pathsep + existing_pythonpath
+        )
+        script = (
+            "import sys\n"
+            "import codex_usage_hud.cli\n"
+            "names = ['PySide6', 'PySide6.QtCore', 'codex_usage_hud.ui.qt_hud']\n"
+            "print('\\n'.join(f'{name}={name in sys.modules}' for name in names))\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=PROJECT_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PySide6=False", result.stdout)
+        self.assertIn("PySide6.QtCore=False", result.stdout)
+        self.assertIn("codex_usage_hud.ui.qt_hud=False", result.stdout)
 
     def test_main_defaults_to_renderer_first_from_auto_config(self) -> None:
         config = UserConfig.defaults()

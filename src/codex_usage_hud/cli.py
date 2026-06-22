@@ -69,7 +69,7 @@ from .platforms.base import BasePlatform
 from .platforms.cdp_probe import cdp_port_from_env
 from .platforms.codex_theme import CodexThemeProbe
 from .settings_bridge import SettingsBridgeServer
-from .ui import QtHudWindow, TokenHudWindow
+from .ui.tk_hud import TokenHudWindow
 from .ui.renderer_hud import (
     RendererHudClient,
     remove_renderer_hud_from_pages,
@@ -142,6 +142,16 @@ WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 _CRASH_DIAGNOSTIC_FILE: Any | None = None
+QtHudWindow: Any | None = None
+
+
+def _qt_hud_window_class() -> Any:
+    global QtHudWindow
+    if QtHudWindow is None:
+        from .ui.qt_hud import QtHudWindow as qt_hud_window_class
+
+        QtHudWindow = qt_hud_window_class
+    return QtHudWindow
 
 
 class HudAlreadyRunningError(RuntimeError):
@@ -4147,7 +4157,8 @@ def _run_qt_window_session(
     )
     try:
         try:
-            window = existing_window or QtHudWindow(
+            qt_window_class = _qt_hud_window_class()
+            window = existing_window or qt_window_class(
                 compact=bool(getattr(args, "compact", False)),
                 hide_until_attached=False,
                 tombstone_follow_ms=(
@@ -4267,7 +4278,8 @@ def run_qt_hud_session(
                     launch_if_missing=True,
                 )
                 try:
-                    window = QtHudWindow(
+                    qt_window_class = _qt_hud_window_class()
+                    window = qt_window_class(
                         compact=bool(getattr(args, "compact", False)),
                         hide_until_attached=hide_until_attached,
                         tombstone_follow_ms=(
