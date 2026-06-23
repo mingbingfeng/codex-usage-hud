@@ -6027,6 +6027,11 @@ class TokenHudWindow:
 
     @staticmethod
     def _blocks_window_interaction(widget: object) -> bool:
+        current = widget
+        while current is not None:
+            if bool(getattr(current, "_hud_blocks_window_interaction", False)):
+                return True
+            current = getattr(current, "master", None)
         return bool(
             getattr(widget, "_hud_handle", False)
             or isinstance(
@@ -7898,6 +7903,7 @@ class TokenHudWindow:
         self.top_labels["session"] = session_label
 
         body = tk.Frame(frame, bg=HUD_BG)
+        setattr(body, "_hud_blocks_window_interaction", True)
         body.pack(fill="both", expand=True)
         canvas = tk.Canvas(
             body,

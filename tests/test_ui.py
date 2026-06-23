@@ -3970,6 +3970,66 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_manual_top_position_stays_put_when_anchor_shifts_without_window_move(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1100, bottom=920)
+                first_anchor = HudAnchor(
+                    left=260,
+                    top=150,
+                    right=820,
+                    bottom=190,
+                    default_x=260,
+                    default_y=150,
+                    default_width=560,
+                    source="test-title",
+                )
+                second_anchor = HudAnchor(
+                    left=260,
+                    top=184,
+                    right=820,
+                    bottom=224,
+                    default_x=260,
+                    default_y=184,
+                    default_width=560,
+                    source="test-title",
+                )
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    window.locator = _FakeAnchorLocator({"top": first_anchor})
+                    window.attach_to_rect(rect)
+                    window.top_window.move(340, 210)
+                    window._remember_panel_geometry("top", window.top_window, "move")
+                    window.top_window._manual_positioned = True
+
+                    window.locator = _FakeAnchorLocator({"top": second_anchor})
+                    window.attach_to_rect(rect)
+
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 210))
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_top_expanded_saved_anchor_uses_window_relative_y(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -5541,6 +5601,37 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
+    def test_tk_top_expanded_body_does_not_toggle_or_drag_window(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _stop_background_jobs(window)
+            window.root.geometry("400x280+100+80")
+            window.top_expanded = True
+            window._show_top_state(True)
+            _flush_tk(window)
+            window._save_settings = MagicMock()
+            body = window.top_labels["top_body_canvas"].master
+            press = SimpleNamespace(widget=body, x_root=220, y_root=150)
+            drag = SimpleNamespace(widget=body, x_root=260, y_root=180)
+            release = SimpleNamespace(widget=body, x_root=260, y_root=180)
+
+            self.assertIsNone(window._handle_window_press(press, "top", window.root))
+            self.assertIsNone(window._handle_window_drag(drag, "top", window.root))
+            self.assertEqual(window._handle_window_release(release, "top", window.root), "break")
+
+            self.assertTrue(window.top_expanded)
+            self.assertEqual((window.root.winfo_x(), window.root.winfo_y()), (100, 80))
+            self.assertIsNone(window._drag_window)
+            window._save_settings.assert_not_called()
+
+            header = window.top_labels["title"].master
+            click = SimpleNamespace(widget=header, x_root=220, y_root=96)
+            self.assertIsNone(window._handle_window_press(click, "top", window.root))
+            self.assertEqual(window._handle_window_release(click, "top", window.root), "break")
+            self.assertFalse(window.top_expanded)
+        finally:
+            window._close()
+
     def test_tk_whole_panel_drag_moves_request_window_and_saves_position(self) -> None:
         window = TokenHudWindow()
         try:
@@ -6928,6 +7019,142 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_window.update_display.assert_called_once()
         fake_context.close.assert_called_once()
 
+    def test_run_tk_hud_session_hides_until_attached_and_exits_when_codex_exits(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            reload_user_config=MagicMock(),
+        )
+        callbacks: list[object] = []
+        fake_window = SimpleNamespace(exit_reason="")
+
+        def after(_delay: int, callback: object) -> None:
+            callbacks.append(callback)
+
+        def close(reason: str = "") -> None:
+            fake_window.exit_reason = reason
+
+        def run() -> None:
+            callbacks[-1]()
+
+        fake_window.root = SimpleNamespace(after=after, update_idletasks=lambda: None)
+        fake_window.request_root = SimpleNamespace(update_idletasks=lambda: None)
+        fake_window.should_refresh_snapshot = lambda: False
+        fake_window.refresh_delay_ms = lambda normal_delay_ms: normal_delay_ms
+        fake_window.run = run
+        fake_window.update_display = MagicMock()
+        fake_window.close = close
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                return_value=(True, "visible", "", 123),
+            ),
+            patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window) as window_class,
+            patch("codex_usage_hud.cli._codex_processes_exited", return_value=True),
+        ):
+            exit_code = run_tk_hud_session(args, lock_already_held=True)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_window.exit_reason, "codex_exited")
+        self.assertTrue(window_class.call_args.kwargs["hide_until_attached"])
+        fake_context.close.assert_called_once()
+
+    def test_run_qt_hud_session_hides_until_attached_before_opening_qt(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            settings_store=SimpleNamespace(path=Path("hud_settings.json")),
+        )
+        fake_window = SimpleNamespace()
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch("codex_usage_hud.cli.remove_renderer_hud_from_pages", return_value=0),
+            patch(
+                "codex_usage_hud.cli._prepare_codex_window_for_standalone",
+                return_value=(True, "visible", "", 123),
+            ),
+            patch("codex_usage_hud.cli._qt_hud_window_class") as window_class_factory,
+            patch("codex_usage_hud.cli._run_qt_window_session", return_value=0),
+        ):
+            window_class = MagicMock(return_value=fake_window)
+            window_class_factory.return_value = window_class
+            exit_code = run_qt_hud_session(args, lock_already_held=True)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(window_class.call_args.kwargs["hide_until_attached"])
+        fake_context.close.assert_called_once()
+
+    def test_run_qt_window_session_exits_when_codex_exits_without_daemon(self) -> None:
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            close=MagicMock(),
+            settings_store=SimpleNamespace(path=Path("hud_settings.json")),
+            reload_user_config=MagicMock(),
+        )
+        fake_window = SimpleNamespace(exit_reason="")
+        timers: list[object] = []
+
+        class FakeSignal:
+            def __init__(self) -> None:
+                self.callback = None
+
+            def connect(self, callback: object) -> None:
+                self.callback = callback
+
+        class FakeTimer:
+            def __init__(self) -> None:
+                self.timeout = FakeSignal()
+                self.started: list[int] = []
+                self.stopped = False
+                timers.append(self)
+
+            def setSingleShot(self, _enabled: bool) -> None:
+                return
+
+            def start(self, delay_ms: int) -> None:
+                self.started.append(delay_ms)
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        def close(reason: str = "") -> None:
+            fake_window.exit_reason = reason
+
+        def run() -> None:
+            timers[1].timeout.callback()
+
+        fake_window.should_defer_background_work = lambda: True
+        fake_window.refresh_delay_ms = lambda normal_delay_ms: normal_delay_ms
+        fake_window.should_refresh_snapshot = lambda: False
+        fake_window.run = run
+        fake_window.close = close
+        fake_window.update_display = MagicMock()
+        args = SimpleNamespace(compact=False)
+
+        with (
+            patch.dict(sys.modules, {"PySide6.QtCore": SimpleNamespace(QTimer=FakeTimer)}),
+            patch("codex_usage_hud.cli._TkSnapshotPump") as pump_class,
+            patch("codex_usage_hud.cli.DesktopWorkOverlay") as overlay_class,
+            patch("codex_usage_hud.cli._codex_processes_exited", return_value=True),
+        ):
+            pump_class.return_value = SimpleNamespace(close=MagicMock())
+            overlay_class.return_value = SimpleNamespace(close=MagicMock())
+            exit_code = cli_module._run_qt_window_session(
+                fake_context,
+                args,
+                existing_window=fake_window,
+                close_context=False,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_window.exit_reason, "codex_exited")
+        self.assertEqual(timers[1].started, [500])
+
     def test_run_qt_hud_session_falls_back_to_tk_when_qt_window_fails(self) -> None:
         fake_context = SimpleNamespace(
             poll_ms=250,
@@ -7879,8 +8106,11 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_window.update_display.assert_not_called()
         fake_overlay.configure.assert_not_called()
         fake_overlay.update.assert_not_called()
-        fake_window.root.after.assert_called_once()
-        self.assertEqual(fake_window.root.after.call_args.args[0], 75)
+        self.assertEqual(fake_window.root.after.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in fake_window.root.after.call_args_list],
+            [75, 500],
+        )
         fake_overlay.close.assert_called_once()
         fake_pump.close.assert_called_once()
         fake_context.close.assert_called_once()

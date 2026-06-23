@@ -3037,6 +3037,13 @@ if QApplication is not None:
                     self.request_window.show()
 
         def attach_to_rect(self, rect: WindowRect) -> None:
+            previous_rect = self._last_rect
+            rect_changed = previous_rect is not None and (
+                previous_rect.left != rect.left
+                or previous_rect.top != rect.top
+                or previous_rect.right != rect.right
+                or previous_rect.bottom != rect.bottom
+            )
             self._attached = True
             self._last_rect = rect
             self._last_anchor_metrics.clear()
@@ -3052,9 +3059,12 @@ if QApplication is not None:
                     rect,
                     panel.expanded,
                 )
-                should_follow = (not panel._manual_positioned) or self._has_saved_attached_position(
-                    target,
-                    anchor_source,
+                should_follow = (not panel._manual_positioned) or (
+                    rect_changed
+                    and self._has_saved_attached_position(
+                        target,
+                        anchor_source,
+                    )
                 )
                 if should_follow:
                     x, y, width, _height = self._attached_panel_geometry(

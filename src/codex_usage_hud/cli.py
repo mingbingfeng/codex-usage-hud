@@ -1381,6 +1381,16 @@ def _codex_processes_running() -> bool:
         return False
 
 
+def _codex_processes_exited() -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        listener = WindowsProcessListener(exclude_pid=os.getpid())
+        return not bool(listener.snapshot().found)
+    except ProcessListenerError:
+        return False
+
+
 def _activate_running_codex_app() -> bool:
     """Ask Codex to foreground its existing instance via normal app activation."""
     if not _codex_processes_running():
@@ -3607,7 +3617,7 @@ def run_hud_session(
     args: argparse.Namespace,
     *,
     lock_already_held: bool = False,
-    hide_until_attached: bool = False,
+    hide_until_attached: bool = True,
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
@@ -4073,7 +4083,7 @@ def _run_tk_window_session(
         try:
             window = existing_window or TokenHudWindow(
                 compact=args.compact,
-                hide_until_attached=False,
+                hide_until_attached=True,
                 tombstone_follow_ms=(
                     100 if daemon_manager is not None else 500
                 ),
@@ -4120,25 +4130,29 @@ def _run_tk_window_session(
             except Exception:
                 return
 
-        def daemon_watchdog() -> None:
-            if daemon_manager is None:
-                return
-            try:
-                if not daemon_manager.codex_is_running():
-                    _LOGGER.info("daemon_codex_exited")
-                    window.close("daemon_codex_exited")
+        def codex_watchdog() -> None:
+            poll_ms = 500
+            if daemon_manager is not None:
+                poll_ms = daemon_manager.poll_ms
+                try:
+                    if not daemon_manager.codex_is_running():
+                        _LOGGER.info("daemon_codex_exited")
+                        window.close("daemon_codex_exited")
+                        return
+                except ProcessListenerError as exc:
+                    _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
                     return
-            except ProcessListenerError as exc:
-                _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
+            elif _codex_processes_exited():
+                _LOGGER.info("codex_exited")
+                window.close("codex_exited")
                 return
             try:
-                window.root.after(daemon_manager.poll_ms, daemon_watchdog)
+                window.root.after(poll_ms, codex_watchdog)
             except Exception:
                 return
 
         refresh()
-        if daemon_manager is not None:
-            window.root.after(daemon_manager.poll_ms, daemon_watchdog)
+        window.root.after(daemon_manager.poll_ms if daemon_manager is not None else 500, codex_watchdog)
         window.run()
         if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
             return DAEMON_RESTART_REQUESTED
@@ -4196,7 +4210,7 @@ def _run_qt_window_session(
             qt_window_class = _qt_hud_window_class()
             window = existing_window or qt_window_class(
                 compact=bool(getattr(args, "compact", False)),
-                hide_until_attached=False,
+                hide_until_attached=True,
                 tombstone_follow_ms=(
                     100 if daemon_manager is not None else 500
                 ),
@@ -4250,10 +4264,10 @@ def _run_qt_window_session(
 
         refresh_timer.timeout.connect(refresh)
 
-        if daemon_manager is not None:
-            daemon_timer = QTimer()
+        daemon_timer = QTimer()
 
-            def daemon_watchdog() -> None:
+        def codex_watchdog() -> None:
+            if daemon_manager is not None:
                 try:
                     if not daemon_manager.codex_is_running():
                         _LOGGER.info("daemon_codex_exited")
@@ -4262,9 +4276,13 @@ def _run_qt_window_session(
                 except ProcessListenerError as exc:
                     _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
                     return
+            elif _codex_processes_exited():
+                _LOGGER.info("codex_exited")
+                window.close("codex_exited")
+                return
 
-            daemon_timer.timeout.connect(daemon_watchdog)
-            daemon_timer.start(daemon_manager.poll_ms)
+        daemon_timer.timeout.connect(codex_watchdog)
+        daemon_timer.start(daemon_manager.poll_ms if daemon_manager is not None else 500)
 
         refresh()
         window.run()
@@ -4303,7 +4321,7 @@ def run_qt_hud_session(
     args: argparse.Namespace,
     *,
     lock_already_held: bool = False,
-    hide_until_attached: bool = False,
+    hide_until_attached: bool = True,
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
@@ -4362,7 +4380,7 @@ def run_tk_hud_session(
     args: argparse.Namespace,
     *,
     lock_already_held: bool = False,
-    hide_until_attached: bool = False,
+    hide_until_attached: bool = True,
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
@@ -4432,7 +4450,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                 return run_hud_session(
                     args,
                     lock_already_held=True,
-                    hide_until_attached=False,
+                    hide_until_attached=True,
                 )
 
             if startup.mode == DAEMON_STARTUP_CANCEL:
@@ -4445,7 +4463,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                 return run_hud_session(
                     _clone_args_with_display_mode(args, "tk"),
                     lock_already_held=True,
-                    hide_until_attached=False,
+                    hide_until_attached=True,
                     daemon_manager=manager,
                 )
             if startup.mode == DAEMON_STARTUP_QT:
@@ -4455,7 +4473,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                 return run_hud_session(
                     _clone_args_with_display_mode(args, "qt"),
                     lock_already_held=True,
-                    hide_until_attached=False,
+                    hide_until_attached=True,
                     daemon_manager=manager,
                 )
             startup_loading: HudLoadingFeedback | None = None
@@ -4481,7 +4499,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                     return run_hud_session(
                         args,
                         lock_already_held=True,
-                        hide_until_attached=False,
+                        hide_until_attached=True,
                     )
                 if force_renderer_retry:
                     exit_code = run_renderer_hud_session(
