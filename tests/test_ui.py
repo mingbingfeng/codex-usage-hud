@@ -91,6 +91,7 @@ from codex_usage_hud.config import (
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.platforms.codex_theme import CodexThemeExport, CodexThemeSnapshot, HudThemeTokens
 from codex_usage_hud.ui import QtHudWindow
+from codex_usage_hud.ui.qt_hud import _qt_contrast, _qt_stylesheet
 from codex_usage_hud.ui.renderer_hud import payload_from_snapshot
 from codex_usage_hud.core.parser import (
     Activity,
@@ -4016,6 +4017,57 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_initial_place_prefers_saved_relative_position_over_absolute(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                settings = HudSettings.empty()
+                settings.top.absolute_x = 12
+                settings.top.absolute_y = 34
+                settings.top.relative_x_ratio = 0.25
+                settings.top.relative_y_ratio = 0.20
+                settings.request.absolute_x = 56
+                settings.request.absolute_y = 78
+                settings.request.relative_x_ratio = 0.70
+                settings.request.relative_bottom_ratio = 0.10
+                hud_store.save(settings)
+                rect = WindowRect(left=200, top=160, right=1200, bottom=960)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=rect):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    expected_top = window._attached_panel_geometry("top", rect, False)
+                    expected_request = window._attached_panel_geometry("request", rect, False)
+                    self.assertEqual(
+                        (window.top_window.x(), window.top_window.y()),
+                        (expected_top[0], expected_top[1]),
+                    )
+                    self.assertEqual(
+                        (window.request_window.x(), window.request_window.y()),
+                        (expected_request[0], expected_request[1]),
+                    )
+                    self.assertNotEqual((window.top_window.x(), window.top_window.y()), (12, 34))
+                    self.assertNotEqual((window.request_window.x(), window.request_window.y()), (56, 78))
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_manual_top_position_stays_put_when_anchor_shifts_without_window_move(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -4408,6 +4460,33 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 os.environ.pop("QT_QPA_PLATFORM", None)
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_stylesheet_uses_readable_light_theme_surfaces(self) -> None:
+        tokens = HudThemeTokens.from_theme(
+            CodexThemeExport.from_share_string(
+                'codex-theme-v1:{"codeThemeId":"github-light","theme":{"accent":"#0969da",'
+                '"contrast":40,"fonts":{"code":null,"ui":null},"ink":"#24292f",'
+                '"opaqueWindows":false,"semanticColors":{"diffAdded":"#1a7f37",'
+                '"diffRemoved":"#cf222e","skill":"#8250df"},"surface":"#ffffff"}}'
+            )
+        ).to_dict()
+        stylesheet = _qt_stylesheet(tokens)
+
+        self.assertIn("rgba(255, 255, 255, 236)", stylesheet)
+        self.assertNotIn("rgba(16, 22, 29, 236)", stylesheet)
+        self.assertNotIn("rgba(255, 255, 255, 18)", stylesheet)
+        self.assertNotIn("#1C2632", stylesheet)
+        self.assertNotIn("#111820", stylesheet)
+        self.assertIn("QFrame#qtHudShell[target=\"request\"]", stylesheet)
+        self.assertIn("QFrame#qtHudRequestCollapsed", stylesheet)
+        self.assertIn("QComboBox QAbstractItemView", stylesheet)
+        self.assertIn("selection-background-color:", stylesheet)
+        self.assertNotIn("background: #151D27;", stylesheet)
+        self.assertIn(f"background: {tokens['requestSurface']};", stylesheet)
+        self.assertIn(f"color: {tokens['requestText']};", stylesheet)
+        self.assertIn("color: #24292f;", stylesheet)
+        self.assertGreaterEqual(_qt_contrast(tokens["surface"], tokens["text"]), 4.5)
+        self.assertGreaterEqual(_qt_contrast(tokens["requestSurface"], tokens["requestText"]), 4.5)
 
     def test_qt_hud_applies_renderer_theme_tokens(self) -> None:
         try:

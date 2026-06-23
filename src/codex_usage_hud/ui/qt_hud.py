@@ -1726,6 +1726,7 @@ if QApplication is not None:
             collapsed_layout.addWidget(self.request_line, 1)
 
             expanded = QFrame()
+            expanded.setObjectName("qtHudRequestExpanded")
             expanded_layout = QVBoxLayout(expanded)
             expanded_layout.setContentsMargins(0, 0, 0, 0)
             expanded_layout.setSpacing(4)
@@ -1829,6 +1830,12 @@ if QApplication is not None:
         def _refresh_running_rows(self) -> None:
             for row in self._row_labels:
                 row.refresh_running_time()
+
+        def apply_theme(self, tokens: Mapping[str, str]) -> None:
+            del tokens
+            for row in self._row_labels:
+                row.style().unpolish(row)
+                row.style().polish(row)
 
 
     class _SettingsDialog(QDialog):
@@ -2638,6 +2645,7 @@ if QApplication is not None:
             self.top_window.setStyleSheet(stylesheet)
             self.request_window.setStyleSheet(stylesheet)
             self.top_window.apply_theme(normalized)
+            self.request_window.apply_theme(normalized)
             if self._settings_dialog is not None:
                 self._settings_dialog.setStyleSheet(stylesheet)
 
@@ -2785,6 +2793,20 @@ if QApplication is not None:
                 and placement.relative_bottom_ratio is not None
             )
 
+        def _has_saved_relative_position(self, target: str) -> bool:
+            placement = self._placement(target)
+            if placement.anchor_x_ratio is not None and placement.anchor_y_ratio is not None:
+                return True
+            if target == "top":
+                return (
+                    placement.relative_x_ratio is not None
+                    and placement.relative_y_ratio is not None
+                )
+            return (
+                placement.relative_x_ratio is not None
+                and placement.relative_bottom_ratio is not None
+            )
+
         def _attached_panel_geometry(
             self,
             target: str,
@@ -2919,6 +2941,15 @@ if QApplication is not None:
             self.settings_store.save(self.settings)
 
         def _place_windows(self) -> None:
+            top_relative_saved = self._has_saved_relative_position("top")
+            request_relative_saved = self._has_saved_relative_position("request")
+            if top_relative_saved:
+                self.top_window._manual_positioned = False
+            if request_relative_saved:
+                self.request_window._manual_positioned = False
+            if (top_relative_saved or request_relative_saved) and self._follow_codex_window():
+                return
+
             top_saved = (
                 self.settings.top.absolute_x is not None
                 and self.settings.top.absolute_y is not None
@@ -3085,9 +3116,161 @@ if QApplication is not None:
                     self.request_window.show()
 
 
+def _qt_hex_rgb(value: object, fallback: str = "#000000") -> tuple[int, int, int]:
+    text = str(value or fallback).strip()
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) == 3:
+        text = "".join(char * 2 for char in text)
+    if len(text) != 6:
+        text = str(fallback).strip().lstrip("#")
+    try:
+        return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+    except ValueError:
+        fallback_text = str(fallback).strip().lstrip("#")
+        return (
+            int(fallback_text[0:2], 16),
+            int(fallback_text[2:4], 16),
+            int(fallback_text[4:6], 16),
+        )
+
+
+def _qt_rgb_hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02X}{:02X}{:02X}".format(
+        *(max(0, min(255, int(channel))) for channel in rgb)
+    )
+
+
+def _qt_mix_hex(left: object, right: object, ratio: float) -> str:
+    ratio = max(0.0, min(1.0, float(ratio)))
+    inverse = 1.0 - ratio
+    left_rgb = _qt_hex_rgb(left)
+    right_rgb = _qt_hex_rgb(right)
+    return _qt_rgb_hex(
+        (
+            round((left_rgb[0] * inverse) + (right_rgb[0] * ratio)),
+            round((left_rgb[1] * inverse) + (right_rgb[1] * ratio)),
+            round((left_rgb[2] * inverse) + (right_rgb[2] * ratio)),
+        )
+    )
+
+
+def _qt_rgba(value: object, alpha: int) -> str:
+    red, green, blue = _qt_hex_rgb(value)
+    return f"rgba({red}, {green}, {blue}, {max(0, min(255, int(alpha)))})"
+
+
+def _qt_luma(value: object) -> float:
+    channels = []
+    for channel in _qt_hex_rgb(value):
+        normalized = channel / 255.0
+        if normalized <= 0.03928:
+            channels.append(normalized / 12.92)
+        else:
+            channels.append(((normalized + 0.055) / 1.055) ** 2.4)
+    return (channels[0] * 0.2126) + (channels[1] * 0.7152) + (channels[2] * 0.0722)
+
+
+def _qt_contrast(left: object, right: object) -> float:
+    left_luma = _qt_luma(left)
+    right_luma = _qt_luma(right)
+    lighter = max(left_luma, right_luma)
+    darker = min(left_luma, right_luma)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _qt_readable_text(background: object, primary: object, secondary: object) -> str:
+    if _qt_contrast(background, primary) >= _qt_contrast(background, secondary):
+        return str(primary)
+    return str(secondary)
+
+
 def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     theme = dict(QT_THEME_DEFAULTS)
     theme.update({str(key): str(value) for key, value in dict(tokens or {}).items()})
+    is_light = _qt_luma(theme["surface"]) > _qt_luma(theme["text"])
+    themed = {
+        "shellBackground": _qt_rgba(theme["surface"], 236),
+        "panelHeaderBackground": _qt_rgba(theme["headerSurface"], 232),
+        "panelHairline": _qt_rgba(theme["panelBorder"], 210),
+        "cardBackground": _qt_mix_hex(
+            theme["panelSurface"],
+            theme["text"],
+            0.025 if is_light else 0.045,
+        ),
+        "cardBorder": _qt_mix_hex(
+            theme["panelBorder"],
+            theme["text"],
+            0.04 if is_light else 0.08,
+        ),
+        "warningPanelBackground": _qt_mix_hex(
+            theme["surface"],
+            theme["warning"],
+            0.14 if is_light else 0.26,
+        ),
+        "warningChipBackground": _qt_mix_hex(
+            theme["surface"],
+            theme["warning"],
+            0.20 if is_light else 0.34,
+        ),
+        "activityTrailBackground": _qt_rgba(theme["requestPanelSurface"], 220),
+        "activityBorder": _qt_rgba(theme["panelBorder"], 190),
+        "activityLine": _qt_mix_hex(theme["requestMuted"], theme["requestText"], 0.18),
+        "activityDotBorder": theme["requestPanelSurface"],
+        "chipBackground": _qt_mix_hex(
+            theme["headerSurface"],
+            theme["text"],
+            0.03 if is_light else 0.06,
+        ),
+        "chipWarningBackground": _qt_mix_hex(
+            theme["surface"],
+            theme["warning"],
+            0.18 if is_light else 0.30,
+        ),
+        "buttonBackground": _qt_mix_hex(
+            theme["headerSurface"],
+            theme["text"],
+            0.035 if is_light else 0.06,
+        ),
+        "buttonHoverBackground": _qt_mix_hex(
+            theme["headerSurface"],
+            theme["progressCache"],
+            0.08 if is_light else 0.18,
+        ),
+        "settingsActionBackground": _qt_mix_hex(
+            theme["headerSurface"],
+            theme["text"],
+            0.08 if is_light else 0.14,
+        ),
+        "primaryActionText": _qt_readable_text(
+            theme["accent"],
+            theme["surface"],
+            theme["text"],
+        ),
+        "inputSelectionBackground": _qt_mix_hex(theme["info"], theme["accent"], 0.35),
+        "settingsStatus": _qt_mix_hex(theme["muted"], theme["text"], 0.22),
+        "settingsChromeBackground": _qt_mix_hex(
+            theme["surface"],
+            theme["headerSurface"],
+            0.58 if is_light else 0.75,
+        ),
+        "settingsControlBackground": _qt_mix_hex(
+            theme["surface"],
+            theme["text"],
+            0.025 if is_light else 0.06,
+        ),
+        "settingsControlHover": _qt_mix_hex(
+            theme["surface"],
+            theme["progressCache"],
+            0.10 if is_light else 0.18,
+        ),
+        "settingsPopupSelection": _qt_mix_hex(
+            theme["surface"],
+            theme["accent"],
+            0.16 if is_light else 0.26,
+        ),
+        "scrollbarBackground": _qt_rgba(theme["text"], 18 if is_light else 10),
+    }
     css = """
     QWidget {
         font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
@@ -3102,6 +3285,12 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QFrame#qtHudShell[target="top"][expanded="true"] {
         background: #10161D;
     }
+    QFrame#qtHudShell[target="request"] {
+        background: #111820;
+    }
+    QFrame#qtHudShell[target="request"][expanded="true"] {
+        background: #0B1016;
+    }
     QFrame#qtHudSettingsDialog {
         background: #10161D;
         border: 0;
@@ -3109,7 +3298,7 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     }
     QFrame#qtHudSettingsHead,
     QFrame#qtHudSettingsActions {
-        background: #151D27;
+        background: __QT_HUD_SETTINGS_CHROME_BACKGROUND__;
         border: 0;
     }
     QFrame#qtHudSettingsHead {
@@ -3146,6 +3335,9 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         background: #FFFFFF;
         border-radius: 6px;
     }
+    QFrame#qtHudRequestCollapsed,
+    QFrame#qtHudRequestExpanded,
+    QFrame#qtHudRequestSubhead,
     QFrame#qtHudRequestListShell,
     QScrollArea#qtHudRequestScroll,
     QScrollArea#qtHudRequestScroll > QWidget,
@@ -3163,6 +3355,15 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QFrame#qtHudRequestRowFrame[latest="true"] QLabel#qtHudLabel-request,
     QFrame#qtHudRequestRowFrame[latest="true"] QLabel#qtHudLabel-request-time {
         color: #F3D27A;
+    }
+    QFrame#qtHudRequestCollapsed QLabel#qtHudLabel-strong,
+    QFrame#qtHudRequestExpanded QLabel#qtHudLabel-strong,
+    QFrame#qtHudRequestExpanded QLabel#qtHudLabel-request {
+        color: #4D6075;
+    }
+    QFrame#qtHudRequestExpanded QLabel#qtHudLabel-caption,
+    QFrame#qtHudRequestExpanded QLabel#qtHudLabel-muted {
+        color: #718095;
     }
     QScrollArea#qtHudActivityTrailScroll {
         background: rgba(16, 24, 33, 190);
@@ -3183,7 +3384,7 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QScrollArea#qtHudActivityTrailScroll QFrame#qtHudActivityTrailLine,
     QFrame#qtHudActivityMarkerLine,
     QScrollArea#qtHudActivityTrailScroll QFrame#qtHudActivityMarkerLine {
-        background: #4D6075;
+        background: __QT_HUD_ACTIVITY_LINE__;
         border: 0;
         padding: 0;
     }
@@ -3343,7 +3544,7 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         padding: 4px 9px;
     }
     QPushButton#qtHudSettingsAction[primary="true"] {
-        color: #10161D;
+        color: __QT_HUD_PRIMARY_ACTION_TEXT__;
         background: #F3D27A;
         font-weight: 700;
     }
@@ -3353,6 +3554,17 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         border: 1px solid #334254;
         border-radius: 6px;
         padding: 5px;
+    }
+    QComboBox:hover {
+        background: __QT_HUD_SETTINGS_CONTROL_HOVER__;
+    }
+    QComboBox QAbstractItemView {
+        color: #DCE7F2;
+        background: #111820;
+        border: 1px solid #334254;
+        selection-color: #DCE7F2;
+        selection-background-color: __QT_HUD_SETTINGS_POPUP_SELECTION__;
+        outline: 0;
     }
     QLineEdit {
         color: #DCE7F2;
@@ -3444,6 +3656,22 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     }
     """
     replacements = {
+        "__QT_HUD_PRIMARY_ACTION_TEXT__": themed["primaryActionText"],
+        "__QT_HUD_ACTIVITY_LINE__": themed["activityLine"],
+        "__QT_HUD_SETTINGS_CHROME_BACKGROUND__": themed["settingsChromeBackground"],
+        "__QT_HUD_SETTINGS_CONTROL_HOVER__": themed["settingsControlHover"],
+        "__QT_HUD_SETTINGS_POPUP_SELECTION__": themed["settingsPopupSelection"],
+        "rgba(16, 22, 29, 236)": themed["shellBackground"],
+        "rgba(24, 33, 43, 220)": themed["panelHeaderBackground"],
+        "rgba(255, 255, 255, 20)": themed["panelHairline"],
+        "rgba(127, 62, 58, 170)": themed["warningPanelBackground"],
+        "rgba(255, 255, 255, 18)": themed["cardBackground"],
+        "rgba(255, 255, 255, 24)": themed["cardBorder"],
+        "rgba(39, 50, 65, 210)": themed["panelHairline"],
+        "rgba(16, 24, 33, 190)": themed["activityTrailBackground"],
+        "rgba(28, 38, 50, 230)": themed["chipBackground"],
+        "rgba(91, 49, 44, 200)": themed["chipWarningBackground"],
+        "rgba(255, 255, 255, 10)": themed["scrollbarBackground"],
         "#10161D": theme["surface"],
         "#10161d": theme["surface"],
         "#141B24": theme["panelSurface"],
@@ -3456,6 +3684,7 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         "#E9F1F8": theme["progressTrackText"],
         "#8D9AAD": theme["muted"],
         "#9AA8BA": theme["muted"],
+        "#A9BCD2": themed["settingsStatus"],
         "#F3D27A": theme["accent"],
         "#9CCBFF": theme["info"],
         "#5EA7FF": theme["progressCache"],
@@ -3469,12 +3698,19 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         "#718095": theme["requestMuted"],
         "#3B4654": theme["progressTrackBorder"],
         "#202832": theme["progressTrack"],
-        "#1C2632": theme["headerSurface"],
+        "#1C2632": themed["buttonBackground"],
         "#111820": theme["requestSurface"],
+        "#0B1016": theme["requestSurface"],
+        "#101821": theme["requestPanelSurface"],
+        "#151D27": theme["requestHeaderSurface"],
         "#151E28": theme["requestHeaderSurface"],
         "#17202A": theme["requestHeaderSurface"],
         "#1D2A38": theme["headerSurface"],
         "#334254": theme["panelBorder"],
+        "#223044": themed["buttonHoverBackground"],
+        "#2E3846": themed["settingsActionBackground"],
+        "#2E6DA8": themed["inputSelectionBackground"],
+        "#FFFFFF": "#FFFFFF",
     }
     for source, target in replacements.items():
         css = css.replace(source, str(target))
