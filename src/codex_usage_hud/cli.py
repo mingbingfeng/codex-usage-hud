@@ -2765,6 +2765,25 @@ class RuntimeContext:
             _configure_ui_cost_estimators(estimator)
 
 
+def _snapshot_session_key(snapshot: ParsedSession | None) -> str:
+    if snapshot is None:
+        return ""
+    return _session_path_key(snapshot.session_path) or str(snapshot.session_id or "")
+
+
+def _active_session_switch_pending(context: "RuntimeContext", snapshot: ParsedSession | None) -> bool:
+    resolver = getattr(context, "session_resolver", None)
+    if resolver is None:
+        return False
+    try:
+        session_path, selection_source = resolver.resolve()
+    except Exception:
+        return False
+    del selection_source
+    current_key = _session_path_key(session_path) or str(getattr(resolver, "session_id", "") or "")
+    return bool(current_key and current_key != _snapshot_session_key(snapshot))
+
+
 class _TkSnapshotPump:
     """Keep Tk responsive by building snapshots off the Tk main thread."""
 
@@ -4069,6 +4088,7 @@ def _run_tk_window_session(
             defer_background_work = bool(
                 getattr(window, "should_defer_background_work", lambda: False)()
             )
+            next_delay_ms = window.refresh_delay_ms(context.poll_ms)
             if not defer_background_work:
                 overlay_item_limit = _work_overlay_item_limit_for_context(context)
                 refresh_snapshot = window.should_refresh_snapshot()
@@ -4076,6 +4096,8 @@ def _run_tk_window_session(
                     snapshot = snapshot_pump.take_latest()
                     if snapshot is not None:
                         latest_snapshot = snapshot
+                    if refresh_snapshot and _active_session_switch_pending(context, latest_snapshot):
+                        next_delay_ms = 80
                     snapshot_pump.request_refresh()
                 if refresh_snapshot:
                     window.update_display(
@@ -4087,7 +4109,7 @@ def _run_tk_window_session(
                 )
                 work_overlay.update(latest_snapshot.active_work_items)
             try:
-                window.root.after(window.refresh_delay_ms(context.poll_ms), refresh)
+                window.root.after(next_delay_ms, refresh)
             except Exception:
                 return
 
@@ -4194,6 +4216,7 @@ def _run_qt_window_session(
             defer_background_work = bool(
                 getattr(window, "should_defer_background_work", lambda: False)()
             )
+            next_delay_ms = window.refresh_delay_ms(context.poll_ms)
             if not defer_background_work:
                 overlay_item_limit = _work_overlay_item_limit_for_context(context)
                 refresh_snapshot = window.should_refresh_snapshot()
@@ -4201,6 +4224,8 @@ def _run_qt_window_session(
                     snapshot = snapshot_pump.take_latest()
                     if snapshot is not None:
                         latest_snapshot = snapshot
+                    if refresh_snapshot and _active_session_switch_pending(context, latest_snapshot):
+                        next_delay_ms = 80
                     snapshot_pump.request_refresh()
                 if refresh_snapshot:
                     window.update_display(
@@ -4211,7 +4236,7 @@ def _run_qt_window_session(
                     item_limit=overlay_item_limit,
                 )
                 work_overlay.update(latest_snapshot.active_work_items)
-            schedule_refresh(window.refresh_delay_ms(context.poll_ms))
+            schedule_refresh(next_delay_ms)
 
         refresh_timer.timeout.connect(refresh)
 

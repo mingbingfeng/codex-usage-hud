@@ -48,6 +48,7 @@ from codex_usage_hud.cli import (
     _VisibleAppErrorCache,
     _TkSnapshotPump,
     _TkWorkOverlayCommandPump,
+    _active_session_switch_pending,
     _apply_visible_app_error,
     _build_session_switch_controller,
     _enable_crash_diagnostics,
@@ -536,6 +537,21 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(prior.tokens, 0)
         self.assertEqual(prior.cost_usd, 0.0)
+
+    def test_active_session_switch_pending_detects_new_resolver_path(self) -> None:
+        old_path = Path(tempfile.gettempdir()) / "old-session.jsonl"
+        new_path = Path(tempfile.gettempdir()) / "new-session.jsonl"
+        snapshot = ParsedSession(session_id="old-session", status="parsed")
+        snapshot.session_path = old_path
+        snapshot.selection_source = "cdp:Old"
+        context = SimpleNamespace(
+            session_resolver=SimpleNamespace(
+                resolve=lambda: (new_path, "cdp:New"),
+                session_id="",
+            ),
+        )
+
+        self.assertTrue(_active_session_switch_pending(context, snapshot))
 
     def test_active_work_items_follow_session_creation_order_desc(self) -> None:
         parser = JsonlSessionParser()
@@ -4265,7 +4281,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_settings_dialog_matches_renderer_modal_structure(self) -> None:
         window = TokenHudWindow()
         try:
-            window._open_settings_dialog()
+            with patch.object(window.locator, "find", return_value=None):
+                window._open_settings_dialog()
             dialog = window._settings_dialog
             self.assertIsNotNone(dialog)
             assert dialog is not None
@@ -4322,6 +4339,25 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 result = window._scroll_settings_body(SimpleNamespace(delta=-120, num=None))
             self.assertEqual(result, "break")
             scroll.assert_called_once_with(1, "units")
+        finally:
+            window._close()
+
+    def test_settings_dialog_centers_on_codex_window_when_available(self) -> None:
+        window = TokenHudWindow()
+        try:
+            rect = WindowRect(left=160, top=90, right=1360, bottom=890)
+            with patch.object(window.locator, "find", return_value=rect):
+                window._open_settings_dialog()
+            dialog = window._settings_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+
+            width, height, x, y = _parse_tk_geometry(dialog.geometry())
+
+            self.assertEqual(width, SETTINGS_DIALOG_WIDTH)
+            self.assertEqual(height, SETTINGS_DIALOG_HEIGHT)
+            self.assertEqual(x, rect.left + (rect.width - width) // 2)
+            self.assertEqual(y, rect.top + (rect.height - height) // 2)
         finally:
             window._close()
 

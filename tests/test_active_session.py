@@ -496,6 +496,64 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(tracker.current_path(), archived_session)
             self.assertEqual(tracker.latest_source, "cdp:Archived Thread")
 
+    def test_current_path_direct_poll_overrides_stale_event_title(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            old_path = sessions_root / "rollout-old-thread.jsonl"
+            new_path = sessions_root / "rollout-new-thread.jsonl"
+            old_path.write_text("{}\n", encoding="utf-8")
+            new_path.write_text("{}\n", encoding="utf-8")
+            session_index = root / "session_index.jsonl"
+            session_index.write_text(
+                "\n".join(
+                    [
+                        '{"id":"old-thread","thread_name":"Old Thread"}',
+                        '{"id":"new-thread","thread_name":"New Thread"}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tracker = ActiveSessionTracker(
+                platform=FakeInProcessTitlePlatform(["New Thread"]),
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=250,
+                enabled=True,
+            )
+            tracker.latest_title = "Old Thread"
+            tracker.latest_path = old_path
+            tracker._mapped_title = "Old Thread"
+
+            self.assertEqual(tracker.current_path(), new_path)
+            self.assertEqual(tracker.latest_title, "New Thread")
+            self.assertEqual(tracker.latest_source, "ui:New Thread")
+
+    def test_current_path_clears_stale_event_title_when_direct_poll_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stale_path = root / "stale.jsonl"
+            stale_path.write_text("{}\n", encoding="utf-8")
+            tracker = ActiveSessionTracker(
+                platform=FakeInProcessTitlePlatform([""]),
+                state_db=root / "state_5.sqlite",
+                sessions_root=root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+            )
+            tracker.latest_title = "Stale Thread"
+            tracker.latest_path = stale_path
+            tracker._mapped_title = "Stale Thread"
+
+            self.assertIsNone(tracker.current_path())
+            self.assertEqual(tracker.latest_title, "")
+            self.assertIsNone(tracker.latest_path)
+            self.assertEqual(tracker.latest_source, "ui-unmatched")
+
 
 class SessionPathResolverTests(unittest.TestCase):
     def test_resolver_prefers_tracker_selected_path_over_latest_mtime(self) -> None:

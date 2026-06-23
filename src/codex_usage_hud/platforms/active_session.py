@@ -350,6 +350,43 @@ class ActiveSessionTracker:
                     )
                     self.latest_event_source = "cdp"
                 return path
+        poll_attempted = self.platform.supports_active_title_polling()
+        polled_title = ""
+        if poll_attempted:
+            try:
+                polled_title = (self.platform.get_active_conversation_title() or "").strip()
+            except Exception as exc:
+                _LOGGER.debug("active_session_direct_poll_failed error=%s", exc)
+                polled_title = ""
+        if polled_title:
+            path = self.path_for_title(polled_title)
+            with self._lock:
+                event_path = self.latest_path
+                event_source = self.latest_event_source
+            if path is None and event_path is not None and event_source == "event":
+                return event_path
+            with self._lock:
+                self.latest_title = polled_title
+                self.latest_path = path
+                self._mapped_title = polled_title
+                self.latest_source = (
+                    f"ui:{compact_text(polled_title)}"
+                    if path is not None
+                    else "ui-unmatched"
+                )
+                self.latest_event_source = "poll"
+            return path
+        if poll_attempted:
+            with self._lock:
+                had_cached_title = bool(self.latest_title)
+                if had_cached_title:
+                    self.latest_title = ""
+                    self.latest_path = None
+                    self._mapped_title = ""
+                    self.latest_source = "ui-unmatched"
+                    self.latest_event_source = "poll-empty"
+            if had_cached_title:
+                return None
         with self._lock:
             title = self.latest_title
         if not title:

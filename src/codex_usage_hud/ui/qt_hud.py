@@ -79,7 +79,7 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 }
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
-    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer
+    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Slot
     from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -2033,6 +2033,8 @@ if QApplication is not None:
             layout.addStretch(1)
             return tab
 
+        @Slot()
+        @Slot(int)
         def _sync_action_visibility(self, *_args: object) -> None:
             active = self.tabs.currentIndex()
             is_settings = active == 0
@@ -2157,6 +2159,7 @@ if QApplication is not None:
             self._window.user_settings = config
             return config
 
+        @Slot()
         def _save_only(self) -> None:
             config = self._save_config()
             target = effective_display_mode(config.display_mode)
@@ -2166,6 +2169,7 @@ if QApplication is not None:
                 else f"已保存到本地配置；当前会话仍保持 Qt，{target} 方案会在下次切换或启动时生效。"
             )
 
+        @Slot(int)
         def _on_display_mode_selected(self, _index: int) -> None:
             self._display_mode_touched = True
             selected_mode = self._selected_mode()
@@ -2181,6 +2185,7 @@ if QApplication is not None:
             self.status.setText("正在应用新的 HUD 显示方案...")
             self._window.request_mode_switch(effective_display_mode(config.display_mode))
 
+        @Slot()
         def _fetch_prices(self) -> None:
             url = self.pricing_url.text().strip()
             try:
@@ -2194,6 +2199,7 @@ if QApplication is not None:
             self._replace_price_rows(config.model_prices)
             self.status.setText(f"已拉取并保存 {len(fetched)} 个模型价格。")
 
+        @Slot()
         def _export_json(self) -> None:
             try:
                 config = self._save_config()
@@ -2204,6 +2210,7 @@ if QApplication is not None:
                 return
             self.status.setText("设置 JSON 已复制到剪贴板。")
 
+        @Slot()
         def _confirm_exit(self) -> None:
             answer = QMessageBox.question(
                 self,
@@ -2227,6 +2234,7 @@ if QApplication is not None:
                     state_text = ""
             self.update_state_label.setText(state_text or "尚未检查更新。")
 
+        @Slot()
         def _check_update(self) -> None:
             manager = self._window.update_manager
             if manager is not None and hasattr(manager, "request_check"):
@@ -2238,6 +2246,7 @@ if QApplication is not None:
             self.status.setText(format_update_info(info))
             self.update_state_label.setText(format_update_info(info))
 
+        @Slot()
         def _install_update(self) -> None:
             manager = self._window.update_manager
             if manager is not None and hasattr(manager, "request_install"):
@@ -2428,9 +2437,33 @@ if QApplication is not None:
             self._mark_interaction()
             if self._settings_dialog is None:
                 self._settings_dialog = _SettingsDialog(self)
+            if not self._settings_dialog.isVisible():
+                self._center_settings_dialog()
             self._settings_dialog.show()
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
+
+        def _center_settings_dialog(self) -> None:
+            if self._settings_dialog is None:
+                return
+            target_rect = self._settings_center_rect()
+            width = max(1, self._settings_dialog.frameGeometry().width())
+            height = max(1, self._settings_dialog.frameGeometry().height())
+            x = target_rect.x() + max(0, (target_rect.width() - width) // 2)
+            y = target_rect.y() + max(0, (target_rect.height() - height) // 2)
+            self._settings_dialog.move(x, y)
+
+        def _settings_center_rect(self) -> QRect:
+            try:
+                rect = self.locator.find()
+            except Exception:
+                rect = None
+            if rect is not None and rect.width > 0 and rect.height > 0:
+                return QRect(rect.left, rect.top, rect.width, rect.height)
+            screen = self.app.screenAt(self.top_window.pos()) or self.app.primaryScreen()
+            if screen is None:
+                return QRect(0, 0, 1, 1)
+            return screen.availableGeometry()
 
         def request_mode_switch(self, target: str) -> None:
             self._mode_switch_request = target

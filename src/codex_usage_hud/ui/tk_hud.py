@@ -6429,6 +6429,13 @@ class TokenHudWindow:
             self._settings_configured_display_mode = str(self.user_settings.display_mode)
             self._settings_display_mode_touched = False
             try:
+                dialog.geometry(
+                    self._centered_settings_geometry(
+                        dialog,
+                        SETTINGS_DIALOG_WIDTH,
+                        SETTINGS_DIALOG_HEIGHT,
+                    )
+                )
                 dialog.deiconify()
             except tk.TclError:
                 return
@@ -6670,10 +6677,18 @@ class TokenHudWindow:
         height: int,
     ) -> str:
         del dialog
-        screen_width = max(1, int(self.root.winfo_screenwidth()))
-        screen_height = max(1, int(self.root.winfo_screenheight()))
-        x = max(0, (screen_width - width) // 2)
-        y = max(0, (screen_height - height) // 2)
+        try:
+            rect = self.locator.find()
+        except Exception:
+            rect = None
+        if rect is not None and rect.width > 0 and rect.height > 0:
+            x = rect.left + max(0, (rect.width - width) // 2)
+            y = rect.top + max(0, (rect.height - height) // 2)
+        else:
+            screen_width = max(1, int(self.root.winfo_screenwidth()))
+            screen_height = max(1, int(self.root.winfo_screenheight()))
+            x = max(0, (screen_width - width) // 2)
+            y = max(0, (screen_height - height) // 2)
         return f"{width}x{height}+{x}+{y}"
 
     def _bind_settings_dialog_drag(

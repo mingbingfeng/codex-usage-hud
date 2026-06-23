@@ -263,6 +263,23 @@ class WindowsActiveTitleTests(unittest.TestCase):
 
         self.assertEqual(platform.get_active_conversation_title(), "UIA 降级标题")
 
+    def test_windows_platform_does_not_return_cached_title_when_poll_is_empty(self) -> None:
+        class _FakeTitleProbe:
+            def conversation_title(self, hwnd: int) -> str | None:
+                del hwnd
+                return None
+
+        platform = object.__new__(WindowsPlatform)
+        platform._last_observed_title = "旧会话标题"
+        platform._last_observed_session_id = ""
+        platform._cdp_probe = None
+        platform._uia_title_probe = _FakeTitleProbe()
+        platform._title_probe = _FakeTitleProbe()
+        platform._find_codex_window = lambda: 123  # type: ignore[method-assign]
+
+        self.assertIsNone(platform.get_active_conversation_title())
+        self.assertEqual(platform._last_observed_title, "旧会话标题")
+
     def test_windows_platform_exposes_visible_cdp_app_error(self) -> None:
         class _FakeCdpProbe:
             def snapshot(self) -> object | None:

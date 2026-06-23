@@ -1171,7 +1171,7 @@ class WindowsPlatform(BasePlatform):
             if title:
                 self._last_observed_title = title
                 return title
-        return self._last_observed_title or None
+        return None
 
     def watch_active_conversation_title(
         self,
