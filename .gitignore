@@ -42,6 +42,7 @@ Thumbs.db
 .omx/
 .omc/
 .codex_delegate/
+.codebase-memory/
 
 # Local debug and mockup artifacts
 /.tmp-*.png
