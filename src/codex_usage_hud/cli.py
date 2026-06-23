@@ -134,7 +134,6 @@ LOADING_FEEDBACK_STALE_SECONDS = 20.0
 ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
-RECENT_WORK_STARTUP_GRACE_SECONDS = 60.0
 VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_ALPHA = 0.88
@@ -2564,19 +2563,6 @@ def _work_overlay_seen_task_keys(context: object) -> set[str]:
     return seen
 
 
-def _should_show_recent_work_overlay_item_on_first_sight(
-    item: WorkStatusItem,
-    *,
-    now: datetime,
-) -> bool:
-    if item.current:
-        return True
-    completed_at = item.updated_at or item.started_at or item.session_started_at
-    if completed_at is None:
-        return False
-    return _datetime_age_seconds(completed_at, now) <= RECENT_WORK_STARTUP_GRACE_SECONDS
-
-
 def _select_runtime_work_overlay_items(
     context: object,
     items: Sequence[WorkStatusItem],
@@ -2585,23 +2571,15 @@ def _select_runtime_work_overlay_items(
 ) -> list[WorkStatusItem]:
     seen_task_keys = _work_overlay_seen_task_keys(context)
     previously_seen_task_keys = set(seen_task_keys)
-    now = datetime.now().astimezone()
     visible: list[WorkStatusItem] = []
     for item in items:
         if len(visible) >= item_limit:
             break
         task_key = _work_overlay_runtime_task_key(item)
         if item.status == "recent":
-            should_show = bool(task_key and task_key in previously_seen_task_keys)
-            if not should_show:
-                should_show = _should_show_recent_work_overlay_item_on_first_sight(
-                    item,
-                    now=now,
-                )
-            if should_show:
+            if task_key and task_key in previously_seen_task_keys:
                 visible.append(item)
-                if task_key:
-                    seen_task_keys.add(task_key)
+                seen_task_keys.add(task_key)
             continue
         visible.append(item)
         if task_key:
@@ -2750,9 +2728,7 @@ class RuntimeContext:
 
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
-        if self.active_session_tracker is not None:
-            self.active_session_tracker.close()
-            self.active_session_tracker = None
+        _stop_active_session_tracker(self)
 
     def reload_user_config(self) -> None:
         """Reload user config and reset cost caches when pricing changes."""
@@ -2773,6 +2749,39 @@ class RuntimeContext:
                 self.sse_tracker.cost_estimator = estimator
             self.usage_cache = UsageSummaryCache(self.parser)
             _configure_ui_cost_estimators(estimator)
+
+
+def _suspend_native_active_title(context: "RuntimeContext") -> None:
+    try:
+        context.platform.suspend_native_active_title(True)
+    except Exception:
+        return
+
+
+def _stop_active_session_tracker(context: "RuntimeContext") -> None:
+    tracker = getattr(context, "active_session_tracker", None)
+    if tracker is None:
+        return
+    try:
+        tracker.close()
+    finally:
+        context.active_session_tracker = None
+
+
+def _prepare_runtime_for_display_mode_switch(
+    context: "RuntimeContext",
+    snapshot_pump: "_TkSnapshotPump | None" = None,
+) -> bool:
+    snapshot_pump_closed = False
+    if snapshot_pump is not None:
+        try:
+            snapshot_pump.close()
+            snapshot_pump_closed = True
+        except Exception:
+            pass
+    _suspend_native_active_title(context)
+    _stop_active_session_tracker(context)
+    return snapshot_pump_closed
 
 
 def _snapshot_session_key(snapshot: ParsedSession | None) -> str:
@@ -2829,7 +2838,7 @@ class _TkSnapshotPump:
         with self._lock:
             return self._worker is not None and self._worker.is_alive()
 
-    def close(self, timeout_seconds: float = 0.5) -> None:
+    def close(self, timeout_seconds: float = 2.0) -> None:
         self._stop_event.set()
         with self._lock:
             worker = self._worker
@@ -3970,10 +3979,12 @@ def run_renderer_hud_session(
                     mode_switch = str(settings_command_status.get("switchMode") or "").strip()
                     if mode_switch == "qt":
                         local_loading.close()
+                        _prepare_runtime_for_display_mode_switch(context)
                         _LOGGER.info("renderer_hud_switch_requested mode=qt")
                         return HUD_SWITCH_TO_QT
                     if mode_switch == "tk":
                         local_loading.close()
+                        _prepare_runtime_for_display_mode_switch(context)
                         _LOGGER.info("renderer_hud_switch_requested mode=tk")
                         return HUD_SWITCH_TO_TK
                     if exit_requested.is_set():
@@ -4070,6 +4081,7 @@ def _run_tk_window_session(
     update_manager: AutoUpdateManager | None = None,
 ) -> int:
     snapshot_pump = _TkSnapshotPump(context)
+    snapshot_pump_closed = False
     work_overlay = DesktopWorkOverlay(
         item_limit=_work_overlay_item_limit_for_context(context),
     )
@@ -4158,7 +4170,10 @@ def _run_tk_window_session(
             return DAEMON_RESTART_REQUESTED
         mode_switch = str(getattr(window, "mode_switch_request", "") or "")
         if mode_switch:
-            context.close()
+            snapshot_pump_closed = _prepare_runtime_for_display_mode_switch(
+                context,
+                snapshot_pump,
+            )
         if mode_switch == "qt":
             return HUD_SWITCH_TO_QT
         if mode_switch == "renderer":
@@ -4170,7 +4185,8 @@ def _run_tk_window_session(
         if command_pump is not None:
             command_pump.close()
         work_overlay.close()
-        snapshot_pump.close()
+        if not snapshot_pump_closed:
+            snapshot_pump.close()
         switching_modes = bool(getattr(window, "mode_switch_request", "") or "")
         window = None
         if not switching_modes:
@@ -4197,6 +4213,7 @@ def _run_qt_window_session(
         return HUD_SWITCH_TO_TK
 
     snapshot_pump = _TkSnapshotPump(context)
+    snapshot_pump_closed = False
     work_overlay = DesktopWorkOverlay(
         item_limit=_work_overlay_item_limit_for_context(context),
     )
@@ -4292,7 +4309,10 @@ def _run_qt_window_session(
             return DAEMON_RESTART_REQUESTED
         mode_switch = str(getattr(window, "mode_switch_request", "") or "")
         if mode_switch:
-            context.close()
+            snapshot_pump_closed = _prepare_runtime_for_display_mode_switch(
+                context,
+                snapshot_pump,
+            )
         if mode_switch == "tk":
             return HUD_SWITCH_TO_TK
         if mode_switch == "renderer":
@@ -4314,7 +4334,8 @@ def _run_qt_window_session(
         if command_pump is not None:
             command_pump.close()
         work_overlay.close()
-        snapshot_pump.close()
+        if not snapshot_pump_closed:
+            snapshot_pump.close()
         if close_context:
             context.close()
 

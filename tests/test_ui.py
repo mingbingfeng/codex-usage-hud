@@ -1333,7 +1333,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].status_label, "处理中")
         self.assertNotEqual(items[0].status_text, "已完成")
 
-    def test_current_completed_task_shows_without_prior_running_overlay(self) -> None:
+    def test_current_completed_task_hides_without_prior_running_overlay(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
         token_payload = {
@@ -1416,9 +1416,7 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertIn(running_items[0].status, {"running", "active"})
         self.assertEqual(completed_snapshot.request.status, "confirmed")
-        self.assertEqual(len(fresh_items), 1)
-        self.assertEqual(fresh_items[0].id, "session-current")
-        self.assertEqual(fresh_items[0].status, "recent")
+        self.assertEqual(fresh_items, [])
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].status, "recent")
         self.assertEqual(items[0].status_label, "刚完成")
@@ -3297,7 +3295,23 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertEqual(saved.work_overlay_max_items, 3)
                     tk_index = dialog.display_mode.findData("tk")
                     self.assertGreaterEqual(tk_index, 0)
-                    dialog.display_mode.setCurrentIndex(tk_index)
+                    with patch.object(
+                        qt_hud_module.QMessageBox,
+                        "question",
+                        return_value=qt_hud_module.QMessageBox.StandardButton.No,
+                    ) as question:
+                        dialog.display_mode.setCurrentIndex(tk_index)
+                    question.assert_called_once()
+                    self.assertNotEqual(store.load().display_mode, "tk")
+                    self.assertEqual(window.mode_switch_request, "")
+
+                    with patch.object(
+                        qt_hud_module.QMessageBox,
+                        "question",
+                        return_value=qt_hud_module.QMessageBox.StandardButton.Yes,
+                    ) as question:
+                        dialog._on_display_mode_selected(tk_index)
+                    question.assert_called_once()
                     switched = store.load()
                     self.assertEqual(switched.display_mode, "tk")
                     self.assertEqual(window.mode_switch_request, "tk")
@@ -4128,6 +4142,72 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_restored_top_position_stays_put_when_anchor_shifts_without_window_move(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                rect = WindowRect(left=100, top=0, right=1100, bottom=800, hwnd=321)
+                first_anchor = HudAnchor(
+                    left=260,
+                    top=30,
+                    right=820,
+                    bottom=70,
+                    default_x=260,
+                    default_y=30,
+                    default_width=560,
+                    source="test-title",
+                )
+                second_anchor = HudAnchor(
+                    left=260,
+                    top=60,
+                    right=820,
+                    bottom=100,
+                    default_x=260,
+                    default_y=60,
+                    default_width=560,
+                    source="test-title",
+                )
+                settings = HudSettings.empty()
+                settings.top.anchor_x_ratio = (340 - first_anchor.left) / first_anchor.width
+                settings.top.anchor_y_ratio = (36 - first_anchor.top) / first_anchor.height
+                settings.top.anchor_source = "test-title"
+                settings.top.relative_x_ratio = (340 - rect.left) / rect.width
+                settings.top.relative_y_ratio = (36 - rect.top) / rect.height
+                hud_store.save(settings)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    window.locator = _FakeAnchorLocator({"top": first_anchor})
+                    window.attach_to_rect(rect)
+
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 36))
+                    self.assertTrue(window.top_window._manual_positioned)
+
+                    window.locator = _FakeAnchorLocator({"top": second_anchor})
+                    window.attach_to_rect(rect)
+
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 36))
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_manual_top_position_survives_inactive_rect_jitter(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -4159,6 +4239,45 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
 
                     self.assertFalse(window._follow_codex_window())
                     self.assertTrue(window._follow_codex_window())
+
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 210))
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_manual_top_position_survives_same_hwnd_vertical_rect_jitter(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1100, bottom=920, hwnd=321)
+                jitter = WindowRect(left=100, top=154, right=1100, bottom=954, hwnd=321)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    window.attach_to_rect(rect)
+                    window.top_window.move(340, 210)
+                    window._remember_panel_geometry("top", window.top_window, "move")
+                    window.top_window._manual_positioned = True
+
+                    window.attach_to_rect(jitter)
 
                     self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 210))
                 finally:
@@ -7362,6 +7481,98 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(fake_window.exit_reason, "codex_exited")
         self.assertEqual(timers[1].started, [500])
 
+    def test_qt_mode_switch_stops_snapshot_pump_before_active_tracker(self) -> None:
+        events: list[object] = []
+
+        class FakePlatform:
+            def suspend_native_active_title(self, suspended: bool = True) -> None:
+                events.append(("suspend", suspended))
+
+        class FakeSignal:
+            def connect(self, callback: object) -> None:
+                del callback
+
+        class FakeTimer:
+            def __init__(self) -> None:
+                self.timeout = FakeSignal()
+
+            def setSingleShot(self, _enabled: bool) -> None:
+                return
+
+            def start(self, _delay_ms: int) -> None:
+                return
+
+            def stop(self) -> None:
+                events.append("timer")
+
+        tracker = SimpleNamespace(
+            close=MagicMock(side_effect=lambda: events.append("tracker")),
+        )
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            platform=FakePlatform(),
+            active_session_tracker=tracker,
+            user_config=UserConfig.defaults(),
+            settings_store=SimpleNamespace(path=Path("hud_settings.json")),
+            reload_user_config=MagicMock(),
+        )
+        fake_pump = SimpleNamespace(
+            take_latest=MagicMock(),
+            request_refresh=MagicMock(),
+            is_refreshing=MagicMock(return_value=False),
+            close=MagicMock(side_effect=lambda: events.append("snapshot")),
+        )
+        fake_overlay = SimpleNamespace(
+            configure=MagicMock(),
+            update=MagicMock(),
+            close=MagicMock(side_effect=lambda: events.append("overlay")),
+        )
+        fake_command_pump = SimpleNamespace(
+            start=MagicMock(),
+            close=MagicMock(side_effect=lambda: events.append("command")),
+        )
+        fake_window = SimpleNamespace(
+            exit_reason="",
+            mode_switch_request="tk",
+            should_defer_background_work=lambda: True,
+            should_refresh_snapshot=lambda: True,
+            refresh_delay_ms=MagicMock(return_value=75),
+            run=MagicMock(),
+            update_display=MagicMock(),
+        )
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "PySide6": SimpleNamespace(),
+                    "PySide6.QtCore": SimpleNamespace(QTimer=FakeTimer),
+                },
+            ),
+            patch("codex_usage_hud.cli._TkSnapshotPump", return_value=fake_pump),
+            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay),
+            patch(
+                "codex_usage_hud.cli._build_session_switch_controller",
+                return_value=SimpleNamespace(),
+            ),
+            patch(
+                "codex_usage_hud.cli._WorkOverlayCommandPump",
+                return_value=fake_command_pump,
+            ),
+        ):
+            exit_code = cli_module._run_qt_window_session(
+                fake_context,
+                SimpleNamespace(compact=False),
+                existing_window=fake_window,
+                close_context=False,
+            )
+
+        self.assertEqual(exit_code, HUD_SWITCH_TO_TK)
+        self.assertEqual(events[:3], ["snapshot", ("suspend", True), "tracker"])
+        self.assertEqual(events[3:], ["timer", "timer", "command", "overlay"])
+        self.assertIsNone(fake_context.active_session_tracker)
+        fake_pump.close.assert_called_once()
+
     def test_run_qt_hud_session_falls_back_to_tk_when_qt_window_fails(self) -> None:
         fake_context = SimpleNamespace(
             poll_ms=250,
@@ -7590,6 +7801,74 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         collect.assert_not_called()
         self.assertEqual(window.exit_reason, "display_mode_switch")
+
+    def test_tk_mode_switch_stops_snapshot_pump_before_active_tracker(self) -> None:
+        events: list[object] = []
+
+        class FakePlatform:
+            def suspend_native_active_title(self, suspended: bool = True) -> None:
+                events.append(("suspend", suspended))
+
+        tracker = SimpleNamespace(
+            close=MagicMock(side_effect=lambda: events.append("tracker")),
+        )
+        fake_context = SimpleNamespace(
+            poll_ms=250,
+            platform=FakePlatform(),
+            active_session_tracker=tracker,
+            user_config=UserConfig.defaults(),
+            reload_user_config=MagicMock(),
+        )
+        fake_pump = SimpleNamespace(
+            take_latest=MagicMock(),
+            request_refresh=MagicMock(),
+            is_refreshing=MagicMock(return_value=False),
+            close=MagicMock(side_effect=lambda: events.append("snapshot")),
+        )
+        fake_overlay = SimpleNamespace(
+            configure=MagicMock(),
+            update=MagicMock(),
+            close=MagicMock(side_effect=lambda: events.append("overlay")),
+        )
+        fake_command_pump = SimpleNamespace(
+            start=MagicMock(),
+            close=MagicMock(side_effect=lambda: events.append("command")),
+        )
+        fake_window = SimpleNamespace(
+            exit_reason="",
+            mode_switch_request="qt",
+            root=SimpleNamespace(after=MagicMock()),
+            should_defer_background_work=lambda: True,
+            should_refresh_snapshot=lambda: True,
+            refresh_delay_ms=MagicMock(return_value=75),
+            run=MagicMock(),
+            update_display=MagicMock(),
+        )
+
+        with (
+            patch("codex_usage_hud.cli._TkSnapshotPump", return_value=fake_pump),
+            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay),
+            patch(
+                "codex_usage_hud.cli._build_session_switch_controller",
+                return_value=SimpleNamespace(),
+            ),
+            patch(
+                "codex_usage_hud.cli._WorkOverlayCommandPump",
+                return_value=fake_command_pump,
+            ),
+        ):
+            exit_code = cli_module._run_tk_window_session(
+                fake_context,
+                SimpleNamespace(compact=False),
+                existing_window=fake_window,
+                close_context=False,
+            )
+
+        self.assertEqual(exit_code, HUD_SWITCH_TO_QT)
+        self.assertEqual(events[:3], ["snapshot", ("suspend", True), "tracker"])
+        self.assertEqual(events[3:], ["command", "overlay"])
+        self.assertIsNone(fake_context.active_session_tracker)
+        fake_pump.close.assert_called_once()
 
     def test_run_hud_session_switches_from_tk_to_qt(self) -> None:
         args = SimpleNamespace(renderer_hud=False)

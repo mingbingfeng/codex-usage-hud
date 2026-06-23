@@ -1096,6 +1096,7 @@ class WindowsPlatform(BasePlatform):
         self._cdp_probe: CodexCdpProbe | None = None
         self._uia_title_probe: _UiaTitleProbe | None = None
         self._title_probe: _MsaaTitleProbe | None = None
+        self._native_active_title_suspended = False
         try:
             self._cdp_probe = CodexCdpProbe()
         except Exception:
@@ -1121,12 +1122,29 @@ class WindowsPlatform(BasePlatform):
     def supports_active_title_polling(self) -> bool:
         return (
             self._cdp_probe is not None
-            or self._uia_title_probe is not None
-            or self._title_probe is not None
+            or (
+                not self._native_active_title_is_suspended()
+                and (
+                    self._uia_title_probe is not None
+                    or self._title_probe is not None
+                )
+            )
         )
 
     def supports_active_title_events(self) -> bool:
-        return self._uia_title_probe is not None or self._title_probe is not None
+        return (
+            not self._native_active_title_is_suspended()
+            and (self._uia_title_probe is not None or self._title_probe is not None)
+        )
+
+    def suspend_native_active_title(self, suspended: bool = True) -> None:
+        self._native_active_title_suspended = bool(suspended)
+
+    def resume_native_active_title(self) -> None:
+        self.suspend_native_active_title(False)
+
+    def _native_active_title_is_suspended(self) -> bool:
+        return bool(getattr(self, "_native_active_title_suspended", False))
 
     def get_active_conversation_ref(self) -> tuple[str, str] | None:
         if self._cdp_probe is None:
@@ -1156,6 +1174,8 @@ class WindowsPlatform(BasePlatform):
         ref = self.get_active_conversation_ref()
         if ref is not None and ref[1]:
             return ref[1]
+        if self._native_active_title_is_suspended():
+            return None
         if self._uia_title_probe is None and self._title_probe is None:
             return None
         hwnd = self._find_codex_window()
@@ -1178,6 +1198,8 @@ class WindowsPlatform(BasePlatform):
         stop_event: threading.Event,
         on_title: Callable[[str], None],
     ) -> bool:
+        if self._native_active_title_is_suspended():
+            return False
         if self._uia_title_probe is not None:
             watcher = _UiaTitleWatcher(self, self._uia_title_probe, on_title)
             if watcher.run(stop_event):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -153,6 +154,89 @@ class SessionSwitchControllerTests(unittest.TestCase):
 
 
 class WindowsActiveTitleTests(unittest.TestCase):
+    def test_windows_platform_initializes_native_active_title_probes_by_default(self) -> None:
+        with mock.patch(
+            "codex_usage_hud.platforms.windows.CodexCdpProbe",
+            return_value=object(),
+        ), mock.patch(
+            "codex_usage_hud.platforms.windows._UiaTitleProbe",
+            return_value=object(),
+        ) as uia_probe, mock.patch(
+            "codex_usage_hud.platforms.windows._MsaaTitleProbe",
+            return_value=object(),
+        ) as msaa_probe:
+            platform = WindowsPlatform()
+
+        self.assertIsNotNone(platform._cdp_probe)
+        self.assertIsNotNone(platform._uia_title_probe)
+        self.assertIsNotNone(platform._title_probe)
+        uia_probe.assert_called_once()
+        msaa_probe.assert_called_once()
+
+    def test_windows_platform_suspend_uses_cdp_only_for_active_titles(self) -> None:
+        class _FakeCdpProbe:
+            def snapshot(self) -> object | None:
+                return None
+
+        class _FakeTitleProbe:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def conversation_title(self, hwnd: int) -> str | None:
+                del hwnd
+                self.calls += 1
+                return "Native Title"
+
+        native_probe = _FakeTitleProbe()
+        platform = object.__new__(WindowsPlatform)
+        platform._last_observed_title = ""
+        platform._last_observed_session_id = ""
+        platform._cdp_probe = _FakeCdpProbe()
+        platform._uia_title_probe = native_probe
+        platform._title_probe = native_probe
+        platform._find_codex_window = lambda: 123  # type: ignore[method-assign]
+
+        platform.suspend_native_active_title()
+
+        self.assertTrue(platform.supports_active_title_polling())
+        self.assertFalse(platform.supports_active_title_events())
+        self.assertIsNone(platform.get_active_conversation_title())
+        self.assertEqual(native_probe.calls, 0)
+
+        platform.resume_native_active_title()
+
+        self.assertEqual(platform.get_active_conversation_title(), "Native Title")
+        self.assertEqual(native_probe.calls, 1)
+
+    def test_windows_platform_suspend_skips_native_event_watcher(self) -> None:
+        with mock.patch(
+            "codex_usage_hud.platforms.windows.CodexCdpProbe",
+            return_value=object(),
+        ), mock.patch(
+            "codex_usage_hud.platforms.windows._UiaTitleProbe",
+            return_value=object(),
+        ) as uia_probe, mock.patch(
+            "codex_usage_hud.platforms.windows._MsaaTitleProbe",
+            return_value=object(),
+        ):
+            platform = WindowsPlatform()
+
+        platform.suspend_native_active_title()
+        with mock.patch(
+            "codex_usage_hud.platforms.windows._UiaTitleWatcher",
+        ) as uia_watcher, mock.patch(
+            "codex_usage_hud.platforms.windows._WinEventTitleWatcher",
+        ) as msaa_watcher:
+            started = platform.watch_active_conversation_title(
+                threading.Event(),
+                lambda title: None,
+            )
+
+        self.assertFalse(started)
+        uia_probe.assert_called_once()
+        uia_watcher.assert_not_called()
+        msaa_watcher.assert_not_called()
+
     class _FailingOleacc:
         def AccessibleObjectFromWindow(self, *args: object) -> int:
             del args

@@ -18,6 +18,7 @@ from ..config import (
     fetch_model_prices,
 )
 from ..core import ParsedSession
+from ..platforms.cdp_probe import cdp_port_from_env, list_targets, pick_page_target
 from ..platforms.codex_theme import CodexThemeProbe
 from ..support_assets import support_qr_asset_paths
 from ..updater import check_for_update, download_update_asset, format_update_info, launch_installer
@@ -45,6 +46,7 @@ QT_HUD_CLICK_REFRESH_DELAY_MS = 50
 QT_HUD_POINTER_PRIORITY_MS = 120
 QT_HUD_POINTER_REFRESH_DELAY_MS = 75
 QT_HUD_TOP_STACK_WIDTH = 420
+QT_HUD_SAME_HWND_RECT_JITTER_PX = 48
 QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT = 38
 QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS = 4
 QT_HUD_FOLLOW_MS = 120
@@ -2290,9 +2292,39 @@ if QApplication is not None:
                     else "当前已经处于所选显示模式。"
                 )
                 return
+
+            restart_codex = False
+            if target == "renderer":
+                debugger_available = self._window.renderer_debugger_available()
+                message = (
+                    "当前 Codex 已开启本地调试端口，HUD 可以直接切换到 Renderer 内嵌模式，无需重启 Codex。"
+                    "\n\n是否现在应用？"
+                    if debugger_available
+                    else "当前 Codex 还不是调试/CDP 启动。要立即切换到 Renderer 内嵌模式，需要先以调试模式重启 Codex App。"
+                    "\n\n是否现在重启并应用？"
+                )
+                title = "立即切换到 Renderer"
+                restart_codex = not debugger_available
+            elif target == "tk":
+                title = "立即切换到 Tk"
+                message = (
+                    "准备切换到 Tk 独立窗口。HUD 会关闭当前 Qt 窗口，并打开新的 Tk 悬浮窗。"
+                    "\n\n是否现在应用？"
+                )
+            else:
+                title = "立即切换 HUD 显示方案"
+                message = "是否现在应用新的 HUD 显示方案？"
+
+            answer = QMessageBox.question(self, title, message)
+            if answer != QMessageBox.StandardButton.Yes:
+                self.status.setText("已保留方案选择，点击保存后会在下次切换或下次启动时生效。")
+                return
             config = self._save_config()
             self.status.setText("正在应用新的 HUD 显示方案...")
-            self._window.request_mode_switch(effective_display_mode(config.display_mode))
+            self._window.request_mode_switch(
+                effective_display_mode(config.display_mode),
+                restart_codex=restart_codex,
+            )
 
         @Slot()
         def _fetch_prices(self) -> None:
@@ -2584,9 +2616,17 @@ if QApplication is not None:
                 return QRect(0, 0, 1, 1)
             return screen.availableGeometry()
 
-        def request_mode_switch(self, target: str) -> None:
+        @staticmethod
+        def renderer_debugger_available(timeout_seconds: float = 0.35) -> bool:
+            try:
+                target = pick_page_target(list_targets(cdp_port_from_env(), timeout_seconds))
+            except Exception:
+                return False
+            return bool(target.get("webSocketDebuggerUrl"))
+
+        def request_mode_switch(self, target: str, *, restart_codex: bool = False) -> None:
             self._mode_switch_request = target
-            self._restart_codex_for_renderer = target == "renderer"
+            self._restart_codex_for_renderer = bool(restart_codex and target == "renderer")
             self.close("display_mode_switch")
 
         def _handle_update_action(self) -> None:
@@ -3070,6 +3110,22 @@ if QApplication is not None:
                 if not self.request_window.isVisible():
                     self.request_window.show()
 
+        @staticmethod
+        def _same_hwnd_rect_jitter(previous: WindowRect | None, current: WindowRect) -> bool:
+            if previous is None:
+                return False
+            if not previous.hwnd or previous.hwnd != current.hwnd:
+                return False
+            if previous.width != current.width or previous.height != current.height:
+                return False
+            max_delta = max(
+                abs(int(previous.left) - int(current.left)),
+                abs(int(previous.top) - int(current.top)),
+                abs(int(previous.right) - int(current.right)),
+                abs(int(previous.bottom) - int(current.bottom)),
+            )
+            return 0 < max_delta <= QT_HUD_SAME_HWND_RECT_JITTER_PX
+
         def attach_to_rect(self, rect: WindowRect) -> None:
             previous_rect = self._last_rect
             rect_changed = previous_rect is not None and (
@@ -3077,6 +3133,10 @@ if QApplication is not None:
                 or previous_rect.top != rect.top
                 or previous_rect.right != rect.right
                 or previous_rect.bottom != rect.bottom
+            )
+            rect_changed_for_follow = rect_changed and not self._same_hwnd_rect_jitter(
+                previous_rect,
+                rect,
             )
             self._attached = True
             self._last_rect = rect
@@ -3093,12 +3153,13 @@ if QApplication is not None:
                     rect,
                     panel.expanded,
                 )
+                has_saved_attached_position = self._has_saved_attached_position(
+                    target,
+                    anchor_source,
+                )
                 should_follow = (not panel._manual_positioned) or (
-                    rect_changed
-                    and self._has_saved_attached_position(
-                        target,
-                        anchor_source,
-                    )
+                    rect_changed_for_follow
+                    and has_saved_attached_position
                 )
                 if should_follow:
                     x, y, width, _height = self._attached_panel_geometry(
@@ -3108,6 +3169,8 @@ if QApplication is not None:
                     )
                     panel.resize(width, panel.height())
                     panel.move(x, y)
+                    if has_saved_attached_position:
+                        panel._manual_positioned = True
             self._hud_hidden_by_follow = False
             if self._should_show_hud():
                 if not self.top_window.isVisible():

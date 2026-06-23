@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $configPath = Join-Path $env:USERPROFILE ".codex\config.toml"
 $serverName = "codebase-memory-mcp"
-$exePath = "C:\Users\zjxqm\AppData\Local\Programs\codebase-memory-mcp\codebase-memory-mcp.exe"
+$exePath = Join-Path $env:LOCALAPPDATA "Programs\codebase-memory-mcp\codebase-memory-mcp.exe"
 
 if (-not (Test-Path -LiteralPath $configPath)) {
     throw "Codex config not found: $configPath"

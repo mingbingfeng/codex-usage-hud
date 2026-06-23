@@ -33,6 +33,13 @@ class BasePlatform(ABC):
         """Return whether this platform can stream title changes without polling."""
         return False
 
+    def suspend_native_active_title(self, suspended: bool = True) -> None:
+        """Temporarily suppress native title probes during HUD surface switches."""
+        del suspended
+
+    def resume_native_active_title(self) -> None:
+        """Re-enable native title probes after a transient suspension."""
+
     def watch_active_conversation_title(
         self,
         stop_event: threading.Event,
