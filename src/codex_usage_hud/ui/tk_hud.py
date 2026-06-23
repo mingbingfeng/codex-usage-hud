@@ -6262,11 +6262,15 @@ class TokenHudWindow:
         selected_fg = _theme_primary_button_fg()
         try:
             style = ttk.Style(self.root)
+            if "clam" in style.theme_names() and style.theme_use() != "clam":
+                style.theme_use("clam")
             style.configure(
                 "CodexUsageHud.TCombobox",
                 fieldbackground=control_bg,
                 background=control_bg,
                 foreground=control_fg,
+                selectbackground=HUD_ACCENT,
+                selectforeground=selected_fg,
                 arrowcolor=_theme_secondary_text(control_bg),
                 bordercolor=_theme_control_border(HUD_BG),
                 lightcolor=_theme_control_border(HUD_BG),
@@ -6280,21 +6284,78 @@ class TokenHudWindow:
                     ("readonly", control_bg),
                     ("disabled", control_bg),
                     ("active", control_bg),
+                    ("!disabled", control_bg),
+                ],
+                background=[
+                    ("readonly", control_bg),
+                    ("active", control_bg),
+                    ("!disabled", control_bg),
                 ],
                 foreground=[
                     ("readonly", control_fg),
                     ("disabled", _theme_secondary_text(control_bg)),
                     ("active", control_fg),
+                    ("!disabled", control_fg),
                 ],
-                selectbackground=[("readonly", HUD_ACCENT)],
-                selectforeground=[("readonly", selected_fg)],
+                selectbackground=[("readonly", HUD_ACCENT), ("!disabled", HUD_ACCENT)],
+                selectforeground=[("readonly", selected_fg), ("!disabled", selected_fg)],
             )
         except tk.TclError:
             return
-        self.root.option_add("*TCombobox*Listbox.background", control_bg)
-        self.root.option_add("*TCombobox*Listbox.foreground", control_fg)
-        self.root.option_add("*TCombobox*Listbox.selectBackground", HUD_ACCENT)
-        self.root.option_add("*TCombobox*Listbox.selectForeground", selected_fg)
+        for pattern in (
+            "*TCombobox*Listbox.background",
+            "*ComboboxPopdown*Listbox.background",
+        ):
+            self.root.option_add(pattern, control_bg, "userDefault")
+        for pattern in (
+            "*TCombobox*Listbox.foreground",
+            "*ComboboxPopdown*Listbox.foreground",
+        ):
+            self.root.option_add(pattern, control_fg, "userDefault")
+        for pattern in (
+            "*TCombobox*Listbox.selectBackground",
+            "*ComboboxPopdown*Listbox.selectBackground",
+        ):
+            self.root.option_add(pattern, HUD_ACCENT, "userDefault")
+        for pattern in (
+            "*TCombobox*Listbox.selectForeground",
+            "*ComboboxPopdown*Listbox.selectForeground",
+        ):
+            self.root.option_add(pattern, selected_fg, "userDefault")
+
+    def _style_settings_combobox_popup(self, combobox: ttk.Combobox) -> None:
+        control_bg = _theme_control_surface(HUD_BG)
+        control_fg = _theme_primary_text(control_bg)
+        selected_fg = _theme_primary_button_fg()
+        try:
+            popdown = str(
+                combobox.tk.call("ttk::combobox::PopdownWindow", str(combobox))
+            )
+            listbox = f"{popdown}.f.l"
+            combobox.tk.call(listbox, "configure", "-background", control_bg)
+            combobox.tk.call(listbox, "configure", "-foreground", control_fg)
+            combobox.tk.call(listbox, "configure", "-selectbackground", HUD_ACCENT)
+            combobox.tk.call(listbox, "configure", "-selectforeground", selected_fg)
+        except tk.TclError:
+            return
+
+    def _configure_settings_combobox(self, combobox: ttk.Combobox) -> None:
+        def sync_popup() -> None:
+            self._style_settings_combobox_popup(combobox)
+
+        combobox.configure(
+            style="CodexUsageHud.TCombobox",
+            postcommand=sync_popup,
+        )
+        for sequence in ("<Button-1>", "<Alt-Down>", "<KeyPress-Down>", "<FocusIn>"):
+            combobox.bind(
+                sequence,
+                lambda _event, widget=combobox: self.root.after_idle(
+                    lambda: self._style_settings_combobox_popup(widget)
+                ),
+                add="+",
+            )
+        self._style_settings_combobox_popup(combobox)
 
     def _reset_settings_dialog_for_theme_change(self) -> None:
         dialog = self._settings_dialog
@@ -6901,6 +6962,7 @@ class TokenHudWindow:
             style="CodexUsageHud.TCombobox",
         )
         weekday.set(f"{settings.weekly_reset_weekday} " + ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][settings.weekly_reset_weekday])
+        self._configure_settings_combobox(weekday)
         weekday.pack(side="left", fill="x", expand=True, padx=(0, 6))
         weekly_time = tk.Entry(
             weekly_controls,
@@ -6939,6 +7001,7 @@ class TokenHudWindow:
                 "tk": "tk - Tk 独立窗口",
             }.get(self._active_display_mode(), "tk - Tk 独立窗口")
         )
+        self._configure_settings_combobox(mode)
         mode.pack(fill="x")
         mode.bind("<<ComboboxSelected>>", self._on_display_mode_selected, add="+")
         self._settings_entries["display_mode"] = mode
@@ -6960,6 +7023,7 @@ class TokenHudWindow:
             style="CodexUsageHud.TCombobox",
         )
         bubble_limit.set(self._work_overlay_setting_text(settings.work_overlay_max_items))
+        self._configure_settings_combobox(bubble_limit)
         bubble_limit.pack(fill="x")
         self._settings_entries["work_overlay_max_items"] = bubble_limit
 
@@ -10005,7 +10069,8 @@ class TokenHudWindow:
         except tk.TclError:
             pass
         self._clear_tk_widget_references()
-        gc.collect()
+        if reason != "display_mode_switch":
+            gc.collect()
 
     def _release_tk_image_references(self) -> None:
         """Drop Tcl-owned resources while the Tk interpreter is still alive."""

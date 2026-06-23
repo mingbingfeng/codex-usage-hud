@@ -3264,6 +3264,11 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
             theme["progressCache"],
             0.10 if is_light else 0.18,
         ),
+        "settingsPopupBackground": _qt_mix_hex(
+            theme["surface"],
+            theme["text"],
+            0.04 if is_light else 0.10,
+        ),
         "settingsPopupSelection": _qt_mix_hex(
             theme["surface"],
             theme["accent"],
@@ -3550,7 +3555,7 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     }
     QComboBox {
         color: #DCE7F2;
-        background: #111820;
+        background: __QT_HUD_SETTINGS_CONTROL_BACKGROUND__;
         border: 1px solid #334254;
         border-radius: 6px;
         padding: 5px;
@@ -3558,17 +3563,30 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
     QComboBox:hover {
         background: __QT_HUD_SETTINGS_CONTROL_HOVER__;
     }
-    QComboBox QAbstractItemView {
+    QComboBox QAbstractItemView,
+    QComboBox QListView {
         color: #DCE7F2;
-        background: #111820;
+        background: __QT_HUD_SETTINGS_POPUP_BACKGROUND__;
         border: 1px solid #334254;
         selection-color: #DCE7F2;
         selection-background-color: __QT_HUD_SETTINGS_POPUP_SELECTION__;
         outline: 0;
     }
+    QComboBox QAbstractItemView::item,
+    QComboBox QListView::item {
+        color: #DCE7F2;
+        background: __QT_HUD_SETTINGS_POPUP_BACKGROUND__;
+        min-height: 22px;
+        padding: 4px 6px;
+    }
+    QComboBox QAbstractItemView::item:selected,
+    QComboBox QListView::item:selected {
+        color: #DCE7F2;
+        background: __QT_HUD_SETTINGS_POPUP_SELECTION__;
+    }
     QLineEdit {
         color: #DCE7F2;
-        background: #111820;
+        background: __QT_HUD_SETTINGS_CONTROL_BACKGROUND__;
         border: 1px solid #334254;
         border-radius: 6px;
         padding: 5px;
@@ -3659,7 +3677,9 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         "__QT_HUD_PRIMARY_ACTION_TEXT__": themed["primaryActionText"],
         "__QT_HUD_ACTIVITY_LINE__": themed["activityLine"],
         "__QT_HUD_SETTINGS_CHROME_BACKGROUND__": themed["settingsChromeBackground"],
+        "__QT_HUD_SETTINGS_CONTROL_BACKGROUND__": themed["settingsControlBackground"],
         "__QT_HUD_SETTINGS_CONTROL_HOVER__": themed["settingsControlHover"],
+        "__QT_HUD_SETTINGS_POPUP_BACKGROUND__": themed["settingsPopupBackground"],
         "__QT_HUD_SETTINGS_POPUP_SELECTION__": themed["settingsPopupSelection"],
         "rgba(16, 22, 29, 236)": themed["shellBackground"],
         "rgba(24, 33, 43, 220)": themed["panelHeaderBackground"],

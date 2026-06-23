@@ -4171,8 +4171,10 @@ def _run_tk_window_session(
             command_pump.close()
         work_overlay.close()
         snapshot_pump.close()
+        switching_modes = bool(getattr(window, "mode_switch_request", "") or "")
         window = None
-        gc.collect()
+        if not switching_modes:
+            gc.collect()
         if close_context:
             context.close()
 

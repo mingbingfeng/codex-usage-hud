@@ -4480,11 +4480,13 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
         self.assertIn("QFrame#qtHudShell[target=\"request\"]", stylesheet)
         self.assertIn("QFrame#qtHudRequestCollapsed", stylesheet)
         self.assertIn("QComboBox QAbstractItemView", stylesheet)
+        self.assertIn("QComboBox QListView", stylesheet)
         self.assertIn("selection-background-color:", stylesheet)
         self.assertNotIn("background: #151D27;", stylesheet)
         self.assertIn(f"background: {tokens['requestSurface']};", stylesheet)
         self.assertIn(f"color: {tokens['requestText']};", stylesheet)
         self.assertIn("color: #24292f;", stylesheet)
+        self.assertNotIn("__QT_HUD_SETTINGS_POPUP_BACKGROUND__", stylesheet)
         self.assertGreaterEqual(_qt_contrast(tokens["surface"], tokens["text"]), 4.5)
         self.assertGreaterEqual(_qt_contrast(tokens["requestSurface"], tokens["requestText"]), 4.5)
 
@@ -5507,6 +5509,45 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 tk_hud_module._contrast_ratio_hex(combo_fg, combo_bg),
                 4.5,
             )
+            combo_select_fg = style.lookup(
+                "CodexUsageHud.TCombobox",
+                "selectforeground",
+                ("readonly",),
+            ) or style.lookup("CodexUsageHud.TCombobox", "selectforeground")
+            combo_select_bg = style.lookup(
+                "CodexUsageHud.TCombobox",
+                "selectbackground",
+                ("readonly",),
+            ) or style.lookup("CodexUsageHud.TCombobox", "selectbackground")
+            self.assertGreaterEqual(
+                tk_hud_module._contrast_ratio_hex(combo_select_fg, combo_select_bg),
+                4.5,
+            )
+
+            combos = [
+                widget
+                for widget in _walk_widgets(window._settings_dialog)
+                if isinstance(widget, ttk.Combobox)
+            ]
+            self.assertTrue(combos)
+            for combo in combos:
+                window._style_settings_combobox_popup(combo)
+                popdown = str(
+                    combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
+                )
+                listbox = f"{popdown}.f.l"
+                popup_bg = str(combo.tk.call(listbox, "cget", "-background"))
+                popup_fg = str(combo.tk.call(listbox, "cget", "-foreground"))
+                popup_select_bg = str(combo.tk.call(listbox, "cget", "-selectbackground"))
+                popup_select_fg = str(combo.tk.call(listbox, "cget", "-selectforeground"))
+                self.assertGreaterEqual(
+                    tk_hud_module._contrast_ratio_hex(popup_fg, popup_bg),
+                    4.5,
+                )
+                self.assertGreaterEqual(
+                    tk_hud_module._contrast_ratio_hex(popup_select_fg, popup_select_bg),
+                    4.5,
+                )
         finally:
             window._close()
 
@@ -7521,6 +7562,49 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         renderer_session.assert_called_once()
+        qt_session.assert_called_once()
+        qt_args = qt_session.call_args.args[0]
+        self.assertFalse(qt_args.renderer_hud)
+        self.assertEqual(qt_args.runtime_hud_mode, "qt")
+
+    def test_tk_close_skips_forced_gc_during_display_mode_switch(self) -> None:
+        window = object.__new__(tk_hud_module.TokenHudWindow)
+        window._exit_reason = ""
+        window._top_rebuild_job = None
+        window._top_core_prewarm_job = None
+        window._top_deferred_render_job = None
+        window._top_animation_job = None
+        window._request_rebuild_job = None
+        window._settings_build_job = None
+        window._settings_prewarm_job = None
+        window._settings_loading_anim_job = None
+        window._settings_update_poll_job = None
+        window._follow_job = None
+        window.request_root = MagicMock()
+        window.root = MagicMock()
+        window._release_tk_image_references = MagicMock()
+        window._clear_tk_widget_references = MagicMock()
+
+        with patch("codex_usage_hud.ui.tk_hud.gc.collect") as collect:
+            tk_hud_module.TokenHudWindow.close(window, "display_mode_switch")
+
+        collect.assert_not_called()
+        self.assertEqual(window.exit_reason, "display_mode_switch")
+
+    def test_run_hud_session_switches_from_tk_to_qt(self) -> None:
+        args = SimpleNamespace(renderer_hud=False)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_tk_hud_session",
+                return_value=HUD_SWITCH_TO_QT,
+            ) as tk_session,
+            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        tk_session.assert_called_once()
         qt_session.assert_called_once()
         qt_args = qt_session.call_args.args[0]
         self.assertFalse(qt_args.renderer_hud)
