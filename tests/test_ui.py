@@ -2830,6 +2830,52 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_panel_resize_grip_only_shows_when_expanded(self) -> None:
+        if getattr(qt_hud_module, "QApplication", None) is None:
+            self.skipTest("PySide6 unavailable")
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication([])
+            app.setQuitOnLastWindowClosed(False)
+            panels = [
+                qt_hud_module._PanelWindow(
+                    target="top",
+                    width=320,
+                    collapsed_height=36,
+                    expanded_height=240,
+                    on_interaction=lambda: None,
+                ),
+                qt_hud_module._PanelWindow(
+                    target="request",
+                    width=320,
+                    collapsed_height=32,
+                    expanded_height=160,
+                    on_interaction=lambda: None,
+                    grow_from_bottom=True,
+                ),
+            ]
+            try:
+                for panel in panels:
+                    panel.show()
+                    app.processEvents()
+                    self.assertFalse(panel._grip.isVisible())
+                    panel.set_expanded(True)
+                    app.processEvents()
+                    self.assertTrue(panel._grip.isVisible())
+                    panel.set_expanded(False)
+                    app.processEvents()
+                    self.assertFalse(panel._grip.isVisible())
+            finally:
+                for panel in panels:
+                    panel.close()
+                    panel.deleteLater()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_panel_resize_tracking_ignores_settings_dialog_children(self) -> None:
         if getattr(qt_hud_module, "QApplication", None) is None:
             self.skipTest("PySide6 unavailable")
@@ -4020,6 +4066,47 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
 
                     window.locator = _FakeAnchorLocator({"top": second_anchor})
                     window.attach_to_rect(rect)
+
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 210))
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_manual_top_position_survives_inactive_rect_jitter(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                visible = WindowRect(left=100, top=120, right=1100, bottom=920, hwnd=321)
+                inactive_jitter = WindowRect(left=100, top=154, right=1100, bottom=954, hwnd=321)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=visible):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    window.locator.find = MagicMock(side_effect=[inactive_jitter, visible])
+                    window.locator.is_active = MagicMock(side_effect=[False, True])
+                    window.top_window.move(340, 210)
+                    window._remember_panel_geometry("top", window.top_window, "move")
+                    window.top_window._manual_positioned = True
+
+                    self.assertFalse(window._follow_codex_window())
+                    self.assertTrue(window._follow_codex_window())
 
                     self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 210))
                 finally:
@@ -8301,7 +8388,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         tk_args = tk_session.call_args.args[0]
         self.assertFalse(tk_args.renderer_hud)
         self.assertEqual(tk_session.call_args.kwargs["lock_already_held"], True)
-        self.assertEqual(tk_session.call_args.kwargs["hide_until_attached"], False)
+        self.assertEqual(tk_session.call_args.kwargs["hide_until_attached"], True)
 
     def test_run_daemon_qt_choice_launches_codex_normally_and_opens_qt(self) -> None:
         fake_manager = SimpleNamespace(
@@ -8338,7 +8425,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertFalse(qt_args.renderer_hud)
         self.assertEqual(qt_args.runtime_hud_mode, "qt")
         self.assertEqual(qt_session.call_args.kwargs["lock_already_held"], True)
-        self.assertEqual(qt_session.call_args.kwargs["hide_until_attached"], False)
+        self.assertEqual(qt_session.call_args.kwargs["hide_until_attached"], True)
 
     def test_launch_codex_app_debugger_uses_remote_debugging_with_uac_fallback(self) -> None:
         executable = Path(r"C:\Program Files\WindowsApps\OpenAI.Codex\app\Codex.exe")

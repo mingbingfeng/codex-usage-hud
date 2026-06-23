@@ -646,10 +646,14 @@ if QApplication is not None:
             shell_layout.addLayout(self._stack)
             self._grip = _HudSizeGrip(self.shell, self._resize_finished)
             self._grip.setFixedSize(14, 14)
+            self._sync_resize_grip_visibility()
             self._install_resize_cursor_tracking(self)
 
         def _sync_window_opacity(self) -> None:
             self.setWindowOpacity(1.0 if self._target == "top" and self._expanded else 0.96)
+
+        def _sync_resize_grip_visibility(self) -> None:
+            self._grip.setVisible(self._expanded)
 
         @property
         def expanded(self) -> bool:
@@ -669,6 +673,7 @@ if QApplication is not None:
                 return
             self._on_interaction()
             self._expanded = expanded
+            self._sync_resize_grip_visibility()
             self.shell.setProperty("expanded", "true" if expanded else "false")
             self.shell.style().unpolish(self.shell)
             self.shell.style().polish(self.shell)
@@ -2993,7 +2998,6 @@ if QApplication is not None:
             if getattr(rect, "minimized", False):
                 self._hide_for_follow()
                 self._attached = False
-                self._last_rect = rect
                 return False
             try:
                 active = self.locator.is_active(rect, self._hud_hwnds())
@@ -3001,7 +3005,6 @@ if QApplication is not None:
                 active = True
             if not active:
                 self._attached = True
-                self._last_rect = rect
                 self._hide_for_follow()
                 return False
             self.attach_to_rect(rect)
