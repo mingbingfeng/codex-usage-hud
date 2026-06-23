@@ -3015,6 +3015,16 @@ RENDERER_HUD_SCRIPT = r"""
   function bindRoot(root) {
     if (root.dataset.bound === "true") return;
     root.dataset.bound = "true";
+    root.addEventListener("wheel", (event) => {
+      const select = event.target?.closest?.(`#${settingsModalId} select[data-setting-key]`);
+      if (!select || !root.contains(select)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      select.closest(".codex-usage-hud-settings-dialog")?.scrollBy({
+        left: event.deltaX,
+        top: event.deltaY,
+      });
+    }, { capture: true, passive: false });
     root.addEventListener("change", (event) => {
       const displaySelect = event.target?.closest?.(`[data-setting-key="display_mode"]`);
       if (!displaySelect || !root.contains(displaySelect)) return;

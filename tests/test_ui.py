@@ -2721,6 +2721,149 @@ class HudSettingsStoreTests(unittest.TestCase):
 
 
 class QtHudWindowLifecycleTests(unittest.TestCase):
+    def test_qt_manual_input_priority_temporarily_defers_refresh_work(self) -> None:
+        if getattr(qt_hud_module, "QApplication", None) is None:
+            self.skipTest("PySide6 unavailable")
+        window = object.__new__(qt_hud_module._QtHudWindowImpl)
+        window._click_priority_hold_until = 0.0
+        window._pointer_priority_hold_until = 0.0
+        window._interaction_block_until = 0.0
+        window.hide_until_attached = False
+        window._attached = True
+
+        window._mark_pointer_priority()
+
+        self.assertTrue(window._pointer_priority_active())
+        self.assertTrue(window.should_defer_background_work())
+        self.assertFalse(window.should_refresh_snapshot())
+        self.assertEqual(
+            window.refresh_delay_ms(1000),
+            qt_hud_module.QT_HUD_POINTER_REFRESH_DELAY_MS,
+        )
+
+        window._mark_click_priority()
+        self.assertEqual(
+            window.refresh_delay_ms(1000),
+            qt_hud_module.QT_HUD_CLICK_REFRESH_DELAY_MS,
+        )
+
+    def test_qt_follow_skips_hide_while_manual_input_is_active(self) -> None:
+        if getattr(qt_hud_module, "QApplication", None) is None:
+            self.skipTest("PySide6 unavailable")
+
+        class _Panel:
+            def __init__(self) -> None:
+                self.hidden = False
+
+            def geometry_interaction_active(self) -> bool:
+                return False
+
+            def hide(self) -> None:
+                self.hidden = True
+
+        class _Locator:
+            def __init__(self) -> None:
+                self.find_called = False
+
+            def find(self) -> None:
+                self.find_called = True
+                return None
+
+        window = object.__new__(qt_hud_module._QtHudWindowImpl)
+        window._interaction_block_until = 0.0
+        window._click_priority_hold_until = time.monotonic() + 1.0
+        window._pointer_priority_hold_until = 0.0
+        window._attached = True
+        window.top_window = _Panel()
+        window.request_window = _Panel()
+        window._settings_dialog = None
+        window.locator = _Locator()
+
+        self.assertTrue(window._follow_codex_window())
+
+        self.assertFalse(window.locator.find_called)
+        self.assertFalse(window.top_window.hidden)
+        self.assertFalse(window.request_window.hidden)
+
+    def test_qt_panel_toggle_uses_press_position_when_release_position_moves(self) -> None:
+        if getattr(qt_hud_module, "QApplication", None) is None:
+            self.skipTest("PySide6 unavailable")
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication([])
+            app.setQuitOnLastWindowClosed(False)
+            panel = qt_hud_module._PanelWindow(
+                target="top",
+                width=320,
+                collapsed_height=36,
+                expanded_height=240,
+                on_interaction=lambda: None,
+            )
+            try:
+                panel._dragging = False
+                panel._drag_origin = qt_hud_module.QPoint(1, 1)
+                panel._drag_window_origin = qt_hud_module.QPoint(2, 2)
+                panel._toggle_press_position = qt_hud_module.QPoint(8, 8)
+                panel._toggle_press_global = qt_hud_module.QPoint(80, 80)
+                panel._should_toggle_from_click = lambda position: position == qt_hud_module.QPoint(8, 8)
+                toggles = []
+                panel.toggle_expanded = lambda: toggles.append(True)
+
+                handled = panel._finish_toggle_click(
+                    qt_hud_module.QPoint(81, 80),
+                    qt_hud_module.QPoint(160, 160),
+                )
+
+                self.assertTrue(handled)
+                self.assertEqual(toggles, [True])
+                self.assertIsNone(panel._drag_origin)
+                self.assertIsNone(panel._drag_window_origin)
+                self.assertIsNone(panel._toggle_press_position)
+                self.assertIsNone(panel._toggle_press_global)
+            finally:
+                panel.close()
+                panel.deleteLater()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_panel_resize_tracking_ignores_settings_dialog_children(self) -> None:
+        if getattr(qt_hud_module, "QApplication", None) is None:
+            self.skipTest("PySide6 unavailable")
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication([])
+            app.setQuitOnLastWindowClosed(False)
+            panel = qt_hud_module._PanelWindow(
+                target="top",
+                width=320,
+                collapsed_height=36,
+                expanded_height=240,
+                on_interaction=lambda: None,
+            )
+            dialog = qt_hud_module.QDialog(panel)
+            button = qt_hud_module.QPushButton("保存", dialog)
+            try:
+                panel._install_resize_cursor_tracking(panel)
+
+                self.assertTrue(bool(panel.property("qtHudResizeCursorTracking")))
+                self.assertFalse(bool(dialog.property("qtHudResizeCursorTracking")))
+                self.assertFalse(bool(button.property("qtHudResizeCursorTracking")))
+            finally:
+                dialog.close()
+                dialog.deleteLater()
+                panel.close()
+                panel.deleteLater()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_hud_window_updates_closes_and_keeps_core_widgets(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -2827,8 +2970,8 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     self.assertLessEqual(top_right.geometry().right(), window.top_window.width())
                     self.assertGreater(top_left.width(), 0)
                     self.assertGreater(top_right.width(), 0)
-                    self.assertFalse(window.top_window.session_meta.isVisible())
-                    self.assertFalse(window.top_window.cache_progress.isVisible())
+                    self.assertTrue(window.top_window.session_meta.isVisible())
+                    self.assertTrue(window.top_window.cache_progress.isVisible())
                     self.assertEqual(window.mode_switch_request, "")
                     request_collapsed_y = window.request_window.y()
                     request_bottom = window.request_window.geometry().bottom()
@@ -3231,6 +3374,43 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 self.assertTrue(strip.scrolling_enabled)
                 self.assertLess(strip._scroll_min_x, 0.0)
                 self.assertGreater(strip.rails[0].width(), 72)
+            finally:
+                strip.close()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_top_collapsed_progress_layout_does_not_depend_on_parent_visibility(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            strip = qt_hud_module._TopCollapsedProgressStrip()
+            try:
+                strip.resize(507, 28)
+                metrics = [
+                    {"label": "本会话 3.8M/$3.70/97%", "ratio": 0.25, "tone": "session"},
+                    {"label": "今日 18.9M/$8.96", "rightText": "总 $100.00", "ratio": 0.35, "tone": "day"},
+                    {"label": "本周 39.5M/$33.41", "rightText": "总 $400.00", "ratio": 0.42, "tone": "week"},
+                ]
+
+                strip.hide()
+                strip.set_metrics(metrics)
+                strip.show()
+                strip._layout_for_current_metrics()
+                app.processEvents()
+
+                self.assertEqual(sum(1 for rail in strip.rails if rail.isVisible()), 3)
+                self.assertFalse(strip.scrolling_enabled)
+                self.assertGreater(strip.rails[1].width(), 0)
+                self.assertGreater(strip.rails[2].width(), 0)
             finally:
                 strip.close()
         finally:
@@ -4339,8 +4519,22 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 result = window._scroll_settings_body(SimpleNamespace(delta=-120, num=None))
             self.assertEqual(result, "break")
             scroll.assert_called_once_with(1, "units")
+            with patch.object(canvas, "yview_scroll") as scroll:
+                result = window._scroll_settings_combobox(SimpleNamespace(delta=-120, num=None))
+            self.assertEqual(result, "break")
+            scroll.assert_called_once_with(1, "units")
         finally:
             window._close()
+
+    def test_settings_dropdown_wheel_guards_are_registered(self) -> None:
+        qt_source = Path(qt_hud_module.__file__).read_text(encoding="utf-8")
+        renderer_source = Path(payload_from_snapshot.__code__.co_filename).read_text(encoding="utf-8")
+
+        self.assertIn("class _SettingsComboBox(QComboBox):", qt_source)
+        self.assertEqual(qt_source.count("_SettingsComboBox()"), 3)
+        self.assertIn('root.addEventListener("wheel"', renderer_source)
+        self.assertIn("select[data-setting-key]", renderer_source)
+        self.assertIn("passive: false", renderer_source)
 
     def test_settings_dialog_centers_on_codex_window_when_available(self) -> None:
         window = TokenHudWindow()
@@ -4889,6 +5083,11 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertEqual(second, (460, 86, 720, TOP_DOCK_HEIGHT))
         finally:
             window._close()
+
+    def test_windows_locator_rejects_browser_process_with_codex_title(self) -> None:
+        self.assertFalse(_WindowsCodexLocator._is_codex_process("chrome.exe"))
+        self.assertFalse(_WindowsCodexLocator._is_codex_process("msedge.exe"))
+        self.assertTrue(_WindowsCodexLocator._is_codex_process("Codex.exe"))
 
     def test_top_cdp_anchor_prefers_computed_title_slot(self) -> None:
         locator = object.__new__(_WindowsCodexLocator)
@@ -7587,6 +7786,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_pump = SimpleNamespace(
             take_latest=MagicMock(return_value=latest_snapshot),
             request_refresh=MagicMock(return_value=True),
+            is_refreshing=MagicMock(return_value=False),
             close=MagicMock(),
         )
         fake_overlay = SimpleNamespace(
@@ -7638,6 +7838,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_pump = SimpleNamespace(
             take_latest=MagicMock(),
             request_refresh=MagicMock(),
+            is_refreshing=MagicMock(return_value=False),
             close=MagicMock(),
         )
         fake_overlay = SimpleNamespace(

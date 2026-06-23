@@ -68,9 +68,15 @@ _INPUT_SAFE_MIN_WIDTH = 260
 _LOGGER_NAME = "codex_usage_hud.windows_tracker"
 _LOG_ENV_PATH = "CODEX_USAGE_HUD_WINDOW_LOG"
 _LOG_ENV_LEVEL = "CODEX_USAGE_HUD_WINDOW_LOG_LEVEL"
+_CODEX_PROCESS_NAMES = {"codex.exe", "openai codex.exe"}
 _logger = logging.getLogger(_LOGGER_NAME)
 _logger.addHandler(logging.NullHandler())
 _logging_configured = False
+
+
+def _is_codex_process_name(process: str) -> bool:
+    process_lower = Path(str(process or "")).name.strip().lower()
+    return process_lower in _CODEX_PROCESS_NAMES or process_lower.startswith("codex")
 
 
 def window_tracker_log_path() -> Path:
@@ -709,6 +715,8 @@ class CodexWindowTracker:
             return False
         title = candidate.title.strip().lower()
         class_name = candidate.class_name.strip().lower()
+        if not _is_codex_process_name(candidate.process):
+            return False
         if title == "codex":
             return True
         if not title:
@@ -724,6 +732,8 @@ class CodexWindowTracker:
     def _is_restore_candidate(candidate: "_WindowCandidate") -> bool:
         title = candidate.title.strip().lower()
         class_name = candidate.class_name.strip().lower()
+        if not _is_codex_process_name(candidate.process):
+            return False
         if title == "codex":
             return True
         if not title:
@@ -731,11 +741,7 @@ class CodexWindowTracker:
         rect = candidate.rect
         if rect is None or rect.width * rect.height < 300_000:
             return False
-        process = candidate.process.strip().lower()
-        return (
-            process.startswith("codex")
-            and (class_name == "chrome_widgetwin_1" or "codex" in class_name)
-        )
+        return class_name == "chrome_widgetwin_1" or "codex" in class_name
 
     def get_window_rect(self) -> tuple[int, int, int, int] | None:
         """Return the live Codex main window rectangle as ``left, top, right, bottom``."""
@@ -1358,13 +1364,11 @@ class CodexWindowTracker:
         process_lower = process.strip().lower()
         if not title_lower and class_lower == "chrome_widgetwin_0":
             return False
-        if process_lower == "codex.exe" or process_lower.startswith("codex"):
-            if class_lower == "chrome_widgetwin_1":
-                return bool(title_lower) or process_lower == "codex.exe"
-            return True
-        if title_lower == "codex" or class_lower == "codex":
-            return True
-        return "codex" in class_lower and bool(title_lower)
+        if not _is_codex_process_name(process_lower):
+            return False
+        if class_lower == "chrome_widgetwin_1":
+            return bool(title_lower) or process_lower == "codex.exe"
+        return True
 
     @staticmethod
     def _score_candidate(candidate: "_WindowCandidate") -> tuple[int, int]:

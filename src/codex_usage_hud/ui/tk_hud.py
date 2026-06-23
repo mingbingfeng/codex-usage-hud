@@ -3633,8 +3633,7 @@ class _WindowsCodexLocator(_BaseLocator):
         self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         process = self._process_name(pid.value)
         if verify_codex or hwnd != self._last_hwnd:
-            haystack = " ".join([title, class_name, process]).lower()
-            if "codex" not in haystack:
+            if not self._is_codex_process(process):
                 return None
         return WindowRect(
             hwnd=int(hwnd),
@@ -3683,6 +3682,11 @@ class _WindowsCodexLocator(_BaseLocator):
         buffer = self.ctypes.create_unicode_buffer(256)
         self.user32.GetClassNameW(hwnd, buffer, 256)
         return buffer.value
+
+    @staticmethod
+    def _is_codex_process(process: str) -> bool:
+        process_lower = Path(str(process or "")).name.strip().lower()
+        return process_lower in {"codex.exe", "openai codex.exe"} or process_lower.startswith("codex")
 
     def _process_name(self, pid: int) -> str:
         if not pid:
@@ -6737,10 +6741,19 @@ class TokenHudWindow:
         canvas.yview_scroll(units, "units")
         return "break"
 
+    def _scroll_settings_combobox(self, event: tk.Event[tk.Misc]) -> str:
+        self._scroll_settings_body(event)
+        return "break"
+
     def _bind_settings_scroll_tree(self, widget: tk.Misc) -> None:
-        widget.bind("<MouseWheel>", self._scroll_settings_body, add="+")
-        widget.bind("<Button-4>", self._scroll_settings_body, add="+")
-        widget.bind("<Button-5>", self._scroll_settings_body, add="+")
+        if isinstance(widget, ttk.Combobox):
+            widget.bind("<MouseWheel>", self._scroll_settings_combobox)
+            widget.bind("<Button-4>", self._scroll_settings_combobox)
+            widget.bind("<Button-5>", self._scroll_settings_combobox)
+        else:
+            widget.bind("<MouseWheel>", self._scroll_settings_body, add="+")
+            widget.bind("<Button-4>", self._scroll_settings_body, add="+")
+            widget.bind("<Button-5>", self._scroll_settings_body, add="+")
         for child in widget.winfo_children():
             self._bind_settings_scroll_tree(child)
 

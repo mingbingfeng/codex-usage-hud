@@ -94,6 +94,29 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
 
 
 class CodexWindowTrackerSelectionTests(unittest.TestCase):
+    def test_browser_title_with_codex_is_not_codex_candidate(self) -> None:
+        self.assertFalse(
+            CodexWindowTracker._looks_like_codex(
+                "Codex documentation - Chrome",
+                "Chrome_WidgetWin_1",
+                "chrome.exe",
+            )
+        )
+        self.assertFalse(
+            CodexWindowTracker._is_stable_candidate(
+                wt._WindowCandidate(
+                    hwnd=101,
+                    title="Codex documentation - Chrome",
+                    class_name="Chrome_WidgetWin_1",
+                    process="chrome.exe",
+                    rect=PhysicalRect(left=40, top=20, right=1320, bottom=840),
+                    visible=True,
+                    minimized=False,
+                    cloaked=False,
+                )
+            )
+        )
+
     def test_cached_hidden_window_does_not_block_visible_codex_window(self) -> None:
         tracker = CodexWindowTracker(enable_uia=False)
         hidden = wt._WindowCandidate(

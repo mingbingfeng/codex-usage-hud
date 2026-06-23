@@ -40,6 +40,10 @@ QT_HUD_REQUEST_EXPANDED_HEIGHT = 180
 QT_HUD_MARGIN = 16
 QT_HUD_ANIMATION_MS = 180
 QT_HUD_INTERACTION_IDLE_MS = 240
+QT_HUD_CLICK_PRIORITY_MS = 180
+QT_HUD_CLICK_REFRESH_DELAY_MS = 50
+QT_HUD_POINTER_PRIORITY_MS = 120
+QT_HUD_POINTER_REFRESH_DELAY_MS = 75
 QT_HUD_TOP_STACK_WIDTH = 420
 QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT = 38
 QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS = 4
@@ -80,7 +84,7 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
     from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Slot
-    from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
+    from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QComboBox,
@@ -187,6 +191,14 @@ if QApplication is not None:
             super().mouseReleaseEvent(event)
             if was_pressed:
                 QTimer.singleShot(0, self._on_resize_finished)
+
+
+    class _SettingsComboBox(QComboBox):
+        def wheelEvent(self, event: object) -> None:  # noqa: N802
+            if self.view().isVisible():
+                super().wheelEvent(event)
+                return
+            event.ignore()
 
 
     class _ProgressRail(QWidget):
@@ -444,7 +456,7 @@ if QApplication is not None:
             self._stop_scrolling()
 
         def _visible_count(self) -> int:
-            return sum(1 for rail in self._rails if rail.isVisible())
+            return sum(1 for rail in self._rails if bool(rail._metric))
 
         def _available_width(self) -> int:
             return max(1, int(self.width()))
@@ -459,7 +471,7 @@ if QApplication is not None:
             return [
                 max(self._base_widths[index], rail.preferred_width())
                 for index, rail in enumerate(self._rails)
-                if rail.isVisible()
+                if bool(rail._metric)
             ]
 
         def _should_scroll(self, widths: Sequence[int], available_width: int) -> bool:
@@ -509,9 +521,10 @@ if QApplication is not None:
 
         def _layout_single_metric(self) -> None:
             available_width = self._available_width()
-            first_width = max(self._base_widths[0], self._rails[0].preferred_width()) if self._rails[0].isVisible() else available_width
+            has_first_metric = bool(self._rails[0]._metric)
+            first_width = max(self._base_widths[0], self._rails[0].preferred_width()) if has_first_metric else available_width
             self._rails[0].setGeometry(0, self._rail_y(), max(first_width, available_width), self._rail_height())
-            self._rails[0].setVisible(bool(self._metrics))
+            self._rails[0].setVisible(has_first_metric)
             for rail in self._rails[1:]:
                 rail.setVisible(False)
             self._content.setGeometry(0, 0, available_width, self.height())
@@ -522,8 +535,10 @@ if QApplication is not None:
             x = 0
             visible_index = 0
             for rail in self._rails:
-                if not rail.isVisible():
+                if not rail._metric:
+                    rail.setVisible(False)
                     continue
+                rail.setVisible(True)
                 width = int(widths[visible_index])
                 rail.setGeometry(x, self._rail_y(), width, self._rail_height())
                 x += width + self._column_gap
@@ -577,6 +592,8 @@ if QApplication is not None:
             collapsed_height: int,
             expanded_height: int,
             on_interaction: Callable[[], None],
+            on_click_priority: Callable[[], None] | None = None,
+            on_pointer_priority: Callable[[], None] | None = None,
             on_geometry_changed: Callable[[str, "_PanelWindow", str], None] | None = None,
             grow_from_bottom: bool = False,
         ) -> None:
@@ -589,6 +606,8 @@ if QApplication is not None:
             self._drag_origin: QPoint | None = None
             self._drag_window_origin: QPoint | None = None
             self._dragging = False
+            self._toggle_press_position: QPoint | None = None
+            self._toggle_press_global: QPoint | None = None
             self._resize_edge = ""
             self._resize_origin: QPoint | None = None
             self._resize_start_geometry: QRect | None = None
@@ -596,6 +615,8 @@ if QApplication is not None:
             self._manual_positioned = False
             self._collapsed_geometry: QRect | None = None
             self._on_interaction = on_interaction
+            self._on_click_priority = on_click_priority or on_interaction
+            self._on_pointer_priority = on_pointer_priority or on_interaction
             self._on_geometry_changed = on_geometry_changed
             self._animation: QPropertyAnimation | None = None
             self._stack = QStackedLayout()
@@ -679,8 +700,12 @@ if QApplication is not None:
             self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
             self._animation.setStartValue(start)
             self._animation.setEndValue(target)
+            self._after_page_switch(expanded)
             self._animation.finished.connect(lambda expanded=expanded: self._settle_height(expanded))
             self._animation.start()
+
+        def _after_page_switch(self, expanded: bool) -> None:
+            del expanded
 
         def _target_height(self, expanded: bool) -> int:
             return self._expanded_height if expanded else self._collapsed_height
@@ -730,6 +755,8 @@ if QApplication is not None:
             return Qt.CursorShape.ArrowCursor
 
         def _install_resize_cursor_tracking(self, widget: QWidget) -> None:
+            if widget is not self and widget.window() is not self:
+                return
             if not bool(widget.property("qtHudResizeCursorTracking")):
                 widget.setProperty("qtHudResizeCursorTracking", True)
                 widget.setMouseTracking(True)
@@ -816,12 +843,28 @@ if QApplication is not None:
                 event_type = event.type()
                 if event_type == QEvent.Type.ChildAdded:
                     self._install_resize_cursor_tracking(watched)
+                elif event_type == QEvent.Type.Wheel:
+                    self._on_pointer_priority()
                 elif isinstance(event, QMouseEvent):
                     position = watched.mapTo(self, event.position().toPoint())
+                    if event_type in {
+                        QEvent.Type.MouseButtonPress,
+                        QEvent.Type.MouseButtonRelease,
+                    }:
+                        self._on_click_priority()
+                    elif event_type == QEvent.Type.MouseMove:
+                        self._on_pointer_priority()
                     if event_type == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                        global_position = event.globalPosition().toPoint()
+                        if self._should_toggle_from_click(position):
+                            self._toggle_press_position = position
+                            self._toggle_press_global = global_position
+                        else:
+                            self._toggle_press_position = None
+                            self._toggle_press_global = None
                         edge = self._resize_edge_at(position)
                         if edge:
-                            self._start_edge_resize(edge, event.globalPosition().toPoint())
+                            self._start_edge_resize(edge, global_position)
                             event.accept()
                             return True
                     if event_type == QEvent.Type.MouseMove:
@@ -833,6 +876,10 @@ if QApplication is not None:
                         self._finish_edge_resize(position)
                         event.accept()
                         return True
+                    if event_type == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                        if self._finish_toggle_click(event.globalPosition().toPoint(), position):
+                            event.accept()
+                            return True
                 if event_type == QEvent.Type.Leave and not self._resizing:
                     self._clear_resize_cursor_override(watched)
                     self.unsetCursor()
@@ -846,9 +893,16 @@ if QApplication is not None:
                     self._start_edge_resize(edge, event.globalPosition().toPoint())
                     event.accept()
                     return
+                global_position = event.globalPosition().toPoint()
+                if self._should_toggle_from_click(position):
+                    self._toggle_press_position = position
+                    self._toggle_press_global = global_position
+                else:
+                    self._toggle_press_position = None
+                    self._toggle_press_global = None
                 if self._should_start_drag_from_click(position):
                     self._on_interaction()
-                    self._drag_origin = event.globalPosition().toPoint()
+                    self._drag_origin = global_position
                     self._drag_window_origin = self.pos()
                     self._dragging = False
             super().mousePressEvent(event)
@@ -872,16 +926,32 @@ if QApplication is not None:
                     self._finish_edge_resize(event.position().toPoint())
                     event.accept()
                     return
-                clicked = not self._dragging
                 if self._dragging:
                     self._manual_positioned = True
                     self._emit_geometry_changed("move")
-                self._drag_origin = None
-                self._drag_window_origin = None
-                self._dragging = False
-                if clicked and self._should_toggle_from_click(event.position().toPoint()):
-                    self.toggle_expanded()
+                if self._finish_toggle_click(event.globalPosition().toPoint(), event.position().toPoint()):
+                    event.accept()
+                    return
             super().mouseReleaseEvent(event)
+
+        def _finish_toggle_click(self, release_global: QPoint, release_position: QPoint) -> bool:
+            press_position = self._toggle_press_position
+            press_global = self._toggle_press_global
+            clicked = not self._dragging
+            if press_global is not None:
+                delta = release_global - press_global
+                clicked = clicked and abs(delta.x()) <= 3 and abs(delta.y()) <= 3
+            self._drag_origin = None
+            self._drag_window_origin = None
+            self._dragging = False
+            self._toggle_press_position = None
+            self._toggle_press_global = None
+            if press_position is None:
+                return False
+            if clicked and self._should_toggle_from_click(press_position):
+                self.toggle_expanded()
+                return True
+            return False
 
         def _panel_header_at(self, position: QPoint) -> QWidget | None:
             child = self.childAt(position)
@@ -891,11 +961,23 @@ if QApplication is not None:
                 child = child.parentWidget()
             return None
 
+        def _toggle_target_at(self, position: QPoint) -> bool:
+            child = self.childAt(position)
+            while child is not None and child is not self:
+                if isinstance(child, QPushButton):
+                    return False
+                child = child.parentWidget()
+            return True
+
         def _should_start_drag_from_click(self, position: QPoint) -> bool:
-            return not self._expanded or self._panel_header_at(position) is not None
+            return self._toggle_target_at(position) and (
+                not self._expanded or self._panel_header_at(position) is not None
+            )
 
         def _should_toggle_from_click(self, position: QPoint) -> bool:
-            return not self._expanded or self._panel_header_at(position) is not None
+            return self._toggle_target_at(position) and (
+                not self._expanded or self._panel_header_at(position) is not None
+            )
 
         def leaveEvent(self, event: Any) -> None:  # noqa: N802
             if not self._resizing:
@@ -928,6 +1010,8 @@ if QApplication is not None:
             on_update_action: Callable[[], None],
             on_dismiss_warnings: Callable[[], None],
             on_interaction: Callable[[], None],
+            on_click_priority: Callable[[], None] | None = None,
+            on_pointer_priority: Callable[[], None] | None = None,
             on_geometry_changed: Callable[[str, _PanelWindow, str], None] | None = None,
         ) -> None:
             super().__init__(
@@ -936,6 +1020,8 @@ if QApplication is not None:
                 collapsed_height=QT_HUD_TOP_COLLAPSED_HEIGHT,
                 expanded_height=expanded_height,
                 on_interaction=on_interaction,
+                on_click_priority=on_click_priority,
+                on_pointer_priority=on_pointer_priority,
                 on_geometry_changed=on_geometry_changed,
             )
             self._on_settings = on_settings
@@ -990,12 +1076,16 @@ if QApplication is not None:
             header.addWidget(self.update_button)
             self.title = _HudLabel("Codex Usage HUD", role="title")
             self.title.setMinimumHeight(24)
-            header.addWidget(self.title, 1)
+            self.title.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            header.addWidget(self.title)
             self.session_meta = _HudLabel("", role="muted")
             self.session_meta.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.session_meta.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             header.addWidget(self.session_meta, 1)
             self.cache_progress = _ProgressRail()
-            self.cache_progress.setFixedWidth(170)
+            self.cache_progress.setMinimumWidth(120)
+            self.cache_progress.setMaximumWidth(170)
+            self.cache_progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             header.addWidget(self.cache_progress)
             self.settings_button = QPushButton("⚙")
             self.settings_button.setObjectName("qtHudIconButton")
@@ -1167,6 +1257,10 @@ if QApplication is not None:
             expanded_layout.addWidget(body_scroll, 1)
             self.set_pages(collapsed, expanded)
             self._sync_responsive_layout()
+
+        def _after_page_switch(self, expanded: bool) -> None:
+            if not expanded and self._collapsed_strip is not None:
+                self._collapsed_strip._layout_for_current_metrics()
 
         def _card(self, parent: QVBoxLayout, title: str) -> tuple[QFrame, QVBoxLayout, QHBoxLayout]:
             card = QFrame()
@@ -1493,11 +1587,10 @@ if QApplication is not None:
 
         def _sync_responsive_layout(self) -> None:
             width = max(1, self.width())
-            compact_header = width <= 760
             if hasattr(self, "session_meta"):
-                self.session_meta.setVisible(not compact_header)
+                self.session_meta.setVisible(True)
             if hasattr(self, "cache_progress"):
-                self.cache_progress.setVisible(not compact_header)
+                self.cache_progress.setVisible(True)
             grid = self._top_grid
             left = self._top_left
             right = self._top_right
@@ -1599,6 +1692,8 @@ if QApplication is not None:
             width: int = QT_HUD_REQUEST_WIDTH,
             expanded_height: int = QT_HUD_REQUEST_EXPANDED_HEIGHT,
             on_interaction: Callable[[], None],
+            on_click_priority: Callable[[], None] | None = None,
+            on_pointer_priority: Callable[[], None] | None = None,
             on_geometry_changed: Callable[[str, _PanelWindow, str], None] | None = None,
         ) -> None:
             super().__init__(
@@ -1607,6 +1702,8 @@ if QApplication is not None:
                 collapsed_height=QT_HUD_REQUEST_COLLAPSED_HEIGHT,
                 expanded_height=expanded_height,
                 on_interaction=on_interaction,
+                on_click_priority=on_click_priority,
+                on_pointer_priority=on_pointer_priority,
                 on_geometry_changed=on_geometry_changed,
                 grow_from_bottom=True,
             )
@@ -1849,7 +1946,7 @@ if QApplication is not None:
             form = QGridLayout()
             form.setHorizontalSpacing(8)
             form.setVerticalSpacing(8)
-            self.display_mode = QComboBox()
+            self.display_mode = _SettingsComboBox()
             self.display_mode.addItem("自动：Renderer -> Qt -> Tk", "auto")
             self.display_mode.addItem("Renderer 内嵌 HUD", "renderer")
             self.display_mode.addItem("Qt 独立窗口", "qt")
@@ -1863,11 +1960,11 @@ if QApplication is not None:
             self.weekly_budget = QLineEdit(f"{self._window.user_settings.weekly_budget_usd:g}")
             self.daily_reset = QLineEdit(str(self._window.user_settings.daily_reset_time))
             self.weekly_reset = QLineEdit(str(self._window.user_settings.weekly_reset_time))
-            self.weekday = QComboBox()
+            self.weekday = _SettingsComboBox()
             for value, label in enumerate(["周一", "周二", "周三", "周四", "周五", "周六", "周日"]):
                 self.weekday.addItem(label, value)
             self.weekday.setCurrentIndex(max(0, min(6, int(self._window.user_settings.weekly_reset_weekday))))
-            self.work_overlay_max_items = QComboBox()
+            self.work_overlay_max_items = _SettingsComboBox()
             for value in self._work_overlay_setting_values():
                 label = f"{value} - 不启用" if value == 0 else str(value)
                 self.work_overlay_max_items.addItem(label, value)
@@ -2315,6 +2412,8 @@ if QApplication is not None:
                 failure_cooldown_seconds=5.0,
             )
             self._interaction_block_until = 0.0
+            self._click_priority_hold_until = 0.0
+            self._pointer_priority_hold_until = 0.0
             self._settings_dialog: _SettingsDialog | None = None
             self.top_window = _TopPanel(
                 width=self._panel_width("top"),
@@ -2323,12 +2422,16 @@ if QApplication is not None:
                 on_update_action=self._handle_update_action,
                 on_dismiss_warnings=self._dismiss_warnings_today,
                 on_interaction=self._mark_interaction,
+                on_click_priority=self._mark_click_priority,
+                on_pointer_priority=self._mark_pointer_priority,
                 on_geometry_changed=self._remember_panel_geometry,
             )
             self.request_window = _RequestPanel(
                 width=self._panel_width("request"),
                 expanded_height=self._panel_expanded_height("request"),
                 on_interaction=self._mark_interaction,
+                on_click_priority=self._mark_click_priority,
+                on_pointer_priority=self._mark_pointer_priority,
                 on_geometry_changed=self._remember_panel_geometry,
             )
             self._apply_theme_tokens(self._theme_tokens)
@@ -2354,14 +2457,18 @@ if QApplication is not None:
             return self._restart_codex_for_renderer
 
         def should_defer_background_work(self) -> bool:
-            return False
+            return self._manual_input_active()
 
         def should_refresh_snapshot(self) -> bool:
-            return time.monotonic() >= self._interaction_block_until
+            return not self._manual_input_active()
 
         def refresh_delay_ms(self, normal_delay_ms: int) -> int:
             if self.hide_until_attached and not self._attached:
                 return self.tombstone_follow_ms
+            if self._click_priority_active():
+                return QT_HUD_CLICK_REFRESH_DELAY_MS
+            if self._pointer_priority_active():
+                return QT_HUD_POINTER_REFRESH_DELAY_MS
             if time.monotonic() < self._interaction_block_until:
                 return max(160, int(normal_delay_ms))
             return max(100, int(normal_delay_ms))
@@ -2543,6 +2650,29 @@ if QApplication is not None:
             self._interaction_block_until = time.monotonic() + (
                 QT_HUD_INTERACTION_IDLE_MS / 1000.0
             )
+
+        def _mark_click_priority(self) -> None:
+            self._click_priority_hold_until = max(
+                self._click_priority_hold_until,
+                time.monotonic() + (QT_HUD_CLICK_PRIORITY_MS / 1000.0),
+            )
+            self._mark_interaction()
+
+        def _mark_pointer_priority(self) -> None:
+            self._pointer_priority_hold_until = max(
+                self._pointer_priority_hold_until,
+                time.monotonic() + (QT_HUD_POINTER_PRIORITY_MS / 1000.0),
+            )
+            self._mark_interaction()
+
+        def _click_priority_active(self) -> bool:
+            return time.monotonic() < self._click_priority_hold_until
+
+        def _pointer_priority_active(self) -> bool:
+            return time.monotonic() < self._pointer_priority_hold_until
+
+        def _manual_input_active(self) -> bool:
+            return self._click_priority_active() or self._pointer_priority_active()
 
         def _placement(self, target: str) -> Any:
             return self.settings.top if target == "top" else self.settings.request
@@ -2826,9 +2956,24 @@ if QApplication is not None:
         def _geometry_interaction_active(self) -> bool:
             return (
                 time.monotonic() < self._interaction_block_until
+                or self._manual_input_active()
+                or self._hud_window_active()
                 or self.top_window.geometry_interaction_active()
                 or self.request_window.geometry_interaction_active()
             )
+
+        def _hud_window_active(self) -> bool:
+            active_window = self.app.activeWindow()
+            windows: list[QWidget] = [self.top_window, self.request_window]
+            if self._settings_dialog is not None:
+                windows.append(self._settings_dialog)
+            if any(active_window is window for window in windows):
+                return True
+            cursor = QCursor.pos()
+            for window in windows:
+                if window.isVisible() and window.geometry().contains(cursor):
+                    return True
+            return False
 
         def _follow_codex_window(self) -> bool:
             if self._geometry_interaction_active():

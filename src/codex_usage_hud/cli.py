@@ -2815,6 +2815,10 @@ class _TkSnapshotPump:
             self._latest_snapshot = None
             return snapshot
 
+    def is_refreshing(self) -> bool:
+        with self._lock:
+            return self._worker is not None and self._worker.is_alive()
+
     def close(self, timeout_seconds: float = 0.5) -> None:
         self._stop_event.set()
         with self._lock:
@@ -4096,9 +4100,12 @@ def _run_tk_window_session(
                     snapshot = snapshot_pump.take_latest()
                     if snapshot is not None:
                         latest_snapshot = snapshot
-                    if refresh_snapshot and _active_session_switch_pending(context, latest_snapshot):
-                        next_delay_ms = 80
-                    snapshot_pump.request_refresh()
+                        if not refresh_snapshot:
+                            snapshot_pump.request_refresh()
+                    else:
+                        refresh_started = snapshot_pump.request_refresh()
+                        if refresh_snapshot and (refresh_started or snapshot_pump.is_refreshing()):
+                            next_delay_ms = 80
                 if refresh_snapshot:
                     window.update_display(
                         latest_snapshot,
@@ -4224,9 +4231,12 @@ def _run_qt_window_session(
                     snapshot = snapshot_pump.take_latest()
                     if snapshot is not None:
                         latest_snapshot = snapshot
-                    if refresh_snapshot and _active_session_switch_pending(context, latest_snapshot):
-                        next_delay_ms = 80
-                    snapshot_pump.request_refresh()
+                        if not refresh_snapshot:
+                            snapshot_pump.request_refresh()
+                    else:
+                        refresh_started = snapshot_pump.request_refresh()
+                        if refresh_snapshot and (refresh_started or snapshot_pump.is_refreshing()):
+                            next_delay_ms = 80
                 if refresh_snapshot:
                     window.update_display(
                         latest_snapshot,
