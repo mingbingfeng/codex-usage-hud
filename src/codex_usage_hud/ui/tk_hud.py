@@ -1177,8 +1177,7 @@ def _window_outside_color() -> str:
     if sys.platform.startswith("win"):
         return HUD_WINDOW_TRANSPARENT
     return HUD_WINDOW_OUTSIDE
-HUD_AUTO_REANCHOR_ENV = "CODEX_USAGE_HUD_AUTO_REANCHOR"
-NATIVE_ANCHOR_STABLE_FRAMES = 3
+
 
 _COST_ESTIMATOR = CostEstimator()
 _HUD_GEOMETRY_LOGGER = logging.getLogger("codex_usage_hud.hud_geometry")
@@ -1275,21 +1274,11 @@ class HudAnchor:
         return max(1, self.bottom - self.top)
 
 
-@dataclass(frozen=True)
-class _NativeAnchorState:
-    signature: tuple[str, int, int, int, int, int, int, int]
-    frames: int
-    anchor: HudAnchor
-    window_left: int
-    window_top: int
-    window_width: int
-    window_height: int
-
-
 @dataclass
 class WindowPlacement:
     """Persisted custom placement for one HUD window."""
 
+    pinned: bool = False
     relative_x: int | None = None
     relative_y: int | None = None
     relative_bottom: int | None = None
@@ -1311,6 +1300,7 @@ class WindowPlacement:
         if not isinstance(value, dict):
             return cls()
         return cls(
+            pinned=_optional_bool(value.get("pinned")),
             relative_x=_optional_int(value.get("relative_x")),
             relative_y=_optional_int(value.get("relative_y")),
             relative_bottom=_optional_int(value.get("relative_bottom")),
@@ -1329,23 +1319,41 @@ class WindowPlacement:
         )
 
     def to_dict(self) -> dict[str, int | float | bool | None]:
-        return {
-            "relative_x": self.relative_x,
-            "relative_y": self.relative_y,
-            "relative_bottom": self.relative_bottom,
-            "relative_x_ratio": self.relative_x_ratio,
-            "relative_y_ratio": self.relative_y_ratio,
-            "relative_bottom_ratio": self.relative_bottom_ratio,
-            "absolute_x": self.absolute_x,
-            "absolute_y": self.absolute_y,
-            "width": self.width,
-            "height": self.height,
-            "width_ratio": self.width_ratio,
-            "anchor_x_ratio": self.anchor_x_ratio,
-            "anchor_y_ratio": self.anchor_y_ratio,
-            "anchor_source": self.anchor_source,
-            "collapsed_width_locked": self.collapsed_width_locked,
-        }
+        payload: dict[str, int | float | bool | None] = {"pinned": bool(self.pinned)}
+        if self.pinned:
+            payload.update(
+                {
+                    "absolute_x": self.absolute_x,
+                    "absolute_y": self.absolute_y,
+                    "width": self.width,
+                    "height": self.height,
+                }
+            )
+        return payload
+
+    def clear_geometry(self) -> None:
+        self.relative_x = None
+        self.relative_y = None
+        self.relative_bottom = None
+        self.relative_x_ratio = None
+        self.relative_y_ratio = None
+        self.relative_bottom_ratio = None
+        self.absolute_x = None
+        self.absolute_y = None
+        self.width = None
+        self.height = None
+        self.width_ratio = None
+        self.anchor_x_ratio = None
+        self.anchor_y_ratio = None
+        self.anchor_source = None
+        self.collapsed_width_locked = False
+
+    def has_pinned_position(self) -> bool:
+        return (
+            bool(self.pinned)
+            and self.absolute_x is not None
+            and self.absolute_y is not None
+        )
 
 
 @dataclass
@@ -3186,6 +3194,43 @@ def _visual_anchor_geometry(
     return rect.left + left_margin, y, width, height
 
 
+def _automatic_hud_geometry(
+    locator: object,
+    target: str,
+    rect: WindowRect,
+    height: int,
+    *,
+    expanded: bool = False,
+    use_roi: bool = True,
+) -> tuple[int, int, int, int]:
+    """Calculate the default HUD geometry from the red/blue ROI rules."""
+    anchor_expanded = expanded if target == "top" else False
+    x, y, width, default_height = _visual_anchor_geometry(
+        target,
+        rect,
+        anchor_expanded,
+    )
+    height = max(1, int(height))
+    if target != "top" and height != default_height:
+        y -= max(0, height - default_height)
+    if use_roi:
+        try:
+            roi = (
+                locator.header_roi_geometry(rect)
+                if target == "top"
+                else locator.bottom_roi_geometry(rect)
+            )
+        except Exception:
+            roi = None
+        if roi is not None and roi.width > 0 and roi.height > 0:
+            x = int(roi.left)
+            width = max(1, int(roi.width))
+            y = int(roi.top)
+            if target != "top":
+                y -= max(0, height - REQUEST_DOCK_HEIGHT)
+    return x, y, max(1, width), height
+
+
 def _fallback_hud_anchor(
     target: str,
     rect: WindowRect,
@@ -3218,74 +3263,6 @@ def _fallback_hud_anchor(
         default_y=base_y,
         default_width=max(1, base_width),
         source="geometry",
-    )
-
-
-def _offset_hud_anchor(anchor: HudAnchor, dx: int, dy: int) -> HudAnchor:
-    return HudAnchor(
-        left=anchor.left + dx,
-        top=anchor.top + dy,
-        right=anchor.right + dx,
-        bottom=anchor.bottom + dy,
-        default_x=anchor.default_x + dx,
-        default_y=anchor.default_y + dy,
-        default_width=anchor.default_width,
-        source=anchor.source,
-    )
-
-
-def _project_hud_anchor(
-    anchor: HudAnchor,
-    from_rect: WindowRect,
-    to_rect: WindowRect,
-) -> HudAnchor:
-    if from_rect.width == to_rect.width and from_rect.height == to_rect.height:
-        return _offset_hud_anchor(
-            anchor,
-            to_rect.left - from_rect.left,
-            to_rect.top - from_rect.top,
-        )
-    x_scale = to_rect.width / max(1, from_rect.width)
-    y_scale = to_rect.height / max(1, from_rect.height)
-
-    def project_x(value: int) -> int:
-        return to_rect.left + int(round((value - from_rect.left) * x_scale))
-
-    def project_y(value: int) -> int:
-        return to_rect.top + int(round((value - from_rect.top) * y_scale))
-
-    projected = HudAnchor(
-        left=project_x(anchor.left),
-        top=project_y(anchor.top),
-        right=project_x(anchor.right),
-        bottom=project_y(anchor.bottom),
-        default_x=project_x(anchor.default_x),
-        default_y=project_y(anchor.default_y),
-        default_width=max(1, int(round(anchor.default_width * x_scale))),
-        source=anchor.source,
-    )
-    if projected.width <= 0 or projected.height <= 0:
-        return _offset_hud_anchor(
-            anchor,
-            to_rect.left - from_rect.left,
-            to_rect.top - from_rect.top,
-        )
-    return projected
-
-
-def _relative_anchor_signature(
-    anchor: HudAnchor,
-    rect: WindowRect,
-) -> tuple[str, int, int, int, int, int, int, int]:
-    return (
-        anchor.source,
-        anchor.left - rect.left,
-        anchor.top - rect.top,
-        anchor.right - rect.left,
-        anchor.bottom - rect.top,
-        anchor.default_x - rect.left,
-        anchor.default_y - rect.top,
-        anchor.default_width,
     )
 
 
@@ -3760,8 +3737,7 @@ class _WindowsCodexLocator(_BaseLocator):
             if self._top_dom_anchors_enabled or self._dom_anchors_enabled:
                 self._cdp_probe = CodexCdpProbe()
             self._tracker = CodexWindowTracker(
-                enable_uia=self._native_anchors_enabled
-                or self._header_roi_demo_enabled
+                enable_uia=True
             )
             self.enabled = True
             self._configure_api()
@@ -4083,8 +4059,6 @@ class _WindowsCodexLocator(_BaseLocator):
         )
 
     def header_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
-        if not getattr(self, "_header_roi_demo_enabled", False):
-            return None
         if self._tracker is None or not getattr(self._tracker, "enabled", False):
             return None
         if not rect.hwnd:
@@ -4108,8 +4082,6 @@ class _WindowsCodexLocator(_BaseLocator):
         )
 
     def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
-        if not getattr(self, "_header_roi_demo_enabled", False):
-            return None
         if self._tracker is None or not getattr(self._tracker, "enabled", False):
             return None
         if not rect.hwnd:
@@ -5991,9 +5963,6 @@ class TokenHudWindow:
         self._mode_switch_request = ""
         self._restart_codex_for_renderer = False
         self._geometry_log_path = configure_hud_geometry_logging()
-        self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
-        self._use_top_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
-        self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
         self._use_header_roi_demo = _env_flag(HUD_UIA_ROI_DEMO_ENV, default=True)
         self.update_manager = update_manager
         self._update_state = AutoUpdateState(current_version=__version__)
@@ -6002,10 +5971,7 @@ class TokenHudWindow:
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
         _HUD_GEOMETRY_LOGGER.info(
-            "hud_started dom_anchors=%s native_anchors=%s header_roi_demo=%s "
-            "follow_ms=%s settings_path=%s log_path=%s",
-            self._use_dom_anchors,
-            self._use_native_anchors,
+            "hud_started header_roi_demo=%s follow_ms=%s settings_path=%s log_path=%s",
             self._use_header_roi_demo,
             self.follow_ms,
             self.settings_store.path,
@@ -6067,15 +6033,14 @@ class TokenHudWindow:
         self._press_target = ""
         self._top_manual_position: tuple[int, int] | None = None
         self._request_manual_position: tuple[int, int] | None = None
+        self._session_manual_targets: set[str] = set()
+        self._pin_buttons: dict[str, list[tk.Button]] = {"top": [], "request": []}
         self._last_geometry_clamp: dict[
             str,
             tuple[int, int, int, int, int, int, int, int, str],
         ] = {}
         self._last_applied_geometry: dict[str, tuple[int, int, int, int]] = {}
         self._last_geometry_backend: dict[str, str] = {}
-        self._native_anchor_candidates: dict[str, _NativeAnchorState] = {}
-        self._stable_native_anchors: dict[str, _NativeAnchorState] = {}
-        self._last_anchor_decisions: dict[str, tuple[str, str, str, str]] = {}
         self._last_budget_log_signature: tuple[int, int, int, str, str] | None = None
         self._snapshot = ParsedSession(status="waiting")
         self._top_collapsed_width_override: int | None = None
@@ -6499,6 +6464,60 @@ class TokenHudWindow:
         )
         setattr(button, "_hud_handle", True)
         return button
+
+    def _pin_button(self, parent: tk.Misc, target: str) -> tk.Button:
+        parent_bg = str(parent.cget("bg"))
+        button = tk.Button(
+            parent,
+            text="📍",
+            command=lambda t=target: self.toggle_pin(t),
+            bg=parent_bg,
+            fg=_theme_secondary_text(parent_bg),
+            activebackground=_theme_hover_surface(parent_bg),
+            activeforeground=_theme_accent_text(parent_bg),
+            relief="flat",
+            padx=5,
+            pady=1,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            cursor="hand2",
+        )
+        setattr(button, "_hud_handle", True)
+        self._pin_buttons.setdefault(target, []).append(button)
+        _HoverTip(button, lambda t=target: self._pin_tooltip_text(t))
+        self._sync_pin_button(target, button)
+        return button
+
+    def _pin_tooltip_text(self, target: str) -> str:
+        placement = self._placement(target)
+        return "取消钉住并自动跟随" if placement.pinned else "钉住此 HUD 位置"
+
+    def _sync_pin_button(self, target: str, button: tk.Button) -> None:
+        placement = self._placement(target)
+        try:
+            parent_bg = str(button.master.cget("bg"))
+            button.configure(
+                text="📌" if placement.pinned else "📍",
+                fg=(
+                    _theme_accent_text(parent_bg)
+                    if placement.pinned
+                    else _theme_secondary_text(parent_bg)
+                ),
+            )
+        except tk.TclError:
+            return
+
+    def _sync_pin_buttons(self) -> None:
+        for target, buttons in getattr(self, "_pin_buttons", {}).items():
+            live_buttons: list[tk.Button] = []
+            for button in buttons:
+                try:
+                    exists = bool(button.winfo_exists())
+                except tk.TclError:
+                    exists = False
+                if exists:
+                    self._sync_pin_button(target, button)
+                    live_buttons.append(button)
+            buttons[:] = live_buttons
 
     def _update_button(self, parent: tk.Misc) -> tk.Button:
         parent_bg = str(parent.cget("bg"))
@@ -8202,6 +8221,7 @@ class TokenHudWindow:
     def _rebuild_top_ui(self) -> None:
         self._cancel_top_core_prewarm()
         self._cancel_top_deferred_render()
+        self._pin_buttons["top"].clear()
         header_roi_window = None
         header_roi_overlay = getattr(self, "_header_roi_overlay", None)
         if header_roi_overlay is not None:
@@ -8283,6 +8303,7 @@ class TokenHudWindow:
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
         controls = tk.Frame(frame, bg=HUD_BG)
         controls.pack(side="left", padx=(0, 4))
+        self._pin_button(controls, "top").pack(side="left")
         self._update_button(controls).pack(side="left")
         self._settings_button(frame).pack(side="right", padx=(4, 0))
         self.top_labels["bar"] = TopHudProgressStrip(frame)
@@ -8294,6 +8315,7 @@ class TokenHudWindow:
         header.pack(fill="x", pady=(0, 7))
         controls = tk.Frame(header, bg=HUD_HEADER_BG)
         controls.pack(side="left", padx=(0, 4))
+        self._pin_button(controls, "top").pack(side="left")
         self._update_button(controls).pack(side="left")
         self._settings_button(header).pack(side="right", padx=(4, 0))
         cache_progress = TopHudProgressBar(
@@ -8935,6 +8957,7 @@ class TokenHudWindow:
         self._bind_top_scroll_tree(content, mode="top")
 
     def _rebuild_request_ui(self) -> None:
+        self._pin_buttons["request"].clear()
         for child in self.request_root.winfo_children():
             child.destroy()
         outside_color = _window_outside_color()
@@ -8961,6 +8984,7 @@ class TokenHudWindow:
 
     def _build_request_collapsed(self, frame: tk.Frame) -> None:
         frame.configure(bg=REQUEST_HUD_BG, padx=8, pady=4)
+        self._pin_button(frame, "request").pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             frame,
             text="↑- ↻- ↓- ◇- ∑- $0.0000",
@@ -8979,6 +9003,7 @@ class TokenHudWindow:
         content = tk.Frame(frame, bg=REQUEST_HUD_BG)
         content.pack(side="top", fill="both", expand=True)
 
+        self._pin_button(header, "request").pack(side="left", padx=(0, 4))
         self.request_label = AutoScrollLabel(
             header,
             text="最近模型请求轮次",
@@ -9645,107 +9670,36 @@ class TokenHudWindow:
     def _attached_geometry(
         self, target: str, rect: WindowRect, expanded: bool
     ) -> tuple[int, int, int, int]:
-        legacy_x, legacy_y, legacy_width, height = _visual_anchor_geometry(
-            target,
-            rect,
-            expanded,
-        )
         placement = self._placement(target)
-        default_height = height
         height = self._window_height(target, expanded, placement)
-        if target != "top" and height != default_height:
-            legacy_y -= height - default_height
-        anchor = self._target_anchor(
+        x, y, width, height = _automatic_hud_geometry(
+            self.locator,
             target,
             rect,
-            expanded,
-            legacy_x,
-            legacy_y,
-            legacy_width,
             height,
+            expanded=expanded,
+            use_roi=True,
         )
-        has_anchor_position = self._has_anchor_position(placement, anchor)
-        has_width_ratio = (
-            placement.width_ratio is not None
-            and (
-                placement.anchor_source is None
-                or placement.anchor_source == anchor.source
+        source = "roi-auto"
+        if placement.has_pinned_position():
+            x = int(placement.absolute_x or x)
+            y = int(placement.absolute_y or y)
+            width = max(1, int(placement.width or width))
+            source = "pinned"
+        elif target in self._session_manual_target_set():
+            manual_position = (
+                self._top_manual_position
+                if target == "top"
+                else self._request_manual_position
             )
-        )
-        width_base = (
-            anchor.width
-            if has_width_ratio and placement.anchor_source == anchor.source
-            else legacy_width
-        )
-        collapsed_width_locked = (
-            target == "top" and not expanded and placement.collapsed_width_locked
-        )
-        auto_width = (
-            self._top_collapsed_auto_width()
-            if target == "top" and not expanded and not collapsed_width_locked
-            else None
-        )
-
-        if auto_width is not None:
-            width = auto_width
-            width_mode = "content-auto"
-        elif has_width_ratio:
-            width = int(round(width_base * placement.width_ratio))
-            width_mode = (
-                "anchor-ratio"
-                if placement.anchor_source == anchor.source
-                else "legacy-ratio"
-            )
-        else:
-            width = placement.width or anchor.default_width
-            width_mode = "saved-width" if placement.width else "anchor-default"
-        x = anchor.default_x
-        y = anchor.default_y
-        position_mode = "anchor-default"
-
-        if has_anchor_position:
-            position_mode = "anchor-ratio"
-            x = anchor.left + int(round(anchor.width * float(placement.anchor_x_ratio or 0.0)))
-            if target == "top":
-                y = anchor.top + int(round(anchor.height * float(placement.anchor_y_ratio or 0.0)))
-            else:
-                bottom_y = anchor.top + int(
-                    round(anchor.height * float(placement.anchor_y_ratio or 0.0))
-                )
-                y = bottom_y - height
-        elif target == "top":
-            if placement.relative_x_ratio is not None and placement.relative_y_ratio is not None:
-                position_mode = "window-relative"
-                x = rect.left + int(round(rect.width * placement.relative_x_ratio))
-                y = rect.top + int(round(rect.height * placement.relative_y_ratio))
-        elif (
-            placement.relative_x_ratio is not None
-            and placement.relative_bottom_ratio is not None
-        ):
-            position_mode = "window-relative"
-            x = rect.left + int(round(rect.width * placement.relative_x_ratio))
-            bottom = int(round(rect.height * placement.relative_bottom_ratio))
-            y = rect.bottom - bottom - height
-        if self._maybe_reanchor_geometry_to_dom(
-            target,
-            placement,
-            anchor,
-            x,
-            y,
-            width,
-            height,
-        ):
-            position_mode = "auto-reanchored"
-            width_mode = "anchor-ratio"
-        self._log_anchor_decision(
-            target,
-            anchor,
-            placement,
-            position_mode,
-            width_mode,
-        )
+            if manual_position is not None:
+                x, y = manual_position
+            width = max(1, int(placement.width or width))
+            source = "session-manual"
 
         min_width = self._interactive_min_width(target, expanded)
+        if source in {"pinned", "session-manual"}:
+            return x, y, max(min_width, width), height
         min_x = rect.left + 8
         max_x = max(min_x, rect.right - min_width - 12)
         original_x = x
@@ -9778,7 +9732,7 @@ class TokenHudWindow:
                 width,
                 original_height,
                 height,
-                anchor.source,
+                source,
             )
             should_log = self._last_geometry_clamp.get(target) != signature
             self._last_geometry_clamp[target] = signature
@@ -9788,9 +9742,9 @@ class TokenHudWindow:
         if should_log:
             _HUD_GEOMETRY_LOGGER.info(
                 "geometry_clamp target=%s source=%s x=%s->%s y=%s->%s width=%s->%s "
-                "height=%s->%s anchor=(%s,%s,%s,%s)",
+                "height=%s->%s",
                 target,
-                anchor.source,
+                source,
                 original_x,
                 x,
                 original_y,
@@ -9799,90 +9753,8 @@ class TokenHudWindow:
                 width,
                 original_height,
                 height,
-                anchor.left,
-                anchor.top,
-                anchor.right,
-                anchor.bottom,
             )
         return x, y, width, height
-
-    def _log_anchor_decision(
-        self,
-        target: str,
-        anchor: HudAnchor,
-        placement: WindowPlacement,
-        position_mode: str,
-        width_mode: str,
-    ) -> None:
-        signature = (
-            anchor.source,
-            placement.anchor_source or "",
-            position_mode,
-            width_mode,
-        )
-        if self._last_anchor_decisions.get(target) == signature:
-            return
-        self._last_anchor_decisions[target] = signature
-        _HUD_GEOMETRY_LOGGER.info(
-            "anchor_decision target=%s anchor_source=%s placement_source=%s "
-            "position_mode=%s width_mode=%s anchor=(%s,%s,%s,%s)",
-            target,
-            anchor.source,
-            placement.anchor_source or "-",
-            position_mode,
-            width_mode,
-            anchor.left,
-            anchor.top,
-            anchor.right,
-            anchor.bottom,
-        )
-
-    def _maybe_reanchor_geometry_to_dom(
-        self,
-        target: str,
-        placement: WindowPlacement,
-        anchor: HudAnchor,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-    ) -> bool:
-        if not _env_flag(HUD_AUTO_REANCHOR_ENV):
-            return False
-        if placement.anchor_source != "geometry":
-            return False
-        if not anchor.source.startswith("cdp:"):
-            return False
-        if anchor.width <= 0 or anchor.height <= 0:
-            return False
-        previous_source = placement.anchor_source
-        previous_x_ratio = placement.anchor_x_ratio
-        previous_y_ratio = placement.anchor_y_ratio
-        previous_width_ratio = placement.width_ratio
-        placement.anchor_x_ratio = (x - anchor.left) / max(1, anchor.width)
-        if target == "top":
-            placement.anchor_y_ratio = (y - anchor.top) / max(1, anchor.height)
-        else:
-            placement.anchor_y_ratio = ((y + height) - anchor.top) / max(
-                1,
-                anchor.height,
-            )
-        placement.width_ratio = width / max(1, anchor.width)
-        placement.anchor_source = anchor.source
-        _HUD_GEOMETRY_LOGGER.info(
-            "anchor_reanchored target=%s from_source=%s to_source=%s "
-            "anchor_x_ratio=%s->%.6f anchor_y_ratio=%s->%.6f width_ratio=%s->%.6f",
-            target,
-            previous_source,
-            anchor.source,
-            previous_x_ratio,
-            placement.anchor_x_ratio,
-            previous_y_ratio,
-            placement.anchor_y_ratio,
-            previous_width_ratio,
-            placement.width_ratio,
-        )
-        return True
 
     def _roi_demo_geometry(
         self,
@@ -9910,165 +9782,6 @@ class TokenHudWindow:
             right=int(roi.right),
             bottom=int(roi.top) + height,
             minimized=False,
-        )
-
-    def _roi_demo_anchor(
-        self,
-        target: str,
-        rect: WindowRect,
-        hud_height: int,
-    ) -> HudAnchor | None:
-        roi = self._roi_demo_geometry(target, rect, hud_height)
-        if roi is None:
-            return None
-        source = "uia:header-roi-demo" if target == "top" else "uia:bottom-roi-demo"
-        return HudAnchor(
-            left=int(roi.left),
-            top=int(roi.top),
-            right=int(roi.right),
-            bottom=int(roi.bottom),
-            default_x=int(roi.left),
-            default_y=int(roi.top),
-            default_width=max(1, int(roi.width)),
-            source=source,
-        )
-
-    def _target_anchor(
-        self,
-        target: str,
-        rect: WindowRect,
-        expanded: bool,
-        legacy_x: int | None = None,
-        legacy_y: int | None = None,
-        legacy_width: int | None = None,
-        height: int | None = None,
-    ) -> HudAnchor:
-        if legacy_x is None or legacy_y is None or legacy_width is None or height is None:
-            legacy_x, legacy_y, legacy_width, height = _visual_anchor_geometry(
-                target,
-                rect,
-                expanded,
-            )
-        roi_anchor = self._roi_demo_anchor(target, rect, height)
-        if roi_anchor is not None:
-            return roi_anchor
-        if (
-            self._use_dom_anchors
-            or self._use_native_anchors
-            or (target == "top" and self._use_top_dom_anchors)
-        ):
-            if self._ui_interaction_active():
-                projected = self._projected_stable_native_anchor(target, rect)
-                if projected is not None:
-                    return projected
-                return _fallback_hud_anchor(
-                    target,
-                    rect,
-                    legacy_x,
-                    legacy_y,
-                    legacy_width,
-                    height,
-                )
-            native = self._stable_native_anchor(target, rect, height)
-            if native is not None:
-                return native
-        return _fallback_hud_anchor(
-            target,
-            rect,
-            legacy_x,
-            legacy_y,
-            legacy_width,
-            height,
-        )
-
-    def _stable_native_anchor(
-        self,
-        target: str,
-        rect: WindowRect,
-        hud_height: int,
-    ) -> HudAnchor | None:
-        projected = self._projected_stable_native_anchor(target, rect)
-        state = self._stable_native_anchors.get(target)
-        if (
-            state is not None
-            and projected is not None
-            and state.window_width == rect.width
-            and state.window_height == rect.height
-            and (state.window_left != rect.left or state.window_top != rect.top)
-        ):
-            return projected
-
-        native = self.locator.anchor_geometry(target, rect, hud_height)
-        if native is None:
-            self._native_anchor_candidates.pop(target, None)
-            return projected
-
-        signature = _relative_anchor_signature(native, rect)
-        previous = self._native_anchor_candidates.get(target)
-        frames = (
-            previous.frames + 1
-            if previous is not None and previous.signature == signature
-            else 1
-        )
-        state = _NativeAnchorState(
-            signature=signature,
-            frames=frames,
-            anchor=native,
-            window_left=rect.left,
-            window_top=rect.top,
-            window_width=rect.width,
-            window_height=rect.height,
-        )
-        self._native_anchor_candidates[target] = state
-        if frames >= NATIVE_ANCHOR_STABLE_FRAMES:
-            previous_stable = self._stable_native_anchors.get(target)
-            if previous_stable is None or previous_stable.signature != signature:
-                _HUD_GEOMETRY_LOGGER.info(
-                    "native_anchor_stable target=%s source=%s frames=%s "
-                    "window=(%s,%s,%s,%s) anchor=(%s,%s,%s,%s)",
-                    target,
-                    native.source,
-                    frames,
-                    rect.left,
-                    rect.top,
-                    rect.right,
-                    rect.bottom,
-                    native.left,
-                    native.top,
-                    native.right,
-                    native.bottom,
-                )
-            self._stable_native_anchors[target] = state
-            return native
-
-        return projected
-
-    def _projected_stable_native_anchor(
-        self,
-        target: str,
-        rect: WindowRect,
-    ) -> HudAnchor | None:
-        state = self._stable_native_anchors.get(target)
-        if state is None:
-            return None
-        source_rect = WindowRect(
-            left=state.window_left,
-            top=state.window_top,
-            right=state.window_left + state.window_width,
-            bottom=state.window_top + state.window_height,
-        )
-        return _project_hud_anchor(
-            state.anchor,
-            source_rect,
-            rect,
-        )
-
-    @staticmethod
-    def _has_anchor_position(placement: WindowPlacement, anchor: HudAnchor) -> bool:
-        return (
-            placement.anchor_x_ratio is not None
-            and placement.anchor_y_ratio is not None
-            and placement.anchor_source == anchor.source
         )
 
     @staticmethod
@@ -10111,7 +9824,12 @@ class TokenHudWindow:
             default = REQUEST_DOCK_EXPANDED_HEIGHT if expanded else REQUEST_DOCK_HEIGHT
         if not expanded:
             return default
-        custom = (placement or self._placement(target)).height
+        placement = placement or self._placement(target)
+        custom = (
+            placement.height
+            if placement.pinned or target in self._session_manual_target_set()
+            else None
+        )
         return max(self._interactive_min_height(target, expanded), custom or default)
 
     def _apply_free_defaults(self, keep_existing: bool = False) -> None:
@@ -10120,6 +9838,8 @@ class TokenHudWindow:
         request_width, request_height = self._request_size()
         if self._top_manual_position is None or not keep_existing:
             if (
+                self.settings.top.pinned
+                and
                 self.settings.top.absolute_x is not None
                 and self.settings.top.absolute_y is not None
             ):
@@ -10134,6 +9854,8 @@ class TokenHudWindow:
                 )
         if self._request_manual_position is None or not keep_existing:
             if (
+                self.settings.request.pinned
+                and
                 self.settings.request.absolute_x is not None
                 and self.settings.request.absolute_y is not None
             ):
@@ -10159,9 +9881,10 @@ class TokenHudWindow:
         return self._top_size_for(self.top_expanded)
 
     def _top_size_for(self, expanded: bool) -> tuple[int, int]:
+        use_saved = self.settings.top.pinned or "top" in self._session_manual_target_set()
         auto_width = (
             self._top_collapsed_auto_width()
-            if not expanded and not self.settings.top.collapsed_width_locked
+            if not expanded and not use_saved
             else None
         )
         if auto_width is not None:
@@ -10169,7 +9892,11 @@ class TokenHudWindow:
         else:
             width = max(
                 self._interactive_min_width("top", expanded),
-                self.settings.top.width or (480 if not self.compact else 360),
+                (
+                    self.settings.top.width
+                    if use_saved and self.settings.top.width is not None
+                    else (480 if not self.compact else 360)
+                ),
             )
         return (
             width,
@@ -10205,16 +9932,84 @@ class TokenHudWindow:
 
     def _request_size(self) -> tuple[int, int]:
         expanded = self.request_expanded
+        use_saved = (
+            self.settings.request.pinned
+            or "request" in self._session_manual_target_set()
+        )
         return (
             max(
                 self._interactive_min_width("request", expanded),
-                self.settings.request.width or REQUEST_DOCK_WIDTH,
+                (
+                    self.settings.request.width
+                    if use_saved and self.settings.request.width is not None
+                    else REQUEST_DOCK_WIDTH
+                ),
             ),
             self._window_height("request", expanded, self.settings.request),
         )
 
     def _placement(self, target: str) -> WindowPlacement:
         return self.settings.top if target == "top" else self.settings.request
+
+    def _session_manual_target_set(self) -> set[str]:
+        return getattr(self, "_session_manual_targets", set())
+
+    def _window_for_target(self, target: str) -> tk.Tk | tk.Toplevel:
+        return self.root if target == "top" else self.request_root
+
+    def _set_session_manual_position(self, target: str, x: int, y: int) -> None:
+        if target == "top":
+            self._top_manual_position = (x, y)
+        else:
+            self._request_manual_position = (x, y)
+
+    def _clear_session_manual_geometry(self, target: str) -> None:
+        self._session_manual_targets.discard(target)
+        if target == "top":
+            self._top_manual_position = None
+        else:
+            self._request_manual_position = None
+
+    def _capture_window_geometry(
+        self,
+        target: str,
+        window: tk.Tk | tk.Toplevel,
+    ) -> None:
+        try:
+            window.update_idletasks()
+        except tk.TclError:
+            pass
+        placement = self._placement(target)
+        placement.absolute_x = int(window.winfo_x())
+        placement.absolute_y = int(window.winfo_y())
+        placement.width = max(
+            self._interactive_min_width(
+                target,
+                self.top_expanded if target == "top" else self.request_expanded,
+            ),
+            int(window.winfo_width()),
+        )
+        placement.height = max(
+            1,
+            int(window.winfo_height()),
+        )
+
+    def toggle_pin(self, target: str) -> str:
+        self._mark_click_priority()
+        placement = self._placement(target)
+        if placement.pinned:
+            placement.pinned = False
+            placement.clear_geometry()
+            self._clear_session_manual_geometry(target)
+        else:
+            window = self._window_for_target(target)
+            placement.clear_geometry()
+            placement.pinned = True
+            self._capture_window_geometry(target, window)
+        self._save_settings()
+        self._sync_pin_buttons()
+        self._apply_geometry()
+        return "break"
 
     def _remember_window_position(
         self,
@@ -10226,70 +10021,29 @@ class TokenHudWindow:
         placement = self._placement(target)
         x = int(window.winfo_x())
         y = int(window.winfo_y())
-        height = int(window.winfo_height())
+        self._session_manual_targets.add(target)
         placement.absolute_x = x
         placement.absolute_y = y
-        if target == "top":
-            self._top_manual_position = (x, y)
-        else:
-            self._request_manual_position = (x, y)
-
-        if self._attached and self._last_rect is not None:
-            anchor = self._target_anchor(
-                target,
-                self._last_rect,
-                self.top_expanded if target == "top" else self.request_expanded,
-            )
-            placement.relative_x = x - self._last_rect.left
-            placement.relative_x_ratio = placement.relative_x / max(1, self._last_rect.width)
-            placement.anchor_x_ratio = (x - anchor.left) / max(1, anchor.width)
-            placement.anchor_source = anchor.source
-            if target == "top":
-                placement.relative_y = y - self._last_rect.top
-                placement.relative_y_ratio = (
-                    placement.relative_y / max(1, self._last_rect.height)
-                )
-                placement.relative_bottom = None
-                placement.relative_bottom_ratio = None
-                placement.anchor_y_ratio = (y - anchor.top) / max(1, anchor.height)
-            else:
-                placement.relative_y = None
-                placement.relative_y_ratio = None
-                placement.relative_bottom = self._last_rect.bottom - (y + height)
-                placement.relative_bottom_ratio = (
-                    placement.relative_bottom / max(1, self._last_rect.height)
-                )
-                placement.anchor_y_ratio = ((y + height) - anchor.top) / max(
-                    1,
-                    anchor.height,
-                )
-            _HUD_GEOMETRY_LOGGER.info(
-                "position_saved target=%s reason=%s source=%s x=%s y=%s "
-                "anchor_x_ratio=%.6f anchor_y_ratio=%.6f width_ratio=%s",
-                target,
-                reason,
-                anchor.source,
-                x,
-                y,
-                placement.anchor_x_ratio,
-                placement.anchor_y_ratio,
-                placement.width_ratio,
-            )
-        else:
-            placement.relative_x_ratio = None
-            placement.relative_y_ratio = None
-            placement.relative_bottom_ratio = None
-            placement.anchor_x_ratio = None
-            placement.anchor_y_ratio = None
-            placement.anchor_source = None
-            _HUD_GEOMETRY_LOGGER.info(
-                "position_saved_free target=%s reason=%s x=%s y=%s width_ratio=%s",
-                target,
-                reason,
-                x,
-                y,
-                placement.width_ratio,
-            )
+        self._set_session_manual_position(target, x, y)
+        placement.relative_x = None
+        placement.relative_y = None
+        placement.relative_bottom = None
+        placement.relative_x_ratio = None
+        placement.relative_y_ratio = None
+        placement.relative_bottom_ratio = None
+        placement.anchor_x_ratio = None
+        placement.anchor_y_ratio = None
+        placement.anchor_source = None
+        placement.width_ratio = None
+        placement.collapsed_width_locked = False
+        _HUD_GEOMETRY_LOGGER.info(
+            "position_saved target=%s reason=%s pinned=%s x=%s y=%s",
+            target,
+            reason,
+            placement.pinned,
+            x,
+            y,
+        )
 
     def _remember_window_width(
         self,
@@ -10305,31 +10059,21 @@ class TokenHudWindow:
             int(window.winfo_width()),
         )
         placement.width = width
-        if target == "top" and not expanded:
-            placement.collapsed_width_locked = True
-
-        if self._attached and self._last_rect is not None:
-            anchor = self._target_anchor(target, self._last_rect, expanded)
-            placement.width_ratio = width / max(1, anchor.width)
-            placement.anchor_source = anchor.source
-            _HUD_GEOMETRY_LOGGER.info(
-                "width_saved target=%s reason=%s source=%s width=%s "
-                "anchor_width=%s width_ratio=%.6f",
-                target,
-                reason,
-                anchor.source,
-                width,
-                anchor.width,
-                placement.width_ratio,
-            )
-        else:
-            placement.width_ratio = None
-            _HUD_GEOMETRY_LOGGER.info(
-                "width_saved_free target=%s reason=%s width=%s",
-                target,
-                reason,
-                width,
-            )
+        placement.collapsed_width_locked = False
+        placement.width_ratio = None
+        self._session_manual_targets.add(target)
+        self._set_session_manual_position(
+            target,
+            int(window.winfo_x()),
+            int(window.winfo_y()),
+        )
+        _HUD_GEOMETRY_LOGGER.info(
+            "width_saved target=%s reason=%s pinned=%s width=%s",
+            target,
+            reason,
+            placement.pinned,
+            width,
+        )
 
     def _remember_window_height(
         self,
@@ -10347,10 +10091,17 @@ class TokenHudWindow:
             int(window.winfo_height()),
         )
         placement.height = height
+        self._session_manual_targets.add(target)
+        self._set_session_manual_position(
+            target,
+            int(window.winfo_x()),
+            int(window.winfo_y()),
+        )
         _HUD_GEOMETRY_LOGGER.info(
-            "height_saved target=%s reason=%s height=%s",
+            "height_saved target=%s reason=%s pinned=%s height=%s",
             target,
             reason,
+            placement.pinned,
             height,
         )
 
@@ -10626,6 +10377,9 @@ class TokenHudWindow:
         self._settings_loading_track = None
         self._top_update_button = None
         self._top_update_buttons.clear()
+        pin_buttons = getattr(self, "_pin_buttons", {})
+        pin_buttons.get("top", []).clear()
+        pin_buttons.get("request", []).clear()
         self._drag_window = None
         self._resize_window = None
         self._top_shell = None

@@ -57,15 +57,20 @@ your environment clean while still giving you a live editable install.
 
 ## 3. Run the test suite / 运行测试套件
 
-The canonical full test command is:
+The canonical fast test command is:
 
 ```powershell
-python -m unittest discover -s tests
+python -m pytest
 ```
 
-This is the same suite used to keep the current 71 unit tests green.
+Real Tk/Qt widget lifecycle regressions are marked `ui` and skipped by default.
+Run them explicitly when touching HUD widget behavior:
 
-这是当前 71 项单元测试的标准执行方式。
+```powershell
+python -m pytest -m ui
+```
+
+默认命令会跳过真实 Tk/Qt 窗口生命周期回归；修改 HUD widget 行为时再显式运行 `python -m pytest -m ui`。
 
 ## 4. Static syntax check / 静态语法检查
 

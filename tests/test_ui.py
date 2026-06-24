@@ -13,6 +13,8 @@ import time
 import tkinter as tk
 from tkinter import ttk
 import unittest
+
+import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -111,7 +113,6 @@ from codex_usage_hud.ui.tk_hud import (
     REQUEST_DOCK_LEFT,
     REQUEST_DOCK_RIGHT,
     REQUEST_DOCK_WIDTH,
-    NATIVE_ANCHOR_STABLE_FRAMES,
     HUD_CDP_DOM_ENV,
     SETTINGS_DIALOG_HEIGHT,
     SETTINGS_DIALOG_WIDTH,
@@ -296,10 +297,7 @@ def _attached_geometry_after_stable(
     rect: WindowRect,
     expanded: bool = False,
 ) -> tuple[int, int, int, int]:
-    result = window._attached_geometry(target, rect, expanded)
-    for _ in range(NATIVE_ANCHOR_STABLE_FRAMES - 1):
-        result = window._attached_geometry(target, rect, expanded)
-    return result
+    return window._attached_geometry(target, rect, expanded)
 
 
 class _FakeUsageParser:
@@ -335,6 +333,13 @@ def _flush_tk(window: TokenHudWindow, iterations: int = 3) -> None:
     for _ in range(iterations):
         window.root.update_idletasks()
         window.root.update()
+
+
+def _settle_top_animation(window: TokenHudWindow) -> None:
+    end = getattr(window, "_top_animation_end", None)
+    if end is not None:
+        window._settle_top_animation(end)
+    _flush_tk(window)
 
 
 def _stop_background_jobs(window: TokenHudWindow) -> None:
@@ -2639,12 +2644,13 @@ class AutoScrollHelpersTests(unittest.TestCase):
 
 
 class HudSettingsStoreTests(unittest.TestCase):
-    def test_settings_round_trip_persists_position_and_width(self) -> None:
+    def test_settings_round_trip_persists_only_pinned_position_and_size(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "hud_settings.json"
             store = HudSettingsStore(path)
             settings = HudSettings(
                 top=WindowPlacement(
+                    pinned=True,
                     relative_x=460,
                     relative_y=44,
                     absolute_x=900,
@@ -2658,6 +2664,7 @@ class HudSettingsStoreTests(unittest.TestCase):
                     collapsed_width_locked=True,
                 ),
                 request=WindowPlacement(
+                    pinned=False,
                     relative_x=520,
                     relative_bottom=28,
                     absolute_x=920,
@@ -2673,24 +2680,38 @@ class HudSettingsStoreTests(unittest.TestCase):
 
             store.save(settings)
             loaded = store.load()
+            raw = json.loads(path.read_text(encoding="utf-8"))
 
-        self.assertEqual(loaded.top.relative_x, 460)
-        self.assertEqual(loaded.top.relative_y, 44)
+        self.assertTrue(loaded.top.pinned)
+        self.assertFalse(loaded.request.pinned)
+        self.assertIsNone(loaded.top.relative_x)
+        self.assertIsNone(loaded.top.relative_y)
         self.assertEqual(loaded.top.width, 640)
         self.assertEqual(loaded.top.height, 390)
-        self.assertEqual(loaded.top.width_ratio, 0.75)
-        self.assertEqual(loaded.top.anchor_x_ratio, 0.25)
-        self.assertEqual(loaded.top.anchor_y_ratio, 0.5)
-        self.assertEqual(loaded.top.anchor_source, "geometry")
-        self.assertTrue(loaded.top.collapsed_width_locked)
-        self.assertEqual(loaded.request.relative_bottom, 28)
-        self.assertEqual(loaded.request.width, 420)
-        self.assertEqual(loaded.request.height, 210)
-        self.assertEqual(loaded.request.width_ratio, 1.1)
-        self.assertEqual(loaded.request.anchor_x_ratio, 0.4)
-        self.assertEqual(loaded.request.anchor_y_ratio, 0.0)
-        self.assertEqual(loaded.request.anchor_source, "geometry")
+        self.assertIsNone(loaded.top.width_ratio)
+        self.assertIsNone(loaded.top.anchor_x_ratio)
+        self.assertIsNone(loaded.top.anchor_y_ratio)
+        self.assertIsNone(loaded.top.anchor_source)
+        self.assertFalse(loaded.top.collapsed_width_locked)
+        self.assertIsNone(loaded.request.relative_bottom)
+        self.assertIsNone(loaded.request.width)
+        self.assertIsNone(loaded.request.height)
+        self.assertIsNone(loaded.request.width_ratio)
+        self.assertIsNone(loaded.request.anchor_x_ratio)
+        self.assertIsNone(loaded.request.anchor_y_ratio)
+        self.assertIsNone(loaded.request.anchor_source)
         self.assertFalse(loaded.request.collapsed_width_locked)
+        self.assertEqual(
+            raw["top"],
+            {
+                "pinned": True,
+                "absolute_x": 900,
+                "absolute_y": 50,
+                "width": 640,
+                "height": 390,
+            },
+        )
+        self.assertEqual(raw["request"], {"pinned": False})
 
     def test_geometry_save_preserves_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2734,6 +2755,8 @@ class HudSettingsStoreTests(unittest.TestCase):
         self.assertEqual(raw["top"]["width"], 320)
 
 
+@pytest.mark.ui
+@pytest.mark.qt_ui
 class QtHudWindowLifecycleTests(unittest.TestCase):
     def test_qt_manual_input_priority_temporarily_defers_refresh_work(self) -> None:
         if getattr(qt_hud_module, "QApplication", None) is None:
@@ -2992,10 +3015,10 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                             weekly_limit_usd=400.0,
                         )
                     )
-                    window.attach_to_rect(WindowRect(left=100, top=120, right=1100, bottom=920))
+                    window.attach_to_rect(WindowRect(left=100, top=120, right=1300, bottom=920))
                     _top_x, _top_y, top_anchor_width, _top_height = _visual_anchor_geometry(
                         "top",
-                        WindowRect(left=100, top=120, right=1100, bottom=920),
+                        WindowRect(left=100, top=120, right=1300, bottom=920),
                         False,
                     )
                     self.assertGreaterEqual(window.top_window.x(), 100)
@@ -3525,7 +3548,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                         ],
                     )
                     window.update_display(snapshot)
-                    window.attach_to_rect(WindowRect(left=100, top=120, right=1100, bottom=920))
+                    window.attach_to_rect(WindowRect(left=100, top=120, right=1300, bottom=920))
                     window.top_window.set_expanded(True)
 
                     self.assertTrue(window.top_window.warning_panel.isVisible())
@@ -3560,12 +3583,14 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 hud_store.save(
                     HudSettings(
                         top=WindowPlacement(
+                            pinned=True,
                             absolute_x=123,
                             absolute_y=145,
                             width=640,
                             height=455,
                         ),
                         request=WindowPlacement(
+                            pinned=True,
                             absolute_x=321,
                             absolute_y=654,
                             width=430,
@@ -3573,11 +3598,12 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                         ),
                     )
                 )
-                window = QtHudWindow(
-                    hide_until_attached=True,
-                    user_settings_store=user_store,
-                    hud_settings_store=hud_store,
-                )
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
                 try:
                     self.assertEqual(window.top_window.width(), 640)
                     self.assertEqual(window.top_window._expanded_height, 455)
@@ -3605,6 +3631,63 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     resized = hud_store.load()
                     self.assertEqual(resized.request.width, 460)
                     self.assertEqual(resized.request.height, 230)
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_qt_pin_button_toggles_persistence_without_expanding_panel(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1300, bottom=920)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    window._impl.locator = _FakeAnchorLocator(
+                        {},
+                        header_roi=WindowRect(left=360, top=144, right=1120, bottom=190),
+                    )
+                    window.attach_to_rect(rect)
+                    window.top_window.move(410, 180)
+                    window.top_window.resize(620, window.top_window.height())
+
+                    self.assertFalse(window.top_window.expanded)
+                    window.top_window._pin_buttons[0].click()
+
+                    saved = hud_store.load().top
+                    self.assertTrue(saved.pinned)
+                    self.assertEqual((saved.absolute_x, saved.absolute_y), (410, 180))
+                    self.assertEqual(saved.width, 620)
+                    self.assertFalse(window.top_window.expanded)
+
+                    window.top_window.move(520, 240)
+                    window.top_window._pin_buttons[0].click()
+
+                    cleared = hud_store.load().top
+                    self.assertFalse(cleared.pinned)
+                    self.assertIsNone(cleared.absolute_x)
+                    self.assertIsNone(cleared.width)
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (360, 144))
+                    self.assertEqual(window.top_window.width(), 760)
+                    self.assertFalse(window.top_window.expanded)
                 finally:
                     window.close("test")
         finally:
@@ -3852,7 +3935,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
-    def test_qt_attached_resize_saves_and_restores_width_ratio(self) -> None:
+    def test_qt_attached_resize_is_session_only_until_pinned(self) -> None:
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -3867,11 +3950,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
                 hud_store.save(HudSettings.empty())
                 rect = WindowRect(left=100, top=120, right=1100, bottom=920)
-                _anchor_x, _anchor_y, anchor_width, _anchor_height = _visual_anchor_geometry(
-                    "top",
-                    rect,
-                    False,
-                )
+                _anchor_x, _anchor_y, anchor_width, _anchor_height = _visual_anchor_geometry("top", rect, False)
                 window = QtHudWindow(
                     hide_until_attached=True,
                     user_settings_store=user_store,
@@ -3882,35 +3961,30 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     target_width = max(120, anchor_width // 2)
                     window.top_window.resize(target_width, window.top_window.height())
                     window._remember_panel_geometry("top", window.top_window, "resize")
+                    self.assertIn("top", window._impl._session_manual_targets)
+                    self.assertEqual(window.settings.top.width, target_width)
                     saved = hud_store.load()
-                    self.assertEqual(saved.top.width, target_width)
-                    self.assertAlmostEqual(
-                        saved.top.width_ratio or 0.0,
-                        target_width / anchor_width,
-                        places=5,
-                    )
-                    self.assertEqual(saved.top.anchor_source, "qt-visual")
+                    self.assertFalse(saved.top.pinned)
+                    self.assertIsNone(saved.top.width)
+                    self.assertIsNone(saved.top.width_ratio)
+                    self.assertIsNone(saved.top.anchor_source)
+
+                    window.attach_to_rect(WindowRect(left=180, top=180, right=1180, bottom=980))
+                    self.assertEqual(window.top_window.width(), target_width)
                 finally:
                     window.close("test")
 
                 wider = WindowRect(left=100, top=120, right=1500, bottom=920)
-                _x, _y, wider_anchor_width, _height = _visual_anchor_geometry(
-                    "top",
-                    wider,
-                    False,
-                )
                 restored = QtHudWindow(
                     hide_until_attached=True,
                     user_settings_store=user_store,
                     hud_settings_store=hud_store,
                 )
                 try:
+                    expected_width = restored._attached_panel_geometry("top", wider, False)[2]
                     restored.attach_to_rect(wider)
-                    expected_width = max(
-                        120,
-                        int(round(wider_anchor_width * (target_width / anchor_width))),
-                    )
                     self.assertEqual(restored.top_window.width(), expected_width)
+                    self.assertNotEqual(restored.top_window.width(), target_width)
                 finally:
                     restored.close("test")
         finally:
@@ -4003,7 +4077,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
-    def test_qt_attached_saved_relative_position_follows_moved_rect(self) -> None:
+    def test_qt_attached_manual_position_is_current_session_only(self) -> None:
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -4030,23 +4104,41 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     window.top_window.move(rect.left + 240, rect.top + 90)
                     window._remember_panel_geometry("top", window.top_window, "move")
                     saved_top = hud_store.load().top
-                    self.assertIsNotNone(saved_top.anchor_x_ratio)
-                    window.top_window._manual_positioned = True
+                    self.assertFalse(saved_top.pinned)
+                    self.assertIsNone(saved_top.absolute_x)
+                    self.assertIsNone(saved_top.relative_x_ratio)
+                    self.assertIsNone(saved_top.anchor_x_ratio)
 
                     window.attach_to_rect(moved)
 
-                    expected_x = moved.left + int(round(moved.width * float(saved_top.relative_x_ratio or 0.0)))
-                    expected_y = moved.top + int(round(moved.height * float(saved_top.relative_y_ratio or 0.0)))
-                    self.assertEqual((window.top_window.x(), window.top_window.y()), (expected_x, expected_y))
+                    self.assertEqual(
+                        (window.top_window.x(), window.top_window.y()),
+                        (rect.left + 240, rect.top + 90),
+                    )
                 finally:
                     window.close("test")
+
+                restored = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=user_store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    expected = restored._attached_panel_geometry("top", moved, False)
+                    restored.attach_to_rect(moved)
+                    self.assertEqual(
+                        (restored.top_window.x(), restored.top_window.y()),
+                        (expected[0], expected[1]),
+                    )
+                finally:
+                    restored.close("test")
         finally:
             if previous_platform is None:
                 os.environ.pop("QT_QPA_PLATFORM", None)
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
-    def test_qt_initial_place_prefers_saved_relative_position_over_absolute(self) -> None:
+    def test_qt_initial_place_ignores_legacy_unpinned_geometry(self) -> None:
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -4059,16 +4151,29 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
                 user_store.save(UserConfig.defaults())
                 hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
-                settings = HudSettings.empty()
-                settings.top.absolute_x = 12
-                settings.top.absolute_y = 34
-                settings.top.relative_x_ratio = 0.25
-                settings.top.relative_y_ratio = 0.20
-                settings.request.absolute_x = 56
-                settings.request.absolute_y = 78
-                settings.request.relative_x_ratio = 0.70
-                settings.request.relative_bottom_ratio = 0.10
-                hud_store.save(settings)
+                hud_store.path.write_text(
+                    json.dumps(
+                        {
+                            "top": {
+                                "pinned": False,
+                                "absolute_x": 12,
+                                "absolute_y": 34,
+                                "relative_x_ratio": 0.25,
+                                "relative_y_ratio": 0.20,
+                                "width_ratio": 0.5,
+                            },
+                            "request": {
+                                "pinned": False,
+                                "absolute_x": 56,
+                                "absolute_y": 78,
+                                "relative_x_ratio": 0.70,
+                                "relative_bottom_ratio": 0.10,
+                                "anchor_x_ratio": 0.2,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 rect = WindowRect(left=200, top=160, right=1200, bottom=960)
                 with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=rect):
                     window = QtHudWindow(
@@ -4097,7 +4202,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
-    def test_qt_initial_place_uses_saved_relative_position_while_codex_inactive(self) -> None:
+    def test_qt_initial_place_ignores_legacy_unpinned_geometry_while_codex_inactive(self) -> None:
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -4110,12 +4215,20 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
                 user_store.save(UserConfig.defaults())
                 hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
-                settings = HudSettings.empty()
-                settings.top.absolute_x = 12
-                settings.top.absolute_y = 34
-                settings.top.relative_x_ratio = 0.25
-                settings.top.relative_y_ratio = 0.20
-                hud_store.save(settings)
+                hud_store.path.write_text(
+                    json.dumps(
+                        {
+                            "top": {
+                                "pinned": False,
+                                "absolute_x": 12,
+                                "absolute_y": 34,
+                                "relative_x_ratio": 0.25,
+                                "relative_y_ratio": 0.20,
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 rect = WindowRect(left=200, top=160, right=1200, bottom=960)
                 with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=rect), patch.object(
                     qt_hud_module.CodexWindowLocator,
@@ -4134,7 +4247,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                         (expected_top[0], expected_top[1]),
                     )
                     self.assertNotEqual((window.top_window.x(), window.top_window.y()), (12, 34))
-                    self.assertTrue(window.top_window._manual_positioned)
+                    self.assertFalse(window.top_window._manual_positioned)
                     self.assertFalse(window.top_window.isVisible())
                 finally:
                     window.close("test")
@@ -4204,7 +4317,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
-    def test_qt_restored_top_position_stays_put_when_anchor_shifts_without_window_move(self) -> None:
+    def test_qt_pinned_top_position_stays_put_when_anchor_shifts_without_window_move(self) -> None:
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -4239,11 +4352,11 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     source="test-title",
                 )
                 settings = HudSettings.empty()
-                settings.top.anchor_x_ratio = (340 - first_anchor.left) / first_anchor.width
-                settings.top.anchor_y_ratio = (36 - first_anchor.top) / first_anchor.height
-                settings.top.anchor_source = "test-title"
-                settings.top.relative_x_ratio = (340 - rect.left) / rect.width
-                settings.top.relative_y_ratio = (36 - rect.top) / rect.height
+                settings.top.pinned = True
+                settings.top.absolute_x = 340
+                settings.top.absolute_y = 36
+                settings.top.width = 560
+                settings.top.height = qt_hud_module.QT_HUD_TOP_EXPANDED_HEIGHT
                 hud_store.save(settings)
                 with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=None):
                     window = QtHudWindow(
@@ -4255,8 +4368,8 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     window.locator = _FakeAnchorLocator({"top": first_anchor})
                     window.attach_to_rect(rect)
 
-                    expected_x = rect.left + int(round(rect.width * float(settings.top.relative_x_ratio or 0.0)))
-                    expected_y = rect.top + int(round(rect.height * float(settings.top.relative_y_ratio or 0.0)))
+                    expected_x = int(settings.top.absolute_x or 0)
+                    expected_y = int(settings.top.absolute_y or 0)
                     self.assertEqual((window.top_window.x(), window.top_window.y()), (expected_x, expected_y))
                     self.assertTrue(window.top_window._manual_positioned)
 
@@ -4352,7 +4465,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
-    def test_qt_top_expanded_saved_anchor_uses_window_relative_y(self) -> None:
+    def test_qt_top_expanded_uses_auto_geometry_not_saved_anchor(self) -> None:
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -4391,6 +4504,8 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     )
                 try:
                     window.locator = SimpleNamespace(
+                        header_roi_geometry=lambda _rect: None,
+                        bottom_roi_geometry=lambda _rect: None,
                         anchor_geometry=lambda target, _rect, _height: anchor if target == "top" else None,
                         find=lambda: rect,
                         is_active=lambda _rect, _hwnds: True,
@@ -4398,7 +4513,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
 
                     _x, y, _width, _height = window._attached_panel_geometry("top", rect, True)
 
-                    self.assertEqual(y, anchor.top)
+                    self.assertEqual(y, _visual_anchor_geometry("top", rect, True)[1])
                     self.assertNotEqual(y, anchor.bottom)
                 finally:
                     window.close("test")
@@ -4587,7 +4702,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
-    def test_qt_attached_geometry_prefers_locator_anchor(self) -> None:
+    def test_qt_attached_geometry_uses_roi_and_ignores_locator_anchor(self) -> None:
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -4607,35 +4722,34 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                         user_settings_store=user_store,
                         hud_settings_store=hud_store,
                     )
-                native_anchor = SimpleNamespace(
-                    left=220,
-                    top=130,
-                    right=920,
-                    bottom=178,
-                    default_x=220,
-                    default_y=136,
-                    default_width=700,
-                    source="cdp:title",
-                    width=700,
-                    height=48,
+                window._impl.locator = _FakeAnchorLocator(
+                    {
+                        "top": HudAnchor(
+                            left=220,
+                            top=130,
+                            right=920,
+                            bottom=178,
+                            default_x=220,
+                            default_y=136,
+                            default_width=700,
+                            source="cdp:title",
+                        )
+                    },
+                    header_roi=WindowRect(left=360, top=144, right=1120, bottom=190),
                 )
-
-                def _anchor_geometry(target: str, rect: WindowRect, hud_height: int) -> object | None:
-                    del rect, hud_height
-                    return native_anchor if target == "top" else None
-
-                window._impl.locator = SimpleNamespace(anchor_geometry=_anchor_geometry)
                 try:
-                    window.attach_to_rect(WindowRect(left=100, top=120, right=1100, bottom=920))
+                    window.attach_to_rect(WindowRect(left=100, top=120, right=1300, bottom=920))
 
-                    self.assertEqual((window.top_window.x(), window.top_window.y()), (220, 136))
-                    self.assertEqual(window.top_window.width(), 700)
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (360, 144))
+                    self.assertEqual(window.top_window.width(), 760)
 
                     window.top_window.resize(350, window.top_window.height())
                     window._remember_panel_geometry("top", window.top_window, "resize")
                     saved = hud_store.load()
-                    self.assertEqual(saved.top.anchor_source, "cdp:title")
-                    self.assertAlmostEqual(saved.top.width_ratio or 0.0, 0.5)
+                    self.assertFalse(saved.top.pinned)
+                    self.assertIsNone(saved.top.width)
+                    self.assertIsNone(saved.top.anchor_source)
+                    self.assertIsNone(saved.top.width_ratio)
                 finally:
                     window.close("test")
         finally:
@@ -4824,6 +4938,8 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
 
+@pytest.mark.ui
+@pytest.mark.tk_ui
 class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_top_toggle_reuses_prebuilt_frames_and_keeps_request_window(self) -> None:
         window = TokenHudWindow()
@@ -5393,27 +5509,65 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
-    def test_tk_dom_anchors_are_opt_in_for_smooth_fallback(self) -> None:
+    def test_tk_cdp_dom_env_does_not_change_hud_auto_geometry(self) -> None:
+        rect = WindowRect(left=100, top=50, right=1300, bottom=850)
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop(HUD_CDP_DOM_ENV, None)
             window = TokenHudWindow()
             try:
-                self.assertFalse(window._use_dom_anchors)
-                self.assertFalse(window._use_top_dom_anchors)
                 self.assertFalse(window._theme_probe.enabled)
+                self.assertEqual(
+                    window._attached_geometry("top", rect, False),
+                    _visual_anchor_geometry("top", rect, False),
+                )
             finally:
                 window._close()
 
         with patch.dict(os.environ, {HUD_CDP_DOM_ENV: "1"}, clear=False):
             window = TokenHudWindow()
             try:
-                self.assertTrue(window._use_dom_anchors)
-                self.assertTrue(window._use_top_dom_anchors)
                 self.assertFalse(window._theme_probe.enabled)
+                self.assertEqual(
+                    window._attached_geometry("top", rect, False),
+                    _visual_anchor_geometry("top", rect, False),
+                )
             finally:
                 window._close()
 
-    def test_top_uses_default_dom_anchor_without_enabling_request_anchor(self) -> None:
+    def test_windows_locator_roi_geometry_works_when_demo_overlay_disabled(self) -> None:
+        class _FakeRoiTracker:
+            enabled = True
+
+            def get_header_roi_snapshot(self) -> SimpleNamespace:
+                return SimpleNamespace(
+                    status="visible",
+                    hwnd=321,
+                    roi=WindowRect(left=360, top=64, right=1120, bottom=120),
+                )
+
+            def get_bottom_roi_snapshot(self) -> SimpleNamespace:
+                return SimpleNamespace(
+                    status="visible",
+                    hwnd=321,
+                    roi=WindowRect(left=520, top=732, right=1000, bottom=786),
+                )
+
+        locator = object.__new__(_WindowsCodexLocator)
+        locator._header_roi_demo_enabled = False
+        locator._tracker = _FakeRoiTracker()
+        rect = WindowRect(hwnd=321, left=100, top=50, right=1300, bottom=850)
+
+        header = locator.header_roi_geometry(rect)
+        bottom = locator.bottom_roi_geometry(rect)
+
+        self.assertIsNotNone(header)
+        self.assertIsNotNone(bottom)
+        assert header is not None
+        assert bottom is not None
+        self.assertEqual((header.left, header.top, header.right, header.bottom), (360, 64, 1120, 120))
+        self.assertEqual((bottom.left, bottom.top, bottom.right, bottom.bottom), (520, 732, 1000, 786))
+
+    def test_top_uses_auto_geometry_without_dom_anchor_dependency(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -5450,12 +5604,12 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             top = _attached_geometry_after_stable(window, "top", rect)
             request = _attached_geometry_after_stable(window, "request", rect)
 
-            self.assertEqual(top, (320, 86, 860, TOP_DOCK_HEIGHT))
-            self.assertNotEqual(request[:3], (600, 688, 600))
+            self.assertEqual(top, _visual_anchor_geometry("top", rect, False))
+            self.assertEqual(request, _visual_anchor_geometry("request", rect, False))
         finally:
             window._close()
 
-    def test_top_dom_anchor_updates_when_title_region_changes(self) -> None:
+    def test_top_auto_geometry_ignores_dom_anchor_changes(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -5490,8 +5644,9 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             locator.anchors["top"] = second_anchor
             second = _attached_geometry_after_stable(window, "top", rect)
 
-            self.assertEqual(first, (300, 86, 880, TOP_DOCK_HEIGHT))
-            self.assertEqual(second, (460, 86, 720, TOP_DOCK_HEIGHT))
+            expected = _visual_anchor_geometry("top", rect, False)
+            self.assertEqual(first, expected)
+            self.assertEqual(second, expected)
         finally:
             window._close()
 
@@ -5820,7 +5975,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             _flush_tk(window)
             window._remember_window_width("top", window.root, reason="test-resize")
 
-            self.assertTrue(window.settings.top.collapsed_width_locked)
+            self.assertFalse(window.settings.top.collapsed_width_locked)
             self.assertEqual(window.settings.top.width, resized_width)
 
             window.toggle_top_expanded()
@@ -5875,7 +6030,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
-    def test_attached_geometry_scales_with_saved_width_ratio(self) -> None:
+    def test_attached_geometry_ignores_legacy_saved_width_ratio(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -5888,13 +6043,18 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window.settings.top.anchor_source = None
             window.settings.top.width_ratio = 0.5
             x, y, width, height = window._attached_geometry("top", rect, False)
+            expected_x, expected_y, expected_width, expected_height = _visual_anchor_geometry(
+                "top",
+                rect,
+                False,
+            )
 
-            self.assertEqual((x, y, height), (286, 88, 36))
-            self.assertEqual(width, 421)
+            self.assertEqual((x, y, height), (expected_x, expected_y, expected_height))
+            self.assertEqual(width, expected_width)
         finally:
             window._close()
 
-    def test_move_saves_anchor_position_without_changing_width_ratio(self) -> None:
+    def test_move_saves_current_session_position_without_anchor_or_ratio(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -5924,13 +6084,15 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 reason="test-move",
             )
 
-            self.assertEqual(window.settings.request.width_ratio, 0.75)
-            self.assertAlmostEqual(window.settings.request.anchor_x_ratio or 0.0, 0.26)
-            self.assertAlmostEqual(window.settings.request.anchor_y_ratio or 0.0, -0.142857, places=5)
+            self.assertIsNone(window.settings.request.width_ratio)
+            self.assertIsNone(window.settings.request.anchor_x_ratio)
+            self.assertIsNone(window.settings.request.anchor_y_ratio)
+            self.assertIn("request", window._session_manual_targets)
+            self.assertEqual(window._request_manual_position, (650, 660))
         finally:
             window._close()
 
-    def test_resize_saves_width_ratio_against_current_anchor_width(self) -> None:
+    def test_resize_saves_current_session_width_without_anchor_or_ratio(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -5957,11 +6119,60 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._remember_window_position("top", fake, reason="test-resize")
             window._remember_window_width("top", fake, reason="test-resize")
 
-            self.assertAlmostEqual(window.settings.top.width_ratio or 0.0, 0.5)
-            self.assertAlmostEqual(window.settings.top.anchor_x_ratio or 0.0, 0.2)
-            self.assertAlmostEqual(window.settings.top.anchor_y_ratio or 0.0, 12 / 46)
+            self.assertEqual(window.settings.top.width, 400)
+            self.assertIsNone(window.settings.top.width_ratio)
+            self.assertIsNone(window.settings.top.anchor_x_ratio)
+            self.assertIsNone(window.settings.top.anchor_y_ratio)
+            self.assertIn("top", window._session_manual_targets)
         finally:
             window._close()
+
+    def test_tk_pin_button_toggles_persistence_without_expanding_hud(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            window = TokenHudWindow()
+            try:
+                _stop_background_jobs(window)
+                store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                store.save(HudSettings.empty())
+                window.settings_store = store
+                window.settings = HudSettings.empty()
+                window._sync_pin_buttons()
+                rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+                window.locator = _FakeAnchorLocator(
+                    {},
+                    header_roi=WindowRect(left=360, top=64, right=1120, bottom=120),
+                )
+                window._attached = True
+                window._last_rect = rect
+                window.root.geometry(f"620x{TOP_DOCK_HEIGHT}+410+180")
+                _flush_tk(window)
+
+                self.assertFalse(window.top_expanded)
+                window._pin_buttons["top"][0].invoke()
+                _flush_tk(window)
+
+                saved = store.load().top
+                self.assertTrue(saved.pinned)
+                self.assertEqual((saved.absolute_x, saved.absolute_y), (410, 180))
+                self.assertEqual(saved.width, 620)
+                self.assertFalse(window.top_expanded)
+
+                window.root.geometry(f"620x{TOP_DOCK_HEIGHT}+520+240")
+                _flush_tk(window)
+                window._pin_buttons["top"][0].invoke()
+                _flush_tk(window)
+
+                cleared = store.load().top
+                self.assertFalse(cleared.pinned)
+                self.assertIsNone(cleared.absolute_x)
+                self.assertIsNone(cleared.width)
+                self.assertEqual(
+                    (window.root.winfo_x(), window.root.winfo_y(), window.root.winfo_width()),
+                    (360, 64, 760),
+                )
+                self.assertFalse(window.top_expanded)
+            finally:
+                window._close()
 
     def test_tk_whole_panel_drag_moves_window_and_preserves_click_toggle(self) -> None:
         window = TokenHudWindow()
@@ -6152,7 +6363,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         finally:
             window._close()
 
-    def test_request_anchor_tracks_input_box_changes(self) -> None:
+    def test_request_auto_geometry_ignores_legacy_input_anchor(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -6183,8 +6394,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
                 rect,
             )
 
-            self.assertEqual(height, 32)
-            self.assertEqual((x, y, width), (720, 688, 300))
+            self.assertEqual((x, y, width, height), _visual_anchor_geometry("request", rect, False))
         finally:
             window._close()
 
@@ -6213,17 +6423,13 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window.settings.request.width_ratio = None
         window.settings.request.relative_x_ratio = None
         window.settings.request.relative_bottom_ratio = None
-        window._use_dom_anchors = False
-        window._use_native_anchors = False
-        window._use_top_dom_anchors = False
-        window._last_anchor_decisions = {}
         window._last_geometry_clamp = {}
 
         x, y, width, height = window._attached_geometry("request", rect, False)
 
         self.assertEqual((x, y, width, height), (460, 782, 495, 32))
 
-    def test_roi_demo_anchor_positions_tk_huds_with_existing_hud_height(self) -> None:
+    def test_roi_demo_positions_tk_huds_with_existing_hud_height(self) -> None:
         class _RecordingOverlay:
             def __init__(self) -> None:
                 self.rect: WindowRect | None = None
@@ -6244,13 +6450,9 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         )
         window.settings = HudSettings.empty()
         window._use_header_roi_demo = True
-        window._use_dom_anchors = False
-        window._use_native_anchors = False
-        window._use_top_dom_anchors = False
         window.top_expanded = False
         window.request_expanded = False
         window._top_collapsed_width_override = None
-        window._last_anchor_decisions = {}
         window._last_geometry_clamp = {}
         header_overlay = _RecordingOverlay()
         bottom_overlay = _RecordingOverlay()
@@ -6262,8 +6464,6 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         request = window._attached_geometry("request", rect, False)
         top_roi = window._roi_demo_geometry("top", rect, TOP_DOCK_HEIGHT)
         request_roi = window._roi_demo_geometry("request", rect, REQUEST_DOCK_HEIGHT)
-        top_anchor = window._target_anchor("top", rect, False)
-        request_anchor = window._target_anchor("request", rect, False)
         window._sync_header_roi_demo(rect)
         window._sync_bottom_roi_demo(rect)
 
@@ -6272,12 +6472,10 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         self.assertEqual(request, (520, 732, 480, REQUEST_DOCK_HEIGHT))
         self.assertEqual((top_roi.left, top_roi.top, top_roi.width, top_roi.height), (360, 64, 760, TOP_DOCK_HEIGHT))
         self.assertEqual((request_roi.left, request_roi.top, request_roi.width, request_roi.height), (520, 732, 480, REQUEST_DOCK_HEIGHT))
-        self.assertEqual(top_anchor.height, TOP_DOCK_HEIGHT)
-        self.assertEqual(request_anchor.height, REQUEST_DOCK_HEIGHT)
         self.assertEqual(header_overlay.rect, top_roi)
         self.assertEqual(bottom_overlay.rect, request_roi)
 
-    def test_native_anchor_waits_for_stable_frames(self) -> None:
+    def test_native_anchor_no_longer_controls_request_geometry(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -6304,12 +6502,13 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             translated = window._attached_geometry("request", moved_rect, False)
 
             self.assertNotEqual(first, (600, 688, 600, 32))
-            self.assertEqual(stable, (600, 688, 600, 32))
-            self.assertEqual(translated, (640, 728, 600, 32))
+            self.assertEqual(first, _visual_anchor_geometry("request", rect, False))
+            self.assertEqual(stable, _visual_anchor_geometry("request", rect, False))
+            self.assertEqual(translated, _visual_anchor_geometry("request", moved_rect, False))
         finally:
             window._close()
 
-    def test_stable_anchor_is_projected_during_resize_gate(self) -> None:
+    def test_request_geometry_uses_auto_fallback_during_resize_gate(self) -> None:
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -6330,7 +6529,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._use_native_anchors = True
             window.settings.request = WindowPlacement()
             stable = _attached_geometry_after_stable(window, "request", rect)
-            self.assertEqual(stable, (600, 688, 600, 32))
+            self.assertEqual(stable, _visual_anchor_geometry("request", rect, False))
 
             window.locator = _FakeAnchorLocator(
                 {
@@ -6350,8 +6549,8 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
             projected = window._attached_geometry("request", resized_rect, False)
 
-            self.assertNotEqual(projected, (520, 900, 588, 32))
-            self.assertEqual(projected, (683, 768, 700, 32))
+            self.assertEqual(projected, _visual_anchor_geometry("request", resized_rect, False))
+            self.assertNotEqual(projected, (683, 768, 700, 32))
         finally:
             window._close()
 
@@ -6447,6 +6646,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.settings.top.pinned = True
             window.settings.top.height = 430
 
             _, _, _, height = window._attached_geometry("top", rect, True)
@@ -6463,7 +6663,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         )
         try:
             window.toggle_top_expanded()
-            _flush_tk(window)
+            _settle_top_animation(window)
             window.root.geometry(f"360x{TOP_DOCK_EXPANDED_HEIGHT}+20+20")
             now = datetime(2026, 5, 29, 12, 56, 25).astimezone()
             snapshot = ParsedSession(
@@ -6674,7 +6874,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             window.toggle_top_expanded()
-            _flush_tk(window)
+            _settle_top_animation(window)
             window.root.geometry(f"320x{TOP_DOCK_EXPANDED_HEIGHT}+20+20")
             now = datetime(2026, 6, 21, 12, 0, 0).astimezone()
             snapshot = ParsedSession(
@@ -6733,7 +6933,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             window.toggle_top_expanded()
-            _flush_tk(window)
+            _settle_top_animation(window)
             themed_export = CodexThemeExport.from_share_string(
                 'codex-theme-v1:{"codeThemeId":"github","theme":{"accent":"#0969da",'
                 '"contrast":40,"fonts":{"code":null,"ui":null},"ink":"#1f2328",'
@@ -6878,7 +7078,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         window = TokenHudWindow()
         try:
             window.toggle_top_expanded()
-            _flush_tk(window)
+            _settle_top_animation(window)
             snapshot = ParsedSession(session_title="Ship the live session switch check")
 
             window.update_display(snapshot)

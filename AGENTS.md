@@ -20,3 +20,21 @@ codebase-memory-mcp cli index_status '{"project":"E-Project-codex-usage-hud"}'
 ```
 
 If codebase-memory-mcp is unavailable in the current client, continue with normal local source inspection and state that the MCP graph was unavailable.
+
+## Verbose build output
+
+When running verbose build or packaging commands (for example `python tools/build_exe.py`, `python tools/build_installer.py`, PyInstaller, or Inno Setup), redirect full stdout/stderr to a log file and only surface a concise summary or log tail in the conversation. Do not stream full build logs into agent context unless explicitly requested.
+
+Preferred pattern:
+
+```powershell
+python tools/build_exe.py *> build_exe.log
+Get-Content build_exe.log -Tail 80
+```
+
+In Bash-compatible shells:
+
+```bash
+python tools/build_exe.py > build_exe.log 2>&1
+tail -n 80 build_exe.log
+```

@@ -130,7 +130,8 @@ No. The project reads local logs and databases only. It does not send telemetry,
 
 ```powershell
 python -m compileall -q src tools tests
-python -m unittest discover -s tests
+python -m pytest
+python -m pytest -m ui        # optional: real Tk/Qt window regressions
 python tools/build_exe.py
 python tools/build_installer.py
 ```

@@ -9,8 +9,9 @@ reports, or screenshots.
 
 ## Before you open a PR
 
-- Run `python -m unittest discover -s tests`.
-- Run `python -m compileall src tests` for a fast syntax check.
+- Run `python -m pytest` for the default fast suite; real Tk/Qt UI lifecycle tests are marked `ui` and skipped by default.
+- Run `python -m pytest -m ui` when your change touches real HUD widget behavior.
+- Run `python -m compileall -q src tests tools` for a quiet syntax check.
 - Keep the diff small and reviewable.
 - Update docs and tests together when behavior changes.
 - Do not attach raw JSONL logs, raw SQLite databases, or unredacted prompts or

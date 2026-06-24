@@ -13,8 +13,9 @@ patch releases can follow the same path without rediscovery.
 4. Create a matching `RELEASE_NOTES_vX.Y.Z_*.md` body for GitHub Releases.
 5. Update version-sensitive tests or docs that read the package version
    directly.
-6. Run the validation trio:
-   - `python -m unittest discover -s tests`
+6. Run the validation set:
+   - `python -m pytest`
+   - `python -m pytest -m ui`
    - `python -m compileall -q src tools tests`
    - `python tools/pre_release_check.py`
 7. Commit the release work with a Lore-style message, then create the

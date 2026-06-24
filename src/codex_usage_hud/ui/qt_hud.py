@@ -28,8 +28,8 @@ from .tk_hud import (
     HUD_UIA_ROI_DEMO_ENV,
     HudSettingsStore,
     WindowRect,
+    _automatic_hud_geometry,
     _env_flag,
-    _visual_anchor_geometry,
 )
 from .work_overlay_qt import work_overlay_max_items_for_screen_height
 
@@ -616,6 +616,7 @@ if QApplication is not None:
             on_click_priority: Callable[[], None] | None = None,
             on_pointer_priority: Callable[[], None] | None = None,
             on_geometry_changed: Callable[[str, "_PanelWindow", str], None] | None = None,
+            on_pin_toggle: Callable[[str], None] | None = None,
             grow_from_bottom: bool = False,
         ) -> None:
             super().__init__()
@@ -639,6 +640,8 @@ if QApplication is not None:
             self._on_click_priority = on_click_priority or on_interaction
             self._on_pointer_priority = on_pointer_priority or on_interaction
             self._on_geometry_changed = on_geometry_changed
+            self._on_pin_toggle = on_pin_toggle
+            self._pin_buttons: list[QPushButton] = []
             self._animation: QPropertyAnimation | None = None
             self._stack = QStackedLayout()
 
@@ -684,6 +687,26 @@ if QApplication is not None:
             self._stack.addWidget(collapsed)
             self._stack.addWidget(expanded)
             self._stack.setCurrentIndex(0)
+
+        def _pin_button(self) -> QPushButton:
+            button = QPushButton("📍")
+            button.setObjectName("qtHudIconButton")
+            button.clicked.connect(lambda _checked=False: self._emit_pin_toggle())
+            self._pin_buttons.append(button)
+            self.set_pinned(False)
+            return button
+
+        def _emit_pin_toggle(self) -> None:
+            self._on_interaction()
+            if self._on_pin_toggle is not None:
+                self._on_pin_toggle(self._target)
+
+        def set_pinned(self, pinned: bool) -> None:
+            for button in self._pin_buttons:
+                button.setText("📌" if pinned else "📍")
+                button.setToolTip(
+                    "取消钉住并自动跟随" if pinned else "钉住此 HUD 位置"
+                )
 
         def toggle_expanded(self) -> None:
             self.set_expanded(not self._expanded)
@@ -1039,6 +1062,7 @@ if QApplication is not None:
             on_click_priority: Callable[[], None] | None = None,
             on_pointer_priority: Callable[[], None] | None = None,
             on_geometry_changed: Callable[[str, _PanelWindow, str], None] | None = None,
+            on_pin_toggle: Callable[[str], None] | None = None,
         ) -> None:
             super().__init__(
                 target="top",
@@ -1049,6 +1073,7 @@ if QApplication is not None:
                 on_click_priority=on_click_priority,
                 on_pointer_priority=on_pointer_priority,
                 on_geometry_changed=on_geometry_changed,
+                on_pin_toggle=on_pin_toggle,
             )
             self._on_settings = on_settings
             self._on_update_action = on_update_action
@@ -1074,6 +1099,7 @@ if QApplication is not None:
             collapsed_layout = QHBoxLayout(collapsed)
             collapsed_layout.setContentsMargins(0, 0, 0, 0)
             collapsed_layout.setSpacing(8)
+            collapsed_layout.addWidget(self._pin_button())
             self._collapsed_strip = _TopCollapsedProgressStrip()
             collapsed_layout.addWidget(self._collapsed_strip, 1, Qt.AlignmentFlag.AlignVCenter)
             self._collapsed_progress = self._collapsed_strip.rails
@@ -1095,6 +1121,7 @@ if QApplication is not None:
             header = QHBoxLayout(header_frame)
             header.setContentsMargins(6, 3, 6, 3)
             header.setSpacing(6)
+            header.addWidget(self._pin_button())
             self.update_button = QPushButton("↓")
             self.update_button.setObjectName("qtHudIconButton")
             self.update_button.setVisible(False)
@@ -1721,6 +1748,7 @@ if QApplication is not None:
             on_click_priority: Callable[[], None] | None = None,
             on_pointer_priority: Callable[[], None] | None = None,
             on_geometry_changed: Callable[[str, _PanelWindow, str], None] | None = None,
+            on_pin_toggle: Callable[[str], None] | None = None,
         ) -> None:
             super().__init__(
                 target="request",
@@ -1731,6 +1759,7 @@ if QApplication is not None:
                 on_click_priority=on_click_priority,
                 on_pointer_priority=on_pointer_priority,
                 on_geometry_changed=on_geometry_changed,
+                on_pin_toggle=on_pin_toggle,
                 grow_from_bottom=True,
             )
             self._row_labels: list[_RequestRow] = []
@@ -1743,6 +1772,7 @@ if QApplication is not None:
             collapsed_layout = QHBoxLayout(collapsed)
             collapsed_layout.setContentsMargins(0, 0, 0, 0)
             collapsed_layout.setSpacing(6)
+            collapsed_layout.addWidget(self._pin_button())
             self.request_line = _HudLabel("等待请求...", role="strong")
             collapsed_layout.addWidget(self.request_line, 1)
 
@@ -1785,6 +1815,7 @@ if QApplication is not None:
             header_layout = QHBoxLayout(header)
             header_layout.setContentsMargins(6, 3, 6, 3)
             header_layout.setSpacing(6)
+            header_layout.addWidget(self._pin_button())
             self.request_title = _HudLabel("最近模型请求轮次", role="strong")
             header_layout.addWidget(self.request_title, 1)
             expanded_layout.addWidget(header)
@@ -2517,7 +2548,6 @@ if QApplication is not None:
             self._latest_payload: RendererHudPayload | None = None
             self._last_snapshot: ParsedSession | None = None
             self._last_update_state: dict[str, object] = {}
-            self._last_anchor_metrics: dict[str, tuple[int, int, int, int, str]] = {}
             self._theme_tokens: dict[str, str] = dict(QT_THEME_DEFAULTS)
             self._theme_signature = ""
             self._theme_probe = CodexThemeProbe(
@@ -2528,6 +2558,7 @@ if QApplication is not None:
             self._interaction_block_until = 0.0
             self._click_priority_hold_until = 0.0
             self._pointer_priority_hold_until = 0.0
+            self._session_manual_targets: set[str] = set()
             self._settings_dialog: _SettingsDialog | None = None
             self.top_window = _TopPanel(
                 width=self._panel_width("top"),
@@ -2539,6 +2570,7 @@ if QApplication is not None:
                 on_click_priority=self._mark_click_priority,
                 on_pointer_priority=self._mark_pointer_priority,
                 on_geometry_changed=self._remember_panel_geometry,
+                on_pin_toggle=self.toggle_pin,
             )
             self.request_window = _RequestPanel(
                 width=self._panel_width("request"),
@@ -2547,7 +2579,9 @@ if QApplication is not None:
                 on_click_priority=self._mark_click_priority,
                 on_pointer_priority=self._mark_pointer_priority,
                 on_geometry_changed=self._remember_panel_geometry,
+                on_pin_toggle=self.toggle_pin,
             )
+            self._sync_pin_buttons()
             self._header_roi_overlay: _HeaderRoiDemoWidget | None = (
                 _HeaderRoiDemoWidget() if self._header_roi_demo_enabled else None
             )
@@ -2821,10 +2855,57 @@ if QApplication is not None:
         def _placement(self, target: str) -> Any:
             return self.settings.top if target == "top" else self.settings.request
 
+        def _panel_for_target(self, target: str) -> _PanelWindow:
+            return self.top_window if target == "top" else self.request_window
+
+        def _use_saved_panel_geometry(self, target: str) -> bool:
+            placement = self._placement(target)
+            return bool(placement.pinned or target in self._session_manual_targets)
+
+        def _sync_pin_buttons(self) -> None:
+            self.top_window.set_pinned(bool(self.settings.top.pinned))
+            self.request_window.set_pinned(bool(self.settings.request.pinned))
+
+        def _capture_panel_geometry(self, target: str, panel: _PanelWindow) -> None:
+            placement = self._placement(target)
+            placement.absolute_x = int(panel.x())
+            placement.absolute_y = int(panel.y())
+            placement.width = max(120, int(panel.width()))
+            placement.height = max(1, int(panel.height()))
+            if panel.expanded:
+                placement.height = max(panel._minimum_expanded_height(), int(panel.height()))
+
+        def _clear_session_manual_geometry(self, target: str) -> None:
+            self._session_manual_targets.discard(target)
+            self._panel_for_target(target)._manual_positioned = False
+
+        def toggle_pin(self, target: str) -> None:
+            self._mark_click_priority()
+            placement = self._placement(target)
+            panel = self._panel_for_target(target)
+            if placement.pinned:
+                placement.pinned = False
+                placement.clear_geometry()
+                self._clear_session_manual_geometry(target)
+                self.settings_store.save(self.settings)
+                self._sync_pin_buttons()
+                if self._attached and self._last_rect is not None:
+                    self.attach_to_rect(self._last_rect)
+                else:
+                    self._place_windows()
+                return
+            placement.clear_geometry()
+            placement.pinned = True
+            self._capture_panel_geometry(target, panel)
+            panel._manual_positioned = True
+            self.settings_store.save(self.settings)
+            self._sync_pin_buttons()
+
         def _panel_width(self, target: str) -> int:
             default = QT_HUD_TOP_WIDTH if target == "top" else QT_HUD_REQUEST_WIDTH
             placement = self._placement(target)
-            return max(120, int(placement.width or default))
+            width = placement.width if self._use_saved_panel_geometry(target) else None
+            return max(120, int(width or default))
 
         def _panel_expanded_height(self, target: str) -> int:
             default = (
@@ -2834,109 +2915,8 @@ if QApplication is not None:
             )
             minimum = 240 if target == "top" else 120
             placement = self._placement(target)
-            return max(minimum, int(placement.height or default))
-
-        def _attached_anchor_geometry(
-            self,
-            target: str,
-            rect: WindowRect,
-            expanded: bool,
-        ) -> tuple[int, int, int, int]:
-            x, y, width, default_height = _visual_anchor_geometry(target, rect, expanded)
-            panel = self.top_window if target == "top" else self.request_window
-            height = panel._target_height(expanded)
-            source = "qt-visual"
-            anchor_left = x
-            anchor_top = y
-            anchor_width = width
-            anchor_height = default_height
-            try:
-                native_anchor = self.locator.anchor_geometry(target, rect, height)
-            except Exception:
-                native_anchor = None
-            if native_anchor is not None:
-                x = int(native_anchor.default_x)
-                y = int(native_anchor.default_y)
-                width = int(native_anchor.default_width)
-                source = str(native_anchor.source or "native")
-                anchor_left = int(native_anchor.left)
-                anchor_top = int(native_anchor.top)
-                anchor_width = int(native_anchor.width)
-                anchor_height = int(native_anchor.height)
-            self._last_anchor_metrics[target] = (
-                anchor_left,
-                anchor_top,
-                max(1, anchor_width),
-                max(1, anchor_height),
-                source,
-            )
-            return x, y, max(1, width), height
-
-        def _anchor_metrics(
-            self,
-            target: str,
-            rect: WindowRect,
-            expanded: bool,
-        ) -> tuple[int, int, int, int, str]:
-            cached = self._last_anchor_metrics.get(target)
-            if cached is not None:
-                return cached
-            self._attached_anchor_geometry(target, rect, expanded)
-            return self._last_anchor_metrics[target]
-
-        def _attached_panel_width(
-            self,
-            target: str,
-            anchor_width: int,
-            anchor_source: str,
-        ) -> int:
-            placement = self._placement(target)
-            if (
-                placement.width_ratio is not None
-                and (
-                    placement.anchor_source is None
-                    or placement.anchor_source == anchor_source
-                )
-            ):
-                return max(120, int(round(max(1, anchor_width) * placement.width_ratio)))
-            if placement.width:
-                return max(120, int(placement.width))
-            return max(120, int(anchor_width))
-
-        def _has_saved_attached_position(self, target: str, anchor_source: str) -> bool:
-            placement = self._placement(target)
-            if (
-                placement.anchor_x_ratio is not None
-                and placement.anchor_y_ratio is not None
-                and (
-                    placement.anchor_source is None
-                    or placement.anchor_source == anchor_source
-                )
-            ):
-                return True
-            if target == "top":
-                return (
-                    placement.relative_x_ratio is not None
-                    and placement.relative_y_ratio is not None
-                )
-            return (
-                placement.relative_x_ratio is not None
-                and placement.relative_bottom_ratio is not None
-            )
-
-        def _has_saved_relative_position(self, target: str) -> bool:
-            placement = self._placement(target)
-            if placement.anchor_x_ratio is not None and placement.anchor_y_ratio is not None:
-                return True
-            if target == "top":
-                return (
-                    placement.relative_x_ratio is not None
-                    and placement.relative_y_ratio is not None
-                )
-            return (
-                placement.relative_x_ratio is not None
-                and placement.relative_bottom_ratio is not None
-            )
+            height = placement.height if self._use_saved_panel_geometry(target) else None
+            return max(minimum, int(height or default))
 
         def _attached_panel_geometry(
             self,
@@ -2945,66 +2925,26 @@ if QApplication is not None:
             expanded: bool,
         ) -> tuple[int, int, int, int]:
             panel = self.top_window if target == "top" else self.request_window
-            anchor_expanded = expanded if target == "top" else False
-            x, y, anchor_width, _anchor_height_value = self._attached_anchor_geometry(
-                target,
-                rect,
-                anchor_expanded,
-            )
             height = panel._target_height(expanded)
-            if target != "top" and expanded:
-                y -= max(0, height - panel._collapsed_height)
-            (
-                anchor_x,
-                anchor_y,
-                anchor_metric_width,
-                anchor_height,
-                anchor_source,
-            ) = self._anchor_metrics(
+            x, y, width, height = _automatic_hud_geometry(
+                self.locator,
                 target,
                 rect,
-                anchor_expanded,
+                height,
+                expanded=expanded,
+                use_roi=True,
             )
             placement = self._placement(target)
-            width = self._attached_panel_width(target, anchor_width, anchor_source)
-            if (
-                target == "top"
-                and placement.relative_x_ratio is not None
-                and placement.relative_y_ratio is not None
-            ):
-                x = rect.left + int(round(rect.width * placement.relative_x_ratio))
-                y = rect.top + int(round(rect.height * placement.relative_y_ratio))
-            elif (
-                placement.anchor_x_ratio is not None
-                and placement.anchor_y_ratio is not None
-                and (
-                    placement.anchor_source is None
-                    or placement.anchor_source == anchor_source
-                )
-            ):
-                x = anchor_x + int(
-                    round(anchor_metric_width * float(placement.anchor_x_ratio))
-                )
-                if target == "top":
-                    y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
-                else:
-                    if placement.relative_bottom_ratio is not None:
-                        bottom = int(round(rect.height * placement.relative_bottom_ratio))
-                        y = rect.bottom - bottom - height
-                    elif placement.relative_y_ratio is not None:
-                        collapsed_y = rect.top + int(round(rect.height * placement.relative_y_ratio))
-                        y = collapsed_y - max(0, height - panel._collapsed_height)
-                    else:
-                        collapsed_y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
-                        y = collapsed_y - max(0, height - panel._collapsed_height)
-            elif target == "top":
-                if placement.relative_x_ratio is not None and placement.relative_y_ratio is not None:
-                    x = rect.left + int(round(rect.width * placement.relative_x_ratio))
-                    y = rect.top + int(round(rect.height * placement.relative_y_ratio))
-            elif placement.relative_x_ratio is not None and placement.relative_bottom_ratio is not None:
-                x = rect.left + int(round(rect.width * placement.relative_x_ratio))
-                bottom = int(round(rect.height * placement.relative_bottom_ratio))
-                y = rect.bottom - bottom - height
+            if placement.has_pinned_position():
+                x = int(placement.absolute_x or x)
+                y = int(placement.absolute_y or y)
+                width = max(120, int(placement.width or width))
+                return x, y, width, height
+            elif target in self._session_manual_targets:
+                x = int(panel.x())
+                y = int(panel.y())
+                width = max(120, int(placement.width or panel.width() or width))
+                return x, y, width, height
             min_x = rect.left + QT_HUD_MARGIN
             max_x = max(min_x, rect.right - width - QT_HUD_MARGIN)
             min_y = rect.top + QT_HUD_MARGIN
@@ -3020,143 +2960,71 @@ if QApplication is not None:
             reason: str,
         ) -> None:
             placement = self._placement(target)
-            if reason == "move":
-                placement.absolute_x = int(panel.x())
-                placement.absolute_y = int(panel.y())
-                if self._attached and self._last_rect is not None:
-                    rect = self._last_rect
-                    anchor_x, anchor_y, anchor_width, anchor_height, anchor_source = self._anchor_metrics(
-                        target,
-                        rect,
-                        panel.expanded,
-                    )
-                    placement.relative_x = int(panel.x()) - rect.left
-                    placement.relative_x_ratio = placement.relative_x / max(1, rect.width)
-                    placement.anchor_x_ratio = (int(panel.x()) - anchor_x) / max(1, anchor_width)
-                    placement.anchor_source = anchor_source
-                    if target == "top":
-                        placement.relative_y = int(panel.y()) - rect.top
-                        placement.relative_y_ratio = placement.relative_y / max(1, rect.height)
-                        placement.relative_bottom = None
-                        placement.relative_bottom_ratio = None
-                        placement.anchor_y_ratio = (int(panel.y()) - anchor_y) / max(1, anchor_height)
-                    else:
-                        placement.relative_y = int(panel.y()) - rect.top
-                        placement.relative_y_ratio = placement.relative_y / max(1, rect.height)
-                        bottom = int(panel.y()) + int(panel.height())
-                        placement.relative_bottom = rect.bottom - bottom
-                        placement.relative_bottom_ratio = placement.relative_bottom / max(1, rect.height)
-                        placement.anchor_y_ratio = (int(panel.y()) - anchor_y) / max(1, anchor_height)
-                else:
-                    placement.relative_x = None
-                    placement.relative_y = None
-                    placement.relative_bottom = None
-                    placement.relative_x_ratio = None
-                    placement.relative_y_ratio = None
-                    placement.relative_bottom_ratio = None
-                    placement.anchor_x_ratio = None
-                    placement.anchor_y_ratio = None
-                    placement.anchor_source = None
-            elif reason == "resize":
-                placement.width = max(120, int(panel.width()))
-                if target == "top" and not panel.expanded:
-                    placement.collapsed_width_locked = True
-                if self._attached and self._last_rect is not None:
-                    _anchor_x, _anchor_y, anchor_width, _anchor_height, anchor_source = self._anchor_metrics(
-                        target,
-                        self._last_rect,
-                        panel.expanded,
-                    )
-                    placement.width_ratio = placement.width / max(1, anchor_width)
-                    placement.anchor_source = anchor_source
-                else:
-                    placement.width_ratio = None
+            self._session_manual_targets.add(target)
+            panel._manual_positioned = True
+            placement.absolute_x = int(panel.x())
+            placement.absolute_y = int(panel.y())
+            placement.width = max(120, int(panel.width()))
+            placement.relative_x = None
+            placement.relative_y = None
+            placement.relative_bottom = None
+            placement.relative_x_ratio = None
+            placement.relative_y_ratio = None
+            placement.relative_bottom_ratio = None
+            placement.anchor_x_ratio = None
+            placement.anchor_y_ratio = None
+            placement.anchor_source = None
+            placement.width_ratio = None
+            placement.collapsed_width_locked = False
+            if panel.expanded or reason == "resize":
+                placement.height = max(1, int(panel.height()))
                 if panel.expanded:
                     placement.height = max(panel._minimum_expanded_height(), int(panel.height()))
             self.settings_store.save(self.settings)
 
         def _place_windows(self) -> None:
-            top_relative_saved = self._has_saved_relative_position("top")
-            request_relative_saved = self._has_saved_relative_position("request")
-            top_preplaced = False
-            request_preplaced = False
-            if top_relative_saved:
-                self.top_window._manual_positioned = False
-            if request_relative_saved:
-                self.request_window._manual_positioned = False
-            if top_relative_saved or request_relative_saved:
+            try:
+                rect = self.locator.find()
+            except Exception:
+                rect = None
+            if rect is not None and not getattr(rect, "minimized", False):
+                self.attach_to_rect(rect)
                 try:
-                    rect = self.locator.find()
+                    active = self.locator.is_active(rect, self._hud_hwnds())
                 except Exception:
-                    rect = None
-                if rect is not None and not getattr(rect, "minimized", False):
-                    self._attached = True
-                    self._last_rect = rect
-                    self._last_anchor_metrics.clear()
-                    if top_relative_saved:
-                        x, y, width, _height = self._attached_panel_geometry("top", rect, self.top_window.expanded)
-                        self.top_window.resize(width, self.top_window.height())
-                        self.top_window.move(x, y)
-                        self.top_window._manual_positioned = True
-                        top_preplaced = True
-                    if request_relative_saved:
-                        x, y, width, _height = self._attached_panel_geometry(
-                            "request",
-                            rect,
-                            self.request_window.expanded,
-                        )
-                        self.request_window.resize(width, self.request_window.height())
-                        self.request_window.move(x, y)
-                        self.request_window._manual_positioned = True
-                        request_preplaced = True
-                    try:
-                        active = self.locator.is_active(rect, self._hud_hwnds())
-                    except Exception:
-                        active = True
-                    if not active:
-                        self._hide_for_follow()
-                    if top_relative_saved and request_relative_saved:
-                        return
-                elif self._follow_codex_window():
-                    return
-
-            top_saved = (
-                not top_relative_saved
-                and self.settings.top.absolute_x is not None
-                and self.settings.top.absolute_y is not None
-            )
-            request_saved = (
-                not request_relative_saved
-                and self.settings.request.absolute_x is not None
-                and self.settings.request.absolute_y is not None
-            )
-            top_placement = self.settings.top
-            if top_saved:
-                self.top_window.move(
-                    int(top_placement.absolute_x),
-                    int(top_placement.absolute_y),
-                )
-                self.top_window._manual_positioned = True
-            request_placement = self.settings.request
-            if request_saved:
-                self.request_window.move(
-                    int(request_placement.absolute_x),
-                    int(request_placement.absolute_y),
-                )
-                self.request_window._manual_positioned = True
-            if (not top_saved or not request_saved) and self._follow_codex_window():
+                    active = True
+                if not active:
+                    self._hide_for_follow()
                 return
 
             screen = self.app.primaryScreen()
             geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1280, 720)
-            if not top_saved and not top_preplaced:
+            top_saved = self.settings.top.has_pinned_position()
+            request_saved = self.settings.request.has_pinned_position()
+            if top_saved:
+                self.top_window.move(
+                    int(self.settings.top.absolute_x or 0),
+                    int(self.settings.top.absolute_y or 0),
+                )
+                self.top_window._manual_positioned = True
+            if request_saved:
+                self.request_window.move(
+                    int(self.settings.request.absolute_x or 0),
+                    int(self.settings.request.absolute_y or 0),
+                )
+                self.request_window._manual_positioned = True
+            if not top_saved:
                 top_x = geometry.left() + max(0, (geometry.width() - self.top_window.width()) // 2)
                 top_y = geometry.top() + QT_HUD_MARGIN
                 self.top_window.move(top_x, top_y)
-            if not request_saved and not request_preplaced:
+                self.top_window._manual_positioned = False
+            if not request_saved:
                 req_x = geometry.right() - self.request_window.width() - QT_HUD_MARGIN
                 req_y = geometry.bottom() - self.request_window.height() - QT_HUD_MARGIN
                 self.request_window.move(max(geometry.left(), req_x), max(geometry.top(), req_y))
+                self.request_window._manual_positioned = False
+            if self.hide_until_attached and not top_saved and not request_saved:
+                self._hide_for_follow()
 
         def _should_show_hud(self) -> bool:
             return (not self.hide_until_attached or self._attached) and not self._hud_hidden_by_follow
@@ -3209,7 +3077,6 @@ if QApplication is not None:
             if not active:
                 self._attached = True
                 self._last_rect = rect
-                self._last_anchor_metrics.clear()
                 self._hide_for_follow()
                 return False
             self.attach_to_rect(rect)
@@ -3269,41 +3136,10 @@ if QApplication is not None:
             return 0 < max_delta <= QT_HUD_SAME_HWND_RECT_JITTER_PX
 
         def attach_to_rect(self, rect: WindowRect) -> None:
-            previous_rect = self._last_rect
-            rect_changed = previous_rect is not None and (
-                previous_rect.left != rect.left
-                or previous_rect.top != rect.top
-                or previous_rect.right != rect.right
-                or previous_rect.bottom != rect.bottom
-            )
-            rect_changed_for_follow = rect_changed and not self._same_hwnd_rect_jitter(
-                previous_rect,
-                rect,
-            )
             self._attached = True
             self._last_rect = rect
-            self._last_anchor_metrics.clear()
             for target, panel in (("top", self.top_window), ("request", self.request_window)):
-                (
-                    _anchor_x,
-                    _anchor_y,
-                    _anchor_width,
-                    _anchor_height,
-                    anchor_source,
-                ) = self._anchor_metrics(
-                    target,
-                    rect,
-                    panel.expanded,
-                )
-                has_saved_attached_position = self._has_saved_attached_position(
-                    target,
-                    anchor_source,
-                )
-                should_follow = (not panel._manual_positioned) or (
-                    rect_changed_for_follow
-                    and has_saved_attached_position
-                )
-                if should_follow:
+                if not panel._manual_positioned:
                     x, y, width, _height = self._attached_panel_geometry(
                         target,
                         rect,
@@ -3311,8 +3147,6 @@ if QApplication is not None:
                     )
                     panel.resize(width, panel.height())
                     panel.move(x, y)
-                    if has_saved_attached_position:
-                        panel._manual_positioned = True
             self._hud_hidden_by_follow = False
             if self._should_show_hud():
                 if not self.top_window.isVisible():

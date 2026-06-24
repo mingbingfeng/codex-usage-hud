@@ -129,7 +129,8 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 
 ```powershell
 python -m compileall -q src tools tests
-python -m unittest discover -s tests
+python -m pytest
+python -m pytest -m ui        # 可选：真实 Tk/Qt 窗口回归
 python tools/build_exe.py
 python tools/build_installer.py
 ```

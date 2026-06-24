@@ -61,6 +61,14 @@ packages = ["src/codex_usage_hud"]
 "src/codex_usage_hud/assets/sponsor_alipay.png" = "codex_usage_hud/assets/sponsor_alipay.png"
 "src/codex_usage_hud/assets/sponsor_wechat.png" = "codex_usage_hud/assets/sponsor_wechat.png"
 
+[tool.pytest.ini_options]
+addopts = "-m 'not ui' --tb=short -q"
+markers = [
+  "ui: real Tk/Qt widget lifecycle tests skipped by default",
+  "tk_ui: real Tk widget lifecycle tests",
+  "qt_ui: real Qt widget lifecycle tests",
+]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["E402"]
 "tools/*.py" = ["E402"]
