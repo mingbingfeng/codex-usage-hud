@@ -3000,19 +3000,56 @@ if QApplication is not None:
         def _place_windows(self) -> None:
             top_relative_saved = self._has_saved_relative_position("top")
             request_relative_saved = self._has_saved_relative_position("request")
+            top_preplaced = False
+            request_preplaced = False
             if top_relative_saved:
                 self.top_window._manual_positioned = False
             if request_relative_saved:
                 self.request_window._manual_positioned = False
-            if (top_relative_saved or request_relative_saved) and self._follow_codex_window():
-                return
+            if top_relative_saved or request_relative_saved:
+                try:
+                    rect = self.locator.find()
+                except Exception:
+                    rect = None
+                if rect is not None and not getattr(rect, "minimized", False):
+                    self._attached = True
+                    self._last_rect = rect
+                    self._last_anchor_metrics.clear()
+                    if top_relative_saved:
+                        x, y, width, _height = self._attached_panel_geometry("top", rect, self.top_window.expanded)
+                        self.top_window.resize(width, self.top_window.height())
+                        self.top_window.move(x, y)
+                        self.top_window._manual_positioned = True
+                        top_preplaced = True
+                    if request_relative_saved:
+                        x, y, width, _height = self._attached_panel_geometry(
+                            "request",
+                            rect,
+                            self.request_window.expanded,
+                        )
+                        self.request_window.resize(width, self.request_window.height())
+                        self.request_window.move(x, y)
+                        self.request_window._manual_positioned = True
+                        request_preplaced = True
+                    try:
+                        active = self.locator.is_active(rect, self._hud_hwnds())
+                    except Exception:
+                        active = True
+                    if not active:
+                        self._hide_for_follow()
+                    if top_relative_saved and request_relative_saved:
+                        return
+                elif self._follow_codex_window():
+                    return
 
             top_saved = (
-                self.settings.top.absolute_x is not None
+                not top_relative_saved
+                and self.settings.top.absolute_x is not None
                 and self.settings.top.absolute_y is not None
             )
             request_saved = (
-                self.settings.request.absolute_x is not None
+                not request_relative_saved
+                and self.settings.request.absolute_x is not None
                 and self.settings.request.absolute_y is not None
             )
             top_placement = self.settings.top
@@ -3034,11 +3071,11 @@ if QApplication is not None:
 
             screen = self.app.primaryScreen()
             geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1280, 720)
-            if not top_saved:
+            if not top_saved and not top_preplaced:
                 top_x = geometry.left() + max(0, (geometry.width() - self.top_window.width()) // 2)
                 top_y = geometry.top() + QT_HUD_MARGIN
                 self.top_window.move(top_x, top_y)
-            if not request_saved:
+            if not request_saved and not request_preplaced:
                 req_x = geometry.right() - self.request_window.width() - QT_HUD_MARGIN
                 req_y = geometry.bottom() - self.request_window.height() - QT_HUD_MARGIN
                 self.request_window.move(max(geometry.left(), req_x), max(geometry.top(), req_y))
@@ -3093,6 +3130,8 @@ if QApplication is not None:
                 active = True
             if not active:
                 self._attached = True
+                self._last_rect = rect
+                self._last_anchor_metrics.clear()
                 self._hide_for_follow()
                 return False
             self.attach_to_rect(rect)

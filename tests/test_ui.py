@@ -4082,6 +4082,53 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_initial_place_uses_saved_relative_position_while_codex_inactive(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                settings = HudSettings.empty()
+                settings.top.absolute_x = 12
+                settings.top.absolute_y = 34
+                settings.top.relative_x_ratio = 0.25
+                settings.top.relative_y_ratio = 0.20
+                hud_store.save(settings)
+                rect = WindowRect(left=200, top=160, right=1200, bottom=960)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=rect), patch.object(
+                    qt_hud_module.CodexWindowLocator,
+                    "is_active",
+                    return_value=False,
+                ):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    expected_top = window._attached_panel_geometry("top", rect, False)
+                    self.assertEqual(
+                        (window.top_window.x(), window.top_window.y()),
+                        (expected_top[0], expected_top[1]),
+                    )
+                    self.assertNotEqual((window.top_window.x(), window.top_window.y()), (12, 34))
+                    self.assertTrue(window.top_window._manual_positioned)
+                    self.assertFalse(window.top_window.isVisible())
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_manual_top_position_stays_put_when_anchor_shifts_without_window_move(self) -> None:
         try:
             import PySide6  # noqa: F401
