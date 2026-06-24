@@ -122,14 +122,12 @@ DOM_PROBE_SCRIPT = r"""
     const title = normalize(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
     return { rawSessionId, sessionId, title };
   };
-  const currentRow = (row) => {
-    if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
-    if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+  const rowMatchesLocation = (row) => {
     const href = rowHref(row);
     if (href) {
       try {
         const url = new URL(href, location.href);
-        if (url.href === location.href || url.pathname === location.pathname) return true;
+        if (url.href === location.href) return true;
       } catch (_) {
         if (location.href.includes(href)) return true;
       }
@@ -140,7 +138,13 @@ DOM_PROBE_SCRIPT = r"""
       || (!!ref.sessionId && location.href.includes(ref.sessionId))
     );
   };
-  const activeRow = threadRows.find(currentRow) || null;
+  const currentRow = (row) => {
+    if (rowMatchesLocation(row)) return true;
+    if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
+    if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+    return false;
+  };
+  const activeRow = threadRows.find(rowMatchesLocation) || threadRows.find(currentRow) || null;
   const activeRef = activeRow ? refFromRow(activeRow) : { sessionId: locationThreadId(), title: "" };
   const compact = (value, limit = 220) => {
     const text = normalize(value);
@@ -545,14 +549,12 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
     const title = normalize(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
     return { rawSessionId, sessionId, title };
   };
-  const currentRow = (row) => {
-    if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
-    if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+  const rowMatchesLocation = (row) => {
     const href = rowHref(row);
     if (href) {
       try {
         const url = new URL(href, location.href);
-        if (url.href === location.href || url.pathname === location.pathname) return true;
+        if (url.href === location.href) return true;
       } catch (_) {
         if (location.href.includes(href)) return true;
       }
@@ -563,9 +565,15 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       || (!!ref.sessionId && location.href.includes(ref.sessionId))
     );
   };
+  const currentRow = (row) => {
+    if (rowMatchesLocation(row)) return true;
+    if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
+    if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+    return false;
+  };
   const activeRef = () => {
     const rows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
-    const row = rows.find(currentRow) || null;
+    const row = rows.find(rowMatchesLocation) || rows.find(currentRow) || null;
     return row ? refFromRow(row) : { sessionId: locationThreadId(), title: "" };
   };
   const queryRows = () => Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"))

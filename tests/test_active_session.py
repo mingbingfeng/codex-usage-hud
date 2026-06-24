@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -244,6 +245,43 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 session_path,
             )
 
+    def test_path_from_session_index_resolves_elided_long_title_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-long-title-session.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            long_title = (
+                "查看首扫页/批扫扫描时图片落盘（D:\\ScanSystemData\\2026-06-23）"
+                "时文件的DPI参数，我实测了更多内容"
+            )
+
+            session_index = root / "session_index.jsonl"
+            session_index.write_text(
+                json.dumps(
+                    {"id": "long-title-session", "thread_name": long_title},
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=500,
+                enabled=False,
+            )
+
+            self.assertEqual(
+                tracker.path_from_session_index("查看首扫页/批扫扫描时图片落盘…"),
+                session_path,
+            )
+            self.assertIsNone(tracker.path_from_session_index("初始…"))
+
     def test_path_for_title_falls_back_to_state_db_threads_table(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -300,7 +338,13 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             session_path.write_text("{}\n", encoding="utf-8")
             session_index = root / "session_index.jsonl"
             session_index.write_text(
-                '{"id":"other-thread","thread_name":"Duplicate Title","updated_at":"2026-05-28T00:00:00Z"}\n',
+                "\n".join(
+                    [
+                        '{"id":"other-thread","thread_name":"Duplicate Title","updated_at":"2026-05-28T00:00:00Z"}',
+                        '{"id":"cdp-thread-123","thread_name":"Resolved CDP Title","updated_at":"2026-05-29T00:00:00Z"}',
+                    ]
+                )
+                + "\n",
                 encoding="utf-8",
             )
 
@@ -314,7 +358,8 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             )
 
             self.assertEqual(tracker.current_path(), session_path)
-            self.assertEqual(tracker.latest_source, "cdp:Duplicate Title")
+            self.assertEqual(tracker.latest_title, "Resolved CDP Title")
+            self.assertEqual(tracker.latest_source, "cdp:Resolved CDP Title")
 
     def test_path_from_thread_id_reuses_cached_rollout_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

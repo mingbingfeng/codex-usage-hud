@@ -75,7 +75,6 @@ from codex_usage_hud.cli import (
     work_item_to_overlay_dict,
     stop_running_hud,
     usage_before_today_in_week,
-    _work_overlay_header_text,
 )
 from codex_usage_hud.platforms.session_switch import (
     SessionSwitchController,
@@ -132,7 +131,6 @@ from codex_usage_hud.ui.tk_hud import (
     ShimmerTextLabel,
     HUD_BG,
     HUD_HEADER_BG,
-    HUD_PANEL_BG,
     HUD_PANEL_BORDER,
     HUD_PROGRESS_DAY,
     HUD_PROGRESS_DAY_END,
@@ -145,7 +143,6 @@ from codex_usage_hud.ui.tk_hud import (
     RoundedHudShell,
     TopHudProgressMetric,
     TopHudProgressStrip,
-    TOKEN_LEGEND_TEXT,
     TokenHudWindow,
     WindowPlacement,
     WindowRect,
@@ -190,6 +187,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _transition_slot_shift_progress,
     _theme_contrast_ratio,
     _visible_overlay_items,
+    _work_overlay_header_text,
     _workdir_display_name,
 )
 
@@ -239,9 +237,18 @@ class _RecordingGeometryWindow:
 
 
 class _FakeAnchorLocator:
-    def __init__(self, anchors: dict[str, HudAnchor], *, active: bool = True) -> None:
+    def __init__(
+        self,
+        anchors: dict[str, HudAnchor],
+        *,
+        active: bool = True,
+        header_roi: WindowRect | None = None,
+        bottom_roi: WindowRect | None = None,
+    ) -> None:
         self.anchors = anchors
         self.active = active
+        self.header_roi = header_roi
+        self.bottom_roi = bottom_roi
 
     def set_dpi_aware(self) -> None:
         return None
@@ -273,6 +280,14 @@ class _FakeAnchorLocator:
     ) -> HudAnchor | None:
         del rect, hud_height
         return self.anchors.get(target)
+
+    def header_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        del rect
+        return self.header_roi
+
+    def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        del rect
+        return self.bottom_roi
 
 
 def _attached_geometry_after_stable(
@@ -4082,6 +4097,53 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_initial_place_uses_saved_relative_position_while_codex_inactive(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                settings = HudSettings.empty()
+                settings.top.absolute_x = 12
+                settings.top.absolute_y = 34
+                settings.top.relative_x_ratio = 0.25
+                settings.top.relative_y_ratio = 0.20
+                hud_store.save(settings)
+                rect = WindowRect(left=200, top=160, right=1200, bottom=960)
+                with patch.object(qt_hud_module.CodexWindowLocator, "find", return_value=rect), patch.object(
+                    qt_hud_module.CodexWindowLocator,
+                    "is_active",
+                    return_value=False,
+                ):
+                    window = QtHudWindow(
+                        hide_until_attached=True,
+                        user_settings_store=user_store,
+                        hud_settings_store=hud_store,
+                    )
+                try:
+                    expected_top = window._attached_panel_geometry("top", rect, False)
+                    self.assertEqual(
+                        (window.top_window.x(), window.top_window.y()),
+                        (expected_top[0], expected_top[1]),
+                    )
+                    self.assertNotEqual((window.top_window.x(), window.top_window.y()), (12, 34))
+                    self.assertTrue(window.top_window._manual_positioned)
+                    self.assertFalse(window.top_window.isVisible())
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_manual_top_position_stays_put_when_anchor_shifts_without_window_move(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -4193,13 +4255,15 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     window.locator = _FakeAnchorLocator({"top": first_anchor})
                     window.attach_to_rect(rect)
 
-                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 36))
+                    expected_x = rect.left + int(round(rect.width * float(settings.top.relative_x_ratio or 0.0)))
+                    expected_y = rect.top + int(round(rect.height * float(settings.top.relative_y_ratio or 0.0)))
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (expected_x, expected_y))
                     self.assertTrue(window.top_window._manual_positioned)
 
                     window.locator = _FakeAnchorLocator({"top": second_anchor})
                     window.attach_to_rect(rect)
 
-                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 36))
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (expected_x, expected_y))
                 finally:
                     window.close("test")
         finally:
@@ -6125,37 +6189,93 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._close()
 
     def test_native_anchor_is_disabled_by_default_for_scroll_stability(self) -> None:
-        window = TokenHudWindow()
-        try:
-            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
-            window.locator = _FakeAnchorLocator(
-                {
-                    "request": HudAnchor(
-                        left=900,
-                        top=300,
-                        right=1200,
-                        bottom=340,
-                        default_x=900,
-                        default_y=268,
-                        default_width=300,
-                        source="test-moving-uia",
-                    )
-                }
-            )
-            window.settings.request.anchor_x_ratio = 0.0
-            window.settings.request.anchor_y_ratio = 0.0
-            window.settings.request.anchor_source = "test-moving-uia"
-            window.settings.request.width = None
-            window.settings.request.width_ratio = None
-            window.settings.request.relative_x_ratio = None
-            window.settings.request.relative_bottom_ratio = None
-            window._use_dom_anchors = False
+        window = object.__new__(TokenHudWindow)
+        rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+        window.locator = _FakeAnchorLocator(
+            {
+                "request": HudAnchor(
+                    left=900,
+                    top=300,
+                    right=1200,
+                    bottom=340,
+                    default_x=900,
+                    default_y=268,
+                    default_width=300,
+                    source="test-moving-uia",
+                )
+            }
+        )
+        window.settings = HudSettings.empty()
+        window.settings.request.anchor_x_ratio = 0.0
+        window.settings.request.anchor_y_ratio = 0.0
+        window.settings.request.anchor_source = "test-moving-uia"
+        window.settings.request.width = None
+        window.settings.request.width_ratio = None
+        window.settings.request.relative_x_ratio = None
+        window.settings.request.relative_bottom_ratio = None
+        window._use_dom_anchors = False
+        window._use_native_anchors = False
+        window._use_top_dom_anchors = False
+        window._last_anchor_decisions = {}
+        window._last_geometry_clamp = {}
 
-            x, y, width, height = window._attached_geometry("request", rect, False)
+        x, y, width, height = window._attached_geometry("request", rect, False)
 
-            self.assertEqual((x, y, width, height), (460, 782, 495, 32))
-        finally:
-            window._close()
+        self.assertEqual((x, y, width, height), (460, 782, 495, 32))
+
+    def test_roi_demo_anchor_positions_tk_huds_with_existing_hud_height(self) -> None:
+        class _RecordingOverlay:
+            def __init__(self) -> None:
+                self.rect: WindowRect | None = None
+
+            def update(self, rect: WindowRect | None) -> None:
+                self.rect = rect
+
+            def hide(self, reason: str = "hidden") -> None:
+                del reason
+                self.rect = None
+
+        window = object.__new__(TokenHudWindow)
+        rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+        window.locator = _FakeAnchorLocator(
+            {},
+            header_roi=WindowRect(left=360, top=64, right=1120, bottom=120),
+            bottom_roi=WindowRect(left=520, top=732, right=1000, bottom=786),
+        )
+        window.settings = HudSettings.empty()
+        window._use_header_roi_demo = True
+        window._use_dom_anchors = False
+        window._use_native_anchors = False
+        window._use_top_dom_anchors = False
+        window.top_expanded = False
+        window.request_expanded = False
+        window._top_collapsed_width_override = None
+        window._last_anchor_decisions = {}
+        window._last_geometry_clamp = {}
+        header_overlay = _RecordingOverlay()
+        bottom_overlay = _RecordingOverlay()
+        window._header_roi_overlay = header_overlay
+        window._bottom_roi_overlay = bottom_overlay
+
+        top = window._attached_geometry("top", rect, False)
+        top_expanded = window._attached_geometry("top", rect, True)
+        request = window._attached_geometry("request", rect, False)
+        top_roi = window._roi_demo_geometry("top", rect, TOP_DOCK_HEIGHT)
+        request_roi = window._roi_demo_geometry("request", rect, REQUEST_DOCK_HEIGHT)
+        top_anchor = window._target_anchor("top", rect, False)
+        request_anchor = window._target_anchor("request", rect, False)
+        window._sync_header_roi_demo(rect)
+        window._sync_bottom_roi_demo(rect)
+
+        self.assertEqual(top, (360, 64, 760, TOP_DOCK_HEIGHT))
+        self.assertEqual(top_expanded, (360, 64, 760, TOP_DOCK_EXPANDED_HEIGHT))
+        self.assertEqual(request, (520, 732, 480, REQUEST_DOCK_HEIGHT))
+        self.assertEqual((top_roi.left, top_roi.top, top_roi.width, top_roi.height), (360, 64, 760, TOP_DOCK_HEIGHT))
+        self.assertEqual((request_roi.left, request_roi.top, request_roi.width, request_roi.height), (520, 732, 480, REQUEST_DOCK_HEIGHT))
+        self.assertEqual(top_anchor.height, TOP_DOCK_HEIGHT)
+        self.assertEqual(request_anchor.height, REQUEST_DOCK_HEIGHT)
+        self.assertEqual(header_overlay.rect, top_roi)
+        self.assertEqual(bottom_overlay.rect, request_roi)
 
     def test_native_anchor_waits_for_stable_frames(self) -> None:
         window = TokenHudWindow()
@@ -7778,7 +7898,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertFalse(qt_args.renderer_hud)
         self.assertEqual(qt_args.runtime_hud_mode, "qt")
 
-    def test_tk_close_skips_forced_gc_during_display_mode_switch(self) -> None:
+    def test_tk_close_destroys_windows_without_forced_gc(self) -> None:
         window = object.__new__(tk_hud_module.TokenHudWindow)
         window._exit_reason = ""
         window._top_rebuild_job = None
@@ -7796,10 +7916,11 @@ class DaemonLifecycleTests(unittest.TestCase):
         window._release_tk_image_references = MagicMock()
         window._clear_tk_widget_references = MagicMock()
 
-        with patch("codex_usage_hud.ui.tk_hud.gc.collect") as collect:
-            tk_hud_module.TokenHudWindow.close(window, "display_mode_switch")
+        tk_hud_module.TokenHudWindow.close(window, "display_mode_switch")
 
-        collect.assert_not_called()
+        window.request_root.destroy.assert_called_once_with()
+        window.root.destroy.assert_called_once_with()
+        window._clear_tk_widget_references.assert_called_once_with()
         self.assertEqual(window.exit_reason, "display_mode_switch")
 
     def test_tk_mode_switch_stops_snapshot_pump_before_active_tracker(self) -> None:

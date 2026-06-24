@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-import gc
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -23,7 +22,6 @@ from typing import Any, Callable
 
 from .. import __version__
 from ..config import (
-    USER_CONFIG_KEY,
     UserConfig,
     UserConfigStore,
     default_settings_path as shared_default_settings_path,
@@ -165,7 +163,16 @@ RESIZE_CORNER_HIT_SIZE = 12
 HUD_GEOMETRY_LOG_FILENAME = "hud_geometry.log"
 HUD_NATIVE_ANCHORS_ENV = "CODEX_USAGE_HUD_NATIVE_ANCHORS"
 HUD_CDP_DOM_ENV = "CODEX_USAGE_HUD_CDP_DOM"
+HUD_UIA_ROI_DEMO_ENV = "CODEX_USAGE_HUD_UIA_ROI_DEMO"
 HUD_NATIVE_GEOMETRY_ENV = "CODEX_USAGE_HUD_NATIVE_GEOMETRY"
+HUD_UIA_ROI_DEMO_BORDER = "#FF3030"
+HUD_UIA_ROI_DEMO_FILL = "#FF3030"
+HUD_UIA_ROI_DEMO_ALPHA = 1.0
+HUD_UIA_ROI_DEMO_BORDER_WIDTH = 6
+HUD_UIA_BOTTOM_ROI_DEMO_BORDER = "#178BFF"
+HUD_UIA_BOTTOM_ROI_DEMO_FILL = "#178BFF"
+HUD_UIA_BOTTOM_ROI_DEMO_ALPHA = 1.0
+HUD_UIA_BOTTOM_ROI_DEMO_BORDER_WIDTH = 6
 HUD_INTERACTION_SETTLE_MS = 120
 HUD_CLICK_PRIORITY_MS = 180
 HUD_CLICK_REFRESH_DELAY_MS = 50
@@ -1177,6 +1184,36 @@ _COST_ESTIMATOR = CostEstimator()
 _HUD_GEOMETRY_LOGGER = logging.getLogger("codex_usage_hud.hud_geometry")
 _HUD_GEOMETRY_LOGGER.addHandler(logging.NullHandler())
 _HUD_GEOMETRY_LOGGING_CONFIGURED = False
+_TK_ROOT_CREATE_ATTEMPTS = 3
+
+
+def _configure_tcl_tk_library_paths() -> None:
+    base = Path(sys.base_prefix) / "tcl"
+    tcl_library = base / "tcl8.6"
+    tk_library = base / "tk8.6"
+    if (tcl_library / "init.tcl").is_file():
+        os.environ.setdefault("TCL_LIBRARY", tcl_library.as_posix())
+    if (tk_library / "tk.tcl").is_file():
+        os.environ.setdefault("TK_LIBRARY", tk_library.as_posix())
+
+
+def _create_tk_root() -> tk.Tk:
+    _configure_tcl_tk_library_paths()
+    last_error: tk.TclError | None = None
+    for attempt in range(_TK_ROOT_CREATE_ATTEMPTS):
+        try:
+            return tk.Tk()
+        except tk.TclError as exc:
+            last_error = exc
+            try:
+                tk._default_root = None  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            if attempt + 1 >= _TK_ROOT_CREATE_ATTEMPTS:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+    assert last_error is not None
+    raise last_error
 
 
 def set_cost_estimator(estimator: CostEstimator) -> None:
@@ -3309,6 +3346,227 @@ def _set_native_window_geometry(
         return False
 
 
+def _make_window_click_through(window: tk.Tk | tk.Toplevel) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        hwnd = int(window.winfo_id())
+        if not hwnd:
+            return False
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = ctypes.c_void_p
+        native_hwnd = int(
+            user32.GetAncestor(wintypes.HWND(hwnd), 2)  # GA_ROOT
+            or hwnd
+        )
+        required_style = (
+            0x00000020  # WS_EX_TRANSPARENT
+            | 0x00000080  # WS_EX_TOOLWINDOW
+            | 0x08000000  # WS_EX_NOACTIVATE
+        )
+        get_window_long = getattr(user32, "GetWindowLongPtrW", None)
+        set_window_long = getattr(user32, "SetWindowLongPtrW", None)
+        long_type = ctypes.c_ssize_t
+        if get_window_long is None or set_window_long is None:
+            get_window_long = user32.GetWindowLongW
+            set_window_long = user32.SetWindowLongW
+            long_type = ctypes.c_long
+        get_window_long.argtypes = [wintypes.HWND, ctypes.c_int]
+        get_window_long.restype = long_type
+        set_window_long.argtypes = [wintypes.HWND, ctypes.c_int, long_type]
+        set_window_long.restype = long_type
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        ex_style = int(get_window_long(wintypes.HWND(native_hwnd), -20) or 0)
+        target_style = ex_style | required_style
+        set_window_long(wintypes.HWND(native_hwnd), -20, long_type(target_style))
+        positioned = bool(
+            user32.SetWindowPos(
+                wintypes.HWND(native_hwnd),
+                wintypes.HWND(-1),  # HWND_TOPMOST
+                0,
+                0,
+                0,
+                0,
+                0x0001
+                | 0x0002
+                | 0x0010
+                | 0x0020
+                | 0x0040,  # NOSIZE | NOMOVE | NOACTIVATE | FRAMECHANGED | SHOWWINDOW
+            )
+        )
+        applied_style = int(get_window_long(wintypes.HWND(native_hwnd), -20) or 0)
+        return positioned and (applied_style & required_style) == required_style
+    except Exception:
+        return False
+
+
+class _HeaderRoiDemoOverlay:
+    def __init__(
+        self,
+        owner: tk.Tk,
+        outside_color: str,
+        *,
+        title: str = "codex-usage-hud UIA ROI",
+        border: str = HUD_UIA_ROI_DEMO_BORDER,
+        fill: str = HUD_UIA_ROI_DEMO_FILL,
+        alpha: float = HUD_UIA_ROI_DEMO_ALPHA,
+        border_width: int = HUD_UIA_ROI_DEMO_BORDER_WIDTH,
+        log_prefix: str = "header_roi_demo_overlay",
+    ) -> None:
+        del outside_color
+        self._border = border
+        self._fill = fill
+        self._alpha = alpha
+        self._border_width = max(1, int(border_width))
+        self._log_prefix = log_prefix
+        self._window = tk.Toplevel(owner)
+        self._window.title(title)
+        self._window.overrideredirect(True)
+        self._window.attributes("-topmost", True)
+        self._window.configure(bg=self._fill)
+        self._frame = tk.Frame(
+            self._window,
+            bg=self._fill,
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+        )
+        self._frame.pack(fill="both", expand=True)
+        self._current: tuple[int, int, int, int] | None = None
+        self._visible = False
+        self._last_hidden_reason = ""
+        self._click_through = False
+        self._window.withdraw()
+        try:
+            self._window.update_idletasks()
+        except tk.TclError:
+            pass
+        self._click_through = _make_window_click_through(self._window)
+        _HUD_GEOMETRY_LOGGER.info(
+            "%s_created hwnd=%s click_through=%s alpha=%.2f",
+            self._log_prefix,
+            self._window.winfo_id(),
+            self._click_through,
+            self._alpha,
+        )
+
+    @property
+    def window(self) -> tk.Toplevel:
+        return self._window
+
+    def update(self, rect: WindowRect | None) -> None:
+        if rect is None or rect.width <= 0 or rect.height <= 0:
+            self.hide("no-roi")
+            return
+        geometry = (int(rect.left), int(rect.top), int(rect.width), int(rect.height))
+        changed = geometry != self._current
+        if changed:
+            self._current = geometry
+            left, top, width, height = geometry
+            try:
+                self._window.geometry(f"{width}x{height}+{left}+{top}")
+                self._window.configure(
+                    bg=self._border,
+                    highlightthickness=0,
+                    bd=0,
+                )
+                self._frame.configure(
+                    bg=self._fill,
+                    width=max(1, width - (self._border_width * 2)),
+                    height=max(1, height - (self._border_width * 2)),
+                    highlightbackground=self._border,
+                    highlightcolor=self._border,
+                    highlightthickness=self._border_width,
+                )
+                self._frame.pack(fill="both", expand=True)
+                self._window.update_idletasks()
+            except tk.TclError as exc:
+                _HUD_GEOMETRY_LOGGER.info(
+                    "%s_geometry_failed "
+                    "geometry=(%s,%s,%s,%s) error=%s",
+                    self._log_prefix,
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    exc,
+                )
+                return
+        try:
+            self._window.attributes("-topmost", True)
+            self._window.deiconify()
+            self._window.lift()
+            self._window.update_idletasks()
+            self._click_through = _make_window_click_through(self._window)
+        except tk.TclError as exc:
+            _HUD_GEOMETRY_LOGGER.info(
+                "%s_show_failed "
+                "geometry=(%s,%s,%s,%s) error=%s",
+                self._log_prefix,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                exc,
+            )
+            return
+        if not self._visible:
+            _HUD_GEOMETRY_LOGGER.info(
+                "%s_shown geometry=(%s,%s,%s,%s) click_through=%s",
+                self._log_prefix,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                self._click_through,
+            )
+        elif changed:
+            _HUD_GEOMETRY_LOGGER.info(
+                "%s_moved geometry=(%s,%s,%s,%s)",
+                self._log_prefix,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+            )
+        self._visible = True
+
+    def hide(self, reason: str = "hidden") -> None:
+        self._current = None
+        if self._visible or reason != self._last_hidden_reason:
+            _HUD_GEOMETRY_LOGGER.info(
+                "%s_hidden reason=%s",
+                self._log_prefix,
+                reason,
+            )
+        self._visible = False
+        self._last_hidden_reason = reason
+        try:
+            self._window.withdraw()
+        except tk.TclError:
+            return
+
+    def close(self) -> None:
+        _HUD_GEOMETRY_LOGGER.info("%s_closed", self._log_prefix)
+        try:
+            self._window.destroy()
+        except tk.TclError:
+            return
+
+
 class CodexWindowLocator:
     """Locate the Codex desktop window using standard-library native hooks."""
 
@@ -3346,6 +3604,12 @@ class CodexWindowLocator:
     ) -> HudAnchor | None:
         return self._impl.anchor_geometry(target, rect, hud_height)
 
+    def header_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        return self._impl.header_roi_geometry(rect)
+
+    def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        return self._impl.bottom_roi_geometry(rect)
+
 
 class _BaseLocator:
     def set_dpi_aware(self) -> None:
@@ -3374,6 +3638,14 @@ class _BaseLocator:
         hud_height: int,
     ) -> HudAnchor | None:
         del target, rect, hud_height
+        return None
+
+    def header_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        del rect
+        return None
+
+    def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        del rect
         return None
 
 
@@ -3481,9 +3753,16 @@ class _WindowsCodexLocator(_BaseLocator):
             self._top_dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=False)
             self._dom_anchors_enabled = _env_flag(HUD_CDP_DOM_ENV, default=False)
             self._native_anchors_enabled = _env_flag(HUD_NATIVE_ANCHORS_ENV)
+            self._header_roi_demo_enabled = _env_flag(
+                HUD_UIA_ROI_DEMO_ENV,
+                default=True,
+            )
             if self._top_dom_anchors_enabled or self._dom_anchors_enabled:
                 self._cdp_probe = CodexCdpProbe()
-            self._tracker = CodexWindowTracker(enable_uia=self._native_anchors_enabled)
+            self._tracker = CodexWindowTracker(
+                enable_uia=self._native_anchors_enabled
+                or self._header_roi_demo_enabled
+            )
             self.enabled = True
             self._configure_api()
         except Exception:
@@ -3801,6 +4080,56 @@ class _WindowsCodexLocator(_BaseLocator):
             default_y=int(default_y),
             default_width=int(default_width),
             source=str(snapshot.source or "uia"),
+        )
+
+    def header_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        if not getattr(self, "_header_roi_demo_enabled", False):
+            return None
+        if self._tracker is None or not getattr(self._tracker, "enabled", False):
+            return None
+        if not rect.hwnd:
+            return None
+        try:
+            snapshot = self._tracker.get_header_roi_snapshot()
+        except Exception:
+            return None
+        if snapshot.status != "visible" or snapshot.roi is None:
+            return None
+        if rect.hwnd and snapshot.hwnd and rect.hwnd != snapshot.hwnd:
+            return None
+        roi = snapshot.roi
+        return WindowRect(
+            hwnd=snapshot.hwnd,
+            left=int(roi.left),
+            top=int(roi.top),
+            right=int(roi.right),
+            bottom=int(roi.bottom),
+            minimized=False,
+        )
+
+    def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
+        if not getattr(self, "_header_roi_demo_enabled", False):
+            return None
+        if self._tracker is None or not getattr(self._tracker, "enabled", False):
+            return None
+        if not rect.hwnd:
+            return None
+        try:
+            snapshot = self._tracker.get_bottom_roi_snapshot()
+        except Exception:
+            return None
+        if snapshot.status != "visible" or snapshot.roi is None:
+            return None
+        if rect.hwnd and snapshot.hwnd and rect.hwnd != snapshot.hwnd:
+            return None
+        roi = snapshot.roi
+        return WindowRect(
+            hwnd=snapshot.hwnd,
+            left=int(roi.left),
+            top=int(roi.top),
+            right=int(roi.right),
+            bottom=int(roi.bottom),
+            minimized=False,
         )
 
     def _cdp_anchor_geometry(
@@ -5665,6 +5994,7 @@ class TokenHudWindow:
         self._use_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
         self._use_top_dom_anchors = _env_flag(HUD_CDP_DOM_ENV, default=False)
         self._use_native_anchors = _env_flag(HUD_NATIVE_ANCHORS_ENV)
+        self._use_header_roi_demo = _env_flag(HUD_UIA_ROI_DEMO_ENV, default=True)
         self.update_manager = update_manager
         self._update_state = AutoUpdateState(current_version=__version__)
         self._top_update_button: tk.Button | None = None
@@ -5672,9 +6002,11 @@ class TokenHudWindow:
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
         _HUD_GEOMETRY_LOGGER.info(
-            "hud_started dom_anchors=%s native_anchors=%s follow_ms=%s settings_path=%s log_path=%s",
+            "hud_started dom_anchors=%s native_anchors=%s header_roi_demo=%s "
+            "follow_ms=%s settings_path=%s log_path=%s",
             self._use_dom_anchors,
             self._use_native_anchors,
+            self._use_header_roi_demo,
             self.follow_ms,
             self.settings_store.path,
             self._geometry_log_path,
@@ -5699,7 +6031,7 @@ class TokenHudWindow:
         )
 
         outside_color = _window_outside_color()
-        self.root = tk.Tk()
+        self.root = _create_tk_root()
         self.root.title("codex-usage-hud")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -5707,6 +6039,8 @@ class TokenHudWindow:
         self._configure_transparent_window(self.root, outside_color)
         self.root.bind("<Escape>", self._close)
         self._bind_window_interactions(self.root, "top")
+        self._header_roi_overlay: _HeaderRoiDemoOverlay | None = None
+        self._bottom_roi_overlay: _HeaderRoiDemoOverlay | None = None
         self._exit_reason = ""
 
         self.top_expanded = False
@@ -5796,6 +6130,25 @@ class TokenHudWindow:
         self.request_root.bind("<Escape>", self._close)
         self._bind_window_interactions(self.request_root, "request")
         self._rebuild_request_ui()
+        self._header_roi_overlay = (
+            _HeaderRoiDemoOverlay(self.root, outside_color)
+            if self._use_header_roi_demo
+            else None
+        )
+        self._bottom_roi_overlay = (
+            _HeaderRoiDemoOverlay(
+                self.root,
+                outside_color,
+                title="codex-usage-hud UIA bottom ROI",
+                border=HUD_UIA_BOTTOM_ROI_DEMO_BORDER,
+                fill=HUD_UIA_BOTTOM_ROI_DEMO_FILL,
+                alpha=HUD_UIA_BOTTOM_ROI_DEMO_ALPHA,
+                border_width=HUD_UIA_BOTTOM_ROI_DEMO_BORDER_WIDTH,
+                log_prefix="bottom_roi_demo_overlay",
+            )
+            if self._use_header_roi_demo
+            else None
+        )
         self._set_alpha(self.root, 1.0)
         self._set_alpha(self.request_root, 0.74)
         self._apply_free_defaults()
@@ -7849,8 +8202,20 @@ class TokenHudWindow:
     def _rebuild_top_ui(self) -> None:
         self._cancel_top_core_prewarm()
         self._cancel_top_deferred_render()
+        header_roi_window = None
+        header_roi_overlay = getattr(self, "_header_roi_overlay", None)
+        if header_roi_overlay is not None:
+            header_roi_window = header_roi_overlay.window
+        bottom_roi_window = None
+        bottom_roi_overlay = getattr(self, "_bottom_roi_overlay", None)
+        if bottom_roi_overlay is not None:
+            bottom_roi_window = bottom_roi_overlay.window
         for child in self.root.winfo_children():
-            if child is getattr(self, "request_root", None):
+            if (
+                child is getattr(self, "request_root", None)
+                or child is header_roi_window
+                or child is bottom_roi_window
+            ):
                 continue
             child.destroy()
         self.top_labels.clear()
@@ -9065,8 +9430,12 @@ class TokenHudWindow:
         self._set_alpha(self.root, 1.0)
         self._set_alpha(self.request_root, 0.94 if self.request_expanded else 0.74)
         self._apply_geometry()
+        self._sync_header_roi_demo(rect)
+        self._sync_bottom_roi_demo(rect)
 
     def _enter_free_mode(self) -> None:
+        self._hide_header_roi_demo()
+        self._hide_bottom_roi_demo()
         self._exit_tombstone("free-mode")
         self._attached = False
         self._last_rect = None
@@ -9077,11 +9446,15 @@ class TokenHudWindow:
             self._apply_free_defaults()
 
     def _hide_for_minimized(self) -> None:
+        self._hide_header_roi_demo()
+        self._hide_bottom_roi_demo()
         self._enter_tombstone("minimized")
         self._hidden_for_minimized = True
 
     def _enter_tombstone(self, reason: str = "inactive") -> None:
         """Hide HUD chrome while Codex is not foreground and pause expensive refreshes."""
+        self._hide_header_roi_demo()
+        self._hide_bottom_roi_demo()
         if self._tombstoned and self._hidden_reason == reason:
             return
         self._focus_state_active = None
@@ -9191,6 +9564,46 @@ class TokenHudWindow:
         if self._tombstoned:
             return max(delay, FOLLOW_TOMBSTONE_MS)
         return self._manual_input_refresh_delay(delay)
+
+    def _sync_header_roi_demo(self, rect: WindowRect | None) -> None:
+        overlay = self._header_roi_overlay
+        if overlay is None:
+            return
+        if rect is None or rect.minimized:
+            overlay.hide()
+            return
+        roi = self._roi_demo_geometry(
+            "top",
+            rect,
+            self._window_height("top", self.top_expanded, self.settings.top),
+        )
+        overlay.update(roi)
+
+    def _sync_bottom_roi_demo(self, rect: WindowRect | None) -> None:
+        overlay = self._bottom_roi_overlay
+        if overlay is None:
+            return
+        if rect is None or rect.minimized:
+            overlay.hide()
+            return
+        roi = self._roi_demo_geometry(
+            "request",
+            rect,
+            self._window_height("request", self.request_expanded, self.settings.request),
+        )
+        overlay.update(roi)
+
+    def _hide_header_roi_demo(self) -> None:
+        overlay = self._header_roi_overlay
+        if overlay is None:
+            return
+        overlay.hide()
+
+    def _hide_bottom_roi_demo(self) -> None:
+        overlay = self._bottom_roi_overlay
+        if overlay is None:
+            return
+        overlay.hide()
 
     def _apply_geometry(self) -> None:
         if self._top_animation_active():
@@ -9471,6 +9884,55 @@ class TokenHudWindow:
         )
         return True
 
+    def _roi_demo_geometry(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> WindowRect | None:
+        if not getattr(self, "_use_header_roi_demo", False):
+            return None
+        try:
+            roi = (
+                self.locator.header_roi_geometry(rect)
+                if target == "top"
+                else self.locator.bottom_roi_geometry(rect)
+            )
+        except Exception:
+            return None
+        if roi is None or roi.width <= 0 or roi.height <= 0:
+            return None
+        height = max(1, int(hud_height))
+        return WindowRect(
+            hwnd=roi.hwnd,
+            left=int(roi.left),
+            top=int(roi.top),
+            right=int(roi.right),
+            bottom=int(roi.top) + height,
+            minimized=False,
+        )
+
+    def _roi_demo_anchor(
+        self,
+        target: str,
+        rect: WindowRect,
+        hud_height: int,
+    ) -> HudAnchor | None:
+        roi = self._roi_demo_geometry(target, rect, hud_height)
+        if roi is None:
+            return None
+        source = "uia:header-roi-demo" if target == "top" else "uia:bottom-roi-demo"
+        return HudAnchor(
+            left=int(roi.left),
+            top=int(roi.top),
+            right=int(roi.right),
+            bottom=int(roi.bottom),
+            default_x=int(roi.left),
+            default_y=int(roi.top),
+            default_width=max(1, int(roi.width)),
+            source=source,
+        )
+
     def _target_anchor(
         self,
         target: str,
@@ -9487,6 +9949,9 @@ class TokenHudWindow:
                 rect,
                 expanded,
             )
+        roi_anchor = self._roi_demo_anchor(target, rect, height)
+        if roi_anchor is not None:
+            return roi_anchor
         if (
             self._use_dom_anchors
             or self._use_native_anchors
@@ -9907,6 +10372,12 @@ class TokenHudWindow:
     def _hud_hwnds(self) -> set[int]:
         hwnds: set[int] = set()
         windows: list[tk.Tk | tk.Toplevel] = [self.root, self.request_root]
+        header_roi_overlay = self._header_roi_overlay
+        if header_roi_overlay is not None:
+            windows.append(header_roi_overlay.window)
+        bottom_roi_overlay = self._bottom_roi_overlay
+        if bottom_roi_overlay is not None:
+            windows.append(bottom_roi_overlay.window)
         dialog = self._settings_dialog
         if dialog is not None and dialog.winfo_exists():
             windows.append(dialog)
@@ -10059,6 +10530,14 @@ class TokenHudWindow:
         self._settings_loading_anim_job = None
         self._settings_update_poll_job = None
         self._follow_job = None
+        header_roi_overlay = getattr(self, "_header_roi_overlay", None)
+        if header_roi_overlay is not None:
+            header_roi_overlay.close()
+            self._header_roi_overlay = None
+        bottom_roi_overlay = getattr(self, "_bottom_roi_overlay", None)
+        if bottom_roi_overlay is not None:
+            bottom_roi_overlay.close()
+            self._bottom_roi_overlay = None
         self._release_tk_image_references()
         try:
             self.request_root.destroy()
@@ -10069,8 +10548,6 @@ class TokenHudWindow:
         except tk.TclError:
             pass
         self._clear_tk_widget_references()
-        if reason != "display_mode_switch":
-            gc.collect()
 
     def _release_tk_image_references(self) -> None:
         """Drop Tcl-owned resources while the Tk interpreter is still alive."""

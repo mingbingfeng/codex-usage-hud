@@ -77,7 +77,6 @@ from .ui.renderer_hud import (
     wait_for_renderer,
 )
 from .ui.work_overlay_qt import (
-    _work_overlay_header_text,
     run_work_overlay_helper_qt,
     work_overlay_max_items_for_screen_height,
 )
@@ -2571,15 +2570,32 @@ def _select_runtime_work_overlay_items(
 ) -> list[WorkStatusItem]:
     seen_task_keys = _work_overlay_seen_task_keys(context)
     previously_seen_task_keys = set(seen_task_keys)
+    now = datetime.now().astimezone()
     visible: list[WorkStatusItem] = []
     for item in items:
         if len(visible) >= item_limit:
             break
         task_key = _work_overlay_runtime_task_key(item)
         if item.status == "recent":
-            if task_key and task_key in previously_seen_task_keys:
+            updated_at = item.updated_at or item.started_at or item.task_started_at
+            fresh = (
+                updated_at is not None
+                and _datetime_age_seconds(updated_at, now) <= WORK_OVERLAY_STALE_SECONDS
+            )
+            current_startup_summary = (
+                item.current
+                and not previously_seen_task_keys
+                and item.tokens_text in {"", "0"}
+                and item.cost_text in {"", "$0"}
+            )
+            if (
+                current_startup_summary
+                or (not item.current and fresh)
+                or (task_key and task_key in previously_seen_task_keys)
+            ):
                 visible.append(item)
-                seen_task_keys.add(task_key)
+                if task_key:
+                    seen_task_keys.add(task_key)
             continue
         visible.append(item)
         if task_key:

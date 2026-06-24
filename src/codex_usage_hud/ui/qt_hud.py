@@ -25,9 +25,10 @@ from ..updater import check_for_update, download_update_asset, format_update_inf
 from .renderer_hud import RendererHudPayload, _renderer_theme_payload, payload_from_snapshot
 from .tk_hud import (
     CodexWindowLocator,
+    HUD_UIA_ROI_DEMO_ENV,
     HudSettingsStore,
-    REQUEST_ANCHOR_BOTTOM,
     WindowRect,
+    _env_flag,
     _visual_anchor_geometry,
 )
 from .work_overlay_qt import work_overlay_max_items_for_screen_height
@@ -85,7 +86,7 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 }
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
-    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Slot
+    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Slot
     from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -152,13 +153,31 @@ if QApplication is not None:
             self.setWordWrap(wrap)
             self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
             self._copy_text = ""
+            self._elided_text = ""
+            self._elided_expands_hint = role == "title"
 
         def set_elided_text(self, value: object, *, limit: int = 220) -> None:
-            text = _compact(value, limit)
+            self._elided_text = _compact(value, limit)
+            self._sync_elided_text()
+            self.updateGeometry()
+
+        def _sync_elided_text(self) -> None:
             metrics = self.fontMetrics()
-            width = max(40, self.width() or self.sizeHint().width() or 120)
-            self.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, width))
-            self.setToolTip(text)
+            width = max(40, self.width() or super().sizeHint().width() or 120)
+            self.setText(metrics.elidedText(self._elided_text, Qt.TextElideMode.ElideRight, width))
+            self.setToolTip(self._elided_text)
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802
+            if self._elided_text:
+                self._sync_elided_text()
+            super().resizeEvent(event)
+
+        def sizeHint(self) -> QSize:  # noqa: N802
+            hint = super().sizeHint()
+            if self._elided_expands_hint and self._elided_text:
+                width = self.fontMetrics().horizontalAdvance(self._elided_text) + 2
+                hint.setWidth(max(hint.width(), width))
+            return hint
 
         def set_copy_text(self, value: object, *, tooltip: str = "") -> None:
             text = str(value or "").strip()
@@ -2410,6 +2429,53 @@ if QApplication is not None:
             self.status.setText(f"已启动 {installer.name}，安装器会先关闭当前 HUD。")
 
 
+    class _HeaderRoiDemoWidget(QWidget):
+        def __init__(
+            self,
+            *,
+            border: str = "#FF3030",
+            fill: QColor | None = None,
+        ) -> None:
+            window_type = Qt.WindowType
+            flags = (
+                window_type.FramelessWindowHint
+                | window_type.Tool
+                | window_type.WindowStaysOnTopHint
+            )
+            transparent_input = getattr(window_type, "WindowTransparentForInput", 0)
+            if transparent_input:
+                flags |= transparent_input
+            super().__init__(None, flags)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._border = QColor(border)
+            self._fill = fill if fill is not None else QColor(255, 48, 48, 220)
+            self._border_width = 6
+            self.hide()
+
+        def update_roi(self, rect: WindowRect | None) -> None:
+            if rect is None or rect.width <= 0 or rect.height <= 0:
+                self.hide()
+                return
+            self.setGeometry(QRect(rect.left, rect.top, rect.width, rect.height))
+            self.show()
+            self.raise_()
+            self.update()
+
+        def paintEvent(self, event: QPaintEvent) -> None:
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            pen = QPen(self._border)
+            pen.setWidth(self._border_width)
+            painter.setPen(pen)
+            painter.setBrush(self._fill)
+            inset = max(1, self._border_width // 2)
+            painter.drawRect(self.rect().adjusted(inset, inset, -inset - 1, -inset - 1))
+            painter.end()
+
+
     class _QtHudWindowImpl:
         active_display_mode = "qt"
 
@@ -2436,6 +2502,10 @@ if QApplication is not None:
             self._attached = False
             self._last_rect: WindowRect | None = None
             self._hud_hidden_by_follow = False
+            self._header_roi_demo_enabled = _env_flag(
+                HUD_UIA_ROI_DEMO_ENV,
+                default=True,
+            )
             self.locator = CodexWindowLocator()
             try:
                 self.locator.set_dpi_aware()
@@ -2477,6 +2547,17 @@ if QApplication is not None:
                 on_click_priority=self._mark_click_priority,
                 on_pointer_priority=self._mark_pointer_priority,
                 on_geometry_changed=self._remember_panel_geometry,
+            )
+            self._header_roi_overlay: _HeaderRoiDemoWidget | None = (
+                _HeaderRoiDemoWidget() if self._header_roi_demo_enabled else None
+            )
+            self._bottom_roi_overlay: _HeaderRoiDemoWidget | None = (
+                _HeaderRoiDemoWidget(
+                    border="#178BFF",
+                    fill=QColor(23, 139, 255, 220),
+                )
+                if self._header_roi_demo_enabled
+                else None
             )
             self._apply_theme_tokens(self._theme_tokens)
             self._place_windows()
@@ -2577,6 +2658,16 @@ if QApplication is not None:
                 self._settings_dialog.close()
                 self._settings_dialog.deleteLater()
                 self._settings_dialog = None
+            if self._header_roi_overlay is not None:
+                self._header_roi_overlay.hide()
+                self._header_roi_overlay.close()
+                self._header_roi_overlay.deleteLater()
+                self._header_roi_overlay = None
+            if self._bottom_roi_overlay is not None:
+                self._bottom_roi_overlay.hide()
+                self._bottom_roi_overlay.close()
+                self._bottom_roi_overlay.deleteLater()
+                self._bottom_roi_overlay = None
             for window in (self.top_window, self.request_window):
                 window.hide()
                 window.close()
@@ -2877,6 +2968,13 @@ if QApplication is not None:
             placement = self._placement(target)
             width = self._attached_panel_width(target, anchor_width, anchor_source)
             if (
+                target == "top"
+                and placement.relative_x_ratio is not None
+                and placement.relative_y_ratio is not None
+            ):
+                x = rect.left + int(round(rect.width * placement.relative_x_ratio))
+                y = rect.top + int(round(rect.height * placement.relative_y_ratio))
+            elif (
                 placement.anchor_x_ratio is not None
                 and placement.anchor_y_ratio is not None
                 and (
@@ -2888,10 +2986,7 @@ if QApplication is not None:
                     round(anchor_metric_width * float(placement.anchor_x_ratio))
                 )
                 if target == "top":
-                    if expanded and placement.relative_y_ratio is not None:
-                        y = rect.top + int(round(rect.height * placement.relative_y_ratio))
-                    else:
-                        y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
+                    y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
                 else:
                     if placement.relative_bottom_ratio is not None:
                         bottom = int(round(rect.height * placement.relative_bottom_ratio))
@@ -2983,19 +3078,56 @@ if QApplication is not None:
         def _place_windows(self) -> None:
             top_relative_saved = self._has_saved_relative_position("top")
             request_relative_saved = self._has_saved_relative_position("request")
+            top_preplaced = False
+            request_preplaced = False
             if top_relative_saved:
                 self.top_window._manual_positioned = False
             if request_relative_saved:
                 self.request_window._manual_positioned = False
-            if (top_relative_saved or request_relative_saved) and self._follow_codex_window():
-                return
+            if top_relative_saved or request_relative_saved:
+                try:
+                    rect = self.locator.find()
+                except Exception:
+                    rect = None
+                if rect is not None and not getattr(rect, "minimized", False):
+                    self._attached = True
+                    self._last_rect = rect
+                    self._last_anchor_metrics.clear()
+                    if top_relative_saved:
+                        x, y, width, _height = self._attached_panel_geometry("top", rect, self.top_window.expanded)
+                        self.top_window.resize(width, self.top_window.height())
+                        self.top_window.move(x, y)
+                        self.top_window._manual_positioned = True
+                        top_preplaced = True
+                    if request_relative_saved:
+                        x, y, width, _height = self._attached_panel_geometry(
+                            "request",
+                            rect,
+                            self.request_window.expanded,
+                        )
+                        self.request_window.resize(width, self.request_window.height())
+                        self.request_window.move(x, y)
+                        self.request_window._manual_positioned = True
+                        request_preplaced = True
+                    try:
+                        active = self.locator.is_active(rect, self._hud_hwnds())
+                    except Exception:
+                        active = True
+                    if not active:
+                        self._hide_for_follow()
+                    if top_relative_saved and request_relative_saved:
+                        return
+                elif self._follow_codex_window():
+                    return
 
             top_saved = (
-                self.settings.top.absolute_x is not None
+                not top_relative_saved
+                and self.settings.top.absolute_x is not None
                 and self.settings.top.absolute_y is not None
             )
             request_saved = (
-                self.settings.request.absolute_x is not None
+                not request_relative_saved
+                and self.settings.request.absolute_x is not None
                 and self.settings.request.absolute_y is not None
             )
             top_placement = self.settings.top
@@ -3017,11 +3149,11 @@ if QApplication is not None:
 
             screen = self.app.primaryScreen()
             geometry = screen.availableGeometry() if screen is not None else QRect(0, 0, 1280, 720)
-            if not top_saved:
+            if not top_saved and not top_preplaced:
                 top_x = geometry.left() + max(0, (geometry.width() - self.top_window.width()) // 2)
                 top_y = geometry.top() + QT_HUD_MARGIN
                 self.top_window.move(top_x, top_y)
-            if not request_saved:
+            if not request_saved and not request_preplaced:
                 req_x = geometry.right() - self.request_window.width() - QT_HUD_MARGIN
                 req_y = geometry.bottom() - self.request_window.height() - QT_HUD_MARGIN
                 self.request_window.move(max(geometry.left(), req_x), max(geometry.top(), req_y))
@@ -3076,6 +3208,8 @@ if QApplication is not None:
                 active = True
             if not active:
                 self._attached = True
+                self._last_rect = rect
+                self._last_anchor_metrics.clear()
                 self._hide_for_follow()
                 return False
             self.attach_to_rect(rect)
@@ -3084,6 +3218,10 @@ if QApplication is not None:
         def _hud_hwnds(self) -> set[int]:
             hwnds: set[int] = set()
             windows: list[QWidget] = [self.top_window, self.request_window]
+            if self._header_roi_overlay is not None:
+                windows.append(self._header_roi_overlay)
+            if self._bottom_roi_overlay is not None:
+                windows.append(self._bottom_roi_overlay)
             if self._settings_dialog is not None:
                 windows.append(self._settings_dialog)
             for window in windows:
@@ -3098,11 +3236,15 @@ if QApplication is not None:
         def _hide_for_follow(self) -> None:
             self.top_window.hide()
             self.request_window.hide()
+            self._hide_header_roi_demo()
+            self._hide_bottom_roi_demo()
             self._hud_hidden_by_follow = True
 
         def _enter_free_mode(self) -> None:
             self._attached = False
             self._last_rect = None
+            self._hide_header_roi_demo()
+            self._hide_bottom_roi_demo()
             self._hud_hidden_by_follow = False
             if self._should_show_hud():
                 if not self.top_window.isVisible():
@@ -3177,6 +3319,46 @@ if QApplication is not None:
                     self.top_window.show()
                 if not self.request_window.isVisible():
                     self.request_window.show()
+            self._sync_header_roi_demo(rect)
+            self._sync_bottom_roi_demo(rect)
+
+        def _sync_header_roi_demo(self, rect: WindowRect | None) -> None:
+            overlay = self._header_roi_overlay
+            if overlay is None:
+                return
+            if rect is None or getattr(rect, "minimized", False):
+                overlay.update_roi(None)
+                return
+            try:
+                roi = self.locator.header_roi_geometry(rect)
+            except Exception:
+                roi = None
+            overlay.update_roi(roi)
+
+        def _hide_header_roi_demo(self) -> None:
+            overlay = self._header_roi_overlay
+            if overlay is None:
+                return
+            overlay.update_roi(None)
+
+        def _sync_bottom_roi_demo(self, rect: WindowRect | None) -> None:
+            overlay = self._bottom_roi_overlay
+            if overlay is None:
+                return
+            if rect is None or getattr(rect, "minimized", False):
+                overlay.update_roi(None)
+                return
+            try:
+                roi = self.locator.bottom_roi_geometry(rect)
+            except Exception:
+                roi = None
+            overlay.update_roi(roi)
+
+        def _hide_bottom_roi_demo(self) -> None:
+            overlay = self._bottom_roi_overlay
+            if overlay is None:
+                return
+            overlay.update_roi(None)
 
 
 def _qt_hex_rgb(value: object, fallback: str = "#000000") -> tuple[int, int, int]:
