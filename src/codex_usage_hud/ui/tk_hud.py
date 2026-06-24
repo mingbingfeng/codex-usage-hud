@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
@@ -182,6 +183,7 @@ TOP_HUD_EXPAND_ANIMATION_MS = 190
 TOP_HUD_ANIMATION_FRAME_MS = 16
 TOP_HUD_ANIMATION_REFRESH_DELAY_MS = 220
 TOP_HUD_DEFERRED_RENDER_MS = 32
+EVENT_DOCK_PUMP_MS = 8
 
 
 def _hud_theme_signature(tokens: HudThemeTokens) -> tuple[tuple[str, object], ...]:
@@ -3323,7 +3325,11 @@ def _set_native_window_geometry(
         return False
 
 
-def _make_window_click_through(window: tk.Tk | tk.Toplevel) -> bool:
+def _make_window_click_through(
+    window: tk.Tk | tk.Toplevel,
+    *,
+    topmost: bool = True,
+) -> bool:
     if not sys.platform.startswith("win"):
         return False
     try:
@@ -3369,10 +3375,11 @@ def _make_window_click_through(window: tk.Tk | tk.Toplevel) -> bool:
         ex_style = int(get_window_long(wintypes.HWND(native_hwnd), -20) or 0)
         target_style = ex_style | required_style
         set_window_long(wintypes.HWND(native_hwnd), -20, long_type(target_style))
+        hwnd_insert_after = -1 if topmost else 0  # HWND_TOPMOST or HWND_TOP
         positioned = bool(
             user32.SetWindowPos(
                 wintypes.HWND(native_hwnd),
-                wintypes.HWND(-1),  # HWND_TOPMOST
+                wintypes.HWND(hwnd_insert_after),
                 0,
                 0,
                 0,
@@ -3380,8 +3387,7 @@ def _make_window_click_through(window: tk.Tk | tk.Toplevel) -> bool:
                 0x0001
                 | 0x0002
                 | 0x0010
-                | 0x0020
-                | 0x0040,  # NOSIZE | NOMOVE | NOACTIVATE | FRAMECHANGED | SHOWWINDOW
+                | 0x0020,  # NOSIZE | NOMOVE | NOACTIVATE | FRAMECHANGED
             )
         )
         applied_style = int(get_window_long(wintypes.HWND(native_hwnd), -20) or 0)
@@ -3402,6 +3408,7 @@ class _HeaderRoiDemoOverlay:
         alpha: float = HUD_UIA_ROI_DEMO_ALPHA,
         border_width: int = HUD_UIA_ROI_DEMO_BORDER_WIDTH,
         log_prefix: str = "header_roi_demo_overlay",
+        topmost: bool = True,
     ) -> None:
         del outside_color
         self._border = border
@@ -3409,10 +3416,12 @@ class _HeaderRoiDemoOverlay:
         self._alpha = alpha
         self._border_width = max(1, int(border_width))
         self._log_prefix = log_prefix
+        self._topmost = bool(topmost)
         self._window = tk.Toplevel(owner)
         self._window.title(title)
+        self._window.withdraw()
         self._window.overrideredirect(True)
-        self._window.attributes("-topmost", True)
+        self._window.attributes("-topmost", self._topmost)
         self._window.configure(bg=self._fill)
         self._frame = tk.Frame(
             self._window,
@@ -3426,12 +3435,14 @@ class _HeaderRoiDemoOverlay:
         self._visible = False
         self._last_hidden_reason = ""
         self._click_through = False
-        self._window.withdraw()
         try:
             self._window.update_idletasks()
         except tk.TclError:
             pass
-        self._click_through = _make_window_click_through(self._window)
+        self._click_through = _make_window_click_through(
+            self._window,
+            topmost=self._topmost,
+        )
         _HUD_GEOMETRY_LOGGER.info(
             "%s_created hwnd=%s click_through=%s alpha=%.2f",
             self._log_prefix,
@@ -3487,7 +3498,10 @@ class _HeaderRoiDemoOverlay:
             self._window.deiconify()
             self._window.lift()
             self._window.update_idletasks()
-            self._click_through = _make_window_click_through(self._window)
+            self._click_through = _make_window_click_through(
+                self._window,
+                topmost=bool(self._topmost),
+            )
         except tk.TclError as exc:
             _HUD_GEOMETRY_LOGGER.info(
                 "%s_show_failed "
@@ -3587,6 +3601,9 @@ class CodexWindowLocator:
     def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
         return self._impl.bottom_roi_geometry(rect)
 
+    def native_tracker(self) -> object | None:
+        return self._impl.native_tracker()
+
 
 class _BaseLocator:
     def set_dpi_aware(self) -> None:
@@ -3623,6 +3640,9 @@ class _BaseLocator:
 
     def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
         del rect
+        return None
+
+    def native_tracker(self) -> object | None:
         return None
 
 
@@ -4103,6 +4123,11 @@ class _WindowsCodexLocator(_BaseLocator):
             bottom=int(roi.bottom),
             minimized=False,
         )
+
+    def native_tracker(self) -> object | None:
+        if self._tracker is None or not getattr(self._tracker, "enabled", False):
+            return None
+        return self._tracker
 
     def _cdp_anchor_geometry(
         self,
@@ -5970,10 +5995,22 @@ class TokenHudWindow:
         self._top_update_buttons: list[tk.Button] = []
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
+        self._event_dock_requested = self._tk_event_dock_requested()
+        self._event_dock: object | None = None
+        self._event_dock_started = False
+        self._event_dock_sync_job: str | None = None
+        self._event_dock_pump_job: str | None = None
+        self._event_dock_signal = threading.Event()
+        self._event_dock_reason_lock = threading.Lock()
+        self._event_dock_last_reason = ""
+        self._event_dock_owner_signature: tuple[object, ...] | None = None
+        self._event_dock_hwnd_signature: dict[str, tuple[int, int]] = {}
+        self._event_dock_owner_disabled_logged = False
         _HUD_GEOMETRY_LOGGER.info(
-            "hud_started header_roi_demo=%s follow_ms=%s settings_path=%s log_path=%s",
+            "hud_started header_roi_demo=%s follow_ms=%s event_dock=%s settings_path=%s log_path=%s",
             self._use_header_roi_demo,
             self.follow_ms,
+            self._event_dock_requested,
             self.settings_store.path,
             self._geometry_log_path,
         )
@@ -5999,8 +6036,9 @@ class TokenHudWindow:
         outside_color = _window_outside_color()
         self.root = _create_tk_root()
         self.root.title("codex-usage-hud")
+        self.root.withdraw()
         self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
+        self.root.attributes("-topmost", not self._event_dock_requested)
         self.root.configure(bg=outside_color)
         self._configure_transparent_window(self.root, outside_color)
         self.root.bind("<Escape>", self._close)
@@ -6088,15 +6126,20 @@ class TokenHudWindow:
 
         self.request_root = tk.Toplevel(self.root)
         self.request_root.title("codex-usage-hud request")
+        self.request_root.withdraw()
         self.request_root.overrideredirect(True)
-        self.request_root.attributes("-topmost", True)
+        self.request_root.attributes("-topmost", not self._event_dock_requested)
         self.request_root.configure(bg=outside_color)
         self._configure_transparent_window(self.request_root, outside_color)
         self.request_root.bind("<Escape>", self._close)
         self._bind_window_interactions(self.request_root, "request")
         self._rebuild_request_ui()
         self._header_roi_overlay = (
-            _HeaderRoiDemoOverlay(self.root, outside_color)
+            _HeaderRoiDemoOverlay(
+                self.root,
+                outside_color,
+                topmost=not self._event_dock_requested,
+            )
             if self._use_header_roi_demo
             else None
         )
@@ -6110,18 +6153,131 @@ class TokenHudWindow:
                 alpha=HUD_UIA_BOTTOM_ROI_DEMO_ALPHA,
                 border_width=HUD_UIA_BOTTOM_ROI_DEMO_BORDER_WIDTH,
                 log_prefix="bottom_roi_demo_overlay",
+                topmost=not self._event_dock_requested,
             )
             if self._use_header_roi_demo
             else None
         )
         self._set_alpha(self.root, 1.0)
         self._set_alpha(self.request_root, 0.74)
+        self._flush_native_window_handles()
+        self._event_dock_started = self._start_event_dock()
+        if self._event_dock_active():
+            self._schedule_event_dock_pump()
+        if self._event_dock_requested and not self._owner_z_order_active():
+            self._restore_topmost_fallback()
         self._apply_free_defaults()
         self._schedule_settings_dialog_prewarm()
         if self.hide_until_attached:
             self._enter_tombstone("waiting")
+        if self.hide_until_attached or self._event_dock_active():
             self.sync_codex_window()
-        self._follow_job = self.root.after(self.follow_ms, self._follow_codex_window)
+        else:
+            self._ensure_hud_visible("initial")
+        if not self._event_dock_active():
+            self._follow_job = self.root.after(self.follow_ms, self._follow_codex_window)
+        else:
+            _HUD_GEOMETRY_LOGGER.info(
+                "event_dock_started mode=tk polling=disabled owner_binding=%s",
+                self._owner_z_order_active(),
+            )
+
+    @staticmethod
+    def _tk_event_dock_requested() -> bool:
+        if not sys.platform.startswith("win"):
+            return False
+        return _env_flag("CODEX_USAGE_HUD_EVENT_DOCK", default=True)
+
+    def _owner_z_order_active(self) -> bool:
+        if not self._event_dock_active():
+            return False
+        return bool(getattr(self._event_dock, "owner_binding_active", False))
+
+    def _event_dock_active(self) -> bool:
+        return bool(
+            self._event_dock_started
+            and self._event_dock is not None
+            and getattr(self._event_dock, "active", False)
+        )
+
+    def _start_event_dock(self) -> bool:
+        if not self._event_dock_requested:
+            return False
+        try:
+            from ..platforms.windows_event_dock import (
+                WindowsEventDockBridge,
+                event_dock_enabled_from_env,
+                event_dock_owner_binding_enabled_from_env,
+            )
+        except Exception as exc:
+            _HUD_GEOMETRY_LOGGER.info("event_dock_unavailable mode=tk error=%s", exc)
+            return False
+        if not event_dock_enabled_from_env(default=True):
+            return False
+        try:
+            self._event_dock = WindowsEventDockBridge(
+                on_event=self._handle_event_dock_event,
+                hud_hwnds=self._hud_hwnds,
+                enable_owner_binding=event_dock_owner_binding_enabled_from_env(
+                    default=False,
+                ),
+            )
+            return bool(self._event_dock.start())
+        except Exception as exc:
+            self._event_dock = None
+            _HUD_GEOMETRY_LOGGER.info("event_dock_start_failed mode=tk error=%s", exc)
+            return False
+
+    def _flush_native_window_handles(self) -> None:
+        for window in (self.root, self.request_root):
+            try:
+                window.update_idletasks()
+                int(window.winfo_id())
+            except Exception:
+                continue
+
+    def _restore_topmost_fallback(self) -> None:
+        for window in (self.root, self.request_root):
+            self._set_window_topmost(window, True)
+        for overlay in (self._header_roi_overlay, self._bottom_roi_overlay):
+            if overlay is not None:
+                self._set_window_topmost(overlay.window, True)
+        _HUD_GEOMETRY_LOGGER.info("event_dock_topmost_fallback mode=tk")
+
+    def _handle_event_dock_event(self, reason: str) -> None:
+        with self._event_dock_reason_lock:
+            self._event_dock_last_reason = str(reason or "event")
+        self._event_dock_signal.set()
+
+    def _schedule_event_dock_pump(self) -> None:
+        if self._event_dock_pump_job is not None:
+            return
+        try:
+            self._event_dock_pump_job = self.root.after(
+                EVENT_DOCK_PUMP_MS,
+                self._pump_event_dock_events,
+            )
+        except tk.TclError:
+            self._event_dock_pump_job = None
+            return
+
+    def _pump_event_dock_events(self) -> None:
+        self._event_dock_pump_job = None
+        if not self._event_dock_active():
+            return
+        if self._event_dock_signal.is_set():
+            self._event_dock_signal.clear()
+            with self._event_dock_reason_lock:
+                reason = self._event_dock_last_reason or "event"
+            self._sync_event_dock(reason)
+        self._schedule_event_dock_pump()
+
+    def _sync_event_dock(self, reason: str = "event") -> None:
+        self._event_dock_sync_job = None
+        if self._move_target or self._resize_target or self._top_animation_active():
+            return
+        _HUD_GEOMETRY_LOGGER.debug("event_dock_sync reason=%s", reason)
+        self.sync_codex_window()
 
     def _maybe_apply_live_theme(self) -> None:
         snapshot = self._theme_probe.snapshot()
@@ -6760,7 +6916,7 @@ class TokenHudWindow:
         dialog.withdraw()
         dialog.title(f"codex-usage-hud v{__version__} 设置")
         dialog.configure(bg=HUD_BG)
-        dialog.attributes("-topmost", True)
+        dialog.attributes("-topmost", not self._owner_z_order_active())
         dialog.overrideredirect(True)
         dialog.geometry(
             self._centered_settings_geometry(
@@ -6881,6 +7037,11 @@ class TokenHudWindow:
                 dialog.deiconify()
             except tk.TclError:
                 return
+            if self._event_dock is not None and self._last_rect is not None and self._last_rect.hwnd:
+                try:
+                    self._event_dock.bind_to_owner(int(self._last_rect.hwnd), self._hud_hwnds())
+                except Exception:
+                    pass
             if self._settings_active_tab == tab == "settings" and self._settings_dialog_populated():
                 self._refresh_settings_dialog_values()
             elif self._settings_dialog_populated():
@@ -7024,7 +7185,7 @@ class TokenHudWindow:
             if not dialog.winfo_exists():
                 return
             dialog.lift()
-            dialog.attributes("-topmost", True)
+            dialog.attributes("-topmost", not self._owner_z_order_active())
         except tk.TclError:
             return
 
@@ -9411,6 +9572,8 @@ class TokenHudWindow:
     def _follow_codex_window(self) -> None:
         self._follow_job = None
         self.sync_codex_window()
+        if self._event_dock_active():
+            return
         try:
             self._follow_job = self.root.after(
                 self._next_follow_delay(),
@@ -9446,17 +9609,58 @@ class TokenHudWindow:
     def _attach_to_rect(self, rect: WindowRect) -> None:
         self._attached = True
         self._last_rect = rect
-        active = self.locator.is_active(rect, self._hud_hwnds())
-        if not active:
-            self._enter_tombstone("inactive")
-            return
-        self._exit_tombstone("attached")
+        if self._event_dock is not None and rect.hwnd:
+            try:
+                self._event_dock.bind_to_owner(int(rect.hwnd), self._hud_hwnds())
+                if self._owner_z_order_active():
+                    self._log_event_dock_owner_state(int(rect.hwnd))
+                elif not self._event_dock_owner_disabled_logged:
+                    self._event_dock_owner_disabled_logged = True
+                    _HUD_GEOMETRY_LOGGER.info(
+                        "event_dock_owner_binding_disabled mode=tk"
+                    )
+            except Exception:
+                pass
+        if not self._owner_z_order_active():
+            active = self.locator.is_active(rect, self._hud_hwnds())
+            if not active:
+                self._enter_tombstone("inactive")
+                return
         self._apply_focus_state(True)
         self._set_alpha(self.root, 1.0)
         self._set_alpha(self.request_root, 0.94 if self.request_expanded else 0.74)
         self._apply_geometry()
         self._sync_header_roi_demo(rect)
         self._sync_bottom_roi_demo(rect)
+        self._exit_tombstone("attached")
+
+    def _log_event_dock_owner_state(self, owner_hwnd: int) -> None:
+        event_dock = self._event_dock
+        manager = getattr(event_dock, "window_manager", None)
+        if manager is None:
+            return
+        try:
+            native_owner = int(manager.native_root(int(owner_hwnd or 0)) or 0)
+            hud_rows: list[tuple[int, int, int]] = []
+            for raw_hwnd in sorted(self._hud_hwnds()):
+                native_hwnd = int(manager.native_root(int(raw_hwnd or 0)) or 0)
+                bound_owner = int(manager.owner_for(native_hwnd) or 0)
+                hud_rows.append((int(raw_hwnd), native_hwnd, bound_owner))
+        except Exception:
+            return
+        signature: tuple[object, ...] = (native_owner, tuple(hud_rows))
+        if signature == self._event_dock_owner_signature:
+            return
+        self._event_dock_owner_signature = signature
+        hud_text = ";".join(
+            f"{raw}->{native}:owner={bound}"
+            for raw, native, bound in hud_rows
+        )
+        _HUD_GEOMETRY_LOGGER.info(
+            "event_dock_owner_state owner=%s huds=%s",
+            native_owner,
+            hud_text,
+        )
 
     def _enter_free_mode(self) -> None:
         self._hide_header_roi_demo()
@@ -9538,6 +9742,8 @@ class TokenHudWindow:
         if self._focus_state_active is active:
             return
         self._focus_state_active = active
+        if self._owner_z_order_active():
+            return
         windows: list[tk.Tk | tk.Toplevel] = [self.root, self.request_root]
         for window in windows:
             self._set_window_topmost(window, active)
@@ -9652,10 +9858,57 @@ class TokenHudWindow:
         """Avoid asking Tk to re-apply identical screen geometry every frame."""
         if self._last_applied_geometry.get(target) == geometry:
             return
-        if _set_native_window_geometry(window, geometry):
+        x, y, width, height = geometry
+        if self._event_dock is not None and self._event_dock_active():
+            raw_hwnd = 0
+            native_hwnd = 0
+            try:
+                raw_hwnd = int(window.winfo_id())
+                manager = getattr(self._event_dock, "window_manager", None)
+                if manager is not None:
+                    native_hwnd = int(manager.native_root(raw_hwnd) or 0)
+                else:
+                    native_hwnd = raw_hwnd
+                hwnd_signature = (raw_hwnd, native_hwnd)
+                if self._event_dock_hwnd_signature.get(target) != hwnd_signature:
+                    self._event_dock_hwnd_signature[target] = hwnd_signature
+                    _HUD_GEOMETRY_LOGGER.info(
+                        "event_dock_hwnd target=%s raw=%s native=%s geometry=(%s,%s,%s,%s)",
+                        target,
+                        raw_hwnd,
+                        native_hwnd,
+                        int(x),
+                        int(y),
+                        int(width),
+                        int(height),
+                    )
+                moved = self._event_dock.set_hud_geometry(
+                    raw_hwnd,
+                    int(x),
+                    int(y),
+                    int(width),
+                    int(height),
+                )
+            except Exception:
+                moved = False
+            if moved:
+                backend = "native-event-dock"
+            else:
+                _HUD_GEOMETRY_LOGGER.info(
+                    "event_dock_move_failed target=%s raw=%s native=%s geometry=(%s,%s,%s,%s)",
+                    target,
+                    raw_hwnd,
+                    native_hwnd,
+                    int(x),
+                    int(y),
+                    int(width),
+                    int(height),
+                )
+                window.geometry(f"{width}x{height}+{x}+{y}")
+                backend = "tk-geometry"
+        elif _set_native_window_geometry(window, geometry):
             backend = "native-setwindowpos"
         else:
-            x, y, width, height = geometry
             window.geometry(f"{width}x{height}+{x}+{y}")
             backend = "tk-geometry"
         if self._last_geometry_backend.get(target) != backend:
@@ -10280,6 +10533,14 @@ class TokenHudWindow:
         """Destroy both HUD windows and cancel Tk timers owned by the widgets."""
         if not self._exit_reason:
             self._exit_reason = reason
+        event_dock = getattr(self, "_event_dock", None)
+        if event_dock is not None:
+            try:
+                event_dock.stop()
+            except Exception:
+                pass
+            self._event_dock = None
+            self._event_dock_started = False
         for job in (
             self._top_rebuild_job,
             self._top_core_prewarm_job,
@@ -10291,6 +10552,8 @@ class TokenHudWindow:
             self._settings_loading_anim_job,
             self._settings_update_poll_job,
             self._follow_job,
+            getattr(self, "_event_dock_sync_job", None),
+            getattr(self, "_event_dock_pump_job", None),
         ):
             if job is None:
                 continue
@@ -10311,6 +10574,8 @@ class TokenHudWindow:
         self._settings_loading_anim_job = None
         self._settings_update_poll_job = None
         self._follow_job = None
+        self._event_dock_sync_job = None
+        self._event_dock_pump_job = None
         header_roi_overlay = getattr(self, "_header_roi_overlay", None)
         if header_roi_overlay is not None:
             header_roi_overlay.close()

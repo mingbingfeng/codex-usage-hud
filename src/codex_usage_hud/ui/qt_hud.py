@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 import json
+import os
 import sys
 import time
 from typing import Any
@@ -48,6 +49,7 @@ QT_HUD_POINTER_PRIORITY_MS = 120
 QT_HUD_POINTER_REFRESH_DELAY_MS = 75
 QT_HUD_TOP_STACK_WIDTH = 420
 QT_HUD_SAME_HWND_RECT_JITTER_PX = 48
+QT_HUD_EVENT_DOCK_ENV = "CODEX_USAGE_HUD_EVENT_DOCK"
 QT_HUD_ACTIVITY_TRAIL_ROW_HEIGHT = 38
 QT_HUD_ACTIVITY_TRAIL_VISIBLE_ROWS = 4
 QT_HUD_FOLLOW_MS = 120
@@ -86,7 +88,7 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 }
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
-    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Slot
+    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Signal, Slot
     from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -645,11 +647,10 @@ if QApplication is not None:
             self._animation: QPropertyAnimation | None = None
             self._stack = QStackedLayout()
 
-            self.setWindowFlags(
-                Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowStaysOnTopHint
-                | Qt.WindowType.Tool
-            )
+            flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+            if not sys.platform.startswith("win"):
+                flags |= Qt.WindowType.WindowStaysOnTopHint
+            self.setWindowFlags(flags)
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             self.setMouseTracking(True)
             self.setMinimumWidth(min(width, 320))
@@ -1897,11 +1898,10 @@ if QApplication is not None:
             self._title_drag_origin: QPoint | None = None
             self._title_drag_window_origin: QPoint | None = None
             self.setWindowTitle("codex-usage-hud 设置")
-            self.setWindowFlags(
-                Qt.WindowType.Dialog
-                | Qt.WindowType.FramelessWindowHint
-                | Qt.WindowType.WindowStaysOnTopHint
-            )
+            flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
+            if not sys.platform.startswith("win"):
+                flags |= Qt.WindowType.WindowStaysOnTopHint
+            self.setWindowFlags(flags)
             self.setMinimumSize(760, 600)
             self.resize(780, 620)
             layout = QVBoxLayout(self)
@@ -2471,8 +2471,9 @@ if QApplication is not None:
             flags = (
                 window_type.FramelessWindowHint
                 | window_type.Tool
-                | window_type.WindowStaysOnTopHint
             )
+            if not sys.platform.startswith("win"):
+                flags |= window_type.WindowStaysOnTopHint
             transparent_input = getattr(window_type, "WindowTransparentForInput", 0)
             if transparent_input:
                 flags |= transparent_input
@@ -2505,6 +2506,13 @@ if QApplication is not None:
             inset = max(1, self._border_width // 2)
             painter.drawRect(self.rect().adjusted(inset, inset, -inset - 1, -inset - 1))
             painter.end()
+
+
+    class _DockEventEmitter(QObject):
+        dock_event = Signal(str)
+
+        def emit_event(self, reason: str) -> None:
+            self.dock_event.emit(str(reason or "event"))
 
 
     class _QtHudWindowImpl:
@@ -2542,6 +2550,10 @@ if QApplication is not None:
                 self.locator.set_dpi_aware()
             except Exception:
                 pass
+            self._event_dock: Any | None = None
+            self._event_dock_started = False
+            self._dock_event_emitter = _DockEventEmitter()
+            self._dock_event_emitter.dock_event.connect(self._handle_dock_event)
             self.exit_reason = ""
             self._mode_switch_request = ""
             self._restart_codex_for_renderer = False
@@ -2594,6 +2606,7 @@ if QApplication is not None:
                 else None
             )
             self._apply_theme_tokens(self._theme_tokens)
+            self._event_dock_started = self._start_event_dock()
             self._place_windows()
             if self._should_show_hud():
                 self.top_window.show()
@@ -2603,9 +2616,10 @@ if QApplication is not None:
             self._clock_timer.start(1000)
             self._follow_timer = QTimer()
             self._follow_timer.timeout.connect(self._follow_codex_window)
-            self._follow_timer.start(
-                max(50, min(QT_HUD_FOLLOW_MS, self.tombstone_follow_ms))
-            )
+            if not self._owner_z_order_active():
+                self._follow_timer.start(
+                    max(50, min(QT_HUD_FOLLOW_MS, self.tombstone_follow_ms))
+                )
 
         @property
         def mode_switch_request(self) -> str:
@@ -2614,6 +2628,44 @@ if QApplication is not None:
         @property
         def restart_codex_for_renderer(self) -> bool:
             return self._restart_codex_for_renderer
+
+        def _start_event_dock(self) -> bool:
+            if not sys.platform.startswith("win"):
+                return False
+            if os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen":
+                return False
+            if not _env_flag(QT_HUD_EVENT_DOCK_ENV, default=True):
+                return False
+            try:
+                from ..platforms.windows_event_dock import (
+                    WindowsEventDockBridge,
+                    event_dock_enabled_from_env,
+                )
+            except Exception:
+                return False
+            if not event_dock_enabled_from_env(default=True):
+                return False
+            try:
+                self._event_dock = WindowsEventDockBridge(
+                    on_event=self._dock_event_emitter.emit_event,
+                    hud_hwnds=self._hud_hwnds,
+                )
+                return bool(self._event_dock.start())
+            except Exception:
+                self._event_dock = None
+                return False
+
+        def _owner_z_order_active(self) -> bool:
+            return bool(
+                self._event_dock_started
+                and self._event_dock is not None
+                and getattr(self._event_dock, "active", False)
+            )
+
+        def _handle_dock_event(self, _reason: str) -> None:
+            if self._geometry_interaction_active():
+                return
+            self._follow_codex_window()
 
         def should_defer_background_work(self) -> bool:
             return self._manual_input_active()
@@ -2690,6 +2742,13 @@ if QApplication is not None:
         def close(self, reason: str = "") -> None:
             if reason and not self.exit_reason:
                 self.exit_reason = reason
+            if self._event_dock is not None:
+                try:
+                    self._event_dock.stop()
+                except Exception:
+                    pass
+                self._event_dock = None
+                self._event_dock_started = False
             for timer in (getattr(self, "_clock_timer", None), getattr(self, "_follow_timer", None)):
                 if timer is not None:
                     timer.stop()
@@ -2721,6 +2780,11 @@ if QApplication is not None:
             if not self._settings_dialog.isVisible():
                 self._center_settings_dialog()
             self._settings_dialog.show()
+            if self._event_dock is not None and self._last_rect is not None and self._last_rect.hwnd:
+                try:
+                    self._event_dock.bind_to_owner(int(self._last_rect.hwnd), self._hud_hwnds())
+                except Exception:
+                    pass
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
 
@@ -2820,7 +2884,8 @@ if QApplication is not None:
                 self._settings_dialog.setStyleSheet(stylesheet)
 
         def _refresh_latest_payload(self) -> None:
-            self._follow_codex_window()
+            if not self._owner_z_order_active():
+                self._follow_codex_window()
             if self._latest_payload is not None:
                 self._apply_payload(self._latest_payload.to_json())
             if self._should_show_hud():
@@ -3024,12 +3089,13 @@ if QApplication is not None:
                 rect = None
             if rect is not None and not getattr(rect, "minimized", False):
                 self.attach_to_rect(rect)
-                try:
-                    active = self.locator.is_active(rect, self._hud_hwnds())
-                except Exception:
-                    active = True
-                if not active:
-                    self._hide_for_follow()
+                if not self._owner_z_order_active():
+                    try:
+                        active = self.locator.is_active(rect, self._hud_hwnds())
+                    except Exception:
+                        active = True
+                    if not active:
+                        self._hide_for_follow()
                 return
 
             screen = self.app.primaryScreen()
@@ -3105,15 +3171,16 @@ if QApplication is not None:
                 self._hide_for_follow()
                 self._attached = False
                 return False
-            try:
-                active = self.locator.is_active(rect, self._hud_hwnds())
-            except Exception:
-                active = True
-            if not active:
-                self._attached = True
-                self._last_rect = rect
-                self._hide_for_follow()
-                return False
+            if not self._owner_z_order_active():
+                try:
+                    active = self.locator.is_active(rect, self._hud_hwnds())
+                except Exception:
+                    active = True
+                if not active:
+                    self._attached = True
+                    self._last_rect = rect
+                    self._hide_for_follow()
+                    return False
             self.attach_to_rect(rect)
             return True
 
@@ -3173,6 +3240,11 @@ if QApplication is not None:
         def attach_to_rect(self, rect: WindowRect) -> None:
             self._attached = True
             self._last_rect = rect
+            if self._event_dock is not None and getattr(rect, "hwnd", 0):
+                try:
+                    self._event_dock.bind_to_owner(int(rect.hwnd), self._hud_hwnds())
+                except Exception:
+                    pass
             for target, panel in (("top", self.top_window), ("request", self.request_window)):
                 if not panel._manual_positioned:
                     x, y, width, _height = self._attached_panel_geometry(
@@ -3180,8 +3252,7 @@ if QApplication is not None:
                         rect,
                         panel.expanded,
                     )
-                    panel.resize(width, panel.height())
-                    panel.move(x, y)
+                    self._apply_panel_geometry(panel, x, y, width)
             self._hud_hidden_by_follow = False
             if self._should_show_hud():
                 if not self.top_window.isVisible():
@@ -3190,6 +3261,27 @@ if QApplication is not None:
                     self.request_window.show()
             self._sync_header_roi_demo(rect)
             self._sync_bottom_roi_demo(rect)
+
+        def _apply_panel_geometry(
+            self,
+            panel: "_PanelWindow",
+            x: int,
+            y: int,
+            width: int,
+        ) -> None:
+            height = int(panel.height())
+            panel.resize(int(width), height)
+            panel.move(int(x), int(y))
+            if self._event_dock is None:
+                return
+            try:
+                hwnd = int(panel.winId())
+            except Exception:
+                return
+            try:
+                self._event_dock.set_hud_geometry(hwnd, int(x), int(y), int(width), height)
+            except Exception:
+                return
 
         def _sync_header_roi_demo(self, rect: WindowRect | None) -> None:
             overlay = self._header_roi_overlay
