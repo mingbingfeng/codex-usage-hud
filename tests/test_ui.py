@@ -4240,13 +4240,15 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                     window.locator = _FakeAnchorLocator({"top": first_anchor})
                     window.attach_to_rect(rect)
 
-                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 36))
+                    expected_x = rect.left + int(round(rect.width * float(settings.top.relative_x_ratio or 0.0)))
+                    expected_y = rect.top + int(round(rect.height * float(settings.top.relative_y_ratio or 0.0)))
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (expected_x, expected_y))
                     self.assertTrue(window.top_window._manual_positioned)
 
                     window.locator = _FakeAnchorLocator({"top": second_anchor})
                     window.attach_to_rect(rect)
 
-                    self.assertEqual((window.top_window.x(), window.top_window.y()), (340, 36))
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (expected_x, expected_y))
                 finally:
                     window.close("test")
         finally:

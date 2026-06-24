@@ -2894,6 +2894,13 @@ if QApplication is not None:
             placement = self._placement(target)
             width = self._attached_panel_width(target, anchor_width, anchor_source)
             if (
+                target == "top"
+                and placement.relative_x_ratio is not None
+                and placement.relative_y_ratio is not None
+            ):
+                x = rect.left + int(round(rect.width * placement.relative_x_ratio))
+                y = rect.top + int(round(rect.height * placement.relative_y_ratio))
+            elif (
                 placement.anchor_x_ratio is not None
                 and placement.anchor_y_ratio is not None
                 and (
@@ -2905,10 +2912,7 @@ if QApplication is not None:
                     round(anchor_metric_width * float(placement.anchor_x_ratio))
                 )
                 if target == "top":
-                    if expanded and placement.relative_y_ratio is not None:
-                        y = rect.top + int(round(rect.height * placement.relative_y_ratio))
-                    else:
-                        y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
+                    y = anchor_y + int(round(anchor_height * float(placement.anchor_y_ratio)))
                 else:
                     if placement.relative_bottom_ratio is not None:
                         bottom = int(round(rect.height * placement.relative_bottom_ratio))
