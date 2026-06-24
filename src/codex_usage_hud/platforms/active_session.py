@@ -18,6 +18,7 @@ from .base import BasePlatform
 _LOGGER = logging.getLogger("codex_usage_hud.active_session")
 _LOGGER.addHandler(logging.NullHandler())
 _THREAD_PATH_NEGATIVE_CACHE_SECONDS = 2.0
+_TITLE_PREFIX_MATCH_MIN_CHARS = 8
 
 
 def _session_search_roots(sessions_root: Path) -> tuple[Path, ...]:
@@ -42,6 +43,27 @@ def compact_text(value: Any, limit: int = 28) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)] + "..."
+
+
+def _title_prefix(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    while text.endswith("..."):
+        text = text[:-3].rstrip()
+    return text.rstrip("…").rstrip()
+
+
+def _title_matches(name: str, title: str) -> bool:
+    name_text = _title_prefix(name)
+    title_text = _title_prefix(title)
+    if not name_text or not title_text:
+        return False
+    if name_text == title_text:
+        return True
+    if name_text.startswith(title_text):
+        return len(title_text) >= _TITLE_PREFIX_MATCH_MIN_CHARS
+    if title_text.startswith(name_text):
+        return len(name_text) >= _TITLE_PREFIX_MATCH_MIN_CHARS
+    return False
 
 
 def find_session_file(session_id: str, sessions_root: Path) -> Path | None:
@@ -338,13 +360,20 @@ class ActiveSessionTracker:
             path = self.path_from_thread_id(session_id) if session_id else None
             if path is None and title:
                 path = self.path_for_title(title)
-            if path is not None or title or session_id:
+            display_title = title
+            if session_id and path is not None:
+                display_title = (
+                    self.title_from_session_index_id(session_id)
+                    or self.title_from_thread_id(session_id)
+                    or title
+                )
+            if path is not None or display_title or session_id:
                 with self._lock:
-                    self.latest_title = title or self.latest_title
+                    self.latest_title = display_title or self.latest_title
                     self.latest_path = path
-                    self._mapped_title = title or self._mapped_title
+                    self._mapped_title = display_title or self._mapped_title
                     self.latest_source = (
-                        f"cdp:{compact_text(title or session_id)}"
+                        f"cdp:{compact_text(display_title or session_id)}"
                         if path is not None
                         else "cdp-unmatched"
                     )
@@ -425,17 +454,32 @@ class ActiveSessionTracker:
                     (title,),
                 ).fetchone()
                 if row is None:
-                    row = con.execute(
-                        """
-                        select rollout_path, title
-                        from threads
-                        where length(title) >= 3
-                          and ? like title || '%'
-                        order by archived asc, length(title) desc, updated_at_ms desc, updated_at desc
-                        limit 1
-                        """,
-                        (title,),
-                    ).fetchone()
+                    title_prefix = _title_prefix(title)
+                    row = None
+                    if len(title_prefix) >= _TITLE_PREFIX_MATCH_MIN_CHARS:
+                        row = con.execute(
+                            """
+                            select rollout_path, title
+                            from threads
+                            where length(title) >= ?
+                              and title like ? || '%'
+                            order by archived asc, length(title) desc, updated_at_ms desc, updated_at desc
+                            limit 1
+                            """,
+                            (_TITLE_PREFIX_MATCH_MIN_CHARS, title_prefix),
+                        ).fetchone()
+                    if row is None:
+                        row = con.execute(
+                            """
+                            select rollout_path, title
+                            from threads
+                            where length(title) >= ?
+                              and ? like title || '%'
+                            order by archived asc, length(title) desc, updated_at_ms desc, updated_at desc
+                            limit 1
+                            """,
+                            (_TITLE_PREFIX_MATCH_MIN_CHARS, title),
+                        ).fetchone()
             finally:
                 con.close()
         except sqlite3.Error:
@@ -488,7 +532,7 @@ class ActiveSessionTracker:
                     except json.JSONDecodeError:
                         continue
                     name = str(item.get("thread_name") or "")
-                    if name == title or title.startswith(name) or name.startswith(title):
+                    if _title_matches(name, title):
                         best_id = str(item.get("id") or best_id)
         except OSError:
             return None

@@ -26,7 +26,6 @@ from .renderer_hud import RendererHudPayload, _renderer_theme_payload, payload_f
 from .tk_hud import (
     CodexWindowLocator,
     HudSettingsStore,
-    REQUEST_ANCHOR_BOTTOM,
     WindowRect,
     _visual_anchor_geometry,
 )
@@ -85,7 +84,7 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 }
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
-    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Slot
+    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Slot
     from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -152,13 +151,31 @@ if QApplication is not None:
             self.setWordWrap(wrap)
             self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
             self._copy_text = ""
+            self._elided_text = ""
+            self._elided_expands_hint = role == "title"
 
         def set_elided_text(self, value: object, *, limit: int = 220) -> None:
-            text = _compact(value, limit)
+            self._elided_text = _compact(value, limit)
+            self._sync_elided_text()
+            self.updateGeometry()
+
+        def _sync_elided_text(self) -> None:
             metrics = self.fontMetrics()
-            width = max(40, self.width() or self.sizeHint().width() or 120)
-            self.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, width))
-            self.setToolTip(text)
+            width = max(40, self.width() or super().sizeHint().width() or 120)
+            self.setText(metrics.elidedText(self._elided_text, Qt.TextElideMode.ElideRight, width))
+            self.setToolTip(self._elided_text)
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802
+            if self._elided_text:
+                self._sync_elided_text()
+            super().resizeEvent(event)
+
+        def sizeHint(self) -> QSize:  # noqa: N802
+            hint = super().sizeHint()
+            if self._elided_expands_hint and self._elided_text:
+                width = self.fontMetrics().horizontalAdvance(self._elided_text) + 2
+                hint.setWidth(max(hint.width(), width))
+            return hint
 
         def set_copy_text(self, value: object, *, tooltip: str = "") -> None:
             text = str(value or "").strip()
