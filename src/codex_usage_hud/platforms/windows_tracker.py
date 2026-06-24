@@ -39,10 +39,38 @@ _S_FALSE = 1
 _DWMWA_CLOAKED = 14
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
+_UIA_BUTTON_CONTROL_TYPE_ID = 50000
+_UIA_COMBO_BOX_CONTROL_TYPE_ID = 50003
 _UIA_EDIT_CONTROL_TYPE_ID = 50004
+_UIA_HYPERLINK_CONTROL_TYPE_ID = 50005
+_UIA_IMAGE_CONTROL_TYPE_ID = 50006
+_UIA_MENU_ITEM_CONTROL_TYPE_ID = 50011
+_UIA_TEXT_CONTROL_TYPE_ID = 50020
+_UIA_GROUP_CONTROL_TYPE_ID = 50026
+_UIA_SPLIT_BUTTON_CONTROL_TYPE_ID = 50031
+_UIA_PANE_CONTROL_TYPE_ID = 50033
 _UIA_TITLE_BAR_CONTROL_TYPE_ID = 50037
 
+_UIA_HEADER_CANDIDATE_TYPES = {
+    _UIA_BUTTON_CONTROL_TYPE_ID,
+    _UIA_COMBO_BOX_CONTROL_TYPE_ID,
+    _UIA_GROUP_CONTROL_TYPE_ID,
+    _UIA_HYPERLINK_CONTROL_TYPE_ID,
+    _UIA_IMAGE_CONTROL_TYPE_ID,
+    _UIA_MENU_ITEM_CONTROL_TYPE_ID,
+    _UIA_SPLIT_BUTTON_CONTROL_TYPE_ID,
+}
+_UIA_HEADER_CONTAINER_TYPES = {
+    _UIA_PANE_CONTROL_TYPE_ID,
+    _UIA_TITLE_BAR_CONTROL_TYPE_ID,
+}
+_UIA_BOTTOM_CANDIDATE_TYPES = _UIA_HEADER_CANDIDATE_TYPES | {
+    _UIA_TEXT_CONTROL_TYPE_ID,
+}
+
 _MAX_UIA_NODES = 900
+_MAX_HEADER_ROI_UIA_NODES = 1600
+_MAX_BOTTOM_UIA_NODES = 1600
 _HWND_REVERIFY_SECONDS = 2.0
 _WINDOW_SNAPSHOT_CACHE_SECONDS = 0.02
 _UIA_REFRESH_SECONDS = 0.75
@@ -56,6 +84,28 @@ _TITLE_SAFE_RIGHT_RATIO = 0.14
 _TITLE_SAFE_LEFT_MIN = 154
 _TITLE_SAFE_RIGHT_MIN = 172
 _TITLE_SAFE_MIN_WIDTH = 320
+_HEADER_ROI_MIN_TOP_OFFSET = 20
+_HEADER_ROI_MAX_TOP_OFFSET = 125
+_HEADER_ROI_MAX_HEIGHT = 56
+_HEADER_ROI_MAX_CANDIDATE_HEIGHT = 56
+_HEADER_MAIN_TITLEBAR_LEFT_FALLBACK = 305
+_HEADER_MAIN_TITLEBAR_RIGHT_FALLBACK = 148
+_HEADER_MAIN_TITLEBAR_TOP_INSET = 0
+_HEADER_MAIN_TITLEBAR_BOTTOM_INSET = 7
+_RIGHT_SIDEBAR_MARKERS = (
+    "omx notepad",
+    "priority context",
+    "working memory",
+    "manual",
+    "审查",
+    "终端",
+    "浏览器",
+    "侧边聊天",
+    "ctrl+shift+g",
+    "ctrl+t",
+    "ctrl+p",
+    "ctrl+alt+s",
+)
 
 _INPUT_BOTTOM_MARGIN = 36
 _INPUT_FALLBACK_HEIGHT = 56
@@ -64,6 +114,10 @@ _INPUT_SAFE_RIGHT_RATIO = 0.28
 _INPUT_SAFE_LEFT_MIN = 298
 _INPUT_SAFE_RIGHT_MIN = 345
 _INPUT_SAFE_MIN_WIDTH = 260
+_BOTTOM_CONTROL_SCAN_TOP_RATIO = 0.32
+_BOTTOM_CONTROL_SCAN_TOP_MIN = 180
+_BOTTOM_ROW_MIN_ABOVE_INPUT = 44
+_BOTTOM_ROW_MIN_BELOW_INPUT = 84
 
 _LOGGER_NAME = "codex_usage_hud.windows_tracker"
 _LOG_ENV_PATH = "CODEX_USAGE_HUD_WINDOW_LOG"
@@ -225,6 +279,82 @@ class _UiNode:
         return " ".join([self.name, self.automation_id, self.class_name]).lower()
 
 
+@dataclass(frozen=True)
+class _HeaderButtonCandidate:
+    rect: PhysicalRect
+    control_type: int
+    name: str
+    automation_id: str
+    class_name: str
+    depth: int
+
+    @property
+    def label(self) -> str:
+        return " ".join(
+            value.strip()
+            for value in (self.name, self.automation_id, self.class_name)
+            if value.strip()
+        )
+
+
+@dataclass(frozen=True)
+class _HeaderButtonCollection:
+    ordered: tuple[_HeaderButtonCandidate, ...]
+    right_cluster: tuple[_HeaderButtonCandidate, ...]
+    left_title_actions: tuple[_HeaderButtonCandidate, ...]
+
+
+@dataclass(frozen=True)
+class HeaderRoiSnapshot:
+    status: str
+    hwnd: int = 0
+    source: str = "none"
+    window_rect: PhysicalRect | None = None
+    header_rect: PhysicalRect | None = None
+    roi: PhysicalRect | None = None
+    nodes: int = 0
+    duration_ms: float = 0.0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class BottomRoiSnapshot:
+    status: str
+    hwnd: int = 0
+    source: str = "none"
+    window_rect: PhysicalRect | None = None
+    input_rect: PhysicalRect | None = None
+    roi: PhysicalRect | None = None
+    left_control: PhysicalRect | None = None
+    right_control: PhysicalRect | None = None
+    nodes: int = 0
+    duration_ms: float = 0.0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _HeaderRoiScan:
+    header_rect: PhysicalRect
+    collection: _HeaderButtonCollection
+    roi: PhysicalRect | None
+    nodes: int = 0
+    right_sidebar_markers: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _BottomRoiScan:
+    input_rect: PhysicalRect
+    left_control: _HeaderButtonCandidate | None
+    left_blockers: tuple[_HeaderButtonCandidate, ...]
+    right_control: _HeaderButtonCandidate | None
+    roi: PhysicalRect | None
+    nodes: int = 0
+    candidates: int = 0
+    row_candidates: int = 0
+    reason: str = ""
+
+
 class _GUID(ctypes.Structure):
     _fields_ = [
         ("Data1", ctypes.c_ulong),
@@ -286,6 +416,57 @@ class _UiaProbe:
             return self._scan_tree(root, walker, window_rect)
         finally:
             self._release(walker)
+            self._release(root)
+
+    def find_header_roi(self, hwnd: int, window_rect: PhysicalRect) -> _HeaderRoiScan | None:
+        automation = self._automation_for_thread()
+        if not automation:
+            return None
+
+        root = self._element_from_handle(automation, hwnd)
+        if not root:
+            return None
+
+        walker = self._control_view_walker(automation) or self._raw_view_walker(automation)
+        if not walker:
+            self._release(root)
+            return None
+
+        try:
+            return self._scan_header_roi(root, walker, window_rect)
+        finally:
+            self._release(walker)
+            self._release(root)
+
+    def find_bottom_roi(self, hwnd: int, window_rect: PhysicalRect) -> _BottomRoiScan | None:
+        automation = self._automation_for_thread()
+        if not automation:
+            return None
+
+        root = self._element_from_handle(automation, hwnd)
+        if not root:
+            return None
+
+        control_walker = self._control_view_walker(automation)
+        raw_walker = 0
+        fallback_scan: _BottomRoiScan | None = None
+        try:
+            if control_walker:
+                fallback_scan = self._scan_bottom_roi(root, control_walker, window_rect)
+                if fallback_scan is not None and fallback_scan.roi is not None:
+                    return fallback_scan
+
+            raw_walker = self._raw_view_walker(automation)
+            if raw_walker and raw_walker != control_walker:
+                raw_scan = self._scan_bottom_roi(root, raw_walker, window_rect)
+                if raw_scan is not None:
+                    return raw_scan
+            return fallback_scan
+        finally:
+            if control_walker:
+                self._release(control_walker)
+            if raw_walker and raw_walker != control_walker:
+                self._release(raw_walker)
             self._release(root)
 
     def _automation_for_thread(self) -> int:
@@ -360,11 +541,12 @@ class _UiaProbe:
     ) -> _Landmarks | None:
         best_title: tuple[int, PhysicalRect] | None = None
         best_input: tuple[int, PhysicalRect] | None = None
-        stack: list[tuple[int, bool]] = [(root, False)]
+        header_candidates: list[_HeaderButtonCandidate] = []
+        stack: list[tuple[int, bool, int]] = [(root, False, 0)]
         visited = 0
 
         while stack and visited < _MAX_UIA_NODES:
-            ptr, release_after = stack.pop()
+            ptr, release_after, depth = stack.pop()
             visited += 1
             try:
                 node = self._node(ptr)
@@ -379,9 +561,13 @@ class _UiaProbe:
                         if best_input is None or input_score > best_input[0]:
                             best_input = (input_score, node.rect)
 
+                    candidate = self._header_button_candidate(node, window_rect, depth)
+                    if candidate is not None:
+                        header_candidates.append(candidate)
+
                 children = self._children(walker, ptr)
                 for child in reversed(children):
-                    stack.append((child, True))
+                    stack.append((child, True, depth + 1))
             finally:
                 if release_after:
                     self._release(ptr)
@@ -390,12 +576,1110 @@ class _UiaProbe:
             return None
 
         fallback = CodexWindowTracker.geometry_fallback(window_rect)
+        title_bar = best_title[1] if best_title is not None else fallback.title_bar
+        input_box = best_input[1] if best_input is not None else fallback.input_box
+        self._log_header_button_candidates(header_candidates, window_rect, title_bar)
         source = "uia" if best_title is not None and best_input is not None else "uia+geometry"
         return _Landmarks(
-            title_bar=best_title[1] if best_title is not None else fallback.title_bar,
-            input_box=best_input[1] if best_input is not None else fallback.input_box,
+            title_bar=title_bar,
+            input_box=input_box,
             source=source,
             nodes=visited,
+        )
+
+    def _scan_header_roi(
+        self,
+        root: int,
+        walker: int,
+        window_rect: PhysicalRect,
+    ) -> _HeaderRoiScan | None:
+        best_title: tuple[int, PhysicalRect] | None = None
+        header_candidates: list[_HeaderButtonCandidate] = []
+        right_sidebar_markers = 0
+        stack: list[tuple[int, bool, int]] = [(root, False, 0)]
+        visited = 0
+
+        while stack and visited < _MAX_HEADER_ROI_UIA_NODES:
+            ptr, release_after, depth = stack.pop()
+            visited += 1
+            try:
+                node = self._node(ptr)
+                if node is not None:
+                    if self._right_sidebar_marker(node, window_rect):
+                        right_sidebar_markers += 1
+
+                    title_candidate = self._header_roi_title_candidate(
+                        node,
+                        window_rect,
+                    )
+                    if title_candidate is not None:
+                        title_score, title_rect = title_candidate
+                        if best_title is None or title_score > best_title[0]:
+                            best_title = (title_score, title_rect)
+
+                    candidate = self._header_button_candidate(node, window_rect, depth)
+                    if candidate is not None:
+                        header_candidates.append(candidate)
+
+                children = self._children(walker, ptr)
+                for child in reversed(children):
+                    stack.append((child, True, depth + 1))
+            finally:
+                if release_after:
+                    self._release(ptr)
+
+        if best_title is None and not header_candidates:
+            return None
+
+        if right_sidebar_markers >= 2:
+            main_titlebar = self._main_titlebar_rect(window_rect)
+            main_titlebar_roi = self._main_titlebar_roi_rect(
+                header_candidates,
+                window_rect,
+                main_titlebar,
+            )
+            if main_titlebar_roi is not None:
+                return _HeaderRoiScan(
+                    header_rect=main_titlebar,
+                    collection=_HeaderButtonCollection(
+                        ordered=(),
+                        right_cluster=(),
+                        left_title_actions=(),
+                    ),
+                    roi=main_titlebar_roi,
+                    nodes=visited,
+                    right_sidebar_markers=right_sidebar_markers,
+                    reason="right-sidebar-main-titlebar",
+                )
+
+        header_rect = (
+            best_title[1]
+            if best_title is not None
+            else CodexWindowTracker.geometry_fallback(window_rect).title_bar
+        )
+        header_rects = [header_rect]
+        fallback_header = CodexWindowTracker.geometry_fallback(window_rect).title_bar
+        if not self._same_rect(fallback_header, header_rect):
+            header_rects.append(fallback_header)
+        inferred_header = self._candidate_header_rect(header_candidates, window_rect)
+        if inferred_header is not None and not any(
+            self._same_rect(inferred_header, item) for item in header_rects
+        ):
+            header_rects.append(inferred_header)
+
+        fallback_scan: _HeaderRoiScan | None = None
+        for candidate_header in header_rects:
+            collection = self._collect_header_button_candidates(
+                header_candidates,
+                candidate_header,
+            )
+            roi, reason = self._header_roi_rect(collection, candidate_header)
+            scan = _HeaderRoiScan(
+                header_rect=candidate_header,
+                collection=collection,
+                roi=roi,
+                nodes=visited,
+                right_sidebar_markers=right_sidebar_markers,
+                reason=reason,
+            )
+            if roi is not None:
+                return scan
+            if fallback_scan is None:
+                fallback_scan = scan
+        return fallback_scan
+
+    def _scan_bottom_roi(
+        self,
+        root: int,
+        walker: int,
+        window_rect: PhysicalRect,
+    ) -> _BottomRoiScan | None:
+        best_input: tuple[int, PhysicalRect] | None = None
+        bottom_candidates: list[_HeaderButtonCandidate] = []
+        stack: list[tuple[int, bool, int]] = [(root, False, 0)]
+        visited = 0
+
+        while stack and visited < _MAX_BOTTOM_UIA_NODES:
+            ptr, release_after, depth = stack.pop()
+            visited += 1
+            try:
+                node = self._node(ptr)
+                if node is not None:
+                    input_score = self._score_bottom_roi_input_box(node, window_rect)
+                    if input_score > 0 and node.rect is not None:
+                        if best_input is None or input_score > best_input[0]:
+                            best_input = (input_score, node.rect)
+
+                    candidate = self._bottom_control_candidate(node, window_rect, depth)
+                    if candidate is not None:
+                        bottom_candidates.append(candidate)
+
+                children = self._children(walker, ptr)
+                for child in reversed(children):
+                    stack.append((child, True, depth + 1))
+            finally:
+                if release_after:
+                    self._release(ptr)
+
+        if best_input is None and not bottom_candidates:
+            return None
+
+        input_rect = (
+            best_input[1]
+            if best_input is not None
+            else CodexWindowTracker.geometry_fallback(window_rect).input_box
+        )
+        row_candidates = self._bottom_roi_row_candidates(
+            bottom_candidates,
+            input_rect,
+            window_rect,
+        )
+        left_control, right_control = self._bottom_roi_controls(row_candidates)
+        left_blockers = self._bottom_left_blockers(
+            row_candidates,
+            left_control,
+            right_control,
+        )
+        roi, reason = self._bottom_roi_rect(
+            left_control,
+            left_blockers,
+            right_control,
+            window_rect,
+        )
+        return _BottomRoiScan(
+            input_rect=input_rect,
+            left_control=left_control,
+            left_blockers=left_blockers,
+            right_control=right_control,
+            roi=roi,
+            nodes=visited,
+            candidates=len(bottom_candidates),
+            row_candidates=len(row_candidates),
+            reason=reason,
+        )
+
+    @staticmethod
+    def _header_button_candidate(
+        node: _UiNode,
+        window_rect: PhysicalRect,
+        depth: int,
+    ) -> _HeaderButtonCandidate | None:
+        rect = node.rect
+        if rect is None:
+            return None
+        clipped = rect.intersection(window_rect)
+        if clipped is None:
+            return None
+        header_bottom = window_rect.top + 170
+        if (
+            clipped.top < window_rect.top + _HEADER_ROI_MIN_TOP_OFFSET
+            or clipped.top > header_bottom
+            or clipped.bottom < window_rect.top
+        ):
+            return None
+        if clipped.height < 8 or clipped.width < 8:
+            return None
+        if clipped.height > _HEADER_ROI_MAX_CANDIDATE_HEIGHT:
+            return None
+        if node.control_type not in _UIA_HEADER_CANDIDATE_TYPES:
+            text = node.search_text
+            if node.control_type not in _UIA_HEADER_CONTAINER_TYPES:
+                return None
+            if not any(
+                token in text
+                for token in ("button", "menu", "action", "toolbar", "header", "caption")
+            ):
+                return None
+        return _HeaderButtonCandidate(
+            rect=clipped,
+            control_type=node.control_type,
+            name=node.name,
+            automation_id=node.automation_id,
+            class_name=node.class_name,
+            depth=depth,
+        )
+
+    @staticmethod
+    def _header_roi_title_candidate(
+        node: _UiNode,
+        window_rect: PhysicalRect,
+    ) -> tuple[int, PhysicalRect] | None:
+        rect = node.rect
+        if rect is None or node.offscreen:
+            return None
+        clipped = rect.intersection(window_rect)
+        if clipped is None:
+            return None
+        if clipped.width < max(160, int(window_rect.width * 0.45)):
+            return None
+        if (
+            clipped.top < window_rect.top + _HEADER_ROI_MIN_TOP_OFFSET
+            or clipped.top > window_rect.top + _HEADER_ROI_MAX_TOP_OFFSET
+            or clipped.height > _HEADER_ROI_MAX_HEIGHT
+        ):
+            return None
+        if clipped.bottom > window_rect.top + 170:
+            return None
+        text = node.search_text
+        has_header_cue = (
+            node.control_type == _UIA_TITLE_BAR_CONTROL_TYPE_ID
+            or "title" in text
+            or "caption" in text
+            or "header" in text
+            or "toolbar" in text
+            or "codex" in text
+        )
+        if not has_header_cue:
+            return None
+
+        score = clipped.width
+        if node.control_type == _UIA_TITLE_BAR_CONTROL_TYPE_ID:
+            score += 5000
+        if "title" in text or "caption" in text:
+            score += 700
+        if "header" in text or "toolbar" in text:
+            score += 900
+        if "codex" in text:
+            score += 500
+        preferred_top = window_rect.top + _TITLE_BAR_HEIGHT
+        score += max(0, 500 - abs(clipped.top - preferred_top) * 8)
+        score -= max(0, clipped.height - _TITLE_BAR_HEIGHT) * 8
+        return max(0, int(score)), clipped
+
+    @staticmethod
+    def _right_sidebar_marker(node: _UiNode, window_rect: PhysicalRect) -> bool:
+        rect = node.rect
+        if rect is None or node.offscreen:
+            return False
+        clipped = rect.intersection(window_rect)
+        if clipped is None:
+            return False
+        center_x = (clipped.left + clipped.right) / 2
+        if center_x < window_rect.left + (window_rect.width * 0.50):
+            return False
+        if clipped.top < window_rect.top + 80:
+            return False
+        if clipped.height < 8 or clipped.height > 96:
+            return False
+        text = node.search_text
+        if not text:
+            return False
+        return any(marker in text for marker in _RIGHT_SIDEBAR_MARKERS)
+
+    @staticmethod
+    def _window_frame_inset(window_rect: PhysicalRect) -> int:
+        if window_rect.top >= 0:
+            return 0
+        return max(0, min(12, -window_rect.top))
+
+    @classmethod
+    def _main_titlebar_rect(cls, window_rect: PhysicalRect) -> PhysicalRect:
+        inset = cls._window_frame_inset(window_rect)
+        return PhysicalRect(
+            window_rect.left + inset,
+            window_rect.top + inset,
+            window_rect.right - inset,
+            window_rect.top + inset + _TITLE_BAR_HEIGHT,
+        )
+
+    @classmethod
+    def _main_titlebar_roi_rect(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+        window_rect: PhysicalRect,
+        titlebar_rect: PhysicalRect,
+    ) -> PhysicalRect | None:
+        left = titlebar_rect.left + _HEADER_MAIN_TITLEBAR_LEFT_FALLBACK
+        right = titlebar_rect.right - _HEADER_MAIN_TITLEBAR_RIGHT_FALLBACK
+        for candidate in candidates:
+            text = candidate.label.lower()
+            if (
+                ("帮助" in text or "help" in text)
+                and candidate.rect.left < titlebar_rect.left + 380
+                and candidate.rect.intersection(titlebar_rect) is not None
+            ):
+                left = max(left, candidate.rect.right + 14)
+            if (
+                ("最小化" in text or "minimize" in text)
+                and candidate.rect.right > titlebar_rect.right - 220
+                and candidate.rect.intersection(titlebar_rect) is not None
+            ):
+                right = min(right, candidate.rect.left - 14)
+
+        if right - left < max(240, int(window_rect.width * 0.25)):
+            return None
+        top = titlebar_rect.top + _HEADER_MAIN_TITLEBAR_TOP_INSET
+        bottom = titlebar_rect.bottom - _HEADER_MAIN_TITLEBAR_BOTTOM_INSET
+        if bottom <= top:
+            return None
+        return PhysicalRect(left, top, right, bottom)
+
+    @staticmethod
+    def _bottom_control_candidate(
+        node: _UiNode,
+        window_rect: PhysicalRect,
+        depth: int,
+    ) -> _HeaderButtonCandidate | None:
+        rect = node.rect
+        if rect is None or node.offscreen:
+            return None
+        clipped = rect.intersection(window_rect)
+        if clipped is None:
+            return None
+        scan_top = window_rect.top + max(
+            _BOTTOM_CONTROL_SCAN_TOP_MIN,
+            int(window_rect.height * _BOTTOM_CONTROL_SCAN_TOP_RATIO),
+        )
+        if clipped.bottom < scan_top:
+            return None
+        if clipped.height < 8 or clipped.width < 8:
+            return None
+        if node.control_type not in _UIA_BOTTOM_CANDIDATE_TYPES:
+            return None
+        return _HeaderButtonCandidate(
+            rect=clipped,
+            control_type=node.control_type,
+            name=node.name,
+            automation_id=node.automation_id,
+            class_name=node.class_name,
+            depth=depth,
+        )
+
+    @classmethod
+    def _bottom_roi_row_candidates(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+        input_rect: PhysicalRect,
+        window_rect: PhysicalRect,
+    ) -> list[_HeaderButtonCandidate]:
+        if not candidates:
+            return []
+
+        band_above = max(
+            _BOTTOM_ROW_MIN_ABOVE_INPUT,
+            min(96, int(input_rect.height * 0.55)),
+        )
+        band_below = max(
+            _BOTTOM_ROW_MIN_BELOW_INPUT,
+            min(132, int(input_rect.height * 0.85)),
+        )
+        band_top = max(window_rect.top, input_rect.bottom - band_above)
+        band_bottom = min(window_rect.bottom, input_rect.bottom + band_below)
+        horizontal_left_margin = max(32, min(48, int(input_rect.width * 0.12)))
+        horizontal_right_margin = max(96, min(180, int(input_rect.width * 0.30)))
+        horizontal_min = max(window_rect.left, input_rect.left - horizontal_left_margin)
+        horizontal_max = min(window_rect.right, input_rect.right + horizontal_right_margin)
+        max_height = max(56, min(128, int(input_rect.height * 0.95)))
+        eligible = [
+            item
+            for item in candidates
+            if horizontal_min <= ((item.rect.left + item.rect.right) / 2) <= horizontal_max
+            if item.rect.bottom >= band_top
+            and item.rect.top <= band_bottom
+            and item.rect.height <= max_height
+        ]
+        if len(eligible) <= 2:
+            return eligible
+
+        tolerance = max(14, min(30, int(input_rect.height * 0.20)))
+        rows: list[list[_HeaderButtonCandidate]] = []
+        for item in sorted(
+            eligible,
+            key=lambda candidate: (
+                candidate.rect.top + candidate.rect.bottom,
+                candidate.rect.left,
+                candidate.depth,
+            ),
+        ):
+            center_y = (item.rect.top + item.rect.bottom) / 2
+            for row in rows:
+                row_center = sum(
+                    (candidate.rect.top + candidate.rect.bottom) / 2
+                    for candidate in row
+                ) / len(row)
+                if abs(center_y - row_center) <= tolerance:
+                    row.append(item)
+                    break
+            else:
+                rows.append([item])
+
+        def row_score(row: list[_HeaderButtonCandidate]) -> tuple[int, int, int, int]:
+            center_y = int(
+                sum(
+                    (candidate.rect.top + candidate.rect.bottom) / 2
+                    for candidate in row
+                )
+                / len(row)
+            )
+            distance = abs(center_y - input_rect.bottom)
+            semantic = sum(
+                1
+                for candidate in row
+                if cls._is_bottom_left_control(candidate)
+                or cls._is_bottom_right_control(candidate)
+                or cls._is_bottom_left_blocker(candidate)
+            )
+            width = max(candidate.rect.right for candidate in row) - min(
+                candidate.rect.left for candidate in row
+            )
+            return (
+                semantic,
+                max(0, 120 - distance),
+                min(width, window_rect.width),
+                len(row),
+            )
+
+        selected = max(rows, key=row_score)
+        return sorted(
+            selected,
+            key=lambda item: (item.rect.left, item.rect.top, item.depth),
+        )
+
+    @classmethod
+    def _bottom_roi_controls(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+    ) -> tuple[_HeaderButtonCandidate | None, _HeaderButtonCandidate | None]:
+        ordered = sorted(
+            candidates,
+            key=lambda item: (
+                -item.rect.bottom,
+                item.rect.left,
+                item.depth,
+                item.control_type,
+            ),
+        )
+
+        left_matches = [
+            item
+            for item in ordered
+            if cls._is_bottom_left_control(item)
+        ]
+        left_control = left_matches[0] if left_matches else None
+
+        right_matches = [
+            item
+            for item in ordered
+            if cls._is_bottom_right_control(item)
+            and (left_control is None or item.rect.left > left_control.rect.right)
+        ]
+        right_control = right_matches[0] if right_matches else None
+        if right_control is None:
+            right_control = cls._bottom_geometry_right_control(ordered, left_control)
+        if left_control is None:
+            left_control = cls._bottom_geometry_left_control(ordered, right_control)
+        return left_control, right_control
+
+    @classmethod
+    def _bottom_geometry_left_control(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+        right_control: _HeaderButtonCandidate | None,
+    ) -> _HeaderButtonCandidate | None:
+        if not candidates:
+            return None
+        right_limit = right_control.rect.left if right_control is not None else None
+        eligible = [
+            item
+            for item in candidates
+            if (right_limit is None or item.rect.right <= right_limit)
+            and not cls._is_bottom_left_blocker(item)
+            and not cls._is_bottom_right_control(item)
+            and not cls._is_bottom_send_control(item)
+            and item.control_type != _UIA_TEXT_CONTROL_TYPE_ID
+        ]
+        if not eligible:
+            return None
+
+        ordered = sorted(eligible, key=lambda item: (item.rect.left, item.rect.top))
+        row_left = ordered[0].rect.left
+        limit = row_left + max(96, int((ordered[-1].rect.right - row_left) * 0.30))
+        max_gap = max(22, min(36, max(item.rect.height for item in ordered)))
+        cluster: list[_HeaderButtonCandidate] = []
+        cluster_right = row_left
+        for item in ordered:
+            if cluster and item.rect.left - cluster_right > max_gap:
+                break
+            if cluster and item.rect.left > limit:
+                break
+            cluster.append(item)
+            cluster_right = max(cluster_right, item.rect.right)
+        return cls._combined_bottom_candidate(cluster, "geometry-left-cluster")
+
+    @classmethod
+    def _bottom_geometry_right_control(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+        left_control: _HeaderButtonCandidate | None,
+    ) -> _HeaderButtonCandidate | None:
+        if not candidates:
+            return None
+        eligible = [
+            item
+            for item in candidates
+            if (left_control is None or item.rect.left >= left_control.rect.right)
+            and not cls._is_bottom_left_blocker(item)
+            and not cls._is_bottom_left_control(item)
+        ]
+        if not eligible:
+            return None
+
+        ordered = sorted(eligible, key=lambda item: (item.rect.left, item.rect.top))
+        send_control = cls._bottom_send_control(ordered)
+        right_limit = send_control.rect.left if send_control is not None else None
+        pool = [
+            item
+            for item in ordered
+            if (right_limit is None or item.rect.right <= right_limit)
+            and not cls._is_bottom_send_control(item)
+        ]
+        if not pool:
+            return None
+
+        row_left = min(item.rect.left for item in ordered)
+        row_right = max(item.rect.right for item in ordered)
+        right_zone_start = row_left + int((row_right - row_left) * 0.42)
+        semantic_pool = [item for item in pool if cls._is_bottom_right_control(item)]
+        zone_pool = semantic_pool or [
+            item for item in pool if item.rect.left >= right_zone_start
+        ]
+        if not zone_pool:
+            return None
+
+        anchor = max(zone_pool, key=lambda item: (item.rect.right, item.rect.left))
+        max_gap = max(18, min(32, anchor.rect.height))
+        cluster = [anchor]
+        cluster_left = anchor.rect.left
+        for item in reversed(pool[: pool.index(anchor)]):
+            if item.rect.left < right_zone_start and not cls._is_bottom_right_control(item):
+                break
+            if cluster_left - item.rect.right > max_gap:
+                break
+            cluster.append(item)
+            cluster_left = min(cluster_left, item.rect.left)
+        return cls._combined_bottom_candidate(cluster, "geometry-right-cluster")
+
+    @staticmethod
+    def _combined_bottom_candidate(
+        candidates: list[_HeaderButtonCandidate],
+        name: str,
+    ) -> _HeaderButtonCandidate | None:
+        if not candidates:
+            return None
+        return _HeaderButtonCandidate(
+            rect=PhysicalRect(
+                min(item.rect.left for item in candidates),
+                min(item.rect.top for item in candidates),
+                max(item.rect.right for item in candidates),
+                max(item.rect.bottom for item in candidates),
+            ),
+            control_type=_UIA_GROUP_CONTROL_TYPE_ID,
+            name=name,
+            automation_id="",
+            class_name="",
+            depth=min(item.depth for item in candidates),
+        )
+
+    @classmethod
+    def _bottom_left_blockers(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+        left_control: _HeaderButtonCandidate | None,
+        right_control: _HeaderButtonCandidate | None,
+    ) -> tuple[_HeaderButtonCandidate, ...]:
+        if left_control is None or right_control is None:
+            return ()
+        row_top = min(left_control.rect.top, right_control.rect.top) - 8
+        row_bottom = max(left_control.rect.bottom, right_control.rect.bottom) + 8
+        blockers = [
+            item
+            for item in candidates
+            if item is not left_control
+            and item is not right_control
+            and item.rect.left >= left_control.rect.right
+            and item.rect.right <= right_control.rect.left
+            and item.rect.bottom >= row_top
+            and item.rect.top <= row_bottom
+            and cls._is_bottom_left_blocker(item)
+        ]
+        return tuple(
+            sorted(
+                blockers,
+                key=lambda item: (item.rect.left, item.rect.top, item.depth),
+            )
+        )
+
+    @staticmethod
+    def _is_bottom_left_control(candidate: _HeaderButtonCandidate) -> bool:
+        if candidate.control_type == _UIA_TEXT_CONTROL_TYPE_ID:
+            return False
+        text = candidate.label.lower()
+        return (
+            "完全访问" in text
+            or "更改权限" in text
+            or "permission" in text
+            or "access" in text
+        )
+
+    @staticmethod
+    def _is_bottom_right_control(candidate: _HeaderButtonCandidate) -> bool:
+        text = candidate.label.lower()
+        return (
+            "选择模型" in text
+            or "超高" in text
+            or "5.5" in text
+            or "model" in text
+            or "ctrl+shift" in text
+        )
+
+    @staticmethod
+    def _is_bottom_left_blocker(candidate: _HeaderButtonCandidate) -> bool:
+        text = candidate.label.lower()
+        return (
+            "目标" in text
+            or "计划" in text
+            or "goal" in text
+            or "plan" in text
+        )
+
+    @staticmethod
+    def _is_bottom_send_control(candidate: _HeaderButtonCandidate) -> bool:
+        text = candidate.label.lower()
+        return (
+            "发送" in text
+            or "send" in text
+            or "submit" in text
+            or "arrow up" in text
+            or "arrow-up" in text
+        )
+
+    @classmethod
+    def _bottom_send_control(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+    ) -> _HeaderButtonCandidate | None:
+        if not candidates:
+            return None
+        semantic = [item for item in candidates if cls._is_bottom_send_control(item)]
+        if semantic:
+            return max(semantic, key=lambda item: (item.rect.right, item.rect.left))
+        if len(candidates) < 2:
+            return None
+
+        ordered = sorted(candidates, key=lambda item: (item.rect.left, item.rect.top))
+        rightmost = ordered[-1]
+        previous = ordered[-2]
+        if (
+            rightmost.rect.width <= 56
+            and rightmost.rect.height <= 56
+            and rightmost.rect.width <= max(12, rightmost.rect.height * 2)
+            and rightmost.rect.left - previous.rect.right <= max(
+                72,
+                rightmost.rect.height * 3,
+            )
+        ):
+            return rightmost
+        return None
+
+    @staticmethod
+    def _bottom_roi_rect(
+        left_control: _HeaderButtonCandidate | None,
+        left_blockers: tuple[_HeaderButtonCandidate, ...],
+        right_control: _HeaderButtonCandidate | None,
+        window_rect: PhysicalRect,
+    ) -> tuple[PhysicalRect | None, str]:
+        if left_control is None:
+            return None, "missing-left-permission"
+        if right_control is None:
+            return None, "missing-right-model"
+
+        controls_height = max(left_control.rect.height, right_control.rect.height)
+        padding = max(8, min(16, int(controls_height * 0.45)))
+        left_edge = left_control.rect.right
+        if left_blockers:
+            left_edge = max(left_edge, max(item.rect.right for item in left_blockers))
+        left = left_edge + padding
+        right = right_control.rect.left - padding
+        min_width = max(120, int(window_rect.width * 0.12))
+        if right - left < min_width:
+            return None, "roi-too-narrow"
+
+        inset_y = max(0, min(4, int(controls_height * 0.10)))
+        top = max(window_rect.top, min(left_control.rect.top, right_control.rect.top) + inset_y)
+        bottom = min(
+            window_rect.bottom,
+            max(left_control.rect.bottom, right_control.rect.bottom) - inset_y,
+        )
+        if bottom <= top:
+            return None, "roi-too-short"
+        return PhysicalRect(left, top, right, bottom), "ok"
+
+    @staticmethod
+    def _same_rect(left: PhysicalRect, right: PhysicalRect) -> bool:
+        return (
+            left.left == right.left
+            and left.top == right.top
+            and left.right == right.right
+            and left.bottom == right.bottom
+        )
+
+    @staticmethod
+    def _candidate_header_rect(
+        candidates: list[_HeaderButtonCandidate],
+        window_rect: PhysicalRect,
+    ) -> PhysicalRect | None:
+        top_min = window_rect.top + _HEADER_ROI_MIN_TOP_OFFSET
+        top_limit = window_rect.top + _HEADER_ROI_MAX_TOP_OFFSET
+        top_candidates = sorted(
+            (
+                item
+                for item in candidates
+                if top_min <= item.rect.top <= top_limit
+                and item.rect.height <= _HEADER_ROI_MAX_CANDIDATE_HEIGHT
+            ),
+            key=lambda item: (
+                item.rect.top + item.rect.bottom,
+                item.rect.left,
+                item.depth,
+            ),
+        )
+        if len(top_candidates) < 2:
+            return None
+
+        rows: list[list[_HeaderButtonCandidate]] = []
+        for item in top_candidates:
+            center_y = (item.rect.top + item.rect.bottom) / 2
+            for row in rows:
+                row_center = sum(
+                    (candidate.rect.top + candidate.rect.bottom) / 2
+                    for candidate in row
+                ) / len(row)
+                if abs(center_y - row_center) <= 12:
+                    row.append(item)
+                    break
+            else:
+                rows.append([item])
+
+        top_candidates = max(
+            rows,
+            key=lambda row: (
+                len(row),
+                max(item.rect.right for item in row) - min(item.rect.left for item in row),
+                -abs(
+                    (
+                        min(item.rect.top for item in row)
+                        + max(item.rect.bottom for item in row)
+                    )
+                    / 2
+                    - (window_rect.top + _TITLE_BAR_HEIGHT)
+                ),
+            ),
+        )
+        if len(top_candidates) < 2:
+            return None
+        left = min(item.rect.left for item in top_candidates)
+        top = min(item.rect.top for item in top_candidates)
+        right = max(item.rect.right for item in top_candidates)
+        bottom = max(item.rect.bottom for item in top_candidates)
+        if right - left < max(180, int(window_rect.width * 0.25)):
+            return None
+        pad_y = max(6, min(14, int((bottom - top) * 0.35)))
+        return PhysicalRect(
+            max(window_rect.left, left - 24),
+            max(window_rect.top, top - pad_y),
+            min(window_rect.right, right + 24),
+            min(window_rect.top + 170, bottom + pad_y),
+        )
+
+    @staticmethod
+    def _format_header_candidate(candidate: _HeaderButtonCandidate) -> str:
+        label = " ".join(candidate.label.split())[:80]
+        return (
+            f"type={candidate.control_type} depth={candidate.depth} "
+            f"rect=({candidate.rect.left},{candidate.rect.top},{candidate.rect.right},{candidate.rect.bottom}) "
+            f"label={label!r}"
+        )
+
+    @staticmethod
+    def _is_compact_header_candidate(
+        candidate: _HeaderButtonCandidate,
+        header_rect: PhysicalRect,
+    ) -> bool:
+        max_width = max(96, int(header_rect.height * 4), int(header_rect.width * 0.22))
+        return candidate.rect.width <= max_width
+
+    @staticmethod
+    def _header_candidate_bounds(
+        candidates: tuple[_HeaderButtonCandidate, ...],
+    ) -> str:
+        if not candidates:
+            return "none"
+        left = min(item.rect.left for item in candidates)
+        top = min(item.rect.top for item in candidates)
+        right = max(item.rect.right for item in candidates)
+        bottom = max(item.rect.bottom for item in candidates)
+        return f"({left},{top},{right},{bottom})"
+
+    @classmethod
+    def _header_roi_rect(
+        cls,
+        collection: _HeaderButtonCollection,
+        header_rect: PhysicalRect,
+    ) -> tuple[PhysicalRect | None, str]:
+        if not collection.right_cluster:
+            return None, "missing-right-cluster"
+
+        padding = max(10, min(18, int(header_rect.height * 0.35)))
+        left = header_rect.left + padding
+        if collection.left_title_actions:
+            left = max(
+                left,
+                max(item.rect.right for item in collection.left_title_actions) + padding,
+            )
+        right = min(item.rect.left for item in collection.right_cluster) - padding
+        min_width = max(120, int(header_rect.width * 0.18))
+        if right - left < min_width:
+            return None, "roi-too-narrow"
+
+        inset_y = max(2, min(8, int(header_rect.height * 0.16)))
+        return (
+            PhysicalRect(
+                left,
+                header_rect.top + inset_y,
+                right,
+                header_rect.bottom - inset_y,
+            ),
+            "ok",
+        )
+
+    @classmethod
+    def _collect_header_button_candidates(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+        header_rect: PhysicalRect,
+    ) -> _HeaderButtonCollection:
+        ordered = tuple(
+            sorted(
+                (
+                    item
+                    for item in candidates
+                    if item.rect.intersection(header_rect) is not None
+                    and item.rect.height <= max(48, int(header_rect.height * 1.5))
+                ),
+                key=lambda item: (
+                    item.rect.left,
+                    item.rect.top,
+                    item.depth,
+                    item.control_type,
+                ),
+            )
+        )
+        right_start = header_rect.left + int(header_rect.width * 0.55)
+        right_edge_start = header_rect.right - max(180, int(header_rect.width * 0.24))
+        right_start = max(right_start, right_edge_start)
+        right_candidates = [
+            item
+            for item in ordered
+            if item.rect.left >= right_start
+            and cls._is_compact_header_candidate(item, header_rect)
+        ]
+        semantic_right_candidates = [
+            item for item in right_candidates if cls._is_header_right_action(item)
+        ]
+        if semantic_right_candidates:
+            right_candidates = semantic_right_candidates
+        right_cluster: list[_HeaderButtonCandidate] = []
+        if right_candidates:
+            max_gap = max(24, int(header_rect.height * 1.25))
+            right_cluster.append(right_candidates[-1])
+            for item in reversed(right_candidates[:-1]):
+                leftmost = right_cluster[-1]
+                gap = leftmost.rect.left - item.rect.right
+                if gap > max_gap:
+                    break
+                right_cluster.append(item)
+            right_cluster.reverse()
+
+        left_limit = header_rect.left + int(header_rect.width * 0.45)
+        if right_cluster:
+            left_limit = min(left_limit, right_cluster[0].rect.left)
+        left_candidates = [
+            item
+            for item in ordered
+            if item.rect.left < left_limit
+            and cls._is_compact_header_candidate(item, header_rect)
+        ]
+        semantic_left_candidates = [
+            item for item in left_candidates if cls._is_header_left_action(item)
+        ]
+        if semantic_left_candidates:
+            left_candidates = semantic_left_candidates
+        left_title_actions = tuple(left_candidates)
+        return _HeaderButtonCollection(
+            ordered=ordered,
+            right_cluster=tuple(right_cluster),
+            left_title_actions=left_title_actions,
+        )
+
+    @staticmethod
+    def _is_header_right_action(candidate: _HeaderButtonCandidate) -> bool:
+        text = candidate.label.lower()
+        return (
+            "打开位置" in text
+            or "file explorer" in text
+            or "次要操作" in text
+            or "secondary" in text
+            or "切换摘要" in text
+            or "summary" in text
+            or "切换底部面板" in text
+            or "bottom panel" in text
+            or "显示/隐藏侧边栏" in text
+            or "sidebar" in text
+        )
+
+    @staticmethod
+    def _is_header_left_action(candidate: _HeaderButtonCandidate) -> bool:
+        text = candidate.label.lower()
+        return (
+            "对话操作" in text
+            or "conversation action" in text
+            or "conversation menu" in text
+        )
+
+    @classmethod
+    def _log_header_button_candidates(
+        cls,
+        candidates: list[_HeaderButtonCandidate],
+        window_rect: PhysicalRect,
+        header_rect: PhysicalRect,
+    ) -> None:
+        collection = cls._collect_header_button_candidates(candidates, header_rect)
+        if not collection.ordered:
+            _logger.info(
+                "uia_header_buttons count=0 window=(%s,%s,%s,%s) header=(%s,%s,%s,%s)",
+                window_rect.left,
+                window_rect.top,
+                window_rect.right,
+                window_rect.bottom,
+                header_rect.left,
+                header_rect.top,
+                header_rect.right,
+                header_rect.bottom,
+            )
+            return
+        sample = " | ".join(
+            cls._format_header_candidate(item) for item in collection.ordered[:24]
+        )
+        right_sample = " | ".join(
+            cls._format_header_candidate(item) for item in collection.right_cluster[:12]
+        )
+        left_sample = " | ".join(
+            cls._format_header_candidate(item)
+            for item in collection.left_title_actions[-12:]
+        )
+        _logger.info(
+            "uia_header_buttons count=%s right_count=%s left_count=%s "
+            "window=(%s,%s,%s,%s) header=(%s,%s,%s,%s) "
+            "right_bounds=%s left_bounds=%s sample=%s right_cluster=%s left_title=%s",
+            len(collection.ordered),
+            len(collection.right_cluster),
+            len(collection.left_title_actions),
+            window_rect.left,
+            window_rect.top,
+            window_rect.right,
+            window_rect.bottom,
+            header_rect.left,
+            header_rect.top,
+            header_rect.right,
+            header_rect.bottom,
+            cls._header_candidate_bounds(collection.right_cluster),
+            cls._header_candidate_bounds(collection.left_title_actions),
+            sample,
+            right_sample,
+            left_sample,
+        )
+
+    @classmethod
+    def _log_header_roi_scan(
+        cls,
+        scan: _HeaderRoiScan,
+        window_rect: PhysicalRect,
+    ) -> None:
+        roi = scan.roi
+        roi_text = (
+            f"({roi.left},{roi.top},{roi.right},{roi.bottom})"
+            if roi is not None
+            else "none"
+        )
+        _logger.info(
+            "uia_header_roi_demo status=%s reason=%s window=(%s,%s,%s,%s) "
+            "header=(%s,%s,%s,%s) roi=%s right_count=%s left_count=%s "
+            "right_bounds=%s left_bounds=%s nodes=%s right_sidebar_markers=%s",
+            "visible" if roi is not None else "not_found",
+            scan.reason,
+            window_rect.left,
+            window_rect.top,
+            window_rect.right,
+            window_rect.bottom,
+            scan.header_rect.left,
+            scan.header_rect.top,
+            scan.header_rect.right,
+            scan.header_rect.bottom,
+            roi_text,
+            len(scan.collection.right_cluster),
+            len(scan.collection.left_title_actions),
+            cls._header_candidate_bounds(scan.collection.right_cluster),
+            cls._header_candidate_bounds(scan.collection.left_title_actions),
+            scan.nodes,
+            scan.right_sidebar_markers,
+        )
+
+    @classmethod
+    def _log_bottom_roi_scan(
+        cls,
+        scan: _BottomRoiScan,
+        window_rect: PhysicalRect,
+    ) -> None:
+        roi = scan.roi
+        roi_text = (
+            f"({roi.left},{roi.top},{roi.right},{roi.bottom})"
+            if roi is not None
+            else "none"
+        )
+        left_text = (
+            cls._format_header_candidate(scan.left_control)
+            if scan.left_control is not None
+            else "none"
+        )
+        right_text = (
+            cls._format_header_candidate(scan.right_control)
+            if scan.right_control is not None
+            else "none"
+        )
+        blockers_text = " | ".join(
+            cls._format_header_candidate(item) for item in scan.left_blockers
+        )
+        _logger.info(
+            "uia_bottom_roi_demo status=%s reason=%s window=(%s,%s,%s,%s) "
+            "input=(%s,%s,%s,%s) roi=%s left=%s blockers=%s right=%s "
+            "nodes=%s candidates=%s row_candidates=%s",
+            "visible" if roi is not None else "not_found",
+            scan.reason,
+            window_rect.left,
+            window_rect.top,
+            window_rect.right,
+            window_rect.bottom,
+            scan.input_rect.left,
+            scan.input_rect.top,
+            scan.input_rect.right,
+            scan.input_rect.bottom,
+            roi_text,
+            left_text,
+            blockers_text or "none",
+            right_text,
+            scan.nodes,
+            scan.candidates,
+            scan.row_candidates,
         )
 
     def _children(self, walker: int, element: int) -> list[int]:
@@ -562,6 +1846,59 @@ class _UiaProbe:
             score -= 600
         return max(0, int(score))
 
+    @staticmethod
+    def _score_bottom_roi_input_box(node: _UiNode, window_rect: PhysicalRect) -> int:
+        rect = node.rect
+        if rect is None:
+            return 0
+        clipped = rect.intersection(window_rect)
+        if clipped is None:
+            return 0
+        if clipped.width < max(240, int(window_rect.width * 0.20)) or clipped.height < 18:
+            return 0
+        if clipped.height > max(240, int(window_rect.height * 0.45)):
+            return 0
+
+        text = node.search_text
+        cue_words = (
+            "prompt",
+            "message",
+            "chat",
+            "composer",
+            "input",
+            "textarea",
+            "ask",
+            "type",
+            "edit",
+            "输入",
+            "消息",
+            "编辑",
+        )
+        has_cue = any(word in text for word in cue_words)
+        is_edit = node.control_type == _UIA_EDIT_CONTROL_TYPE_ID
+        if not is_edit and not has_cue:
+            return 0
+
+        center_y = clipped.top + (clipped.height / 2)
+        if center_y < window_rect.top + (window_rect.height * 0.35):
+            return 0
+        score = clipped.width
+        if is_edit:
+            score += 3000
+        if has_cue:
+            score += 1200
+        if center_y > window_rect.top + (window_rect.height * 0.55):
+            score += 1300
+        if center_y > window_rect.top + (window_rect.height * 0.70):
+            score += 2200
+        if clipped.bottom > window_rect.bottom - 180:
+            score += 1800
+        if node.offscreen:
+            score -= 2000
+        if "search" in text or "find" in text:
+            score -= 600
+        return max(0, int(score))
+
     def _release(self, ptr: int) -> None:
         if not ptr:
             return
@@ -598,6 +1935,14 @@ class CodexWindowTracker:
         self._landmark_cache: _Landmarks | None = None
         self._landmark_cache_hwnd = 0
         self._landmark_cache_window_rect: PhysicalRect | None = None
+        self._header_roi_cache_at = 0.0
+        self._header_roi_cache: HeaderRoiSnapshot | None = None
+        self._header_roi_cache_hwnd = 0
+        self._header_roi_cache_window_rect: PhysicalRect | None = None
+        self._bottom_roi_cache_at = 0.0
+        self._bottom_roi_cache: BottomRoiSnapshot | None = None
+        self._bottom_roi_cache_hwnd = 0
+        self._bottom_roi_cache_window_rect: PhysicalRect | None = None
         self._last_uia_attempt_at = 0.0
         self._uia_lock = threading.Lock()
         self._uia_scan_running = False
@@ -839,6 +2184,188 @@ class CodexWindowTracker:
             dock=dock,
         )
         self._remember(snapshot)
+        return snapshot
+
+    def get_header_roi_snapshot(self) -> HeaderRoiSnapshot:
+        """Return a debug-only UIA header safe area without affecting dock state."""
+        if not self.enabled:
+            return HeaderRoiSnapshot(
+                status=STATUS_UNSUPPORTED,
+                reason="Windows APIs unavailable",
+            )
+        if not self.enable_uia or self._uia_probe is None:
+            return HeaderRoiSnapshot(
+                status=STATUS_UNSUPPORTED,
+                reason="UIA disabled",
+            )
+
+        base = self.get_window_snapshot()
+        if base.status != STATUS_VISIBLE or base.window_rect is None:
+            return HeaderRoiSnapshot(
+                status=base.status,
+                hwnd=base.hwnd,
+                window_rect=base.window_rect,
+                reason=base.reason,
+            )
+
+        hwnd = base.hwnd
+        window_rect = base.window_rect
+        now = time.monotonic()
+        with self._uia_lock:
+            cached = self._header_roi_cache
+            cached_rect = self._header_roi_cache_window_rect
+            cached_hwnd = self._header_roi_cache_hwnd
+            cache_age = now - self._header_roi_cache_at
+
+        if cached is not None and cached_rect is not None and cached_hwnd == hwnd:
+            if (
+                window_rect.width == cached_rect.width
+                and window_rect.height == cached_rect.height
+                and cache_age <= _UIA_REFRESH_SECONDS
+            ):
+                return self._translate_header_roi_snapshot(cached, cached_rect, window_rect)
+
+        started = time.perf_counter()
+        try:
+            scan = self._uia_probe.find_header_roi(hwnd, window_rect)
+        except Exception as exc:
+            _logger.exception("uia_header_roi_scan_failed hwnd=%s error=%s", hwnd, exc)
+            scan = None
+        duration_ms = (time.perf_counter() - started) * 1000
+        if scan is None:
+            snapshot = HeaderRoiSnapshot(
+                status=STATUS_NOT_FOUND,
+                hwnd=hwnd,
+                source="uia",
+                window_rect=window_rect,
+                duration_ms=duration_ms,
+                reason="no-header-controls",
+            )
+            _logger.info(
+                "uia_header_roi_demo status=%s reason=%s window=(%s,%s,%s,%s) duration_ms=%.1f",
+                snapshot.status,
+                snapshot.reason,
+                window_rect.left,
+                window_rect.top,
+                window_rect.right,
+                window_rect.bottom,
+                duration_ms,
+            )
+        else:
+            self._uia_probe._log_header_roi_scan(scan, window_rect)
+            snapshot = HeaderRoiSnapshot(
+                status=STATUS_VISIBLE if scan.roi is not None else STATUS_NOT_FOUND,
+                hwnd=hwnd,
+                source="uia",
+                window_rect=window_rect,
+                header_rect=scan.header_rect,
+                roi=scan.roi,
+                nodes=scan.nodes,
+                duration_ms=duration_ms,
+                reason=scan.reason,
+            )
+
+        with self._uia_lock:
+            self._header_roi_cache_at = time.monotonic()
+            self._header_roi_cache = snapshot
+            self._header_roi_cache_hwnd = hwnd
+            self._header_roi_cache_window_rect = window_rect
+        return snapshot
+
+    def get_bottom_roi_snapshot(self) -> BottomRoiSnapshot:
+        """Return a debug-only UIA bottom safe area without affecting dock state."""
+        if not self.enabled:
+            return BottomRoiSnapshot(
+                status=STATUS_UNSUPPORTED,
+                reason="Windows APIs unavailable",
+            )
+        if not self.enable_uia or self._uia_probe is None:
+            return BottomRoiSnapshot(
+                status=STATUS_UNSUPPORTED,
+                reason="UIA disabled",
+            )
+
+        base = self.get_window_snapshot()
+        if base.status != STATUS_VISIBLE or base.window_rect is None:
+            return BottomRoiSnapshot(
+                status=base.status,
+                hwnd=base.hwnd,
+                window_rect=base.window_rect,
+                reason=base.reason,
+            )
+
+        hwnd = base.hwnd
+        window_rect = base.window_rect
+        now = time.monotonic()
+        with self._uia_lock:
+            cached = self._bottom_roi_cache
+            cached_rect = self._bottom_roi_cache_window_rect
+            cached_hwnd = self._bottom_roi_cache_hwnd
+            cache_age = now - self._bottom_roi_cache_at
+
+        if cached is not None and cached_rect is not None and cached_hwnd == hwnd:
+            if (
+                window_rect.width == cached_rect.width
+                and window_rect.height == cached_rect.height
+                and cache_age <= _UIA_REFRESH_SECONDS
+            ):
+                return self._translate_bottom_roi_snapshot(
+                    cached,
+                    cached_rect,
+                    window_rect,
+                )
+
+        started = time.perf_counter()
+        try:
+            scan = self._uia_probe.find_bottom_roi(hwnd, window_rect)
+        except Exception as exc:
+            _logger.exception("uia_bottom_roi_scan_failed hwnd=%s error=%s", hwnd, exc)
+            scan = None
+        duration_ms = (time.perf_counter() - started) * 1000
+        if scan is None:
+            snapshot = BottomRoiSnapshot(
+                status=STATUS_NOT_FOUND,
+                hwnd=hwnd,
+                source="uia",
+                window_rect=window_rect,
+                duration_ms=duration_ms,
+                reason="no-bottom-controls",
+            )
+            _logger.info(
+                "uia_bottom_roi_demo status=%s reason=%s window=(%s,%s,%s,%s) duration_ms=%.1f",
+                snapshot.status,
+                snapshot.reason,
+                window_rect.left,
+                window_rect.top,
+                window_rect.right,
+                window_rect.bottom,
+                duration_ms,
+            )
+        else:
+            self._uia_probe._log_bottom_roi_scan(scan, window_rect)
+            snapshot = BottomRoiSnapshot(
+                status=STATUS_VISIBLE if scan.roi is not None else STATUS_NOT_FOUND,
+                hwnd=hwnd,
+                source="uia",
+                window_rect=window_rect,
+                input_rect=scan.input_rect,
+                roi=scan.roi,
+                left_control=(
+                    scan.left_control.rect if scan.left_control is not None else None
+                ),
+                right_control=(
+                    scan.right_control.rect if scan.right_control is not None else None
+                ),
+                nodes=scan.nodes,
+                duration_ms=duration_ms,
+                reason=scan.reason,
+            )
+
+        with self._uia_lock:
+            self._bottom_roi_cache_at = time.monotonic()
+            self._bottom_roi_cache = snapshot
+            self._bottom_roi_cache_hwnd = hwnd
+            self._bottom_roi_cache_window_rect = window_rect
         return snapshot
 
     def is_active(self, hwnd: int, allowed_hwnds: set[int] | None = None) -> bool:
@@ -1306,6 +2833,68 @@ class CodexWindowTracker:
             source=landmarks.source,
             nodes=landmarks.nodes,
             duration_ms=landmarks.duration_ms,
+        )
+
+    @staticmethod
+    def _translate_header_roi_snapshot(
+        snapshot: HeaderRoiSnapshot,
+        from_rect: PhysicalRect,
+        to_rect: PhysicalRect,
+    ) -> HeaderRoiSnapshot:
+        if from_rect.left == to_rect.left and from_rect.top == to_rect.top:
+            return snapshot
+        dx = to_rect.left - from_rect.left
+        dy = to_rect.top - from_rect.top
+        return HeaderRoiSnapshot(
+            status=snapshot.status,
+            hwnd=snapshot.hwnd,
+            source=snapshot.source,
+            window_rect=to_rect,
+            header_rect=(
+                _offset_rect(snapshot.header_rect, dx, dy)
+                if snapshot.header_rect is not None
+                else None
+            ),
+            roi=_offset_rect(snapshot.roi, dx, dy) if snapshot.roi is not None else None,
+            nodes=snapshot.nodes,
+            duration_ms=snapshot.duration_ms,
+            reason=snapshot.reason,
+        )
+
+    @staticmethod
+    def _translate_bottom_roi_snapshot(
+        snapshot: BottomRoiSnapshot,
+        from_rect: PhysicalRect,
+        to_rect: PhysicalRect,
+    ) -> BottomRoiSnapshot:
+        if from_rect.left == to_rect.left and from_rect.top == to_rect.top:
+            return snapshot
+        dx = to_rect.left - from_rect.left
+        dy = to_rect.top - from_rect.top
+        return BottomRoiSnapshot(
+            status=snapshot.status,
+            hwnd=snapshot.hwnd,
+            source=snapshot.source,
+            window_rect=to_rect,
+            input_rect=(
+                _offset_rect(snapshot.input_rect, dx, dy)
+                if snapshot.input_rect is not None
+                else None
+            ),
+            roi=_offset_rect(snapshot.roi, dx, dy) if snapshot.roi is not None else None,
+            left_control=(
+                _offset_rect(snapshot.left_control, dx, dy)
+                if snapshot.left_control is not None
+                else None
+            ),
+            right_control=(
+                _offset_rect(snapshot.right_control, dx, dy)
+                if snapshot.right_control is not None
+                else None
+            ),
+            nodes=snapshot.nodes,
+            duration_ms=snapshot.duration_ms,
+            reason=snapshot.reason,
         )
 
     def _window_text(self, hwnd: int) -> str:

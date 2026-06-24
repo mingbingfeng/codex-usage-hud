@@ -70,6 +70,752 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
 
         self.assertEqual(wt._UiaProbe._score_input_box(node, window), 0)
 
+    def test_uia_header_button_candidate_collects_top_buttons_only(self) -> None:
+        window = PhysicalRect(left=100, top=50, right=1100, bottom=850)
+        button = wt._UiNode(
+            rect=PhysicalRect(left=900, top=80, right=930, bottom=110),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="Open in File Explorer",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        image = wt._UiNode(
+            rect=PhysicalRect(left=940, top=80, right=970, bottom=110),
+            control_type=wt._UIA_IMAGE_CONTROL_TYPE_ID,
+            name="",
+            automation_id="avatar",
+            class_name="",
+            offscreen=False,
+        )
+        group = wt._UiNode(
+            rect=PhysicalRect(left=980, top=80, right=1030, bottom=110),
+            control_type=wt._UIA_GROUP_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        mid_window_button = wt._UiNode(
+            rect=PhysicalRect(left=900, top=320, right=930, bottom=350),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="Later button",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+
+        candidate = wt._UiaProbe._header_button_candidate(button, window, 4)
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.rect.as_xywh(), (900, 80, 30, 30))
+        self.assertIsNotNone(wt._UiaProbe._header_button_candidate(image, window, 4))
+        self.assertIsNotNone(wt._UiaProbe._header_button_candidate(group, window, 4))
+        self.assertIsNone(
+            wt._UiaProbe._header_button_candidate(mid_window_button, window, 4)
+        )
+
+    def test_uia_header_button_collection_sorts_and_clusters_right_edge(self) -> None:
+        header = PhysicalRect(left=400, top=70, right=1000, bottom=120)
+        candidates = [
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=940, top=82, right=970, bottom=112),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="Right B",
+                automation_id="",
+                class_name="",
+                depth=4,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=420, top=80, right=448, bottom=108),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="Left action",
+                automation_id="",
+                class_name="",
+                depth=5,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=760, top=80, right=790, bottom=110),
+                control_type=wt._UIA_IMAGE_CONTROL_TYPE_ID,
+                name="Separated right",
+                automation_id="",
+                class_name="",
+                depth=4,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=900, top=80, right=930, bottom=110),
+                control_type=wt._UIA_GROUP_CONTROL_TYPE_ID,
+                name="Right A",
+                automation_id="",
+                class_name="",
+                depth=3,
+            ),
+        ]
+
+        collection = wt._UiaProbe._collect_header_button_candidates(candidates, header)
+
+        self.assertEqual(
+            [item.name for item in collection.ordered],
+            ["Left action", "Separated right", "Right A", "Right B"],
+        )
+        self.assertEqual(
+            [item.name for item in collection.right_cluster],
+            ["Right A", "Right B"],
+        )
+        self.assertEqual(
+            [item.name for item in collection.left_title_actions],
+            ["Left action"],
+        )
+
+    def test_uia_header_collection_prefers_semantic_header_actions(self) -> None:
+        header = PhysicalRect(left=370, top=159, right=1399, bottom=205)
+        candidates = [
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=714, top=168, right=742, bottom=196),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="对话操作",
+                automation_id="",
+                class_name="",
+                depth=13,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=759, top=168, right=789, bottom=196),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="复制",
+                automation_id="",
+                class_name="",
+                depth=16,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1203, top=168, right=1230, bottom=196),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="重试",
+                automation_id="",
+                class_name="",
+                depth=16,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1235, top=168, right=1266, bottom=196),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="打开位置",
+                automation_id="",
+                class_name="",
+                depth=13,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1295, top=168, right=1323, bottom=196),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="切换摘要",
+                automation_id="",
+                class_name="",
+                depth=13,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1329, top=168, right=1357, bottom=196),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="切换底部面板显示",
+                automation_id="",
+                class_name="",
+                depth=12,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1363, top=168, right=1391, bottom=196),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="显示/隐藏侧边栏",
+                automation_id="",
+                class_name="",
+                depth=12,
+            ),
+        ]
+
+        collection = wt._UiaProbe._collect_header_button_candidates(candidates, header)
+
+        self.assertEqual([item.name for item in collection.left_title_actions], ["对话操作"])
+        self.assertEqual(collection.right_cluster[0].name, "打开位置")
+        self.assertNotIn("复制", [item.name for item in collection.left_title_actions])
+        self.assertNotIn("重试", [item.name for item in collection.right_cluster])
+
+    def test_uia_header_roi_title_rejects_tall_scroll_content(self) -> None:
+        window = PhysicalRect(left=119, top=123, right=1399, bottom=943)
+        scroll_content = wt._UiNode(
+            rect=PhysicalRect(left=516, top=42, right=1253, bottom=213),
+            control_type=wt._UIA_GROUP_CONTROL_TYPE_ID,
+            name="Scrolled transcript group",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        header_row = wt._UiNode(
+            rect=PhysicalRect(left=370, top=159, right=1399, bottom=205),
+            control_type=wt._UIA_TITLE_BAR_CONTROL_TYPE_ID,
+            name="Codex title",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+
+        self.assertIsNone(
+            wt._UiaProbe._header_roi_title_candidate(scroll_content, window)
+        )
+        accepted = wt._UiaProbe._header_roi_title_candidate(header_row, window)
+
+        self.assertIsNotNone(accepted)
+        assert accepted is not None
+        self.assertEqual(accepted[1], PhysicalRect(left=370, top=159, right=1399, bottom=205))
+
+    def test_uia_candidate_header_rect_groups_compact_header_row(self) -> None:
+        window = PhysicalRect(left=119, top=123, right=1399, bottom=943)
+        header_left = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=714, top=168, right=742, bottom=196),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="Header left",
+            automation_id="",
+            class_name="",
+            depth=4,
+        )
+        header_right = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=1235, top=168, right=1266, bottom=196),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="Header right",
+            automation_id="",
+            class_name="",
+            depth=4,
+        )
+        scroll_candidate = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=714, top=168, right=955, bottom=241),
+            control_type=wt._UIA_GROUP_CONTROL_TYPE_ID,
+            name="Tall transcript action group",
+            automation_id="",
+            class_name="",
+            depth=8,
+        )
+
+        inferred = wt._UiaProbe._candidate_header_rect(
+            [scroll_candidate, header_left, header_right],
+            window,
+        )
+
+        self.assertIsNotNone(inferred)
+        assert inferred is not None
+        self.assertGreaterEqual(inferred.top, 150)
+        self.assertLessEqual(inferred.bottom, 210)
+
+    def test_uia_header_roi_uses_gap_between_left_actions_and_right_cluster(self) -> None:
+        header = PhysicalRect(left=400, top=70, right=1000, bottom=120)
+        collection = wt._HeaderButtonCollection(
+            ordered=(),
+            right_cluster=(
+                wt._HeaderButtonCandidate(
+                    rect=PhysicalRect(left=900, top=80, right=930, bottom=110),
+                    control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                    name="Right A",
+                    automation_id="",
+                    class_name="",
+                    depth=3,
+                ),
+            ),
+            left_title_actions=(
+                wt._HeaderButtonCandidate(
+                    rect=PhysicalRect(left=420, top=80, right=448, bottom=108),
+                    control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                    name="More actions",
+                    automation_id="",
+                    class_name="",
+                    depth=4,
+                ),
+            ),
+        )
+
+        roi, reason = wt._UiaProbe._header_roi_rect(collection, header)
+
+        self.assertEqual(reason, "ok")
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        self.assertGreater(roi.left, 448)
+        self.assertLess(roi.right, 900)
+        self.assertGreaterEqual(roi.top, header.top)
+        self.assertLessEqual(roi.bottom, header.bottom)
+
+        too_narrow = wt._HeaderButtonCollection(
+            ordered=(),
+            right_cluster=collection.right_cluster,
+            left_title_actions=(
+                wt._HeaderButtonCandidate(
+                    rect=PhysicalRect(left=760, top=80, right=875, bottom=108),
+                    control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                    name="Wide left action",
+                    automation_id="",
+                    class_name="",
+                    depth=4,
+                ),
+            ),
+        )
+
+        roi, reason = wt._UiaProbe._header_roi_rect(too_narrow, header)
+
+        self.assertIsNone(roi)
+        self.assertEqual(reason, "roi-too-narrow")
+
+    def test_uia_header_right_sidebar_marker_requires_right_panel_position(self) -> None:
+        window = PhysicalRect(left=0, top=0, right=1280, bottom=820)
+        right_panel_marker = wt._UiNode(
+            rect=PhysicalRect(left=720, top=180, right=880, bottom=212),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="OMX Notepad",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        left_chat_text = wt._UiNode(
+            rect=PhysicalRect(left=280, top=180, right=440, bottom=212),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="OMX Notepad",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        top_menu_text = wt._UiNode(
+            rect=PhysicalRect(left=180, top=12, right=220, bottom=36),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="帮助",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+
+        self.assertTrue(wt._UiaProbe._right_sidebar_marker(right_panel_marker, window))
+        self.assertFalse(wt._UiaProbe._right_sidebar_marker(left_chat_text, window))
+        self.assertFalse(wt._UiaProbe._right_sidebar_marker(top_menu_text, window))
+
+    def test_uia_header_main_titlebar_roi_uses_help_to_minimize_gap(self) -> None:
+        window = PhysicalRect(left=0, top=0, right=1280, bottom=820)
+        titlebar = wt._UiaProbe._main_titlebar_rect(window)
+        help_menu = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=264, top=8, right=292, bottom=34),
+            control_type=wt._UIA_MENU_ITEM_CONTROL_TYPE_ID,
+            name="帮助",
+            automation_id="",
+            class_name="",
+            depth=3,
+        )
+        minimize = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=1146, top=8, right=1192, bottom=38),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="最小化",
+            automation_id="",
+            class_name="",
+            depth=3,
+        )
+
+        roi = wt._UiaProbe._main_titlebar_roi_rect(
+            [help_menu, minimize],
+            window,
+            titlebar,
+        )
+
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        self.assertGreater(roi.left, help_menu.rect.right)
+        self.assertLess(roi.right, minimize.rect.left)
+        self.assertEqual(roi.top, 0)
+        self.assertEqual(roi.bottom, 38)
+
+    def test_uia_header_main_titlebar_roi_accounts_for_maximized_frame_inset(self) -> None:
+        window = PhysicalRect(left=-8, top=-8, right=1928, bottom=1040)
+        titlebar = wt._UiaProbe._main_titlebar_rect(window)
+        roi = wt._UiaProbe._main_titlebar_roi_rect([], window, titlebar)
+
+        self.assertEqual(titlebar.top, 0)
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        self.assertEqual(roi.top, 0)
+        self.assertEqual(roi.bottom, 38)
+        self.assertEqual(roi.left, 305)
+        self.assertEqual(roi.right, 1772)
+
+    def test_uia_bottom_roi_uses_gap_between_permission_and_model(self) -> None:
+        window = PhysicalRect(left=100, top=50, right=1300, bottom=850)
+        left = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=220, top=800, right=330, bottom=828),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="完全访问",
+            automation_id="",
+            class_name="",
+            depth=3,
+        )
+        right = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=1080, top=800, right=1170, bottom=828),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="5.5 超高",
+            automation_id="",
+            class_name="",
+            depth=3,
+        )
+
+        roi, reason = wt._UiaProbe._bottom_roi_rect(left, (), right, window)
+
+        self.assertEqual(reason, "ok")
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        self.assertGreater(roi.left, left.rect.right)
+        self.assertLess(roi.right, right.rect.left)
+        self.assertGreaterEqual(roi.top, left.rect.top)
+        self.assertLessEqual(roi.bottom, left.rect.bottom)
+
+    def test_uia_bottom_row_filter_rejects_matching_text_above_composer_row(self) -> None:
+        window = PhysicalRect(left=100, top=50, right=1300, bottom=850)
+        input_rect = PhysicalRect(left=300, top=730, right=900, bottom=786)
+        body_text = wt._UiNode(
+            rect=PhysicalRect(left=300, top=620, right=900, bottom=652),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="完全访问",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        composer_button = wt._UiNode(
+            rect=PhysicalRect(left=300, top=800, right=410, bottom=828),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="完全访问",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+
+        body_candidate = wt._UiaProbe._bottom_control_candidate(body_text, window, 4)
+        composer_candidate = wt._UiaProbe._bottom_control_candidate(
+            composer_button,
+            window,
+            4,
+        )
+
+        self.assertIsNotNone(body_candidate)
+        self.assertIsNotNone(composer_candidate)
+        assert body_candidate is not None
+        assert composer_candidate is not None
+
+        row_candidates = wt._UiaProbe._bottom_roi_row_candidates(
+            [body_candidate, composer_candidate],
+            input_rect,
+            window,
+        )
+
+        self.assertEqual([item.name for item in row_candidates], ["完全访问"])
+        self.assertEqual(row_candidates[0].rect, composer_candidate.rect)
+
+    def test_uia_bottom_roi_uses_geometry_when_labels_are_omitted(self) -> None:
+        window = PhysicalRect(left=250, top=0, right=680, bottom=820)
+        input_rect = PhysicalRect(left=282, top=706, right=648, bottom=764)
+        plus = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=302, top=780, right=320, bottom=802),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            depth=5,
+        )
+        shield = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=338, top=780, right=352, bottom=802),
+            control_type=wt._UIA_IMAGE_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            depth=6,
+        )
+        left_arrow = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=356, top=780, right=370, bottom=802),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            depth=6,
+        )
+        model_text = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=560, top=780, right=590, bottom=802),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="5.5",
+            automation_id="",
+            class_name="",
+            depth=6,
+        )
+        model_arrow = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=594, top=780, right=606, bottom=802),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            depth=6,
+        )
+        send = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=612, top=772, right=642, bottom=806),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="发送",
+            automation_id="",
+            class_name="",
+            depth=5,
+        )
+
+        candidates = [plus, shield, left_arrow, model_text, model_arrow, send]
+        row_candidates = wt._UiaProbe._bottom_roi_row_candidates(
+            candidates,
+            input_rect,
+            window,
+        )
+        left, right = wt._UiaProbe._bottom_roi_controls(row_candidates)
+        roi, reason = wt._UiaProbe._bottom_roi_rect(left, (), right, window)
+
+        self.assertEqual(reason, "ok")
+        self.assertIsNotNone(left)
+        self.assertIsNotNone(right)
+        self.assertIsNotNone(roi)
+        assert left is not None
+        assert right is not None
+        assert roi is not None
+        self.assertEqual(left.rect.right, left_arrow.rect.right)
+        self.assertEqual(right.rect.left, model_text.rect.left)
+        self.assertGreater(roi.left, left_arrow.rect.right)
+        self.assertLess(roi.right, model_text.rect.left)
+
+    def test_uia_bottom_text_node_cannot_be_left_permission_control(self) -> None:
+        text = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=589, top=933, right=825, bottom=943),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="正文里的“完全访问”不会污染底栏行。",
+            automation_id="",
+            class_name="",
+            depth=28,
+        )
+        right = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=1172, top=890, right=1258, bottom=918),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="5.5 超高",
+            automation_id="",
+            class_name="",
+            depth=13,
+        )
+
+        left_control, right_control = wt._UiaProbe._bottom_roi_controls([text, right])
+
+        self.assertIsNone(left_control)
+        self.assertIs(right_control, right)
+
+    def test_uia_bottom_candidate_accepts_composer_row_pushed_above_bottom_panel(self) -> None:
+        window = PhysicalRect(left=250, top=0, right=1280, bottom=820)
+        input_rect = PhysicalRect(left=398, top=344, right=1134, bottom=524)
+        input_node = wt._UiNode(
+            rect=input_rect,
+            control_type=wt._UIA_EDIT_CONTROL_TYPE_ID,
+            name="composer message input",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        left = wt._UiNode(
+            rect=PhysicalRect(left=448, top=490, right=536, bottom=514),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="完全访问",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        right = wt._UiNode(
+            rect=PhysicalRect(left=1012, top=490, right=1082, bottom=514),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="5.5 超高",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+        terminal_tab = wt._UiNode(
+            rect=PhysicalRect(left=266, top=552, right=394, bottom=578),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="D:\\Program Files\\PowerShell",
+            automation_id="",
+            class_name="",
+            offscreen=False,
+        )
+
+        self.assertEqual(wt._UiaProbe._score_input_box(input_node, window), 0)
+        self.assertGreater(wt._UiaProbe._score_bottom_roi_input_box(input_node, window), 0)
+
+        candidates = [
+            wt._UiaProbe._bottom_control_candidate(left, window, 5),
+            wt._UiaProbe._bottom_control_candidate(right, window, 5),
+            wt._UiaProbe._bottom_control_candidate(terminal_tab, window, 5),
+        ]
+        compact_candidates = [item for item in candidates if item is not None]
+        row_candidates = wt._UiaProbe._bottom_roi_row_candidates(
+            compact_candidates,
+            input_rect,
+            window,
+        )
+        left_control, right_control = wt._UiaProbe._bottom_roi_controls(row_candidates)
+        roi, reason = wt._UiaProbe._bottom_roi_rect(
+            left_control,
+            (),
+            right_control,
+            window,
+        )
+
+        self.assertEqual([item.name for item in row_candidates], ["完全访问", "5.5 超高"])
+        self.assertEqual(reason, "ok")
+        self.assertIsNotNone(roi)
+
+    def test_uia_bottom_roi_combined_sidebar_and_bottom_panel_ignores_left_noise(self) -> None:
+        window = PhysicalRect(left=169, top=123, right=1449, bottom=943)
+        input_rect = PhysicalRect(left=464, top=562, right=805, bottom=606)
+        outside_noise = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=360, top=610, right=408, bottom=631),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            depth=17,
+        )
+        permission_icon = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=460, top=610, right=482, bottom=638),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            depth=12,
+        )
+        permission_arrow = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=510, top=610, right=541, bottom=638),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="",
+            automation_id="",
+            class_name="",
+            depth=12,
+        )
+        model = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=720, top=610, right=773, bottom=638),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="5.5",
+            automation_id="",
+            class_name="",
+            depth=13,
+        )
+        send = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=789, top=606, right=819, bottom=640),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="发送",
+            automation_id="",
+            class_name="",
+            depth=13,
+        )
+
+        row_candidates = wt._UiaProbe._bottom_roi_row_candidates(
+            [outside_noise, permission_icon, permission_arrow, model, send],
+            input_rect,
+            window,
+        )
+        left, right = wt._UiaProbe._bottom_roi_controls(row_candidates)
+        roi, reason = wt._UiaProbe._bottom_roi_rect(left, (), right, window)
+
+        self.assertNotIn(outside_noise, row_candidates)
+        self.assertEqual(reason, "ok")
+        self.assertIsNotNone(left)
+        self.assertIsNotNone(right)
+        self.assertIsNotNone(roi)
+        assert left is not None
+        assert right is not None
+        assert roi is not None
+        self.assertGreaterEqual(left.rect.left, permission_icon.rect.left)
+        self.assertGreater(roi.left, permission_arrow.rect.right)
+        self.assertLess(roi.right, model.rect.left)
+
+    def test_uia_bottom_roi_leaves_room_for_goal_and_plan_tags(self) -> None:
+        window = PhysicalRect(left=100, top=50, right=1300, bottom=850)
+        left = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=220, top=800, right=330, bottom=828),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="完全访问",
+            automation_id="",
+            class_name="",
+            depth=3,
+        )
+        plan = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=360, top=800, right=430, bottom=828),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="计划",
+            automation_id="",
+            class_name="",
+            depth=4,
+        )
+        goal = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=450, top=800, right=520, bottom=828),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="目标",
+            automation_id="",
+            class_name="",
+            depth=4,
+        )
+        usage_text = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=560, top=800, right=900, bottom=828),
+            control_type=wt._UIA_TEXT_CONTROL_TYPE_ID,
+            name="9.25 18.9M 094%",
+            automation_id="",
+            class_name="",
+            depth=4,
+        )
+        right = wt._HeaderButtonCandidate(
+            rect=PhysicalRect(left=1080, top=800, right=1170, bottom=828),
+            control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+            name="选择模型 Ctrl+Shift+M 5.5 超高",
+            automation_id="",
+            class_name="",
+            depth=3,
+        )
+
+        blockers = wt._UiaProbe._bottom_left_blockers(
+            [left, plan, goal, usage_text, right],
+            left,
+            right,
+        )
+        roi, reason = wt._UiaProbe._bottom_roi_rect(left, blockers, right, window)
+
+        self.assertEqual([item.name for item in blockers], ["计划", "目标"])
+        self.assertEqual(reason, "ok")
+        self.assertIsNotNone(roi)
+        assert roi is not None
+        self.assertGreater(roi.left, goal.rect.right)
+        self.assertLess(roi.left, usage_text.rect.left)
+
+    def test_uia_header_button_collector_logs_candidates_without_dock_changes(self) -> None:
+        window = PhysicalRect(left=100, top=50, right=1100, bottom=850)
+        candidates = [
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=900, top=80, right=930, bottom=110),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="Open in File Explorer",
+                automation_id="",
+                class_name="",
+                depth=4,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=420, top=80, right=448, bottom=108),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="More actions",
+                automation_id="",
+                class_name="",
+                depth=5,
+            ),
+        ]
+
+        header = PhysicalRect(left=400, top=70, right=1000, bottom=120)
+        with self.assertLogs("codex_usage_hud.windows_tracker", level="INFO") as logs:
+            wt._UiaProbe._log_header_button_candidates(candidates, window, header)
+
+        combined = "\n".join(logs.output)
+        self.assertIn("uia_header_buttons", combined)
+        self.assertIn("right_count=1", combined)
+        self.assertIn("right_cluster=", combined)
+        self.assertIn("left_title=", combined)
+        self.assertIn("Open in File Explorer", combined)
+        self.assertIn("More actions", combined)
+
     def test_disabled_uia_landmarks_stay_geometry_only(self) -> None:
         tracker = CodexWindowTracker(enable_uia=False)
         rect = PhysicalRect(left=230, top=126, right=1482, bottom=872)

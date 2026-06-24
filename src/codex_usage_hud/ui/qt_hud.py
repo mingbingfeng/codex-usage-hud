@@ -25,8 +25,10 @@ from ..updater import check_for_update, download_update_asset, format_update_inf
 from .renderer_hud import RendererHudPayload, _renderer_theme_payload, payload_from_snapshot
 from .tk_hud import (
     CodexWindowLocator,
+    HUD_UIA_ROI_DEMO_ENV,
     HudSettingsStore,
     WindowRect,
+    _env_flag,
     _visual_anchor_geometry,
 )
 from .work_overlay_qt import work_overlay_max_items_for_screen_height
@@ -2427,6 +2429,53 @@ if QApplication is not None:
             self.status.setText(f"已启动 {installer.name}，安装器会先关闭当前 HUD。")
 
 
+    class _HeaderRoiDemoWidget(QWidget):
+        def __init__(
+            self,
+            *,
+            border: str = "#FF3030",
+            fill: QColor | None = None,
+        ) -> None:
+            window_type = Qt.WindowType
+            flags = (
+                window_type.FramelessWindowHint
+                | window_type.Tool
+                | window_type.WindowStaysOnTopHint
+            )
+            transparent_input = getattr(window_type, "WindowTransparentForInput", 0)
+            if transparent_input:
+                flags |= transparent_input
+            super().__init__(None, flags)
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._border = QColor(border)
+            self._fill = fill if fill is not None else QColor(255, 48, 48, 220)
+            self._border_width = 6
+            self.hide()
+
+        def update_roi(self, rect: WindowRect | None) -> None:
+            if rect is None or rect.width <= 0 or rect.height <= 0:
+                self.hide()
+                return
+            self.setGeometry(QRect(rect.left, rect.top, rect.width, rect.height))
+            self.show()
+            self.raise_()
+            self.update()
+
+        def paintEvent(self, event: QPaintEvent) -> None:
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            pen = QPen(self._border)
+            pen.setWidth(self._border_width)
+            painter.setPen(pen)
+            painter.setBrush(self._fill)
+            inset = max(1, self._border_width // 2)
+            painter.drawRect(self.rect().adjusted(inset, inset, -inset - 1, -inset - 1))
+            painter.end()
+
+
     class _QtHudWindowImpl:
         active_display_mode = "qt"
 
@@ -2453,6 +2502,10 @@ if QApplication is not None:
             self._attached = False
             self._last_rect: WindowRect | None = None
             self._hud_hidden_by_follow = False
+            self._header_roi_demo_enabled = _env_flag(
+                HUD_UIA_ROI_DEMO_ENV,
+                default=True,
+            )
             self.locator = CodexWindowLocator()
             try:
                 self.locator.set_dpi_aware()
@@ -2494,6 +2547,17 @@ if QApplication is not None:
                 on_click_priority=self._mark_click_priority,
                 on_pointer_priority=self._mark_pointer_priority,
                 on_geometry_changed=self._remember_panel_geometry,
+            )
+            self._header_roi_overlay: _HeaderRoiDemoWidget | None = (
+                _HeaderRoiDemoWidget() if self._header_roi_demo_enabled else None
+            )
+            self._bottom_roi_overlay: _HeaderRoiDemoWidget | None = (
+                _HeaderRoiDemoWidget(
+                    border="#178BFF",
+                    fill=QColor(23, 139, 255, 220),
+                )
+                if self._header_roi_demo_enabled
+                else None
             )
             self._apply_theme_tokens(self._theme_tokens)
             self._place_windows()
@@ -2594,6 +2658,16 @@ if QApplication is not None:
                 self._settings_dialog.close()
                 self._settings_dialog.deleteLater()
                 self._settings_dialog = None
+            if self._header_roi_overlay is not None:
+                self._header_roi_overlay.hide()
+                self._header_roi_overlay.close()
+                self._header_roi_overlay.deleteLater()
+                self._header_roi_overlay = None
+            if self._bottom_roi_overlay is not None:
+                self._bottom_roi_overlay.hide()
+                self._bottom_roi_overlay.close()
+                self._bottom_roi_overlay.deleteLater()
+                self._bottom_roi_overlay = None
             for window in (self.top_window, self.request_window):
                 window.hide()
                 window.close()
@@ -3144,6 +3218,10 @@ if QApplication is not None:
         def _hud_hwnds(self) -> set[int]:
             hwnds: set[int] = set()
             windows: list[QWidget] = [self.top_window, self.request_window]
+            if self._header_roi_overlay is not None:
+                windows.append(self._header_roi_overlay)
+            if self._bottom_roi_overlay is not None:
+                windows.append(self._bottom_roi_overlay)
             if self._settings_dialog is not None:
                 windows.append(self._settings_dialog)
             for window in windows:
@@ -3158,11 +3236,15 @@ if QApplication is not None:
         def _hide_for_follow(self) -> None:
             self.top_window.hide()
             self.request_window.hide()
+            self._hide_header_roi_demo()
+            self._hide_bottom_roi_demo()
             self._hud_hidden_by_follow = True
 
         def _enter_free_mode(self) -> None:
             self._attached = False
             self._last_rect = None
+            self._hide_header_roi_demo()
+            self._hide_bottom_roi_demo()
             self._hud_hidden_by_follow = False
             if self._should_show_hud():
                 if not self.top_window.isVisible():
@@ -3237,6 +3319,46 @@ if QApplication is not None:
                     self.top_window.show()
                 if not self.request_window.isVisible():
                     self.request_window.show()
+            self._sync_header_roi_demo(rect)
+            self._sync_bottom_roi_demo(rect)
+
+        def _sync_header_roi_demo(self, rect: WindowRect | None) -> None:
+            overlay = self._header_roi_overlay
+            if overlay is None:
+                return
+            if rect is None or getattr(rect, "minimized", False):
+                overlay.update_roi(None)
+                return
+            try:
+                roi = self.locator.header_roi_geometry(rect)
+            except Exception:
+                roi = None
+            overlay.update_roi(roi)
+
+        def _hide_header_roi_demo(self) -> None:
+            overlay = self._header_roi_overlay
+            if overlay is None:
+                return
+            overlay.update_roi(None)
+
+        def _sync_bottom_roi_demo(self, rect: WindowRect | None) -> None:
+            overlay = self._bottom_roi_overlay
+            if overlay is None:
+                return
+            if rect is None or getattr(rect, "minimized", False):
+                overlay.update_roi(None)
+                return
+            try:
+                roi = self.locator.bottom_roi_geometry(rect)
+            except Exception:
+                roi = None
+            overlay.update_roi(roi)
+
+        def _hide_bottom_roi_demo(self) -> None:
+            overlay = self._bottom_roi_overlay
+            if overlay is None:
+                return
+            overlay.update_roi(None)
 
 
 def _qt_hex_rgb(value: object, fallback: str = "#000000") -> tuple[int, int, int]:
