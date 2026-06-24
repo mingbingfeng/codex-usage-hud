@@ -245,17 +245,19 @@ class _FakeAnchorLocator:
         active: bool = True,
         header_roi: WindowRect | None = None,
         bottom_roi: WindowRect | None = None,
+        window_rect: WindowRect | None = None,
     ) -> None:
         self.anchors = anchors
         self.active = active
         self.header_roi = header_roi
         self.bottom_roi = bottom_roi
+        self.window_rect = window_rect
 
     def set_dpi_aware(self) -> None:
         return None
 
     def find(self) -> WindowRect | None:
-        return None
+        return self.window_rect
 
     def is_active(self, rect: WindowRect, allowed_hwnds: set[int]) -> bool:
         del rect, allowed_hwnds
@@ -3993,6 +3995,61 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_manual_geometry_resets_when_session_changes(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                user_store = UserConfigStore(Path(temp_dir) / "user_settings.json")
+                user_store.save(UserConfig.defaults())
+                hud_store = HudSettingsStore(Path(temp_dir) / "hud_settings.json")
+                hud_store.save(HudSettings.empty())
+                rect = WindowRect(left=100, top=120, right=1300, bottom=920)
+                roi = WindowRect(left=360, top=144, right=1120, bottom=196)
+                window = QtHudWindow(
+                    hide_until_attached=True,
+                    user_settings_store=user_store,
+                    hud_settings_store=hud_store,
+                )
+                try:
+                    window._impl.locator = _FakeAnchorLocator(
+                        {},
+                        header_roi=roi,
+                        window_rect=rect,
+                    )
+                    window.attach_to_rect(rect)
+                    window.update_display(ParsedSession(session_id="session-a"))
+
+                    window.top_window.move(410, 180)
+                    window.top_window.resize(620, window.top_window.height())
+                    window._remember_panel_geometry("top", window.top_window, "move")
+                    self.assertIn("top", window._impl._session_manual_targets)
+
+                    window.update_display(ParsedSession(session_id="session-a"))
+                    self.assertIn("top", window._impl._session_manual_targets)
+                    self.assertEqual((window.top_window.x(), window.top_window.y()), (410, 180))
+
+                    window.update_display(ParsedSession(session_id="session-b"))
+                    self.assertNotIn("top", window._impl._session_manual_targets)
+                    self.assertFalse(window.top_window._manual_positioned)
+                    self.assertIsNone(window.settings.top.width)
+                    self.assertEqual(
+                        (window.top_window.x(), window.top_window.y(), window.top_window.width()),
+                        (360, 144, 760),
+                    )
+                finally:
+                    window.close("test")
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_qt_attached_windows_follow_moved_codex_rect(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -6124,6 +6181,42 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertIsNone(window.settings.top.anchor_x_ratio)
             self.assertIsNone(window.settings.top.anchor_y_ratio)
             self.assertIn("top", window._session_manual_targets)
+        finally:
+            window._close()
+
+    def test_tk_manual_geometry_resets_when_session_changes(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _stop_background_jobs(window)
+            rect = WindowRect(left=100, top=50, right=1300, bottom=850)
+            window.locator = _FakeAnchorLocator(
+                {},
+                header_roi=WindowRect(left=360, top=64, right=1120, bottom=120),
+            )
+            window._attached = True
+            window._last_rect = rect
+            window.update_display(ParsedSession(session_id="session-a"))
+
+            fake = _FakeWindow(x=420, y=92, width=400, height=TOP_DOCK_HEIGHT)
+            window._remember_window_position("top", fake, reason="test-move")
+            window._remember_window_width("top", fake, reason="test-resize")
+            self.assertIn("top", window._session_manual_targets)
+            self.assertEqual(
+                window._attached_geometry("top", rect, False),
+                (420, 92, 400, TOP_DOCK_HEIGHT),
+            )
+
+            window.update_display(ParsedSession(session_id="session-a"))
+            self.assertIn("top", window._session_manual_targets)
+
+            window.update_display(ParsedSession(session_id="session-b"))
+            self.assertNotIn("top", window._session_manual_targets)
+            self.assertIsNone(window._top_manual_position)
+            self.assertIsNone(window.settings.top.width)
+            self.assertEqual(
+                window._attached_geometry("top", rect, False),
+                (360, 64, 760, TOP_DOCK_HEIGHT),
+            )
         finally:
             window._close()
 

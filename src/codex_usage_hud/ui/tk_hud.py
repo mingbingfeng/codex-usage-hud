@@ -9970,6 +9970,36 @@ class TokenHudWindow:
         else:
             self._request_manual_position = None
 
+    @staticmethod
+    def _snapshot_session_id(snapshot: ParsedSession | None) -> str:
+        if snapshot is None:
+            return ""
+        return str(getattr(snapshot, "session_id", "") or "").strip()
+
+    def _reset_manual_geometry_for_session_switch(
+        self,
+        next_snapshot: ParsedSession,
+    ) -> bool:
+        previous_session_id = self._snapshot_session_id(self._snapshot)
+        next_session_id = self._snapshot_session_id(next_snapshot)
+        if (
+            not previous_session_id
+            or not next_session_id
+            or previous_session_id == next_session_id
+        ):
+            return False
+        changed = False
+        for target in ("top", "request"):
+            if target not in self._session_manual_target_set():
+                continue
+            placement = self._placement(target)
+            if placement.pinned:
+                continue
+            placement.clear_geometry()
+            self._clear_session_manual_geometry(target)
+            changed = True
+        return changed
+
     def _capture_window_geometry(
         self,
         target: str,
@@ -10395,6 +10425,9 @@ class TokenHudWindow:
         update_state: AutoUpdateState | None = None,
     ) -> None:
         """Refresh both HUD windows with the latest parsed session snapshot."""
+        reset_manual_geometry = self._reset_manual_geometry_for_session_switch(
+            parsed_session,
+        )
         if not self._top_animation_active():
             self._maybe_apply_live_theme()
         self._snapshot = parsed_session
@@ -10404,6 +10437,8 @@ class TokenHudWindow:
                 self._sync_about_update_controls()
         if self._top_animation_active():
             return
+        if reset_manual_geometry:
+            self._apply_geometry()
         self._log_budget_snapshot(parsed_session)
         self._render_top()
         self._render_request()

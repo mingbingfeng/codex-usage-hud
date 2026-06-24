@@ -2650,10 +2650,15 @@ if QApplication is not None:
                 if isinstance(update_state, Mapping)
                 else {}
             )
+            reset_manual_geometry = self._reset_manual_geometry_for_session_switch(
+                snapshot,
+            )
             self._last_snapshot = snapshot
             self._last_update_state = dict(update_payload)
             self._latest_payload = self._payload_from_snapshot(snapshot, update_payload)
             self._follow_codex_window()
+            if reset_manual_geometry and self._attached and self._last_rect is not None:
+                self.attach_to_rect(self._last_rect)
             self._apply_payload(self._latest_payload.to_json())
             if self._should_show_hud() and not self.top_window.isVisible():
                 self.top_window.show()
@@ -2878,6 +2883,36 @@ if QApplication is not None:
         def _clear_session_manual_geometry(self, target: str) -> None:
             self._session_manual_targets.discard(target)
             self._panel_for_target(target)._manual_positioned = False
+
+        @staticmethod
+        def _snapshot_session_id(snapshot: ParsedSession | None) -> str:
+            if snapshot is None:
+                return ""
+            return str(getattr(snapshot, "session_id", "") or "").strip()
+
+        def _reset_manual_geometry_for_session_switch(
+            self,
+            next_snapshot: ParsedSession,
+        ) -> bool:
+            previous_session_id = self._snapshot_session_id(self._last_snapshot)
+            next_session_id = self._snapshot_session_id(next_snapshot)
+            if (
+                not previous_session_id
+                or not next_session_id
+                or previous_session_id == next_session_id
+            ):
+                return False
+            changed = False
+            for target in ("top", "request"):
+                if target not in self._session_manual_targets:
+                    continue
+                placement = self._placement(target)
+                if placement.pinned:
+                    continue
+                placement.clear_geometry()
+                self._clear_session_manual_geometry(target)
+                changed = True
+            return changed
 
         def toggle_pin(self, target: str) -> None:
             self._mark_click_priority()
