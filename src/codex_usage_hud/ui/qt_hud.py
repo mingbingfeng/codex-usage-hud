@@ -29,7 +29,9 @@ from .tk_hud import (
     HudSettingsStore,
     WindowRect,
     _automatic_hud_geometry,
+    _HUD_GEOMETRY_LOGGER,
     _env_flag,
+    configure_hud_geometry_logging,
 )
 from .work_overlay_qt import work_overlay_max_items_for_screen_height
 
@@ -86,7 +88,7 @@ QT_THEME_DEFAULTS: dict[str, str] = {
 }
 
 try:  # pragma: no cover - exercised through QtHudWindow construction.
-    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Slot
+    from PySide6.QtCore import QAbstractAnimation, QEvent, QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt, QTimer, Signal, Slot
     from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -116,6 +118,17 @@ try:  # pragma: no cover - exercised through QtHudWindow construction.
 except Exception as exc:  # pragma: no cover - depends on optional GUI runtime.
     QApplication = None  # type: ignore[assignment]
     _QT_IMPORT_ERROR = exc
+
+
+if _QT_IMPORT_ERROR is None:  # pragma: no cover - exercised through Qt runtime.
+    class _HeaderRoiRefreshBridge(QObject):
+        triggered = Signal()
+
+        def __init__(self, callback: Callable[[], None]) -> None:
+            super().__init__()
+            self.triggered.connect(callback)
+else:  # pragma: no cover - optional Qt runtime unavailable.
+    _HeaderRoiRefreshBridge = None  # type: ignore[assignment,misc]
 
 
 def _compact(value: object, limit: int = 140) -> str:
@@ -690,7 +703,9 @@ if QApplication is not None:
 
         def _pin_button(self) -> QPushButton:
             button = QPushButton("📍")
-            button.setObjectName("qtHudIconButton")
+            button.setObjectName("qtHudPinButton")
+            button.setFixedSize(20, 24)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.clicked.connect(lambda _checked=False: self._emit_pin_toggle())
             self._pin_buttons.append(button)
             self.set_pinned(False)
@@ -704,9 +719,12 @@ if QApplication is not None:
         def set_pinned(self, pinned: bool) -> None:
             for button in self._pin_buttons:
                 button.setText("📌" if pinned else "📍")
+                button.setProperty("pinned", "true" if pinned else "false")
                 button.setToolTip(
                     "取消钉住并自动跟随" if pinned else "钉住此 HUD 位置"
                 )
+                button.style().unpolish(button)
+                button.style().polish(button)
 
         def toggle_expanded(self) -> None:
             self.set_expanded(not self._expanded)
@@ -1098,8 +1116,8 @@ if QApplication is not None:
             collapsed.setObjectName("qtHudTopCollapsed")
             collapsed_layout = QHBoxLayout(collapsed)
             collapsed_layout.setContentsMargins(0, 0, 0, 0)
-            collapsed_layout.setSpacing(8)
-            collapsed_layout.addWidget(self._pin_button())
+            collapsed_layout.setSpacing(6)
+            collapsed_layout.addWidget(self._pin_button(), 0, Qt.AlignmentFlag.AlignVCenter)
             self._collapsed_strip = _TopCollapsedProgressStrip()
             collapsed_layout.addWidget(self._collapsed_strip, 1, Qt.AlignmentFlag.AlignVCenter)
             self._collapsed_progress = self._collapsed_strip.rails
@@ -1120,8 +1138,8 @@ if QApplication is not None:
             header_frame.setObjectName("qtHudPanelHeader")
             header = QHBoxLayout(header_frame)
             header.setContentsMargins(6, 3, 6, 3)
-            header.setSpacing(6)
-            header.addWidget(self._pin_button())
+            header.setSpacing(5)
+            header.addWidget(self._pin_button(), 0, Qt.AlignmentFlag.AlignVCenter)
             self.update_button = QPushButton("↓")
             self.update_button.setObjectName("qtHudIconButton")
             self.update_button.setVisible(False)
@@ -1771,8 +1789,8 @@ if QApplication is not None:
             collapsed.setObjectName("qtHudRequestCollapsed")
             collapsed_layout = QHBoxLayout(collapsed)
             collapsed_layout.setContentsMargins(0, 0, 0, 0)
-            collapsed_layout.setSpacing(6)
-            collapsed_layout.addWidget(self._pin_button())
+            collapsed_layout.setSpacing(5)
+            collapsed_layout.addWidget(self._pin_button(), 0, Qt.AlignmentFlag.AlignVCenter)
             self.request_line = _HudLabel("等待请求...", role="strong")
             collapsed_layout.addWidget(self.request_line, 1)
 
@@ -1814,8 +1832,8 @@ if QApplication is not None:
             header.setObjectName("qtHudRequestExpandedHeader")
             header_layout = QHBoxLayout(header)
             header_layout.setContentsMargins(6, 3, 6, 3)
-            header_layout.setSpacing(6)
-            header_layout.addWidget(self._pin_button())
+            header_layout.setSpacing(5)
+            header_layout.addWidget(self._pin_button(), 0, Qt.AlignmentFlag.AlignVCenter)
             self.request_title = _HudLabel("最近模型请求轮次", role="strong")
             header_layout.addWidget(self.request_title, 1)
             expanded_layout.addWidget(header)
@@ -2533,9 +2551,10 @@ if QApplication is not None:
             self._attached = False
             self._last_rect: WindowRect | None = None
             self._hud_hidden_by_follow = False
+            self._geometry_log_path = configure_hud_geometry_logging()
             self._header_roi_demo_enabled = _env_flag(
                 HUD_UIA_ROI_DEMO_ENV,
-                default=True,
+                default=False,
             )
             self.locator = CodexWindowLocator()
             try:
@@ -2558,6 +2577,14 @@ if QApplication is not None:
             self._interaction_block_until = 0.0
             self._click_priority_hold_until = 0.0
             self._pointer_priority_hold_until = 0.0
+            self._header_roi_refresh_queued = False
+            self._header_roi_refresh_bridge = _HeaderRoiRefreshBridge(
+                self._schedule_header_roi_refresh,
+            )
+            try:
+                self.locator.set_header_roi_change_callback(self._emit_header_roi_refresh)
+            except Exception:
+                pass
             self._session_manual_targets: set[str] = set()
             self._settings_dialog: _SettingsDialog | None = None
             self.top_window = _TopPanel(
@@ -2605,6 +2632,60 @@ if QApplication is not None:
             self._follow_timer.timeout.connect(self._follow_codex_window)
             self._follow_timer.start(
                 max(50, min(QT_HUD_FOLLOW_MS, self.tombstone_follow_ms))
+            )
+
+        def _emit_header_roi_refresh(self) -> None:
+            self._header_roi_refresh_bridge.triggered.emit()
+
+        @Slot()
+        def _schedule_header_roi_refresh(self) -> None:
+            if self._header_roi_refresh_queued:
+                return
+            self._header_roi_refresh_queued = True
+            QTimer.singleShot(0, self._flush_header_roi_refresh)
+
+        @Slot()
+        def _flush_header_roi_refresh(self) -> None:
+            self._header_roi_refresh_queued = False
+            self._refresh_header_roi_geometry()
+
+        def _refresh_header_roi_geometry(self) -> None:
+            if (
+                self.top_window.geometry_interaction_active()
+                or self.request_window.geometry_interaction_active()
+            ):
+                return
+            if not self._attached or self._last_rect is None:
+                self._follow_codex_window()
+                return
+            if self._hud_hidden_by_follow:
+                return
+            rect = self._last_rect
+            started = time.perf_counter()
+            top_x = int(getattr(self.top_window, "x", lambda: 0)() or 0)
+            top_y = int(getattr(self.top_window, "y", lambda: 0)() or 0)
+            top_width = int(getattr(self.top_window, "width", lambda: 0)() or 0)
+            top_height = int(self.top_window.height())
+            if not self.top_window._manual_positioned:
+                x, y, width, _height = self._attached_panel_geometry(
+                    "top",
+                    rect,
+                    self.top_window.expanded,
+                )
+                self.top_window.resize(width, self.top_window.height())
+                self.top_window.move(x, y)
+                top_x, top_y, top_width = x, y, width
+            self._hud_hidden_by_follow = False
+            if self._should_show_hud() and not self.top_window.isVisible():
+                self.top_window.show()
+            self._sync_header_roi_demo(rect)
+            _HUD_GEOMETRY_LOGGER.info(
+                "header_roi_refresh_applied target=top geometry=(%s,%s,%s,%s) duration_ms=%.1f",
+                top_x,
+                top_y,
+                top_width,
+                top_height,
+                (time.perf_counter() - started) * 1000,
             )
 
         @property
@@ -2690,6 +2771,10 @@ if QApplication is not None:
         def close(self, reason: str = "") -> None:
             if reason and not self.exit_reason:
                 self.exit_reason = reason
+            try:
+                self.locator.set_header_roi_change_callback(None)
+            except Exception:
+                pass
             for timer in (getattr(self, "_clock_timer", None), getattr(self, "_follow_timer", None)):
                 if timer is not None:
                     timer.stop()
@@ -2982,7 +3067,7 @@ if QApplication is not None:
                 return x, y, width, height
             min_x = rect.left + QT_HUD_MARGIN
             max_x = max(min_x, rect.right - width - QT_HUD_MARGIN)
-            min_y = rect.top + QT_HUD_MARGIN
+            min_y = rect.top if target == "top" else rect.top + QT_HUD_MARGIN
             max_y = max(min_y, rect.bottom - height - QT_HUD_MARGIN)
             x = max(min_x, min(x, max_x))
             y = max(min_y, min(y, max_y))
@@ -3114,6 +3199,15 @@ if QApplication is not None:
                 self._last_rect = rect
                 self._hide_for_follow()
                 return False
+            if self._attached and self._same_window_rect(self._last_rect, rect):
+                self._last_rect = rect
+                self._hud_hidden_by_follow = False
+                if self._should_show_hud():
+                    if not self.top_window.isVisible():
+                        self.top_window.show()
+                    if not self.request_window.isVisible():
+                        self.request_window.show()
+                return True
             self.attach_to_rect(rect)
             return True
 
@@ -3169,6 +3263,18 @@ if QApplication is not None:
                 abs(int(previous.bottom) - int(current.bottom)),
             )
             return 0 < max_delta <= QT_HUD_SAME_HWND_RECT_JITTER_PX
+
+        @staticmethod
+        def _same_window_rect(previous: WindowRect | None, current: WindowRect) -> bool:
+            return (
+                previous is not None
+                and previous.hwnd == current.hwnd
+                and previous.left == current.left
+                and previous.top == current.top
+                and previous.right == current.right
+                and previous.bottom == current.bottom
+                and previous.minimized == current.minimized
+            )
 
         def attach_to_rect(self, rect: WindowRect) -> None:
             self._attached = True
@@ -3645,6 +3751,28 @@ def _qt_stylesheet(tokens: Mapping[str, str] | None = None) -> str:
         max-width: 28px;
         padding: 3px;
         font-weight: 700;
+    }
+    QPushButton#qtHudPinButton {
+        color: #8D9AAD;
+        background: transparent;
+        border: 0;
+        min-width: 20px;
+        max-width: 20px;
+        min-height: 24px;
+        max-height: 24px;
+        padding: 0 2px;
+        margin: 0;
+        font-size: 13px;
+        font-weight: 700;
+        qproperty-iconSize: 14px 14px;
+    }
+    QPushButton#qtHudPinButton:hover {
+        color: #F3D27A;
+        background: transparent;
+        border: 0;
+    }
+    QPushButton#qtHudPinButton[pinned="true"] {
+        color: #F3D27A;
     }
     QPushButton#qtHudIconButton[phase="ready"] {
         color: #B5DD92;

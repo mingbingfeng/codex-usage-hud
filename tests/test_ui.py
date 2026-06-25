@@ -18,6 +18,7 @@ import pytest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Callable
 from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -252,6 +253,9 @@ class _FakeAnchorLocator:
         self.header_roi = header_roi
         self.bottom_roi = bottom_roi
         self.window_rect = window_rect
+        self.header_roi_change_callback: Callable[[], None] | None = None
+        self.header_roi_calls = 0
+        self.bottom_roi_calls = 0
 
     def set_dpi_aware(self) -> None:
         return None
@@ -286,11 +290,16 @@ class _FakeAnchorLocator:
 
     def header_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
         del rect
+        self.header_roi_calls += 1
         return self.header_roi
 
     def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
         del rect
+        self.bottom_roi_calls += 1
         return self.bottom_roi
+
+    def set_header_roi_change_callback(self, callback: Callable[[], None] | None) -> None:
+        self.header_roi_change_callback = callback
 
 
 def _attached_geometry_after_stable(
@@ -3641,6 +3650,61 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_qt_pin_button_is_compact_borderless_and_centered(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = qt_hud_module.QApplication.instance() or qt_hud_module.QApplication(sys.argv[:1])
+            panel = qt_hud_module._TopPanel(
+                on_settings=lambda: None,
+                on_update_action=lambda: None,
+                on_dismiss_warnings=lambda: None,
+                on_interaction=lambda: None,
+            )
+            try:
+                pin = panel._pin_buttons[0]
+                panel.resize(520, qt_hud_module.QT_HUD_TOP_COLLAPSED_HEIGHT)
+                panel.show()
+                app.processEvents()
+
+                self.assertEqual(pin.objectName(), "qtHudPinButton")
+                self.assertEqual((pin.width(), pin.height()), (20, 24))
+                self.assertEqual(pin.property("pinned"), "false")
+                self.assertAlmostEqual(
+                    pin.mapTo(panel.shell, pin.rect().center()).y(),
+                    panel.shell.contentsRect().center().y(),
+                    delta=4,
+                )
+
+                panel.set_pinned(True)
+                self.assertEqual(pin.property("pinned"), "true")
+            finally:
+                panel.close()
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_tk_pin_button_is_compact_borderless(self) -> None:
+        window = TokenHudWindow()
+        try:
+            _stop_background_jobs(window)
+            button = window._pin_buttons["top"][0]
+
+            self.assertEqual(int(button.cget("borderwidth")), 0)
+            self.assertEqual(int(button.cget("highlightthickness")), 0)
+            self.assertLessEqual(int(button.cget("padx")), 2)
+            self.assertEqual(int(button.cget("pady")), 0)
+            self.assertEqual(int(button.cget("width")), 2)
+        finally:
+            window._close()
+
     def test_qt_pin_button_toggles_persistence_without_expanding_panel(self) -> None:
         try:
             import PySide6  # noqa: F401
@@ -5758,6 +5822,26 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             self.assertFalse(locator._dom_anchors_enabled)
             self.assertIsNone(locator._cdp_probe)
 
+    def test_windows_locator_disables_roi_demo_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(tk_hud_module.HUD_UIA_ROI_DEMO_ENV, None)
+
+            locator = _WindowsCodexLocator()
+
+        if locator.enabled:
+            self.assertFalse(locator._header_roi_demo_enabled)
+
+    def test_tk_header_roi_demo_is_disabled_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(tk_hud_module.HUD_UIA_ROI_DEMO_ENV, None)
+            window = TokenHudWindow()
+            try:
+                self.assertFalse(window._use_header_roi_demo)
+                self.assertIsNone(window._header_roi_overlay)
+                self.assertIsNone(window._bottom_roi_overlay)
+            finally:
+                window._close()
+
     def test_collapsed_top_bar_shows_session_cache_hit_rate(self) -> None:
         window = TokenHudWindow()
         try:
@@ -6521,6 +6605,203 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
         x, y, width, height = window._attached_geometry("request", rect, False)
 
         self.assertEqual((x, y, width, height), (460, 782, 495, 32))
+
+    def test_top_roi_at_window_top_is_not_clamped_below_title_bar(self) -> None:
+        rect = WindowRect(left=100, top=0, right=1300, bottom=850)
+        roi = WindowRect(left=360, top=0, right=1120, bottom=38)
+        window = object.__new__(TokenHudWindow)
+        window.locator = _FakeAnchorLocator({}, header_roi=roi)
+        window.settings = HudSettings.empty()
+        window.top_expanded = False
+        window._top_collapsed_width_override = None
+        window._last_geometry_clamp = {}
+
+        self.assertEqual(
+            window._attached_geometry("top", rect, False),
+            (360, 0, 760, TOP_DOCK_HEIGHT),
+        )
+
+    def test_qt_top_roi_at_window_top_is_not_clamped_below_title_bar(self) -> None:
+        rect = WindowRect(left=100, top=0, right=1300, bottom=850)
+        roi = WindowRect(left=360, top=0, right=1120, bottom=38)
+        impl = object.__new__(qt_hud_module._QtHudWindowImpl)
+        impl.locator = _FakeAnchorLocator({}, header_roi=roi)
+        impl.settings = HudSettings.empty()
+        impl.top_window = SimpleNamespace(_target_height=lambda _expanded: TOP_DOCK_HEIGHT)
+        impl.request_window = SimpleNamespace()
+        impl._session_manual_targets = set()
+
+        self.assertEqual(
+            impl._attached_panel_geometry("top", rect, False),
+            (360, 0, 760, TOP_DOCK_HEIGHT),
+        )
+
+    def test_tk_header_roi_event_schedules_window_sync(self) -> None:
+        class _Root:
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, Callable[[], None]]] = []
+
+            def after(self, delay: int, callback: Callable[[], None]) -> str:
+                self.calls.append((delay, callback))
+                return "after-id"
+
+        window = object.__new__(TokenHudWindow)
+        window.root = _Root()
+        window._header_roi_refresh_job = None
+        window._refresh_header_roi_geometry = MagicMock()
+
+        window._schedule_header_roi_refresh()
+
+        self.assertEqual(window._header_roi_refresh_job, "after-id")
+        self.assertEqual(window.root.calls[0][0], 0)
+        window.root.calls[0][1]()
+        window._refresh_header_roi_geometry.assert_called_once()
+        self.assertIsNone(window._header_roi_refresh_job)
+
+    def test_qt_header_roi_event_schedules_window_follow(self) -> None:
+        impl = object.__new__(qt_hud_module._QtHudWindowImpl)
+        impl._header_roi_refresh_queued = False
+        impl._refresh_header_roi_geometry = MagicMock()
+
+        with patch.object(
+            qt_hud_module.QTimer,
+            "singleShot",
+            side_effect=lambda _delay, callback: callback(),
+        ) as single_shot:
+            impl._schedule_header_roi_refresh()
+
+        single_shot.assert_called_once()
+        impl._refresh_header_roi_geometry.assert_called_once()
+        self.assertFalse(impl._header_roi_refresh_queued)
+
+    def test_tk_header_roi_event_refreshes_only_top_geometry(self) -> None:
+        rect = WindowRect(hwnd=321, left=100, top=50, right=1300, bottom=850)
+        locator = _FakeAnchorLocator(
+            {},
+            header_roi=WindowRect(hwnd=321, left=360, top=64, right=1120, bottom=120),
+            bottom_roi=WindowRect(hwnd=321, left=520, top=732, right=1000, bottom=786),
+            window_rect=rect,
+        )
+        window = object.__new__(TokenHudWindow)
+        window.locator = locator
+        window.settings = HudSettings.empty()
+        window.top_expanded = False
+        window._top_collapsed_width_override = None
+        window._last_geometry_clamp = {}
+        window._attached = True
+        window._last_rect = rect
+        window._move_target = None
+        window._resize_target = None
+        window._top_animation_active = lambda: False
+        window._hud_hwnds = lambda: set()
+        window._exit_tombstone = MagicMock()
+        window._apply_focus_state = MagicMock()
+        window._set_alpha = MagicMock()
+        window._apply_window_geometry = MagicMock()
+        window._sync_header_roi_demo = MagicMock()
+        window.root = MagicMock()
+
+        window._refresh_header_roi_geometry()
+
+        window._apply_window_geometry.assert_called_once()
+        self.assertEqual(window._apply_window_geometry.call_args.args[0], "top")
+        self.assertEqual(locator.header_roi_calls, 1)
+        self.assertEqual(locator.bottom_roi_calls, 0)
+
+    def test_qt_header_roi_event_refreshes_only_top_geometry(self) -> None:
+        class _Panel:
+            def __init__(self) -> None:
+                self._manual_positioned = False
+                self.expanded = False
+                self.moves: list[tuple[int, int]] = []
+                self.resizes: list[tuple[int, int]] = []
+
+            def _target_height(self, expanded: bool) -> int:
+                del expanded
+                return TOP_DOCK_HEIGHT
+
+            def geometry_interaction_active(self) -> bool:
+                return False
+
+            def height(self) -> int:
+                return TOP_DOCK_HEIGHT
+
+            def resize(self, width: int, height: int) -> None:
+                self.resizes.append((width, height))
+
+            def move(self, x: int, y: int) -> None:
+                self.moves.append((x, y))
+
+            def isVisible(self) -> bool:
+                return True
+
+            def show(self) -> None:
+                return None
+
+        rect = WindowRect(hwnd=321, left=100, top=50, right=1300, bottom=850)
+        locator = _FakeAnchorLocator(
+            {},
+            header_roi=WindowRect(hwnd=321, left=360, top=64, right=1120, bottom=120),
+            bottom_roi=WindowRect(hwnd=321, left=520, top=732, right=1000, bottom=786),
+            window_rect=rect,
+        )
+        impl = object.__new__(qt_hud_module._QtHudWindowImpl)
+        impl.locator = locator
+        impl.settings = HudSettings.empty()
+        impl.top_window = _Panel()
+        impl.request_window = SimpleNamespace(geometry_interaction_active=lambda: False)
+        impl._session_manual_targets = set()
+        impl._attached = True
+        impl._last_rect = rect
+        impl._hud_hidden_by_follow = False
+        impl.hide_until_attached = True
+        impl._hud_hwnds = lambda: set()
+        impl._sync_header_roi_demo = MagicMock()
+
+        impl._refresh_header_roi_geometry()
+
+        self.assertEqual(impl.top_window.moves, [(360, 64)])
+        self.assertEqual(impl.top_window.resizes, [(760, TOP_DOCK_HEIGHT)])
+        self.assertEqual(locator.header_roi_calls, 1)
+        self.assertEqual(locator.bottom_roi_calls, 0)
+
+    def test_tk_follow_same_rect_skips_geometry_recompute(self) -> None:
+        rect = WindowRect(hwnd=321, left=100, top=50, right=1300, bottom=850)
+        window = object.__new__(TokenHudWindow)
+        window.locator = _FakeAnchorLocator({}, window_rect=rect)
+        window._attached = True
+        window._last_rect = rect
+        window._move_target = None
+        window._resize_target = None
+        window._top_animation_active = lambda: False
+        window._manual_input_active = lambda _now=None: False
+        window._ui_interaction_active = lambda _now=None: False
+        window._hud_hwnds = lambda: set()
+        window._exit_tombstone = MagicMock()
+        window._apply_focus_state = MagicMock()
+        window._attach_to_rect = MagicMock()
+
+        window.sync_codex_window()
+
+        window._attach_to_rect.assert_not_called()
+
+    def test_qt_follow_same_rect_skips_geometry_recompute(self) -> None:
+        rect = WindowRect(hwnd=321, left=100, top=50, right=1300, bottom=850)
+        impl = object.__new__(qt_hud_module._QtHudWindowImpl)
+        impl.locator = _FakeAnchorLocator({}, window_rect=rect)
+        impl._attached = True
+        impl._last_rect = rect
+        impl._geometry_interaction_active = lambda: False
+        impl._hud_hwnds = lambda: set()
+        impl._hud_hidden_by_follow = False
+        impl.hide_until_attached = True
+        impl.top_window = SimpleNamespace(isVisible=lambda: True, show=lambda: None)
+        impl.request_window = SimpleNamespace(isVisible=lambda: True, show=lambda: None)
+        impl.attach_to_rect = MagicMock()
+
+        self.assertTrue(impl._follow_codex_window())
+
+        impl.attach_to_rect.assert_not_called()
 
     def test_roi_demo_positions_tk_huds_with_existing_hud_height(self) -> None:
         class _RecordingOverlay:

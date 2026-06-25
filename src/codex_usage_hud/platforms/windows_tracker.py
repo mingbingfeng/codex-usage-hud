@@ -18,7 +18,7 @@ import uuid
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 DockTarget = Literal["title", "input"]
 
@@ -36,8 +36,21 @@ _CLSCTX_LOCAL_SERVER = 0x4
 _RPC_E_CHANGED_MODE = -2147417850
 _S_OK = 0
 _S_FALSE = 1
+_E_NOINTERFACE = -2147467262
 _DWMWA_CLOAKED = 14
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_TREE_SCOPE_ELEMENT = 0x1
+_TREE_SCOPE_DESCENDANTS = 0x4
+_TREE_SCOPE_SUBTREE = _TREE_SCOPE_ELEMENT | _TREE_SCOPE_DESCENDANTS
+_UIA_STRUCTURE_CHANGED_EVENT_ID = 20002
+_UIA_LAYOUT_INVALIDATED_EVENT_ID = 20008
+_UIA_BOUNDING_RECTANGLE_PROPERTY_ID = 30001
+_UIA_IS_OFFSCREEN_PROPERTY_ID = 30022
+_UIA_HEADER_EVENT_DEBOUNCE_SECONDS = 0.08
+_PM_REMOVE = 0x0001
+_QS_ALLINPUT = 0x04FF
+_MWMO_INPUTAVAILABLE = 0x0004
+_MWMO_ALERTABLE = 0x0002
 
 _UIA_BUTTON_CONTROL_TYPE_ID = 50000
 _UIA_COMBO_BOX_CONTROL_TYPE_ID = 50003
@@ -305,6 +318,12 @@ class _HeaderButtonCollection:
 
 
 @dataclass(frozen=True)
+class _HeaderEventTargetCandidate:
+    candidate: _HeaderButtonCandidate
+    element: int
+
+
+@dataclass(frozen=True)
 class HeaderRoiSnapshot:
     status: str
     hwnd: int = 0
@@ -370,6 +389,208 @@ class _GUID(ctypes.Structure):
         node = int(fields[5]).to_bytes(6, "big")
         data4 = (ctypes.c_ubyte * 8)(fields[3], fields[4], *node)
         return cls(fields[0], fields[1], fields[2], data4)
+
+
+def _same_guid(left: _GUID, right: _GUID) -> bool:
+    return bytes(ctypes.string_at(ctypes.byref(left), ctypes.sizeof(_GUID))) == bytes(
+        ctypes.string_at(ctypes.byref(right), ctypes.sizeof(_GUID))
+    )
+
+
+_IID_IUNKNOWN = _GUID.from_string("{00000000-0000-0000-c000-000000000046}")
+_IID_IUIAUTOMATION_EVENT_HANDLER = _GUID.from_string(
+    "{146c3c17-f12e-4e22-8c27-f894b9b79c69}"
+)
+_IID_IUIAUTOMATION_PROPERTY_CHANGED_EVENT_HANDLER = _GUID.from_string(
+    "{40cd37d4-c756-4b0c-8c6f-bddfeeb13b50}"
+)
+
+
+class _VariantValue(ctypes.Union):
+    _fields_ = [
+        ("lVal", ctypes.c_long),
+        ("boolVal", ctypes.c_short),
+        ("bstrVal", ctypes.c_void_p),
+        ("pdispVal", ctypes.c_void_p),
+    ]
+
+
+class _Variant(ctypes.Structure):
+    _anonymous_ = ("value",)
+    _fields_ = [
+        ("vt", ctypes.c_ushort),
+        ("wReserved1", ctypes.c_ushort),
+        ("wReserved2", ctypes.c_ushort),
+        ("wReserved3", ctypes.c_ushort),
+        ("value", _VariantValue),
+    ]
+
+
+_UiaQueryInterfaceProc = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_void_p,
+    ctypes.POINTER(_GUID),
+    ctypes.POINTER(ctypes.c_void_p),
+)
+_UiaAddRefProc = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_UiaReleaseProc = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_UiaHandleEventProc = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_int,
+)
+
+
+class _UiaAutomationEventHandlerVTable(ctypes.Structure):
+    _fields_ = [
+        ("QueryInterface", _UiaQueryInterfaceProc),
+        ("AddRef", _UiaAddRefProc),
+        ("Release", _UiaReleaseProc),
+        ("HandleAutomationEvent", _UiaHandleEventProc),
+    ]
+
+
+class _UiaAutomationEventHandlerObject(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(_UiaAutomationEventHandlerVTable))]
+
+
+class _UiaAutomationEventHandler:
+    """Small COM object implementing IUIAutomationEventHandler."""
+
+    def __init__(self, callback: Callable[[int, int], None]) -> None:
+        self.callback = callback
+        self._ref_count = 1
+        self._query_interface = _UiaQueryInterfaceProc(self._query_interface_impl)
+        self._add_ref = _UiaAddRefProc(self._add_ref_impl)
+        self._release = _UiaReleaseProc(self._release_impl)
+        self._handle_event = _UiaHandleEventProc(self._handle_event_impl)
+        self._vtable = _UiaAutomationEventHandlerVTable(
+            self._query_interface,
+            self._add_ref,
+            self._release,
+            self._handle_event,
+        )
+        self._object = _UiaAutomationEventHandlerObject()
+        self._object.lpVtbl = ctypes.pointer(self._vtable)
+        self.ptr = ctypes.cast(ctypes.pointer(self._object), ctypes.c_void_p)
+
+    def _query_interface_impl(
+        self,
+        this: int,
+        riid: ctypes.POINTER(_GUID),
+        out: ctypes.POINTER(ctypes.c_void_p),
+    ) -> int:
+        if not out:
+            return _E_NOINTERFACE
+        requested = riid.contents
+        if _same_guid(requested, _IID_IUNKNOWN) or _same_guid(
+            requested,
+            _IID_IUIAUTOMATION_EVENT_HANDLER,
+        ):
+            out[0] = ctypes.c_void_p(this)
+            self._add_ref_impl(this)
+            return _S_OK
+        out[0] = ctypes.c_void_p()
+        return _E_NOINTERFACE
+
+    def _add_ref_impl(self, _this: int) -> int:
+        self._ref_count += 1
+        return self._ref_count
+
+    def _release_impl(self, _this: int) -> int:
+        self._ref_count = max(1, self._ref_count - 1)
+        return self._ref_count
+
+    def _handle_event_impl(self, _this: int, sender: int, event_id: int) -> int:
+        try:
+            self.callback(int(sender or 0), int(event_id))
+        except Exception:
+            pass
+        return _S_OK
+
+
+_UiaHandlePropertyChangedProc = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_int,
+    _Variant,
+)
+
+
+class _UiaPropertyChangedEventHandlerVTable(ctypes.Structure):
+    _fields_ = [
+        ("QueryInterface", _UiaQueryInterfaceProc),
+        ("AddRef", _UiaAddRefProc),
+        ("Release", _UiaReleaseProc),
+        ("HandlePropertyChangedEvent", _UiaHandlePropertyChangedProc),
+    ]
+
+
+class _UiaPropertyChangedEventHandlerObject(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(_UiaPropertyChangedEventHandlerVTable))]
+
+
+class _UiaPropertyChangedEventHandler:
+    """Small COM object implementing IUIAutomationPropertyChangedEventHandler."""
+
+    def __init__(self, callback: Callable[[int, int], None]) -> None:
+        self.callback = callback
+        self._ref_count = 1
+        self._query_interface = _UiaQueryInterfaceProc(self._query_interface_impl)
+        self._add_ref = _UiaAddRefProc(self._add_ref_impl)
+        self._release = _UiaReleaseProc(self._release_impl)
+        self._handle_event = _UiaHandlePropertyChangedProc(self._handle_event_impl)
+        self._vtable = _UiaPropertyChangedEventHandlerVTable(
+            self._query_interface,
+            self._add_ref,
+            self._release,
+            self._handle_event,
+        )
+        self._object = _UiaPropertyChangedEventHandlerObject()
+        self._object.lpVtbl = ctypes.pointer(self._vtable)
+        self.ptr = ctypes.cast(ctypes.pointer(self._object), ctypes.c_void_p)
+
+    def _query_interface_impl(
+        self,
+        this: int,
+        riid: ctypes.POINTER(_GUID),
+        out: ctypes.POINTER(ctypes.c_void_p),
+    ) -> int:
+        if not out:
+            return _E_NOINTERFACE
+        requested = riid.contents
+        if _same_guid(requested, _IID_IUNKNOWN) or _same_guid(
+            requested,
+            _IID_IUIAUTOMATION_PROPERTY_CHANGED_EVENT_HANDLER,
+        ):
+            out[0] = ctypes.c_void_p(this)
+            self._add_ref_impl(this)
+            return _S_OK
+        out[0] = ctypes.c_void_p()
+        return _E_NOINTERFACE
+
+    def _add_ref_impl(self, _this: int) -> int:
+        self._ref_count += 1
+        return self._ref_count
+
+    def _release_impl(self, _this: int) -> int:
+        self._ref_count = max(1, self._ref_count - 1)
+        return self._ref_count
+
+    def _handle_event_impl(
+        self,
+        _this: int,
+        sender: int,
+        property_id: int,
+        _new_value: _Variant,
+    ) -> int:
+        try:
+            self.callback(int(sender or 0), int(property_id))
+        except Exception:
+            pass
+        return _S_OK
 
 
 class _UiaProbe:
@@ -438,6 +659,58 @@ class _UiaProbe:
             self._release(walker)
             self._release(root)
 
+    def find_header_event_targets(
+        self,
+        hwnd: int,
+        window_rect: PhysicalRect,
+    ) -> tuple[int, ...]:
+        automation = self._automation_for_thread()
+        if not automation:
+            return ()
+
+        root = self._element_from_handle(automation, hwnd)
+        if not root:
+            return ()
+
+        walker = self._control_view_walker(automation) or self._raw_view_walker(automation)
+        if not walker:
+            self._release(root)
+            return ()
+
+        try:
+            return self._scan_header_event_targets(root, walker, window_rect)
+        finally:
+            self._release(walker)
+            self._release(root)
+
+    def find_header_roi_from_event_targets(
+        self,
+        elements: tuple[int, ...],
+        window_rect: PhysicalRect,
+    ) -> _HeaderRoiScan | None:
+        if not elements:
+            main_titlebar = CodexWindowTracker._main_titlebar_rect(window_rect)
+            main_titlebar_roi = CodexWindowTracker._main_titlebar_roi_rect(
+                [],
+                window_rect,
+                main_titlebar,
+            )
+            if main_titlebar_roi is None:
+                return None
+            return _HeaderRoiScan(
+                header_rect=main_titlebar,
+                collection=_HeaderButtonCollection(
+                    ordered=(),
+                    right_cluster=(),
+                    left_title_actions=(),
+                ),
+                roi=main_titlebar_roi,
+                nodes=0,
+                reason="event-target-main-titlebar",
+            )
+
+        return self._scan_header_roi_from_event_targets(elements, window_rect)
+
     def find_bottom_roi(self, hwnd: int, window_rect: PhysicalRect) -> _BottomRoiScan | None:
         automation = self._automation_for_thread()
         if not automation:
@@ -468,6 +741,112 @@ class _UiaProbe:
             if raw_walker and raw_walker != control_walker:
                 self._release(raw_walker)
             self._release(root)
+
+    def add_automation_event_handler(
+        self,
+        automation: int,
+        event_id: int,
+        element: int,
+        handler: int,
+    ) -> bool:
+        func = self._method(
+            automation,
+            32,
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        hr = int(
+            func(
+                automation,
+                int(event_id),
+                ctypes.c_void_p(element),
+                _TREE_SCOPE_SUBTREE,
+                None,
+                ctypes.c_void_p(handler),
+            )
+        )
+        return hr >= 0
+
+    def remove_automation_event_handler(
+        self,
+        automation: int,
+        event_id: int,
+        element: int,
+        handler: int,
+    ) -> None:
+        func = self._method(
+            automation,
+            33,
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        try:
+            func(
+                automation,
+                int(event_id),
+                ctypes.c_void_p(element),
+                ctypes.c_void_p(handler),
+            )
+        except Exception:
+            pass
+
+    def add_property_changed_event_handler(
+        self,
+        automation: int,
+        element: int,
+        handler: int,
+        property_ids: tuple[int, ...],
+    ) -> bool:
+        if not property_ids:
+            return False
+        properties = (ctypes.c_int * len(property_ids))(*[int(item) for item in property_ids])
+        func = self._method(
+            automation,
+            34,
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+        )
+        hr = int(
+            func(
+                automation,
+                ctypes.c_void_p(element),
+                _TREE_SCOPE_SUBTREE,
+                None,
+                ctypes.c_void_p(handler),
+                properties,
+                len(property_ids),
+            )
+        )
+        return hr >= 0
+
+    def remove_property_changed_event_handler(
+        self,
+        automation: int,
+        element: int,
+        handler: int,
+    ) -> None:
+        func = self._method(
+            automation,
+            35,
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        try:
+            func(automation, ctypes.c_void_p(element), ctypes.c_void_p(handler))
+        except Exception:
+            pass
 
     def _automation_for_thread(self) -> int:
         automation = int(getattr(self._local, "automation", 0) or 0)
@@ -687,6 +1066,177 @@ class _UiaProbe:
             if fallback_scan is None:
                 fallback_scan = scan
         return fallback_scan
+
+    def _scan_header_event_targets(
+        self,
+        root: int,
+        walker: int,
+        window_rect: PhysicalRect,
+    ) -> tuple[int, ...]:
+        best_title: tuple[int, PhysicalRect] | None = None
+        target_candidates: list[_HeaderEventTargetCandidate] = []
+        stack: list[tuple[int, bool, int]] = [(root, False, 0)]
+        visited = 0
+
+        while stack and visited < _MAX_HEADER_ROI_UIA_NODES:
+            ptr, release_after, depth = stack.pop()
+            visited += 1
+            try:
+                node = self._node(ptr)
+                if node is not None:
+                    title_candidate = self._header_roi_title_candidate(node, window_rect)
+                    if title_candidate is not None:
+                        title_score, title_rect = title_candidate
+                        if best_title is None or title_score > best_title[0]:
+                            best_title = (title_score, title_rect)
+
+                    candidate = self._header_button_candidate(node, window_rect, depth)
+                    if candidate is not None:
+                        retained = self._retain(ptr)
+                        if retained:
+                            target_candidates.append(
+                                _HeaderEventTargetCandidate(
+                                    candidate=candidate,
+                                    element=retained,
+                                )
+                            )
+
+                children = self._children(walker, ptr)
+                for child in reversed(children):
+                    stack.append((child, True, depth + 1))
+            finally:
+                if release_after:
+                    self._release(ptr)
+
+        if not target_candidates:
+            return ()
+
+        header_candidates = [item.candidate for item in target_candidates]
+        header_rect = (
+            best_title[1]
+            if best_title is not None
+            else CodexWindowTracker.geometry_fallback(window_rect).title_bar
+        )
+        header_rects = [header_rect]
+        fallback_header = CodexWindowTracker.geometry_fallback(window_rect).title_bar
+        if not self._same_rect(fallback_header, header_rect):
+            header_rects.append(fallback_header)
+        inferred_header = self._candidate_header_rect(header_candidates, window_rect)
+        if inferred_header is not None and not any(
+            self._same_rect(inferred_header, item) for item in header_rects
+        ):
+            header_rects.append(inferred_header)
+
+        candidate_elements = {
+            item.candidate: item.element
+            for item in target_candidates
+        }
+        selected: list[_HeaderButtonCandidate] = []
+        for candidate_header in header_rects:
+            collection = self._collect_header_button_candidates(
+                header_candidates,
+                candidate_header,
+            )
+            selected = list(self._header_event_candidates(collection))
+            if selected:
+                break
+        if not selected:
+            for item in target_candidates:
+                self._release(item.element)
+            return ()
+
+        seen_elements: set[int] = set()
+        elements: list[int] = []
+        for candidate in selected:
+            element = candidate_elements.get(candidate, 0)
+            if not element or element in seen_elements:
+                continue
+            seen_elements.add(element)
+            elements.append(element)
+
+        selected_elements = set(elements)
+        for item in target_candidates:
+            if item.element not in selected_elements:
+                self._release(item.element)
+        return tuple(elements)
+
+    def _scan_header_roi_from_event_targets(
+        self,
+        elements: tuple[int, ...],
+        window_rect: PhysicalRect,
+    ) -> _HeaderRoiScan | None:
+        header_candidates: list[_HeaderButtonCandidate] = []
+        for depth, element in enumerate(elements):
+            node = self._node(element)
+            if node is None or node.offscreen:
+                continue
+            candidate = self._header_button_candidate(node, window_rect, depth)
+            if candidate is not None:
+                header_candidates.append(candidate)
+
+        fallback_header = CodexWindowTracker.geometry_fallback(window_rect).title_bar
+        header_rects: list[PhysicalRect] = [fallback_header]
+        inferred_header = self._candidate_header_rect(header_candidates, window_rect)
+        if inferred_header is not None and not self._same_rect(inferred_header, fallback_header):
+            header_rects.insert(0, inferred_header)
+
+        fallback_scan: _HeaderRoiScan | None = None
+        for candidate_header in header_rects:
+            collection = self._collect_header_button_candidates(
+                header_candidates,
+                candidate_header,
+            )
+            roi, reason = self._header_roi_rect(collection, candidate_header)
+            scan = _HeaderRoiScan(
+                header_rect=candidate_header,
+                collection=collection,
+                roi=roi,
+                nodes=len(elements),
+                reason=f"event-target-{reason}",
+            )
+            if roi is not None:
+                return scan
+            if fallback_scan is None:
+                fallback_scan = scan
+
+        main_titlebar = CodexWindowTracker._main_titlebar_rect(window_rect)
+        main_titlebar_roi = CodexWindowTracker._main_titlebar_roi_rect(
+            header_candidates,
+            window_rect,
+            main_titlebar,
+        )
+        if main_titlebar_roi is not None:
+            return _HeaderRoiScan(
+                header_rect=main_titlebar,
+                collection=_HeaderButtonCollection(
+                    ordered=tuple(header_candidates),
+                    right_cluster=(),
+                    left_title_actions=(),
+                ),
+                roi=main_titlebar_roi,
+                nodes=len(elements),
+                reason="event-target-main-titlebar",
+            )
+        return fallback_scan
+
+    @classmethod
+    def _header_event_candidates(
+        cls,
+        collection: _HeaderButtonCollection,
+    ) -> tuple[_HeaderButtonCandidate, ...]:
+        # Event anchors must be discoverable in the always-collapsed header row.
+        # Popup menus and expanded-state affordances are intentionally excluded.
+        selected: list[_HeaderButtonCandidate] = []
+        if collection.left_title_actions:
+            selected.append(
+                max(
+                    collection.left_title_actions,
+                    key=cls._left_header_event_score,
+                )
+            )
+
+        selected.extend(collection.right_cluster)
+        return tuple(selected)
 
     def _scan_bottom_roi(
         self,
@@ -1400,6 +1950,27 @@ class _UiaProbe:
             f"label={label!r}"
         )
 
+    @classmethod
+    def _left_header_event_score(
+        cls,
+        candidate: _HeaderButtonCandidate,
+    ) -> int:
+        return (
+            candidate.rect.right
+            - candidate.rect.width
+            - (candidate.depth * 30)
+            + cls._left_header_action_bonus(candidate)
+        )
+
+    @staticmethod
+    def _left_header_action_bonus(candidate: _HeaderButtonCandidate) -> int:
+        text = candidate.label.lower()
+        return int(
+            "对话操作" in text
+            or "conversation action" in text
+            or "conversation menu" in text
+        ) * 20
+
     @staticmethod
     def _is_compact_header_candidate(
         candidate: _HeaderButtonCandidate,
@@ -1483,11 +2054,6 @@ class _UiaProbe:
             if item.rect.left >= right_start
             and cls._is_compact_header_candidate(item, header_rect)
         ]
-        semantic_right_candidates = [
-            item for item in right_candidates if cls._is_header_right_action(item)
-        ]
-        if semantic_right_candidates:
-            right_candidates = semantic_right_candidates
         right_cluster: list[_HeaderButtonCandidate] = []
         if right_candidates:
             max_gap = max(24, int(header_rect.height * 1.25))
@@ -1496,6 +2062,9 @@ class _UiaProbe:
                 leftmost = right_cluster[-1]
                 gap = leftmost.rect.left - item.rect.right
                 if gap > max_gap:
+                    break
+                shallowest_depth = min(candidate.depth for candidate in right_cluster)
+                if item.depth > shallowest_depth + 2:
                     break
                 right_cluster.append(item)
             right_cluster.reverse()
@@ -1509,41 +2078,15 @@ class _UiaProbe:
             if item.rect.left < left_limit
             and cls._is_compact_header_candidate(item, header_rect)
         ]
-        semantic_left_candidates = [
-            item for item in left_candidates if cls._is_header_left_action(item)
-        ]
-        if semantic_left_candidates:
-            left_candidates = semantic_left_candidates
-        left_title_actions = tuple(left_candidates)
+        left_title_actions = (
+            (max(left_candidates, key=cls._left_header_event_score),)
+            if left_candidates
+            else ()
+        )
         return _HeaderButtonCollection(
             ordered=ordered,
             right_cluster=tuple(right_cluster),
             left_title_actions=left_title_actions,
-        )
-
-    @staticmethod
-    def _is_header_right_action(candidate: _HeaderButtonCandidate) -> bool:
-        text = candidate.label.lower()
-        return (
-            "打开位置" in text
-            or "file explorer" in text
-            or "次要操作" in text
-            or "secondary" in text
-            or "切换摘要" in text
-            or "summary" in text
-            or "切换底部面板" in text
-            or "bottom panel" in text
-            or "显示/隐藏侧边栏" in text
-            or "sidebar" in text
-        )
-
-    @staticmethod
-    def _is_header_left_action(candidate: _HeaderButtonCandidate) -> bool:
-        text = candidate.label.lower()
-        return (
-            "对话操作" in text
-            or "conversation action" in text
-            or "conversation menu" in text
         )
 
     @classmethod
@@ -1899,6 +2442,16 @@ class _UiaProbe:
             score -= 600
         return max(0, int(score))
 
+    def _retain(self, ptr: int) -> int:
+        if not ptr:
+            return 0
+        try:
+            func = self._method(ptr, 1, ctypes.c_ulong)
+            func(ptr)
+        except Exception:
+            return 0
+        return ptr
+
     def _release(self, ptr: int) -> None:
         if not ptr:
             return
@@ -1915,6 +2468,296 @@ class _UiaProbe:
             ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
         ).contents
         return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
+
+
+class _UiaHeaderRoiEventWatcher:
+    """Invalidate cached header ROI when Codex header UIA layout changes."""
+
+    def __init__(self, tracker: "CodexWindowTracker") -> None:
+        self.tracker = tracker
+        self.probe = tracker._uia_probe
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._hwnd = 0
+        self._window_rect: PhysicalRect | None = None
+        self._last_event_at = 0.0
+        self._last_invalidated_at = 0.0
+        self._registered_hwnd = 0
+        self._event_handler: _UiaAutomationEventHandler | None = None
+        self._property_handler: _UiaPropertyChangedEventHandler | None = None
+        self._owned_target_elements: tuple[int, ...] = ()
+
+    def ensure(self, hwnd: int, window_rect: PhysicalRect | None = None) -> None:
+        if self.probe is None or not hwnd:
+            return
+        if self._thread is not None and self._thread.is_alive() and self._hwnd == hwnd:
+            if window_rect is not None:
+                self._window_rect = window_rect
+            return
+        self.stop()
+        self._hwnd = int(hwnd)
+        self._window_rect = window_rect
+        stop_event = threading.Event()
+        self._stop_event = stop_event
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(stop_event,),
+            name="codex-hud-header-roi-uia",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        thread = self._thread
+        self._stop_event.set()
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
+        if thread is self._thread:
+            self._thread = None
+
+    def _run(self, stop_event: threading.Event) -> None:
+        probe = self.probe
+        hwnd = self._hwnd
+        if probe is None or not hwnd:
+            return
+        automation = probe._automation_for_thread()
+        if not automation:
+            return
+        root = probe._element_from_handle(automation, hwnd)
+        if not root:
+            return
+        target_elements: tuple[int, ...] = ()
+        owned_target_elements: tuple[int, ...] = ()
+        registered_automation_targets: list[tuple[int, int]] = []
+        registered_property_targets: list[int] = []
+        watch_scope = "root"
+        self._event_handler = _UiaAutomationEventHandler(self._handle_event)
+        self._property_handler = _UiaPropertyChangedEventHandler(self._handle_event)
+        event_handler_ptr = int(self._event_handler.ptr.value or 0)
+        property_handler_ptr = int(self._property_handler.ptr.value or 0)
+        try:
+            if self._window_rect is not None:
+                try:
+                    target_elements = probe.find_header_event_targets(
+                        hwnd,
+                        self._window_rect,
+                    )
+                except Exception as exc:
+                    _logger.debug(
+                        "uia_header_roi_event_targets_failed hwnd=%s error=%s",
+                        hwnd,
+                        exc,
+                    )
+            if target_elements:
+                owned_target_elements = target_elements
+                target_elements = (*target_elements, root)
+                watch_scope = "anchors+root-layout"
+            else:
+                target_elements = (root,)
+            (
+                registered_automation_targets,
+                registered_property_targets,
+            ) = self._register_targets(
+                probe,
+                automation,
+                target_elements,
+                event_handler_ptr,
+                property_handler_ptr,
+                register_property_handlers=watch_scope == "root",
+            )
+            if (
+                not registered_automation_targets
+                and not registered_property_targets
+                and owned_target_elements
+            ):
+                for element in owned_target_elements:
+                    probe._release(element)
+                owned_target_elements = ()
+                target_elements = (root,)
+                watch_scope = "root-fallback"
+                (
+                    registered_automation_targets,
+                    registered_property_targets,
+                ) = self._register_targets(
+                    probe,
+                    automation,
+                    target_elements,
+                    event_handler_ptr,
+                    property_handler_ptr,
+                    register_property_handlers=True,
+                )
+            if not registered_automation_targets and not registered_property_targets:
+                return
+            event_ids = sorted({event_id for event_id, _element in registered_automation_targets})
+            _logger.info(
+                "uia_header_roi_event_watcher_started hwnd=%s events=%s property=%s "
+                "scope=%s target_count=%s",
+                hwnd,
+                ",".join(str(item) for item in event_ids) or "none",
+                bool(registered_property_targets),
+                watch_scope,
+                len(target_elements),
+            )
+            self._registered_hwnd = hwnd
+            self._owned_target_elements = owned_target_elements
+            self._message_loop(stop_event)
+        finally:
+            self._registered_hwnd = 0
+            self._owned_target_elements = ()
+            for element in registered_property_targets:
+                probe.remove_property_changed_event_handler(
+                    automation,
+                    element,
+                    property_handler_ptr,
+                )
+            for event_id, element in registered_automation_targets:
+                probe.remove_automation_event_handler(
+                    automation,
+                    event_id,
+                    element,
+                    event_handler_ptr,
+                )
+            for element in owned_target_elements:
+                probe._release(element)
+            self._event_handler = None
+            self._property_handler = None
+            probe._release(root)
+
+    def _register_targets(
+        self,
+        probe: _UiaProbe,
+        automation: int,
+        elements: tuple[int, ...],
+        event_handler_ptr: int,
+        property_handler_ptr: int,
+        *,
+        register_property_handlers: bool,
+    ) -> tuple[list[tuple[int, int]], list[int]]:
+        registered_automation_targets: list[tuple[int, int]] = []
+        registered_property_targets: list[int] = []
+        for element in elements:
+            for event_id in (
+                _UIA_STRUCTURE_CHANGED_EVENT_ID,
+                _UIA_LAYOUT_INVALIDATED_EVENT_ID,
+            ):
+                if probe.add_automation_event_handler(
+                    automation,
+                    event_id,
+                    element,
+                    event_handler_ptr,
+                ):
+                    registered_automation_targets.append((event_id, element))
+            if register_property_handlers and probe.add_property_changed_event_handler(
+                automation,
+                element,
+                property_handler_ptr,
+                (_UIA_BOUNDING_RECTANGLE_PROPERTY_ID, _UIA_IS_OFFSCREEN_PROPERTY_ID),
+            ):
+                registered_property_targets.append(element)
+        return registered_automation_targets, registered_property_targets
+
+    def _message_loop(self, stop_event: threading.Event) -> None:
+        user32 = ctypes.windll.user32
+        user32.MsgWaitForMultipleObjectsEx.argtypes = [
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        user32.MsgWaitForMultipleObjectsEx.restype = wintypes.DWORD
+        user32.PeekMessageW.argtypes = [
+            ctypes.POINTER(wintypes.MSG),
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.UINT,
+            wintypes.UINT,
+        ]
+        user32.PeekMessageW.restype = wintypes.BOOL
+        user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        user32.TranslateMessage.restype = wintypes.BOOL
+        user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        user32.DispatchMessageW.restype = wintypes.LPARAM
+        msg = wintypes.MSG()
+        while not stop_event.is_set():
+            user32.MsgWaitForMultipleObjectsEx(
+                0,
+                None,
+                100,
+                _QS_ALLINPUT,
+                _MWMO_INPUTAVAILABLE | _MWMO_ALERTABLE,
+            )
+            while user32.PeekMessageW(ctypes.byref(msg), 0, 0, 0, _PM_REMOVE):
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            self._drain_debounced_event()
+
+    def _handle_event(self, _sender: int, event_id: int) -> None:
+        if event_id not in {
+            _UIA_STRUCTURE_CHANGED_EVENT_ID,
+            _UIA_LAYOUT_INVALIDATED_EVENT_ID,
+            _UIA_BOUNDING_RECTANGLE_PROPERTY_ID,
+            _UIA_IS_OFFSCREEN_PROPERTY_ID,
+        }:
+            return
+        self._last_event_at = time.monotonic()
+
+    def _drain_debounced_event(self) -> None:
+        event_at = self._last_event_at
+        if not event_at or event_at == self._last_invalidated_at:
+            return
+        now = time.monotonic()
+        if now - event_at < _UIA_HEADER_EVENT_DEBOUNCE_SECONDS:
+            return
+        self._last_invalidated_at = event_at
+        _logger.info(
+            "uia_header_roi_event_invalidated hwnd=%s debounce_ms=%.1f",
+            self._hwnd,
+            (now - event_at) * 1000,
+        )
+        snapshot = self._fast_header_roi_snapshot()
+        if snapshot is not None:
+            self.tracker.publish_header_roi_snapshot(snapshot, reason="uia-event")
+            return
+        self.tracker.invalidate_header_roi_cache("uia-event")
+
+    def _fast_header_roi_snapshot(self) -> HeaderRoiSnapshot | None:
+        probe = self.probe
+        window_rect = self._window_rect
+        if probe is None or window_rect is None:
+            return None
+        started = time.perf_counter()
+        try:
+            scan = probe.find_header_roi_from_event_targets(
+                self._owned_target_elements,
+                window_rect,
+            )
+        except Exception as exc:
+            _logger.debug("uia_header_roi_event_fast_scan_failed hwnd=%s error=%s", self._hwnd, exc)
+            return None
+        duration_ms = (time.perf_counter() - started) * 1000
+        if scan is None:
+            return None
+        return HeaderRoiSnapshot(
+            status=STATUS_VISIBLE if scan.roi is not None else STATUS_NOT_FOUND,
+            hwnd=self._hwnd,
+            source="uia-event",
+            window_rect=window_rect,
+            header_rect=scan.header_rect,
+            roi=scan.roi,
+            nodes=scan.nodes,
+            duration_ms=duration_ms,
+            reason=scan.reason,
+        )
+
+    def is_event_driven_for(self, hwnd: int) -> bool:
+        thread = self._thread
+        return (
+            bool(hwnd)
+            and self._registered_hwnd == int(hwnd)
+            and thread is not None
+            and thread.is_alive()
+        )
 
 
 class CodexWindowTracker:
@@ -1943,10 +2786,12 @@ class CodexWindowTracker:
         self._bottom_roi_cache: BottomRoiSnapshot | None = None
         self._bottom_roi_cache_hwnd = 0
         self._bottom_roi_cache_window_rect: PhysicalRect | None = None
+        self._header_roi_change_callback: Callable[[str], None] | None = None
         self._last_uia_attempt_at = 0.0
         self._uia_lock = threading.Lock()
         self._uia_scan_running = False
         self._uia_probe: _UiaProbe | None = None
+        self._header_roi_event_watcher: _UiaHeaderRoiEventWatcher | None = None
 
         if not sys.platform.startswith("win"):
             _logger.info("windows_tracker_unsupported platform=%s", sys.platform)
@@ -1959,6 +2804,7 @@ class CodexWindowTracker:
             self._configure_api()
             if self.enable_uia:
                 self._uia_probe = _UiaProbe()
+                self._header_roi_event_watcher = _UiaHeaderRoiEventWatcher(self)
             self.enabled = True
             self.last_status = STATUS_NOT_FOUND
             self.last_snapshot = DockSnapshot(status=STATUS_NOT_FOUND)
@@ -2210,6 +3056,11 @@ class CodexWindowTracker:
 
         hwnd = base.hwnd
         window_rect = base.window_rect
+        self._ensure_header_roi_event_watcher(hwnd, window_rect)
+        event_driven_cache = (
+            self._header_roi_event_watcher is not None
+            and self._header_roi_event_watcher.is_event_driven_for(hwnd)
+        )
         now = time.monotonic()
         with self._uia_lock:
             cached = self._header_roi_cache
@@ -2221,7 +3072,7 @@ class CodexWindowTracker:
             if (
                 window_rect.width == cached_rect.width
                 and window_rect.height == cached_rect.height
-                and cache_age <= _UIA_REFRESH_SECONDS
+                and (event_driven_cache or cache_age <= _UIA_REFRESH_SECONDS)
             ):
                 return self._translate_header_roi_snapshot(cached, cached_rect, window_rect)
 
@@ -2253,6 +3104,13 @@ class CodexWindowTracker:
             )
         else:
             self._uia_probe._log_header_roi_scan(scan, window_rect)
+            _logger.info(
+                "uia_header_roi_scan_complete hwnd=%s duration_ms=%.1f nodes=%s reason=%s",
+                hwnd,
+                duration_ms,
+                scan.nodes,
+                scan.reason,
+            )
             snapshot = HeaderRoiSnapshot(
                 status=STATUS_VISIBLE if scan.roi is not None else STATUS_NOT_FOUND,
                 hwnd=hwnd,
@@ -2271,6 +3129,68 @@ class CodexWindowTracker:
             self._header_roi_cache_hwnd = hwnd
             self._header_roi_cache_window_rect = window_rect
         return snapshot
+
+    def invalidate_header_roi_cache(self, reason: str = "manual") -> None:
+        with self._uia_lock:
+            self._header_roi_cache_at = 0.0
+            self._header_roi_cache = None
+            self._header_roi_cache_hwnd = 0
+            self._header_roi_cache_window_rect = None
+        _logger.info("uia_header_roi_cache_invalidated reason=%s", reason)
+        callback = self._header_roi_change_callback
+        if callback is not None:
+            try:
+                callback(reason)
+            except Exception as exc:
+                _logger.debug("uia_header_roi_change_callback_failed error=%s", exc)
+
+    def publish_header_roi_snapshot(
+        self,
+        snapshot: HeaderRoiSnapshot,
+        *,
+        reason: str = "manual",
+    ) -> None:
+        with self._uia_lock:
+            self._header_roi_cache_at = time.monotonic()
+            self._header_roi_cache = snapshot
+            self._header_roi_cache_hwnd = snapshot.hwnd
+            self._header_roi_cache_window_rect = snapshot.window_rect
+        _logger.info(
+            "uia_header_roi_cache_published reason=%s status=%s duration_ms=%.1f roi=%s",
+            reason,
+            snapshot.status,
+            snapshot.duration_ms,
+            (
+                f"({snapshot.roi.left},{snapshot.roi.top},{snapshot.roi.right},{snapshot.roi.bottom})"
+                if snapshot.roi is not None
+                else "none"
+            ),
+        )
+        callback = self._header_roi_change_callback
+        if callback is not None:
+            try:
+                callback(reason)
+            except Exception as exc:
+                _logger.debug("uia_header_roi_change_callback_failed error=%s", exc)
+
+    def set_header_roi_change_callback(
+        self,
+        callback: Callable[[str], None] | None,
+    ) -> None:
+        self._header_roi_change_callback = callback
+
+    def _ensure_header_roi_event_watcher(
+        self,
+        hwnd: int,
+        window_rect: PhysicalRect,
+    ) -> None:
+        watcher = self._header_roi_event_watcher
+        if watcher is None:
+            return
+        try:
+            watcher.ensure(hwnd, window_rect)
+        except Exception as exc:
+            _logger.debug("uia_header_roi_event_watcher_failed hwnd=%s error=%s", hwnd, exc)
 
     def get_bottom_roi_snapshot(self) -> BottomRoiSnapshot:
         """Return a debug-only UIA bottom safe area without affecting dock state."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import sys
 import unittest
@@ -168,13 +169,13 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
             ["Left action"],
         )
 
-    def test_uia_header_collection_prefers_semantic_header_actions(self) -> None:
+    def test_uia_header_collection_filters_deeper_popup_items(self) -> None:
         header = PhysicalRect(left=370, top=159, right=1399, bottom=205)
         candidates = [
             wt._HeaderButtonCandidate(
                 rect=PhysicalRect(left=714, top=168, right=742, bottom=196),
                 control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
-                name="对话操作",
+                name="Stable left",
                 automation_id="",
                 class_name="",
                 depth=13,
@@ -182,7 +183,7 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
             wt._HeaderButtonCandidate(
                 rect=PhysicalRect(left=759, top=168, right=789, bottom=196),
                 control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
-                name="复制",
+                name="Popup left",
                 automation_id="",
                 class_name="",
                 depth=16,
@@ -190,7 +191,7 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
             wt._HeaderButtonCandidate(
                 rect=PhysicalRect(left=1203, top=168, right=1230, bottom=196),
                 control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
-                name="重试",
+                name="Popup right",
                 automation_id="",
                 class_name="",
                 depth=16,
@@ -198,7 +199,7 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
             wt._HeaderButtonCandidate(
                 rect=PhysicalRect(left=1235, top=168, right=1266, bottom=196),
                 control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
-                name="打开位置",
+                name="Right A",
                 automation_id="",
                 class_name="",
                 depth=13,
@@ -206,7 +207,7 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
             wt._HeaderButtonCandidate(
                 rect=PhysicalRect(left=1295, top=168, right=1323, bottom=196),
                 control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
-                name="切换摘要",
+                name="Right B",
                 automation_id="",
                 class_name="",
                 depth=13,
@@ -214,7 +215,7 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
             wt._HeaderButtonCandidate(
                 rect=PhysicalRect(left=1329, top=168, right=1357, bottom=196),
                 control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
-                name="切换底部面板显示",
+                name="Right C",
                 automation_id="",
                 class_name="",
                 depth=12,
@@ -222,7 +223,7 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
             wt._HeaderButtonCandidate(
                 rect=PhysicalRect(left=1363, top=168, right=1391, bottom=196),
                 control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
-                name="显示/隐藏侧边栏",
+                name="Right D",
                 automation_id="",
                 class_name="",
                 depth=12,
@@ -231,10 +232,64 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
 
         collection = wt._UiaProbe._collect_header_button_candidates(candidates, header)
 
-        self.assertEqual([item.name for item in collection.left_title_actions], ["对话操作"])
-        self.assertEqual(collection.right_cluster[0].name, "打开位置")
-        self.assertNotIn("复制", [item.name for item in collection.left_title_actions])
-        self.assertNotIn("重试", [item.name for item in collection.right_cluster])
+        self.assertEqual([item.name for item in collection.left_title_actions], ["Stable left"])
+        self.assertEqual(collection.right_cluster[0].name, "Right A")
+        self.assertNotIn("Popup left", [item.name for item in collection.left_title_actions])
+        self.assertNotIn("Popup right", [item.name for item in collection.right_cluster])
+
+    def test_uia_header_event_candidates_fall_back_to_geometry_when_text_varies(self) -> None:
+        header = PhysicalRect(left=593, top=207, right=1622, bottom=253)
+        candidates = [
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=708, top=216, right=734, bottom=244),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="",
+                automation_id="left-a",
+                class_name="",
+                depth=12,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=759, top=216, right=788, bottom=244),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="",
+                automation_id="left-b",
+                class_name="",
+                depth=11,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1458, top=216, right=1487, bottom=244),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="",
+                automation_id="right-a",
+                class_name="",
+                depth=9,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1492, top=216, right=1521, bottom=244),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="",
+                automation_id="right-b",
+                class_name="",
+                depth=9,
+            ),
+            wt._HeaderButtonCandidate(
+                rect=PhysicalRect(left=1526, top=216, right=1555, bottom=244),
+                control_type=wt._UIA_BUTTON_CONTROL_TYPE_ID,
+                name="",
+                automation_id="right-c",
+                class_name="",
+                depth=8,
+            ),
+        ]
+
+        collection = wt._UiaProbe._collect_header_button_candidates(candidates, header)
+        selected = wt._UiaProbe._header_event_candidates(collection)
+
+        self.assertEqual(selected[0].automation_id, "left-b")
+        self.assertEqual(
+            [item.automation_id for item in selected[1:]],
+            ["right-a", "right-b", "right-c"],
+        )
 
     def test_uia_header_roi_title_rejects_tall_scroll_content(self) -> None:
         window = PhysicalRect(left=119, top=123, right=1399, bottom=943)
@@ -837,6 +892,230 @@ class CodexWindowTrackerGeometryTests(unittest.TestCase):
 
         self.assertEqual(landmarks.source, "geometry")
         self.assertEqual(landmarks.input_box.bottom, 836)
+
+
+class UiaHeaderRoiEventWatcherTests(unittest.TestCase):
+    class _FakeProbe:
+        def __init__(
+            self,
+            *,
+            targets: tuple[int, ...],
+            root: int = 22,
+        ) -> None:
+            self.targets = targets
+            self.root = root
+            self.add_automation_calls: list[tuple[int, int]] = []
+            self.add_property_calls: list[tuple[int, tuple[int, ...]]] = []
+            self.remove_automation_calls: list[tuple[int, int]] = []
+            self.remove_property_calls: list[int] = []
+            self.released: list[int] = []
+            self.fast_scan: wt._HeaderRoiScan | None = None
+
+        def _automation_for_thread(self) -> int:
+            return 11
+
+        def _element_from_handle(self, automation: int, hwnd: int) -> int:
+            return self.root
+
+        def find_header_event_targets(
+            self,
+            hwnd: int,
+            window_rect: PhysicalRect,
+        ) -> tuple[int, ...]:
+            return self.targets
+
+        def add_automation_event_handler(
+            self,
+            automation: int,
+            event_id: int,
+            element: int,
+            handler: int,
+        ) -> bool:
+            self.add_automation_calls.append((event_id, element))
+            return True
+
+        def add_property_changed_event_handler(
+            self,
+            automation: int,
+            element: int,
+            handler: int,
+            property_ids: tuple[int, ...],
+        ) -> bool:
+            self.add_property_calls.append((element, tuple(property_ids)))
+            return True
+
+        def remove_automation_event_handler(
+            self,
+            automation: int,
+            event_id: int,
+            element: int,
+            handler: int,
+        ) -> None:
+            self.remove_automation_calls.append((event_id, element))
+
+        def remove_property_changed_event_handler(
+            self,
+            automation: int,
+            element: int,
+            handler: int,
+        ) -> None:
+            self.remove_property_calls.append(element)
+
+        def find_header_roi_from_event_targets(
+            self,
+            elements: tuple[int, ...],
+            window_rect: PhysicalRect,
+        ) -> wt._HeaderRoiScan | None:
+            del elements, window_rect
+            return self.fast_scan
+
+        def _release(self, ptr: int) -> None:
+            self.released.append(ptr)
+
+    def _build_watcher(self, probe: "_FakeProbe") -> wt._UiaHeaderRoiEventWatcher:
+        tracker = SimpleNamespace(
+            _uia_probe=probe,
+            invalidate_header_roi_cache=lambda reason: None,
+            publish_header_roi_snapshot=lambda snapshot, reason: None,
+        )
+        watcher = wt._UiaHeaderRoiEventWatcher(tracker)  # type: ignore[arg-type]
+        watcher._hwnd = 196764
+        watcher._window_rect = PhysicalRect(left=342, top=171, right=1622, bottom=991)
+        watcher._message_loop = lambda stop_event: None  # type: ignore[method-assign]
+        return watcher
+
+    def test_watcher_uses_anchor_targets_with_root_layout_sentinel(self) -> None:
+        probe = self._FakeProbe(targets=(501, 502))
+        watcher = self._build_watcher(probe)
+
+        watcher._run(threading.Event())
+
+        self.assertEqual(
+            sorted({element for _event_id, element in probe.add_automation_calls}),
+            [probe.root, 501, 502],
+        )
+        self.assertEqual(probe.add_property_calls, [])
+        self.assertEqual(
+            sorted(
+                event_id
+                for event_id, element in probe.add_automation_calls
+                if element == probe.root
+            ),
+            [
+                wt._UIA_STRUCTURE_CHANGED_EVENT_ID,
+                wt._UIA_LAYOUT_INVALIDATED_EVENT_ID,
+            ],
+        )
+        self.assertIn(probe.root, probe.released)
+        self.assertIn(501, probe.released)
+        self.assertIn(502, probe.released)
+
+    def test_watcher_falls_back_to_root_when_no_anchor_targets_exist(self) -> None:
+        probe = self._FakeProbe(targets=())
+        watcher = self._build_watcher(probe)
+
+        watcher._run(threading.Event())
+
+        self.assertEqual(
+            sorted({element for _event_id, element in probe.add_automation_calls}),
+            [probe.root],
+        )
+        self.assertEqual(
+            sorted({element for element, _props in probe.add_property_calls}),
+            [probe.root],
+        )
+        self.assertEqual(probe.released, [probe.root])
+
+    def test_header_roi_invalidation_notifies_callback(self) -> None:
+        tracker = object.__new__(CodexWindowTracker)
+        tracker._uia_lock = threading.Lock()
+        tracker._header_roi_cache_at = 10.0
+        tracker._header_roi_cache = object()
+        tracker._header_roi_cache_hwnd = 123
+        tracker._header_roi_cache_window_rect = PhysicalRect(1, 2, 3, 4)
+        reasons: list[str] = []
+        tracker._header_roi_change_callback = reasons.append
+
+        tracker.invalidate_header_roi_cache("uia-event")
+
+        self.assertEqual(reasons, ["uia-event"])
+        self.assertIsNone(tracker._header_roi_cache)
+        self.assertEqual(tracker._header_roi_cache_hwnd, 0)
+
+    def test_event_driven_header_roi_cache_does_not_expire_by_ttl(self) -> None:
+        class _Probe:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def find_header_roi(self, hwnd: int, window_rect: PhysicalRect) -> None:
+                del hwnd, window_rect
+                self.calls += 1
+                return None
+
+        rect = PhysicalRect(100, 50, 900, 650)
+        roi = PhysicalRect(300, 70, 700, 110)
+        probe = _Probe()
+        tracker = object.__new__(CodexWindowTracker)
+        tracker.enabled = True
+        tracker.enable_uia = True
+        tracker._uia_probe = probe
+        tracker._uia_lock = threading.Lock()
+        tracker._header_roi_cache_at = 0.0
+        tracker._header_roi_cache = wt.HeaderRoiSnapshot(
+            status="visible",
+            hwnd=77,
+            window_rect=rect,
+            roi=roi,
+        )
+        tracker._header_roi_cache_hwnd = 77
+        tracker._header_roi_cache_window_rect = rect
+        tracker._header_roi_event_watcher = SimpleNamespace(
+            is_event_driven_for=lambda hwnd: hwnd == 77,
+        )
+        tracker._ensure_header_roi_event_watcher = lambda hwnd, window_rect: None
+        tracker.get_window_snapshot = lambda: wt.DockSnapshot(
+            status="visible",
+            hwnd=77,
+            window_rect=rect,
+        )
+
+        snapshot = tracker.get_header_roi_snapshot()
+
+        self.assertEqual(probe.calls, 0)
+        self.assertEqual(snapshot.roi, roi)
+
+    def test_watcher_publishes_fast_snapshot_on_debounced_event(self) -> None:
+        probe = self._FakeProbe(targets=(501, 502))
+        probe.fast_scan = wt._HeaderRoiScan(
+            header_rect=PhysicalRect(342, 171, 1622, 216),
+            collection=wt._HeaderButtonCollection(
+                ordered=(),
+                right_cluster=(),
+                left_title_actions=(),
+            ),
+            roi=PhysicalRect(521, 171, 1348, 209),
+            nodes=2,
+            reason="event-target-main-titlebar",
+        )
+        published: list[tuple[wt.HeaderRoiSnapshot, str]] = []
+        tracker = SimpleNamespace(
+            _uia_probe=probe,
+            invalidate_header_roi_cache=lambda reason: published.append((None, reason)),  # type: ignore[arg-type]
+            publish_header_roi_snapshot=lambda snapshot, reason: published.append((snapshot, reason)),
+        )
+        watcher = wt._UiaHeaderRoiEventWatcher(tracker)  # type: ignore[arg-type]
+        watcher._hwnd = 196764
+        watcher._window_rect = PhysicalRect(left=342, top=171, right=1622, bottom=991)
+        watcher._owned_target_elements = (501, 502)
+        watcher._last_event_at = time.monotonic() - 0.2
+
+        watcher._drain_debounced_event()
+
+        self.assertEqual(len(published), 1)
+        snapshot, reason = published[0]
+        assert snapshot is not None
+        self.assertEqual(reason, "uia-event")
+        self.assertEqual(snapshot.roi, PhysicalRect(521, 171, 1348, 209))
 
 
 class CodexWindowTrackerSelectionTests(unittest.TestCase):

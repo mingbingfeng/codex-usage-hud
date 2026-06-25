@@ -3587,6 +3587,9 @@ class CodexWindowLocator:
     def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
         return self._impl.bottom_roi_geometry(rect)
 
+    def set_header_roi_change_callback(self, callback: Callable[[], None] | None) -> None:
+        self._impl.set_header_roi_change_callback(callback)
+
 
 class _BaseLocator:
     def set_dpi_aware(self) -> None:
@@ -3623,6 +3626,10 @@ class _BaseLocator:
 
     def bottom_roi_geometry(self, rect: WindowRect) -> WindowRect | None:
         del rect
+        return None
+
+    def set_header_roi_change_callback(self, callback: Callable[[], None] | None) -> None:
+        del callback
         return None
 
 
@@ -3732,7 +3739,7 @@ class _WindowsCodexLocator(_BaseLocator):
             self._native_anchors_enabled = _env_flag(HUD_NATIVE_ANCHORS_ENV)
             self._header_roi_demo_enabled = _env_flag(
                 HUD_UIA_ROI_DEMO_ENV,
-                default=True,
+                default=False,
             )
             if self._top_dom_anchors_enabled or self._dom_anchors_enabled:
                 self._cdp_probe = CodexCdpProbe()
@@ -3808,6 +3815,18 @@ class _WindowsCodexLocator(_BaseLocator):
             self.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+    def set_header_roi_change_callback(self, callback: Callable[[], None] | None) -> None:
+        tracker = self._tracker
+        if tracker is None or not hasattr(tracker, "set_header_roi_change_callback"):
+            return
+        try:
+            if callback is None:
+                tracker.set_header_roi_change_callback(None)
+            else:
+                tracker.set_header_roi_change_callback(lambda _reason: callback())
+        except Exception:
+            return
 
     def find(self) -> WindowRect | None:
         if not self.enabled:
@@ -5963,13 +5982,15 @@ class TokenHudWindow:
         self._mode_switch_request = ""
         self._restart_codex_for_renderer = False
         self._geometry_log_path = configure_hud_geometry_logging()
-        self._use_header_roi_demo = _env_flag(HUD_UIA_ROI_DEMO_ENV, default=True)
+        self._use_header_roi_demo = _env_flag(HUD_UIA_ROI_DEMO_ENV, default=False)
         self.update_manager = update_manager
         self._update_state = AutoUpdateState(current_version=__version__)
         self._top_update_button: tk.Button | None = None
         self._top_update_buttons: list[tk.Button] = []
+        self._header_roi_refresh_job: str | None = None
         self.locator = CodexWindowLocator()
         self.locator.set_dpi_aware()
+        self.locator.set_header_roi_change_callback(self._schedule_header_roi_refresh)
         _HUD_GEOMETRY_LOGGER.info(
             "hud_started header_roi_demo=%s follow_ms=%s settings_path=%s log_path=%s",
             self._use_header_roi_demo,
@@ -6122,6 +6143,45 @@ class TokenHudWindow:
             self._enter_tombstone("waiting")
             self.sync_codex_window()
         self._follow_job = self.root.after(self.follow_ms, self._follow_codex_window)
+
+    def _schedule_header_roi_refresh(self) -> None:
+        if self._header_roi_refresh_job is not None:
+            return
+        try:
+            self._header_roi_refresh_job = self.root.after(0, self._flush_header_roi_refresh)
+        except tk.TclError:
+            self._header_roi_refresh_job = None
+
+    def _flush_header_roi_refresh(self) -> None:
+        self._header_roi_refresh_job = None
+        self._refresh_header_roi_geometry()
+
+    def _refresh_header_roi_geometry(self) -> None:
+        if self._move_target or self._resize_target:
+            return
+        if self._top_animation_active():
+            return
+        if not self._attached or self._last_rect is None:
+            self.sync_codex_window()
+            return
+        if getattr(self, "_tombstoned", False) or getattr(self, "_hidden_for_minimized", False):
+            return
+        rect = self._last_rect
+        started = time.perf_counter()
+        self._exit_tombstone("attached")
+        self._apply_focus_state(True)
+        self._set_alpha(self.root, 1.0)
+        top = self._attached_geometry("top", rect, self.top_expanded)
+        self._apply_window_geometry("top", self.root, top)
+        self._sync_header_roi_demo(rect)
+        _HUD_GEOMETRY_LOGGER.info(
+            "header_roi_refresh_applied target=top geometry=(%s,%s,%s,%s) duration_ms=%.1f",
+            top[0],
+            top[1],
+            top[2],
+            top[3],
+            (time.perf_counter() - started) * 1000,
+        )
 
     def _maybe_apply_live_theme(self) -> None:
         snapshot = self._theme_probe.snapshot()
@@ -6473,12 +6533,15 @@ class TokenHudWindow:
             command=lambda t=target: self.toggle_pin(t),
             bg=parent_bg,
             fg=_theme_secondary_text(parent_bg),
-            activebackground=_theme_hover_surface(parent_bg),
+            activebackground=parent_bg,
             activeforeground=_theme_accent_text(parent_bg),
             relief="flat",
-            padx=5,
-            pady=1,
-            font=("Microsoft YaHei UI", 9, "bold"),
+            borderwidth=0,
+            highlightthickness=0,
+            padx=2,
+            pady=0,
+            width=2,
+            font=("Microsoft YaHei UI", 8, "bold"),
             cursor="hand2",
         )
         setattr(button, "_hud_handle", True)
@@ -8302,8 +8365,8 @@ class TokenHudWindow:
 
     def _build_top_collapsed(self, frame: tk.Frame) -> None:
         controls = tk.Frame(frame, bg=HUD_BG)
-        controls.pack(side="left", padx=(0, 4))
-        self._pin_button(controls, "top").pack(side="left")
+        controls.pack(side="left", padx=(1, 3), fill="y")
+        self._pin_button(controls, "top").pack(side="left", padx=(1, 2), fill="y")
         self._update_button(controls).pack(side="left")
         self._settings_button(frame).pack(side="right", padx=(4, 0))
         self.top_labels["bar"] = TopHudProgressStrip(frame)
@@ -8314,8 +8377,8 @@ class TokenHudWindow:
         header.configure(cursor="hand2")
         header.pack(fill="x", pady=(0, 7))
         controls = tk.Frame(header, bg=HUD_HEADER_BG)
-        controls.pack(side="left", padx=(0, 4))
-        self._pin_button(controls, "top").pack(side="left")
+        controls.pack(side="left", padx=(1, 3), fill="y")
+        self._pin_button(controls, "top").pack(side="left", padx=(1, 2), fill="y")
         self._update_button(controls).pack(side="left")
         self._settings_button(header).pack(side="right", padx=(4, 0))
         cache_progress = TopHudProgressBar(
@@ -8984,7 +9047,7 @@ class TokenHudWindow:
 
     def _build_request_collapsed(self, frame: tk.Frame) -> None:
         frame.configure(bg=REQUEST_HUD_BG, padx=8, pady=4)
-        self._pin_button(frame, "request").pack(side="left", padx=(0, 4))
+        self._pin_button(frame, "request").pack(side="left", padx=(1, 4), fill="y")
         self.request_label = AutoScrollLabel(
             frame,
             text="↑- ↻- ↓- ◇- ∑- $0.0000",
@@ -9003,7 +9066,7 @@ class TokenHudWindow:
         content = tk.Frame(frame, bg=REQUEST_HUD_BG)
         content.pack(side="top", fill="both", expand=True)
 
-        self._pin_button(header, "request").pack(side="left", padx=(0, 4))
+        self._pin_button(header, "request").pack(side="left", padx=(1, 4), fill="y")
         self.request_label = AutoScrollLabel(
             header,
             text="最近模型请求轮次",
@@ -9441,7 +9504,28 @@ class TokenHudWindow:
         elif rect.minimized:
             self._hide_for_minimized()
         else:
+            if self._same_window_rect(self._last_rect, rect) and self._attached:
+                active = self.locator.is_active(rect, self._hud_hwnds())
+                if not active:
+                    self._enter_tombstone("inactive")
+                    return
+                self._last_rect = rect
+                self._exit_tombstone("attached")
+                self._apply_focus_state(True)
+                return
             self._attach_to_rect(rect)
+
+    @staticmethod
+    def _same_window_rect(previous: WindowRect | None, current: WindowRect) -> bool:
+        return (
+            previous is not None
+            and previous.hwnd == current.hwnd
+            and previous.left == current.left
+            and previous.top == current.top
+            and previous.right == current.right
+            and previous.bottom == current.bottom
+            and previous.minimized == current.minimized
+        )
 
     def _attach_to_rect(self, rect: WindowRect) -> None:
         self._attached = True
@@ -9707,7 +9791,7 @@ class TokenHudWindow:
         original_width = width
         original_height = height
         x = max(min_x, min(x, max_x))
-        min_y = rect.top + 8
+        min_y = rect.top if target == "top" else rect.top + 8
         max_height = max(
             self._interactive_min_height(target, expanded),
             rect.bottom - min_y - 8,
@@ -10291,6 +10375,7 @@ class TokenHudWindow:
             self._settings_loading_anim_job,
             self._settings_update_poll_job,
             self._follow_job,
+            getattr(self, "_header_roi_refresh_job", None),
         ):
             if job is None:
                 continue
@@ -10311,6 +10396,11 @@ class TokenHudWindow:
         self._settings_loading_anim_job = None
         self._settings_update_poll_job = None
         self._follow_job = None
+        self._header_roi_refresh_job = None
+        try:
+            self.locator.set_header_roi_change_callback(None)
+        except Exception:
+            pass
         header_roi_overlay = getattr(self, "_header_roi_overlay", None)
         if header_roi_overlay is not None:
             header_roi_overlay.close()
