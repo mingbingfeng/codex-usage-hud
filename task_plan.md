@@ -14,7 +14,7 @@
 - 不在本轮处理 macOS 安装包和自动更新发行策略。
 
 ## 当前阶段
-阶段 8：PySide6 桌面会话气泡 optional helper 已恢复；自动化验证已完成，等待 Windows/macOS 安装 PySide6 后手动验证。
+阶段 8：PySide6 桌面会话气泡 optional helper 已恢复；自动化验证和 Windows 实机验证已完成，等待 macOS 安装 PySide6 后手动验证。
 
 ## 各阶段
 
@@ -76,7 +76,7 @@
 - [x] `python -m pytest -q`
 - [x] `python -m compileall -q src tests tools`
 - [x] `git diff --check`
-- [ ] Windows 手动：安装 PySide6 后运行 `codex-hud --daemon` 验证桌面气泡、点击切换和 renderer HUD 注入
+- [x] Windows 手动：安装 PySide6 后运行 `codex-hud --daemon` 验证桌面气泡、点击切换和 renderer HUD 注入
 - [ ] macOS 手动：安装 PySide6 后运行 `codex-hud --daemon` 验证桌面气泡、点击切换和 renderer HUD 注入
 - **状态：** partial
 
@@ -103,6 +103,6 @@
 | README 精确补丁上下文不匹配 | 1 | 先读取局部上下文，再用更小补丁插入 FAQ |
 
 ## 下一步
-1. 在 Windows 源码环境安装 optional extra：`python -m pip install -e ".[desktop-overlay]"`
+1. 在 macOS 源码环境安装 optional extra：`python -m pip install -e ".[desktop-overlay]"`
 2. 运行 `codex-hud --daemon`，验证方形运行气泡、完成态圆气泡、dismiss、点击切换会话和 renderer HUD 注入。
-3. 在 macOS 重复同样手动验证，重点确认 Codex App CDP/debug 启动和 PySide6 overlay 置顶行为。
+3. macOS 验证通过后，将阶段 6 标记 complete；再单独规划发行策略，决定 Windows/macOS 安装包是否内置 PySide6。

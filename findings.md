@@ -62,6 +62,8 @@
   - `python -m compileall -q src tests tools`
 - whitespace 检查通过：
   - `git diff --check`
+- Windows 实机验证通过：
+  - 用户确认安装 PySide6 后运行 `codex-hud --daemon`，PySide6 桌面气泡无问题。
 - 本轮设置页调整目标测试通过：
   - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_install_desktop_overlay_starts_optional_dependency_install tests/test_ui.py::DaemonLifecycleTests::test_renderer_enable_desktop_overlay_rechecks_and_enables_without_restart tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available -q`
   - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py -q`
@@ -69,7 +71,6 @@
 ## 剩余风险
 | 风险 | 影响 | 当前处理 |
 |------|------|----------|
-| 尚未在真实 Windows 桌面安装 PySide6 后验证 overlay | 自动化只证明调度和 helper 启动路径 | 需要手动运行 `codex-hud --daemon` |
 | 尚未在真实 macOS 验证 PySide6 overlay 置顶和点击切换 | macOS 窗口层级/权限可能与 Windows 不同 | 已保留 PySide6 helper 路径；需实机验证 |
 | 默认 Windows 安装包不含 PySide6 | 安装包用户默认看不到桌面气泡 | 当前按 optional extra 处理，是否内置 PySide6 是后续发行策略 |
 | macOS 自动更新仍不是完整发行方案 | macOS 用户无法复用 Windows installer 语义 | 保留为后续平台化任务 |
@@ -84,10 +85,10 @@
 7. `README.md`
 8. `README_EN.md`
 
-## 手动验证前提
+## macOS 手动验证前提
 - 安装 optional extra：`python -m pip install -e ".[desktop-overlay]"`
 - Codex App 需要暴露本地 CDP/debug target，renderer HUD 才能注入和跟随当前会话。
-- Windows/macOS 都需要检查方形运行气泡、完成态圆气泡、dismiss、点击切换会话和 renderer HUD 注入。
+- macOS 需要检查方形运行气泡、完成态圆气泡、dismiss、点击切换会话和 renderer HUD 注入。
 
 ---
 *每执行2次查看/搜索/浏览器操作后更新此文件，避免新发现丢失。*
