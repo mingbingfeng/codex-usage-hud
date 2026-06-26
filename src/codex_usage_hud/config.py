@@ -25,8 +25,8 @@ DEFAULT_BUDGET_THRESHOLDS = (0.5, 0.8, 0.9, 1.0)
 DEFAULT_DAILY_RESET_TIME = "10:00"
 DEFAULT_WEEKLY_RESET_WEEKDAY = 3
 DEFAULT_WEEKLY_RESET_TIME = "10:00"
-DEFAULT_DISPLAY_MODE = "auto"
-VALID_DISPLAY_MODES = {"auto", "renderer", "qt", "tk"}
+DEFAULT_DISPLAY_MODE = "renderer"
+VALID_DISPLAY_MODES = {"renderer"}
 DEFAULT_SUPPORT_URL = "https://github.com/mingbingfeng/codex-usage-hud"
 DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
 JSON_WRITE_REPLACE_RETRIES = 8
@@ -442,19 +442,18 @@ def normalize_weekday(value: Any, default: int = DEFAULT_WEEKLY_RESET_WEEKDAY) -
 
 def normalize_display_mode(value: Any) -> str:
     mode = str(value or DEFAULT_DISPLAY_MODE).strip().lower().replace("-", "_")
-    if mode in {"inject", "injection", "renderer_hud"}:
-        mode = "renderer"
-    if mode in {"qt_hud", "pyside", "pyside6"}:
-        mode = "qt"
-    if mode in {"tkinter", "tk_hud"}:
-        mode = "tk"
+    legacy_renderer_aliases = {"auto", "inject", "injection", "renderer_hud"}
+    legacy_qt_aliases = {"qt", "qt_hud", "pyside", "pyside6"}
+    legacy_tk_aliases = {"tk", "tkinter", "tk_hud"}
+    if mode in legacy_renderer_aliases | legacy_qt_aliases | legacy_tk_aliases:
+        return "renderer"
     return mode if mode in VALID_DISPLAY_MODES else DEFAULT_DISPLAY_MODE
 
 
 def effective_display_mode(value: Any) -> str:
     """Collapse a configured display preference into the active HUD surface."""
-    mode = normalize_display_mode(value)
-    return mode if mode in {"renderer", "qt", "tk"} else "renderer"
+    del value
+    return "renderer"
 
 
 def normalize_work_overlay_max_items(

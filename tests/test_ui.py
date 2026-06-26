@@ -922,6 +922,62 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
 
+    def test_desktop_work_overlay_skips_when_pyside6_unavailable(self) -> None:
+        item = WorkStatusItem(
+            id="thread-1",
+            title="Desktop bubble",
+            status="running",
+            status_label="运行中",
+            detail="正在处理",
+        )
+        overlay = DesktopWorkOverlay(item_limit=2)
+
+        with (
+            patch("codex_usage_hud.cli.importlib.util.find_spec", return_value=None),
+            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+            patch.object(overlay, "_start") as start,
+        ):
+            overlay.update([item])
+            overlay.update([item])
+
+        start.assert_not_called()
+        diagnostic.assert_called_once()
+        self.assertTrue(overlay.enabled)
+        self.assertIsNone(overlay._process)
+
+    def test_desktop_work_overlay_starts_when_pyside6_available(self) -> None:
+        item = WorkStatusItem(
+            id="thread-1",
+            title="Desktop bubble",
+            status="running",
+            status_label="运行中",
+            detail="正在处理",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            fake_process = SimpleNamespace(
+                poll=MagicMock(return_value=None),
+                wait=MagicMock(return_value=None),
+            )
+
+            with (
+                patch("codex_usage_hud.cli.importlib.util.find_spec", return_value=object()),
+                patch("codex_usage_hud.cli.subprocess.Popen", return_value=fake_process) as popen,
+            ):
+                overlay.update([item])
+
+            popen.assert_called_once()
+            command = popen.call_args.args[0]
+            self.assertIn("--work-overlay-helper", command)
+            self.assertIn(str(overlay._state_path), command)
+            self.assertIs(overlay._process, fake_process)
+            self.assertTrue(overlay._state_path.exists())
+            overlay.close()
+
     def test_desktop_work_overlay_exports_runtime_theme_tokens_when_available(self) -> None:
         overlay = DesktopWorkOverlay(item_limit=2)
         overlay._theme_probe = SimpleNamespace(
@@ -1975,7 +2031,8 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("...", text)
 
     def test_work_overlay_helper_delegates_to_qt_runner(self) -> None:
-        with patch("codex_usage_hud.cli.run_work_overlay_helper_qt", return_value=7) as runner:
+        runner = MagicMock(return_value=7)
+        with patch("codex_usage_hud.cli._work_overlay_helper_qt", return_value=runner):
             exit_code = run_work_overlay_helper("overlay-state.json")
 
         self.assertEqual(exit_code, 7)
@@ -7840,7 +7897,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         restart_requested.set.assert_not_called()
         exit_requested.set.assert_not_called()
 
-    def test_renderer_apply_display_mode_requests_qt_switch(self) -> None:
+    def test_renderer_apply_display_mode_normalizes_qt_to_renderer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
             store.save(UserConfig.defaults())
@@ -7860,13 +7917,13 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             saved = store.load()
 
-        self.assertEqual(saved.display_mode, "qt")
-        self.assertEqual(status["switchMode"], "qt")
+        self.assertEqual(saved.display_mode, "renderer")
+        self.assertNotIn("switchMode", status)
         self.assertFalse(status["restartVisible"])
         restart_requested.set.assert_not_called()
         exit_requested.set.assert_not_called()
 
-    def test_renderer_apply_display_mode_requests_tk_switch(self) -> None:
+    def test_renderer_apply_display_mode_normalizes_tk_to_renderer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
             store.save(UserConfig.defaults())
@@ -7886,9 +7943,84 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             saved = store.load()
 
-        self.assertEqual(saved.display_mode, "tk")
-        self.assertEqual(status["switchMode"], "tk")
+        self.assertEqual(saved.display_mode, "renderer")
+        self.assertNotIn("switchMode", status)
         self.assertFalse(status["restartVisible"])
+        restart_requested.set.assert_not_called()
+        exit_requested.set.assert_not_called()
+
+    def test_renderer_install_desktop_overlay_starts_optional_dependency_install(self) -> None:
+        context = SimpleNamespace()
+        restart_requested = MagicMock()
+        exit_requested = MagicMock()
+
+        with (
+            patch(
+                "codex_usage_hud.cli._desktop_overlay_dependency_status",
+                return_value={
+                    "installed": False,
+                    "canInstall": True,
+                    "installing": False,
+                    "requiresRestart": False,
+                },
+            ),
+            patch("codex_usage_hud.cli._start_desktop_overlay_install", return_value=True) as install,
+        ):
+            status = _handle_renderer_settings_command(
+                {"action": "installDesktopOverlay"},
+                context,
+                restart_requested,
+                exit_requested,
+            )
+
+        self.assertEqual(status["kind"], "")
+        self.assertIn("已开始安装 PySide6", status["message"])
+        install.assert_called_once()
+        restart_requested.set.assert_not_called()
+        exit_requested.set.assert_not_called()
+
+    def test_renderer_enable_desktop_overlay_rechecks_and_enables_without_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            config = UserConfig.defaults()
+            config.work_overlay_max_items = 0
+            store.save(config)
+            context = SimpleNamespace(
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                reload_user_config=MagicMock(),
+            )
+            restart_requested = MagicMock()
+            exit_requested = MagicMock()
+            overlay = SimpleNamespace(reset_runtime_availability=MagicMock(return_value=True))
+
+            with (
+                patch(
+                    "codex_usage_hud.cli._desktop_overlay_dependency_status",
+                    return_value={
+                        "installed": True,
+                        "version": "6.8.1",
+                        "canInstall": True,
+                        "installing": False,
+                        "requiresRestart": False,
+                    },
+                ),
+                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+            ):
+                status = _handle_renderer_settings_command(
+                    {"action": "enableDesktopOverlay"},
+                    context,
+                    restart_requested,
+                    exit_requested,
+                    work_overlay=overlay,
+                )
+
+            saved = store.load()
+
+        self.assertEqual(status["kind"], "")
+        self.assertIn("桌面气泡已启用", status["message"])
+        self.assertEqual(saved.work_overlay_max_items, 4)
+        overlay.reset_runtime_availability.assert_called_once()
         restart_requested.set.assert_not_called()
         exit_requested.set.assert_not_called()
 
@@ -8300,7 +8432,13 @@ class DaemonLifecycleTests(unittest.TestCase):
         script = (
             "import sys\n"
             "import codex_usage_hud.cli\n"
-            "names = ['PySide6', 'PySide6.QtCore', 'codex_usage_hud.ui.qt_hud']\n"
+            "names = [\n"
+            "    'PySide6',\n"
+            "    'PySide6.QtCore',\n"
+            "    'codex_usage_hud.ui.qt_hud',\n"
+            "    'codex_usage_hud.ui.tk_hud',\n"
+            "    'codex_usage_hud.ui.work_overlay_qt',\n"
+            "]\n"
             "print('\\n'.join(f'{name}={name in sys.modules}' for name in names))\n"
         )
 
@@ -8317,6 +8455,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn("PySide6=False", result.stdout)
         self.assertIn("PySide6.QtCore=False", result.stdout)
         self.assertIn("codex_usage_hud.ui.qt_hud=False", result.stdout)
+        self.assertIn("codex_usage_hud.ui.tk_hud=False", result.stdout)
+        self.assertIn("codex_usage_hud.ui.work_overlay_qt=False", result.stdout)
 
     def test_main_defaults_to_renderer_first_from_auto_config(self) -> None:
         config = UserConfig.defaults()
@@ -8349,7 +8489,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertTrue(args.renderer_hud)
         self.assertEqual(args.runtime_hud_mode, "renderer")
 
-    def test_qt_config_skips_renderer_path(self) -> None:
+    def test_qt_config_normalizes_to_renderer_path(self) -> None:
         config = UserConfig.defaults()
         config.display_mode = "qt"
 
@@ -8362,10 +8502,11 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         args = run_session.call_args.args[0]
-        self.assertFalse(args.renderer_hud)
-        self.assertEqual(args.runtime_hud_mode, "qt")
+        self.assertTrue(args.renderer_hud)
+        self.assertEqual(args.runtime_hud_mode, "renderer")
+        self.assertIsNone(args.standalone_hud_mode)
 
-    def test_qt_hud_flag_forces_qt_runtime_mode(self) -> None:
+    def test_qt_hud_flag_is_renderer_compatibility_alias(self) -> None:
         config = UserConfig.defaults()
 
         with (
@@ -8377,11 +8518,12 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         args = run_session.call_args.args[0]
-        self.assertFalse(args.renderer_hud)
-        self.assertEqual(args.hud_mode, "qt")
-        self.assertEqual(args.runtime_hud_mode, "qt")
+        self.assertTrue(args.renderer_hud)
+        self.assertEqual(args.hud_mode, "renderer")
+        self.assertEqual(args.runtime_hud_mode, "renderer")
+        self.assertIsNone(args.standalone_hud_mode)
 
-    def test_tk_config_skips_renderer_path(self) -> None:
+    def test_tk_config_normalizes_to_renderer_path(self) -> None:
         config = UserConfig.defaults()
         config.display_mode = "tk"
 
@@ -8394,10 +8536,11 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         args = run_session.call_args.args[0]
-        self.assertFalse(args.renderer_hud)
-        self.assertEqual(args.runtime_hud_mode, "tk")
+        self.assertTrue(args.renderer_hud)
+        self.assertEqual(args.runtime_hud_mode, "renderer")
+        self.assertIsNone(args.standalone_hud_mode)
 
-    def test_renderer_first_falls_back_to_qt_when_injection_unavailable(self) -> None:
+    def test_renderer_unavailable_does_not_fallback_to_qt_or_tk(self) -> None:
         args = SimpleNamespace(renderer_hud=True)
 
         with (
@@ -8410,14 +8553,12 @@ class DaemonLifecycleTests(unittest.TestCase):
         ):
             exit_code = run_hud_session(args)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         renderer_session.assert_called_once()
-        qt_session.assert_called_once()
+        qt_session.assert_not_called()
         tk_session.assert_not_called()
-        qt_args = qt_session.call_args.args[0]
-        self.assertEqual(qt_args.runtime_hud_mode, "qt")
 
-    def test_qt_fallback_uses_tk_when_qt_unavailable(self) -> None:
+    def test_qt_fallback_path_is_not_used_when_renderer_is_unavailable(self) -> None:
         args = SimpleNamespace(renderer_hud=True)
 
         with (
@@ -8430,11 +8571,11 @@ class DaemonLifecycleTests(unittest.TestCase):
         ):
             exit_code = run_hud_session(args)
 
-        self.assertEqual(exit_code, 0)
-        qt_session.assert_called_once()
-        tk_session.assert_called_once()
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        qt_session.assert_not_called()
+        tk_session.assert_not_called()
 
-    def test_run_hud_session_switches_from_renderer_to_tk(self) -> None:
+    def test_run_hud_session_ignores_legacy_renderer_to_tk_switch(self) -> None:
         args = SimpleNamespace(renderer_hud=True)
 
         with (
@@ -8446,14 +8587,11 @@ class DaemonLifecycleTests(unittest.TestCase):
         ):
             exit_code = run_hud_session(args)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         renderer_session.assert_called_once()
-        tk_session.assert_called_once()
-        tk_args = tk_session.call_args.args[0]
-        self.assertFalse(tk_args.renderer_hud)
-        self.assertEqual(tk_args.runtime_hud_mode, "tk")
+        tk_session.assert_not_called()
 
-    def test_run_hud_session_switches_from_renderer_to_qt(self) -> None:
+    def test_run_hud_session_ignores_legacy_renderer_to_qt_switch(self) -> None:
         args = SimpleNamespace(renderer_hud=True)
 
         with (
@@ -8465,12 +8603,9 @@ class DaemonLifecycleTests(unittest.TestCase):
         ):
             exit_code = run_hud_session(args)
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         renderer_session.assert_called_once()
-        qt_session.assert_called_once()
-        qt_args = qt_session.call_args.args[0]
-        self.assertFalse(qt_args.renderer_hud)
-        self.assertEqual(qt_args.runtime_hud_mode, "qt")
+        qt_session.assert_not_called()
 
     def test_tk_close_destroys_windows_without_forced_gc(self) -> None:
         window = object.__new__(tk_hud_module.TokenHudWindow)
@@ -8565,7 +8700,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIsNone(fake_context.active_session_tracker)
         fake_pump.close.assert_called_once()
 
-    def test_run_hud_session_switches_from_tk_to_qt(self) -> None:
+    def test_run_hud_session_with_legacy_tk_preference_runs_renderer_only(self) -> None:
         args = SimpleNamespace(renderer_hud=False)
 
         with (
@@ -8574,17 +8709,16 @@ class DaemonLifecycleTests(unittest.TestCase):
                 return_value=HUD_SWITCH_TO_QT,
             ) as tk_session,
             patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
+            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
         ):
             exit_code = run_hud_session(args)
 
         self.assertEqual(exit_code, 0)
-        tk_session.assert_called_once()
-        qt_session.assert_called_once()
-        qt_args = qt_session.call_args.args[0]
-        self.assertFalse(qt_args.renderer_hud)
-        self.assertEqual(qt_args.runtime_hud_mode, "qt")
+        renderer_session.assert_called_once()
+        tk_session.assert_not_called()
+        qt_session.assert_not_called()
 
-    def test_run_hud_session_switches_from_tk_to_renderer(self) -> None:
+    def test_run_hud_session_does_not_use_tk_switch_to_renderer(self) -> None:
         args = SimpleNamespace(renderer_hud=False)
 
         with (
@@ -8597,12 +8731,13 @@ class DaemonLifecycleTests(unittest.TestCase):
             exit_code = run_hud_session(args)
 
         self.assertEqual(exit_code, 0)
-        tk_session.assert_called_once()
         renderer_session.assert_called_once()
         renderer_args = renderer_session.call_args.args[0]
         self.assertTrue(renderer_args.renderer_hud)
+        self.assertEqual(renderer_args.runtime_hud_mode, "renderer")
+        tk_session.assert_not_called()
 
-    def test_run_hud_session_restarts_codex_for_renderer_switch(self) -> None:
+    def test_run_hud_session_does_not_restart_from_legacy_tk_switch(self) -> None:
         args = SimpleNamespace(renderer_hud=False)
 
         with (
@@ -8616,10 +8751,10 @@ class DaemonLifecycleTests(unittest.TestCase):
             exit_code = run_hud_session(args)
 
         self.assertEqual(exit_code, 0)
-        tk_session.assert_called_once()
-        restart_codex.assert_called_once()
         renderer_session.assert_called_once()
-        self.assertTrue(renderer_session.call_args.kwargs["launched_codex"])
+        tk_session.assert_not_called()
+        restart_codex.assert_not_called()
+        self.assertFalse(renderer_session.call_args.kwargs["launched_codex"])
 
     def test_renderer_initial_connect_failure_writes_diagnostic_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -8661,13 +8796,13 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_bridge.close.assert_called_once()
         fake_context.close.assert_called_once()
 
-    def test_auto_mode_uses_faster_timeout_failure_limit(self) -> None:
+    def test_legacy_auto_mode_uses_renderer_failure_limit(self) -> None:
         self.assertEqual(
             _renderer_update_failure_limit(
                 "auto",
                 "URLError: <urlopen error timed out>",
             ),
-            AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
+            RENDERER_UPDATE_FAILURE_LIMIT,
         )
         self.assertEqual(
             _renderer_update_failure_limit(
@@ -9134,7 +9269,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
             patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
             patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay),
+            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay) as overlay_class,
             patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
             patch(
                 "codex_usage_hud.cli._build_session_switch_controller",
@@ -9144,6 +9279,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "codex_usage_hud.cli._prepare_codex_window_for_renderer",
                 return_value=(True, "visible", "", 123),
             ) as prepare_window,
+            patch("codex_usage_hud.cli._primary_screen_height", return_value=1080),
             patch(
                 "codex_usage_hud.cli._prepare_codex_window_for_tk",
                 return_value=(True, "visible", "", 321),
@@ -9158,6 +9294,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 130)
+        overlay_class.assert_called_once_with(item_limit=6)
         self.assertTrue(command_started.is_set())
         self.assertTrue(command_finished.is_set())
         fake_overlay.take_commands.assert_called()
@@ -9393,22 +9530,13 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_context.close.assert_called_once()
 
     def test_run_hud_session_returns_restart_code_when_codex_exits(self) -> None:
-        fake_context = SimpleNamespace(poll_ms=250, close=MagicMock())
-        fake_window = SimpleNamespace(
-            exit_reason="daemon_codex_exited",
-            root=SimpleNamespace(after=lambda *args, **kwargs: None),
-            should_refresh_snapshot=lambda: False,
-            refresh_delay_ms=lambda normal_delay_ms: normal_delay_ms,
-            run=lambda: None,
-            update_display=lambda snapshot: None,
-        )
         args = SimpleNamespace(compact=False)
         daemon_manager = SimpleNamespace(poll_ms=250)
 
-        with (
-            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-            patch("codex_usage_hud.cli.TokenHudWindow", return_value=fake_window),
-        ):
+        with patch(
+            "codex_usage_hud.cli.run_renderer_hud_session",
+            return_value=DAEMON_RESTART_REQUESTED,
+        ) as renderer_session:
             exit_code = run_hud_session(
                 args,
                 lock_already_held=True,
@@ -9417,7 +9545,8 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, DAEMON_RESTART_REQUESTED)
-        fake_context.close.assert_called_once()
+        renderer_session.assert_called_once()
+        self.assertIs(renderer_session.call_args.kwargs["daemon_manager"], daemon_manager)
 
     def test_run_daemon_renderer_choice_launches_codex_debugger_before_wait(self) -> None:
         fake_manager = SimpleNamespace(
@@ -9491,7 +9620,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIs(renderer_session.call_args.kwargs["daemon_manager"], fake_manager)
         hud_session.assert_not_called()
 
-    def test_run_daemon_tk_choice_launches_codex_normally_and_opens_tk(self) -> None:
+    def test_run_daemon_tk_choice_normalizes_to_renderer(self) -> None:
         fake_manager = SimpleNamespace(
             poll_ms=250,
             wait_for_codex=MagicMock(),
@@ -9515,19 +9644,18 @@ class DaemonLifecycleTests(unittest.TestCase):
             ),
             patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch,
             patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
+            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
         ):
             exit_code = run_daemon(args)
 
         self.assertEqual(exit_code, 0)
-        launch.assert_called_once_with(debugger=False)
-        fake_manager.wait_for_codex.assert_not_called()
-        tk_session.assert_called_once()
-        tk_args = tk_session.call_args.args[0]
-        self.assertFalse(tk_args.renderer_hud)
-        self.assertEqual(tk_session.call_args.kwargs["lock_already_held"], True)
-        self.assertEqual(tk_session.call_args.kwargs["hide_until_attached"], True)
+        launch.assert_called_once_with(debugger=True)
+        fake_manager.wait_for_codex.assert_called_once()
+        renderer_session.assert_called_once()
+        self.assertTrue(renderer_session.call_args.args[0].renderer_hud)
+        tk_session.assert_not_called()
 
-    def test_run_daemon_qt_choice_launches_codex_normally_and_opens_qt(self) -> None:
+    def test_run_daemon_qt_choice_normalizes_to_renderer(self) -> None:
         fake_manager = SimpleNamespace(
             poll_ms=250,
             wait_for_codex=MagicMock(),
@@ -9551,18 +9679,17 @@ class DaemonLifecycleTests(unittest.TestCase):
             ),
             patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch,
             patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
+            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
         ):
             exit_code = run_daemon(args)
 
         self.assertEqual(exit_code, 0)
-        launch.assert_called_once_with(debugger=False)
-        fake_manager.wait_for_codex.assert_not_called()
-        qt_session.assert_called_once()
-        qt_args = qt_session.call_args.args[0]
-        self.assertFalse(qt_args.renderer_hud)
-        self.assertEqual(qt_args.runtime_hud_mode, "qt")
-        self.assertEqual(qt_session.call_args.kwargs["lock_already_held"], True)
-        self.assertEqual(qt_session.call_args.kwargs["hide_until_attached"], True)
+        launch.assert_called_once_with(debugger=True)
+        fake_manager.wait_for_codex.assert_called_once()
+        renderer_session.assert_called_once()
+        self.assertTrue(renderer_session.call_args.args[0].renderer_hud)
+        self.assertEqual(renderer_session.call_args.args[0].runtime_hud_mode, "renderer")
+        qt_session.assert_not_called()
 
     def test_launch_codex_app_debugger_uses_remote_debugging_with_uac_fallback(self) -> None:
         executable = Path(r"C:\Program Files\WindowsApps\OpenAI.Codex\app\Codex.exe")
@@ -9590,6 +9717,21 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(first_call.kwargs["parameters"], expected_parameters)
         self.assertEqual(second_call.kwargs["verb"], "runas")
         self.assertEqual(second_call.kwargs["parameters"], expected_parameters)
+
+    def test_launch_codex_app_debugger_uses_macos_open_args(self) -> None:
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch("codex_usage_hud.cli.cdp_port_from_env", return_value=9333),
+            patch.dict(os.environ, {}, clear=True),
+            patch("codex_usage_hud.cli.subprocess.Popen") as popen,
+        ):
+            launched = launch_codex_app(debugger=True)
+
+        self.assertTrue(launched)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:4], ["open", "-a", "Codex", "--args"])
+        self.assertIn("--remote-debugging-port=9333", command)
+        self.assertIn("--remote-allow-origins=http://127.0.0.1:9333", command)
 
     def test_run_daemon_waits_for_next_codex_start_after_session_exit(self) -> None:
         fake_manager = SimpleNamespace(

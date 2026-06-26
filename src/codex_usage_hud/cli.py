@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from contextlib import nullcontext
 import gc
+import importlib.metadata as importlib_metadata
+import importlib.util
 import json
 import logging
 import os
@@ -70,15 +72,10 @@ from .platforms.base import BasePlatform
 from .platforms.cdp_probe import cdp_port_from_env
 from .platforms.codex_theme import CodexThemeProbe
 from .settings_bridge import SettingsBridgeServer
-from .ui.tk_hud import TokenHudWindow
 from .ui.renderer_hud import (
     RendererHudClient,
     remove_renderer_hud_from_pages,
     wait_for_renderer,
-)
-from .ui.work_overlay_qt import (
-    run_work_overlay_helper_qt,
-    work_overlay_max_items_for_screen_height,
 )
 from .updater import (
     AutoUpdateManager,
@@ -138,10 +135,18 @@ WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_ALPHA = 0.88
 WORK_OVERLAY_HOVER_ALPHA = 0.52
 WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
+WORK_OVERLAY_RESTART_BACKOFF_SECONDS = 60.0
+WORK_OVERLAY_TOP_OFFSET = 56
+WORK_OVERLAY_MARGIN = 16
+WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT = 160
+DESKTOP_OVERLAY_PACKAGE = "PySide6"
+DESKTOP_OVERLAY_PIP_SPEC = "PySide6>=6.8"
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 _CRASH_DIAGNOSTIC_FILE: Any | None = None
+_DESKTOP_OVERLAY_INSTALL_PROCESS: subprocess.Popen[Any] | None = None
 QtHudWindow: Any | None = None
+TokenHudWindow: Any | None = None
 
 
 def _qt_hud_window_class() -> Any:
@@ -151,6 +156,99 @@ def _qt_hud_window_class() -> Any:
 
         QtHudWindow = qt_hud_window_class
     return QtHudWindow
+
+
+def _token_hud_window_class() -> Any:
+    global TokenHudWindow
+    if TokenHudWindow is None:
+        from .ui.tk_hud import TokenHudWindow as tk_hud_window_class
+
+        TokenHudWindow = tk_hud_window_class
+    return TokenHudWindow
+
+
+def _work_overlay_helper_qt() -> Any:
+    from .ui.work_overlay_qt import run_work_overlay_helper_qt
+
+    return run_work_overlay_helper_qt
+
+
+def _work_overlay_max_items_for_screen_height(screen_height: int) -> int:
+    available_height = max(
+        1,
+        int(screen_height) - WORK_OVERLAY_TOP_OFFSET - (WORK_OVERLAY_MARGIN * 2),
+    )
+    return max(1, available_height // WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT)
+
+
+def _pyside6_runtime_available() -> bool:
+    try:
+        importlib.invalidate_caches()
+        return importlib.util.find_spec(DESKTOP_OVERLAY_PACKAGE) is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+def _pyside6_version() -> str:
+    try:
+        return importlib_metadata.version(DESKTOP_OVERLAY_PACKAGE)
+    except importlib_metadata.PackageNotFoundError:
+        return ""
+    except Exception:
+        return ""
+
+
+def _desktop_overlay_install_running() -> bool:
+    global _DESKTOP_OVERLAY_INSTALL_PROCESS
+    process = _DESKTOP_OVERLAY_INSTALL_PROCESS
+    if process is None:
+        return False
+    if process.poll() is None:
+        return True
+    _DESKTOP_OVERLAY_INSTALL_PROCESS = None
+    return False
+
+
+def _desktop_overlay_can_install() -> bool:
+    return bool(sys.executable) and not bool(getattr(sys, "frozen", False))
+
+
+def _desktop_overlay_dependency_status() -> dict[str, object]:
+    installed = _pyside6_runtime_available()
+    version = _pyside6_version() if installed else ""
+    can_install = _desktop_overlay_can_install()
+    installing = _desktop_overlay_install_running()
+    requires_restart = bool(getattr(sys, "frozen", False)) and not installed
+    install_command = f"{Path(sys.executable).name} -m pip install \"{DESKTOP_OVERLAY_PIP_SPEC}\""
+    return {
+        "package": DESKTOP_OVERLAY_PACKAGE,
+        "installed": installed,
+        "version": version,
+        "canInstall": can_install,
+        "installing": installing,
+        "requiresRestart": requires_restart,
+        "canEnableNow": not requires_restart,
+        "installCommand": install_command,
+    }
+
+
+def _start_desktop_overlay_install() -> bool:
+    global _DESKTOP_OVERLAY_INSTALL_PROCESS
+    if _desktop_overlay_install_running():
+        return True
+    if not _desktop_overlay_can_install():
+        return False
+    try:
+        _DESKTOP_OVERLAY_INSTALL_PROCESS = subprocess.Popen(
+            [sys.executable, "-m", "pip", "install", DESKTOP_OVERLAY_PIP_SPEC],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        _DESKTOP_OVERLAY_INSTALL_PROCESS = None
+        return False
+    return True
 
 
 class HudAlreadyRunningError(RuntimeError):
@@ -580,7 +678,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
 
 
 class DesktopWorkOverlay:
-    """Primary-screen Tk overlay that stays visible when Codex is minimized."""
+    """Optional PySide6 primary-screen desktop overlay for work bubbles."""
 
     def __init__(
         self,
@@ -597,6 +695,11 @@ class DesktopWorkOverlay:
         self._command_offset = 0
         self._process: subprocess.Popen[str] | None = None
         self._closed = False
+        self._available: bool | None = None
+        self._unavailable_reason = ""
+        self._unavailable_reported = False
+        self._restart_blocked_until = 0.0
+        self._last_helper_exit_code: int | None = None
         self._theme_probe = CodexThemeProbe(
             timeout_seconds=0.08,
             cache_seconds=0.8,
@@ -622,14 +725,25 @@ class DesktopWorkOverlay:
         if not self.enabled:
             self._stop_runtime(permanent=False)
             return
+        if not self._runtime_available():
+            self._stop_runtime(permanent=False)
+            self._report_unavailable_once(self._unavailable_reason)
+            return
         payload_items = [work_item_to_overlay_dict(item) for item in items]
         theme_payload = self._theme_payload()
         if not payload_items and self._process is None:
             return
         if self._process is not None and self._process.poll() is not None:
+            self._last_helper_exit_code = int(self._process.returncode or 0)
             self._process = None
+            self._restart_blocked_until = (
+                time.monotonic() + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
+            )
+            self._report_unavailable_once(
+                f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
+            )
         self._write_state(payload_items, theme=theme_payload, close=False)
-        if self._process is None:
+        if self._process is None and time.monotonic() >= self._restart_blocked_until:
             self._start()
 
     def close(self) -> None:
@@ -708,6 +822,44 @@ class DesktopWorkOverlay:
             )
         except Exception:
             self._process = None
+            self._restart_blocked_until = (
+                time.monotonic() + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
+            )
+            self._report_unavailable_once("unable to start PySide6 desktop overlay helper")
+
+    def reset_runtime_availability(self) -> bool:
+        self._available = None
+        self._unavailable_reason = ""
+        self._unavailable_reported = False
+        self._restart_blocked_until = 0.0
+        return self._runtime_available()
+
+    def _runtime_available(self) -> bool:
+        if self._available is not None:
+            return self._available
+        try:
+            available = _pyside6_runtime_available()
+        except (ImportError, AttributeError, ValueError) as exc:
+            available = False
+            self._unavailable_reason = str(exc)
+        if not available and not self._unavailable_reason:
+            self._unavailable_reason = (
+                "PySide6 is not installed; install codex-usage-hud[desktop-overlay] "
+                "to enable desktop work bubbles."
+            )
+        self._available = available
+        return available
+
+    def _report_unavailable_once(self, reason: str) -> None:
+        if self._unavailable_reported:
+            return
+        self._unavailable_reported = True
+        message = str(reason or "PySide6 desktop overlay is unavailable")
+        _LOGGER.warning("work_overlay_unavailable reason=%s", message)
+        try:
+            _append_renderer_diagnostic("work_overlay_unavailable", reason=message)
+        except Exception:
+            return
 
     def _write_state(
         self,
@@ -806,7 +958,7 @@ def run_work_overlay_helper(state_file: str | Path) -> int:
     if not state_arg:
         return 1
     try:
-        return run_work_overlay_helper_qt(
+        return _work_overlay_helper_qt()(
             state_arg,
             process_exists=_process_exists,
             owner_pid_from_path=_work_overlay_owner_pid,
@@ -1055,8 +1207,87 @@ def _codex_app_debugger_parameters(port: int) -> str:
     )
 
 
+def _codex_app_debugger_args(port: int) -> list[str]:
+    return _codex_app_debugger_parameters(port).split()
+
+
+def _macos_codex_app_target() -> str:
+    configured = os.environ.get(CODEX_APP_PATH_ENV, "").strip()
+    return configured or "Codex"
+
+
+def _macos_codex_app_name() -> str:
+    target = _macos_codex_app_target()
+    name = Path(target).stem if target.endswith(".app") or "/" in target else target
+    return name or "Codex"
+
+
+def _launch_macos_codex_app(*, debugger: bool = False) -> bool:
+    target = _macos_codex_app_target()
+    command = ["open"]
+    if target.endswith(".app") or "/" in target:
+        command.append(target)
+    else:
+        command.extend(["-a", target])
+    if debugger:
+        command.extend(["--args", *_codex_app_debugger_args(cdp_port_from_env())])
+    try:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        _LOGGER.info("codex_app_macos_launch_failed target=%s error=%s", target, exc)
+        return False
+    _LOGGER.info(
+        "codex_app_launched mode=%s target=%s",
+        "debugger" if debugger else "normal",
+        target,
+    )
+    return True
+
+
+def _stop_macos_codex_app(*, timeout_seconds: float = 8.0) -> bool:
+    app_name = _macos_codex_app_name()
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'tell application "{app_name}" to quit'],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=max(1.0, float(timeout_seconds)),
+            check=False,
+        )
+    except Exception as exc:
+        _LOGGER.info("codex_app_macos_quit_failed app=%s error=%s", app_name, exc)
+        return False
+    deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-x", app_name],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+                check=False,
+            )
+        except Exception:
+            return True
+        if result.returncode != 0:
+            return True
+        time.sleep(0.1)
+    _LOGGER.info("codex_app_macos_quit_timeout app=%s", app_name)
+    return False
+
+
 def launch_codex_app(*, debugger: bool = False) -> bool:
     """Best-effort launch of Codex App, optionally with local CDP enabled."""
+    if sys.platform == "darwin":
+        return _launch_macos_codex_app(debugger=debugger)
+
     if debugger:
         port = cdp_port_from_env()
         parameters = _codex_app_debugger_parameters(port)
@@ -1102,8 +1333,12 @@ def _clone_args_with_renderer_preference(
     args: argparse.Namespace,
     prefer_renderer: bool,
 ) -> argparse.Namespace:
+    del prefer_renderer
     cloned = argparse.Namespace(**vars(args))
-    cloned.renderer_hud = bool(prefer_renderer)
+    cloned.renderer_hud = True
+    cloned.hud_mode = "renderer"
+    cloned.runtime_hud_mode = "renderer"
+    cloned.standalone_hud_mode = None
     return cloned
 
 
@@ -1111,12 +1346,12 @@ def _clone_args_with_display_mode(
     args: argparse.Namespace,
     mode: str,
 ) -> argparse.Namespace:
-    normalized = effective_display_mode(mode)
+    del mode
     cloned = argparse.Namespace(**vars(args))
-    cloned.hud_mode = normalized
-    cloned.runtime_hud_mode = normalized
-    cloned.standalone_hud_mode = normalized if normalized in {"qt", "tk"} else None
-    cloned.renderer_hud = normalized == "renderer"
+    cloned.hud_mode = "renderer"
+    cloned.runtime_hud_mode = "renderer"
+    cloned.standalone_hud_mode = None
+    cloned.renderer_hud = True
     return cloned
 
 
@@ -1125,16 +1360,8 @@ def _runtime_display_mode(value: object) -> str:
 
 
 def _initial_runtime_display_mode(args: argparse.Namespace) -> str:
-    explicit_mode = getattr(args, "hud_mode", None)
-    if explicit_mode:
-        return effective_display_mode(explicit_mode)
-    runtime_mode = getattr(args, "runtime_hud_mode", None)
-    if runtime_mode:
-        return effective_display_mode(runtime_mode)
-    standalone_mode = getattr(args, "standalone_hud_mode", None)
-    if standalone_mode in {"qt", "tk"}:
-        return str(standalone_mode)
-    return "renderer" if bool(getattr(args, "renderer_hud", False)) else "tk"
+    del args
+    return "renderer"
 
 
 def _stop_codex_processes(*, timeout_seconds: float = 8.0) -> bool:
@@ -1177,6 +1404,8 @@ def _stop_codex_processes(*, timeout_seconds: float = 8.0) -> bool:
 def _restart_codex_for_renderer() -> bool:
     if sys.platform.startswith("win") and not _stop_codex_processes():
         return False
+    if sys.platform == "darwin" and not _stop_macos_codex_app():
+        return False
     return launch_codex_app(debugger=True)
 
 
@@ -1188,9 +1417,9 @@ def _prompt_missing_codex_startup() -> str:
         "未检测到 Codex App。\n\n"
         "请选择本次启动方式：\n\n"
         "是：启动 Codex App（调试/CDP 模式），并将 HUD 注入到 Codex 界面里。\n"
-        "否：启动 Codex App（普通模式），同时打开独立 Qt HUD 窗口。\n"
+        "否：暂不启动 Codex App，继续等待你手动启动调试/CDP 模式。\n"
         "取消：退出 HUD。\n\n"
-        "Renderer 注入需要 Codex 暴露本地调试端口；Qt 模式可作为独立窗口使用，Tk 会保留为最终兜底。"
+        "Renderer HUD 需要 Codex 暴露本地调试端口；不会回退到 Qt/Tk 独立窗口。"
         "\n\n如 Windows 阻止直接启动，HUD 会请求一次权限确认。"
     )
     title = "Codex App 未启动"
@@ -1213,7 +1442,7 @@ def _prompt_missing_codex_startup() -> str:
         if int(result or 0) == IDYES:
             return DAEMON_STARTUP_RENDERER
         if int(result or 0) == IDNO:
-            return DAEMON_STARTUP_QT
+            return DAEMON_STARTUP_WAIT
         if int(result or 0) == IDCANCEL:
             return DAEMON_STARTUP_CANCEL
     except Exception as exc:
@@ -1234,7 +1463,7 @@ def _daemon_startup_decision(
     mode = _prompt_missing_codex_startup()
     return DaemonStartupDecision(
         mode,
-        launch_codex=mode in {DAEMON_STARTUP_RENDERER, DAEMON_STARTUP_QT, DAEMON_STARTUP_TK},
+        launch_codex=mode == DAEMON_STARTUP_RENDERER,
     )
 
 
@@ -2521,7 +2750,7 @@ def _primary_screen_height() -> int:
 
 def _work_overlay_screen_max_items(screen_height: int | None = None) -> int:
     height = _primary_screen_height() if screen_height is None else int(screen_height)
-    return work_overlay_max_items_for_screen_height(height)
+    return _work_overlay_max_items_for_screen_height(height)
 
 
 def _work_overlay_item_limit_for_context(context: object) -> int:
@@ -2925,10 +3154,9 @@ def _cost_estimator_from_config(config: UserConfig) -> CostEstimator:
 
 def _configure_ui_cost_estimators(estimator: CostEstimator) -> None:
     try:
-        from .ui import renderer_hud, tk_hud
+        from .ui import renderer_hud
 
         renderer_hud.set_cost_estimator(estimator)
-        tk_hud.set_cost_estimator(estimator)
     except Exception:
         return
 
@@ -2993,6 +3221,7 @@ def _handle_renderer_settings_command(
     restart_requested: Event,
     exit_requested: Event,
     update_manager: AutoUpdateManager | None = None,
+    work_overlay: DesktopWorkOverlay | None = None,
 ) -> dict[str, object]:
     action = str(command.get("action") or "").strip()
     try:
@@ -3002,17 +3231,8 @@ def _handle_renderer_settings_command(
                 command.get("settings"),
             )
             _save_renderer_user_config(context, config)
-            next_runtime_mode = _runtime_display_mode(config.display_mode)
             return _renderer_settings_status(
-                (
-                    "已保存到本地配置；预算和价格会自动刷新。"
-                    if next_runtime_mode == "renderer"
-                    else (
-                        "已保存到本地配置；当前会话仍保持 Renderer，Qt 方案会在下次切换或重启后生效。"
-                        if next_runtime_mode == "qt"
-                        else "已保存到本地配置；当前会话仍保持 Renderer，Tk 方案会在下次切换或重启后生效。"
-                    )
-                ),
+                "已保存到本地配置；预算、价格和 Renderer 显示会自动刷新。",
             )
         if action == "applyDisplayMode":
             config = _config_from_settings_payload(
@@ -3020,17 +3240,6 @@ def _handle_renderer_settings_command(
                 command.get("settings"),
             )
             _save_renderer_user_config(context, config)
-            next_runtime_mode = _runtime_display_mode(config.display_mode)
-            if next_runtime_mode == "qt":
-                return _renderer_settings_status(
-                    "正在切换到 Qt 独立窗口。",
-                    switch_mode="qt",
-                )
-            if next_runtime_mode == "tk":
-                return _renderer_settings_status(
-                    "正在切换到 Tk 独立窗口。",
-                    switch_mode="tk",
-                )
             return _renderer_settings_status(
                 "Renderer 方案已保存；当前会话已处于内嵌显示，无需重启。",
             )
@@ -3097,6 +3306,57 @@ def _handle_renderer_settings_command(
             restart_requested.set()
             return _renderer_settings_status(
                 f"已启动 {info.asset_name}，安装器会先关闭当前 HUD。",
+            )
+        if action == "installDesktopOverlay":
+            status = _desktop_overlay_dependency_status()
+            if bool(status.get("installed")):
+                version = str(status.get("version") or "").strip()
+                return _renderer_settings_status(
+                    f"PySide6 已可用{f'（{version}）' if version else ''}；可直接启用桌面气泡。",
+                )
+            if bool(status.get("installing")):
+                return _renderer_settings_status(
+                    "正在安装 PySide6；完成后点击“已安装，立即启用”。",
+                )
+            if not bool(status.get("canInstall")):
+                return _renderer_settings_status(
+                    "当前运行环境不能在线安装 PySide6；请安装带桌面气泡的版本后重启 HUD。",
+                    kind="error",
+                    restart_visible=bool(status.get("requiresRestart")),
+                )
+            if _start_desktop_overlay_install():
+                return _renderer_settings_status(
+                    "已开始安装 PySide6；完成后点击“已安装，立即启用”。",
+                )
+            return _renderer_settings_status(
+                "无法启动 PySide6 安装；请在终端运行 pip install PySide6>=6.8。",
+                kind="error",
+            )
+        if action == "enableDesktopOverlay":
+            status = _desktop_overlay_dependency_status()
+            if not bool(status.get("installed")):
+                return _renderer_settings_status(
+                    "还没检测到 PySide6；安装完成后再点一次“已安装，立即启用”。",
+                    kind="error",
+                    restart_visible=bool(status.get("requiresRestart")),
+                )
+            config = context.settings_store.load()
+            if normalize_work_overlay_max_items(config.work_overlay_max_items) <= 0:
+                config = replace(
+                    config,
+                    work_overlay_max_items=min(
+                        DEFAULT_WORK_OVERLAY_MAX_ITEMS,
+                        _work_overlay_screen_max_items(),
+                    ),
+                )
+                _save_renderer_user_config(context, config)
+            elif hasattr(context, "reload_user_config"):
+                context.reload_user_config()
+            if work_overlay is not None:
+                work_overlay.reset_runtime_availability()
+            version = str(status.get("version") or "").strip()
+            return _renderer_settings_status(
+                f"桌面气泡已启用{f'（PySide6 {version}）' if version else ''}。",
             )
         if action == "updateAction":
             if update_manager is None:
@@ -3450,7 +3710,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compact",
         action="store_true",
-        help="Use compact output mode for CLI snapshots and standalone HUDs.",
+        help="Use compact output mode for CLI snapshots.",
     )
     parser.set_defaults(renderer_hud=None)
     parser.add_argument(
@@ -3458,30 +3718,31 @@ def build_parser() -> argparse.ArgumentParser:
         dest="renderer_hud",
         action="store_true",
         help=(
-            "Prefer the renderer-injected HUD when Codex exposes a local CDP "
-            "target, falling back to Qt and then Tk otherwise. Enabled by default."
+            "Use the renderer-injected HUD when Codex exposes a local CDP target. "
+            "Enabled by default."
         ),
     )
     parser.add_argument(
         "--qt-hud",
         dest="hud_mode",
         action="store_const",
-        const="qt",
-        help="Force the Qt standalone HUD and skip renderer injection.",
+        const="renderer",
+        help="Deprecated compatibility flag; renderer HUD is always used.",
     )
     parser.add_argument(
         "--tk-hud",
         "--no-renderer-hud",
-        dest="renderer_hud",
-        action="store_false",
-        help="Force the legacy Tk HUD and skip renderer injection.",
+        dest="hud_mode",
+        action="store_const",
+        const="renderer",
+        help="Deprecated compatibility flag; renderer HUD is always used.",
     )
     parser.add_argument(
         "--hud-mode",
         choices=["auto", "renderer", "qt", "tk"],
         help=(
             "Override the configured HUD display mode for this run. "
-            "auto tries renderer, then Qt, then Tk; qt and tk skip renderer injection."
+            "Legacy values auto, qt, and tk are accepted but treated as renderer."
         ),
     )
     parser.add_argument(
@@ -3646,145 +3907,25 @@ def run_hud_session(
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
-    """Run one HUD session, preferring renderer, then Qt, with Tk as final fallback."""
-    runtime_mode = _initial_runtime_display_mode(args)
-    session_args = _clone_args_with_display_mode(args, runtime_mode)
-    launched_codex_for_renderer = False
-
-    def switch_to(mode: str, *, title: str, message: str) -> None:
-        nonlocal runtime_mode, session_args, loading_feedback
-        runtime_mode = effective_display_mode(mode)
-        loading_feedback = _create_loading_feedback(
-            session_args,
-            title=title,
-            message=message,
-        ).start()
-        session_args = _clone_args_with_display_mode(session_args, runtime_mode)
-
-    while True:
-        if runtime_mode == "renderer":
-            renderer_exit = run_renderer_hud_session(
-                session_args,
-                lock_already_held=lock_already_held,
-                daemon_manager=daemon_manager,
-                launched_codex=launched_codex_for_renderer,
-                loading_feedback=loading_feedback,
-            )
-            launched_codex_for_renderer = False
-            loading_feedback = None
-            if renderer_exit == HUD_SWITCH_TO_QT:
-                switch_to(
-                    "qt",
-                    title="正在切换到 Qt HUD",
-                    message="正在关闭内嵌 HUD 并打开独立的 Qt 悬浮窗...",
-                )
-                continue
-            if renderer_exit == HUD_SWITCH_TO_TK:
-                switch_to(
-                    "tk",
-                    title="正在切换到 Tk HUD",
-                    message="正在关闭内嵌 HUD 并打开独立的 Tk 悬浮窗...",
-                )
-                continue
-            if renderer_exit != RENDERER_HUD_UNAVAILABLE:
-                return renderer_exit
-            _LOGGER.info("renderer_hud_unavailable falling_back=qt")
-            switch_to(
-                "qt",
-                title="正在启动 Qt HUD",
-                message="Renderer 暂不可用，正在打开独立的 Qt 悬浮窗...",
-            )
-            continue
-
-        if runtime_mode == "qt":
-            qt_exit = run_qt_hud_session(
-                session_args,
-                lock_already_held=lock_already_held,
-                hide_until_attached=hide_until_attached,
-                daemon_manager=daemon_manager,
-                loading_feedback=loading_feedback,
-            )
-            loading_feedback = None
-            if qt_exit == HUD_SWITCH_TO_TK:
-                switch_to(
-                    "tk",
-                    title="正在切换到 Tk HUD",
-                    message="Qt HUD 暂不可用，正在打开最终兜底的 Tk 悬浮窗...",
-                )
-                continue
-            if qt_exit == HUD_SWITCH_TO_RENDERER:
-                runtime_mode = "renderer"
-                session_args = _clone_args_with_display_mode(session_args, "renderer")
-                continue
-            if qt_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
-                if loading_feedback is None:
-                    loading_feedback = _create_loading_feedback(
-                        session_args,
-                        title="正在切换到 Renderer HUD",
-                        message="正在以调试模式重启 Codex App...",
-                    ).start()
-                else:
-                    loading_feedback.update(
-                        title="正在切换到 Renderer HUD",
-                        message="正在以调试模式重启 Codex App...",
-                    )
-                if not _restart_codex_for_renderer():
-                    loading_feedback.close()
-                    _eprint("codex-usage-hud: unable to restart Codex App in debugger mode.")
-                    switch_to(
-                        "tk",
-                        title="正在切换到 Tk HUD",
-                        message="Renderer 切换失败，正在打开最终兜底的 Tk 悬浮窗...",
-                    )
-                    continue
-                runtime_mode = "renderer"
-                session_args = _clone_args_with_display_mode(session_args, "renderer")
-                launched_codex_for_renderer = True
-                continue
-            return qt_exit
-
-        tk_exit = run_tk_hud_session(
-            session_args,
-            lock_already_held=lock_already_held,
-            hide_until_attached=hide_until_attached,
-            daemon_manager=daemon_manager,
-            loading_feedback=loading_feedback,
-        )
-        loading_feedback = None
-        if tk_exit == HUD_SWITCH_TO_QT:
-            switch_to(
-                "qt",
-                title="正在切换到 Qt HUD",
-                message="正在关闭 Tk HUD 并打开独立的 Qt 悬浮窗...",
-            )
-            continue
-        if tk_exit == HUD_SWITCH_TO_RENDERER:
-            runtime_mode = "renderer"
-            session_args = _clone_args_with_display_mode(session_args, "renderer")
-            continue
-        if tk_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
-            if loading_feedback is None:
-                loading_feedback = _create_loading_feedback(
-                    session_args,
-                    title="正在切换到 Renderer HUD",
-                    message="正在以调试模式重启 Codex App...",
-                ).start()
-            else:
-                loading_feedback.update(
-                    title="正在切换到 Renderer HUD",
-                    message="正在以调试模式重启 Codex App...",
-                )
-            if not _restart_codex_for_renderer():
-                loading_feedback.close()
-                _eprint("codex-usage-hud: unable to restart Codex App in debugger mode.")
-                runtime_mode = "tk"
-                session_args = _clone_args_with_display_mode(session_args, "tk")
-                continue
-            runtime_mode = "renderer"
-            session_args = _clone_args_with_display_mode(session_args, "renderer")
-            launched_codex_for_renderer = True
-            continue
-        return tk_exit
+    """Run one renderer-injected HUD session."""
+    del hide_until_attached
+    session_args = _clone_args_with_display_mode(args, "renderer")
+    renderer_exit = run_renderer_hud_session(
+        session_args,
+        lock_already_held=lock_already_held,
+        daemon_manager=daemon_manager,
+        launched_codex=False,
+        loading_feedback=loading_feedback,
+    )
+    if renderer_exit in {
+        HUD_SWITCH_TO_QT,
+        HUD_SWITCH_TO_TK,
+        HUD_SWITCH_TO_RENDERER,
+        HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
+    }:
+        _LOGGER.info("renderer_hud_legacy_switch_ignored code=%s", renderer_exit)
+        return RENDERER_HUD_UNAVAILABLE
+    return renderer_exit
 
 
 def run_renderer_hud_session(
@@ -3990,6 +4131,7 @@ def run_renderer_hud_session(
                             restart_requested,
                             exit_requested,
                             update_manager,
+                            work_overlay,
                         )
                         update_state = update_manager.status().to_dict()
                     mode_switch = str(settings_command_status.get("switchMode") or "").strip()
@@ -4028,6 +4170,7 @@ def run_renderer_hud_session(
                         settings_command_status=settings_command_status,
                         update_state=update_state,
                         work_overlay_selectable_max=_work_overlay_screen_max_items(),
+                        desktop_overlay_dependency=_desktop_overlay_dependency_status(),
                     ):
                         settings_command_status = {}
                         failures = 0
@@ -4109,7 +4252,7 @@ def _run_tk_window_session(
     window: TokenHudWindow | None = None
     try:
         try:
-            window = existing_window or TokenHudWindow(
+            window = existing_window or _token_hud_window_class()(
                 compact=args.compact,
                 hide_until_attached=True,
                 tombstone_follow_ms=(
@@ -4437,7 +4580,7 @@ def run_tk_hud_session(
                     timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
                     launch_if_missing=True,
                 )
-                window = TokenHudWindow(
+                window = _token_hud_window_class()(
                     compact=args.compact,
                     hide_until_attached=hide_until_attached,
                     tombstone_follow_ms=(
@@ -4495,25 +4638,11 @@ def run_daemon(args: argparse.Namespace) -> int:
             if startup.mode == DAEMON_STARTUP_CANCEL:
                 _LOGGER.info("daemon_startup_cancelled")
                 return 0
-            if startup.mode == DAEMON_STARTUP_TK:
-                if startup.launch_codex:
-                    launch_codex_app(debugger=False)
-                _LOGGER.info("daemon_startup_tk_selected")
-                return run_hud_session(
-                    _clone_args_with_display_mode(args, "tk"),
-                    lock_already_held=True,
-                    hide_until_attached=True,
-                    daemon_manager=manager,
-                )
-            if startup.mode == DAEMON_STARTUP_QT:
-                if startup.launch_codex:
-                    launch_codex_app(debugger=False)
-                _LOGGER.info("daemon_startup_qt_selected")
-                return run_hud_session(
-                    _clone_args_with_display_mode(args, "qt"),
-                    lock_already_held=True,
-                    hide_until_attached=True,
-                    daemon_manager=manager,
+            if startup.mode in {DAEMON_STARTUP_TK, DAEMON_STARTUP_QT}:
+                _LOGGER.info("daemon_startup_legacy_mode_normalized mode=%s", startup.mode)
+                startup = DaemonStartupDecision(
+                    DAEMON_STARTUP_RENDERER,
+                    launch_codex=startup.launch_codex,
                 )
             startup_loading: HudLoadingFeedback | None = None
             if startup.mode == DAEMON_STARTUP_RENDERER and startup.launch_codex:
@@ -4557,11 +4686,11 @@ def run_daemon(args: argparse.Namespace) -> int:
                     )
                 startup_loading = None
                 if exit_code == HUD_SWITCH_TO_QT:
-                    preferred_runtime_mode = "qt"
+                    preferred_runtime_mode = "renderer"
                     force_renderer_retry = False
                     continue
                 if exit_code == HUD_SWITCH_TO_TK:
-                    preferred_runtime_mode = "tk"
+                    preferred_runtime_mode = "renderer"
                     force_renderer_retry = False
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
@@ -4593,22 +4722,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_update_check()
     if args.update:
         return run_update_install()
-    if args.renderer_hud is None:
-        configured_mode = normalize_display_mode(
-            args.hud_mode or UserConfigStore().load().display_mode
-        )
-        runtime_mode = effective_display_mode(configured_mode)
-        args.runtime_hud_mode = runtime_mode
-        args.standalone_hud_mode = runtime_mode if runtime_mode in {"qt", "tk"} else None
-        args.renderer_hud = runtime_mode == "renderer"
-    elif getattr(args, "hud_mode", None):
-        runtime_mode = effective_display_mode(args.hud_mode)
-        args.runtime_hud_mode = runtime_mode
-        args.standalone_hud_mode = runtime_mode if runtime_mode in {"qt", "tk"} else None
-        args.renderer_hud = runtime_mode == "renderer"
-    else:
-        args.runtime_hud_mode = "renderer" if args.renderer_hud else "tk"
-        args.standalone_hud_mode = "tk" if not args.renderer_hud else None
+    if args.renderer_hud is None and not getattr(args, "hud_mode", None):
+        normalize_display_mode(UserConfigStore().load().display_mode)
+    args.hud_mode = "renderer"
+    args.runtime_hud_mode = "renderer"
+    args.standalone_hud_mode = None
+    args.renderer_hud = True
     if args.stop:
         print(stop_running_hud())
         return 0

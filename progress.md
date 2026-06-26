@@ -1,89 +1,81 @@
-# 进度日志
+# 进度日志：PySide6 桌面级会话气泡恢复
 
-## 会话：2026-06-18
+## 会话：2026-06-26
 
-### 运行约定 / 项目记忆
-- 后续修改 `codex-usage-hud` 源码后，默认重启步骤固定为：
-  1. 先检查是否已有 HUD 进程在运行
-  2. 若有，先关闭当前运行实例
-  3. 再启动编译版/源码版，而不是安装版
-- 本机源码版当前约定启动方式：
-  - 工作目录：`D:\AI\codex-hud\codex-usage-hud`
-  - 启动命令语义：`pythonw -m codex_usage_hud --daemon --no-startup-prompt`
-- 已踩坑记录：
-  - Renderer 顶部折叠条的横向滚动不能在每次 HUD 刷新时先清空再重建 overflow 动画状态，否则动画时间轴会不断重置，视觉上会像“完全不滚动”。
+### 本次推进目标
+按用户给定计划恢复 PySide6 桌面级会话气泡：主 HUD 继续 renderer-only，会话方形气泡/完成态圆气泡通过可选 PySide6 helper 恢复；未安装 PySide6 时不影响 renderer HUD。
 
-### 阶段 1：需求与发现
-- **状态：** complete
-- **开始时间：** 2026-06-18T16:26:54+08:00
-- 执行的操作：
-  - 读取 `guihua` 技能说明。
-  - 确认项目根目录此前没有 `task_plan.md`、`findings.md`、`progress.md`。
-  - 运行 session catchup，无额外输出。
-  - 检查当前 git 状态，确认已有多处用户/前序改动，按当前工作树继续。
-  - 阅读动画核心函数和现有测试。
-- 创建/修改的文件：
+### 本次已完成
+- **状态：** 自动化实现完成；Windows/macOS 实机 PySide6 overlay 验证待做。
+- 读取 `$guihua`、`$zhongwen` 技能说明。
+- 恢复并修正三份任务文档：
   - `task_plan.md`
   - `findings.md`
   - `progress.md`
+- 确认用户最终方向：后续长期采用 Qt/PySide6 桌面级气泡，不采用沿 Codex App 边框绘制方案。
+- `DesktopWorkOverlay` 恢复为 optional PySide6 desktop overlay。
+- renderer 会话重新按 `_work_overlay_item_limit_for_context(context)` 创建 overlay。
+- `work_overlay_max_items <= 0` 时桌面气泡保持关闭。
+- PySide6 不可用时不启动 helper，并记录一次 `work_overlay_unavailable` renderer diagnostic。
+- helper 异常退出或启动失败后增加 60s backoff。
+- `work_overlay_qt.py` 改为 helper 路径惰性导入，默认 CLI import 不加载 PySide6 / Qt overlay 模块。
+- `pyproject.toml` 新增 optional extra：`desktop-overlay = ["PySide6>=6.8"]`。
+- README / README_EN 明确 `codex-usage-hud[desktop-overlay]` 和 `work_overlay_max_items` 的含义。
+- renderer 设置页文案改为“PySide6 桌面气泡数量（0 为关闭）”，并新增“气泡依赖 PySide6”状态块。
+- 增加 PySide6 可用时 helper 启动单测。
+- 移除 renderer 设置页里的“HUD 显示方案”字段和选项。
+- “PySide6 桌面气泡数量（0 为关闭）”字段已左移占用原显示方案位置。
+- 新增“气泡依赖 PySide6”状态块：
+  - 已安装时显示 PySide6 版本号。
+  - 未安装时显示“需要安装环境”、立即安装、已安装立即启用。
+  - 需要重启时显示“立即重启”。
+- 新增 `installDesktopOverlay` 和 `enableDesktopOverlay` 设置命令。
 
-### 阶段 2：规划与结构
-- **状态：** complete
-- 执行的操作：
-  - 把用户强调的垂直路径、让路回位、反向恢复整理为实现约束。
-  - 明确目标测试集中在 `WorkOverlayTransitionTests`。
-- 创建/修改的文件：
-  - `task_plan.md`
-  - `findings.md`
-  - `progress.md`
+### 已验证
+| 验证 | 结果 | 备注 |
+|------|------|------|
+| `python -m pytest tests/test_renderer_hud.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_install_desktop_overlay_starts_optional_dependency_install tests/test_ui.py::DaemonLifecycleTests::test_renderer_enable_desktop_overlay_rechecks_and_enables_without_restart tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available -q` | passed | 覆盖设置页脚本、新安装/启用命令和 overlay 可用性分支 |
+| `python -m pytest tests/test_config.py tests/test_renderer_hud.py tests/test_build_exe.py tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep tests/test_ui.py::DaemonLifecycleTests::test_cli_import_does_not_eagerly_import_qt_hud -q` | passed | 覆盖 optional overlay、导入隔离、renderer 会话创建 overlay |
+| `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py tests/test_platforms.py -q` | passed | 覆盖 renderer 设置、UI 回归、打包命令、平台 mock |
+| `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py -q` | passed | 设置页调整后的 UI/打包相关回归 |
+| `python -m pytest -q` | passed | 默认全量单测通过 |
+| `python -m compileall -q src tests tools` | passed | Python 编译检查通过 |
+| `git diff --check` | passed | 无 whitespace 错误 |
 
-### 阶段 3：实现
-- **状态：** complete
-- 执行的操作：
-  - 修改完成路径：收缩圆右边缘锚定到卡片右边缘，移动阶段 x 不变、只改变 y。
-  - 修改恢复路径：顶部圆沿同一右侧轨道返回，再展开成矩形。
-  - 增加过渡期矩形让路偏移和已完成圆 slot shift 时序。
-  - 增加完成前卡片矩形记忆，用于恢复路径目标位置。
-  - 完成态稳定圆短暂简化为 check 圆，后续已按用户要求恢复信息型徽章。
-  - 将恢复过渡改为蓝色恢复态，恢复展开阶段内容渐入。
-- 创建/修改的文件：
-  - `src/codex_usage_hud/ui/work_overlay_qt.py`
-  - `tests/test_ui.py`
+### 剩余工作
+- Windows 手动验证：安装 PySide6 后运行 `codex-hud --daemon`，验证方形运行气泡、完成态圆气泡、dismiss、点击切换会话、renderer HUD 注入。
+- macOS 手动验证：安装 PySide6 后运行 `codex-hud --daemon`，验证 Codex debug/CDP 启动、PySide6 overlay 置顶、点击切换会话、renderer HUD 注入。
+- 后续发行策略：决定 Windows/macOS 安装包是否内置 PySide6，或继续只通过 optional extra 提供桌面气泡。
+- 后续平台化自动更新 UI/逻辑，避免 macOS 复用 Windows installer 语义。
 
-## 测试结果
-| 测试 | 输入 | 预期结果 | 实际结果 | 状态 |
-|------|------|---------|---------|------|
-| `python -m pytest tests/test_ui.py -k WorkOverlayTransitionTests -q` | 过渡相关单测 | 全部通过 | 17 passed, 162 deselected | pass |
-| `python -m compileall -q src tests tools` | 语法编译 | 无语法错误 | 通过 | pass |
-| 坐标复核脚本 | 正/反向关键进度 | 圆形阶段 x 固定，只改变 y | 正向/反向圆形阶段 x 均为 262 | pass |
-| `python -m pytest tests/test_ui.py -q` | 全量 UI 单测 | 全部通过 | 178 passed, 1 failed；失败为 `TkSnapshotPumpTests.test_snapshot_pump_is_single_flight_while_worker_is_busy` 等待线程启动超时 | investigating |
-| `python -m pytest tests/test_ui.py -k WorkOverlayTransitionTests -q` | 更新后的过渡相关单测 | 全部通过 | 18 passed, 162 deselected | pass |
-| `git diff --check` | diff 空白检查 | 无 whitespace error | 通过 | pass |
-| `python .\tools\demo_work_overlay_transition.py --scale 3 --once` | 慢速 demo | 完整执行并退出 | 5/5 stable final state, finished; closing overlay | pass |
-| `python -m pytest tests/test_ui.py -q -k "not TokenHudWindowLifecycleTests and not TkSnapshotPumpTests"` | 排除当前 Tk 环境问题后的 UI 测试 | 全部通过 | 122 passed, 58 deselected | pass |
-| `python -m pytest tests/test_ui.py -k "completed_task_requires_seen_running_overlay_before_showing_completed or historical_completed_overlay_item_does_not_show_on_startup or only_historical_completed_overlay_items_do_not_show_on_startup" -q` | 启动完成态过滤 | 历史完成项启动不显示，运行后完成仍显示 | 3 passed, 178 deselected | pass |
-| `python -m pytest tests/test_ui.py -k WorkOverlayTransitionTests -q` | 启动过滤改动后复查动画过渡 | 全部通过 | 18 passed, 163 deselected | pass |
-| `python -m compileall -q src tests tools` | 启动过滤改动后语法编译 | 无语法错误 | 通过 | pass |
-| `git diff --check` | 启动过滤改动后 diff 空白检查 | 无 whitespace error | 通过 | pass |
-| `python -m pytest tests/test_ui.py -k WorkOverlayTransitionTests -q` | 恢复完成态信息徽章后复查动画过渡 | 全部通过 | 18 passed, 163 deselected | pass |
-| `python -m compileall -q src tests tools` | 恢复完成态信息徽章后语法编译 | 无语法错误 | 通过 | pass |
-| `git diff --check` | 恢复完成态信息徽章后 diff 空白检查 | 无 whitespace error | 通过 | pass |
+### 手动验证命令
+```powershell
+python -m pip install -e ".[desktop-overlay]"
+codex-hud --daemon
+```
+
+确认项：
+- renderer HUD 注入 Codex App。
+- 运行中的会话显示方形桌面气泡。
+- 完成会话收缩为圆形完成态气泡。
+- dismiss 后不会重复出现已关闭气泡。
+- 点击气泡触发 `activateSession` 并切换到目标会话。
+- 关闭 HUD 后 helper 子进程和 state file 清理正常。
 
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
-| 2026-06-18T16:xx:xx+08:00 | `TkSnapshotPumpTests.test_snapshot_pump_is_single_flight_while_worker_is_busy` 等待 `started` 事件超时 | 1 | 单独重跑该测试判断是否为偶发时序问题 |
-| 2026-06-18T16:xx:xx+08:00 | demo 中 `_prepare_completed_badge_moves` 局部 `target_rect` 覆盖传入的 `QRectF`，导致 tuple 没有 `.top()` | 1 | 将局部变量重命名为 `target_slot_rect` |
-| 2026-06-18T16:xx:xx+08:00 | Python 3.14 Tk 环境缺少 `init.tcl`，全量 UI 测试中的 Tk 窗口用例无法可靠运行 | 1 | 记录环境限制；用目标测试、compileall、demo、排除 Tk 环境用例的 UI 测试验证本次改动 |
+| 2026-06-26 | PowerShell 不支持 Bash here-doc `python - <<'PY'` | 1 | 改用 PowerShell here-string：`@' ... '@ \| python -` |
+| 2026-06-26 | README 精确补丁上下文不匹配 | 1 | 读取局部上下文后改用更小补丁 |
 
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 阶段 7：完成态信息徽章恢复完成 |
-| 我要去哪里？ | 等待用户复核或后续要求 |
-| 目标是什么？ | 完成气泡动画符合设计和用户补充要求，启动不显示历史完成圆，完成态保留上一版信息徽章 |
-| 我学到了什么？ | 见 findings.md |
-| 我做了什么？ | 收紧完成态 seen-key 过滤，补启动历史完成项回归测试，恢复完成态信息徽章并复查动画测试 |
+| 我在哪里？ | 自动化实现和验证已完成，等待 Windows/macOS 手动 PySide6 overlay 验证 |
+| 我要去哪里？ | 做实机验证，之后再决定安装包是否内置 PySide6 |
+| 目标是什么？ | 主 HUD renderer-only，同时恢复 PySide6 桌面级会话气泡 |
+| 我学到了什么？ | PySide6 可以作为 optional helper 恢复，不需要破坏默认 CLI 导入图和 renderer-only 主路径 |
+| 我做了什么？ | 恢复 DesktopWorkOverlay、添加 optional extra、更新设置/文档/测试并记录验证结果 |
 
 ---
-*每个阶段完成后或遇到错误时更新此文件*
+*每个阶段完成后或遇到错误时更新此文件。*

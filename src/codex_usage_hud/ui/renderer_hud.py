@@ -1379,6 +1379,20 @@ RENDERER_HUD_SCRIPT = r"""
         color: #10161d;
         font-weight: 700;
       }
+      #${rootId} .codex-usage-hud-settings-link {
+        min-height: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: #f3d27a;
+        padding: 0;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 700;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
       #${rootId} .codex-usage-hud-settings-tabs {
         display: flex;
         gap: 6px;
@@ -1441,6 +1455,42 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-settings-field select:focus,
       #${rootId} .codex-usage-hud-price-row input:focus {
         border-color: #f3d27a;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency {
+        min-height: 30px;
+        box-sizing: border-box;
+        display: grid;
+        gap: 5px;
+        padding: 7px 8px;
+        border: 1px solid #273241;
+        border-radius: 5px;
+        background: #141b24;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-state {
+        color: #e8eef7;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-version {
+        color: #8fe3a1;
+        font: 700 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-note {
+        color: #8492a6;
+        font-size: 11px;
+        line-height: 1.35;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
       }
       #${rootId} .codex-usage-hud-settings-inline {
         display: grid;
@@ -2246,7 +2296,7 @@ RENDERER_HUD_SCRIPT = r"""
       daily_reset_time: "10:00",
       weekly_reset_weekday: 3,
       weekly_reset_time: "10:00",
-      display_mode: "auto",
+      display_mode: "renderer",
       work_overlay_max_items: 6,
       pricing_url: "",
       budget_thresholds: [0.5, 0.8, 0.9, 1.0],
@@ -2259,17 +2309,6 @@ RENDERER_HUD_SCRIPT = r"""
   function hudSettingsFromPayload() {
     const raw = currentPayload()?.settings || {};
     return { ...defaultHudSettings(), ...(raw && typeof raw === "object" ? raw : {}) };
-  }
-
-  function activeDisplayMode() {
-    const mode = String(currentPayload()?.activeDisplayMode || "renderer");
-    return mode === "qt" || mode === "tk" ? mode : "renderer";
-  }
-
-  function effectiveRuntimeMode(displayMode) {
-    const mode = String(displayMode || "auto");
-    if (mode === "qt" || mode === "tk") return mode;
-    return "renderer";
   }
 
   function settingsBridgeUrl() {
@@ -2292,6 +2331,61 @@ RENDERER_HUD_SCRIPT = r"""
   function workOverlaySelectableMax() {
     const value = Number(currentPayload()?.workOverlaySelectableMax ?? 6);
     return Number.isFinite(value) && value >= 1 ? Math.round(value) : 6;
+  }
+
+  function desktopOverlayDependency() {
+    const raw = currentPayload()?.desktopOverlayDependency || {};
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  function desktopOverlayDependencyHtml() {
+    const dependency = desktopOverlayDependency();
+    const installed = !!dependency.installed;
+    const installing = !!dependency.installing;
+    const requiresRestart = !!dependency.requiresRestart;
+    const canInstall = !!dependency.canInstall;
+    const version = String(dependency.version || "").trim();
+    const installCommand = String(dependency.installCommand || "python -m pip install \"PySide6>=6.8\"");
+    if (installed) {
+      return `
+        <div class="codex-usage-hud-overlay-dependency" data-installed="true">
+          <div class="codex-usage-hud-overlay-dependency-head">
+            <span class="codex-usage-hud-overlay-dependency-state">已安装</span>
+            <span class="codex-usage-hud-overlay-dependency-version">${escapeHtml(version ? `PySide6 ${version}` : "PySide6 可用")}</span>
+          </div>
+          <div class="codex-usage-hud-overlay-dependency-note">修改左侧数量后保存，桌面气泡会自动生效。</div>
+        </div>
+      `;
+    }
+    const actions = [];
+    if (canInstall && !installing) {
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-install-desktop-overlay">立即安装</button>');
+    }
+    if (!requiresRestart) {
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-enable-desktop-overlay">已安装，立即启用</button>');
+    } else {
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-restart">立即重启</button>');
+    }
+    return `
+      <div class="codex-usage-hud-overlay-dependency" data-installed="false">
+        <div class="codex-usage-hud-overlay-dependency-head">
+          <span class="codex-usage-hud-overlay-dependency-state">${installing ? "正在安装" : (requiresRestart ? "需要重启" : "需要安装环境")}</span>
+        </div>
+        <div class="codex-usage-hud-overlay-dependency-note">${
+          installing
+            ? "PySide6 正在后台安装；完成后点击“已安装，立即启用”。"
+            : (requiresRestart
+              ? "安装完成后需要重启 HUD，才能加载桌面气泡环境。"
+              : `桌面气泡依赖 PySide6。命令：${escapeHtml(installCommand)}`)
+        }</div>
+        <div class="codex-usage-hud-overlay-dependency-actions">${actions.join("")}</div>
+      </div>
+    `;
+  }
+
+  function syncDesktopOverlayDependency() {
+    const node = document.querySelector(`#${settingsModalId} [data-desktop-overlay-dependency="true"]`);
+    if (node) node.innerHTML = desktopOverlayDependencyHtml();
   }
 
   function updateStateFromPayload(payload) {
@@ -2383,11 +2477,6 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function settingsPanelHtml(settings, bridge, path) {
-    const currentMode = activeDisplayMode();
-    const configuredDisplayMode = String(settings.display_mode || "auto");
-    const selectedDisplayMode = ["auto", "renderer", "qt", "tk"].includes(configuredDisplayMode)
-      ? configuredDisplayMode
-      : currentMode;
     const overlaySelectableMax = workOverlaySelectableMax();
     const overlayValue = Math.min(
       overlaySelectableMax,
@@ -2421,17 +2510,12 @@ RENDERER_HUD_SCRIPT = r"""
           </div>
         </div>
         <div class="codex-usage-hud-settings-field">
-          <label>HUD 显示方案</label>
-          <select data-setting-key="display_mode" data-configured-display-mode="${escapeHtml(settings.display_mode)}" data-active-display-mode="${currentMode}" data-touched="false">
-            <option value="auto" ${selectedDisplayMode === "auto" ? "selected" : ""}>自动：Renderer -> Qt -> Tk</option>
-            <option value="renderer" ${selectedDisplayMode === "renderer" ? "selected" : ""}>Renderer 内嵌 HUD</option>
-            <option value="qt" ${selectedDisplayMode === "qt" ? "selected" : ""}>Qt 独立窗口</option>
-            <option value="tk" ${selectedDisplayMode === "tk" ? "selected" : ""}>Tk 独立窗口</option>
-          </select>
+          <label>PySide6 桌面气泡数量（0 为关闭）</label>
+          <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
         </div>
         <div class="codex-usage-hud-settings-field">
-          <label>会话气泡最大显示数（0 表示不启用）</label>
-          <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
+          <label>气泡依赖 PySide6</label>
+          <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
         </div>
         <div class="codex-usage-hud-settings-field">
           <label>超额提醒阈值</label>
@@ -2610,6 +2694,7 @@ RENDERER_HUD_SCRIPT = r"""
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden) return;
     updateAboutActionButtons(updateStateFromPayload(payload));
+    syncDesktopOverlayDependency();
     syncSettingsUpdateLoading(payload);
     const status = payload?.settingsCommandStatus;
     if (!status || typeof status !== "object") return;
@@ -2644,28 +2729,6 @@ RENDERER_HUD_SCRIPT = r"""
     if (layer) layer.remove();
   }
 
-  function openSettingsConfirm({ kicker = "立即应用", title = "", body = "" } = {}) {
-    const dialog = settingsDialogRoot();
-    if (!dialog) return;
-    closeSettingsConfirm();
-    const layer = document.createElement("div");
-    layer.className = "codex-usage-hud-settings-confirm-layer";
-    layer.dataset.settingsConfirm = "true";
-    layer.innerHTML = `
-      <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="${escapeHtml(title || "确认切换显示方案")}">
-        <div class="codex-usage-hud-settings-confirm-kicker">${escapeHtml(kicker)}</div>
-        <div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div>
-        <div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div>
-        <div class="codex-usage-hud-settings-confirm-actions">
-          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-cancel" data-variant="ghost">取消</button>
-          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-save" data-variant="subtle">仅保存为默认</button>
-          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-apply-display-mode" data-primary="true">立即切换</button>
-        </div>
-      </div>
-    `;
-    dialog.appendChild(layer);
-  }
-
   function openSettingsLoading({ kicker = "正在处理", title = "", body = "", mode = "" } = {}) {
     const dialog = settingsDialogRoot();
     if (!dialog) return;
@@ -2693,7 +2756,6 @@ RENDERER_HUD_SCRIPT = r"""
     const settings = hudSettingsFromPayload();
     const settingNode = (key) => modal?.querySelector(`[data-setting-key="${key}"]`);
     const read = (key) => settingNode(key)?.value;
-    const displayNode = settingNode("display_mode");
     const numberValue = (key, fallback) => {
       const value = Number(read(key));
       return Number.isFinite(value) && value >= 0 ? value : fallback;
@@ -2718,10 +2780,7 @@ RENDERER_HUD_SCRIPT = r"""
         reasoning: field("reasoning"),
       };
     });
-    const configuredDisplayMode = String(displayNode?.dataset.configuredDisplayMode || settings.display_mode);
-    const displayMode = displayNode?.dataset.touched === "true"
-      ? String(displayNode?.value || settings.display_mode)
-      : configuredDisplayMode;
+    const displayMode = "renderer";
     return {
       ...settings,
       daily_budget_usd: numberValue("daily_budget_usd", settings.daily_budget_usd),
@@ -2755,24 +2814,6 @@ RENDERER_HUD_SCRIPT = r"""
     );
   }
 
-  function applyDisplayModeFromModal() {
-    const settings = collectSettingsForm();
-    const nextMode = effectiveRuntimeMode(settings.display_mode);
-    const standaloneLabel = nextMode === "qt" ? "Qt" : "Tk";
-    openSettingsLoading({
-      kicker: "正在切换",
-      title: nextMode === "renderer" ? "正在切换到 Renderer 内嵌 HUD" : `正在切换到 ${standaloneLabel} 独立窗口`,
-      body: nextMode === "renderer"
-        ? "HUD 正在切回 Codex 内嵌显示。通常只需 1 到 3 秒。"
-        : `HUD 正在关闭当前内嵌面板，并启动独立的 ${standaloneLabel} 悬浮窗。通常只需 1 到 3 秒。`,
-    });
-    submitSettingsCommand(
-      { action: "applyDisplayMode", settings },
-      "正在应用显示方案，等待 HUD 切换...",
-      { preserveOverlay: true }
-    );
-  }
-
   function fetchPricesFromModal() {
     const settings = collectSettingsForm();
     submitSettingsCommand(
@@ -2785,6 +2826,20 @@ RENDERER_HUD_SCRIPT = r"""
     submitSettingsCommand(
       { action: "restart", reason: "settings" },
       "重启请求已提交，等待 HUD daemon 处理..."
+    );
+  }
+
+  function installDesktopOverlayFromModal() {
+    submitSettingsCommand(
+      { action: "installDesktopOverlay" },
+      "正在准备安装 PySide6..."
+    );
+  }
+
+  function enableDesktopOverlayFromModal() {
+    submitSettingsCommand(
+      { action: "enableDesktopOverlay" },
+      "正在重新检测 PySide6..."
     );
   }
 
@@ -2811,39 +2866,6 @@ RENDERER_HUD_SCRIPT = r"""
         document.getElementById(styleId)?.remove();
       }, 120);
     }
-  }
-
-  function promptForDisplayModeChange(select) {
-    if (!(select instanceof HTMLSelectElement)) return;
-    select.dataset.touched = "true";
-    const currentMode = String(select.dataset.activeDisplayMode || activeDisplayMode());
-    const selectedMode = String(select.value || "auto");
-    const nextMode = effectiveRuntimeMode(selectedMode);
-    if (nextMode === currentMode) {
-      if (selectedMode !== String(select.dataset.configuredDisplayMode || "")) {
-        setSettingsStatus(
-          selectedMode === "auto"
-            ? "已改为自动模式；当前 Renderer 已在运行，点击保存后会写入新的启动偏好。"
-            : "当前显示方案无需立即切换，点击保存后会写入新的启动偏好。"
-        );
-      }
-      setSettingsRestartVisible(false);
-      closeSettingsConfirm();
-      return;
-    }
-    if (nextMode === "qt" || nextMode === "tk") {
-      const standaloneLabel = nextMode === "qt" ? "Qt" : "Tk";
-      setSettingsRestartVisible(false);
-      setSettingsStatus(`已选择 ${standaloneLabel} 方案。请确认是现在切换，还是只把它保存为下次默认值。`);
-      openSettingsConfirm({
-        kicker: "切换显示方案",
-        title: `立即切换到 ${standaloneLabel} 独立窗口？`,
-        body: `当前 HUD 正显示在 Codex 窗口里。\n\n立即切换后，会关闭当前内嵌 HUD，并打开独立的 ${standaloneLabel} 悬浮窗。\n\n如果你只是想修改下次启动时的默认方案，可以点“仅保存为默认”。`,
-      });
-      return;
-    }
-    setSettingsRestartVisible(false);
-    closeSettingsConfirm();
   }
 
   function checkUpdateFromModal() {
@@ -3025,11 +3047,6 @@ RENDERER_HUD_SCRIPT = r"""
         top: event.deltaY,
       });
     }, { capture: true, passive: false });
-    root.addEventListener("change", (event) => {
-      const displaySelect = event.target?.closest?.(`[data-setting-key="display_mode"]`);
-      if (!displaySelect || !root.contains(displaySelect)) return;
-      promptForDisplayModeChange(displaySelect);
-    });
     root.addEventListener("click", (event) => {
       if (event.target?.id === settingsModalId) {
         event.preventDefault();
@@ -3089,26 +3106,6 @@ RENDERER_HUD_SCRIPT = r"""
         void saveSettingsFromModal();
         return;
       }
-      if (action.dataset.action === "settings-apply-display-mode") {
-        event.preventDefault();
-        event.stopPropagation();
-        void applyDisplayModeFromModal();
-        return;
-      }
-      if (action.dataset.action === "settings-confirm-save") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsConfirm();
-        void saveSettingsFromModal();
-        return;
-      }
-      if (action.dataset.action === "settings-confirm-cancel") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsConfirm();
-        setSettingsStatus("已取消立即切换；如需只改默认值，也可以直接点保存。");
-        return;
-      }
       if (action.dataset.action === "settings-exit") {
         event.preventDefault();
         event.stopPropagation();
@@ -3132,6 +3129,18 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         void restartHudFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-install-desktop-overlay") {
+        event.preventDefault();
+        event.stopPropagation();
+        void installDesktopOverlayFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-enable-desktop-overlay") {
+        event.preventDefault();
+        event.stopPropagation();
+        void enableDesktopOverlayFromModal();
         return;
       }
       if (action.dataset.action === "settings-fetch-prices") {
@@ -4715,6 +4724,7 @@ class RendererHudPayload:
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
     work_overlay_selectable_max: int = 6
+    desktop_overlay_dependency: dict[str, object] = field(default_factory=dict)
     support_images: list[dict[str, str]] = field(default_factory=list)
     theme: dict[str, object] = field(default_factory=dict)
     update_state: dict[str, object] = field(default_factory=dict)
@@ -4742,6 +4752,7 @@ class RendererHudPayload:
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
             "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
+            "desktopOverlayDependency": dict(self.desktop_overlay_dependency),
             "supportImages": [dict(item) for item in self.support_images],
             "theme": dict(self.theme),
             "updateState": dict(self.update_state),
@@ -4794,6 +4805,7 @@ class RendererHudClient:
         settings_command_status: dict[str, object] | None = None,
         update_state: dict[str, object] | None = None,
         work_overlay_selectable_max: int = 6,
+        desktop_overlay_dependency: dict[str, object] | None = None,
     ) -> bool:
         support_images = [] if self._support_images_sent else support_qr_payload()
         theme_snapshot = self._theme_probe.snapshot()
@@ -4808,6 +4820,7 @@ class RendererHudClient:
             theme=_renderer_theme_payload(theme_snapshot),
             update_state=update_state,
             work_overlay_selectable_max=work_overlay_selectable_max,
+            desktop_overlay_dependency=desktop_overlay_dependency,
         ).to_json()
         if self.update_payload(payload):
             if support_images:
@@ -5053,6 +5066,7 @@ def payload_from_snapshot(
     theme: dict[str, object] | None = None,
     update_state: dict[str, object] | None = None,
     work_overlay_selectable_max: int = 6,
+    desktop_overlay_dependency: dict[str, object] | None = None,
 ) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
     warnings_dismissed = (
@@ -5107,6 +5121,7 @@ def payload_from_snapshot(
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},
         work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),
+        desktop_overlay_dependency=desktop_overlay_dependency or {},
         support_images=support_images or [],
         theme=theme or {},
         update_state=update_state or {},

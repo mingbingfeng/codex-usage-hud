@@ -118,10 +118,6 @@ def build_pyinstaller_command(
         str(build_root / "spec"),
         "--paths",
         str(src_root),
-        "--hidden-import",
-        "tkinter.font",
-        "--hidden-import",
-        "PySide6",
         "--log-level",
         log_level.upper(),
     ]

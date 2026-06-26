@@ -7,7 +7,7 @@
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
 
-`codex-usage-hud` is a local real-time usage HUD for Codex App. It reads local Codex JSONL / SQLite logs and shows session tokens, cache hit rate, live cost, day/week budgets, and waiting status inside Codex, in the Qt standalone window, or in the final Tk fallback window. It does not upload conversation content.
+`codex-usage-hud` is a local real-time usage HUD for Codex App. It reads local Codex JSONL / SQLite logs and injects a renderer/CDP HUD into Codex to show session tokens, cache hit rate, live cost, day/week budgets, and waiting status. It does not upload conversation content.
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ Download the latest Windows installer from [GitHub Releases](https://github.com/
 
 After installation, Start Menu shortcuts are available:
 
-- `Codex Usage HUD`: daemon entry; when Codex App is not running, it prompts for Renderer injection or the Qt standalone window and starts Codex App accordingly. Tk remains available as the final fallback. Login startup entries keep waiting silently.
+- `Codex Usage HUD`: daemon entry; when Codex App is not running, it prompts to start Codex App in debug/CDP mode and inject the renderer HUD. Login startup entries keep waiting silently.
 - `Stop Codex Usage HUD`: stops the running HUD.
 - `Check for Updates`: checks GitHub Releases for a newer installer.
 
@@ -51,9 +51,9 @@ If this HUD saves you time while checking token usage and cost, you can support 
 
 ## Main Features
 
-- Renderer-first HUD: when Codex exposes a local CDP target, the HUD renders inside Codex App.
-- Qt fallback + final Tk fallback: when CDP is unavailable, the local Qt HUD opens; when Qt is unavailable or `tk` is selected explicitly, the Tk HUD remains available.
-- Codex theme sync: Renderer mode follows the live Codex App theme first; without CDP, Qt, Tk, and overlay fall back to the saved Codex theme settings so light/dark mode and most custom chrome colors still carry over.
+- Renderer-only HUD: when Codex exposes a local CDP target, the HUD renders inside Codex App; when CDP is unavailable, the app reports diagnostics instead of falling back to Qt/Tk standalone windows.
+- PySide6 desktop work bubbles: source / pip installs can enable square running bubbles and completed circular bubbles with `codex-usage-hud[desktop-overlay]`; the main HUD remains renderer-only.
+- Codex theme sync: Renderer mode follows the live Codex App theme; without an available CDP target, diagnostics point you to restart Codex App with the debug port enabled.
 - Real-time tokens and cost: input, cached input, output, reasoning, total, cache hit rate, and live USD estimate.
 - Day/week budgets: custom limits, reset time, weekly reset day, thresholds, and manual weekly adjustment.
 - Work status visibility: current activity, longest wait, slowest tool, and request timeline.
@@ -120,7 +120,11 @@ No. `v0.1.0`, `v0.2.0`, and `v0.3.0` remain as historical alpha / preview tags. 
 
 ### The HUD does not appear inside Codex
 
-Start it from `Codex Usage HUD` or `codex-hud --daemon`. When launched manually and Codex App is not running, the HUD prompts for Renderer injection or Tk mode. Renderer mode tries to start Codex App with debugging/CDP enabled and keeps waiting/retrying Renderer injection; Tk mode starts Codex App normally and opens the standalone HUD window. Windows may show one elevation prompt if direct launch is blocked. Login startup uses `--no-startup-prompt`, so it does not show the mode prompt.
+Start it from `Codex Usage HUD` or `codex-hud --daemon`. The HUD requires Codex App to expose a local CDP/debug target. When Codex App is not running, the HUD prompts to start it with debugging/CDP enabled and keeps waiting/retrying renderer injection. Windows may show one elevation prompt if direct launch is blocked. Login startup uses `--no-startup-prompt`, so it does not show the mode prompt.
+
+### Desktop work bubbles do not appear
+
+The `work_overlay_max_items` setting controls the number of PySide6 desktop-level session bubbles; set it to `0` to disable desktop bubbles. If `codex-usage-hud[desktop-overlay]` is not installed, the renderer HUD still works and records a single `work_overlay_unavailable` diagnostic.
 
 ### Does it upload prompts or logs?
 
@@ -129,9 +133,10 @@ No. The project reads local logs and databases only. It does not send telemetry,
 ## Development
 
 ```powershell
+python -m pip install -e ".[desktop-overlay]"  # optional: PySide6 desktop work bubbles
 python -m compileall -q src tools tests
 python -m pytest
-python -m pytest -m ui        # optional: real Tk/Qt window regressions
+python -m pytest -m ui        # optional: legacy Tk/Qt module window regressions
 python tools/build_exe.py
 python tools/build_installer.py
 ```
@@ -143,8 +148,9 @@ src/codex_usage_hud/
   cli.py                 CLI, daemon, and update command entry
   daemon.py              Windows Codex process listener
   ui/renderer_hud.py     Codex renderer-injected HUD
-  ui/qt_hud.py           Qt standalone fallback HUD
-  ui/tk_hud.py           Final Tk fallback HUD
+  ui/work_overlay_qt.py  Optional PySide6 desktop work-bubble helper
+  ui/qt_hud.py           Legacy Qt standalone module, not loaded by default
+  ui/tk_hud.py           Legacy Tk standalone module, not loaded by default
   updater.py             GitHub Release update check and installer launch
 tools/
   build_exe.py           PyInstaller single-file exe build

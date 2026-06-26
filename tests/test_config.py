@@ -86,16 +86,17 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertNotIn("work_overlay_enabled", config.to_dict())
         self.assertEqual(config.to_dict()["work_overlay_max_items"], 0)
 
-    def test_display_mode_keeps_qt_and_tk_as_valid_modes(self) -> None:
-        self.assertEqual(normalize_display_mode("qt"), "qt")
-        self.assertEqual(normalize_display_mode("pyside6"), "qt")
-        self.assertEqual(normalize_display_mode("tk"), "tk")
-        self.assertEqual(normalize_display_mode("tkinter"), "tk")
-        self.assertEqual(normalize_display_mode("unknown"), "auto")
+    def test_display_mode_normalizes_legacy_modes_to_renderer(self) -> None:
+        self.assertEqual(normalize_display_mode("auto"), "renderer")
+        self.assertEqual(normalize_display_mode("qt"), "renderer")
+        self.assertEqual(normalize_display_mode("pyside6"), "renderer")
+        self.assertEqual(normalize_display_mode("tk"), "renderer")
+        self.assertEqual(normalize_display_mode("tkinter"), "renderer")
+        self.assertEqual(normalize_display_mode("unknown"), "renderer")
         self.assertEqual(effective_display_mode("auto"), "renderer")
         self.assertEqual(effective_display_mode("renderer"), "renderer")
-        self.assertEqual(effective_display_mode("qt"), "qt")
-        self.assertEqual(effective_display_mode("tk"), "tk")
+        self.assertEqual(effective_display_mode("qt"), "renderer")
+        self.assertEqual(effective_display_mode("tk"), "renderer")
 
     def test_budget_windows_use_user_reset_day_and_time(self) -> None:
         config = UserConfig.defaults()

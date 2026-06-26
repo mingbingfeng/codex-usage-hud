@@ -380,5 +380,51 @@ class WindowsActiveTitleTests(unittest.TestCase):
         )
 
 
+class MacOSActiveTitleTests(unittest.TestCase):
+    def test_macos_platform_initializes_cdp_probe_by_default(self) -> None:
+        with mock.patch(
+            "codex_usage_hud.platforms.macos.CodexCdpProbe",
+            return_value=object(),
+        ) as cdp_probe:
+            platform = MacOSPlatform()
+
+        self.assertIsNotNone(platform._cdp_probe)
+        self.assertTrue(platform.supports_active_title_polling())
+        cdp_probe.assert_called_once()
+
+    def test_macos_platform_reads_active_ref_from_cdp_snapshot(self) -> None:
+        class _FakeCdpProbe:
+            def snapshot(self) -> object | None:
+                return SimpleNamespace(
+                    session_id=" session-123 ",
+                    title=" 当前会话 ",
+                    app_error="",
+                )
+
+        platform = object.__new__(MacOSPlatform)
+        platform._last_observed_title = ""
+        platform._last_observed_session_id = ""
+        platform._cdp_probe = _FakeCdpProbe()
+
+        self.assertEqual(platform.get_active_conversation_ref(), ("session-123", "当前会话"))
+        self.assertEqual(platform.get_active_conversation_title(), "当前会话")
+        self.assertEqual(platform._last_observed_session_id, "session-123")
+        self.assertEqual(platform._last_observed_title, "当前会话")
+
+    def test_macos_platform_exposes_visible_cdp_app_error(self) -> None:
+        class _FakeCdpProbe:
+            def snapshot(self) -> object | None:
+                return SimpleNamespace(
+                    session_id="",
+                    title="",
+                    app_error="rate limit exceeded",
+                )
+
+        platform = object.__new__(MacOSPlatform)
+        platform._cdp_probe = _FakeCdpProbe()
+
+        self.assertEqual(platform.get_active_app_error(), "rate limit exceeded")
+
+
 if __name__ == "__main__":
     unittest.main()
