@@ -97,6 +97,12 @@ codex-hud --update
 
 安装器会在替换文件前先运行 `codex-hud --stop`，避免旧 HUD 进程占用可执行文件。
 
+当前发行策略：
+
+- 官方发布仍以 Windows 安装包为主，默认安装包不内置 PySide6 桌面气泡依赖。
+- 需要桌面会话气泡时，当前推荐源码 / pip 环境安装 `codex-usage-hud[desktop-overlay]`。
+- macOS 当前不发布安装包，只保留源码 / pip 路径和 `macOS Smoke` 代码级验证；详见 [docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md](docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md)。
+
 ## 数据位置
 
 - Codex 会话日志：`~/.codex/sessions/`

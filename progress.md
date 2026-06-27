@@ -102,5 +102,35 @@ codex-hud --daemon
 - 保留 macOS checklist 供未来真实 Mac 环境使用。
 - 在文档和后续发布说明里继续明确：macOS 目前只有 CI smoke，没有桌面交互实机确认。
 
+## 会话：2026-06-27（续）
+
+### 本次推进目标
+在 `macOS Smoke` 真实跑通后，把结果写回计划，并收口 Windows/macOS 的桌面气泡发行策略。
+
+### 本次已完成
+- **状态：** macOS 代码级验证已通过，发行策略已文档化。
+- GitHub Actions `macOS Smoke` run `28283179999` 通过：
+  - `python -m pip install -e ".[desktop-overlay]"`
+  - lazy `import codex_usage_hud.cli`
+  - `python -m compileall -q src tests tools`
+  - 任务相关 pytest，结果 `54 passed`
+- 修复跨平台导入边界：
+  - Windows-only platform modules 不再在非 Windows 导入时要求 `ctypes.WINFUNCTYPE`
+  - 新增对应回归测试
+- 新增发行策略文档：
+  - `docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md`
+- 更新发布相关说明：
+  - `docs/RELEASE_PLAYBOOK.md`
+  - `docs/MACOS_VALIDATION.md`
+  - `README.md`
+  - `README_EN.md`
+  - `CHANGELOG.md`
+  - `task_plan.md`
+  - `findings.md`
+
+### 剩余工作
+- 当前轮次仍不做真实 Mac 桌面交互验证。
+- 后续若要发布 macOS 安装包或内置 PySide6，再单独开启新阶段。
+
 ---
 *每个阶段完成后或遇到错误时更新此文件。*

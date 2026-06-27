@@ -97,6 +97,12 @@ codex-hud --update
 
 The installer runs `codex-hud --stop` before replacing files so the previous HUD process does not keep the executable locked.
 
+Current release strategy:
+
+- Official releases are still centered on the Windows installer, and the default packaged build does not bundle PySide6 desktop bubble dependencies.
+- If desktop work bubbles are needed today, the recommended path is a source / pip environment with `codex-usage-hud[desktop-overlay]`.
+- macOS does not currently ship an installer; it stays on the source / pip path plus `macOS Smoke` code-level validation. See [docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md](docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md).
+
 ## Data Locations
 
 - Codex session logs: `~/.codex/sessions/`

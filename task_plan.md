@@ -14,7 +14,7 @@
 - 不在本轮处理 macOS 安装包和自动更新发行策略。
 
 ## 当前阶段
-阶段 7：在没有本地 Mac、且本轮不使用远程 Mac 的前提下推进 macOS 验证与发行策略。自动化验证、Windows 实机验证和 macOS CI smoke 已完成；macOS 桌面交互验证暂缓，当前以 CI smoke 作为代码级保障。
+阶段 8：桌面气泡发行策略已收口。当前结论是 Windows 官方发布仍不内置 PySide6，macOS 仍保持源码 / pip + CI smoke，不把桌面交互实机验证伪装成“已完成”。
 
 ## 各阶段
 
@@ -82,9 +82,17 @@
 
 ### 阶段 7：无本地 Mac 的推进方案
 - [x] 新增 macOS CI smoke：在 GitHub Actions `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`，跑 `python -m compileall -q src tests tools` 和任务相关 `pytest`
+- [x] 实跑 macOS CI smoke：GitHub Actions run `28283179999` 在 `macos-latest` 上验证“能装、能导入、能跑测试”
 - [x] 产出一份 macOS 人工验证 checklist，供未来真实 Mac 环境使用
 - [x] 决定本轮采用的无本地 Mac 验证路径：只保留 GitHub Actions macOS smoke，不使用远程 Mac
 - [x] 在 macOS 人工验证完成前，明确桌面气泡对 macOS 仍为“待实机确认”，不阻塞 Windows 路线继续推进
+- **状态：** complete
+
+### 阶段 8：发行策略
+- [x] 记录当前 Windows 发行策略：官方安装包继续不内置 PySide6，桌面气泡保持 optional extra 路径
+- [x] 记录当前 macOS 发行策略：不发布安装包，只保留源码 / pip + `macOS Smoke`
+- [x] 明确 `macOS Smoke` 只代表代码级兼容，不替代桌面交互实机验证
+- [x] 产出独立策略文档并挂到 release playbook / README
 - **状态：** complete
 
 ## 关键设计决策
@@ -131,6 +139,6 @@
 | README 精确补丁上下文不匹配 | 1 | 先读取局部上下文，再用更小补丁插入 FAQ |
 
 ## 下一步
-1. 保留并观察 GitHub Actions macOS smoke 结果，把它作为当前 macOS 代码级回归入口。
-2. 在文档和发布说明里继续明确：macOS 桌面气泡路径目前只有 CI smoke，真实桌面交互仍待未来实机确认。
-3. 之后单独规划发行策略，决定 Windows/macOS 安装包是否内置 PySide6，以及何时再引入真实 Mac 验证。
+1. 保持 `macOS Smoke` 作为后续 renderer / overlay / 导入边界改动的必过 CI gate。
+2. 只有在拿到真实 Mac 验证路径后，才重新评估 macOS 桌面气泡“正式支持”与安装包方案。
+3. 只有在用户明确需要 packaged desktop bubbles 时，才重新评估 Windows 安装包是否内置 PySide6 或拆分 overlay 专用产物。

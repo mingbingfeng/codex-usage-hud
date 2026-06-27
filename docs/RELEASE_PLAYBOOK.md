@@ -18,7 +18,11 @@ patch releases can follow the same path without rediscovery.
    - `python -m pytest -m ui`
    - `python -m compileall -q src tools tests`
    - `python tools/pre_release_check.py`
-7. Commit the release work with a Lore-style message, then create the
+7. If the release changes renderer injection, desktop overlay behavior, or
+   platform import boundaries, confirm the latest GitHub Actions `macOS Smoke`
+   run is green and review
+   `docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md`.
+8. Commit the release work with a Lore-style message, then create the
    annotated tag `vX.Y.Z` with a matching tag message.
 
 ## Local conventions
@@ -27,5 +31,7 @@ patch releases can follow the same path without rediscovery.
 - Keep historical release notes untouched once tagged.
 - Keep the release checklist in this file rather than a global skill so it only
   applies to this repository.
+- Treat macOS `macos-latest` smoke as a code-level gate, not as a substitute
+  for real-device desktop interaction validation.
 - Use `git tag -a vX.Y.Z -m "codex-usage-hud vX.Y.Z"` unless the release says
   otherwise.

@@ -19,6 +19,15 @@ and this repository follows Semantic Versioning for release tags.
   Windows PyInstaller build path.
 - Restored the PySide6 desktop work-bubble overlay as an optional helper driven
   from renderer sessions when `work_overlay_max_items` is enabled.
+- Added a GitHub Actions `macOS Smoke` workflow to verify desktop-overlay
+  installability, lazy CLI imports, source compilation, and task-related tests
+  on `macos-latest`.
+
+### Fixed
+
+- Hardened Windows-only platform modules so cross-platform imports no longer
+  require `ctypes.WINFUNCTYPE` at import time on macOS and other non-Windows
+  environments.
 
 ## [1.0.2] - 2026-06-18
 

@@ -7,6 +7,7 @@ This repository currently uses GitHub Actions `macos-latest` for macOS smoke cov
 - Workflow: `.github/workflows/macos-smoke.yml`
 - Trigger: `workflow_dispatch`, `push`, `pull_request`
 - Goal: verify installability of `codex-usage-hud[desktop-overlay]`, lazy CLI imports, source compilation, and task-related tests
+- Latest verified run: `28283179999` on 2026-06-27, status `success`
 
 This smoke workflow is intentionally limited. It does **not** prove real desktop behavior such as:
 

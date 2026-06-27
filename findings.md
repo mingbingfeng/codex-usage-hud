@@ -21,7 +21,9 @@
 - `enableDesktopOverlay` 会重新探测 PySide6、清理 overlay 可用性缓存，并在当前配置数量为 0 时恢复默认可用数量。
 - README / README_EN 已说明 `codex-usage-hud[desktop-overlay]` 和 `work_overlay_max_items` 的含义。
 - 仓库已补 `.github/workflows/macos-smoke.yml`：在 `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`，验证 lazy CLI import、`compileall` 和任务相关 pytest。
+- GitHub Actions `macOS Smoke` 已实跑通过：run `28283179999` 在 `macos-latest` 上确认“能装、能导入、能跑测试”。
 - 当前轮次已决定不使用远程 Mac；macOS 路线暂时只保留 CI smoke，桌面交互实机验证延后。
+- 当前发行策略已单独落档在 `docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md`。
 
 ## 导入图事实
 - `import codex_usage_hud.cli` 不加载：
@@ -32,6 +34,7 @@
   - `codex_usage_hud.ui.tk_hud`
 - PySide6 探测使用 `importlib.util.find_spec("PySide6")`，不会触发 Qt 模块导入。
 - 只有 `codex-hud --work-overlay-helper <state-file>` 子进程路径会惰性进入 `work_overlay_qt.py`。
+- `src/codex_usage_hud/platforms/windows.py` 和 `windows_tracker.py` 已不再要求非 Windows 环境提供 `ctypes.WINFUNCTYPE` 才能被导入。
 
 ## 复用能力
 | 能力 | 当前状态 |
@@ -69,6 +72,12 @@
 - 本轮设置页调整目标测试通过：
   - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_install_desktop_overlay_starts_optional_dependency_install tests/test_ui.py::DaemonLifecycleTests::test_renderer_enable_desktop_overlay_rechecks_and_enables_without_restart tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available -q`
   - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py -q`
+- macOS CI smoke 通过：
+  - GitHub Actions run `28283179999`
+  - `python -m pip install -e ".[desktop-overlay]"`
+  - lazy `import codex_usage_hud.cli`
+  - `python -m compileall -q src tests tools`
+  - 任务相关 pytest：`54 passed`
 
 ## 剩余风险
 | 风险 | 影响 | 当前处理 |
