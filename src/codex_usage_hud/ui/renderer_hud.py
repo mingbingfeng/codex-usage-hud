@@ -2334,6 +2334,16 @@ RENDERER_HUD_SCRIPT = r"""
     return match ? normalize(match[1]) : text;
   }
 
+  const activeSessionRowSelector = [
+    "[data-app-action-sidebar-thread-id]",
+    "[data-session-id]",
+    "a[href*='thread']",
+    "a[href*='conversation']",
+    "a[href*='session']",
+    "[role='link']",
+    "[role='button']",
+  ].join(",");
+
   function activeSessionLocationId() {
     const source = `${location.pathname}${location.search}${location.hash}`;
     const match = source.match(/(?:session|conversation|thread)(?:\/|=|:|-)([A-Za-z0-9_.-]+)/i)
@@ -2399,7 +2409,13 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function activeSessionRows() {
-    return Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
+    const container = activeSessionContainer();
+    const root = container || document;
+    return Array.from(root.querySelectorAll(activeSessionRowSelector))
+      .filter((row) => {
+        const ref = activeSessionRefFromRow(row);
+        return !!(ref.sessionId || ref.title);
+      });
   }
 
   function readActiveSessionRef() {
@@ -2414,10 +2430,10 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function activeSessionContainer() {
-    const rows = activeSessionRows();
-    const row = rows[0] || null;
+    const row = document.querySelector(activeSessionRowSelector);
     return row?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
       || row?.parentElement
+      || document.querySelector("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
       || null;
   }
 
@@ -2551,8 +2567,11 @@ RENDERER_HUD_SCRIPT = r"""
   function ensureActiveSessionWatchers() {
     if (!window[activeSessionClickHandlerName]) {
       window[activeSessionClickHandlerName] = (event) => {
-        const row = event.target?.closest?.("[data-app-action-sidebar-thread-id]");
-        if (row) {
+        const container = event.target?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]");
+        const row = event.target?.closest?.(activeSessionRowSelector);
+        const explicitRow = row?.matches?.("[data-app-action-sidebar-thread-id], [data-session-id], a[href*='thread'], a[href*='conversation'], a[href*='session'], [role='link']");
+        if (row && !container && !explicitRow) return;
+        if (row && (!container || container.contains(row))) {
           const ref = activeSessionRefFromRow(row);
           postActiveSession("click", {
             sessionId: ref.sessionId || "",
