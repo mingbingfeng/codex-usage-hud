@@ -275,6 +275,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function readActiveSessionRef()", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("activeSessionHistoryPatchName", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("[data-app-action-sidebar-thread-id]", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('postActiveSession("click"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('scheduleActiveSessionReport("click-followup")', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-support-qr-grid", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-support-qr-title", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("previousPayload.supportImages?.length", renderer_hud.RENDERER_HUD_SCRIPT)

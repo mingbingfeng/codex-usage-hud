@@ -2346,6 +2346,16 @@ RENDERER_HUD_SCRIPT = r"""
     return row?.getAttribute?.("href") || row?.querySelector?.("a")?.getAttribute?.("href") || "";
   }
 
+  function activeSessionRowUrl(row) {
+    const href = activeSessionRowHref(row);
+    if (!href) return location.href;
+    try {
+      return new URL(href, location.href).href;
+    } catch (_) {
+      return location.href;
+    }
+  }
+
   function activeSessionRefFromRow(row) {
     const href = activeSessionRowHref(row);
     const idMatch = href.match(/(?:session|conversation|thread)[=/:-]([A-Za-z0-9_.-]+)/i)
@@ -2411,18 +2421,18 @@ RENDERER_HUD_SCRIPT = r"""
       || null;
   }
 
-  function postActiveSession(reason = "event") {
+  function postActiveSession(reason = "event", overrideRef = null) {
     const bridge = settingsBridgeUrl();
     if (!bridge) return;
-    const ref = readActiveSessionRef();
+    const ref = overrideRef || readActiveSessionRef();
     if (!ref.sessionId && !ref.title) return;
-    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url]);
+    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href]);
     if (window[activeSessionLastSignatureName] === signature) return;
     window[activeSessionLastSignatureName] = signature;
     const payload = {
       sessionId: ref.sessionId,
       title: ref.title,
-      url: ref.url,
+      url: ref.url || location.href,
       reason,
       observedAt: Date.now(),
     };
@@ -2541,8 +2551,15 @@ RENDERER_HUD_SCRIPT = r"""
   function ensureActiveSessionWatchers() {
     if (!window[activeSessionClickHandlerName]) {
       window[activeSessionClickHandlerName] = (event) => {
-        if (event.target?.closest?.("[data-app-action-sidebar-thread-id]")) {
-          scheduleActiveSessionReport("click");
+        const row = event.target?.closest?.("[data-app-action-sidebar-thread-id]");
+        if (row) {
+          const ref = activeSessionRefFromRow(row);
+          postActiveSession("click", {
+            sessionId: ref.sessionId || "",
+            title: ref.title || "",
+            url: activeSessionRowUrl(row),
+          });
+          scheduleActiveSessionReport("click-followup");
         }
       };
       document.addEventListener("click", window[activeSessionClickHandlerName], true);
