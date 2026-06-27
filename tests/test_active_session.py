@@ -521,6 +521,25 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 "Live Selected Thread",
             )
 
+    def test_invalidate_mapping_cache_clears_title_and_thread_path_cache(self) -> None:
+        tracker = ActiveSessionTracker(
+            platform=FakePlatform(),
+            state_db=Path("state_5.sqlite"),
+            sessions_root=Path("sessions"),
+            session_index_path=Path("session_index.jsonl"),
+            poll_ms=250,
+            enabled=True,
+        )
+        tracker._title_cache_key = ("thread-1", "path")
+        tracker._title_cache_value = "Cached Title"
+        tracker._thread_path_cache["thread-1"] = (None, 1.0)
+
+        tracker.invalidate_mapping_cache()
+
+        self.assertIsNone(tracker._title_cache_key)
+        self.assertEqual(tracker._title_cache_value, "")
+        self.assertEqual(tracker._thread_path_cache, {})
+
     def test_current_path_resolves_archived_session_from_cdp_thread_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

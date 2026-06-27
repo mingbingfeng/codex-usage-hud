@@ -79,6 +79,7 @@ from .platforms.cdp_probe import (
     pick_page_target,
 )
 from .platforms.codex_theme import CodexThemeProbe
+from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
 from .settings_bridge import SettingsBridgeServer
 from .ui.renderer_hud import (
     RendererHudClient,
@@ -111,6 +112,8 @@ DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
 NATIVE_SEARCH_SESSION_SWITCH_ENV = "CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH"
 DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
 RENDERER_IDLE_POLL_MS = 1500
+RENDERER_FILE_WATCHER_FALLBACK_SECONDS = 5.0
+RENDERER_EVENT_IDLE_WAIT_SECONDS = 30.0
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
 HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
@@ -147,6 +150,7 @@ ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
 VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
+WORK_OVERLAY_KEEPALIVE_SECONDS = 5.0
 WORK_OVERLAY_ALPHA = 0.88
 WORK_OVERLAY_HOVER_ALPHA = 0.52
 WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
@@ -715,6 +719,9 @@ class DesktopWorkOverlay:
         self._unavailable_reported = False
         self._restart_blocked_until = 0.0
         self._last_helper_exit_code: int | None = None
+        self._last_payload_items: list[dict[str, object]] | None = None
+        self._last_theme_payload: dict[str, object] = {}
+        self._last_state_write_at = 0.0
         self._theme_probe = CodexThemeProbe(
             timeout_seconds=0.08,
             cache_seconds=0.8,
@@ -752,14 +759,56 @@ class DesktopWorkOverlay:
             self._last_helper_exit_code = int(self._process.returncode or 0)
             self._process = None
             self._restart_blocked_until = (
-                time.monotonic() + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
+                0.0
+                if self._last_helper_exit_code == 0
+                else time.monotonic() + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
             )
-            self._report_unavailable_once(
-                f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
-            )
+            if self._last_helper_exit_code != 0:
+                self._report_unavailable_once(
+                    f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
+                )
         self._write_state(payload_items, theme=theme_payload, close=False)
+        self._last_payload_items = [dict(item) for item in payload_items]
+        self._last_theme_payload = dict(theme_payload)
         if self._process is None and time.monotonic() >= self._restart_blocked_until:
             self._start()
+
+    def keep_alive(self) -> None:
+        """Refresh the helper state file while renderer snapshots are unchanged."""
+        if self._closed or not self.enabled:
+            return
+        if not self._last_payload_items:
+            return
+        now = time.monotonic()
+        if now - self._last_state_write_at < WORK_OVERLAY_KEEPALIVE_SECONDS:
+            return
+        process = self._process
+        if process is not None and process.poll() is not None:
+            self._last_helper_exit_code = int(process.returncode or 0)
+            self._process = None
+            self._restart_blocked_until = (
+                0.0
+                if self._last_helper_exit_code == 0
+                else now + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
+            )
+            if self._last_helper_exit_code != 0:
+                self._report_unavailable_once(
+                    f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
+                )
+        self._write_state(
+            self._last_payload_items,
+            theme=self._last_theme_payload,
+            close=False,
+        )
+        if self._process is None and now >= self._restart_blocked_until:
+            self._start()
+
+    def next_keep_alive_seconds(self) -> float | None:
+        """Return when the helper state file needs its next refresh."""
+        if self._closed or not self.enabled or not self._last_payload_items:
+            return None
+        elapsed = time.monotonic() - self._last_state_write_at
+        return max(0.1, WORK_OVERLAY_KEEPALIVE_SECONDS - max(0.0, elapsed))
 
     def close(self) -> None:
         if self._closed:
@@ -826,6 +875,9 @@ class DesktopWorkOverlay:
         except OSError:
             pass
         self._command_offset = 0
+        self._last_payload_items = None
+        self._last_theme_payload = {}
+        self._last_state_write_at = 0.0
 
     def _start(self) -> None:
         try:
@@ -896,6 +948,7 @@ class DesktopWorkOverlay:
                     "close": bool(close),
                 },
             )
+            self._last_state_write_at = time.monotonic()
         except OSError:
             return
 
@@ -1946,6 +1999,114 @@ def _renderer_runtime_signature(
         _json_signature(update_state),
         _json_signature(settings_command_status),
     )
+
+
+def _renderer_file_watch_specs(
+    context: "RuntimeContext",
+    session_path: Path | None,
+) -> list[FileWatchSpec]:
+    specs: list[FileWatchSpec] = []
+    settings_path = getattr(getattr(context, "settings_store", None), "path", None)
+    if settings_path is not None:
+        specs.append(FileWatchSpec.file(Path(settings_path), "settings"))
+    session_index_path = getattr(context, "session_index_path", None)
+    if session_index_path is not None:
+        specs.append(FileWatchSpec.file(Path(session_index_path), "session-map"))
+    state_db_path = getattr(context, "state_db_path", None)
+    if state_db_path is not None:
+        specs.append(FileWatchSpec.file(Path(state_db_path), "session-map"))
+    sessions_root = getattr(context, "sessions_root", None)
+    if sessions_root is not None:
+        root = Path(sessions_root)
+        specs.append(FileWatchSpec.tree(root, "sessions-root", suffixes=(".jsonl",)))
+        if root.name == "sessions":
+            specs.append(
+                FileWatchSpec.tree(
+                    root.parent / "archived_sessions",
+                    "sessions-root",
+                    suffixes=(".jsonl",),
+                )
+            )
+    if session_path is not None:
+        specs.append(FileWatchSpec.file(Path(session_path), "session"))
+    return specs
+
+
+class _RendererFileEventSource:
+    """Coalesce filesystem invalidations for the renderer loop."""
+
+    def __init__(self, context: "RuntimeContext", wake_event: Event) -> None:
+        self._context = context
+        self._wake_event = wake_event
+        self._lock = threading.Lock()
+        self._reasons: set[str] = set()
+        self._paths: set[Path] = set()
+        self._session_path: Path | None = None
+        self._watcher = FileChangeWatcher(
+            self._on_change,
+            fallback_poll_seconds=RENDERER_FILE_WATCHER_FALLBACK_SECONDS,
+        )
+        self.update_session_path(None)
+
+    @property
+    def event_driven(self) -> bool:
+        return self._watcher.event_driven
+
+    def update_session_path(self, session_path: Path | None) -> None:
+        if self._same_path(self._session_path, session_path):
+            return
+        self._session_path = Path(session_path) if session_path is not None else None
+        self._watcher.update(
+            _renderer_file_watch_specs(self._context, self._session_path)
+        )
+
+    def take_reasons(self) -> set[str]:
+        with self._lock:
+            reasons = set(self._reasons)
+            self._reasons.clear()
+            self._paths.clear()
+        return reasons
+
+    def close(self) -> None:
+        self._watcher.close()
+
+    def _on_change(self, reasons: set[str], paths: set[Path]) -> None:
+        with self._lock:
+            self._reasons.update(reasons)
+            self._paths.update(paths)
+        self._wake_event.set()
+
+    @staticmethod
+    def _same_path(left: Path | None, right: Path | None) -> bool:
+        if left is None or right is None:
+            return left is None and right is None
+        return _session_path_key(left) == _session_path_key(right)
+
+
+def _invalidate_active_session_mapping_cache(context: "RuntimeContext") -> None:
+    tracker = getattr(context, "active_session_tracker", None)
+    invalidate = getattr(tracker, "invalidate_mapping_cache", None)
+    if callable(invalidate):
+        invalidate()
+
+
+def _renderer_event_idle_wait_enabled(
+    file_events: _RendererFileEventSource | None,
+    snapshot: ParsedSession,
+    update_state: Mapping[str, object],
+    delay: float,
+    *,
+    force_fast: bool,
+) -> bool:
+    if file_events is None or not file_events.event_driven or force_fast:
+        return False
+    if delay < (RENDERER_IDLE_POLL_MS / 1000.0) - 0.05:
+        return False
+    request_status = str(getattr(snapshot.request, "status", "") or "")
+    if request_status == "running":
+        return False
+    update_phase = str(update_state.get("phase") or "")
+    return update_phase not in {"checking", "downloading"}
 
 
 def _wait_for_visible_codex_window(
@@ -4636,6 +4797,10 @@ def run_renderer_hud_session(
                     session_controller,
                     command_event=command_refresh_requested,
                 )
+                file_events = _RendererFileEventSource(
+                    context,
+                    command_refresh_requested,
+                )
                 local_loading.close()
                 command_pump.start()
                 failures = 0
@@ -4664,6 +4829,9 @@ def run_renderer_hud_session(
                     bridge_wakeup = command_refresh_requested.is_set()
                     if bridge_wakeup:
                         command_refresh_requested.clear()
+                    file_change_reasons = file_events.take_reasons()
+                    if "session-map" in file_change_reasons:
+                        _invalidate_active_session_mapping_cache(context)
                     command = take_renderer_bridge_command()
                     if command is None and not bridge_wakeup:
                         command = client.take_settings_command()
@@ -4671,6 +4839,7 @@ def run_renderer_hud_session(
                         command
                         or settings_command_status
                         or update_state.get("phase") == "downloading"
+                        or file_change_reasons
                         or bridge_wakeup
                     )
                     if command:
@@ -4722,6 +4891,7 @@ def run_renderer_hud_session(
                             item_limit=_work_overlay_item_limit_for_context(context),
                         )
                         work_overlay.update(snapshot.active_work_items)
+                        file_events.update_session_path(snapshot.session_path)
                         if client.update(
                             snapshot,
                             settings=context.user_config,
@@ -4765,6 +4935,9 @@ def run_renderer_hud_session(
                                     runtime_failure_reported = True
                     else:
                         snapshot = latest_snapshot
+                        keep_alive = getattr(work_overlay, "keep_alive", None)
+                        if callable(keep_alive):
+                            keep_alive()
                     elapsed = time.monotonic() - started
                     delay = _renderer_refresh_delay_seconds(
                         context,
@@ -4772,6 +4945,26 @@ def run_renderer_hud_session(
                         elapsed,
                         force_fast=force_fast_refresh,
                     )
+                    if _renderer_event_idle_wait_enabled(
+                        file_events,
+                        snapshot,
+                        update_state,
+                        delay,
+                        force_fast=force_fast_refresh,
+                    ):
+                        delay = max(delay, RENDERER_EVENT_IDLE_WAIT_SECONDS)
+                    next_keep_alive = getattr(
+                        work_overlay,
+                        "next_keep_alive_seconds",
+                        lambda: None,
+                    )()
+                    if next_keep_alive is not None:
+                        delay = min(delay, max(0.1, float(next_keep_alive)))
+                    if daemon_manager is not None:
+                        delay = min(
+                            delay,
+                            max(0.1, next_daemon_check_at - time.monotonic()),
+                        )
                     if failures >= _renderer_update_failure_limit(
                         display_mode,
                         client.last_error,
@@ -4787,6 +4980,8 @@ def run_renderer_hud_session(
                 bridge.close()
                 if command_pump is not None:
                     command_pump.close()
+                if "file_events" in locals():
+                    file_events.close()
                 work_overlay.close()
                 update_manager.close()
                 context.close()

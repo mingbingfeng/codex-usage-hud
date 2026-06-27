@@ -741,6 +741,13 @@ class ActiveSessionTracker:
             return ""
         return str(row[0] or "").strip()
 
+    def invalidate_mapping_cache(self) -> None:
+        """Clear title/thread lookup caches after session mapping files change."""
+        with self._lock:
+            self._title_cache_key = None
+            self._title_cache_value = ""
+            self._thread_path_cache.clear()
+
     def _handle_title_candidate(
         self,
         title: str,

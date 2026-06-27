@@ -1000,6 +1000,59 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertTrue(overlay._state_path.exists())
             overlay.close()
 
+    def test_desktop_work_overlay_keep_alive_refreshes_cached_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay._last_payload_items = [{"id": "thread-1"}]
+            overlay._last_theme_payload = {"variant": "dark"}
+            overlay._last_state_write_at = 1.0
+            overlay._process = SimpleNamespace(poll=MagicMock(return_value=None))
+
+            with (
+                patch("codex_usage_hud.cli.time.monotonic", return_value=7.0),
+                patch("codex_usage_hud.cli.write_json_object") as write_json,
+                patch.object(overlay, "_start") as start,
+            ):
+                overlay.keep_alive()
+
+        write_json.assert_called_once()
+        path_arg, payload_arg = write_json.call_args.args
+        self.assertEqual(path_arg, overlay._state_path)
+        self.assertEqual(payload_arg["items"], [{"id": "thread-1"}])
+        self.assertEqual(payload_arg["theme"], {"variant": "dark"})
+        self.assertFalse(payload_arg["close"])
+        start.assert_not_called()
+
+    def test_desktop_work_overlay_keep_alive_restarts_clean_helper_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay._last_payload_items = [{"id": "thread-1"}]
+            overlay._last_theme_payload = {}
+            overlay._last_state_write_at = 1.0
+            overlay._process = SimpleNamespace(
+                poll=MagicMock(return_value=0),
+                returncode=0,
+            )
+
+            with (
+                patch("codex_usage_hud.cli.time.monotonic", return_value=7.0),
+                patch("codex_usage_hud.cli.write_json_object"),
+                patch.object(overlay, "_start") as start,
+                patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+            ):
+                overlay.keep_alive()
+
+        self.assertIsNone(overlay._process)
+        self.assertEqual(overlay._restart_blocked_until, 0.0)
+        start.assert_called_once()
+        diagnostic.assert_not_called()
+
     def test_desktop_work_overlay_exports_runtime_theme_tokens_when_available(self) -> None:
         overlay = DesktopWorkOverlay(item_limit=2)
         overlay._theme_probe = SimpleNamespace(
@@ -9209,6 +9262,67 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(running_delay, 0.5)
         self.assertAlmostEqual(forced_delay, 0.5)
 
+    def test_renderer_file_watch_specs_cover_session_settings_and_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=root / "hud_settings.json"),
+                session_index_path=root / "session_index.jsonl",
+                state_db_path=root / "state_5.sqlite",
+                sessions_root=root / "sessions",
+            )
+            session_path = root / "sessions" / "2026" / "06" / "session.jsonl"
+
+            specs = cli_module._renderer_file_watch_specs(context, session_path)
+
+        reasons_by_name = {(spec.path.name, spec.kind): spec.reason for spec in specs}
+        self.assertEqual(reasons_by_name[("hud_settings.json", "file")], "settings")
+        self.assertEqual(reasons_by_name[("session_index.jsonl", "file")], "session-map")
+        self.assertEqual(reasons_by_name[("state_5.sqlite", "file")], "session-map")
+        self.assertEqual(reasons_by_name[("session.jsonl", "file")], "session")
+        self.assertIn(("sessions", "tree"), reasons_by_name)
+        self.assertIn(("archived_sessions", "tree"), reasons_by_name)
+
+    def test_renderer_file_event_source_coalesces_reasons_and_updates_session_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wake_event = threading.Event()
+            context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=root / "hud_settings.json"),
+                session_index_path=root / "session_index.jsonl",
+                state_db_path=root / "state_5.sqlite",
+                sessions_root=root / "sessions",
+            )
+            created: list[object] = []
+
+            class FakeWatcher:
+                event_driven = True
+
+                def __init__(self, callback, **kwargs):
+                    del kwargs
+                    self.callback = callback
+                    self.specs = []
+                    created.append(self)
+
+                def update(self, specs):
+                    self.specs = list(specs)
+
+                def close(self):
+                    return None
+
+            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
+                source = cli_module._RendererFileEventSource(context, wake_event)
+                watcher = created[0]
+                watcher.callback({"session-map", "settings"}, {root / "state_5.sqlite"})
+                session_path = root / "sessions" / "session.jsonl"
+                source.update_session_path(session_path)
+                specs = list(watcher.specs)
+                source.close()
+
+        self.assertTrue(wake_event.is_set())
+        self.assertEqual(source.take_reasons(), {"session-map", "settings"})
+        self.assertTrue(any(spec.path == session_path for spec in specs))
+
     def test_renderer_loop_skips_snapshot_when_runtime_signature_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -9269,6 +9383,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         build_snapshot.assert_called_once_with(fake_context)
         fake_client.update.assert_called_once()
         self.assertEqual(fake_work_overlay.update.call_count, 1)
+        fake_work_overlay.keep_alive.assert_called_once()
 
     def test_renderer_loop_handles_bridge_settings_command_without_cdp_poll(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
