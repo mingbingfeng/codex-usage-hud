@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
+_WINFUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+
 DockTarget = Literal["title", "input"]
 
 
@@ -426,15 +428,15 @@ class _Variant(ctypes.Structure):
     ]
 
 
-_UiaQueryInterfaceProc = ctypes.WINFUNCTYPE(
+_UiaQueryInterfaceProc = _WINFUNCTYPE(
     ctypes.c_long,
     ctypes.c_void_p,
     ctypes.POINTER(_GUID),
     ctypes.POINTER(ctypes.c_void_p),
 )
-_UiaAddRefProc = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
-_UiaReleaseProc = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
-_UiaHandleEventProc = ctypes.WINFUNCTYPE(
+_UiaAddRefProc = _WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_UiaReleaseProc = _WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_UiaHandleEventProc = _WINFUNCTYPE(
     ctypes.c_long,
     ctypes.c_void_p,
     ctypes.c_void_p,
@@ -510,7 +512,7 @@ class _UiaAutomationEventHandler:
         return _S_OK
 
 
-_UiaHandlePropertyChangedProc = ctypes.WINFUNCTYPE(
+_UiaHandlePropertyChangedProc = _WINFUNCTYPE(
     ctypes.c_long,
     ctypes.c_void_p,
     ctypes.c_void_p,
@@ -2467,7 +2469,7 @@ class _UiaProbe:
             ptr,
             ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
         ).contents
-        return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
+        return _WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
 
 
 class _UiaHeaderRoiEventWatcher:
@@ -3390,7 +3392,7 @@ class CodexWindowTracker:
         return x, y, max(1, input_box.width)
 
     def _configure_api(self) -> None:
-        enum_proc_type = ctypes.WINFUNCTYPE(
+        enum_proc_type = _WINFUNCTYPE(
             wintypes.BOOL,
             wintypes.HWND,
             wintypes.LPARAM,

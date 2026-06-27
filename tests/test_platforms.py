@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -98,6 +99,36 @@ class PlatformFactoryTests(unittest.TestCase):
             self.assertIsInstance(platform, LinuxPlatform)
         else:
             self.fail(f"Unexpected platform under test: {sys.platform}")
+
+    def test_cross_platform_imports_do_not_require_winfunctype(self) -> None:
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(SRC_ROOT)
+            if not existing_pythonpath
+            else str(SRC_ROOT) + os.pathsep + existing_pythonpath
+        )
+        script = (
+            "import ctypes\n"
+            "if hasattr(ctypes, 'WINFUNCTYPE'):\n"
+            "    delattr(ctypes, 'WINFUNCTYPE')\n"
+            "import codex_usage_hud.cli\n"
+            "import codex_usage_hud.platforms.windows\n"
+            "import codex_usage_hud.platforms.windows_tracker\n"
+            "print('cross-platform-import-ok')\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=PROJECT_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cross-platform-import-ok", result.stdout)
 
 
 class SessionSwitchControllerTests(unittest.TestCase):
