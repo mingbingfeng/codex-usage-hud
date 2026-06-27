@@ -9983,6 +9983,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_client.update.side_effect = update_side_effect
 
         with (
+            patch.object(sys, "platform", "win32"),
             patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
             patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
             patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
