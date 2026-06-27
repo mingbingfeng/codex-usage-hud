@@ -107,6 +107,75 @@ class SettingsBridgeServerTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(restart_requested.is_set())
 
+    def test_command_endpoint_invokes_command_callback(self) -> None:
+        received: list[dict[str, object]] = []
+        command_received = threading.Event()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+
+            def on_command(command: dict[str, object]) -> None:
+                received.append(command)
+                command_received.set()
+
+            bridge = SettingsBridgeServer(
+                store,
+                port=0,
+                command_callback=on_command,
+            )
+            try:
+                url = bridge.start()
+                request = Request(
+                    f"{url}/command",
+                    data=json.dumps({"action": "exit", "id": "cmd-1"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                bridge.close()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(command_received.is_set())
+        self.assertEqual(received, [{"action": "exit", "id": "cmd-1"}])
+
+    def test_active_session_endpoint_invokes_callback(self) -> None:
+        received: list[dict[str, object]] = []
+        session_received = threading.Event()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+
+            def on_active_session(payload: dict[str, object]) -> None:
+                received.append(payload)
+                session_received.set()
+
+            bridge = SettingsBridgeServer(
+                store,
+                port=0,
+                active_session_callback=on_active_session,
+            )
+            try:
+                url = bridge.start()
+                request = Request(
+                    f"{url}/active-session",
+                    data=json.dumps(
+                        {"sessionId": "thread-1", "title": "Selected Thread"}
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                bridge.close()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(session_received.is_set())
+        self.assertEqual(
+            received,
+            [{"sessionId": "thread-1", "title": "Selected Thread"}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

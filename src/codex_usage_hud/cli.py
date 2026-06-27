@@ -12,10 +12,12 @@ import logging
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta
@@ -69,7 +71,13 @@ from .platforms import (
     get_current_platform,
 )
 from .platforms.base import BasePlatform
-from .platforms.cdp_probe import cdp_port_from_env
+from .platforms.cdp_probe import (
+    CDP_PORT_ENV,
+    DEFAULT_CDP_PORT,
+    cdp_port_from_env,
+    list_targets,
+    pick_page_target,
+)
 from .platforms.codex_theme import CodexThemeProbe
 from .settings_bridge import SettingsBridgeServer
 from .ui.renderer_hud import (
@@ -87,7 +95,13 @@ from .updater import (
 
 DEFAULT_POLL_MS = 500
 WORK_OVERLAY_COMMAND_POLL_MS = 60
-WORK_OVERLAY_CURRENT_SESSION_REFOCUS_DELAY_SECONDS = 0.12
+WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS = 0.7
+WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS = 0.8
+WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS = 0.8
+WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS = 0.08
+WORK_OVERLAY_CURRENT_SESSION_REFOCUS_DELAY_SECONDS = (
+    WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS
+)
 DEFAULT_SQLITE_LOG = "logs_2.sqlite"
 DEFAULT_STATE_DB = "state_5.sqlite"
 DEFAULT_SESSION_INDEX = "session_index.jsonl"
@@ -109,13 +123,14 @@ HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
 HUD_SWITCH_TO_QT = 33
 RENDERER_CDP_TIMEOUT_SECONDS = 1.0
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
-RENDERER_INITIAL_TIMEOUT_SECONDS = 2.0
+RENDERER_INITIAL_TIMEOUT_SECONDS = 6.0
 RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS = 2.0
-DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 5.0
+DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 10.0
 DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
 RENDERER_UPDATE_FAILURE_LIMIT = 6
 AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT = 3
 RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
+RENDERER_CDP_STATE_FILENAME = "renderer_cdp_state.json"
 CRASH_DIAGNOSTIC_FILENAME = "crash.log"
 CRASH_DIAGNOSTICS_ENV = "CODEX_USAGE_HUD_CRASH_DIAGNOSTICS"
 CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
@@ -1402,6 +1417,7 @@ def _stop_codex_processes(*, timeout_seconds: float = 8.0) -> bool:
 
 
 def _restart_codex_for_renderer() -> bool:
+    _select_initial_renderer_cdp_port()
     if sys.platform.startswith("win") and not _stop_codex_processes():
         return False
     if sys.platform == "darwin" and not _stop_macos_codex_app():
@@ -1409,10 +1425,105 @@ def _restart_codex_for_renderer() -> bool:
     return launch_codex_app(debugger=True)
 
 
+def _askyesno_modal(title: str, message: str) -> bool | None:
+    """Show a best-effort cross-platform modal confirmation dialog."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:
+        if not sys.platform.startswith("win"):
+            return None
+        try:
+            import ctypes
+
+            MB_YESNO = 0x00000004
+            MB_ICONQUESTION = 0x00000020
+            MB_SETFOREGROUND = 0x00010000
+            MB_TOPMOST = 0x00040000
+            IDYES = 6
+            IDNO = 7
+            result = ctypes.windll.user32.MessageBoxW(
+                None,
+                message,
+                title,
+                MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+            if int(result or 0) == IDYES:
+                return True
+            if int(result or 0) == IDNO:
+                return False
+        except Exception as exc:
+            _LOGGER.info("modal_yesno_fallback_failed error=%s", exc)
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        root.update_idletasks()
+        return bool(messagebox.askyesno(title, message, parent=root))
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
+def _askyesnocancel_modal(title: str, message: str) -> bool | None:
+    """Show a best-effort cross-platform yes/no/cancel modal dialog."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:
+        if not sys.platform.startswith("win"):
+            return None
+        try:
+            import ctypes
+
+            MB_YESNOCANCEL = 0x00000003
+            MB_ICONQUESTION = 0x00000020
+            MB_SETFOREGROUND = 0x00010000
+            MB_TOPMOST = 0x00040000
+            IDYES = 6
+            IDNO = 7
+            IDCANCEL = 2
+            result = ctypes.windll.user32.MessageBoxW(
+                None,
+                message,
+                title,
+                MB_YESNOCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+            if int(result or 0) == IDYES:
+                return True
+            if int(result or 0) == IDNO:
+                return False
+            if int(result or 0) == IDCANCEL:
+                return None
+        except Exception as exc:
+            _LOGGER.info("modal_yesnocancel_fallback_failed error=%s", exc)
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        root.update_idletasks()
+        return messagebox.askyesnocancel(title, message, parent=root)
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
 def _prompt_missing_codex_startup() -> str:
     """Ask the user how to continue when daemon startup finds no Codex app."""
-    if not sys.platform.startswith("win"):
-        return DAEMON_STARTUP_WAIT
     message = (
         "未检测到 Codex App。\n\n"
         "请选择本次启动方式：\n\n"
@@ -1423,31 +1534,26 @@ def _prompt_missing_codex_startup() -> str:
         "\n\n如 Windows 阻止直接启动，HUD 会请求一次权限确认。"
     )
     title = "Codex App 未启动"
-    try:
-        import ctypes
-
-        MB_YESNOCANCEL = 0x00000003
-        MB_ICONINFORMATION = 0x00000040
-        MB_SETFOREGROUND = 0x00010000
-        MB_TOPMOST = 0x00040000
-        IDYES = 6
-        IDNO = 7
-        IDCANCEL = 2
-        result = ctypes.windll.user32.MessageBoxW(
-            None,
-            message,
-            title,
-            MB_YESNOCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST,
-        )
-        if int(result or 0) == IDYES:
-            return DAEMON_STARTUP_RENDERER
-        if int(result or 0) == IDNO:
-            return DAEMON_STARTUP_WAIT
-        if int(result or 0) == IDCANCEL:
-            return DAEMON_STARTUP_CANCEL
-    except Exception as exc:
-        _LOGGER.info("daemon_startup_prompt_failed error=%s", exc)
+    result = _askyesnocancel_modal(title, message)
+    if result is True:
+        return DAEMON_STARTUP_RENDERER
+    if result is False:
+        return DAEMON_STARTUP_WAIT
+    if result is None:
+        return DAEMON_STARTUP_CANCEL
     return DAEMON_STARTUP_WAIT
+
+
+def _prompt_restart_codex_for_cdp() -> bool | None:
+    """Ask whether Codex should be restarted in debug/CDP mode and retried."""
+    title = "需要重启 Codex 以启用 Renderer HUD"
+    message = (
+        "HUD 未能连接 Codex 的本地调试/CDP 目标。\n\n"
+        "这通常表示当前 Codex 不是以调试/CDP 模式启动，Renderer HUD 无法注入。\n\n"
+        "是：立即以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD。\n"
+        "否：关闭本次 HUD 启动。"
+    )
+    return _askyesno_modal(title, message)
 
 
 def _daemon_startup_decision(
@@ -1491,6 +1597,11 @@ def hud_lock_path() -> Path:
 def renderer_diagnostic_path() -> Path:
     """Return the renderer fallback diagnostics path."""
     return hud_runtime_dir() / RENDERER_DIAGNOSTIC_FILENAME
+
+
+def renderer_cdp_state_path() -> Path:
+    """Return the per-user renderer CDP runtime state path."""
+    return hud_runtime_dir() / RENDERER_CDP_STATE_FILENAME
 
 
 def crash_diagnostic_path() -> Path:
@@ -1567,6 +1678,274 @@ def _renderer_refresh_delay_seconds(
     if not force_fast and request_status != "running":
         target_seconds = max(fast_seconds, RENDERER_IDLE_POLL_MS / 1000.0)
     return max(0.1, target_seconds - max(0.0, elapsed_seconds))
+
+
+def _renderer_initial_failure_can_be_fixed_by_restart(last_error: str) -> bool:
+    """Return whether an initial CDP failure likely means Codex lacks debug mode."""
+    text = str(last_error or "").lower()
+    if not text:
+        return False
+    if "timed out" in text or "timeout" in text:
+        return False
+    if "10013" in text or "access" in text or "permission" in text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "connection refused",
+            "actively refused",
+            "target has no websocket",
+            "no page target",
+            "no websocket",
+            "connection reset",
+            "winerror 10061",
+        )
+    )
+
+
+def _renderer_initial_failure_should_recover_cdp_port(last_error: str) -> bool:
+    """Return whether a fresh CDP port is a better first recovery than prompting."""
+    text = str(last_error or "").lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "timed out",
+            "timeout",
+            "connection refused",
+            "actively refused",
+            "connection reset",
+            "winerror 10061",
+            "winerror 10013",
+            "访问权限不允许",
+        )
+    )
+
+
+def _explicit_renderer_cdp_port_from_env() -> int | None:
+    raw = os.environ.get(CDP_PORT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _read_persisted_renderer_cdp_port() -> int | None:
+    try:
+        data = json.loads(renderer_cdp_state_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    try:
+        port = int(data.get("lastSuccessfulPort"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _remember_successful_renderer_cdp_port(port: int | None) -> None:
+    if port is None:
+        return
+    try:
+        value = int(port)
+    except (TypeError, ValueError):
+        return
+    if value <= 0 or value >= 65536:
+        return
+    path = renderer_cdp_state_path()
+    payload = {
+        "lastSuccessfulPort": value,
+        "updatedAt": datetime.now().astimezone().isoformat(),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def _renderer_cdp_port_has_codex_target(
+    port: int,
+    *,
+    timeout_seconds: float = 0.18,
+) -> bool:
+    try:
+        pick_page_target(list_targets(int(port), timeout_seconds))
+    except Exception:
+        return False
+    return True
+
+
+def _unique_ports(*ports: int | None) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    for port in ports:
+        if port is None:
+            continue
+        try:
+            value = int(port)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or value >= 65536 or value in seen:
+            continue
+        result.append(value)
+        seen.add(value)
+    return result
+
+
+def _select_initial_renderer_cdp_port() -> int:
+    """Pick the renderer CDP port for this process before probes are created."""
+    explicit = _explicit_renderer_cdp_port_from_env()
+    if explicit is not None:
+        return explicit
+
+    persisted = _read_persisted_renderer_cdp_port()
+    candidates = _unique_ports(persisted, DEFAULT_CDP_PORT)
+    for port in candidates:
+        if _renderer_cdp_port_has_codex_target(port):
+            os.environ[CDP_PORT_ENV] = str(port)
+            _LOGGER.info("renderer_cdp_port_selected healthy=%s", port)
+            return port
+
+    selected = persisted or DEFAULT_CDP_PORT
+    os.environ[CDP_PORT_ENV] = str(selected)
+    _LOGGER.info(
+        "renderer_cdp_port_selected preferred=%s persisted=%s default=%s",
+        selected,
+        persisted or "-",
+        DEFAULT_CDP_PORT,
+    )
+    return selected
+
+
+def _refresh_renderer_cdp_dependents(context: object) -> None:
+    platform = getattr(context, "platform", None)
+    refresh = getattr(platform, "refresh_cdp_probe", None)
+    if callable(refresh):
+        try:
+            refresh()
+        except Exception as exc:
+            _LOGGER.info("renderer_cdp_probe_refresh_failed error=%s", exc)
+
+
+def _localhost_cdp_bind_targets() -> list[tuple[int, str]]:
+    targets = [(socket.AF_INET, "127.0.0.1")]
+    if socket.has_ipv6:
+        targets.append((socket.AF_INET6, "::1"))
+    return targets
+
+
+def _localhost_cdp_port_available(port: int) -> bool:
+    sockets: list[socket.socket] = []
+    try:
+        for family, host in _localhost_cdp_bind_targets():
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    sock.setsockopt(
+                        socket.SOL_SOCKET,
+                        socket.SO_EXCLUSIVEADDRUSE,
+                        1,
+                    )
+                sock.bind((host, int(port)))
+            except OSError:
+                sock.close()
+                raise
+            sockets.append(sock)
+    except OSError:
+        return False
+    finally:
+        for sock in sockets:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return True
+
+
+def _allocate_fresh_renderer_cdp_port() -> int:
+    """Pick a currently unused localhost TCP port for Codex CDP."""
+    current = cdp_port_from_env()
+    for _attempt in range(20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port != current and _localhost_cdp_port_available(port):
+            return port
+    raise RuntimeError("unable to allocate a fresh local CDP port")
+
+
+def _assign_fresh_renderer_cdp_port() -> int:
+    old_port = cdp_port_from_env()
+    new_port = _allocate_fresh_renderer_cdp_port()
+    os.environ[CDP_PORT_ENV] = str(new_port)
+    _LOGGER.info("renderer_cdp_port_reassigned old=%s new=%s", old_port, new_port)
+    return new_port
+
+
+def _json_signature(value: Mapping[str, object] | None) -> str:
+    if not value:
+        return ""
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    except TypeError:
+        return str(sorted(value.items()))
+
+
+def _path_stat_signature(path: Path | None) -> tuple[str, int, int]:
+    if path is None:
+        return "", 0, 0
+    key = _session_path_key(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return key, 0, 0
+    mtime_ns = int(
+        getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+    )
+    return key, mtime_ns, int(stat.st_size)
+
+
+def _renderer_runtime_signature(
+    context: "RuntimeContext",
+    *,
+    update_state: Mapping[str, object] | None = None,
+    settings_command_status: Mapping[str, object] | None = None,
+) -> tuple[object, ...]:
+    """Cheap invalidation key for renderer refreshes.
+
+    This is a transitional event-driven gate: when the current session file,
+    settings file, budget window, update state, and pending command state are
+    unchanged, the renderer loop can skip JSONL parsing and CDP payload pushes.
+    """
+    try:
+        session_path, selection_source = context.session_resolver.resolve()
+    except Exception as exc:
+        session_path = None
+        selection_source = f"resolve-error:{type(exc).__name__}"
+    try:
+        settings_mtime = context.settings_store.mtime()
+    except Exception:
+        settings_mtime = None
+    try:
+        day_start, week_start = current_budget_windows(context.user_config)
+        day_key = day_start.isoformat()
+        week_key = week_start.isoformat()
+    except Exception:
+        day_key = ""
+        week_key = ""
+    return (
+        _path_stat_signature(session_path),
+        str(selection_source or ""),
+        settings_mtime,
+        day_key,
+        week_key,
+        _json_signature(update_state),
+        _json_signature(settings_command_status),
+    )
 
 
 def _wait_for_visible_codex_window(
@@ -1708,6 +2087,7 @@ def _prepare_codex_window_for_renderer(
                 launched = _restart_codex_for_renderer()
                 action = "restart_debugger"
             else:
+                _select_initial_renderer_cdp_port()
                 launched = launch_codex_app(debugger=True)
                 action = "launch_debugger"
             _LOGGER.info(
@@ -1836,7 +2216,7 @@ def _build_session_switch_controller(
     *,
     prefer_native_search: bool,
 ) -> SessionSwitchController:
-    cdp = CdpSessionSwitchBackend(timeout_seconds=RENDERER_CDP_TIMEOUT_SECONDS)
+    cdp = CdpSessionSwitchBackend(timeout_seconds=WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS)
     native_setting = os.environ.get(NATIVE_SEARCH_SESSION_SWITCH_ENV, "").strip().lower()
     native_enabled = native_setting not in {"0", "false", "no", "off"}
     backends: list[object] = [cdp]
@@ -1846,13 +2226,41 @@ def _build_session_switch_controller(
     return SessionSwitchController(backends)
 
 
-def _refocus_codex_window_after_current_session_click() -> tuple[bool, str, str, int]:
-    time.sleep(WORK_OVERLAY_CURRENT_SESSION_REFOCUS_DELAY_SECONDS)
+def _prepare_codex_window_for_work_overlay_switch() -> tuple[bool, str, str, int]:
+    if sys.platform == "darwin":
+        activated = launch_codex_app(debugger=False)
+        return (
+            bool(activated),
+            "activated" if activated else "launch-failed",
+            "" if activated else "macOS open failed",
+            0,
+        )
     return _prepare_codex_window_for_tk(
-        timeout_seconds=min(RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS, 0.75),
-        poll_seconds=0.12,
+        timeout_seconds=WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
+        poll_seconds=0.08,
         launch_if_missing=True,
     )
+
+
+def _refocus_codex_window_after_work_overlay_switch() -> tuple[bool, str, str, int]:
+    time.sleep(WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS)
+    if sys.platform == "darwin":
+        activated = launch_codex_app(debugger=False)
+        return (
+            bool(activated),
+            "activated" if activated else "launch-failed",
+            "" if activated else "macOS open failed",
+            0,
+        )
+    return _prepare_codex_window_for_tk(
+        timeout_seconds=WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS,
+        poll_seconds=0.08,
+        launch_if_missing=True,
+    )
+
+
+def _refocus_codex_window_after_current_session_click() -> tuple[bool, str, str, int]:
+    return _refocus_codex_window_after_work_overlay_switch()
 
 
 def _handle_work_overlay_command(
@@ -1872,9 +2280,8 @@ def _handle_work_overlay_command(
         return
 
     if prepare_window:
-        window_ready, window_status, window_reason, window_hwnd = _prepare_codex_window_for_tk(
-            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
-            launch_if_missing=True,
+        window_ready, window_status, window_reason, window_hwnd = (
+            _prepare_codex_window_for_work_overlay_switch()
         )
         if not window_ready:
             _LOGGER.info(
@@ -1899,12 +2306,12 @@ def _handle_work_overlay_command(
         result.matched_by or "-",
         result.message or "-",
     )
-    if prepare_window and (is_current or result.status == "already-active"):
+    if prepare_window and (is_current or result.ok or result.status == "already-active"):
         window_ready, window_status, window_reason, window_hwnd = (
             _refocus_codex_window_after_current_session_click()
         )
         _LOGGER.info(
-            "work_overlay_command_current_session_refocus ok=%s status=%s hwnd=%s reason=%s",
+            "work_overlay_command_session_refocus ok=%s status=%s hwnd=%s reason=%s",
             window_ready,
             window_status,
             window_hwnd,
@@ -3005,6 +3412,12 @@ def _suspend_native_active_title(context: "RuntimeContext") -> None:
 
 def _stop_active_session_tracker(context: "RuntimeContext") -> None:
     tracker = getattr(context, "active_session_tracker", None)
+    resolver = getattr(context, "session_resolver", None)
+    if resolver is not None and hasattr(resolver, "active_session_tracker"):
+        try:
+            resolver.active_session_tracker = None
+        except Exception:
+            pass
     if tracker is None:
         return
     try:
@@ -3906,6 +4319,7 @@ def run_hud_session(
     hide_until_attached: bool = True,
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
+    launched_codex: bool = False,
 ) -> int:
     """Run one renderer-injected HUD session."""
     del hide_until_attached
@@ -3914,14 +4328,29 @@ def run_hud_session(
         session_args,
         lock_already_held=lock_already_held,
         daemon_manager=daemon_manager,
-        launched_codex=False,
+        launched_codex=launched_codex,
         loading_feedback=loading_feedback,
     )
+    if renderer_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
+        if daemon_manager is not None:
+            try:
+                daemon_manager.close()
+            except Exception:
+                pass
+        if not _restart_codex_for_renderer():
+            _LOGGER.info("renderer_hud_restart_requested_but_failed")
+            return RENDERER_HUD_UNAVAILABLE
+        return run_hud_session(
+            session_args,
+            lock_already_held=lock_already_held,
+            daemon_manager=daemon_manager,
+            loading_feedback=loading_feedback,
+            launched_codex=True,
+        )
     if renderer_exit in {
         HUD_SWITCH_TO_QT,
         HUD_SWITCH_TO_TK,
         HUD_SWITCH_TO_RENDERER,
-        HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
     }:
         _LOGGER.info("renderer_hud_legacy_switch_ignored code=%s", renderer_exit)
         return RENDERER_HUD_UNAVAILABLE
@@ -3940,6 +4369,7 @@ def run_renderer_hud_session(
     lock_context = nullcontext() if lock_already_held else HudInstanceLock()
     try:
         with lock_context:
+            _select_initial_renderer_cdp_port()
             context = build_runtime_context(args)
             local_loading = loading_feedback or _create_loading_feedback(
                 args,
@@ -3957,32 +4387,52 @@ def run_renderer_hud_session(
             display_mode = normalize_display_mode(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
-            client = RendererHudClient(
-                timeout_seconds=(
-                    DAEMON_RENDERER_CDP_TIMEOUT_SECONDS
-                    if daemon_manager is not None
-                    else RENDERER_CDP_TIMEOUT_SECONDS
-                )
+            renderer_cdp_timeout = (
+                DAEMON_RENDERER_CDP_TIMEOUT_SECONDS
+                if daemon_manager is not None
+                else RENDERER_CDP_TIMEOUT_SECONDS
             )
+            client = RendererHudClient(timeout_seconds=renderer_cdp_timeout)
             update_manager = AutoUpdateManager(current_version=__version__)
             restart_requested = Event()
             exit_requested = Event()
             work_overlay = DesktopWorkOverlay(
                 item_limit=_work_overlay_item_limit_for_context(context),
             )
-            session_controller = _build_session_switch_controller(
-                getattr(context, "platform", get_current_platform()),
-                prefer_native_search=False,
-            )
             command_refresh_requested = Event()
-            command_pump = _WorkOverlayCommandPump(
-                work_overlay,
-                session_controller,
-                command_event=command_refresh_requested,
-            )
+            command_pump: _WorkOverlayCommandPump | None = None
+            bridge_commands: deque[dict[str, object]] = deque()
+            bridge_command_lock = threading.Lock()
+
+            def enqueue_renderer_command(command: dict[str, object]) -> None:
+                with bridge_command_lock:
+                    bridge_commands.append(dict(command))
+                command_refresh_requested.set()
+
+            def observe_renderer_active_session(payload: dict[str, object]) -> None:
+                tracker = getattr(context, "active_session_tracker", None)
+                observer = getattr(tracker, "observe_conversation_ref", None)
+                if not callable(observer):
+                    return
+                changed = observer(
+                    session_id=str(payload.get("sessionId") or payload.get("session_id") or ""),
+                    title=str(payload.get("title") or ""),
+                    source="renderer",
+                )
+                if changed:
+                    command_refresh_requested.set()
+
+            def take_renderer_bridge_command() -> dict[str, object] | None:
+                with bridge_command_lock:
+                    if not bridge_commands:
+                        return None
+                    return bridge_commands.popleft()
+
             bridge = SettingsBridgeServer(
                 context.settings_store,
                 restart_callback=restart_requested.set,
+                command_callback=enqueue_renderer_command,
+                active_session_callback=observe_renderer_active_session,
             )
             bridge_url = bridge.start()
 
@@ -4075,29 +4525,125 @@ def run_renderer_hud_session(
                     snapshot_or_error,
                     timeout_seconds=initial_timeout,
                 ):
-                    local_loading.close()
-                    _LOGGER.info(
-                        "renderer_hud_initial_connect_failed status=%s error=%s",
-                        client.last_status,
-                        client.last_error,
-                    )
-                    _append_renderer_diagnostic(
-                        "initial_connect_failed",
-                        status=client.last_status,
-                        error=client.last_error,
-                        display_mode=display_mode,
-                        daemon_mode=daemon_manager is not None,
-                        initial_timeout_seconds=initial_timeout,
-                        cdp_timeout_seconds=getattr(client, "timeout_seconds", None),
+                    recovered_with_fresh_port = False
+                    recovery_attempted = False
+                    original_error = client.last_error
+                    if _renderer_initial_failure_should_recover_cdp_port(original_error):
+                        try:
+                            fresh_port = _assign_fresh_renderer_cdp_port()
+                        except Exception as exc:
+                            _LOGGER.info("renderer_cdp_port_reassign_failed error=%s", exc)
+                            fresh_port = 0
+                        if fresh_port:
+                            _append_renderer_diagnostic(
+                                "initial_connect_recovering_fresh_port",
+                                status=client.last_status,
+                                error=original_error,
+                                old_port=getattr(client, "port", None),
+                                new_port=fresh_port,
+                                display_mode=display_mode,
+                                daemon_mode=daemon_manager is not None,
+                            )
+                            local_loading.update(
+                                title=(
+                                    "正在切换 Renderer HUD 端口"
+                                    if launched_codex
+                                    else "正在恢复 Renderer HUD 连接"
+                                ),
+                                message=(
+                                    f"当前 CDP 端口无响应，正在改用 {fresh_port} "
+                                    "并重启 Codex App..."
+                                ),
+                            )
+                            try:
+                                client.close()
+                            except Exception:
+                                pass
+                            recovery_attempted = True
+                            if _restart_codex_for_renderer():
+                                _refresh_renderer_cdp_dependents(context)
+                                client = RendererHudClient(
+                                    timeout_seconds=renderer_cdp_timeout
+                                )
+                                _wait_for_visible_codex_window(
+                                    timeout_seconds=DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS
+                                )
+                                recovered_with_fresh_port = wait_for_renderer(
+                                    client,
+                                    snapshot_or_error,
+                                    timeout_seconds=DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS,
+                                )
+                            else:
+                                _LOGGER.info(
+                                    "renderer_cdp_port_recovery_restart_failed port=%s",
+                                    fresh_port,
+                                )
+                    if recovered_with_fresh_port:
+                        _LOGGER.info(
+                            "renderer_hud_initial_connect_recovered port=%s",
+                            getattr(client, "port", None),
                         )
-                    return RENDERER_HUD_UNAVAILABLE
+                        _append_renderer_diagnostic(
+                            "initial_connect_recovered_fresh_port",
+                            status=client.last_status,
+                            port=getattr(client, "port", None),
+                            display_mode=display_mode,
+                            daemon_mode=daemon_manager is not None,
+                        )
+                        _remember_successful_renderer_cdp_port(
+                            getattr(client, "port", None)
+                        )
+                    else:
+                        local_loading.close()
+                        _LOGGER.info(
+                            "renderer_hud_initial_connect_failed status=%s error=%s",
+                            client.last_status,
+                            client.last_error,
+                        )
+                        _append_renderer_diagnostic(
+                            "initial_connect_failed",
+                            status=client.last_status,
+                            error=client.last_error,
+                            display_mode=display_mode,
+                            daemon_mode=daemon_manager is not None,
+                            initial_timeout_seconds=initial_timeout,
+                            cdp_timeout_seconds=getattr(client, "timeout_seconds", None),
+                        )
+                        if (
+                            not recovery_attempted
+                            and not getattr(args, "no_startup_prompt", False)
+                            and _renderer_initial_failure_can_be_fixed_by_restart(
+                                client.last_error
+                            )
+                        ):
+                            restart_requested = _prompt_restart_codex_for_cdp()
+                            if restart_requested is True:
+                                return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
+                            if restart_requested is False:
+                                return 0
+                        return RENDERER_HUD_UNAVAILABLE
+                else:
+                    _remember_successful_renderer_cdp_port(
+                        getattr(client, "port", None)
+                    )
 
+                session_controller = _build_session_switch_controller(
+                    getattr(context, "platform", get_current_platform()),
+                    prefer_native_search=False,
+                )
+                command_pump = _WorkOverlayCommandPump(
+                    work_overlay,
+                    session_controller,
+                    command_event=command_refresh_requested,
+                )
                 local_loading.close()
                 command_pump.start()
                 failures = 0
                 runtime_failure_reported = False
                 settings_command_status: dict[str, object] = {}
                 next_daemon_check_at = 0.0
+                latest_snapshot: ParsedSession | None = None
+                latest_signature: tuple[object, ...] | None = None
                 while True:
                     started = time.monotonic()
                     if (
@@ -4115,15 +4661,18 @@ def run_renderer_hud_session(
                             _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
                             return RENDERER_HUD_UNAVAILABLE
                     update_state = update_manager.tick().to_dict()
-                    command = client.take_settings_command()
+                    bridge_wakeup = command_refresh_requested.is_set()
+                    if bridge_wakeup:
+                        command_refresh_requested.clear()
+                    command = take_renderer_bridge_command()
+                    if command is None and not bridge_wakeup:
+                        command = client.take_settings_command()
                     force_fast_refresh = bool(
                         command
                         or settings_command_status
                         or update_state.get("phase") == "downloading"
+                        or bridge_wakeup
                     )
-                    if command_refresh_requested.is_set():
-                        command_refresh_requested.clear()
-                        force_fast_refresh = True
                     if command:
                         settings_command_status = _handle_renderer_settings_command(
                             command,
@@ -4155,53 +4704,67 @@ def run_renderer_hud_session(
                             if daemon_manager is not None
                             else 0
                         )
-                    context.reload_user_config()
-                    snapshot = snapshot_or_error()
-                    work_overlay.configure(
-                        item_limit=_work_overlay_item_limit_for_context(context),
-                    )
-                    work_overlay.update(snapshot.active_work_items)
-                    if client.update(
-                        snapshot,
-                        settings=context.user_config,
-                        active_display_mode="renderer",
-                        settings_path=context.settings_store.path,
-                        settings_bridge_url=bridge_url,
-                        settings_command_status=settings_command_status,
+                    signature = _renderer_runtime_signature(
+                        context,
                         update_state=update_state,
-                        work_overlay_selectable_max=_work_overlay_screen_max_items(),
-                        desktop_overlay_dependency=_desktop_overlay_dependency_status(),
-                    ):
-                        settings_command_status = {}
-                        failures = 0
-                        runtime_failure_reported = False
+                        settings_command_status=settings_command_status,
+                    )
+                    refresh_required = (
+                        force_fast_refresh
+                        or latest_snapshot is None
+                        or signature != latest_signature
+                    )
+                    if refresh_required:
+                        snapshot = snapshot_or_error()
+                        latest_snapshot = snapshot
+                        latest_signature = signature
+                        work_overlay.configure(
+                            item_limit=_work_overlay_item_limit_for_context(context),
+                        )
+                        work_overlay.update(snapshot.active_work_items)
+                        if client.update(
+                            snapshot,
+                            settings=context.user_config,
+                            active_display_mode="renderer",
+                            settings_path=context.settings_store.path,
+                            settings_bridge_url=bridge_url,
+                            settings_command_status=settings_command_status,
+                            update_state=update_state,
+                            work_overlay_selectable_max=_work_overlay_screen_max_items(),
+                            desktop_overlay_dependency=_desktop_overlay_dependency_status(),
+                        ):
+                            settings_command_status = {}
+                            failures = 0
+                            runtime_failure_reported = False
+                        else:
+                            failures += 1
+                            _LOGGER.info(
+                                "renderer_hud_update_failed failures=%s status=%s error=%s",
+                                failures,
+                                client.last_status,
+                                client.last_error,
+                            )
+                            failure_limit = _renderer_update_failure_limit(
+                                display_mode,
+                                client.last_error,
+                            )
+                            if failures >= failure_limit:
+                                if not runtime_failure_reported:
+                                    _append_renderer_diagnostic(
+                                        "runtime_update_failed_retrying",
+                                        failures=failures,
+                                        failure_limit=failure_limit,
+                                        status=client.last_status,
+                                        error=client.last_error,
+                                        display_mode=display_mode,
+                                        daemon_mode=daemon_manager is not None,
+                                        cdp_timeout_seconds=getattr(
+                                            client, "timeout_seconds", None
+                                        ),
+                                    )
+                                    runtime_failure_reported = True
                     else:
-                        failures += 1
-                        _LOGGER.info(
-                            "renderer_hud_update_failed failures=%s status=%s error=%s",
-                            failures,
-                            client.last_status,
-                            client.last_error,
-                        )
-                        failure_limit = _renderer_update_failure_limit(
-                            display_mode,
-                            client.last_error,
-                        )
-                        if failures >= failure_limit:
-                            if not runtime_failure_reported:
-                                _append_renderer_diagnostic(
-                                    "runtime_update_failed_retrying",
-                                    failures=failures,
-                                    failure_limit=failure_limit,
-                                    status=client.last_status,
-                                    error=client.last_error,
-                                    display_mode=display_mode,
-                                    daemon_mode=daemon_manager is not None,
-                                    cdp_timeout_seconds=getattr(
-                                        client, "timeout_seconds", None
-                                    ),
-                                )
-                                runtime_failure_reported = True
+                        snapshot = latest_snapshot
                     elapsed = time.monotonic() - started
                     delay = _renderer_refresh_delay_seconds(
                         context,
@@ -4214,14 +4777,16 @@ def run_renderer_hud_session(
                         client.last_error,
                     ):
                         delay = max(delay, min(5.0, failures * 0.5))
-                    time.sleep(delay)
+                    if command_refresh_requested.wait(delay):
+                        command_refresh_requested.clear()
             except KeyboardInterrupt:
                 local_loading.close()
                 return 130
             finally:
                 client.close()
                 bridge.close()
-                command_pump.close()
+                if command_pump is not None:
+                    command_pump.close()
                 work_overlay.close()
                 update_manager.close()
                 context.close()
@@ -4651,6 +5216,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                     title="正在启动 Renderer HUD",
                     message="正在以调试模式启动 Codex App...",
                 ).start()
+                _select_initial_renderer_cdp_port()
                 launch_codex_app(debugger=True)
                 _LOGGER.info("daemon_startup_renderer_selected")
             if startup.mode == DAEMON_STARTUP_RENDERER:
@@ -4692,6 +5258,19 @@ def run_daemon(args: argparse.Namespace) -> int:
                 if exit_code == HUD_SWITCH_TO_TK:
                     preferred_runtime_mode = "renderer"
                     force_renderer_retry = False
+                    continue
+                if exit_code == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
+                    startup_loading = _create_loading_feedback(
+                        args,
+                        title="正在重启 Codex",
+                        message="正在以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD...",
+                    ).start()
+                    if not _restart_codex_for_renderer():
+                        startup_loading.close()
+                        _LOGGER.info("daemon_renderer_restart_requested_but_failed")
+                        return RENDERER_HUD_UNAVAILABLE
+                    force_renderer_retry = True
+                    _LOGGER.info("daemon_renderer_restart_requested")
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
                     _LOGGER.info("daemon_restarting_wait_for_codex")

@@ -20,6 +20,12 @@ class MacOSPlatform(BasePlatform):
         except Exception:
             self._cdp_probe = None
 
+    def refresh_cdp_probe(self) -> None:
+        try:
+            self._cdp_probe = CodexCdpProbe()
+        except Exception:
+            self._cdp_probe = None
+
     def get_codex_data_dir(self) -> Path:
         return Path.home() / "Library" / "Application Support" / "Codex"
 

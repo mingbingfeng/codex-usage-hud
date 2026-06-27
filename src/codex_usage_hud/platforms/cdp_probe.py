@@ -138,13 +138,15 @@ DOM_PROBE_SCRIPT = r"""
       || (!!ref.sessionId && location.href.includes(ref.sessionId))
     );
   };
-  const currentRow = (row) => {
-    if (rowMatchesLocation(row)) return true;
+  const rowSelectedByState = (row) => {
     if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
     if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+    if (row.getAttribute("aria-selected") === "true") return true;
+    if (row.getAttribute("data-active") === "true" || row.getAttribute("data-selected") === "true") return true;
+    if (row.matches?.("[data-state='active'], [data-state='selected'], .active, .selected")) return true;
     return false;
   };
-  const activeRow = threadRows.find(rowMatchesLocation) || threadRows.find(currentRow) || null;
+  const activeRow = threadRows.find(rowSelectedByState) || threadRows.find(rowMatchesLocation) || null;
   const activeRef = activeRow ? refFromRow(activeRow) : { sessionId: locationThreadId(), title: "" };
   const compact = (value, limit = 220) => {
     const text = normalize(value);
@@ -565,15 +567,17 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       || (!!ref.sessionId && location.href.includes(ref.sessionId))
     );
   };
-  const currentRow = (row) => {
-    if (rowMatchesLocation(row)) return true;
+  const rowSelectedByState = (row) => {
     if (row.getAttribute("data-app-action-sidebar-thread-active") === "true") return true;
     if (row.getAttribute("aria-current") === "page" || row.getAttribute("aria-current") === "true") return true;
+    if (row.getAttribute("aria-selected") === "true") return true;
+    if (row.getAttribute("data-active") === "true" || row.getAttribute("data-selected") === "true") return true;
+    if (row.matches?.("[data-state='active'], [data-state='selected'], .active, .selected")) return true;
     return false;
   };
   const activeRef = () => {
     const rows = Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
-    const row = rows.find(rowMatchesLocation) || rows.find(currentRow) || null;
+    const row = rows.find(rowSelectedByState) || rows.find(rowMatchesLocation) || null;
     return row ? refFromRow(row) : { sessionId: locationThreadId(), title: "" };
   };
   const queryRows = () => Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"))
@@ -737,12 +741,22 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       availableCount: queryRows().length,
     });
   }
-  return (async () => {
-    let rows = queryRows();
-    if (!rows.length) {
-      await revealSidebar();
+  let rows = queryRows();
+  let sidebarRevealRequested = false;
+  if (!rows.length) {
+    const toggles = Array.from(document.querySelectorAll("button, [role='button'], a"))
+      .filter((node) => visible(node) && !node.closest(hudRootSelector))
+      .map((node) => ({ node, label: labelForNode(node), rect: node.getBoundingClientRect() }))
+      .filter((item) => /sidebar|history|conversation|conversations|chat history|对话|会话|历史/i.test(item.label))
+      .sort((left, right) => (left.rect.left - right.rect.left) || (left.rect.top - right.rect.top));
+    const toggle = toggles[0]?.node;
+    if (toggle) {
+      clickPrimaryNode(toggle);
+      sidebarRevealRequested = true;
       rows = queryRows();
     }
+  }
+  {
     const refs = rows.map((row) => ({ row, ref: refFromRow(row) }));
     const match = refs.find((item) => targetSessionId && item.ref.sessionId === targetSessionId)
       || refs.find((item) => targetRawSessionId && item.ref.rawSessionId === targetRawSessionId)
@@ -752,28 +766,16 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       || refs.find((item) => targetTitle && titleMatches(item.ref.title, targetTitle))
       || null;
     if (!match) {
-      if (targetTitle) {
-        const searchResult = await activateViaSearch(targetTitle, targetSessionId, targetWorkdir);
-        const active = activeRef();
-        return {
-          ok: searchResult.ok,
-          status: searchResult.status,
-          requestedSessionId: targetSessionId,
-          requestedTitle: targetTitle,
-          activeSessionId: active.sessionId || "",
-          activeTitle: active.title || "",
-          matchedBy: searchResult.matchedBy || "",
-          availableCount: rows.length,
-        };
-      }
       return {
         ok: false,
-        status: rows.length ? "thread-not-found" : "sidebar-unavailable",
+        status: sidebarRevealRequested
+          ? "sidebar-reveal-requested"
+          : (rows.length ? "thread-not-found" : "sidebar-unavailable"),
         requestedSessionId: targetSessionId,
         requestedTitle: targetTitle,
         activeSessionId: current.sessionId || "",
         activeTitle: current.title || "",
-        matchedBy: "",
+        matchedBy: sidebarRevealRequested ? "sidebar-toggle" : "",
         availableCount: rows.length,
       };
     }
@@ -794,30 +796,10 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       || row.querySelector("button, [role='button']")
       || row;
     clickPrimaryNode(primary);
-    for (let attempt = 0; attempt < 18; attempt += 1) {
-      await sleep(80);
-      const active = activeRef();
-      if (
-        (targetSessionId && active.sessionId === targetSessionId)
-        || (!targetSessionId && targetTitle && titleMatches(active.title, targetTitle))
-        || currentRow(row)
-      ) {
-        return {
-          ok: true,
-          status: "switched",
-          requestedSessionId: targetSessionId,
-          requestedTitle: targetTitle,
-          activeSessionId: active.sessionId || "",
-          activeTitle: active.title || "",
-          matchedBy,
-          availableCount: rows.length,
-        };
-      }
-    }
     const active = activeRef();
     return {
-      ok: false,
-      status: "switch-timeout",
+      ok: true,
+      status: "switch-requested",
       requestedSessionId: targetSessionId,
       requestedTitle: targetTitle,
       activeSessionId: active.sessionId || "",
@@ -825,7 +807,7 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       matchedBy,
       availableCount: rows.length,
     };
-  })();
+  }
 })()
 """
 
@@ -978,41 +960,50 @@ class CodexCdpSessionController:
             websocket_url = str(target.get("webSocketDebuggerUrl") or "")
             if not websocket_url:
                 raise RuntimeError("CDP target has no websocket URL")
-            result = send_cdp_command(
-                websocket_url,
-                "Runtime.evaluate",
-                runtime_evaluate_params(
-                    session_switch_script(
-                        requested_session_id,
-                        requested_title,
-                        requested_workdir,
+
+            def evaluate_switch() -> CdpSessionSwitchResult:
+                result = send_cdp_command(
+                    websocket_url,
+                    "Runtime.evaluate",
+                    runtime_evaluate_params(
+                        session_switch_script(
+                            requested_session_id,
+                            requested_title,
+                            requested_workdir,
+                        ),
+                        await_promise=True,
                     ),
-                    await_promise=True,
-                ),
-                self.timeout_seconds,
-            )
-            value = (
-                result.get("result", {})
-                .get("result", {})
-                .get("value")
-            )
-            if not isinstance(value, dict):
-                raise RuntimeError("CDP switch script returned no value")
-            switch_result = CdpSessionSwitchResult(
-                ok=bool(value.get("ok")),
-                status=str(value.get("status") or "unknown"),
-                requested_session_id=str(
-                    value.get("requestedSessionId") or requested_session_id
-                ).strip(),
-                requested_title=str(
-                    value.get("requestedTitle") or requested_title
-                ).strip(),
-                active_session_id=str(value.get("activeSessionId") or "").strip(),
-                active_title=str(value.get("activeTitle") or "").strip(),
-                matched_by=str(value.get("matchedBy") or "").strip(),
-                available_count=int(value.get("availableCount") or 0),
-                message=str(value.get("message") or "").strip(),
-            )
+                    self.timeout_seconds,
+                )
+                value = (
+                    result.get("result", {})
+                    .get("result", {})
+                    .get("value")
+                )
+                if not isinstance(value, dict):
+                    raise RuntimeError("CDP switch script returned no value")
+                return CdpSessionSwitchResult(
+                    ok=bool(value.get("ok")),
+                    status=str(value.get("status") or "unknown"),
+                    requested_session_id=str(
+                        value.get("requestedSessionId") or requested_session_id
+                    ).strip(),
+                    requested_title=str(
+                        value.get("requestedTitle") or requested_title
+                    ).strip(),
+                    active_session_id=str(value.get("activeSessionId") or "").strip(),
+                    active_title=str(value.get("activeTitle") or "").strip(),
+                    matched_by=str(value.get("matchedBy") or "").strip(),
+                    available_count=int(value.get("availableCount") or 0),
+                    message=str(value.get("message") or "").strip(),
+                )
+
+            switch_result = evaluate_switch()
+            if switch_result.status == "sidebar-reveal-requested":
+                time.sleep(0.16)
+                retry_result = evaluate_switch()
+                if retry_result.status != "sidebar-reveal-requested" or retry_result.ok:
+                    switch_result = retry_result
         except Exception as exc:
             self.last_status = "failed"
             self.last_error = f"{type(exc).__name__}: {exc}"

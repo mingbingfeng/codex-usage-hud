@@ -169,8 +169,10 @@ from codex_usage_hud.ui.tk_hud import (
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     _completed_badge_palette,
+    _completed_badge_restore_slot_moves,
     _completed_badge_slot_moves,
     _completed_badge_slot_rects,
+    _completed_restore_staged_items,
     _detect_transition,
     _detect_transition_item_id,
     _find_item_rect,
@@ -179,6 +181,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _overlay_payload_signature,
     _overlay_hover_hit_test,
     _ordered_overlay_items,
+    _pending_workdir_window_rect,
     _point_in_inscribed_circle,
     _round_badge_palette,
     _remembered_card_rect_for_layout,
@@ -854,7 +857,15 @@ class BudgetHelperTests(unittest.TestCase):
             title="Thread One",
             workdir="",
         )
-        prepare_window.assert_called_once()
+        self.assertEqual(prepare_window.call_count, 2)
+        self.assertEqual(
+            prepare_window.call_args_list[0].kwargs["timeout_seconds"],
+            cli_module.WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            prepare_window.call_args_list[1].kwargs["timeout_seconds"],
+            cli_module.WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS,
+        )
 
     def test_current_session_overlay_command_refocuses_codex_after_already_active_result(self) -> None:
         session_controller = SimpleNamespace(
@@ -899,10 +910,21 @@ class BudgetHelperTests(unittest.TestCase):
             workdir="",
         )
         prepare_window.assert_called_once_with(
-            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            timeout_seconds=cli_module.WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            poll_seconds=0.08,
             launch_if_missing=True,
         )
         refocus_window.assert_called_once()
+
+    def test_work_overlay_switch_activates_codex_on_macos(self) -> None:
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch,
+        ):
+            result = cli_module._prepare_codex_window_for_work_overlay_switch()
+
+        self.assertEqual(result, (True, "activated", "", 0))
+        launch.assert_called_once_with(debugger=False)
 
     def test_desktop_work_overlay_writes_state_with_atomic_json_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2030,6 +2052,32 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(text.startswith("09:08:07 | 已处理 42s | "))
         self.assertIn("...", text)
 
+    def test_pending_workdir_window_expands_short_anchor_leftward(self) -> None:
+        x, y, width, height = _pending_workdir_window_rect(
+            300,
+            40,
+            28,
+            18,
+            pending=True,
+            screen_left=0,
+        )
+
+        self.assertEqual((y, width, height), (40, 150, 18))
+        self.assertEqual(x + width, 328)
+
+    def test_pending_workdir_window_keeps_normal_anchor_size_when_idle(self) -> None:
+        self.assertEqual(
+            _pending_workdir_window_rect(
+                300,
+                40,
+                28,
+                18,
+                pending=False,
+                screen_left=0,
+            ),
+            (300, 40, 28, 18),
+        )
+
     def test_work_overlay_helper_delegates_to_qt_runner(self) -> None:
         runner = MagicMock(return_value=7)
         with patch("codex_usage_hud.cli._work_overlay_helper_qt", return_value=runner):
@@ -2419,6 +2467,50 @@ class WorkOverlayTransitionTests(unittest.TestCase):
 
         self.assertRectAlmostEqual(moves["old"][0], (86.0, 0.0, 168.0, 168.0))
         self.assertRectAlmostEqual(moves["old"][1], (262.0, 0.0, 168.0, 168.0))
+
+    def test_completed_restore_stages_clicked_badge_at_right_edge(self) -> None:
+        old_items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "restoring", "status": "recent"},
+            {"id": "latest", "status": "recent"},
+            {"id": "active", "status": "tool"},
+        ]
+
+        staged_items = _completed_restore_staged_items(old_items, "restoring")
+        slots = _completed_badge_slot_rects(staged_items, layout_width=520)
+
+        self.assertEqual([item["id"] for item in staged_items[:3]], ["oldest", "latest", "restoring"])
+        self.assertRectAlmostEqual(slots["oldest"], (0.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(slots["latest"], (176.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(slots["restoring"], (352.0, 0.0, 168.0, 168.0))
+
+    def test_completed_restore_moves_remaining_badges_in_two_phases(self) -> None:
+        old_items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "restoring", "status": "recent"},
+            {"id": "latest", "status": "recent"},
+            {"id": "active", "status": "tool"},
+        ]
+        new_items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "restoring", "status": "tool"},
+            {"id": "latest", "status": "recent"},
+            {"id": "active", "status": "tool"},
+        ]
+
+        moves = _completed_badge_restore_slot_moves(
+            old_items,
+            new_items,
+            "restoring",
+            layout_width=520,
+        )
+
+        self.assertRectAlmostEqual(moves["latest"][0], (352.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(moves["latest"][1], (176.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(moves["latest"][2], (352.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(moves["oldest"][0], (0.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(moves["oldest"][1], (0.0, 0.0, 168.0, 168.0))
+        self.assertRectAlmostEqual(moves["oldest"][2], (176.0, 0.0, 168.0, 168.0))
 
     def test_card_to_completed_morphs_to_right_edge_before_vertical_rise(self) -> None:
         source = (0.0, 188.0, 430.0, 110.0)
@@ -8777,11 +8869,19 @@ class DaemonLifecycleTests(unittest.TestCase):
                 patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
                 patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
                 patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
                 patch("codex_usage_hud.cli.wait_for_renderer", return_value=False),
+                patch(
+                    "codex_usage_hud.cli._assign_fresh_renderer_cdp_port",
+                    side_effect=RuntimeError("no available CDP port"),
+                ),
                 patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
-                    SimpleNamespace(),
+                    SimpleNamespace(no_startup_prompt=True),
                     lock_already_held=True,
                 )
 
@@ -8795,6 +8895,276 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
         fake_context.close.assert_called_once()
+
+    def test_renderer_initial_connect_timeout_does_not_prompt_for_cdp_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=temp_root / "hud_settings.json"),
+                user_config=UserConfig.defaults(),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="failed",
+                last_error="TimeoutError: Timed out waiting for CDP command response",
+                close=MagicMock(),
+                timeout_seconds=1.5,
+            )
+            fake_bridge = MagicMock()
+            fake_bridge.start.return_value = "http://127.0.0.1:8765"
+
+            with (
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=False),
+                patch(
+                    "codex_usage_hud.cli._assign_fresh_renderer_cdp_port",
+                    side_effect=RuntimeError("no available CDP port"),
+                ),
+                patch("codex_usage_hud.cli._prompt_restart_codex_for_cdp", return_value=True) as prompt,
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        prompt.assert_not_called()
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_renderer_initial_failure_restart_prompt_is_limited_to_missing_cdp(self) -> None:
+        self.assertFalse(
+            cli_module._renderer_initial_failure_can_be_fixed_by_restart(
+                "URLError: <urlopen error timed out>"
+            )
+        )
+        self.assertFalse(
+            cli_module._renderer_initial_failure_can_be_fixed_by_restart(
+                "TimeoutError: timed out"
+            )
+        )
+        self.assertTrue(
+            cli_module._renderer_initial_failure_should_recover_cdp_port(
+                "URLError: <urlopen error timed out>"
+            )
+        )
+        self.assertTrue(
+            cli_module._renderer_initial_failure_can_be_fixed_by_restart(
+                "URLError: <urlopen error [WinError 10061] actively refused>"
+            )
+        )
+
+    def test_renderer_cdp_port_selection_reuses_persisted_port_for_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            (temp_root / "renderer_cdp_state.json").write_text(
+                '{"lastSuccessfulPort":9444}\n',
+                encoding="utf-8",
+            )
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch(
+                    "codex_usage_hud.cli._renderer_cdp_port_has_codex_target",
+                    return_value=False,
+                ) as healthy,
+            ):
+                port = cli_module._select_initial_renderer_cdp_port()
+                env_port = os.environ.get(cli_module.CDP_PORT_ENV)
+
+        self.assertEqual(port, 9444)
+        self.assertEqual(env_port, "9444")
+        self.assertEqual(
+            [call.args[0] for call in healthy.call_args_list],
+            [9444, cli_module.DEFAULT_CDP_PORT],
+        )
+
+    def test_renderer_cdp_port_selection_prefers_healthy_default_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            (temp_root / "renderer_cdp_state.json").write_text(
+                '{"lastSuccessfulPort":9444}\n',
+                encoding="utf-8",
+            )
+
+            def healthy(port: int) -> bool:
+                return int(port) == cli_module.DEFAULT_CDP_PORT
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch(
+                    "codex_usage_hud.cli._renderer_cdp_port_has_codex_target",
+                    side_effect=healthy,
+                ),
+            ):
+                port = cli_module._select_initial_renderer_cdp_port()
+                env_port = os.environ.get(cli_module.CDP_PORT_ENV)
+
+        self.assertEqual(port, cli_module.DEFAULT_CDP_PORT)
+        self.assertEqual(env_port, str(cli_module.DEFAULT_CDP_PORT))
+
+    def test_renderer_cdp_port_success_is_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+
+            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root):
+                cli_module._remember_successful_renderer_cdp_port(9444)
+
+            payload = json.loads(
+                (temp_root / "renderer_cdp_state.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(payload["lastSuccessfulPort"], 9444)
+        self.assertIn("updatedAt", payload)
+
+    def test_renderer_initial_timeout_recovers_with_fresh_cdp_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            active_tracker = SimpleNamespace(close=MagicMock())
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                platform=SimpleNamespace(refresh_cdp_probe=MagicMock()),
+                active_session_tracker=active_tracker,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    active_session_tracker=active_tracker,
+                    resolve=MagicMock(return_value=(None, "activity")),
+                ),
+                close=MagicMock(),
+            )
+            failed_client = SimpleNamespace(
+                last_status="failed",
+                last_error="URLError: <urlopen error timed out>",
+                close=MagicMock(),
+                timeout_seconds=1.0,
+                port=9229,
+            )
+            recovered_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                close=MagicMock(),
+                timeout_seconds=1.0,
+                port=9444,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(side_effect=KeyboardInterrupt),
+            )
+            fake_bridge = MagicMock()
+            fake_bridge.start.return_value = "http://127.0.0.1:8765"
+            fake_work_overlay = MagicMock()
+
+            def assign_fresh_port() -> int:
+                os.environ[cli_module.CDP_PORT_ENV] = "9444"
+                return 9444
+
+            with (
+                patch.dict(os.environ, {cli_module.CDP_PORT_ENV: "9229"}),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch(
+                    "codex_usage_hud.cli.RendererHudClient",
+                    side_effect=[failed_client, recovered_client],
+                ) as client_class,
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch(
+                    "codex_usage_hud.cli.wait_for_renderer",
+                    side_effect=[False, True],
+                ) as wait_renderer,
+                patch(
+                    "codex_usage_hud.cli._assign_fresh_renderer_cdp_port",
+                    side_effect=assign_fresh_port,
+                ) as assign_port,
+                patch("codex_usage_hud.cli._restart_codex_for_renderer", return_value=True) as restart_codex,
+                patch(
+                    "codex_usage_hud.cli._build_session_switch_controller",
+                    side_effect=lambda *args, **kwargs: (
+                        self.assertEqual(
+                            cli_module.cdp_port_from_env(),
+                            9444,
+                        )
+                        or SimpleNamespace()
+                    ),
+                ),
+                patch("codex_usage_hud.cli._prompt_restart_codex_for_cdp", return_value=True) as prompt,
+                patch(
+                    "codex_usage_hud.cli._remember_successful_renderer_cdp_port",
+                    wraps=cli_module._remember_successful_renderer_cdp_port,
+                ) as remember_port,
+                patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(client_class.call_count, 2)
+        self.assertEqual(wait_renderer.call_count, 2)
+        assign_port.assert_called_once_with()
+        restart_codex.assert_called_once_with()
+        prompt.assert_not_called()
+        failed_client.close.assert_called()
+        recovered_client.close.assert_called_once()
+        active_tracker.close.assert_not_called()
+        fake_context.platform.refresh_cdp_probe.assert_called_once()
+        remember_port.assert_called_once_with(9444)
+        fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_run_hud_session_restarts_codex_and_retries_renderer(self) -> None:
+        args = SimpleNamespace(renderer_hud=True)
+
+        with (
+            patch(
+                "codex_usage_hud.cli.run_renderer_hud_session",
+                side_effect=[HUD_SWITCH_TO_RENDERER_RESTART_CODEX, 0],
+            ) as renderer_session,
+            patch("codex_usage_hud.cli._restart_codex_for_renderer", return_value=True) as restart_codex,
+        ):
+            exit_code = run_hud_session(args)
+
+        self.assertEqual(exit_code, 0)
+        restart_codex.assert_called_once_with()
+        self.assertEqual(renderer_session.call_count, 2)
+        self.assertFalse(renderer_session.call_args_list[0].kwargs["launched_codex"])
+        self.assertTrue(renderer_session.call_args_list[1].kwargs["launched_codex"])
+
+    def test_prompt_missing_codex_startup_uses_cross_platform_modal(self) -> None:
+        with patch("codex_usage_hud.cli._askyesnocancel_modal", return_value=True):
+            self.assertEqual(
+                cli_module._prompt_missing_codex_startup(),
+                DAEMON_STARTUP_RENDERER,
+            )
+        with patch("codex_usage_hud.cli._askyesnocancel_modal", return_value=False):
+            self.assertEqual(
+                cli_module._prompt_missing_codex_startup(),
+                cli_module.DAEMON_STARTUP_WAIT,
+            )
+        with patch("codex_usage_hud.cli._askyesnocancel_modal", return_value=None):
+            self.assertEqual(
+                cli_module._prompt_missing_codex_startup(),
+                cli_module.DAEMON_STARTUP_CANCEL,
+            )
 
     def test_legacy_auto_mode_uses_renderer_failure_limit(self) -> None:
         self.assertEqual(
@@ -8839,6 +9209,232 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertAlmostEqual(running_delay, 0.5)
         self.assertAlmostEqual(forced_delay, 0.5)
 
+    def test_renderer_loop_skips_snapshot_when_runtime_signature_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text('{"type":"session"}\n', encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            settings_store = SimpleNamespace(
+                path=settings_path,
+                mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+            )
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=settings_store,
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "pinned:file")),
+                ),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_bridge = MagicMock()
+            fake_bridge.start.return_value = "http://127.0.0.1:8765"
+            fake_work_overlay = MagicMock()
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+
+            with (
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=[0.0, KeyboardInterrupt],
+                ),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        build_snapshot.assert_called_once_with(fake_context)
+        fake_client.update.assert_called_once()
+        self.assertEqual(fake_work_overlay.update.call_count, 1)
+
+    def test_renderer_loop_handles_bridge_settings_command_without_cdp_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(path=temp_root / "hud_settings.json"),
+                user_config=UserConfig.defaults(),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                command_callback = kwargs["command_callback"]
+
+                def start() -> str:
+                    command_callback({"action": "exit", "id": "bridge-command"})
+                    return "http://127.0.0.1:8765"
+
+                fake_bridge.start = MagicMock(side_effect=start)
+                return fake_bridge
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 0)
+        fake_client.take_settings_command.assert_not_called()
+        fake_command_pump.start.assert_called_once()
+        fake_command_pump.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_update_manager.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_renderer_loop_handles_active_session_bridge_event_without_cdp_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            active_tracker = SimpleNamespace(
+                observe_conversation_ref=MagicMock(return_value=True)
+            )
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                active_session_tracker=active_tracker,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                active_session_callback = kwargs["active_session_callback"]
+
+                def start() -> str:
+                    active_session_callback(
+                        {"sessionId": "thread-1", "title": "Live Thread"}
+                    )
+                    return "http://127.0.0.1:8765"
+
+                fake_bridge.start = MagicMock(side_effect=start)
+                return fake_bridge
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=KeyboardInterrupt,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        active_tracker.observe_conversation_ref.assert_called_once_with(
+            session_id="thread-1",
+            title="Live Thread",
+            source="renderer",
+        )
+        fake_client.take_settings_command.assert_not_called()
+        fake_client.update.assert_called_once()
+        fake_command_pump.start.assert_called_once()
+        fake_command_pump.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_update_manager.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
     def test_renderer_runtime_failures_retry_without_tk_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -8871,7 +9467,10 @@ class DaemonLifecycleTests(unittest.TestCase):
                 patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
                 patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
                 patch("codex_usage_hud.cli._renderer_update_failure_limit", return_value=1),
-                patch("codex_usage_hud.cli.time.sleep", side_effect=KeyboardInterrupt),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=KeyboardInterrupt,
+                ),
                 patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
@@ -9164,7 +9763,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             close=MagicMock(),
             timeout_seconds=1.0,
             take_settings_command=MagicMock(return_value=None),
-            update=MagicMock(return_value=True),
+            update=MagicMock(side_effect=KeyboardInterrupt),
         )
         fake_bridge = MagicMock()
         fake_bridge.start.return_value = "http://127.0.0.1:8765"
@@ -9180,7 +9779,6 @@ class DaemonLifecycleTests(unittest.TestCase):
             ) as prepare_window,
             patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
             patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
-            patch("codex_usage_hud.cli.time.sleep", side_effect=KeyboardInterrupt),
         ):
             exit_code = run_renderer_hud_session(
                 SimpleNamespace(),
@@ -9259,7 +9857,11 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
         )
 
+        update_calls = 0
+
         def update_side_effect(*args: object, **kwargs: object) -> bool:
+            nonlocal update_calls
+            update_calls += 1
             self.assertTrue(command_finished.wait(timeout=1.0))
             return True
 
@@ -9284,9 +9886,16 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "codex_usage_hud.cli._prepare_codex_window_for_tk",
                 return_value=(True, "visible", "", 321),
             ) as prepare_overlay_window,
+            patch(
+                "codex_usage_hud.cli._refocus_codex_window_after_current_session_click",
+                return_value=(True, "visible", "", 321),
+            ) as refocus_overlay_window,
             patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
             patch("codex_usage_hud.cli.build_snapshot", return_value=fake_snapshot),
-            patch("codex_usage_hud.cli.time.sleep", side_effect=KeyboardInterrupt),
+            patch(
+                "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                side_effect=KeyboardInterrupt,
+            ),
         ):
             exit_code = run_renderer_hud_session(
                 SimpleNamespace(hud_mode="renderer"),
@@ -9308,9 +9917,11 @@ class DaemonLifecycleTests(unittest.TestCase):
             launch_if_missing=True,
         )
         prepare_overlay_window.assert_called_once_with(
-            timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            timeout_seconds=cli_module.WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            poll_seconds=0.08,
             launch_if_missing=True,
         )
+        refocus_overlay_window.assert_called_once()
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
         fake_update_manager.close.assert_called_once()

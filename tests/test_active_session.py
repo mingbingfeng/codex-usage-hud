@@ -64,8 +64,10 @@ class FakeCdpRefPlatform(FakePlatform):
         super().__init__()
         self.session_id = session_id
         self.title = title
+        self.ref_calls = 0
 
     def get_active_conversation_ref(self) -> tuple[str, str] | None:
+        self.ref_calls += 1
         return self.session_id, self.title
 
 
@@ -541,6 +543,38 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(tracker.current_path(), archived_session)
             self.assertEqual(tracker.latest_source, "cdp:Archived Thread")
 
+    def test_renderer_observed_ref_bypasses_cdp_probe_in_current_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-renderer-thread-123.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            platform = FakeCdpRefPlatform("stale-cdp-thread", "Stale CDP Thread")
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+            )
+
+            changed = tracker.observe_conversation_ref(
+                "renderer-thread-123",
+                "Renderer Selected Thread",
+            )
+            tracker.latest_event_source = "cdp"
+            tracker.latest_source = "cdp:Stale CDP Thread"
+            tracker.latest_title = "Stale CDP Thread"
+            tracker.latest_session_id = "stale-cdp-thread"
+            tracker.latest_path = None
+
+            self.assertTrue(changed)
+            self.assertEqual(tracker.current_path(), session_path)
+            self.assertEqual(platform.ref_calls, 0)
+            self.assertEqual(tracker.latest_source, "renderer:Renderer Selected Thread")
+
     def test_current_path_direct_poll_overrides_stale_event_title(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -690,6 +724,31 @@ class SessionPathResolverTests(unittest.TestCase):
 
             self.assertEqual(path, latest)
             self.assertEqual(source, "ui-unmatched+activity")
+
+    def test_resolver_bypasses_idle_gate_for_unresolved_renderer_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "current.jsonl"
+            latest = root / "latest.jsonl"
+            current.write_text("{}\n", encoding="utf-8")
+            latest.write_text("{}\n", encoding="utf-8")
+
+            now = time.time()
+            os.utime(current, (now, now))
+            os.utime(latest, (now + 5, now + 5))
+
+            resolver = SessionPathResolver(
+                platform=FakePlatform(latest_session=latest),
+                sessions_root=root,
+                active_session_tracker=_TrackerStub(None, source="renderer-unmatched"),
+                auto_switch_idle_seconds=30.0,
+            )
+            resolver.auto_session_file = current
+
+            path, source = resolver.resolve()
+
+            self.assertEqual(path, latest)
+            self.assertEqual(source, "renderer-unmatched+activity")
 
     def test_resolver_switches_to_archived_latest_when_tracker_is_unmatched(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

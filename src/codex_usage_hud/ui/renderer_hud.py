@@ -84,6 +84,9 @@ RENDERER_HUD_SCRIPT = r"""
   const resizeHandlerName = "__codexUsageHudResize";
   const scrollHandlerName = "__codexUsageHudScroll";
   const mutationObserverName = "__codexUsageHudObserver";
+  const resizeObserverName = "__codexUsageHudResizeObserver";
+  const bootstrapObserverName = "__codexUsageHudBootstrapObserver";
+  const bootstrapTimerName = "__codexUsageHudBootstrapTimer";
   const scheduleName = "__codexUsageHudSchedule";
   const stateName = "__codexUsageHudState";
   const rafName = "__codexUsageHudRaf";
@@ -94,9 +97,19 @@ RENDERER_HUD_SCRIPT = r"""
   const storageKey = "codexUsageHudPanelState:v5";
   const settingsCommandKey = "codexUsageHudSettingsCommand:v1";
   const settingsModalId = "codex-usage-hud-settings-modal";
+  const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
+  const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
+  const activeSessionTimerName = "__codexUsageHudActiveSessionTimer";
+  const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";
+  const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
+  const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
   const staleUpdateMs = 10000;
   let topSlotCache = null;
   let pendingSyncPanels = null;
+  let cachedHeaderNode = null;
+  let cachedComposerNode = null;
+  let observedHeaderNode = null;
+  let observedComposerNode = null;
   const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
   const numericAnimations = new WeakMap();
 
@@ -2315,6 +2328,230 @@ RENDERER_HUD_SCRIPT = r"""
     return String(currentPayload()?.settingsBridgeUrl || "").replace(/\/+$/, "");
   }
 
+  function normalizeThreadId(value) {
+    const text = normalize(value);
+    const match = text.match(/^(?:[a-z0-9_.-]+:)(.+)$/i);
+    return match ? normalize(match[1]) : text;
+  }
+
+  function activeSessionLocationId() {
+    const source = `${location.pathname}${location.search}${location.hash}`;
+    const match = source.match(/(?:session|conversation|thread)(?:\/|=|:|-)([A-Za-z0-9_.-]+)/i)
+      || source.match(/\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:[/?#]|$)/)
+      || source.match(/\/([A-Za-z0-9_-]{24,})(?:[/?#]|$)/);
+    return match ? normalizeThreadId(decodeURIComponent(match[1])) : "";
+  }
+
+  function activeSessionRowHref(row) {
+    return row?.getAttribute?.("href") || row?.querySelector?.("a")?.getAttribute?.("href") || "";
+  }
+
+  function activeSessionRefFromRow(row) {
+    const href = activeSessionRowHref(row);
+    const idMatch = href.match(/(?:session|conversation|thread)[=/:-]([A-Za-z0-9_.-]+)/i)
+      || href.match(/([A-Za-z0-9_-]{8,})$/);
+    const rawSessionId = row?.getAttribute?.("data-app-action-sidebar-thread-id")
+      || (idMatch && idMatch[1])
+      || row?.getAttribute?.("data-session-id")
+      || row?.getAttribute?.("data-testid")
+      || "";
+    const sessionId = normalizeThreadId(rawSessionId);
+    const titleNode = row?.querySelector?.("[data-thread-title], .truncate.select-none, .truncate.text-base");
+    const rawTitle = titleNode?.textContent || (titleNode ? "" : (row?.textContent || ""));
+    const title = normalize(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
+    return { rawSessionId: normalize(rawSessionId), sessionId, title };
+  }
+
+  function activeSessionRowSelected(row) {
+    if (row?.getAttribute?.("data-app-action-sidebar-thread-active") === "true") return true;
+    if (row?.getAttribute?.("aria-current") === "page" || row?.getAttribute?.("aria-current") === "true") return true;
+    if (row?.getAttribute?.("aria-selected") === "true") return true;
+    if (row?.getAttribute?.("data-active") === "true" || row?.getAttribute?.("data-selected") === "true") return true;
+    if (row?.matches?.("[data-state='active'], [data-state='selected'], .active, .selected")) return true;
+    return false;
+  }
+
+  function activeSessionRowMatchesLocation(row) {
+    const href = activeSessionRowHref(row);
+    if (href) {
+      try {
+        const url = new URL(href, location.href);
+        if (url.href === location.href) return true;
+      } catch (_) {
+        if (location.href.includes(href)) return true;
+      }
+    }
+    const ref = activeSessionRefFromRow(row);
+    return (
+      (!!ref.rawSessionId && location.href.includes(ref.rawSessionId))
+      || (!!ref.sessionId && location.href.includes(ref.sessionId))
+    );
+  }
+
+  function activeSessionRows() {
+    return Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"));
+  }
+
+  function readActiveSessionRef() {
+    const rows = activeSessionRows();
+    const row = rows.find(activeSessionRowSelected) || rows.find(activeSessionRowMatchesLocation) || null;
+    const ref = row ? activeSessionRefFromRow(row) : { sessionId: activeSessionLocationId(), title: "" };
+    return {
+      sessionId: ref.sessionId || "",
+      title: ref.title || "",
+      url: location.href,
+    };
+  }
+
+  function activeSessionContainer() {
+    const rows = activeSessionRows();
+    const row = rows[0] || null;
+    return row?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
+      || row?.parentElement
+      || null;
+  }
+
+  function postActiveSession(reason = "event") {
+    const bridge = settingsBridgeUrl();
+    if (!bridge) return;
+    const ref = readActiveSessionRef();
+    if (!ref.sessionId && !ref.title) return;
+    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url]);
+    if (window[activeSessionLastSignatureName] === signature) return;
+    window[activeSessionLastSignatureName] = signature;
+    const payload = {
+      sessionId: ref.sessionId,
+      title: ref.title,
+      url: ref.url,
+      reason,
+      observedAt: Date.now(),
+    };
+    fetch(`${bridge}/active-session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function scheduleActiveSessionReport(reason = "event") {
+    clearTimeout(window[activeSessionTimerName] || 0);
+    window[activeSessionTimerName] = setTimeout(() => {
+      postActiveSession(reason);
+      refreshActiveSessionObserver();
+    }, 40);
+  }
+
+  function refreshActiveSessionObserver() {
+    const container = activeSessionContainer();
+    window[activeSessionObserverName]?.disconnect?.();
+    if (!container) return false;
+    window[activeSessionObserverName] = new MutationObserver(() => {
+      scheduleActiveSessionReport("sidebar");
+    });
+    window[activeSessionObserverName].observe(container, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: [
+        "aria-selected",
+        "aria-current",
+        "data-active",
+        "data-selected",
+        "data-state",
+        "data-app-action-sidebar-thread-active",
+        "data-app-action-sidebar-thread-id",
+        "href",
+      ],
+    });
+    return true;
+  }
+
+  function startActiveSessionBootstrapObserver() {
+    if (window[activeSessionBootstrapObserverName] || refreshActiveSessionObserver()) return;
+    if (!document.body) return;
+    window[activeSessionBootstrapObserverName] = new MutationObserver(() => {
+      if (refreshActiveSessionObserver()) {
+        window[activeSessionBootstrapObserverName]?.disconnect?.();
+        delete window[activeSessionBootstrapObserverName];
+        scheduleActiveSessionReport("sidebar-ready");
+      }
+    });
+    window[activeSessionBootstrapObserverName].observe(document.body, {
+      subtree: true,
+      childList: true,
+    });
+    setTimeout(() => {
+      window[activeSessionBootstrapObserverName]?.disconnect?.();
+      delete window[activeSessionBootstrapObserverName];
+    }, 5000);
+  }
+
+  function installActiveSessionHistoryPatch() {
+    if (window[activeSessionHistoryPatchName]) return;
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    const patch = {
+      originalPushState,
+      originalReplaceState,
+      pushState: function(...args) {
+        const result = originalPushState.apply(this, args);
+        scheduleActiveSessionReport("history");
+        return result;
+      },
+      replaceState: function(...args) {
+        const result = originalReplaceState.apply(this, args);
+        scheduleActiveSessionReport("history");
+        return result;
+      },
+      popstate: () => scheduleActiveSessionReport("popstate"),
+    };
+    try {
+      history.pushState = patch.pushState;
+      history.replaceState = patch.replaceState;
+      window.addEventListener("popstate", patch.popstate);
+      window[activeSessionHistoryPatchName] = patch;
+    } catch (_) {
+      try {
+        history.pushState = originalPushState;
+        history.replaceState = originalReplaceState;
+      } catch (_) {}
+    }
+  }
+
+  function removeActiveSessionWatchers() {
+    clearTimeout(window[activeSessionTimerName] || 0);
+    document.removeEventListener("click", window[activeSessionClickHandlerName], true);
+    window[activeSessionObserverName]?.disconnect?.();
+    window[activeSessionBootstrapObserverName]?.disconnect?.();
+    const patch = window[activeSessionHistoryPatchName];
+    if (patch) {
+      if (history.pushState === patch.pushState) history.pushState = patch.originalPushState;
+      if (history.replaceState === patch.replaceState) history.replaceState = patch.originalReplaceState;
+      window.removeEventListener("popstate", patch.popstate);
+    }
+    delete window[activeSessionObserverName];
+    delete window[activeSessionBootstrapObserverName];
+    delete window[activeSessionTimerName];
+    delete window[activeSessionClickHandlerName];
+    delete window[activeSessionHistoryPatchName];
+    delete window[activeSessionLastSignatureName];
+  }
+
+  function ensureActiveSessionWatchers() {
+    if (!window[activeSessionClickHandlerName]) {
+      window[activeSessionClickHandlerName] = (event) => {
+        if (event.target?.closest?.("[data-app-action-sidebar-thread-id]")) {
+          scheduleActiveSessionReport("click");
+        }
+      };
+      document.addEventListener("click", window[activeSessionClickHandlerName], true);
+    }
+    installActiveSessionHistoryPatch();
+    startActiveSessionBootstrapObserver();
+    scheduleActiveSessionReport("payload");
+  }
+
   function settingsPathLabel() {
     return String(currentPayload()?.settingsPath || "");
   }
@@ -2713,6 +2950,17 @@ RENDERER_HUD_SCRIPT = r"""
     } catch (error) {
       setSettingsStatus(`无法提交设置命令：${error?.message || error}`, "error");
       return false;
+    }
+    const bridge = settingsBridgeUrl();
+    if (bridge) {
+      try {
+        fetch(`${bridge}/command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          keepalive: true,
+        }).catch(() => {});
+      } catch (_) {}
     }
     setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
     setSettingsRestartVisible(false);
@@ -3334,6 +3582,19 @@ RENDERER_HUD_SCRIPT = r"""
     panel.style.height = px(height);
   }
 
+  function anchorUsable(node) {
+    return node instanceof HTMLElement && node.isConnected && !node.closest?.(`#${rootId}`) && visible(node);
+  }
+
+  function invalidateHeaderAnchor() {
+    cachedHeaderNode = null;
+    topSlotCache = null;
+  }
+
+  function invalidateComposerAnchor() {
+    cachedComposerNode = null;
+  }
+
   function candidateHeaders() {
     return Array.from(document.querySelectorAll([
       "header.app-header-tint",
@@ -3362,12 +3623,18 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function conversationHeaderElement() {
+    if (anchorUsable(cachedHeaderNode)) return cachedHeaderNode;
+    cachedHeaderNode = null;
     const surface = document.querySelector('[data-testid="app-shell-header-context-menu-surface"]');
     const surfaceHeader = surface?.closest?.("header.app-header-tint, header, .app-header-tint");
-    if (visible(surfaceHeader)) return surfaceHeader;
-    return candidateHeaders()
+    if (anchorUsable(surfaceHeader)) {
+      cachedHeaderNode = surfaceHeader;
+      return cachedHeaderNode;
+    }
+    cachedHeaderNode = candidateHeaders()
       .map((node, index) => ({ node, index, score: scoreHeader(node) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.node || null;
+    return cachedHeaderNode;
   }
 
   function conversationHeaderRect() {
@@ -3397,6 +3664,8 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function composerElement() {
+    if (anchorUsable(cachedComposerNode)) return cachedComposerNode;
+    cachedComposerNode = null;
     const candidates = new Set();
     const composerClasses = [
       "relative",
@@ -3424,7 +3693,8 @@ RENDERER_HUD_SCRIPT = r"""
     const best = Array.from(candidates)
       .map((node, index) => ({ node, index, score: scoreComposer(node) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.node;
-    return visible(best) ? best : null;
+    cachedComposerNode = anchorUsable(best) ? best : null;
+    return cachedComposerNode;
   }
 
   function composerRect() {
@@ -3778,6 +4048,8 @@ RENDERER_HUD_SCRIPT = r"""
       applyRect(panel, left, top, width, height);
     }
     refreshAllMarquees(root);
+    refreshLayoutObservers();
+    startBootstrapObserver();
   }
 
   function syncPositionSettled(names = Object.keys(PANEL)) {
@@ -3808,6 +4080,105 @@ RENDERER_HUD_SCRIPT = r"""
       window[composerSettleTimerName] = 0;
       scheduleForPanels(["request"]);
     }, 180);
+  }
+
+  function layoutMutationTouchesTextInput(mutation) {
+    const element = elementFromMutationNode(mutation.target);
+    return !!element?.closest?.("textarea, [contenteditable='true'], [role='textbox']");
+  }
+
+  function layoutMutationTarget(mutation, headerNode, composerNode) {
+    const element = elementFromMutationNode(mutation.target);
+    if (!element || element.closest?.(`#${rootId}`)) return "";
+    if (headerNode && (element === headerNode || headerNode.contains(element))) return "header";
+    if (composerNode && (element === composerNode || composerNode.contains(element))) return "composer";
+    return "";
+  }
+
+  function handleLayoutMutations(mutations) {
+    const headerNode = cachedHeaderNode;
+    const composerNode = cachedComposerNode;
+    let touchesHeader = false;
+    let touchesComposer = false;
+    let touchesTextInput = false;
+    for (const mutation of mutations) {
+      const target = layoutMutationTarget(mutation, headerNode, composerNode);
+      if (target === "header") touchesHeader = true;
+      if (target === "composer") {
+        touchesComposer = true;
+        if (layoutMutationTouchesTextInput(mutation)) touchesTextInput = true;
+      }
+    }
+    if (touchesHeader) {
+      invalidateHeaderAnchor();
+      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
+      return;
+    }
+    if (!touchesComposer) return;
+    if (touchesTextInput) {
+      scheduleRequestAfterComposerSettles();
+      return;
+    }
+    invalidateComposerAnchor();
+    scheduleForPanels(["request"]);
+  }
+
+  function refreshLayoutObservers() {
+    const headerNode = conversationHeaderElement();
+    const composerNode = composerElement();
+    if (
+      headerNode === observedHeaderNode
+      && composerNode === observedComposerNode
+      && window[mutationObserverName]
+      && window[resizeObserverName]
+    ) return;
+    observedHeaderNode = headerNode;
+    observedComposerNode = composerNode;
+    window[mutationObserverName]?.disconnect?.();
+    window[resizeObserverName]?.disconnect?.();
+    window[mutationObserverName] = new MutationObserver(handleLayoutMutations);
+    const mutationOptions = {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["aria-label", "title", "data-thread-title", "class"],
+    };
+    if (headerNode) window[mutationObserverName].observe(headerNode, mutationOptions);
+    if (composerNode && composerNode !== headerNode) window[mutationObserverName].observe(composerNode, mutationOptions);
+    if (typeof ResizeObserver === "function") {
+      window[resizeObserverName] = new ResizeObserver(() => scheduleForPanels(Object.keys(PANEL), { invalidateTop: true }));
+      if (headerNode) window[resizeObserverName].observe(headerNode);
+      if (composerNode && composerNode !== headerNode) window[resizeObserverName].observe(composerNode);
+    } else {
+      window[resizeObserverName] = { disconnect() {} };
+    }
+  }
+
+  function stopBootstrapObserver() {
+    window[bootstrapObserverName]?.disconnect?.();
+    clearTimeout(window[bootstrapTimerName] || 0);
+    delete window[bootstrapObserverName];
+    delete window[bootstrapTimerName];
+  }
+
+  function startBootstrapObserver() {
+    if (cachedHeaderNode && cachedComposerNode) {
+      stopBootstrapObserver();
+      return;
+    }
+    if (window[bootstrapObserverName] || !document.body) return;
+    window[bootstrapObserverName] = new MutationObserver(() => {
+      invalidateHeaderAnchor();
+      invalidateComposerAnchor();
+      const headerNode = conversationHeaderElement();
+      const composerNode = composerElement();
+      if (!headerNode && !composerNode) return;
+      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
+      if (headerNode && composerNode) stopBootstrapObserver();
+    });
+    window[bootstrapObserverName].observe(document.body, { childList: true, subtree: true });
+    window[bootstrapTimerName] = setTimeout(stopBootstrapObserver, 5000);
   }
 
   function headerScopeSelector() {
@@ -4578,25 +4949,28 @@ RENDERER_HUD_SCRIPT = r"""
     const payload = state.payload || {};
     const updatedAt = Number(state.updatedAt || 0);
     if (!root || !updatedAt || Date.now() - updatedAt < staleUpdateMs) return;
-    const title = String(payload?.topDetails?.title || payload?.session || "").trim();
+    if (!payloadNeedsStaleGuard(payload)) return;
     const ageSeconds = Math.max(10, Math.floor((Date.now() - updatedAt) / 1000));
-    setText(root, "topLine", `HUD 更新暂停 | ${title ? `上次 ${title}` : "等待后端恢复"}`);
-    setText(root, "requestLine", "后端未继续刷新，正在显示旧数据");
-    setText(root, "requestLineExpanded", "后端未继续刷新，正在显示旧数据");
-    setText(root, "topTitle", "HUD 更新暂停");
-    setText(root, "topSession", title ? `上次显示 ${title}` : "");
-    setText(root, "topWarnings", `后端 ${ageSeconds}s 未更新，当前内容可能不是所选会话`);
+    const existingWarning = String(payload?.topDetails?.warnings || "").trim();
+    const staleWarning = `数据可能不是最新，已 ${ageSeconds}s 未同步`;
+    setText(root, "topWarnings", existingWarning ? `${existingWarning}\n${staleWarning}` : staleWarning);
     root.querySelectorAll('[data-field-panel="topWarnings"]').forEach((node) => {
       node.hidden = false;
     });
-    renderTopProgress(root, { topProgress: {} });
-    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+    root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
       node.classList.add(warningClass);
     });
   }
 
-  function scheduleStaleGuard() {
+  function payloadNeedsStaleGuard(payload) {
+    const requestStatus = String(payload?.requestStatus || "").toLowerCase();
+    const updatePhase = String(payload?.updateState?.phase || "").toLowerCase();
+    return requestStatus === "running" || updatePhase === "downloading" || updatePhase === "installing";
+  }
+
+  function scheduleStaleGuard(payload) {
     clearTimeout(window[staleTimerName] || 0);
+    if (!payloadNeedsStaleGuard(payload)) return;
     window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250);
   }
 
@@ -4610,12 +4984,18 @@ RENDERER_HUD_SCRIPT = r"""
       nextPayload.supportImages = previousPayload.supportImages;
     }
     window[stateName] = { payload: nextPayload, updatedAt: Date.now() };
+    try {
+      ensureActiveSessionWatchers();
+    } catch (_) {}
     const root = ensureRoot();
     if (!root) return false;
     applyTheme(root, nextPayload);
     setText(root, "topLine", nextPayload?.topLine || "codex-usage-hud 等待数据");
     setText(root, "requestLine", nextPayload?.requestLine || "本次请求 等待");
     setText(root, "requestLineExpanded", nextPayload?.requestLine || "最近模型请求轮次");
+    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+      node.classList.remove(warningClass);
+    });
     root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
       node.classList.toggle(warningClass, !!nextPayload?.warning);
     });
@@ -4628,7 +5008,7 @@ RENDERER_HUD_SCRIPT = r"""
     applySettingsCommandStatus(nextPayload || {});
     syncPosition();
     syncPositionSettled();
-    scheduleStaleGuard();
+    scheduleStaleGuard(nextPayload);
     return true;
   };
 
@@ -4640,12 +5020,22 @@ RENDERER_HUD_SCRIPT = r"""
     window.removeEventListener("resize", window[resizeHandlerName]);
     window.removeEventListener("scroll", window[scrollHandlerName], true);
     window[mutationObserverName]?.disconnect?.();
+    window[resizeObserverName]?.disconnect?.();
+    try {
+      removeActiveSessionWatchers();
+    } catch (_) {}
+    stopBootstrapObserver();
+    observedHeaderNode = null;
+    observedComposerNode = null;
     cancelAnimationFrame(window[rafName] || 0);
     clearInterval(window[runningTimerName] || 0);
     clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
     for (const timer of (window[settleTimerName] || [])) clearTimeout(timer);
     delete window[mutationObserverName];
+    delete window[resizeObserverName];
+    delete window[bootstrapObserverName];
+    delete window[bootstrapTimerName];
     delete window[resizeHandlerName];
     delete window[scrollHandlerName];
     delete window[scheduleName];
@@ -4664,26 +5054,6 @@ RENDERER_HUD_SCRIPT = r"""
   window[scrollHandlerName] = () => scheduleForPanels(["request"]);
   window.addEventListener("resize", window[resizeHandlerName]);
   window.addEventListener("scroll", window[scrollHandlerName], true);
-  window[mutationObserverName] = new MutationObserver((mutations) => {
-    const touchesHeader = mutations.some(mutationTouchesHeaderScope);
-    if (touchesHeader) {
-      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
-      return;
-    }
-    if (!mutations.some(mutationTouchesComposerScope)) return;
-    if (mutations.some(mutationTouchesTextInput)) {
-      scheduleRequestAfterComposerSettles();
-      return;
-    }
-    scheduleForPanels(["request"]);
-  });
-  window[mutationObserverName].observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: ["aria-label", "title", "data-thread-title", "class"],
-  });
   const boot = () => {
     const state = window[stateName];
     if (state?.payload) {
@@ -4691,6 +5061,7 @@ RENDERER_HUD_SCRIPT = r"""
     } else {
       ensureRoot();
       syncPosition();
+      refreshLayoutObservers();
     }
   };
   if (document.body) {

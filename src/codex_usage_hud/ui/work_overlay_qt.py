@@ -43,6 +43,10 @@ WORK_OVERLAY_SHIMMER_STEP_PX = 3.5
 WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX = 58
 WORK_OVERLAY_SHIMMER_HIGHLIGHT = "#FFFFFF"
 WORK_OVERLAY_SHIMMER_PEAK_ALPHA = 245
+WORK_OVERLAY_SWITCH_PENDING_SLOW_SECONDS = 3.0
+WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS = 45.0
+WORK_OVERLAY_SWITCH_PENDING_TIMER_MS = 120
+WORK_OVERLAY_SWITCH_PENDING_MIN_WIDTH = 150
 WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
 WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS = 1.2
 DEFAULT_WORK_OVERLAY_THEME: dict[str, str] = {
@@ -111,6 +115,44 @@ OverlayRect = tuple[float, float, float, float]
 
 def _item_id(item: Mapping[str, object]) -> str:
     return str(item.get("id") or "").strip()
+
+
+def _switch_item_key(item: Mapping[str, object]) -> str:
+    session_id = str(item.get("sessionId") or item.get("id") or "").strip()
+    title = str(item.get("targetTitle") or item.get("title") or "").strip()
+    workdir = str(item.get("workdir") or "").strip()
+    if not session_id and not title and not workdir:
+        return ""
+    return json.dumps(
+        {
+            "sessionId": session_id,
+            "title": title,
+            "workdir": workdir,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _pending_workdir_window_rect(
+    anchor_x: int,
+    anchor_y: int,
+    anchor_width: int,
+    anchor_height: int,
+    *,
+    pending: bool,
+    screen_left: int = 0,
+) -> tuple[int, int, int, int]:
+    width = max(1, int(anchor_width))
+    height = max(1, int(anchor_height))
+    x = int(anchor_x)
+    y = int(anchor_y)
+    if not pending:
+        return x, y, width, height
+    right = x + width
+    width = max(width, WORK_OVERLAY_SWITCH_PENDING_MIN_WIDTH)
+    x = max(int(screen_left), right - width)
+    return x, y, width, height
 
 
 def _item_kind(item: Mapping[str, object]) -> str:
@@ -434,6 +476,55 @@ def _completed_badge_slot_moves(
         item_id: (old_rects[item_id], new_rects[item_id])
         for item_id in old_rects.keys() & new_rects.keys()
         if old_rects[item_id] != new_rects[item_id]
+    }
+
+
+def _completed_restore_staged_items(
+    old_items: Sequence[Mapping[str, object]],
+    item_id: str,
+) -> list[Mapping[str, object]]:
+    clicked: Mapping[str, object] | None = None
+    remaining_completed: list[Mapping[str, object]] = []
+    other_items: list[Mapping[str, object]] = []
+    for item in old_items:
+        if not _item_is_completed(item):
+            other_items.append(item)
+            continue
+        if _item_id(item) == item_id:
+            clicked = item
+        else:
+            remaining_completed.append(item)
+    staged = list(remaining_completed)
+    if clicked is not None:
+        staged.append(clicked)
+    staged.extend(other_items)
+    return staged
+
+
+def _completed_badge_restore_slot_moves(
+    old_items: Sequence[Mapping[str, object]],
+    new_items: Sequence[Mapping[str, object]],
+    item_id: str,
+    *,
+    layout_width: int = WORK_OVERLAY_WIDTH,
+) -> dict[str, tuple[OverlayRect, OverlayRect, OverlayRect]]:
+    old_rects = _completed_badge_slot_rects(old_items, layout_width=layout_width)
+    staged_rects = _completed_badge_slot_rects(
+        _completed_restore_staged_items(old_items, item_id),
+        layout_width=layout_width,
+    )
+    new_rects = _completed_badge_slot_rects(new_items, layout_width=layout_width)
+    return {
+        completed_id: (
+            old_rects[completed_id],
+            staged_rects[completed_id],
+            new_rects[completed_id],
+        )
+        for completed_id in old_rects.keys() & staged_rects.keys() & new_rects.keys()
+        if (
+            old_rects[completed_id] != staged_rects[completed_id]
+            or staged_rects[completed_id] != new_rects[completed_id]
+        )
     }
 
 
@@ -976,7 +1067,19 @@ def run_work_overlay_helper_qt(
     header_title_limit: int,
 ) -> int:
     try:
-        from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer
+        from PySide6.QtCore import (
+            QEasingCurve,
+            QParallelAnimationGroup,
+            QPoint,
+            QPointF,
+            Property,
+            QPropertyAnimation,
+            QRect,
+            QRectF,
+            QSize,
+            Qt,
+            QTimer,
+        )
         from PySide6.QtGui import (
             QColor,
             QCursor,
@@ -992,6 +1095,7 @@ def run_work_overlay_helper_qt(
         from PySide6.QtWidgets import (
             QApplication,
             QFrame,
+            QGraphicsOpacityEffect,
             QHBoxLayout,
             QLabel,
             QSizePolicy,
@@ -1291,17 +1395,30 @@ def run_work_overlay_helper_qt(
             self._activate_callback = activate_callback
             self._item: Mapping[str, object] = {}
             self._hover = False
+            self._pending = False
+            self._pending_started_at = 0.0
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setFocusPolicy(focus_policy.NoFocus)
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
-        def configure(self, item: Mapping[str, object], *, opacity: float) -> None:
+        def configure(
+            self,
+            item: Mapping[str, object],
+            *,
+            opacity: float,
+            pending: bool = False,
+            pending_started_at: float = 0.0,
+        ) -> None:
             self._item = dict(item)
+            self._pending = bool(pending)
+            self._pending_started_at = float(pending_started_at or 0.0)
             self.setWindowOpacity(opacity)
             tooltip = str(
                 item.get("targetTitle") or item.get("title") or item.get("workdir") or ""
             ).strip()
+            if self._pending:
+                tooltip = (tooltip + "\n" if tooltip else "") + "正在前往会话..."
             self.setToolTip(tooltip)
             self.update()
 
@@ -1334,8 +1451,31 @@ def run_work_overlay_helper_qt(
             fill = QColor(255, 255, 255, 1)
             if self._hover:
                 fill = QColor(156, 203, 255, 18)
+            if self._pending:
+                fill = QColor(156, 203, 255, 42)
             painter.setBrush(fill)
             painter.drawRoundedRect(self.rect(), 4, 4)
+            if not self._pending:
+                return
+            elapsed = max(0.0, time.monotonic() - self._pending_started_at)
+            side = min(16, max(10, self.height() - 8))
+            spinner_rect = QRectF(6, (self.height() - side) / 2, side, side)
+            spinner = QPen(QColor(156, 203, 255, 230), 2.0)
+            spinner.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(spinner)
+            start_angle = int((elapsed * 540.0) % 360.0 * 16)
+            painter.drawArc(spinner_rect, -start_angle, -270 * 16)
+            if self.width() < 86:
+                return
+            painter.setPen(QColor(220, 238, 255, 238))
+            painter.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
+            label = (
+                "仍在前往会话..."
+                if elapsed >= WORK_OVERLAY_SWITCH_PENDING_SLOW_SECONDS
+                else "正在前往会话..."
+            )
+            text_rect = self.rect().adjusted(side + 12, 0, -4, 0)
+            painter.drawText(text_rect, alignment.AlignVCenter | alignment.AlignLeft, label)
 
     class ClickHotspotWindow(QWidget):
         def __init__(
@@ -1715,6 +1855,11 @@ def run_work_overlay_helper_qt(
             self._progress = max(0.0, min(1.0, progress))
             self.update()
 
+        def progress(self) -> float:
+            return self._progress
+
+        progress_value = Property(float, progress, set_progress)
+
         def paintEvent(self, event: object) -> None:
             del event
             if self._transition_type not in ("card_to_completed", "completed_to_card"):
@@ -1844,13 +1989,20 @@ def run_work_overlay_helper_qt(
             self._transition_item_id = ""
             self._transition_started_at = 0.0
             self._transition_widget: TransitionOverlay | None = None
+            self._transition_animation_group: Any | None = None
+            self._transition_source_effect: QGraphicsOpacityEffect | None = None
+            self._transition_source_widget: QWidget | None = None
             self._transition_hidden_widget: QWidget | None = None
             self._completed_badge_moves: list[tuple[QWidget, int, int]] = []
             self._card_clearance_moves: list[tuple[QWidget, int]] = []
             self._completed_card_memory_rects: dict[str, OverlayRect] = {}
             self._settled_completed_intro_ids: set[str] = set()
+            self._switch_pending_key = ""
+            self._switch_pending_started_at = 0.0
             self._transition_timer = QTimer(self)
             self._transition_timer.timeout.connect(self._update_transition)
+            self._switch_pending_timer = QTimer(self)
+            self._switch_pending_timer.timeout.connect(self._tick_switch_pending)
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -1879,6 +2031,64 @@ def run_work_overlay_helper_qt(
             self._last_structure_signature = ""
             self.render_items(self._raw_items)
 
+        def _switch_pending_active_for_item(self, item: Mapping[str, object]) -> bool:
+            if not self._switch_pending_key or self._switch_pending_started_at <= 0.0:
+                return False
+            if _switch_item_key(item) != self._switch_pending_key:
+                return False
+            return (
+                time.monotonic() - self._switch_pending_started_at
+                <= WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS
+            )
+
+        def _set_switch_pending(self, item: Mapping[str, object]) -> None:
+            key = _switch_item_key(item)
+            if not key:
+                return
+            self._switch_pending_key = key
+            self._switch_pending_started_at = time.monotonic()
+            if not self._switch_pending_timer.isActive():
+                self._switch_pending_timer.start(WORK_OVERLAY_SWITCH_PENDING_TIMER_MS)
+            self.reposition_interactive_windows()
+
+        def _clear_switch_pending(self) -> None:
+            self._switch_pending_key = ""
+            self._switch_pending_started_at = 0.0
+            self._switch_pending_timer.stop()
+            for window in self._workdir_windows:
+                window.update()
+
+        def _sync_switch_pending(self, items: Sequence[Mapping[str, object]]) -> None:
+            if not self._switch_pending_key:
+                return
+            elapsed = time.monotonic() - self._switch_pending_started_at
+            if elapsed > WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS:
+                self._clear_switch_pending()
+                return
+            pending_items = [
+                item
+                for item in items
+                if _switch_item_key(item) == self._switch_pending_key
+            ]
+            if not pending_items:
+                self._clear_switch_pending()
+                return
+            if any(bool(item.get("current")) for item in pending_items):
+                self._clear_switch_pending()
+
+        def _tick_switch_pending(self) -> None:
+            if not self._switch_pending_key:
+                self._switch_pending_timer.stop()
+                return
+            if (
+                time.monotonic() - self._switch_pending_started_at
+                > WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS
+            ):
+                self._clear_switch_pending()
+                return
+            for window in self._workdir_windows:
+                window.update()
+
         def switch_item(self, item: Mapping[str, object]) -> None:
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
             target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
@@ -1899,6 +2109,7 @@ def run_work_overlay_helper_qt(
                     handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
             except OSError:
                 return
+            self._set_switch_pending(item)
 
         def hide_overlay(self) -> None:
             self.hide()
@@ -2373,6 +2584,54 @@ def run_work_overlay_helper_qt(
                         return widget
             return None
 
+        def _qrect_from_rectf(self, rect: QRectF) -> QRect:
+            return QRect(
+                int(round(rect.x())),
+                int(round(rect.y())),
+                max(1, int(round(rect.width()))),
+                max(1, int(round(rect.height()))),
+            )
+
+        def _badge_geometry_for_slot(
+            self,
+            widget: QWidget,
+            slot_rect: OverlayRect,
+        ) -> QRect:
+            return QRect(
+                int(round(slot_rect[0])),
+                widget.y(),
+                max(1, widget.width()),
+                max(1, widget.height()),
+            )
+
+        def _animate_widget_geometry(
+            self,
+            widget: QWidget,
+            target: QRect,
+            duration_ms: int,
+            easing: QEasingCurve.Type,
+        ) -> QPropertyAnimation:
+            animation = QPropertyAnimation(widget, b"geometry")
+            animation.setStartValue(widget.geometry())
+            animation.setEndValue(target)
+            animation.setDuration(duration_ms)
+            animation.setEasingCurve(easing)
+            return animation
+
+        def _animate_effect_opacity(
+            self,
+            effect: QGraphicsOpacityEffect,
+            start: float,
+            end: float,
+            duration_ms: int,
+        ) -> QPropertyAnimation:
+            animation = QPropertyAnimation(effect, b"opacity")
+            animation.setStartValue(float(start))
+            animation.setEndValue(float(end))
+            animation.setDuration(duration_ms)
+            animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
+            return animation
+
         def _prepare_completed_badge_moves(
             self,
             old_items: list[Mapping[str, object]],
@@ -2445,6 +2704,311 @@ def run_work_overlay_helper_qt(
             for window in [*self._close_windows, *self._completed_check_windows]:
                 window.hide()
 
+        def _transition_item_payload(
+            self,
+            item_id: str,
+            old_items: Sequence[Mapping[str, object]],
+            new_items: Sequence[Mapping[str, object]],
+        ) -> Mapping[str, object]:
+            for items in (new_items, old_items):
+                for item in items:
+                    if _item_id(item) == item_id:
+                        return item
+            return {}
+
+        def _add_noop_animation(
+            self,
+            group: QParallelAnimationGroup,
+            duration_ms: int,
+        ) -> None:
+            if self._transition_widget is None:
+                return
+            animation = QPropertyAnimation(self._transition_widget, b"progress_value")
+            animation.setStartValue(self._transition_widget.progress())
+            animation.setEndValue(self._transition_widget.progress())
+            animation.setDuration(max(1, int(duration_ms)))
+            group.addAnimation(animation)
+
+        def _start_completed_to_card_transition(
+            self,
+            item_id: str,
+            old_items: list[Mapping[str, object]],
+            new_items: list[Mapping[str, object]],
+        ) -> None:
+            self._transition_in_progress = True
+            self._transition_type = "completed_to_card"
+            self._transition_item_id = item_id
+            self._transition_started_at = time.monotonic()
+            self._transition_timer.stop()
+
+            source_widget = self._record_widget_for_kind(item_id, "completed")
+            source_rect = (
+                self._widget_shell_rect(source_widget)
+                if source_widget is not None
+                else QRectF(
+                    *_find_item_rect(
+                        old_items,
+                        item_id,
+                        "completed",
+                        layout_width=self._layout_width,
+                    )
+                )
+            )
+            staged_items = _completed_restore_staged_items(old_items, item_id)
+            rightmost_rect = QRectF(
+                *_find_item_rect(
+                    staged_items,
+                    item_id,
+                    "completed",
+                    layout_width=self._layout_width,
+                )
+            )
+            target_rect = QRectF(
+                *_find_item_rect(
+                    new_items,
+                    item_id,
+                    "card",
+                    layout_width=self._layout_width,
+                )
+            )
+            if rightmost_rect.width() <= 0 or rightmost_rect.height() <= 0:
+                rightmost_rect = QRectF(source_rect)
+            if target_rect.width() <= 0 or target_rect.height() <= 0:
+                target_rect = QRectF(source_rect)
+
+            required_height = _transition_required_height(
+                "completed_to_card",
+                (
+                    rightmost_rect.x(),
+                    rightmost_rect.y(),
+                    rightmost_rect.width(),
+                    rightmost_rect.height(),
+                ),
+                (
+                    target_rect.x(),
+                    target_rect.y(),
+                    target_rect.width(),
+                    target_rect.height(),
+                ),
+            )
+            self._shell.setMinimumHeight(max(self._shell.minimumHeight(), required_height))
+            self._sync_overlay_geometry()
+
+            item = self._transition_item_payload(item_id, old_items, new_items)
+            if self._transition_widget is None:
+                self._transition_widget = TransitionOverlay(
+                    self._shell,
+                    theme_tokens=self._theme_tokens,
+                )
+            else:
+                self._transition_widget.set_theme_tokens(self._theme_tokens)
+            self._transition_widget.setGeometry(self._shell.rect())
+            self._transition_widget.set_transition(
+                "completed_to_card",
+                rightmost_rect,
+                target_rect,
+                item,
+            )
+            self._transition_widget.hide()
+            self._transition_hidden_widget = source_widget
+            self._transition_source_widget = source_widget
+            self._transition_source_effect = None
+            if source_widget is not None:
+                effect = QGraphicsOpacityEffect(source_widget)
+                effect.setOpacity(1.0)
+                source_widget.setGraphicsEffect(effect)
+                self._transition_source_effect = effect
+
+            self._hide_transition_interactive_windows()
+            self._start_completed_to_card_phase1(
+                old_items,
+                new_items,
+                item_id,
+                source_widget,
+                rightmost_rect,
+                target_rect,
+            )
+
+        def _start_completed_to_card_phase1(
+            self,
+            old_items: list[Mapping[str, object]],
+            new_items: list[Mapping[str, object]],
+            item_id: str,
+            source_widget: QWidget | None,
+            rightmost_rect: QRectF,
+            target_rect: QRectF,
+        ) -> None:
+            phase1 = QParallelAnimationGroup(self)
+            if self._transition_source_effect is not None:
+                phase1.addAnimation(
+                    self._animate_effect_opacity(
+                        self._transition_source_effect,
+                        1.0,
+                        0.0,
+                        WORK_OVERLAY_TRANSITION_SHRINK_MS,
+                    )
+                )
+            moves = _completed_badge_restore_slot_moves(
+                old_items,
+                new_items,
+                item_id,
+                layout_width=self._layout_width,
+            )
+            for record in self._item_widgets:
+                if record.get("kind") != "completed":
+                    continue
+                completed_id = str(record.get("item_id") or "")
+                if completed_id == item_id or completed_id not in moves:
+                    continue
+                widget = record.get("badge")
+                if not isinstance(widget, QWidget):
+                    continue
+                _, staged_slot_rect, _ = moves[completed_id]
+                phase1.addAnimation(
+                    self._animate_widget_geometry(
+                        widget,
+                        self._badge_geometry_for_slot(widget, staged_slot_rect),
+                        WORK_OVERLAY_TRANSITION_SHRINK_MS,
+                        QEasingCurve.Type.InOutQuad,
+                    )
+                )
+            if phase1.animationCount() == 0:
+                self._add_noop_animation(phase1, WORK_OVERLAY_TRANSITION_SHRINK_MS)
+            phase1.finished.connect(
+                lambda: self._start_completed_to_card_phase2(
+                    old_items,
+                    new_items,
+                    item_id,
+                    source_widget,
+                    rightmost_rect,
+                    target_rect,
+                )
+            )
+            self._transition_animation_group = phase1
+            phase1.start()
+
+        def _start_completed_to_card_phase2(
+            self,
+            old_items: list[Mapping[str, object]],
+            new_items: list[Mapping[str, object]],
+            item_id: str,
+            source_widget: QWidget | None,
+            rightmost_rect: QRectF,
+            target_rect: QRectF,
+        ) -> None:
+            if source_widget is not None:
+                source_widget.hide()
+            if self._transition_widget is None:
+                self._end_transition()
+                return
+            self._transition_widget.set_transition(
+                "completed_to_card",
+                rightmost_rect,
+                target_rect,
+                self._transition_item_payload(item_id, old_items, new_items),
+            )
+            self._transition_widget.set_progress(0.0)
+            effect = QGraphicsOpacityEffect(self._transition_widget)
+            effect.setOpacity(0.0)
+            self._transition_widget.setGraphicsEffect(effect)
+            self._transition_widget.setGeometry(self._shell.rect())
+            self._transition_widget.show()
+            self._transition_widget.raise_()
+
+            phase2 = QParallelAnimationGroup(self)
+            phase2.addAnimation(
+                self._animate_effect_opacity(
+                    effect,
+                    0.0,
+                    1.0,
+                    WORK_OVERLAY_TRANSITION_PAUSE_MS,
+                )
+            )
+            phase2.finished.connect(
+                lambda: self._start_completed_to_card_phase3(
+                    old_items,
+                    new_items,
+                    item_id,
+                )
+            )
+            self._transition_animation_group = phase2
+            phase2.start()
+
+        def _start_completed_to_card_phase3(
+            self,
+            old_items: list[Mapping[str, object]],
+            new_items: list[Mapping[str, object]],
+            item_id: str,
+        ) -> None:
+            phase3 = QParallelAnimationGroup(self)
+            duration_ms = WORK_OVERLAY_TRANSITION_MOVE_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS
+            if self._transition_widget is not None:
+                self._transition_widget.setGraphicsEffect(None)
+                progress = QPropertyAnimation(self._transition_widget, b"progress_value")
+                progress.setStartValue(0.0)
+                progress.setEndValue(1.0)
+                progress.setDuration(duration_ms)
+                progress.setEasingCurve(QEasingCurve.Type.InOutCubic)
+                phase3.addAnimation(progress)
+
+            moves = _completed_badge_restore_slot_moves(
+                old_items,
+                new_items,
+                item_id,
+                layout_width=self._layout_width,
+            )
+            for record in self._item_widgets:
+                if record.get("kind") == "completed":
+                    completed_id = str(record.get("item_id") or "")
+                    if completed_id == item_id or completed_id not in moves:
+                        continue
+                    widget = record.get("badge")
+                    if not isinstance(widget, QWidget):
+                        continue
+                    _, _, target_slot_rect = moves[completed_id]
+                    phase3.addAnimation(
+                        self._animate_widget_geometry(
+                            widget,
+                            self._badge_geometry_for_slot(widget, target_slot_rect),
+                            duration_ms,
+                            QEasingCurve.Type.InOutQuad,
+                        )
+                    )
+                    continue
+
+                if record.get("kind") != "card":
+                    continue
+                card_id = str(record.get("item_id") or "")
+                if not card_id:
+                    continue
+                widget = record.get("card")
+                if not isinstance(widget, QWidget):
+                    continue
+                target = QRectF(
+                    *_find_item_rect(
+                        new_items,
+                        card_id,
+                        "card",
+                        layout_width=self._layout_width,
+                    )
+                )
+                if target.width() <= 0 or target.height() <= 0:
+                    continue
+                phase3.addAnimation(
+                    self._animate_widget_geometry(
+                        widget,
+                        self._qrect_from_rectf(target),
+                        duration_ms,
+                        QEasingCurve.Type.OutBack,
+                    )
+                )
+
+            if phase3.animationCount() == 0:
+                self._add_noop_animation(phase3, duration_ms)
+            phase3.finished.connect(self._end_transition)
+            self._transition_animation_group = phase3
+            phase3.start()
+
         def _start_transition(
             self,
             transition_type: str,
@@ -2452,6 +3016,9 @@ def run_work_overlay_helper_qt(
             old_items: list[Mapping[str, object]],
             new_items: list[Mapping[str, object]],
         ) -> None:
+            if transition_type == "completed_to_card":
+                self._start_completed_to_card_transition(item_id, old_items, new_items)
+                return
             self._transition_in_progress = True
             self._transition_type = transition_type
             self._transition_item_id = item_id
@@ -2577,7 +3144,16 @@ def run_work_overlay_helper_qt(
             self._completed_badge_moves.clear()
             self._card_clearance_moves.clear()
             self._transition_timer.stop()
+            if self._transition_animation_group is not None:
+                self._transition_animation_group.deleteLater()
+                self._transition_animation_group = None
+            if self._transition_source_widget is not None:
+                self._transition_source_widget.setGraphicsEffect(None)
+                self._transition_source_widget.show()
+            self._transition_source_widget = None
+            self._transition_source_effect = None
             if self._transition_widget is not None:
+                self._transition_widget.setGraphicsEffect(None)
                 self._transition_widget.setParent(None)
                 self._transition_widget.deleteLater()
                 self._transition_widget = None
@@ -2636,6 +3212,7 @@ def run_work_overlay_helper_qt(
                 self._dismissed_instances,
                 item_limit=self._item_limit,
             )
+            self._sync_switch_pending(visible_items)
             if not visible_items:
                 if self.isVisible():
                     now = time.time()
@@ -2755,12 +3332,24 @@ def run_work_overlay_helper_qt(
                     workdir_window.hide()
                     continue
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
-                workdir_window.configure(item, opacity=current_opacity)
+                pending = self._switch_pending_active_for_item(item)
+                workdir_window.configure(
+                    item,
+                    opacity=current_opacity,
+                    pending=pending,
+                    pending_started_at=self._switch_pending_started_at if pending else 0.0,
+                )
+                screen = app.primaryScreen()
+                geometry = screen.availableGeometry() if screen is not None else self.geometry()
                 workdir_window.setGeometry(
-                    anchor_top_left.x(),
-                    anchor_top_left.y(),
-                    max(1, anchor.width()),
-                    max(1, anchor.height()),
+                    *_pending_workdir_window_rect(
+                        anchor_top_left.x(),
+                        anchor_top_left.y(),
+                        anchor.width(),
+                        anchor.height(),
+                        pending=pending,
+                        screen_left=geometry.left(),
+                    )
                 )
                 workdir_window.show()
                 workdir_window.raise_()

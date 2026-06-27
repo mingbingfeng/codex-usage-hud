@@ -1111,6 +1111,12 @@ class WindowsPlatform(BasePlatform):
         except Exception:
             self._title_probe = None
 
+    def refresh_cdp_probe(self) -> None:
+        try:
+            self._cdp_probe = CodexCdpProbe()
+        except Exception:
+            self._cdp_probe = None
+
     def get_codex_data_dir(self) -> Path:
         appdata = os.environ.get("APPDATA")
         if appdata:
