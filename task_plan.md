@@ -14,7 +14,7 @@
 - 不在本轮处理 macOS 安装包和自动更新发行策略。
 
 ## 当前阶段
-阶段 8：PySide6 桌面会话气泡 optional helper 已恢复；自动化验证和 Windows 实机验证已完成，等待 macOS 安装 PySide6 后手动验证。
+阶段 7：在没有本地 Mac、且本轮不使用远程 Mac 的前提下推进 macOS 验证与发行策略。自动化验证、Windows 实机验证和 macOS CI smoke 已完成；macOS 桌面交互验证暂缓，当前以 CI smoke 作为代码级保障。
 
 ## 各阶段
 
@@ -80,6 +80,13 @@
 - [ ] macOS 手动：安装 PySide6 后运行 `codex-hud --daemon` 验证桌面气泡、点击切换和 renderer HUD 注入
 - **状态：** partial
 
+### 阶段 7：无本地 Mac 的推进方案
+- [x] 新增 macOS CI smoke：在 GitHub Actions `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`，跑 `python -m compileall -q src tests tools` 和任务相关 `pytest`
+- [x] 产出一份 macOS 人工验证 checklist，供未来真实 Mac 环境使用
+- [x] 决定本轮采用的无本地 Mac 验证路径：只保留 GitHub Actions macOS smoke，不使用远程 Mac
+- [x] 在 macOS 人工验证完成前，明确桌面气泡对 macOS 仍为“待实机确认”，不阻塞 Windows 路线继续推进
+- **状态：** complete
+
 ## 关键设计决策
 | 决策 | 理由 |
 |------|------|
@@ -96,6 +103,27 @@
 - `import codex_usage_hud.cli` 不加载 PySide6 / Qt overlay 模块。
 - README、README_EN、设置页文案都明确 `work_overlay_max_items` 是 PySide6 桌面级会话气泡数量。
 
+## 没有本地 Mac 的推荐方案
+1. GitHub Actions `macos-latest` smoke 回归
+   - 用途：先补齐“能装、能导入、能跑测试”的最低保障，不解决真实桌面置顶、点击切换、窗口权限等交互问题。
+   - 适合当前项目：仓库目前没有现成的 Actions workflow，最适合作为下一步先落地的低成本方案。
+   - 建议执行：新增一个只跑 macOS smoke 的 workflow，先覆盖 optional extra 安装、相关 pytest 和 `compileall`。
+2. AWS EC2 Mac 短租做一次人工验证
+   - 用途：需要真实 macOS 环境时，远程连上去跑 `codex-hud --daemon`，验证 overlay 置顶、dismiss、点击切换和 renderer HUD 注入。
+   - 适合当前项目：一次性验证最直接；做完即可沉淀录屏、截图和 checklist 结果。
+   - 代价：比 CI 贵，但比长期持有设备轻；适合“先验证再决定是否长期支持”。
+3. MacStadium 远程 Mac / 虚拟化
+   - 用途：如果后续要持续维护 macOS 桌面体验、安装包、签名或多轮人工回归，适合用作长期环境。
+   - 适合当前项目：只有当 macOS 会成为持续交付目标时才值得上；当前阶段可能偏重。
+4. Codemagic 托管 macOS CI/CD
+   - 用途：如果下一步重点转向打包、签名、发布而不是仅做一次 UI 验证，可以直接把 macOS 构建链放到托管平台。
+   - 适合当前项目：适合后续发行策略阶段，不是当前“补一个人工验证”的最短路径。
+
+## 推荐顺序
+1. 先做 GitHub Actions macOS smoke，尽快把“代码级兼容性”补齐。
+2. 本轮不做远程 Mac；macOS 桌面交互验证保持待实机确认状态。
+3. 如果后续确定要长期维护 macOS 安装包/签名，再评估真实 Mac 设备、MacStadium 或 Codemagic。
+
 ## 遇到的错误
 | 错误 | 尝试次数 | 解决方案 |
 |------|---------|---------|
@@ -103,6 +131,6 @@
 | README 精确补丁上下文不匹配 | 1 | 先读取局部上下文，再用更小补丁插入 FAQ |
 
 ## 下一步
-1. 在 macOS 源码环境安装 optional extra：`python -m pip install -e ".[desktop-overlay]"`
-2. 运行 `codex-hud --daemon`，验证方形运行气泡、完成态圆气泡、dismiss、点击切换会话和 renderer HUD 注入。
-3. macOS 验证通过后，将阶段 6 标记 complete；再单独规划发行策略，决定 Windows/macOS 安装包是否内置 PySide6。
+1. 保留并观察 GitHub Actions macOS smoke 结果，把它作为当前 macOS 代码级回归入口。
+2. 在文档和发布说明里继续明确：macOS 桌面气泡路径目前只有 CI smoke，真实桌面交互仍待未来实机确认。
+3. 之后单独规划发行策略，决定 Windows/macOS 安装包是否内置 PySide6，以及何时再引入真实 Mac 验证。

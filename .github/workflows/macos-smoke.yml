@@ -1,0 +1,67 @@
+name: macOS Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/macos-smoke.yml"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/**"
+      - "tools/**"
+  pull_request:
+    paths:
+      - ".github/workflows/macos-smoke.yml"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/**"
+      - "tools/**"
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install -e ".[desktop-overlay]"
+
+      - name: Verify lazy CLI import
+        run: |
+          python - <<'PY'
+          import sys
+          import codex_usage_hud.cli  # noqa: F401
+
+          imported = set(sys.modules)
+          assert "PySide6.QtCore" not in imported, "CLI import should not eagerly import QtCore"
+          assert "codex_usage_hud.ui.work_overlay_qt" not in imported, "CLI import should stay lazy"
+          print("lazy cli import ok")
+          PY
+
+      - name: Compile sources
+        run: python -m compileall -q src tests tools
+
+      - name: Run macOS smoke tests
+        run: |
+          python -m pytest \
+            tests/test_config.py \
+            tests/test_renderer_hud.py \
+            tests/test_build_exe.py \
+            tests/test_platforms.py \
+            tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable \
+            tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available \
+            tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep \
+            tests/test_ui.py::DaemonLifecycleTests::test_cli_import_does_not_eagerly_import_qt_hud \
+            tests/test_ui.py::DaemonLifecycleTests::test_launch_codex_app_debugger_uses_macos_open_args

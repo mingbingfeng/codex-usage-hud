@@ -140,6 +140,11 @@ python tools/build_exe.py
 python tools/build_installer.py
 ```
 
+macOS 无本机验证路径：
+
+- GitHub Actions `macOS Smoke` workflow 会在 `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`，并执行 lazy import、`compileall` 与任务相关 pytest。
+- 这条 workflow 只覆盖代码级 smoke，不替代真实桌面交互验证；当前轮次不使用远程 Mac，因此 macOS 桌面气泡仍属于“待实机确认”。人工验证 checklist 见 [docs/MACOS_VALIDATION.md](docs/MACOS_VALIDATION.md)。
+
 主要结构：
 
 ```text

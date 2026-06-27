@@ -79,5 +79,28 @@ codex-hud --daemon
 | 我学到了什么？ | PySide6 可以作为 optional helper 恢复，不需要破坏默认 CLI 导入图和 renderer-only 主路径 |
 | 我做了什么？ | 恢复 DesktopWorkOverlay、添加 optional extra、更新设置/文档/测试并记录验证结果 |
 
+## 会话：2026-06-27
+
+### 本次推进目标
+在没有本地 Mac 的前提下继续推进 `task_plan.md`，先补 macOS CI smoke，再给出后续人工验证路径。
+
+### 本次已完成
+- **状态：** macOS CI smoke workflow 已补齐；当前轮次不使用远程 Mac，真实 macOS 桌面交互验证留待未来真实设备执行。
+- 更新 `task_plan.md`：
+  - 当前阶段改为“无本地 Mac 的推进方案”。
+  - 新增“没有本地 Mac 的推荐方案”和推荐顺序。
+  - 将下一步改为“保留 GitHub Actions macOS smoke，macOS 桌面交互待未来真实设备确认”。
+- 新增 GitHub Actions workflow：
+  - `.github/workflows/macos-smoke.yml`
+  - 在 `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`
+  - 验证 lazy CLI import
+  - 运行 `python -m compileall -q src tests tools`
+  - 运行与本任务相关的 pytest 集合
+
+### 剩余工作
+- 当前轮次不使用远程 Mac。
+- 保留 macOS checklist 供未来真实 Mac 环境使用。
+- 在文档和后续发布说明里继续明确：macOS 目前只有 CI smoke，没有桌面交互实机确认。
+
 ---
 *每个阶段完成后或遇到错误时更新此文件。*

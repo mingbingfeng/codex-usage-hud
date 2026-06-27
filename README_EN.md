@@ -141,6 +141,11 @@ python tools/build_exe.py
 python tools/build_installer.py
 ```
 
+macOS without a local device:
+
+- The GitHub Actions `macOS Smoke` workflow runs on `macos-latest` and covers `codex-usage-hud[desktop-overlay]` installation, lazy imports, `compileall`, and task-related pytest coverage.
+- This workflow is code-level smoke coverage only, not a substitute for real desktop interaction validation; the current round does not use a remote Mac, so macOS desktop bubbles are still pending real-device confirmation. See [docs/MACOS_VALIDATION.md](docs/MACOS_VALIDATION.md) for the parked manual checklist.
+
 Project structure:
 
 ```text

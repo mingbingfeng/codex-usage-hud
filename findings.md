@@ -20,6 +20,8 @@
 - `installDesktopOverlay` 会后台启动 `pip install PySide6>=6.8`；安装完成后用户可点“已安装，立即启用”重新探测。
 - `enableDesktopOverlay` 会重新探测 PySide6、清理 overlay 可用性缓存，并在当前配置数量为 0 时恢复默认可用数量。
 - README / README_EN 已说明 `codex-usage-hud[desktop-overlay]` 和 `work_overlay_max_items` 的含义。
+- 仓库已补 `.github/workflows/macos-smoke.yml`：在 `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`，验证 lazy CLI import、`compileall` 和任务相关 pytest。
+- 当前轮次已决定不使用远程 Mac；macOS 路线暂时只保留 CI smoke，桌面交互实机验证延后。
 
 ## 导入图事实
 - `import codex_usage_hud.cli` 不加载：
@@ -71,7 +73,8 @@
 ## 剩余风险
 | 风险 | 影响 | 当前处理 |
 |------|------|----------|
-| 尚未在真实 macOS 验证 PySide6 overlay 置顶和点击切换 | macOS 窗口层级/权限可能与 Windows 不同 | 已保留 PySide6 helper 路径；需实机验证 |
+| 尚未在真实 macOS 验证 PySide6 overlay 置顶和点击切换 | macOS 窗口层级/权限可能与 Windows 不同 | 当前轮次不做远程 Mac；已保留 checklist 和 helper 路径，等待未来真实设备验证 |
+| 当前 macOS CI 只能覆盖安装/导入/测试，不能替代真实桌面交互验证 | overlay 置顶、dismiss、点击切换仍可能只在实机暴露问题 | 已新增 `macos-smoke.yml`，当前轮次先停在 CI smoke，等待未来真实设备补齐 |
 | 默认 Windows 安装包不含 PySide6 | 安装包用户默认看不到桌面气泡 | 当前按 optional extra 处理，是否内置 PySide6 是后续发行策略 |
 | macOS 自动更新仍不是完整发行方案 | macOS 用户无法复用 Windows installer 语义 | 保留为后续平台化任务 |
 
