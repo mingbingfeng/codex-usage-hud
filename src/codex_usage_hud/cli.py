@@ -1073,11 +1073,13 @@ def _attach_cli_logger_to_daemon_log() -> None:
     ]
     if not handlers:
         return
-    for handler in handlers:
-        if handler not in _LOGGER.handlers:
-            _LOGGER.addHandler(handler)
-    _LOGGER.setLevel(daemon_logger.level or logging.INFO)
-    _LOGGER.propagate = False
+    for logger_name in ("codex_usage_hud.cli", "codex_usage_hud.file_watcher"):
+        logger = logging.getLogger(logger_name)
+        for handler in handlers:
+            if handler not in logger.handlers:
+                logger.addHandler(handler)
+        logger.setLevel(daemon_logger.level or logging.INFO)
+        logger.propagate = False
     _cli_daemon_logging_attached = True
 
 
@@ -2001,6 +2003,57 @@ def _renderer_runtime_signature(
     )
 
 
+def _renderer_budget_signature(context: "RuntimeContext") -> tuple[object, ...]:
+    try:
+        settings_mtime = context.settings_store.mtime()
+    except Exception:
+        settings_mtime = None
+    try:
+        day_start, week_start = current_budget_windows(context.user_config)
+        day_key = day_start.isoformat()
+        week_key = week_start.isoformat()
+    except Exception:
+        day_key = ""
+        week_key = ""
+    return (
+        _session_path_key(getattr(context, "sessions_root", None)),
+        settings_mtime,
+        day_key,
+        week_key,
+    )
+
+
+def _paths_only_current_session(paths: set[Path], session_path: Path | None) -> bool:
+    if not paths or session_path is None:
+        return False
+    current_key = _session_path_key(session_path)
+    if not current_key:
+        return False
+    return all(_session_path_key(path) == current_key for path in paths)
+
+
+def _renderer_should_refresh_budget_aggregate(
+    *,
+    latest_snapshot: ParsedSession | None,
+    latest_budget_signature: tuple[object, ...] | None,
+    budget_signature: tuple[object, ...],
+    file_change_reasons: set[str],
+    file_change_paths: set[Path],
+) -> bool:
+    if latest_snapshot is None:
+        return True
+    if budget_signature != latest_budget_signature:
+        return True
+    if "settings" in file_change_reasons:
+        return True
+    if "sessions-root" not in file_change_reasons:
+        return False
+    return not _paths_only_current_session(
+        file_change_paths,
+        latest_snapshot.session_path,
+    )
+
+
 def _renderer_file_watch_specs(
     context: "RuntimeContext",
     session_path: Path | None,
@@ -2061,11 +2114,16 @@ class _RendererFileEventSource:
         )
 
     def take_reasons(self) -> set[str]:
+        reasons, _paths = self.take_changes()
+        return reasons
+
+    def take_changes(self) -> tuple[set[str], set[Path]]:
         with self._lock:
             reasons = set(self._reasons)
+            paths = set(self._paths)
             self._reasons.clear()
             self._paths.clear()
-        return reasons
+        return reasons, paths
 
     def close(self) -> None:
         self._watcher.close()
@@ -2925,12 +2983,18 @@ class UsageSummaryCache:
         sessions_root: Path,
         day_start: datetime,
         week_start: datetime,
+        *,
+        allow_stale: bool = False,
+        force_rescan: bool = False,
     ) -> tuple[UsageSummary, UsageSummary]:
         now = time.monotonic()
         scan_roots = self._scan_roots(sessions_root)
         scan_key = (scan_roots, day_start, week_start)
+        if allow_stale and self._last_scan_key == scan_key:
+            return replace(self._last_day_total), replace(self._last_week_total)
         if (
-            self._last_scan_key == scan_key
+            not force_rescan
+            and self._last_scan_key == scan_key
             and now - self._last_scan_at < self._min_rescan_seconds
         ):
             return replace(self._last_day_total), replace(self._last_week_total)
@@ -4095,7 +4159,11 @@ def _apply_visible_app_error(snapshot: ParsedSession, message: str) -> None:
         snapshot.request.started_at = snapshot.task_started_at
 
 
-def build_snapshot(context: RuntimeContext) -> ParsedSession:
+def build_snapshot(
+    context: RuntimeContext,
+    *,
+    refresh_budget_aggregate: bool | None = None,
+) -> ParsedSession:
     context.reload_user_config()
     session_path, selection_source = context.session_resolver.resolve()
 
@@ -4145,6 +4213,8 @@ def build_snapshot(context: RuntimeContext) -> ParsedSession:
         context.sessions_root,
         day_start,
         week_start,
+        allow_stale=refresh_budget_aggregate is False,
+        force_rescan=refresh_budget_aggregate is True,
     )
     week_adjustment_usd = max(0.0, float(context.user_config.weekly_adjustment_usd))
     snapshot.today_tokens = today_total.tokens
@@ -4597,9 +4667,17 @@ def run_renderer_hud_session(
             )
             bridge_url = bridge.start()
 
-            def snapshot_or_error() -> ParsedSession:
+            def snapshot_or_error(
+                *,
+                refresh_budget_aggregate: bool | None = None,
+            ) -> ParsedSession:
                 try:
-                    return build_snapshot(context)
+                    if refresh_budget_aggregate is None:
+                        return build_snapshot(context)
+                    return build_snapshot(
+                        context,
+                        refresh_budget_aggregate=refresh_budget_aggregate,
+                    )
                 except Exception as exc:
                     return ParsedSession(status="error", error=str(exc))
 
@@ -4809,6 +4887,7 @@ def run_renderer_hud_session(
                 next_daemon_check_at = 0.0
                 latest_snapshot: ParsedSession | None = None
                 latest_signature: tuple[object, ...] | None = None
+                latest_budget_signature: tuple[object, ...] | None = None
                 while True:
                     started = time.monotonic()
                     if (
@@ -4829,7 +4908,7 @@ def run_renderer_hud_session(
                     bridge_wakeup = command_refresh_requested.is_set()
                     if bridge_wakeup:
                         command_refresh_requested.clear()
-                    file_change_reasons = file_events.take_reasons()
+                    file_change_reasons, file_change_paths = file_events.take_changes()
                     if "session-map" in file_change_reasons:
                         _invalidate_active_session_mapping_cache(context)
                     command = take_renderer_bridge_command()
@@ -4884,9 +4963,20 @@ def run_renderer_hud_session(
                         or signature != latest_signature
                     )
                     if refresh_required:
-                        snapshot = snapshot_or_error()
+                        budget_signature = _renderer_budget_signature(context)
+                        refresh_budget_aggregate = _renderer_should_refresh_budget_aggregate(
+                            latest_snapshot=latest_snapshot,
+                            latest_budget_signature=latest_budget_signature,
+                            budget_signature=budget_signature,
+                            file_change_reasons=file_change_reasons,
+                            file_change_paths=file_change_paths,
+                        )
+                        snapshot = snapshot_or_error(
+                            refresh_budget_aggregate=refresh_budget_aggregate,
+                        )
                         latest_snapshot = snapshot
                         latest_signature = signature
+                        latest_budget_signature = _renderer_budget_signature(context)
                         work_overlay.configure(
                             item_limit=_work_overlay_item_limit_for_context(context),
                         )
@@ -4970,8 +5060,7 @@ def run_renderer_hud_session(
                         client.last_error,
                     ):
                         delay = max(delay, min(5.0, failures * 0.5))
-                    if command_refresh_requested.wait(delay):
-                        command_refresh_requested.clear()
+                    command_refresh_requested.wait(delay)
             except KeyboardInterrupt:
                 local_loading.close()
                 return 130

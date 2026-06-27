@@ -532,6 +532,38 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(second.tokens, 28)
         self.assertEqual(parser.loads, 1)
 
+    def test_usage_summary_cache_can_reuse_or_force_aggregate_scan(self) -> None:
+        parser = _FakeUsageParser()
+        cache = UsageSummaryCache(  # type: ignore[arg-type]
+            parser,
+            min_rescan_seconds=60.0,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            path.write_text("{}", encoding="utf-8")
+            day_start = datetime(2026, 5, 28, 10, 0)
+            week_start = datetime(2026, 5, 25, 10, 0)
+
+            first, _ = cache.summarize(Path(temp_dir), day_start, week_start)
+            path.write_text('{"later": true}', encoding="utf-8")
+            stale, _ = cache.summarize(
+                Path(temp_dir),
+                day_start,
+                week_start,
+                allow_stale=True,
+            )
+            forced, _ = cache.summarize(
+                Path(temp_dir),
+                day_start,
+                week_start,
+                force_rescan=True,
+            )
+
+        self.assertEqual(first.tokens, 28)
+        self.assertEqual(stale.tokens, 28)
+        self.assertEqual(forced.tokens, 28)
+        self.assertEqual(parser.loads, 2)
+
     def test_usage_summary_cache_includes_archived_sessions_sibling(self) -> None:
         parser = _FakeUsageParser()
         cache = UsageSummaryCache(parser)  # type: ignore[arg-type]
@@ -550,6 +582,60 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(day_total.tokens, 56)
         self.assertEqual(week_total.tokens, 50)
         self.assertEqual(parser.loads, 2)
+
+    def test_renderer_current_session_path_filter_matches_only_current_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "sessions" / "current.jsonl"
+            other = root / "sessions" / "other.jsonl"
+            current.parent.mkdir()
+            current.write_text("{}\n", encoding="utf-8")
+            other.write_text("{}\n", encoding="utf-8")
+
+            self.assertTrue(cli_module._paths_only_current_session({current}, current))
+            self.assertFalse(
+                cli_module._paths_only_current_session({current, other}, current)
+            )
+            self.assertFalse(cli_module._paths_only_current_session(set(), current))
+
+    def test_renderer_budget_aggregate_skips_current_session_only_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current = Path(temp_dir) / "sessions" / "current.jsonl"
+            current.parent.mkdir()
+            current.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(session_path=current)
+            signature = ("sessions", 1, "day", "week")
+
+            self.assertFalse(
+                cli_module._renderer_should_refresh_budget_aggregate(
+                    latest_snapshot=snapshot,
+                    latest_budget_signature=signature,
+                    budget_signature=signature,
+                    file_change_reasons={"session", "sessions-root"},
+                    file_change_paths={current},
+                )
+            )
+
+    def test_renderer_budget_aggregate_refreshes_for_non_current_session_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            current = root / "current.jsonl"
+            other = root / "other.jsonl"
+            root.mkdir()
+            current.write_text("{}\n", encoding="utf-8")
+            other.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(session_path=current)
+            signature = ("sessions", 1, "day", "week")
+
+            self.assertTrue(
+                cli_module._renderer_should_refresh_budget_aggregate(
+                    latest_snapshot=snapshot,
+                    latest_budget_signature=signature,
+                    budget_signature=signature,
+                    file_change_reasons={"sessions-root"},
+                    file_change_paths={other},
+                )
+            )
 
     def test_week_before_today_breakdown_subtracts_current_daily_window(self) -> None:
         week = UsageSummary(tokens=1190, input_tokens=800, cost_usd=119.142012)
@@ -9380,7 +9466,10 @@ class DaemonLifecycleTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 130)
-        build_snapshot.assert_called_once_with(fake_context)
+        build_snapshot.assert_called_once_with(
+            fake_context,
+            refresh_budget_aggregate=True,
+        )
         fake_client.update.assert_called_once()
         self.assertEqual(fake_work_overlay.update.call_count, 1)
         fake_work_overlay.keep_alive.assert_called_once()
@@ -9549,6 +9638,105 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_bridge.close.assert_called_once()
         fake_update_manager.close.assert_called_once()
         fake_context.close.assert_called_once()
+
+    def test_renderer_loop_keeps_wakeup_for_active_session_event_during_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            active_tracker = SimpleNamespace(
+                observe_conversation_ref=MagicMock(return_value=True)
+            )
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                active_session_tracker=active_tracker,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            callbacks: dict[str, object] = {}
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["active"] = kwargs["active_session_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            delay_calls = 0
+
+            def delay_then_wakeup(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["active"]
+                callback({"sessionId": "thread-2", "title": "Other Thread"})
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_wakeup,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 2)
+        self.assertEqual(fake_client.update.call_count, 2)
+        active_tracker.observe_conversation_ref.assert_called_once_with(
+            session_id="thread-2",
+            title="Other Thread",
+            source="renderer",
+        )
 
     def test_renderer_runtime_failures_retry_without_tk_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

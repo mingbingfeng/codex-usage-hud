@@ -39,6 +39,24 @@ class _FailingListener:
         raise RuntimeError("process api denied")
 
 
+class _FakeExitMonitor:
+    def __init__(self, states: list[bool | None]) -> None:
+        self.states = list(states)
+        self.calls = 0
+        self.closed = False
+
+    def is_running(self) -> bool | None:
+        self.calls += 1
+        if not self.states:
+            return None
+        if len(self.states) == 1:
+            return self.states[0]
+        return self.states.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class DaemonProcessMatchingTests(unittest.TestCase):
     def test_codex_process_names_are_detected(self) -> None:
         self.assertTrue(is_codex_client_process("Codex.exe"))
@@ -88,6 +106,42 @@ class DaemonStateMachineTests(unittest.TestCase):
 
         self.assertFalse(manager.codex_is_running())
 
+        self.assertEqual(manager.state, DaemonState.EXITING)
+
+    def test_codex_is_running_prefers_exit_monitor_over_full_snapshot(self) -> None:
+        listener = _FakeListener([ProcessSnapshot(found=True, pids=(123,))])
+        monitor = _FakeExitMonitor([True])
+        manager = CodexDaemonManager(
+            listener=listener,
+            poll_ms=1,
+            exit_monitor_factory=lambda snapshot: monitor,
+        )
+        manager.snapshot()
+        calls_after_initial_snapshot = listener.calls
+
+        self.assertTrue(manager.codex_is_running())
+
+        self.assertEqual(listener.calls, calls_after_initial_snapshot)
+        self.assertEqual(monitor.calls, 1)
+
+    def test_codex_is_running_rescans_after_exit_monitor_reports_exit(self) -> None:
+        listener = _FakeListener(
+            [
+                ProcessSnapshot(found=True, pids=(123,)),
+                ProcessSnapshot(found=False),
+            ]
+        )
+        monitor = _FakeExitMonitor([False])
+        manager = CodexDaemonManager(
+            listener=listener,
+            poll_ms=1,
+            exit_monitor_factory=lambda snapshot: monitor,
+        )
+        manager.snapshot()
+
+        self.assertFalse(manager.codex_is_running())
+
+        self.assertTrue(monitor.closed)
         self.assertEqual(manager.state, DaemonState.EXITING)
 
 

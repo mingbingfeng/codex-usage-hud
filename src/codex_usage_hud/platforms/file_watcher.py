@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import ctypes
+import logging
 import os
 from pathlib import Path
 import select
@@ -15,6 +16,8 @@ from typing import Any
 
 
 FileChangeCallback = Callable[[set[str], set[Path]], None]
+_LOGGER = logging.getLogger("codex_usage_hud.file_watcher")
+_LOGGER.addHandler(logging.NullHandler())
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,13 @@ class FileChangeWatcher:
             self._workers, self._event_driven = self._build_workers_locked(
                 self._specs,
                 self._stop_event,
+            )
+            _LOGGER.info(
+                "file_watcher_started mode=%s workers=%s specs=%s reasons=%s",
+                "native" if self._event_driven else "polling",
+                ",".join(type(worker).__name__ for worker in self._workers),
+                len(self._specs),
+                ",".join(sorted({spec.reason for spec in self._specs})),
             )
             for worker in self._workers:
                 worker.start()
@@ -184,7 +194,10 @@ class _PollingWorker(_ThreadWorker):
                 if previous.get(reason) != token
             }
             if reasons:
-                self._callback(reasons, set())
+                self._callback(
+                    reasons,
+                    _changed_paths_from_poll_signatures(previous, signature),
+                )
 
 
 class _WindowsDirectoryWorker(_ThreadWorker):
@@ -374,6 +387,39 @@ def _poll_signature(specs: tuple[FileWatchSpec, ...]) -> dict[str, tuple[object,
     for spec in specs:
         tokens.setdefault(spec.reason, []).append(_poll_token_for_spec(spec))
     return {reason: tuple(value) for reason, value in tokens.items()}
+
+
+def _iter_stat_tokens(value: object) -> Iterable[tuple[str, int, int]]:
+    if (
+        isinstance(value, tuple)
+        and len(value) == 3
+        and isinstance(value[0], str)
+        and isinstance(value[1], int)
+        and isinstance(value[2], int)
+    ):
+        yield value
+        return
+    if isinstance(value, tuple):
+        for item in value:
+            yield from _iter_stat_tokens(item)
+
+
+def _stat_token_map(value: object) -> dict[str, tuple[str, int, int]]:
+    return {token[0]: token for token in _iter_stat_tokens(value)}
+
+
+def _changed_paths_from_poll_signatures(
+    previous: dict[str, tuple[object, ...]],
+    current: dict[str, tuple[object, ...]],
+) -> set[Path]:
+    changed: set[Path] = set()
+    for reason in set(previous) | set(current):
+        previous_tokens = _stat_token_map(previous.get(reason, ()))
+        current_tokens = _stat_token_map(current.get(reason, ()))
+        for key in set(previous_tokens) | set(current_tokens):
+            if previous_tokens.get(key) != current_tokens.get(key):
+                changed.add(Path(key))
+    return changed
 
 
 def _poll_token_for_spec(spec: FileWatchSpec) -> object:

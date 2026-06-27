@@ -30,45 +30,52 @@ class FileChangeWatcherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "hud_settings.json"
             path.write_text("{}", encoding="utf-8")
-            events: list[set[str]] = []
+            events: list[tuple[set[str], set[Path]]] = []
             watcher = FileChangeWatcher(
-                lambda reasons, paths: events.append(set(reasons)),
+                lambda reasons, paths: events.append((set(reasons), set(paths))),
                 fallback_poll_seconds=0.05,
                 force_polling=True,
             )
             try:
                 watcher.update([FileWatchSpec.file(path, "settings")])
                 path.write_text('{"daily_budget_usd": 1}', encoding="utf-8")
-                _wait_for(lambda: any("settings" in event for event in events))
+                _wait_for(
+                    lambda: any("settings" in reasons for reasons, _paths in events)
+                )
             finally:
                 watcher.close()
+        self.assertTrue(any(path in paths for _reasons, paths in events))
 
     def test_polling_fallback_treats_sqlite_wal_as_mapping_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             db_path = root / "state_5.sqlite"
             db_path.write_text("", encoding="utf-8")
-            events: list[set[str]] = []
+            events: list[tuple[set[str], set[Path]]] = []
             watcher = FileChangeWatcher(
-                lambda reasons, paths: events.append(set(reasons)),
+                lambda reasons, paths: events.append((set(reasons), set(paths))),
                 fallback_poll_seconds=0.05,
                 force_polling=True,
             )
             try:
                 watcher.update([FileWatchSpec.file(db_path, "session-map")])
-                (root / "state_5.sqlite-wal").write_text("changed", encoding="utf-8")
-                _wait_for(lambda: any("session-map" in event for event in events))
+                wal_path = root / "state_5.sqlite-wal"
+                wal_path.write_text("changed", encoding="utf-8")
+                _wait_for(
+                    lambda: any("session-map" in reasons for reasons, _paths in events)
+                )
             finally:
                 watcher.close()
+        self.assertTrue(any(wal_path in paths for _reasons, paths in events))
 
     def test_polling_fallback_emits_tree_reason_for_nested_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "sessions"
             nested = root / "2026" / "06"
             nested.mkdir(parents=True)
-            events: list[set[str]] = []
+            events: list[tuple[set[str], set[Path]]] = []
             watcher = FileChangeWatcher(
-                lambda reasons, paths: events.append(set(reasons)),
+                lambda reasons, paths: events.append((set(reasons), set(paths))),
                 fallback_poll_seconds=0.05,
                 force_polling=True,
             )
@@ -76,10 +83,16 @@ class FileChangeWatcherTests(unittest.TestCase):
                 watcher.update(
                     [FileWatchSpec.tree(root, "sessions-root", suffixes=(".jsonl",))]
                 )
-                (nested / "session.jsonl").write_text("{}\n", encoding="utf-8")
-                _wait_for(lambda: any("sessions-root" in event for event in events))
+                session_path = nested / "session.jsonl"
+                session_path.write_text("{}\n", encoding="utf-8")
+                _wait_for(
+                    lambda: any(
+                        "sessions-root" in reasons for reasons, _paths in events
+                    )
+                )
             finally:
                 watcher.close()
+        self.assertTrue(any(session_path in paths for _reasons, paths in events))
 
 
 if __name__ == "__main__":
