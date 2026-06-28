@@ -53,6 +53,8 @@ WORK_OVERLAY_SWITCH_PENDING_SLOW_SECONDS = 3.0
 WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS = 45.0
 WORK_OVERLAY_SWITCH_PENDING_TIMER_MS = 120
 WORK_OVERLAY_SWITCH_PENDING_MIN_WIDTH = 150
+WORK_OVERLAY_COMPLETED_PENDING_LAUNCH_SECONDS = 0.45
+WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS = 0.85
 WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
 WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS = 1.2
 DEFAULT_WORK_OVERLAY_THEME: dict[str, str] = {
@@ -497,6 +499,41 @@ def _completed_pending_particle_state(
     )
     link_pulse = _clamp01((math.sin(elapsed * 9.0 + index * 2.2) - 0.35) / 0.65)
     return angle, radial_jitter, link_pulse
+
+
+def _completed_pending_launch_progress(elapsed_seconds: float) -> float:
+    return _clamp01(
+        float(elapsed_seconds) / max(0.001, WORK_OVERLAY_COMPLETED_PENDING_LAUNCH_SECONDS)
+    )
+
+
+def _completed_pending_launch_scale(elapsed_seconds: float) -> float:
+    progress = _completed_pending_launch_progress(elapsed_seconds)
+    if progress >= 1.0:
+        return 1.0
+    if progress < 0.52:
+        return 1.0 - 0.032 * math.sin(math.pi * progress / 0.52)
+    return 1.0 + 0.012 * math.sin(math.pi * (progress - 0.52) / 0.48)
+
+
+def _completed_pending_finish_progress(elapsed_seconds: float) -> float:
+    return _clamp01(
+        float(elapsed_seconds) / max(0.001, WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS)
+    )
+
+
+def _completed_pending_caption_opacity(
+    pending_elapsed_seconds: float,
+    *,
+    completed: bool,
+    finish_elapsed_seconds: float = 0.0,
+) -> float:
+    if completed:
+        progress = _completed_pending_finish_progress(finish_elapsed_seconds)
+        if progress <= 0.35:
+            return 1.0
+        return 1.0 - _ease_out_cubic((progress - 0.35) / 0.65)
+    return _clamp01(float(pending_elapsed_seconds) / 0.16)
 
 
 def _workdir_link_pending_for_item(
@@ -1863,6 +1900,8 @@ def run_work_overlay_helper_qt(
             self._progress = 0.0 if animate_intro else 1.0
             self._switch_pending = False
             self._switch_pending_started_at = 0.0
+            self._switch_pending_completed = False
+            self._switch_pending_completed_at = 0.0
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._advance)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -1890,16 +1929,26 @@ def run_work_overlay_helper_qt(
             self,
             pending: bool,
             started_at: float,
+            *,
+            completed: bool = False,
+            completed_at: float = 0.0,
         ) -> None:
             pending = bool(pending)
             started_at = float(started_at or 0.0)
+            completed = bool(completed)
+            completed_at = float(completed_at or 0.0)
             if self._switch_pending == pending and (
                 not pending
                 or abs(self._switch_pending_started_at - started_at) < 0.001
+            ) and self._switch_pending_completed == completed and (
+                not completed
+                or abs(self._switch_pending_completed_at - completed_at) < 0.001
             ):
                 return
             self._switch_pending = pending
             self._switch_pending_started_at = started_at if pending else 0.0
+            self._switch_pending_completed = completed if pending else False
+            self._switch_pending_completed_at = completed_at if pending and completed else 0.0
             if pending and not self._timer.isActive():
                 self._timer.start(24)
             elif not pending and self._progress >= 1.0:
@@ -1939,6 +1988,21 @@ def run_work_overlay_helper_qt(
             eased = 1.0 - pow(1.0 - max(0.0, min(1.0, self._progress)), 3)
             palette = _completed_badge_palette(self._theme_tokens)
             final_size = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
+            pending_elapsed = (
+                max(0.0, time.monotonic() - self._switch_pending_started_at)
+                if self._switch_pending
+                else 0.0
+            )
+            launch_scale = (
+                _completed_pending_launch_scale(pending_elapsed)
+                if not self._switch_pending_completed
+                else 1.0
+            )
+            if abs(launch_scale - 1.0) > 0.0001:
+                launch_center = QPointF(final_size / 2.0, final_size / 2.0)
+                painter.translate(launch_center)
+                painter.scale(launch_scale, launch_scale)
+                painter.translate(-launch_center)
             start_height = 118.0
             start_width = float(WORK_OVERLAY_COMPLETED_BADGE_SIZE)
             start_rect = QRectF(
@@ -2062,7 +2126,12 @@ def run_work_overlay_helper_qt(
 
             painter.restore()
             if self._switch_pending:
-                self._draw_switch_pending_quantum(painter, end_rect)
+                self._draw_switch_pending_quantum(
+                    painter,
+                    end_rect,
+                    completed=self._switch_pending_completed,
+                    completed_at=self._switch_pending_completed_at,
+                )
 
         def _arc_limited_text(self, text: str, font: QFont, max_width: float) -> str:
             compact = " ".join(str(text or "").split())
@@ -2135,19 +2204,40 @@ def run_work_overlay_helper_qt(
             self,
             painter: QPainter,
             rect: QRectF,
+            *,
+            completed: bool,
+            completed_at: float,
         ) -> None:
             started_at = self._switch_pending_started_at or time.monotonic()
             elapsed = max(0.0, time.monotonic() - started_at)
+            finish_elapsed = (
+                max(0.0, time.monotonic() - completed_at)
+                if completed and completed_at > 0.0
+                else 0.0
+            )
+            finish_progress = (
+                _completed_pending_finish_progress(finish_elapsed)
+                if completed
+                else 0.0
+            )
+            motion_alpha = 1.0 - _ease_out_cubic(finish_progress)
+            launch_progress = 1.0 if completed else _completed_pending_launch_progress(elapsed)
             center = QPointF(rect.center())
             orbit_radius = min(rect.width(), rect.height()) / 2.0 - 7.0
 
             painter.save()
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            ring_color = QColor(93, 216, 255, 170)
+            if launch_progress < 1.0:
+                self._draw_switch_pending_launch(painter, center, orbit_radius, launch_progress)
+            if completed:
+                self._draw_switch_pending_finish(painter, center, orbit_radius, finish_progress)
+
+            ring_alpha = motion_alpha if completed else max(0.18, motion_alpha)
+            ring_color = QColor(93, 216, 255, int(170 * ring_alpha))
             painter.setPen(QPen(ring_color, 1.6))
             painter.drawEllipse(center, orbit_radius, orbit_radius)
 
-            collapse_color = QColor(119, 255, 210, 60)
+            collapse_color = QColor(119, 255, 210, int(60 * motion_alpha))
             collapse_pen = QPen(collapse_color, 0.9)
             collapse_pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(collapse_pen)
@@ -2176,7 +2266,7 @@ def run_work_overlay_helper_qt(
                 strength = min(pulses[index], pulses[next_index])
                 if strength <= 0.08:
                     continue
-                filament = QColor(102, 255, 218, int(150 * strength))
+                filament = QColor(102, 255, 218, int(150 * strength * motion_alpha))
                 pen = QPen(filament, max(0.55, 1.15 * strength))
                 pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
@@ -2185,15 +2275,150 @@ def run_work_overlay_helper_qt(
             for index, point in enumerate(points):
                 pulse = pulses[index]
                 glow_radius = 5.8 + pulse * 2.2
-                glow = QColor(66, 225, 255, int(95 + pulse * 90))
+                glow = QColor(66, 225, 255, int((95 + pulse * 90) * motion_alpha))
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(glow)
                 painter.drawEllipse(point, glow_radius, glow_radius)
 
-                core = QColor(238, 255, 255, 242)
+                core = QColor(238, 255, 255, int(242 * motion_alpha))
                 painter.setBrush(core)
                 painter.drawEllipse(point, 2.0, 2.0)
 
+            self._draw_switch_pending_caption(
+                painter,
+                center,
+                elapsed,
+                completed=completed,
+                finish_elapsed=finish_elapsed,
+            )
+            painter.restore()
+
+        def _draw_switch_pending_launch(
+            self,
+            painter: QPainter,
+            center: QPointF,
+            orbit_radius: float,
+            progress: float,
+        ) -> None:
+            progress = _clamp01(progress)
+            eased = _ease_out_cubic(progress)
+            alpha = int(210 * (1.0 - progress))
+            if alpha <= 0:
+                return
+
+            wave_center = QPointF(center.x(), center.y() + orbit_radius * 0.74)
+            wave_radius_x = 14.0 + (orbit_radius * 0.58) * eased
+            wave_radius_y = 4.0 + (orbit_radius * 0.16) * eased
+            wave_pen = QPen(QColor(100, 255, 218, alpha), 1.4)
+            wave_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(wave_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(wave_center, wave_radius_x, wave_radius_y)
+
+            sweep_rect = QRectF(
+                center.x() - orbit_radius,
+                center.y() - orbit_radius,
+                orbit_radius * 2.0,
+                orbit_radius * 2.0,
+            )
+            sweep_pen = QPen(QColor(84, 220, 255, min(255, int(alpha * 1.15))), 3.1)
+            sweep_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(sweep_pen)
+            start_degrees = -115.0 + 395.0 * eased
+            painter.drawArc(
+                sweep_rect,
+                int(-start_degrees * 16),
+                int(-76.0 * (1.0 - progress * 0.35) * 16),
+            )
+
+            inner_pen = QPen(QColor(228, 255, 255, int(alpha * 0.58)), 1.0)
+            inner_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(inner_pen)
+            painter.drawArc(
+                sweep_rect.adjusted(10.0, 10.0, -10.0, -10.0),
+                int(-(start_degrees + 28.0) * 16),
+                int(-34.0 * 16),
+            )
+
+        def _draw_switch_pending_finish(
+            self,
+            painter: QPainter,
+            center: QPointF,
+            orbit_radius: float,
+            progress: float,
+        ) -> None:
+            progress = _clamp01(progress)
+            eased = _ease_out_cubic(progress)
+            alpha = int(170 * (1.0 - progress))
+            if alpha <= 0:
+                return
+            finish_radius = orbit_radius * (0.42 + 0.58 * eased)
+            finish_pen = QPen(QColor(102, 255, 218, alpha), 2.0)
+            finish_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(finish_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, finish_radius, finish_radius)
+
+            sweep_rect = QRectF(
+                center.x() - orbit_radius,
+                center.y() - orbit_radius,
+                orbit_radius * 2.0,
+                orbit_radius * 2.0,
+            )
+            sweep_pen = QPen(QColor(230, 255, 255, int(alpha * 0.75)), 2.4)
+            sweep_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(sweep_pen)
+            painter.drawArc(
+                sweep_rect.adjusted(5.0, 5.0, -5.0, -5.0),
+                int((-60.0 - 240.0 * eased) * 16),
+                int(-92.0 * (1.0 - progress * 0.4) * 16),
+            )
+
+        def _draw_switch_pending_caption(
+            self,
+            painter: QPainter,
+            center: QPointF,
+            pending_elapsed: float,
+            *,
+            completed: bool,
+            finish_elapsed: float,
+        ) -> None:
+            opacity = _completed_pending_caption_opacity(
+                pending_elapsed,
+                completed=completed,
+                finish_elapsed_seconds=finish_elapsed,
+            )
+            if opacity <= 0.001:
+                return
+
+            finish_progress = (
+                _completed_pending_finish_progress(finish_elapsed)
+                if completed
+                else 0.0
+            )
+            scale = 1.0 + (0.07 * math.sin(math.pi * min(1.0, finish_progress)) if completed else 0.0)
+            text = "已跳转" if completed else "正在跳转"
+            panel_rect = QRectF(center.x() - 45.0, center.y() - 16.0, 90.0, 32.0)
+
+            painter.save()
+            painter.translate(center)
+            painter.scale(scale, scale)
+            painter.translate(-center)
+
+            panel_alpha = int(150 * opacity)
+            border_alpha = int((210 if completed else 180) * opacity)
+            text_alpha = int(245 * opacity)
+            panel_color = QColor(5, 23, 34, panel_alpha)
+            border_color = QColor(118, 255, 202, border_alpha) if completed else QColor(76, 213, 255, border_alpha)
+            text_color = QColor(204, 255, 232, text_alpha) if completed else QColor(229, 250, 255, text_alpha)
+
+            painter.setPen(QPen(border_color, 1.0))
+            painter.setBrush(panel_color)
+            painter.drawRoundedRect(panel_rect, 10.0, 10.0)
+
+            painter.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.DemiBold))
+            painter.setPen(text_color)
+            painter.drawText(panel_rect, alignment.AlignCenter, text)
             painter.restore()
 
     class OverlayWindow(QWidget):
@@ -2245,6 +2470,7 @@ def run_work_overlay_helper_qt(
             self._settled_completed_intro_ids: set[str] = set()
             self._switch_pending_key = ""
             self._switch_pending_started_at = 0.0
+            self._switch_pending_completed_at = 0.0
             self._transition_watchdog = QTimer(self)
             self._transition_watchdog.setSingleShot(True)
             self._transition_watchdog.timeout.connect(self._handle_transition_timeout)
@@ -2284,9 +2510,24 @@ def run_work_overlay_helper_qt(
                 return False
             if _switch_item_key(item) != self._switch_pending_key:
                 return False
+            if self._switch_pending_completed_at > 0.0:
+                return (
+                    time.monotonic() - self._switch_pending_completed_at
+                    <= WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS
+                )
             return (
                 time.monotonic() - self._switch_pending_started_at
                 <= WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS
+            )
+
+        def _switch_pending_completed_for_item(self, item: Mapping[str, object]) -> bool:
+            if self._switch_pending_completed_at <= 0.0:
+                return False
+            if _switch_item_key(item) != self._switch_pending_key:
+                return False
+            return (
+                time.monotonic() - self._switch_pending_completed_at
+                <= WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS
             )
 
         def _set_switch_pending(self, item: Mapping[str, object]) -> None:
@@ -2295,6 +2536,7 @@ def run_work_overlay_helper_qt(
                 return
             self._switch_pending_key = key
             self._switch_pending_started_at = time.monotonic()
+            self._switch_pending_completed_at = 0.0
             if not self._switch_pending_timer.isActive():
                 self._switch_pending_timer.start(WORK_OVERLAY_SWITCH_PENDING_TIMER_MS)
             self._sync_completed_pending_animations()
@@ -2303,13 +2545,33 @@ def run_work_overlay_helper_qt(
         def _clear_switch_pending(self) -> None:
             self._switch_pending_key = ""
             self._switch_pending_started_at = 0.0
+            self._switch_pending_completed_at = 0.0
             self._switch_pending_timer.stop()
             self._sync_completed_pending_animations()
             for window in self._workdir_windows:
                 window.update()
 
+        def _complete_switch_pending(self) -> None:
+            if not self._switch_pending_key:
+                return
+            if self._switch_pending_completed_at <= 0.0:
+                self._switch_pending_completed_at = time.monotonic()
+            if not self._switch_pending_timer.isActive():
+                self._switch_pending_timer.start(WORK_OVERLAY_SWITCH_PENDING_TIMER_MS)
+            self._sync_completed_pending_animations()
+            self.reposition_interactive_windows()
+
         def _sync_switch_pending(self, items: Sequence[Mapping[str, object]]) -> None:
             if not self._switch_pending_key:
+                return
+            if self._switch_pending_completed_at > 0.0:
+                if (
+                    time.monotonic() - self._switch_pending_completed_at
+                    > WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS
+                ):
+                    self._clear_switch_pending()
+                else:
+                    self._sync_completed_pending_animations()
                 return
             elapsed = time.monotonic() - self._switch_pending_started_at
             if elapsed > WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS:
@@ -2324,11 +2586,22 @@ def run_work_overlay_helper_qt(
                 self._clear_switch_pending()
                 return
             if any(bool(item.get("current")) for item in pending_items):
-                self._clear_switch_pending()
+                self._complete_switch_pending()
 
         def _tick_switch_pending(self) -> None:
             if not self._switch_pending_key:
                 self._switch_pending_timer.stop()
+                return
+            if self._switch_pending_completed_at > 0.0:
+                if (
+                    time.monotonic() - self._switch_pending_completed_at
+                    > WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS
+                ):
+                    self._clear_switch_pending()
+                    return
+                for window in self._workdir_windows:
+                    window.update()
+                self._sync_completed_pending_animations()
                 return
             if (
                 time.monotonic() - self._switch_pending_started_at
@@ -2352,9 +2625,15 @@ def run_work_overlay_helper_qt(
                     isinstance(item, Mapping)
                     and self._switch_pending_active_for_item(item)
                 )
+                completed = (
+                    isinstance(item, Mapping)
+                    and self._switch_pending_completed_for_item(item)
+                )
                 badge.set_switch_pending(
                     pending,
                     self._switch_pending_started_at if pending else 0.0,
+                    completed=completed,
+                    completed_at=self._switch_pending_completed_at if completed else 0.0,
                 )
 
         def switch_item(self, item: Mapping[str, object]) -> None:
@@ -2590,9 +2869,12 @@ def run_work_overlay_helper_qt(
             badge.set_theme_tokens(self._theme_tokens)
             badge.set_item(item)
             pending = self._switch_pending_active_for_item(item)
+            completed = self._switch_pending_completed_for_item(item)
             badge.set_switch_pending(
                 pending,
                 self._switch_pending_started_at if pending else 0.0,
+                completed=completed,
+                completed_at=self._switch_pending_completed_at if completed else 0.0,
             )
             self._completed_hover_anchors.append(record["hover_anchor"])
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()

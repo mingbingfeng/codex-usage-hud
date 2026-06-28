@@ -538,10 +538,21 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
                 return
             delay_ms = max(0, int(args.auto_pending_delay_ms))
             QTimer.singleShot(delay_ms, lambda: self.demo_pending_switch(item_id))
+            complete_ms = max(0, int(args.auto_pending_complete_ms))
+            if complete_ms > 0:
+                QTimer.singleShot(
+                    delay_ms + complete_ms,
+                    lambda: self.complete_pending_switch(item_id),
+                )
             has_auto_toggle = bool(str(args.auto_toggle or "").strip())
             has_auto_dismiss = bool(str(args.auto_dismiss or "").strip())
             if args.auto_close_ms > 0 and not has_auto_toggle and not has_auto_dismiss:
-                QTimer.singleShot(delay_ms + int(args.auto_close_ms), self.close_demo)
+                close_delay_ms = delay_ms + int(args.auto_close_ms)
+                if complete_ms > 0:
+                    close_delay_ms += complete_ms + int(
+                        work_overlay_qt.WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS * 1000
+                    )
+                QTimer.singleShot(close_delay_ms, self.close_demo)
 
         def _set_speed_from_slider(self, value: int) -> None:
             self._set_speed(max(0.25, min(4.0, float(value) / 100.0)))
@@ -669,6 +680,34 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             if hasattr(overlay, "reposition_interactive_windows"):
                 getattr(overlay, "reposition_interactive_windows")()
             self._log_state("circle_pending.start", item=_item_id(item))
+
+        def complete_pending_switch(self, item_id: str = "") -> None:
+            circles = _circles(self.items)
+            item = (
+                next((candidate for candidate in circles if _item_id(candidate) == item_id), None)
+                if item_id
+                else None
+            )
+            if item is None and circles:
+                item = circles[0]
+            if item is None:
+                self._log_state("pending.complete.skip", reason="没有可完成的圆形")
+                return
+
+            target_id = _item_id(item)
+            self.items = [
+                {
+                    **dict(candidate),
+                    "current": _item_id(candidate) == target_id,
+                }
+                for candidate in self.items
+            ]
+            _write_state(state_path, items=self.items)
+            overlay = self._overlay_window()
+            if overlay is not None and hasattr(overlay, "_sync_switch_pending"):
+                getattr(overlay, "_sync_switch_pending")(self.items)
+            self._log_state("circle_pending.complete", item=target_id)
+            self._update_status()
 
         def _overlay_window(self) -> QWidget | None:
             for widget in QApplication.topLevelWidgets():
@@ -1312,6 +1351,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=800,
         help="Delay before --auto-pending starts. Default: 800.",
+    )
+    parser.add_argument(
+        "--auto-pending-complete-ms",
+        type=int,
+        default=0,
+        help="Mark the pending completed item current this many ms after it starts.",
     )
     parser.add_argument(
         "--auto-close-ms",

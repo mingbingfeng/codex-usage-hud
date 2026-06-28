@@ -171,6 +171,10 @@ from codex_usage_hud.ui.tk_hud import (
 from codex_usage_hud.ui.work_overlay_qt import (
     WORK_OVERLAY_TOP_OFFSET,
     _completed_badge_palette,
+    _completed_pending_caption_opacity,
+    _completed_pending_finish_progress,
+    _completed_pending_launch_progress,
+    _completed_pending_launch_scale,
     _completed_pending_particle_state,
     _completed_badge_restore_slot_moves,
     _completed_badge_slot_moves,
@@ -961,6 +965,35 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertLessEqual(pulse_a, 1.0)
         self.assertGreaterEqual(pulse_b, 0.0)
         self.assertLessEqual(pulse_b, 1.0)
+
+    def test_work_overlay_completed_pending_launch_has_press_and_rebound(self) -> None:
+        self.assertEqual(_completed_pending_launch_progress(0.0), 0.0)
+        self.assertEqual(_completed_pending_launch_progress(1.0), 1.0)
+        self.assertLess(_completed_pending_launch_scale(0.12), 1.0)
+        self.assertGreater(_completed_pending_launch_scale(0.34), 1.0)
+        self.assertEqual(_completed_pending_launch_scale(0.7), 1.0)
+
+    def test_work_overlay_completed_pending_caption_fades_out_after_completion(self) -> None:
+        self.assertEqual(_completed_pending_finish_progress(0.0), 0.0)
+        self.assertEqual(_completed_pending_finish_progress(10.0), 1.0)
+        self.assertLess(_completed_pending_caption_opacity(0.04, completed=False), 1.0)
+        self.assertEqual(_completed_pending_caption_opacity(0.2, completed=False), 1.0)
+        self.assertEqual(
+            _completed_pending_caption_opacity(
+                0.2,
+                completed=True,
+                finish_elapsed_seconds=0.1,
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            _completed_pending_caption_opacity(
+                0.2,
+                completed=True,
+                finish_elapsed_seconds=10.0,
+            ),
+            0.0,
+        )
 
     def test_work_overlay_completed_workdir_pending_uses_badge_not_link(self) -> None:
         self.assertFalse(_workdir_link_pending_for_item({"status": "recent"}, True))
