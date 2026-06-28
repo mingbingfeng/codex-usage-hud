@@ -301,6 +301,20 @@ class ActiveSessionTracker:
         self._renderer_session_id = ""
         self._renderer_title = ""
         self._renderer_path: Path | None = None
+        self._change_callback: Callable[[], None] | None = None
+
+    def set_change_callback(self, callback: Callable[[], None] | None) -> None:
+        """Notify the renderer loop when the background active-session watcher moves."""
+        self._change_callback = callback
+
+    def _notify_change(self) -> None:
+        callback = self._change_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            return
 
     def start(self) -> None:
         """Begin best-effort platform tracking for the selected Codex conversation."""
@@ -515,6 +529,7 @@ class ActiveSessionTracker:
                 response_ms,
                 compact_text(display_title or session_id, 80),
             )
+            self._notify_change()
         return changed
 
     def path_for_title(self, title: str) -> Path | None:
@@ -793,6 +808,7 @@ class ActiveSessionTracker:
                 response_ms,
                 compact_text(title, 80),
             )
+            self._notify_change()
 
     def _current_renderer_selection(self) -> tuple[bool, Path | None]:
         with self._lock:

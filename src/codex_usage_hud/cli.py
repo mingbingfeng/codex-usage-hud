@@ -4163,6 +4163,7 @@ def build_snapshot(
     context: RuntimeContext,
     *,
     refresh_budget_aggregate: bool | None = None,
+    refresh_active_work_items: bool = True,
 ) -> ParsedSession:
     context.reload_user_config()
     session_path, selection_source = context.session_resolver.resolve()
@@ -4242,11 +4243,12 @@ def build_snapshot(
         context.budget_thresholds,
     )
     snapshot.budget_error = "" if context.sessions_root.exists() else snapshot.error
-    snapshot.active_work_items = active_work_items_for_snapshot(
-        context,
-        snapshot,
-        session_path,
-    )
+    if refresh_active_work_items:
+        snapshot.active_work_items = active_work_items_for_snapshot(
+            context,
+            snapshot,
+            session_path,
+        )
     return snapshot
 
 
@@ -4631,9 +4633,22 @@ def run_renderer_hud_session(
                 item_limit=_work_overlay_item_limit_for_context(context),
             )
             command_refresh_requested = Event()
+            active_session_refresh_requested = Event()
             command_pump: _WorkOverlayCommandPump | None = None
             bridge_commands: deque[dict[str, object]] = deque()
             bridge_command_lock = threading.Lock()
+
+            def wake_active_session_refresh() -> None:
+                active_session_refresh_requested.set()
+                command_refresh_requested.set()
+
+            tracker_change_callback = getattr(
+                getattr(context, "active_session_tracker", None),
+                "set_change_callback",
+                None,
+            )
+            if callable(tracker_change_callback):
+                tracker_change_callback(wake_active_session_refresh)
 
             def enqueue_renderer_command(command: dict[str, object]) -> None:
                 with bridge_command_lock:
@@ -4651,7 +4666,7 @@ def run_renderer_hud_session(
                     source="renderer",
                 )
                 if changed:
-                    command_refresh_requested.set()
+                    wake_active_session_refresh()
 
             def take_renderer_bridge_command() -> dict[str, object] | None:
                 with bridge_command_lock:
@@ -4670,13 +4685,25 @@ def run_renderer_hud_session(
             def snapshot_or_error(
                 *,
                 refresh_budget_aggregate: bool | None = None,
+                refresh_active_work_items: bool = True,
             ) -> ParsedSession:
                 try:
-                    if refresh_budget_aggregate is None:
+                    if refresh_budget_aggregate is None and refresh_active_work_items:
                         return build_snapshot(context)
+                    if refresh_budget_aggregate is None:
+                        return build_snapshot(
+                            context,
+                            refresh_active_work_items=False,
+                        )
+                    if refresh_active_work_items:
+                        return build_snapshot(
+                            context,
+                            refresh_budget_aggregate=refresh_budget_aggregate,
+                        )
                     return build_snapshot(
                         context,
                         refresh_budget_aggregate=refresh_budget_aggregate,
+                        refresh_active_work_items=False,
                     )
                 except Exception as exc:
                     return ParsedSession(status="error", error=str(exc))
@@ -4888,6 +4915,7 @@ def run_renderer_hud_session(
                 latest_snapshot: ParsedSession | None = None
                 latest_signature: tuple[object, ...] | None = None
                 latest_budget_signature: tuple[object, ...] | None = None
+                active_work_refresh_pending = False
                 while True:
                     started = time.monotonic()
                     if (
@@ -4908,6 +4936,9 @@ def run_renderer_hud_session(
                     bridge_wakeup = command_refresh_requested.is_set()
                     if bridge_wakeup:
                         command_refresh_requested.clear()
+                    active_session_wakeup = active_session_refresh_requested.is_set()
+                    if active_session_wakeup:
+                        active_session_refresh_requested.clear()
                     file_change_reasons, file_change_paths = file_events.take_changes()
                     if "session-map" in file_change_reasons:
                         _invalidate_active_session_mapping_cache(context)
@@ -4920,6 +4951,7 @@ def run_renderer_hud_session(
                         or update_state.get("phase") == "downloading"
                         or file_change_reasons
                         or bridge_wakeup
+                        or active_work_refresh_pending
                     )
                     if command:
                         settings_command_status = _handle_renderer_settings_command(
@@ -4971,9 +5003,26 @@ def run_renderer_hud_session(
                             file_change_reasons=file_change_reasons,
                             file_change_paths=file_change_paths,
                         )
+                        lightweight_active_session_refresh = bool(
+                            active_session_wakeup
+                            and latest_snapshot is not None
+                            and not active_work_refresh_pending
+                            and not command
+                            and not settings_command_status
+                            and not file_change_reasons
+                            and update_state.get("phase") != "downloading"
+                        )
                         snapshot = snapshot_or_error(
                             refresh_budget_aggregate=refresh_budget_aggregate,
+                            refresh_active_work_items=not lightweight_active_session_refresh,
                         )
+                        if lightweight_active_session_refresh:
+                            snapshot.active_work_items = list(
+                                latest_snapshot.active_work_items
+                            )
+                            active_work_refresh_pending = True
+                        else:
+                            active_work_refresh_pending = False
                         latest_snapshot = snapshot
                         latest_signature = signature
                         latest_budget_signature = _renderer_budget_signature(context)
@@ -5065,6 +5114,8 @@ def run_renderer_hud_session(
                 local_loading.close()
                 return 130
             finally:
+                if callable(tracker_change_callback):
+                    tracker_change_callback(None)
                 client.close()
                 bridge.close()
                 if command_pump is not None:

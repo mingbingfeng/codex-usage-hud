@@ -616,6 +616,49 @@ class BudgetHelperTests(unittest.TestCase):
                 )
             )
 
+    def test_build_snapshot_can_skip_active_work_items(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_path = root / "session.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(status="parsed", session_path=session_path)
+            context = SimpleNamespace(
+                reload_user_config=MagicMock(),
+                session_resolver=SimpleNamespace(
+                    session_id="",
+                    session_file=None,
+                    resolve=MagicMock(return_value=(session_path, "renderer:thread")),
+                ),
+                sessions_root=root,
+                parser=SimpleNamespace(parse_file=MagicMock(return_value=snapshot)),
+                sse_tracker=None,
+                active_session_tracker=None,
+                visible_app_error_cache=SimpleNamespace(
+                    resolve=MagicMock(return_value="")
+                ),
+                platform=SimpleNamespace(get_active_app_error=MagicMock(return_value="")),
+                user_config=UserConfig.defaults(),
+                usage_cache=SimpleNamespace(
+                    summarize=MagicMock(return_value=(UsageSummary(), UsageSummary()))
+                ),
+                daily_budget_usd=100.0,
+                weekly_budget_usd=400.0,
+                budget_thresholds=[],
+            )
+
+            with patch(
+                "codex_usage_hud.cli.active_work_items_for_snapshot",
+                return_value=[],
+            ) as active_work:
+                result = cli_module.build_snapshot(
+                    context,
+                    refresh_budget_aggregate=False,
+                    refresh_active_work_items=False,
+                )
+
+        active_work.assert_not_called()
+        self.assertEqual(result.active_work_items, [])
+
     def test_renderer_budget_aggregate_refreshes_for_non_current_session_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "sessions"
@@ -9694,8 +9737,10 @@ class DaemonLifecycleTests(unittest.TestCase):
                 nonlocal delay_calls
                 del args, kwargs
                 delay_calls += 1
-                if delay_calls > 1:
+                if delay_calls > 2:
                     raise KeyboardInterrupt
+                if delay_calls > 1:
+                    return 0.0
                 callback = callbacks["active"]
                 callback({"sessionId": "thread-2", "title": "Other Thread"})
                 return 0.0
@@ -9730,13 +9775,119 @@ class DaemonLifecycleTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 130)
-        self.assertEqual(build_snapshot.call_count, 2)
-        self.assertEqual(fake_client.update.call_count, 2)
+        self.assertEqual(build_snapshot.call_count, 3)
+        self.assertEqual(fake_client.update.call_count, 3)
+        self.assertEqual(
+            build_snapshot.call_args_list[1].kwargs.get("refresh_active_work_items"),
+            False,
+        )
+        self.assertNotIn("refresh_active_work_items", build_snapshot.call_args_list[2].kwargs)
         active_tracker.observe_conversation_ref.assert_called_once_with(
             session_id="thread-2",
             title="Other Thread",
             source="renderer",
         )
+
+    def test_renderer_loop_wakes_for_tracker_active_session_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            callbacks: dict[str, object] = {}
+            callback_values: list[object] = []
+
+            def set_change_callback(callback: object) -> None:
+                callback_values.append(callback)
+                callbacks["tracker"] = callback
+
+            active_tracker = SimpleNamespace(
+                set_change_callback=MagicMock(side_effect=set_change_callback)
+            )
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "cdp:Live Thread")),
+                ),
+                active_session_tracker=active_tracker,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            delay_calls = 0
+
+            def delay_then_tracker_wakeup(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 2:
+                    raise KeyboardInterrupt
+                if delay_calls > 1:
+                    return 0.0
+                callback = callbacks["tracker"]
+                assert callable(callback)
+                callback()
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_tracker_wakeup,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 3)
+        self.assertEqual(
+            build_snapshot.call_args_list[1].kwargs.get("refresh_active_work_items"),
+            False,
+        )
+        self.assertIsNone(callback_values[-1])
 
     def test_renderer_runtime_failures_retry_without_tk_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
