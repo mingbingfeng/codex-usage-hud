@@ -474,6 +474,39 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
 
             self._log_state("init")
             self._update_status()
+            self._schedule_auto_toggles()
+
+        def _schedule_auto_toggles(self) -> None:
+            sequence = [
+                item_id.strip()
+                for item_id in str(args.auto_toggle or "").split(",")
+                if item_id.strip()
+            ]
+            if not sequence:
+                return
+            delay_ms = max(0, int(args.auto_toggle_delay_ms))
+            interval_ms = max(
+                1000,
+                int(
+                    (
+                        work_overlay_qt.WORK_OVERLAY_TRANSITION_SHRINK_MS
+                        + work_overlay_qt.WORK_OVERLAY_TRANSITION_PAUSE_MS
+                        + work_overlay_qt.WORK_OVERLAY_TRANSITION_MOVE_MS
+                        + work_overlay_qt.WORK_OVERLAY_TRANSITION_SHIFT_MS
+                    )
+                    + 900
+                ),
+            )
+            for index, item_id in enumerate(sequence):
+                QTimer.singleShot(
+                    delay_ms + index * interval_ms,
+                    lambda item_id=item_id: self.toggle_item(item_id),
+                )
+            if args.auto_close_ms > 0:
+                QTimer.singleShot(
+                    delay_ms + len(sequence) * interval_ms + int(args.auto_close_ms),
+                    self.close_demo,
+                )
 
         def _set_speed_from_slider(self, value: int) -> None:
             self._set_speed(max(0.25, min(4.0, float(value) / 100.0)))
@@ -586,11 +619,13 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
                         rect = transition_badge.geometry()
                         effect = transition_badge.graphicsEffect()
                         opacity = float(effect.opacity()) if effect is not None else 1.0
-                        records[transition_item_id] = (
-                            "C",
-                            type(rect)(top_left.x(), top_left.y(), rect.width(), rect.height()),
-                            opacity,
-                        )
+                        existing = records.get(transition_item_id)
+                        if existing is None or opacity >= existing[2]:
+                            records[transition_item_id] = (
+                                "C",
+                                type(rect)(top_left.x(), top_left.y(), rect.width(), rect.height()),
+                                opacity,
+                            )
                 except RuntimeError:
                     pass
 
@@ -750,6 +785,105 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
                 next_circles=_ids_text(_circles(new_items)),
                 next_rects=_ids_text(_rects(new_items)),
                 targets=_target_map_text(targets),
+            )
+            source_rect = work_overlay_qt._find_item_rect(
+                old_items,
+                item_id,
+                "card",
+                layout_width=layout_width,
+            )
+            source_circle = work_overlay_qt._card_height_circle_rect_for_rect(source_rect)
+            self._log_state(
+                "rect_to_circle.shape.start",
+                clicked=item_id,
+                source=_overlay_rect_text(source_rect),
+                circle=_overlay_rect_text(source_circle),
+            )
+            self._schedule_rect_to_circle_logs(item_id, old_items, new_items)
+
+        def _schedule_rect_to_circle_logs(
+            self,
+            item_id: str,
+            old_items: list[dict[str, object]],
+            new_items: list[dict[str, object]],
+        ) -> None:
+            delay_ms = (
+                work_overlay_qt.WORK_OVERLAY_TRANSITION_SHRINK_MS
+                + work_overlay_qt.WORK_OVERLAY_TRANSITION_PAUSE_MS
+            )
+            QTimer.singleShot(
+                max(1, delay_ms),
+                lambda: self._log_rect_to_circle_fly_start(item_id, old_items, new_items),
+            )
+
+        def _log_rect_to_circle_fly_start(
+            self,
+            item_id: str,
+            old_items: list[dict[str, object]],
+            new_items: list[dict[str, object]],
+        ) -> None:
+            if self._animation_label != "rect_to_circle" or self._animation_item_id != item_id:
+                return
+            layout_width = work_overlay_qt._transition_layout_width(old_items, new_items)
+            source_rect = work_overlay_qt._find_item_rect(
+                old_items,
+                item_id,
+                "card",
+                layout_width=layout_width,
+            )
+            source_circle = work_overlay_qt._card_height_circle_rect_for_rect(source_rect)
+            target_circle = work_overlay_qt._find_item_rect(
+                new_items,
+                item_id,
+                "completed",
+                layout_width=layout_width,
+            )
+            target_circle = (
+                target_circle[0],
+                target_circle[1],
+                target_circle[2],
+                float(work_overlay_qt.WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT),
+            )
+            clicked_idx = next(
+                (index for index, item in enumerate(_rects(old_items)) if _item_id(item) == item_id),
+                -1,
+            )
+            move_ms = (
+                work_overlay_qt.WORK_OVERLAY_TRANSITION_MOVE_MS
+                + work_overlay_qt.WORK_OVERLAY_TRANSITION_SHIFT_MS
+            )
+            yield_parts: list[str] = []
+            for item in _rects(new_items):
+                rect_id = _item_id(item)
+                old_index = next(
+                    (index for index, old_item in enumerate(_rects(old_items)) if _item_id(old_item) == rect_id),
+                    -1,
+                )
+                if clicked_idx < 0 or old_index < 0 or old_index >= clicked_idx:
+                    continue
+                card_rect = work_overlay_qt._find_item_rect(
+                    old_items,
+                    rect_id,
+                    "card",
+                    layout_width=layout_width,
+                )
+                yield_rect = work_overlay_qt._card_yield_rect_for_circle_path(
+                    card_rect,
+                    target_circle,
+                )
+                delay = work_overlay_qt._card_yield_delay_ms(
+                    card_rect,
+                    source_circle,
+                    target_circle,
+                    move_ms,
+                )
+                yield_parts.append(f"{rect_id}->{_overlay_rect_text(yield_rect)}@{delay}ms")
+            self._log_state(
+                "rect_to_circle.fly.start",
+                clicked=item_id,
+                source=_overlay_rect_text(source_circle),
+                target=_overlay_rect_text(target_circle),
+                yields=";".join(yield_parts) if yield_parts else "[]",
             )
 
         def _log_circle_to_rect_phase1_start(
@@ -1025,6 +1159,23 @@ def main(argv: list[str] | None = None) -> int:
             "Initial UI speed multiplier. Higher is faster; "
             f"default: {DEFAULT_SPEED:g}."
         ),
+    )
+    parser.add_argument(
+        "--auto-toggle",
+        default="",
+        help="Comma-separated item ids to toggle after the interactive demo starts.",
+    )
+    parser.add_argument(
+        "--auto-toggle-delay-ms",
+        type=int,
+        default=800,
+        help="Delay before --auto-toggle starts. Default: 800.",
+    )
+    parser.add_argument(
+        "--auto-close-ms",
+        type=int,
+        default=0,
+        help="Close the interactive demo this many ms after auto toggles finish.",
     )
     parser.add_argument(
         "--auto",

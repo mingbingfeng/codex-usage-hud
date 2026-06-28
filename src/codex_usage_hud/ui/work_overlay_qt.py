@@ -408,6 +408,50 @@ def _right_edge_circle_rect_for_rect(rect: OverlayRect) -> OverlayRect:
     )
 
 
+def _card_height_circle_rect_for_rect(rect: OverlayRect) -> OverlayRect:
+    diameter = max(1.0, float(rect[3]))
+    return (
+        float(rect[0]) + float(rect[2]) - diameter,
+        float(rect[1]),
+        diameter,
+        diameter,
+    )
+
+
+def _card_yield_rect_for_circle_path(
+    card_rect: OverlayRect,
+    circle_rect: OverlayRect,
+) -> OverlayRect:
+    target_right = float(circle_rect[0]) - WORK_OVERLAY_COMPLETED_BADGE_SPACING
+    current_right = float(card_rect[0]) + float(card_rect[2])
+    offset_x = min(0.0, target_right - current_right)
+    return (
+        float(card_rect[0]) + offset_x,
+        float(card_rect[1]),
+        float(card_rect[2]),
+        float(card_rect[3]),
+    )
+
+
+def _card_yield_delay_ms(
+    card_rect: OverlayRect,
+    source_circle_rect: OverlayRect,
+    target_circle_rect: OverlayRect,
+    duration_ms: int,
+) -> int:
+    source_y = float(source_circle_rect[1])
+    target_y = float(target_circle_rect[1])
+    source_center_y = source_y + float(source_circle_rect[3]) / 2.0
+    target_center_y = target_y + float(target_circle_rect[3]) / 2.0
+    travel = abs(source_center_y - target_center_y)
+    if travel <= 1.0:
+        return 0
+    card_center_y = float(card_rect[1]) + float(card_rect[3]) / 2.0
+    progress = abs(source_center_y - card_center_y) / travel
+    progress = max(0.0, min(0.82, progress))
+    return max(0, int(round(max(1, duration_ms) * progress)))
+
+
 def _transition_required_height(
     transition_type: str,
     source_rect: OverlayRect,
@@ -1713,6 +1757,15 @@ def run_work_overlay_helper_qt(
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             painter.setPen(Qt.PenStyle.NoPen)
+            paint_scale = min(
+                max(1.0, float(self.width())) / float(WORK_OVERLAY_COMPLETED_BADGE_SIZE),
+                max(1.0, float(self.height())) / float(WORK_OVERLAY_COMPLETED_BADGE_SIZE),
+            )
+            painter.translate(
+                (float(self.width()) - WORK_OVERLAY_COMPLETED_BADGE_SIZE * paint_scale) / 2.0,
+                0.0,
+            )
+            painter.scale(paint_scale, paint_scale)
 
             eased = 1.0 - pow(1.0 - max(0.0, min(1.0, self._progress)), 3)
             palette = _completed_badge_palette(self._theme_tokens)
@@ -2510,8 +2563,10 @@ def run_work_overlay_helper_qt(
         def _build_transition_card_widget(self, item: Mapping[str, object]) -> QFrame:
             card = QFrame(self._shell)
             card.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-            card.setFixedWidth(WORK_OVERLAY_WIDTH)
             card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            card.setMinimumSize(1, 1)
+            card.setMaximumSize(16777215, 16777215)
+            card.resize(WORK_OVERLAY_WIDTH, WORK_OVERLAY_TRANSITION_CARD_HEIGHT)
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(
                 WORK_OVERLAY_CARD_X_PADDING,
@@ -3098,7 +3153,65 @@ def run_work_overlay_helper_qt(
                 theme_tokens=self._theme_tokens,
             )
             badge.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            badge.setMinimumSize(1, 1)
+            badge.setMaximumSize(16777215, 16777215)
+            badge.resize(
+                WORK_OVERLAY_COMPLETED_BADGE_SIZE,
+                WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
+            )
             return badge
+
+        def _card_yield_geometry_for_circle_path(
+            self,
+            widget: QWidget,
+            circle_rect: QRect,
+        ) -> QRect:
+            card_rect = widget.geometry()
+            target = _card_yield_rect_for_circle_path(
+                (
+                    float(card_rect.x()),
+                    float(card_rect.y()),
+                    float(card_rect.width()),
+                    float(card_rect.height()),
+                ),
+                (
+                    float(circle_rect.x()),
+                    float(circle_rect.y()),
+                    float(circle_rect.width()),
+                    float(circle_rect.height()),
+                ),
+            )
+            return self._card_geometry_for_slot(target)
+
+        def _card_yield_delay_for_circle_path(
+            self,
+            widget: QWidget,
+            source_circle: QRect,
+            target_circle: QRect,
+            duration_ms: int,
+        ) -> int:
+            card_rect = widget.geometry()
+            return _card_yield_delay_ms(
+                (
+                    float(card_rect.x()),
+                    float(card_rect.y()),
+                    float(card_rect.width()),
+                    float(card_rect.height()),
+                ),
+                (
+                    float(source_circle.x()),
+                    float(source_circle.y()),
+                    float(source_circle.width()),
+                    float(source_circle.height()),
+                ),
+                (
+                    float(target_circle.x()),
+                    float(target_circle.y()),
+                    float(target_circle.width()),
+                    float(target_circle.height()),
+                ),
+                duration_ms,
+            )
 
         def _start_card_to_completed_transition(
             self,
@@ -3129,13 +3242,15 @@ def run_work_overlay_helper_qt(
                 next_circles = [*circles, clicked_record]
                 circle_count_after = len(next_circles)
                 source_rect = self._widget_shell_rect(source_widget)
-                source_circle = self._completed_badge_geometry_for_slot(
-                    _right_edge_circle_rect_for_rect(
-                        (
-                            source_rect.x(),
-                            source_rect.y(),
-                            source_rect.width(),
-                            source_rect.height(),
+                source_circle = self._qrect_from_rectf(
+                    QRectF(
+                        *_card_height_circle_rect_for_rect(
+                            (
+                                source_rect.x(),
+                                source_rect.y(),
+                                source_rect.width(),
+                                source_rect.height(),
+                            )
                         )
                     )
                 )
@@ -3149,13 +3264,128 @@ def run_work_overlay_helper_qt(
                 source_widget.hide()
                 self._transition_hidden_widget = source_widget
                 self._transition_source_widget = source_widget
+                transition_card = self._build_transition_card_widget(
+                    self._transition_item_payload(item_id, old_items, new_items)
+                )
+                transition_card.setGeometry(self._qrect_from_rectf(source_rect))
+                transition_card.show()
+                transition_card.raise_()
+                self._transition_card_widget = transition_card
                 transition_badge = self._build_transition_badge_widget(
                     self._transition_item_payload(item_id, old_items, new_items)
                 )
                 transition_badge.setGeometry(source_circle)
+                badge_effect = QGraphicsOpacityEffect(transition_badge)
+                badge_effect.setOpacity(0.0)
+                transition_badge.setGraphicsEffect(badge_effect)
                 transition_badge.show()
                 transition_badge.raise_()
                 self._transition_badge_widget = transition_badge
+
+                self._start_card_to_completed_shape_phase(
+                    circles,
+                    rects,
+                    clicked_record,
+                    clicked_idx,
+                    next_rects,
+                    circle_count_after,
+                    source_circle,
+                    target_circle,
+                    transition_card,
+                    transition_badge,
+                    badge_effect,
+                )
+            except Exception:
+                self._end_transition()
+
+        def _start_card_to_completed_shape_phase(
+            self,
+            circles: list[dict[str, Any]],
+            rects: list[dict[str, Any]],
+            clicked_record: dict[str, Any],
+            clicked_idx: int,
+            next_rects: list[dict[str, Any]],
+            circle_count_after: int,
+            source_circle: QRect,
+            target_circle: QRect,
+            transition_card: QWidget,
+            transition_badge: QWidget,
+            badge_effect: QGraphicsOpacityEffect,
+        ) -> None:
+            try:
+                duration_ms = WORK_OVERLAY_TRANSITION_SHRINK_MS + WORK_OVERLAY_TRANSITION_PAUSE_MS
+                self._touch_transition_watchdog(duration_ms)
+                card_effect = QGraphicsOpacityEffect(transition_card)
+                card_effect.setOpacity(1.0)
+                transition_card.setGraphicsEffect(card_effect)
+
+                phase = QParallelAnimationGroup(self)
+                phase.addAnimation(
+                    self._animate_widget_geometry(
+                        transition_card,
+                        source_circle,
+                        WORK_OVERLAY_TRANSITION_SHRINK_MS,
+                        QEasingCurve.Type.OutCubic,
+                    )
+                )
+                phase.addAnimation(
+                    self._animate_effect_opacity(
+                        card_effect,
+                        1.0,
+                        0.0,
+                        WORK_OVERLAY_TRANSITION_SHRINK_MS,
+                    )
+                )
+                phase.addAnimation(
+                    self._animate_effect_opacity(
+                        badge_effect,
+                        0.0,
+                        1.0,
+                        WORK_OVERLAY_TRANSITION_SHRINK_MS,
+                    )
+                )
+                self._add_noop_animation(phase, duration_ms)
+                phase.finished.connect(
+                    lambda: self._start_card_to_completed_fly_phase(
+                        circles,
+                        rects,
+                        clicked_record,
+                        clicked_idx,
+                        next_rects,
+                        circle_count_after,
+                        source_circle,
+                        target_circle,
+                        transition_card,
+                        transition_badge,
+                    )
+                )
+                self._transition_animation_group = phase
+                phase.start()
+            except Exception:
+                self._end_transition()
+
+        def _start_card_to_completed_fly_phase(
+            self,
+            circles: list[dict[str, Any]],
+            rects: list[dict[str, Any]],
+            clicked_record: dict[str, Any],
+            clicked_idx: int,
+            next_rects: list[dict[str, Any]],
+            circle_count_after: int,
+            source_circle: QRect,
+            target_circle: QRect,
+            transition_card: QWidget,
+            transition_badge: QWidget,
+        ) -> None:
+            try:
+                del clicked_record
+                transition_card.hide()
+                transition_badge.setGeometry(source_circle)
+                transition_badge.show()
+                transition_badge.raise_()
+                effect = transition_badge.graphicsEffect()
+                if isinstance(effect, QGraphicsOpacityEffect):
+                    effect.setOpacity(1.0)
 
                 duration_ms = WORK_OVERLAY_TRANSITION_MOVE_MS + WORK_OVERLAY_TRANSITION_SHIFT_MS
                 self._touch_transition_watchdog(duration_ms)
@@ -3194,21 +3424,37 @@ def run_work_overlay_helper_qt(
                     old_index = rects.index(record) if record in rects else index_from_top
                     if clicked_idx >= 0 and old_index < clicked_idx:
                         sequence = QSequentialAnimationGroup(self)
-                        yield_rect = QRect(widget.geometry())
-                        yield_rect.translate(-80, 0)
+                        yield_rect = self._card_yield_geometry_for_circle_path(
+                            widget,
+                            target_circle,
+                        )
+                        yield_delay = self._card_yield_delay_for_circle_path(
+                            widget,
+                            source_circle,
+                            target_circle,
+                            duration_ms,
+                        )
+                        yield_ms = max(1, min(WORK_OVERLAY_TRANSITION_SHIFT_MS, duration_ms // 3))
+                        settle_ms = max(1, min(WORK_OVERLAY_TRANSITION_SHIFT_MS, duration_ms // 3))
+                        max_yield_start = max(0, duration_ms - yield_ms - settle_ms - 1)
+                        yield_start = min(max_yield_start, max(0, yield_delay - yield_ms // 2))
+                        hold_ms = max(1, duration_ms - yield_start - yield_ms - settle_ms)
+                        if yield_start > 0:
+                            sequence.addAnimation(QPauseAnimation(yield_start, self))
                         sequence.addAnimation(
                             self._animate_widget_geometry(
                                 widget,
                                 yield_rect,
-                                max(1, duration_ms // 2),
+                                yield_ms,
                                 QEasingCurve.Type.InOutQuad,
                             )
                         )
+                        sequence.addAnimation(QPauseAnimation(hold_ms, self))
                         sequence.addAnimation(
                             self._animate_widget_geometry(
                                 widget,
                                 target,
-                                max(1, duration_ms - duration_ms // 2),
+                                settle_ms,
                                 QEasingCurve.Type.InOutQuad,
                             )
                         )

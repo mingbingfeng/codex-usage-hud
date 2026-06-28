@@ -174,6 +174,9 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _completed_badge_slot_moves,
     _completed_badge_slot_rects,
     _completed_restore_staged_items,
+    _card_height_circle_rect_for_rect,
+    _card_yield_delay_ms,
+    _card_yield_rect_for_circle_path,
     _detect_transition,
     _detect_transition_item_id,
     _find_item_rect,
@@ -892,6 +895,46 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(_overlay_window_top_y(0), WORK_OVERLAY_TOP_OFFSET)
         self.assertEqual(_overlay_window_top_y(48), 48 + WORK_OVERLAY_TOP_OFFSET)
         self.assertEqual(_overlay_window_top_y(-120), -120 + WORK_OVERLAY_TOP_OFFSET)
+
+    def test_work_overlay_card_to_completed_starts_as_card_height_circle(self) -> None:
+        card_rect = (90.0, 424.0, 430.0, 110.0)
+
+        circle_rect = _card_height_circle_rect_for_rect(card_rect)
+
+        self.assertEqual(circle_rect, (410.0, 424.0, 110.0, 110.0))
+
+    def test_work_overlay_card_yield_clears_circle_path(self) -> None:
+        card_rect = (90.0, 306.0, 430.0, 110.0)
+        circle_rect = (352.0, 0.0, 168.0, 180.0)
+
+        yield_rect = _card_yield_rect_for_circle_path(card_rect, circle_rect)
+
+        self.assertEqual(yield_rect, (-86.0, 306.0, 430.0, 110.0))
+        self.assertLessEqual(
+            yield_rect[0] + yield_rect[2],
+            circle_rect[0] - 8.0,
+        )
+
+    def test_work_overlay_card_yield_delay_follows_vertical_pass_order(self) -> None:
+        source_circle = _card_height_circle_rect_for_rect((90.0, 424.0, 430.0, 110.0))
+        target_circle = (528.0, 0.0, 168.0, 180.0)
+        lower_blocker = (266.0, 306.0, 430.0, 110.0)
+        upper_blocker = (266.0, 188.0, 430.0, 110.0)
+
+        lower_delay = _card_yield_delay_ms(
+            lower_blocker,
+            source_circle,
+            target_circle,
+            520,
+        )
+        upper_delay = _card_yield_delay_ms(
+            upper_blocker,
+            source_circle,
+            target_circle,
+            520,
+        )
+
+        self.assertGreater(upper_delay, lower_delay)
 
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()
