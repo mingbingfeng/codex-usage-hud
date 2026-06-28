@@ -7,6 +7,10 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-28
+
+Renderer-Only Cross-Platform Patch.
+
 ### Changed
 
 - Switched the runtime surface to renderer-only: legacy `auto`, `qt`, `tk`,
