@@ -10108,6 +10108,21 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(hwnd, 777)
         launch_app.assert_called_once_with(debugger=True)
 
+    def test_launch_codex_app_debugger_uses_macos_open_args(self) -> None:
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch("codex_usage_hud.cli.cdp_port_from_env", return_value=9333),
+            patch.dict(os.environ, {}, clear=True),
+            patch("codex_usage_hud.cli.subprocess.Popen") as popen,
+        ):
+            launched = launch_codex_app(debugger=True)
+
+        self.assertTrue(launched)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:4], ["open", "-a", "Codex", "--args"])
+        self.assertIn("--remote-debugging-port=9333", command)
+        self.assertIn("--remote-allow-origins=http://127.0.0.1:9333", command)
+
     def test_run_renderer_hud_session_prepares_window_before_connect_in_manual_mode(self) -> None:
         fake_context = SimpleNamespace(
             settings_store=SimpleNamespace(path=Path("hud_settings.json")),

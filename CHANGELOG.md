@@ -7,6 +7,15 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-06-28
+
+macOS Smoke Workflow Patch.
+
+### Fixed
+
+- Restored the macOS Codex debug-launch argument regression test referenced by
+  the `macOS Smoke` workflow.
+
 ## [1.0.3] - 2026-06-28
 
 Renderer-Only Cross-Platform Patch.
