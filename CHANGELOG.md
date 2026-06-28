@@ -7,6 +7,28 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+### Changed
+
+- Switched the runtime surface to renderer-only: legacy `auto`, `qt`, `tk`,
+  `pyside6`, and `tkinter` display modes now normalize to `renderer`, and
+  CDP failures return diagnostics instead of falling back to standalone HUDs.
+- Stopped importing Tk, Qt HUD, PySide6, or the desktop work-overlay helper from
+  the default CLI import graph.
+- Added macOS CDP active-session probing and Codex debug launch support.
+- Removed PySide6 and Tk/PySide hidden imports from the default package and
+  Windows PyInstaller build path.
+- Restored the PySide6 desktop work-bubble overlay as an optional helper driven
+  from renderer sessions when `work_overlay_max_items` is enabled.
+- Added a GitHub Actions `macOS Smoke` workflow to verify desktop-overlay
+  installability, lazy CLI imports, source compilation, and task-related tests
+  on `macos-latest`.
+
+### Fixed
+
+- Hardened Windows-only platform modules so cross-platform imports no longer
+  require `ctypes.WINFUNCTYPE` at import time on macOS and other non-Windows
+  environments.
+
 ## [1.0.2] - 2026-06-18
 
 Completed Bubble Transition Patch.

@@ -17,13 +17,16 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 DEFAULT_DAEMON_POLL_MS = 1000
 MAX_DAEMON_POLL_MS = 5000
 MIN_DAEMON_POLL_MS = 100
 
 _TH32CS_SNAPPROCESS = 0x00000002
+_SYNCHRONIZE = 0x00100000
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
 _MAX_PATH = 260
 _SW_HIDE = 0
 _HUD_PROCESS_MARKERS = ("hud", "usage-hud", "usage_hud")
@@ -67,6 +70,16 @@ class ProcessListener(Protocol):
 
     def snapshot(self) -> ProcessSnapshot:
         """Return a current process snapshot or raise ``ProcessListenerError``."""
+
+
+class ProcessExitMonitor(Protocol):
+    """Event-source style monitor for one already-detected process."""
+
+    def is_running(self) -> bool | None:
+        """Return process liveness, or None when the monitor cannot tell."""
+
+    def close(self) -> None:
+        """Release monitor resources."""
 
 
 class _ProcessEntry32W(ctypes.Structure):
@@ -199,6 +212,17 @@ class WindowsProcessListener:
         self.kernel32.Process32NextW.restype = wintypes.BOOL
         self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         self.kernel32.CloseHandle.restype = wintypes.BOOL
+        self.kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        self.kernel32.OpenProcess.restype = wintypes.HANDLE
+        self.kernel32.WaitForSingleObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+        ]
+        self.kernel32.WaitForSingleObject.restype = wintypes.DWORD
 
     def snapshot(self) -> ProcessSnapshot:
         """Return whether any Codex client process is currently alive."""
@@ -235,6 +259,48 @@ class WindowsProcessListener:
             checked_at=checked_at,
         )
 
+    def exit_monitor_for_snapshot(
+        self,
+        snapshot: ProcessSnapshot,
+    ) -> ProcessExitMonitor | None:
+        pid = snapshot.primary_pid
+        if not self.enabled or pid is None:
+            return None
+        handle = self.kernel32.OpenProcess(_SYNCHRONIZE, False, int(pid))
+        if not handle:
+            return None
+        return _WindowsProcessExitMonitor(self.kernel32, int(handle))
+
+
+class _WindowsProcessExitMonitor:
+    def __init__(self, kernel32: object, handle: int) -> None:
+        self._kernel32 = kernel32
+        self._handle: int | None = handle
+
+    def is_running(self) -> bool | None:
+        handle = self._handle
+        if handle is None:
+            return None
+        try:
+            result = self._kernel32.WaitForSingleObject(handle, 0)
+        except Exception:
+            return None
+        if result == _WAIT_TIMEOUT:
+            return True
+        if result == _WAIT_OBJECT_0:
+            return False
+        return None
+
+    def close(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        try:
+            self._kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+
 
 class CodexDaemonManager:
     """Small polling state machine that owns process-level daemon decisions."""
@@ -244,11 +310,16 @@ class CodexDaemonManager:
         listener: ProcessListener | None = None,
         *,
         poll_ms: int = DEFAULT_DAEMON_POLL_MS,
+        exit_monitor_factory: Callable[[ProcessSnapshot], ProcessExitMonitor | None]
+        | None = None,
     ) -> None:
         self.listener = listener or WindowsProcessListener()
         self.poll_ms = max(MIN_DAEMON_POLL_MS, min(MAX_DAEMON_POLL_MS, int(poll_ms)))
         self.state = DaemonState.WAITING_FOR_CODEX
         self.last_snapshot = ProcessSnapshot(found=False, checked_at=time.monotonic())
+        self._exit_monitor_factory = exit_monitor_factory
+        self._exit_monitor: ProcessExitMonitor | None = None
+        self._exit_monitor_pid: int | None = None
 
     @property
     def poll_seconds(self) -> float:
@@ -265,6 +336,7 @@ class CodexDaemonManager:
             self.state = DaemonState.FALLBACK
             raise ProcessListenerError(str(exc)) from exc
         self.last_snapshot = snapshot
+        self._refresh_exit_monitor(snapshot)
         return snapshot
 
     def wait_for_codex(self) -> ProcessSnapshot:
@@ -285,10 +357,53 @@ class CodexDaemonManager:
 
     def codex_is_running(self) -> bool:
         """Return whether the watched Codex process family is still alive."""
+        if self._exit_monitor is not None:
+            running = self._exit_monitor.is_running()
+            if running is True:
+                return True
+            self._clear_exit_monitor()
         snapshot = self.snapshot()
         if not snapshot.found:
             self.state = DaemonState.EXITING
         return snapshot.found
+
+    def close(self) -> None:
+        self._clear_exit_monitor()
+
+    def _refresh_exit_monitor(self, snapshot: ProcessSnapshot) -> None:
+        pid = snapshot.primary_pid
+        if pid is None:
+            self._clear_exit_monitor()
+            return
+        if self._exit_monitor is not None and self._exit_monitor_pid == pid:
+            return
+        self._clear_exit_monitor()
+        factory = self._exit_monitor_factory
+        if factory is None:
+            factory = getattr(self.listener, "exit_monitor_for_snapshot", None)
+        if not callable(factory):
+            return
+        try:
+            monitor = factory(snapshot)
+        except Exception as exc:
+            _logger.info("daemon_exit_monitor_unavailable pid=%s error=%s", pid, exc)
+            return
+        if monitor is None:
+            return
+        self._exit_monitor = monitor
+        self._exit_monitor_pid = pid
+        _logger.info("daemon_exit_monitor_started pid=%s", pid)
+
+    def _clear_exit_monitor(self) -> None:
+        monitor = self._exit_monitor
+        self._exit_monitor = None
+        self._exit_monitor_pid = None
+        if monitor is None:
+            return
+        try:
+            monitor.close()
+        except Exception:
+            pass
 
 
 __all__ = [
@@ -297,6 +412,7 @@ __all__ = [
     "DEFAULT_DAEMON_POLL_MS",
     "MAX_DAEMON_POLL_MS",
     "ProcessListenerError",
+    "ProcessExitMonitor",
     "ProcessSnapshot",
     "WindowsProcessListener",
     "configure_daemon_logging",

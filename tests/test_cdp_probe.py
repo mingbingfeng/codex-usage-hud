@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -228,9 +229,21 @@ class CdpProbeTests(unittest.TestCase):
         self.assertIn("data-app-action-sidebar-thread-id", script)
         self.assertIn('"thread-123"', script)
         self.assertIn('"Selected Thread"', script)
-        self.assertIn("await revealSidebar()", script)
-        self.assertIn('match.shortcut.match(/Ctrl\\+([0-9])/i)', script)
-        self.assertIn('status: "switched"', script)
+        self.assertNotIn("return (async () =>", script)
+        self.assertIn('status: "switch-requested"', script)
+        self.assertIn('status: sidebarRevealRequested', script)
+
+    def test_dom_probe_prefers_sidebar_selected_state_before_location_match(self) -> None:
+        selected = "rows.find(rowSelectedByState) || rows.find(rowMatchesLocation)"
+
+        self.assertIn("const rowSelectedByState = (row) =>", DOM_PROBE_SCRIPT)
+        self.assertIn('row.getAttribute("aria-selected") === "true"', DOM_PROBE_SCRIPT)
+        self.assertIn("[data-state='active']", DOM_PROBE_SCRIPT)
+        self.assertIn(
+            "threadRows.find(rowSelectedByState) || threadRows.find(rowMatchesLocation)",
+            DOM_PROBE_SCRIPT,
+        )
+        self.assertIn(selected, session_switch_script("thread-123", "Selected Thread"))
 
     def test_session_controller_runs_awaited_runtime_evaluate(self) -> None:
         original_list_targets = cdp_probe.list_targets
@@ -301,6 +314,77 @@ class CdpProbeTests(unittest.TestCase):
         assert isinstance(captured["params"], dict)
         self.assertTrue(captured["params"]["awaitPromise"])
         self.assertIn('"thread-123"', str(captured["params"]["expression"]))
+
+    def test_session_controller_retries_after_sidebar_reveal_request(self) -> None:
+        original_list_targets = cdp_probe.list_targets
+        original_send = cdp_probe.send_cdp_command
+        calls: list[dict[str, object]] = []
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            return [
+                {
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://-/index.html",
+                    "id": "page-1",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/codex",
+                }
+            ]
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            calls.append(
+                {
+                    "websocket_url": websocket_url,
+                    "method": method,
+                    "params": params,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+            status = "sidebar-reveal-requested" if len(calls) == 1 else "switch-requested"
+            return {
+                "result": {
+                    "result": {
+                        "value": {
+                            "ok": len(calls) > 1,
+                            "status": status,
+                            "requestedSessionId": "thread-123",
+                            "requestedTitle": "Selected Thread",
+                            "activeSessionId": "thread-123" if len(calls) > 1 else "",
+                            "activeTitle": "Selected Thread" if len(calls) > 1 else "",
+                            "matchedBy": "session-id",
+                            "availableCount": 1,
+                        }
+                    }
+                }
+            }
+
+        cdp_probe.list_targets = fake_list_targets
+        cdp_probe.send_cdp_command = fake_send
+        try:
+            controller = CodexCdpSessionController(
+                port=9229,
+                timeout_seconds=0.5,
+                enabled=True,
+            )
+            with patch("codex_usage_hud.platforms.cdp_probe.time.sleep") as sleep:
+                result = controller.activate_thread(
+                    session_id="thread-123",
+                    title="Selected Thread",
+                )
+        finally:
+            cdp_probe.list_targets = original_list_targets
+            cdp_probe.send_cdp_command = original_send
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "switch-requested")
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(0.16)
 
 
 

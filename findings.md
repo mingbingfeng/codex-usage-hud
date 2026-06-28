@@ -1,62 +1,106 @@
-# 发现与决策
+# 发现与决策：PySide6 桌面级会话气泡恢复
 
-## 需求
-- 完成路径必须拆为：原位确认 -> 原位收缩成圆 -> 完整圆形停顿 -> 贴屏幕右侧垂直上浮到右上顶位。
-- 圆形不能从源卡片中心斜飞到右上；成圆后应先贴到右侧轨道，再只改变 y。
-- 圆形起飞前，上方矩形气泡按顺序左移让路；圆形经过后，矩形气泡弹性回位。
-- 恢复聊天必须走完全反向路径：顶部唤醒 -> 原路返回 -> 回到记忆栈位 -> 展开回矩形 -> 内容渐入。
+## 当前实现事实
+- 主 HUD 已保持 renderer-only：`run_hud_session()` 只调用 `run_renderer_hud_session()`。
+- 旧配置值 `auto`、`qt`、`tk`、`tkinter`、`pyside6` 读取后统一归一为 `renderer`。
+- 旧 CLI 参数 `--qt-hud`、`--tk-hud`、`--no-renderer-hud` 仍作为兼容 alias 保留，但不会启动 Qt/Tk 独立 HUD。
+- renderer 初始连接失败或窗口不可用时返回 `RENDERER_HUD_UNAVAILABLE` 并写入 renderer 诊断，不再 fallback。
+- `DesktopWorkOverlay` 已恢复为可选 PySide6 桌面 overlay：当 `work_overlay_max_items > 0` 且 PySide6 可用时启动 helper。
+- PySide6 不可用时，`DesktopWorkOverlay` 不启动 helper，不影响 renderer HUD，并记录一次 `work_overlay_unavailable` 诊断。
+- helper 启动失败或异常退出后会设置 60s backoff，避免刷新循环不断拉起失败进程。
+- `run_work_overlay_helper()` 惰性导入 `work_overlay_qt.py`，默认 CLI import 不加载 Qt overlay 模块。
+- 默认依赖不包含 PySide6；`pyproject.toml` 新增 `desktop-overlay = ["PySide6>=6.8"]` optional extra。
+- Windows PyInstaller 默认构建不 hidden-import `PySide6` 或 `tkinter.font`。
+- renderer 设置页文案已改为“PySide6 桌面气泡数量（0 为关闭）”，并新增“气泡依赖 PySide6”状态块。
+- renderer 设置页已移除“HUD 显示方案”字段和 `display_mode` 下拉选项；保存时仍写入 `display_mode: "renderer"` 作为兼容字段。
+- “气泡依赖 PySide6”状态块会根据后端 `desktopOverlayDependency` 显示：
+  - 已安装：显示 PySide6 版本号。
+  - 未安装且源码/pip 环境可安装：显示“需要安装环境”、“立即安装”和“已安装，立即启用”。
+  - 需要重启：显示“立即重启”。
+- `installDesktopOverlay` 会后台启动 `pip install PySide6>=6.8`；安装完成后用户可点“已安装，立即启用”重新探测。
+- `enableDesktopOverlay` 会重新探测 PySide6、清理 overlay 可用性缓存，并在当前配置数量为 0 时恢复默认可用数量。
+- README / README_EN 已说明 `codex-usage-hud[desktop-overlay]` 和 `work_overlay_max_items` 的含义。
+- 仓库已补 `.github/workflows/macos-smoke.yml`：在 `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`，验证 lazy CLI import、`compileall` 和任务相关 pytest。
+- GitHub Actions `macOS Smoke` 已实跑通过：run `28283179999` 在 `macos-latest` 上确认“能装、能导入、能跑测试”。
+- 当前轮次已决定不使用远程 Mac；macOS 路线暂时只保留 CI smoke，桌面交互实机验证延后。
+- 当前发行策略已单独落档在 `docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md`。
 
-## 研究发现
-- 现有 `_transition_rect_for_progress` 在完成路径中从 `source_circle` 直接插值到 `target_rect`，因此 x 和 y 同时变化，表现为斜向飞行。
-- 现有 `_transition_rect_for_progress` 在恢复路径中从顶部圆直接插值到目标栈位圆，仍是 x/y 同时变化，不是同一右侧垂直轨道反向。
-- 现有 `_prepare_completed_badge_moves` 只移动已完成圆形，不处理矩形卡片让路/回位。
-- 现有 `_update_completed_badge_moves` 从过渡开始就把已完成圆移动到目标，没有区分“起飞前让路”和“经过后回位”。
-- 现有恢复目标矩形位置来自 `_find_item_rect(new_items, ...)`，没有保存完成前记忆栈位；排序变化时不能保证回到原位。
+## 导入图事实
+- `import codex_usage_hud.cli` 不加载：
+  - `PySide6`
+  - `PySide6.QtCore`
+  - `codex_usage_hud.ui.work_overlay_qt`
+  - `codex_usage_hud.ui.qt_hud`
+  - `codex_usage_hud.ui.tk_hud`
+- PySide6 探测使用 `importlib.util.find_spec("PySide6")`，不会触发 Qt 模块导入。
+- 只有 `codex-hud --work-overlay-helper <state-file>` 子进程路径会惰性进入 `work_overlay_qt.py`。
+- `src/codex_usage_hud/platforms/windows.py` 和 `windows_tracker.py` 已不再要求非 Windows 环境提供 `ctypes.WINFUNCTYPE` 才能被导入。
 
-## 技术决策
+## 复用能力
+| 能力 | 当前状态 |
+|------|----------|
+| `active_work_items` | 继续作为桌面气泡数据源 |
+| `work_item_to_overlay_dict` | 继续输出 helper payload |
+| state file / command file | 继续作为 renderer 主进程和 PySide6 helper 的 IPC |
+| 完成态圆形动画 | 保留在 `work_overlay_qt.py` |
+| dismiss 行为 | 保留既有逻辑和回归测试 |
+| 点击 `activateSession` | 保留命令流，主进程继续用 `SessionSwitchController` 处理 |
+| 会话切换 backend | macOS/Windows 优先 CDP；Windows 保留 search shortcut fallback |
+
+## 关键决策
 | 决策 | 理由 |
 |------|------|
-| 抽出垂直轨道几何函数 | 让正向和逆向共用同一路径，测试更直接 |
-| 把路径拆成原位圆、右侧轨道圆、顶部槽位圆 | 满足“不斜飞”和“贴右侧垂直运动” |
-| 增加过渡期让路偏移函数 | 先用纯函数表达左移/回位时序，再接入 QWidget move |
-| 记录卡片历史矩形 | 恢复路径需要记忆栈位，而不是仅按当前列表重算 |
-| 保留信息型完成徽章 | 用户要求完成态恢复上一版信息密度：标题、对勾、tokens、金额、缓存命中率、工作目录和点击能力 |
-| 恢复过渡使用蓝色和 `↻` | 区分“完成”与“恢复运行”的视觉语义 |
+| 主 HUD renderer-only，桌面气泡 PySide6 optional | 符合“主 HUD 不回退 Qt/Tk，但桌面级气泡长期用 PySide6”的目标 |
+| 不采用沿 Codex App 边框绘制方案 | 用户已明确后续长期采用 Qt/PySide6 桌面级气泡 |
+| PySide6 不放入默认 dependencies | 避免 CLI、renderer HUD、打包路径重新强依赖 Qt |
+| PySide6 缺失只诊断不报错退出 | 未安装 optional extra 的用户仍应能使用 renderer HUD |
+| helper 失败加 backoff | 避免每次刷新都创建失败子进程和重复诊断 |
 
-## 遇到的问题
-| 问题 | 解决方案 |
-|------|---------|
-| Puppeteer 本地缺少绑定 Chrome，无法直接渲染设计稿 | 使用设计 HTML 文本规范、录屏抽帧和源码证据完成验收 |
-| 之前 aide 报告对慢速录屏有误判 | 主线程以抽帧和源码为准，只采纳可复核结论 |
-| 当前 Python 3.14 Tk 缺少 `init.tcl` | 全量 Tk 窗口用例受环境限制；本轮用目标测试、compileall、demo 和排除 Tk 环境依赖的 UI 测试验证 |
+## 已验证事实
+- 目标小集合通过：
+  - `python -m pytest tests/test_config.py tests/test_renderer_hud.py tests/test_build_exe.py tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep tests/test_ui.py::DaemonLifecycleTests::test_cli_import_does_not_eagerly_import_qt_hud -q`
+- 任务相关集合通过：
+  - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py tests/test_platforms.py -q`
+- 全量单测通过：
+  - `python -m pytest -q`
+- 编译检查通过：
+  - `python -m compileall -q src tests tools`
+- whitespace 检查通过：
+  - `git diff --check`
+- Windows 实机验证通过：
+  - 用户确认安装 PySide6 后运行 `codex-hud --daemon`，PySide6 桌面气泡无问题。
+- 本轮设置页调整目标测试通过：
+  - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_install_desktop_overlay_starts_optional_dependency_install tests/test_ui.py::DaemonLifecycleTests::test_renderer_enable_desktop_overlay_rechecks_and_enables_without_restart tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available -q`
+  - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py -q`
+- macOS CI smoke 通过：
+  - GitHub Actions run `28283179999`
+  - `python -m pip install -e ".[desktop-overlay]"`
+  - lazy `import codex_usage_hud.cli`
+  - `python -m compileall -q src tests tools`
+  - 任务相关 pytest：`54 passed`
 
-## 资源
-- 设计稿：`docs/designs/completed-session-bubble-concept.html`
-- 录屏：`C:/Users/zjxqm/AppData/Local/Packages/Microsoft.ScreenSketch_8wekyb3d8bbwe/TempState/Recordings/20260618-0813-21.4548067.mp4`
-- 核心代码：`src/codex_usage_hud/ui/work_overlay_qt.py`
-- 目标测试：`tests/test_ui.py::WorkOverlayTransitionTests`
+## 剩余风险
+| 风险 | 影响 | 当前处理 |
+|------|------|----------|
+| 尚未在真实 macOS 验证 PySide6 overlay 置顶和点击切换 | macOS 窗口层级/权限可能与 Windows 不同 | 当前轮次不做远程 Mac；已保留 checklist 和 helper 路径，等待未来真实设备验证 |
+| 当前 macOS CI 只能覆盖安装/导入/测试，不能替代真实桌面交互验证 | overlay 置顶、dismiss、点击切换仍可能只在实机暴露问题 | 已新增 `macos-smoke.yml`，当前轮次先停在 CI smoke，等待未来真实设备补齐 |
+| 默认 Windows 安装包不含 PySide6 | 安装包用户默认看不到桌面气泡 | 当前按 optional extra 处理，是否内置 PySide6 是后续发行策略 |
+| macOS 自动更新仍不是完整发行方案 | macOS 用户无法复用 Windows installer 语义 | 保留为后续平台化任务 |
 
-## 视觉/浏览器发现
-- 录屏里第二个完成态上升时，已有完成圆和新圆有接触/重叠感。
-- 录屏里恢复阶段仍是绿色对勾/绿色胶囊，缺少明显“恢复运行”语义。
-- 录屏里到顶后从过渡圆切换为复杂完成徽章，有二次视觉替换感。
+## 新会话优先阅读
+1. `src/codex_usage_hud/cli.py`
+2. `src/codex_usage_hud/ui/work_overlay_qt.py`
+3. `src/codex_usage_hud/ui/renderer_hud.py`
+4. `src/codex_usage_hud/config.py`
+5. `tests/test_ui.py`
+6. `tests/test_renderer_hud.py`
+7. `README.md`
+8. `README_EN.md`
 
-## 启动态完成圆发现
-- 用户反馈刚启动出现两个绿色完成圆；完成态气泡不应从历史完成会话直接出现。
-- 复现“两个历史完成 JSONL + 全新 context”时，当前 CLI 返回空列表，说明基础过滤链路没有直接放出历史完成项。
-- 本机当前真实 work-overlay state 中两个条目是 `active`，不是 `recent`；`%TEMP%\codex-work-overlay-transition-demo.json` 留有 demo 状态，且 demo 默认循环时会出现完成圆，容易和真实启动 overlay 混淆。
-- 仍然收紧 `_select_runtime_work_overlay_items`：`recent` 只认本次选择开始前已有的 seen task key，避免同一次启动扫描内自我登记后显示完成态。
-
-## 完成态信息徽章发现
-- 只保留对勾会丢失上一版完成态的信息价值和操作入口的视觉指示。
-- 完成态点击锚点没有丢：`check_anchor` 仍负责关闭，`workdir_anchor` 仍负责跳转 Codex 会话；缺陷主要在绘制层。
-- 已恢复 `CompletedBadgeWidget.paintEvent` 中的标题弧形文字、工作目录弧形文字、中心对勾、耗时、Tokens/Cost/Cache 三个指标。
-
-## 方变圆裁剪发现
-- 不建议增加稳定态卡片高度：会让运行态气泡长期变厚，影响信息密度。
-- 不建议缩小最终完成圆：会让成圆后到稳定完成态之间出现尺寸跳变。
-- 修复点应在过渡层：中间圆的 top 不允许为负，且过渡期间临时把 shell 最小高度撑到整条路径所需高度，结束后恢复。
+## macOS 手动验证前提
+- 安装 optional extra：`python -m pip install -e ".[desktop-overlay]"`
+- Codex App 需要暴露本地 CDP/debug target，renderer HUD 才能注入和跟随当前会话。
+- macOS 需要检查方形运行气泡、完成态圆气泡、dismiss、点击切换会话和 renderer HUD 注入。
 
 ---
-*每执行2次查看/浏览器/搜索操作后更新此文件*
-*防止视觉信息丢失*
+*每执行2次查看/搜索/浏览器操作后更新此文件，避免新发现丢失。*

@@ -15,6 +15,7 @@ import uuid
 from .base import BasePlatform
 from .cdp_probe import CodexCdpProbe
 
+_WINFUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 
 _OBJID_CLIENT = 0xFFFFFFFC
 _CHILDID_SELF = 0
@@ -231,15 +232,15 @@ _IID_IUIAUTOMATION_EVENT_HANDLER = _GUID.from_string(
     "{146c3c17-f12e-4e22-8c27-f894b9b79c69}"
 )
 
-_UiaQueryInterfaceProc = ctypes.WINFUNCTYPE(
+_UiaQueryInterfaceProc = _WINFUNCTYPE(
     ctypes.c_long,
     ctypes.c_void_p,
     ctypes.POINTER(_GUID),
     ctypes.POINTER(ctypes.c_void_p),
 )
-_UiaAddRefProc = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
-_UiaReleaseProc = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
-_UiaHandleEventProc = ctypes.WINFUNCTYPE(
+_UiaAddRefProc = _WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_UiaReleaseProc = _WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_UiaHandleEventProc = _WINFUNCTYPE(
     ctypes.c_long,
     ctypes.c_void_p,
     ctypes.c_void_p,
@@ -830,7 +831,7 @@ class _UiaTitleProbe:
             ptr,
             ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
         ).contents
-        return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
+        return _WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
 
 
 class _MsaaTitleProbe:
@@ -1084,7 +1085,7 @@ class _MsaaTitleProbe:
             ptr,
             ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)),
         ).contents
-        return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
+        return _WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])
 
 
 class WindowsPlatform(BasePlatform):
@@ -1109,6 +1110,12 @@ class WindowsPlatform(BasePlatform):
             self._title_probe = _MsaaTitleProbe()
         except Exception:
             self._title_probe = None
+
+    def refresh_cdp_probe(self) -> None:
+        try:
+            self._cdp_probe = CodexCdpProbe()
+        except Exception:
+            self._cdp_probe = None
 
     def get_codex_data_dir(self) -> Path:
         appdata = os.environ.get("APPDATA")
@@ -1216,7 +1223,7 @@ class WindowsPlatform(BasePlatform):
     def _find_codex_window(self) -> int | None:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
-        enum_proc_type = ctypes.WINFUNCTYPE(
+        enum_proc_type = _WINFUNCTYPE(
             wintypes.BOOL,
             wintypes.HWND,
             wintypes.LPARAM,
@@ -1333,7 +1340,7 @@ class WindowsPlatform(BasePlatform):
 class _UiaTitleWatcher:
     """Listen for structured UIA selection/invoke events from Codex's sidebar."""
 
-    _mouse_callback_type = ctypes.WINFUNCTYPE(
+    _mouse_callback_type = _WINFUNCTYPE(
         wintypes.LPARAM,
         ctypes.c_int,
         wintypes.WPARAM,
@@ -1527,7 +1534,7 @@ class _UiaTitleWatcher:
 class _WinEventTitleWatcher:
     """Listen for Codex accessibility focus/selection events and emit thread titles."""
 
-    _callback_type = ctypes.WINFUNCTYPE(
+    _callback_type = _WINFUNCTYPE(
         None,
         ctypes.c_void_p,
         wintypes.DWORD,

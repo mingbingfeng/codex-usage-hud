@@ -57,6 +57,9 @@ class BasePlatform(ABC):
         """Return ``(session_id, title)`` for the selected Codex conversation."""
         return None
 
+    def refresh_cdp_probe(self) -> None:
+        """Refresh any CDP-backed probes after the renderer debug port changes."""
+
     def get_active_app_error(self) -> str:
         """Return the visible Codex App error text, if one is currently shown."""
         return ""

@@ -82,9 +82,9 @@ class PyInstallerCommandTests(unittest.TestCase):
             self.assertIn("PySide2", command)
             self.assertIn("codex_usage_hud.platforms.linux", command)
             self.assertIn("codex_usage_hud.platforms.macos", command)
-            self.assertIn("--hidden-import", command)
-            self.assertIn("tkinter.font", command)
-            self.assertIn("PySide6", command)
+            self.assertNotIn("--hidden-import", command)
+            self.assertNotIn("tkinter.font", command)
+            self.assertNotIn("PySide6", command)
             self.assertEqual(command[-1], str(entry_script))
 
     def test_format_command_returns_copy_pasteable_string(self) -> None:

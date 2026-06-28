@@ -84,6 +84,9 @@ RENDERER_HUD_SCRIPT = r"""
   const resizeHandlerName = "__codexUsageHudResize";
   const scrollHandlerName = "__codexUsageHudScroll";
   const mutationObserverName = "__codexUsageHudObserver";
+  const resizeObserverName = "__codexUsageHudResizeObserver";
+  const bootstrapObserverName = "__codexUsageHudBootstrapObserver";
+  const bootstrapTimerName = "__codexUsageHudBootstrapTimer";
   const scheduleName = "__codexUsageHudSchedule";
   const stateName = "__codexUsageHudState";
   const rafName = "__codexUsageHudRaf";
@@ -94,9 +97,19 @@ RENDERER_HUD_SCRIPT = r"""
   const storageKey = "codexUsageHudPanelState:v5";
   const settingsCommandKey = "codexUsageHudSettingsCommand:v1";
   const settingsModalId = "codex-usage-hud-settings-modal";
+  const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
+  const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
+  const activeSessionTimerName = "__codexUsageHudActiveSessionTimer";
+  const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";
+  const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
+  const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
   const staleUpdateMs = 10000;
   let topSlotCache = null;
   let pendingSyncPanels = null;
+  let cachedHeaderNode = null;
+  let cachedComposerNode = null;
+  let observedHeaderNode = null;
+  let observedComposerNode = null;
   const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
   const numericAnimations = new WeakMap();
 
@@ -1379,6 +1392,20 @@ RENDERER_HUD_SCRIPT = r"""
         color: #10161d;
         font-weight: 700;
       }
+      #${rootId} .codex-usage-hud-settings-link {
+        min-height: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: #f3d27a;
+        padding: 0;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 700;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
       #${rootId} .codex-usage-hud-settings-tabs {
         display: flex;
         gap: 6px;
@@ -1441,6 +1468,42 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .codex-usage-hud-settings-field select:focus,
       #${rootId} .codex-usage-hud-price-row input:focus {
         border-color: #f3d27a;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency {
+        min-height: 30px;
+        box-sizing: border-box;
+        display: grid;
+        gap: 5px;
+        padding: 7px 8px;
+        border: 1px solid #273241;
+        border-radius: 5px;
+        background: #141b24;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-state {
+        color: #e8eef7;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-version {
+        color: #8fe3a1;
+        font: 700 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-note {
+        color: #8492a6;
+        font-size: 11px;
+        line-height: 1.35;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
       }
       #${rootId} .codex-usage-hud-settings-inline {
         display: grid;
@@ -2246,7 +2309,7 @@ RENDERER_HUD_SCRIPT = r"""
       daily_reset_time: "10:00",
       weekly_reset_weekday: 3,
       weekly_reset_time: "10:00",
-      display_mode: "auto",
+      display_mode: "renderer",
       work_overlay_max_items: 6,
       pricing_url: "",
       budget_thresholds: [0.5, 0.8, 0.9, 1.0],
@@ -2261,19 +2324,268 @@ RENDERER_HUD_SCRIPT = r"""
     return { ...defaultHudSettings(), ...(raw && typeof raw === "object" ? raw : {}) };
   }
 
-  function activeDisplayMode() {
-    const mode = String(currentPayload()?.activeDisplayMode || "renderer");
-    return mode === "qt" || mode === "tk" ? mode : "renderer";
-  }
-
-  function effectiveRuntimeMode(displayMode) {
-    const mode = String(displayMode || "auto");
-    if (mode === "qt" || mode === "tk") return mode;
-    return "renderer";
-  }
-
   function settingsBridgeUrl() {
     return String(currentPayload()?.settingsBridgeUrl || "").replace(/\/+$/, "");
+  }
+
+  function normalizeThreadId(value) {
+    const text = normalize(value);
+    const match = text.match(/^(?:[a-z0-9_.-]+:)(.+)$/i);
+    return match ? normalize(match[1]) : text;
+  }
+
+  const activeSessionRowSelector = [
+    "[data-app-action-sidebar-thread-id]",
+    "[data-session-id]",
+    "a[href*='thread']",
+    "a[href*='conversation']",
+    "a[href*='session']",
+    "[role='link']",
+    "[role='button']",
+  ].join(",");
+
+  function activeSessionLocationId() {
+    const source = `${location.pathname}${location.search}${location.hash}`;
+    const match = source.match(/(?:session|conversation|thread)(?:\/|=|:|-)([A-Za-z0-9_.-]+)/i)
+      || source.match(/\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:[/?#]|$)/)
+      || source.match(/\/([A-Za-z0-9_-]{24,})(?:[/?#]|$)/);
+    return match ? normalizeThreadId(decodeURIComponent(match[1])) : "";
+  }
+
+  function activeSessionRowHref(row) {
+    return row?.getAttribute?.("href") || row?.querySelector?.("a")?.getAttribute?.("href") || "";
+  }
+
+  function activeSessionRowUrl(row) {
+    const href = activeSessionRowHref(row);
+    if (!href) return location.href;
+    try {
+      return new URL(href, location.href).href;
+    } catch (_) {
+      return location.href;
+    }
+  }
+
+  function activeSessionRefFromRow(row) {
+    const href = activeSessionRowHref(row);
+    const idMatch = href.match(/(?:session|conversation|thread)[=/:-]([A-Za-z0-9_.-]+)/i)
+      || href.match(/([A-Za-z0-9_-]{8,})$/);
+    const rawSessionId = row?.getAttribute?.("data-app-action-sidebar-thread-id")
+      || (idMatch && idMatch[1])
+      || row?.getAttribute?.("data-session-id")
+      || row?.getAttribute?.("data-testid")
+      || "";
+    const sessionId = normalizeThreadId(rawSessionId);
+    const titleNode = row?.querySelector?.("[data-thread-title], .truncate.select-none, .truncate.text-base");
+    const rawTitle = titleNode?.textContent || (titleNode ? "" : (row?.textContent || ""));
+    const title = normalize(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
+    return { rawSessionId: normalize(rawSessionId), sessionId, title };
+  }
+
+  function activeSessionRowSelected(row) {
+    if (row?.getAttribute?.("data-app-action-sidebar-thread-active") === "true") return true;
+    if (row?.getAttribute?.("aria-current") === "page" || row?.getAttribute?.("aria-current") === "true") return true;
+    if (row?.getAttribute?.("aria-selected") === "true") return true;
+    if (row?.getAttribute?.("data-active") === "true" || row?.getAttribute?.("data-selected") === "true") return true;
+    if (row?.matches?.("[data-state='active'], [data-state='selected'], .active, .selected")) return true;
+    return false;
+  }
+
+  function activeSessionRowMatchesLocation(row) {
+    const href = activeSessionRowHref(row);
+    if (href) {
+      try {
+        const url = new URL(href, location.href);
+        if (url.href === location.href) return true;
+      } catch (_) {
+        if (location.href.includes(href)) return true;
+      }
+    }
+    const ref = activeSessionRefFromRow(row);
+    return (
+      (!!ref.rawSessionId && location.href.includes(ref.rawSessionId))
+      || (!!ref.sessionId && location.href.includes(ref.sessionId))
+    );
+  }
+
+  function activeSessionRows() {
+    const container = activeSessionContainer();
+    const root = container || document;
+    return Array.from(root.querySelectorAll(activeSessionRowSelector))
+      .filter((row) => {
+        const ref = activeSessionRefFromRow(row);
+        return !!(ref.sessionId || ref.title);
+      });
+  }
+
+  function readActiveSessionRef() {
+    const rows = activeSessionRows();
+    const row = rows.find(activeSessionRowSelected) || rows.find(activeSessionRowMatchesLocation) || null;
+    const ref = row ? activeSessionRefFromRow(row) : { sessionId: activeSessionLocationId(), title: "" };
+    return {
+      sessionId: ref.sessionId || "",
+      title: ref.title || "",
+      url: location.href,
+    };
+  }
+
+  function activeSessionContainer() {
+    const row = document.querySelector(activeSessionRowSelector);
+    return row?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
+      || row?.parentElement
+      || document.querySelector("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
+      || null;
+  }
+
+  function postActiveSession(reason = "event", overrideRef = null) {
+    const bridge = settingsBridgeUrl();
+    if (!bridge) return;
+    const ref = overrideRef || readActiveSessionRef();
+    if (!ref.sessionId && !ref.title) return;
+    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href]);
+    if (window[activeSessionLastSignatureName] === signature) return;
+    window[activeSessionLastSignatureName] = signature;
+    const payload = {
+      sessionId: ref.sessionId,
+      title: ref.title,
+      url: ref.url || location.href,
+      reason,
+      observedAt: Date.now(),
+    };
+    fetch(`${bridge}/active-session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function scheduleActiveSessionReport(reason = "event") {
+    clearTimeout(window[activeSessionTimerName] || 0);
+    window[activeSessionTimerName] = setTimeout(() => {
+      postActiveSession(reason);
+      refreshActiveSessionObserver();
+    }, 40);
+  }
+
+  function refreshActiveSessionObserver() {
+    const container = activeSessionContainer();
+    window[activeSessionObserverName]?.disconnect?.();
+    if (!container) return false;
+    window[activeSessionObserverName] = new MutationObserver(() => {
+      scheduleActiveSessionReport("sidebar");
+    });
+    window[activeSessionObserverName].observe(container, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: [
+        "aria-selected",
+        "aria-current",
+        "data-active",
+        "data-selected",
+        "data-state",
+        "data-app-action-sidebar-thread-active",
+        "data-app-action-sidebar-thread-id",
+        "href",
+      ],
+    });
+    return true;
+  }
+
+  function startActiveSessionBootstrapObserver() {
+    if (window[activeSessionBootstrapObserverName] || refreshActiveSessionObserver()) return;
+    if (!document.body) return;
+    window[activeSessionBootstrapObserverName] = new MutationObserver(() => {
+      if (refreshActiveSessionObserver()) {
+        window[activeSessionBootstrapObserverName]?.disconnect?.();
+        delete window[activeSessionBootstrapObserverName];
+        scheduleActiveSessionReport("sidebar-ready");
+      }
+    });
+    window[activeSessionBootstrapObserverName].observe(document.body, {
+      subtree: true,
+      childList: true,
+    });
+    setTimeout(() => {
+      window[activeSessionBootstrapObserverName]?.disconnect?.();
+      delete window[activeSessionBootstrapObserverName];
+    }, 5000);
+  }
+
+  function installActiveSessionHistoryPatch() {
+    if (window[activeSessionHistoryPatchName]) return;
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    const patch = {
+      originalPushState,
+      originalReplaceState,
+      pushState: function(...args) {
+        const result = originalPushState.apply(this, args);
+        scheduleActiveSessionReport("history");
+        return result;
+      },
+      replaceState: function(...args) {
+        const result = originalReplaceState.apply(this, args);
+        scheduleActiveSessionReport("history");
+        return result;
+      },
+      popstate: () => scheduleActiveSessionReport("popstate"),
+    };
+    try {
+      history.pushState = patch.pushState;
+      history.replaceState = patch.replaceState;
+      window.addEventListener("popstate", patch.popstate);
+      window[activeSessionHistoryPatchName] = patch;
+    } catch (_) {
+      try {
+        history.pushState = originalPushState;
+        history.replaceState = originalReplaceState;
+      } catch (_) {}
+    }
+  }
+
+  function removeActiveSessionWatchers() {
+    clearTimeout(window[activeSessionTimerName] || 0);
+    document.removeEventListener("click", window[activeSessionClickHandlerName], true);
+    window[activeSessionObserverName]?.disconnect?.();
+    window[activeSessionBootstrapObserverName]?.disconnect?.();
+    const patch = window[activeSessionHistoryPatchName];
+    if (patch) {
+      if (history.pushState === patch.pushState) history.pushState = patch.originalPushState;
+      if (history.replaceState === patch.replaceState) history.replaceState = patch.originalReplaceState;
+      window.removeEventListener("popstate", patch.popstate);
+    }
+    delete window[activeSessionObserverName];
+    delete window[activeSessionBootstrapObserverName];
+    delete window[activeSessionTimerName];
+    delete window[activeSessionClickHandlerName];
+    delete window[activeSessionHistoryPatchName];
+    delete window[activeSessionLastSignatureName];
+  }
+
+  function ensureActiveSessionWatchers() {
+    if (!window[activeSessionClickHandlerName]) {
+      window[activeSessionClickHandlerName] = (event) => {
+        const container = event.target?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]");
+        const row = event.target?.closest?.(activeSessionRowSelector);
+        const explicitRow = row?.matches?.("[data-app-action-sidebar-thread-id], [data-session-id], a[href*='thread'], a[href*='conversation'], a[href*='session'], [role='link']");
+        if (row && !container && !explicitRow) return;
+        if (row && (!container || container.contains(row))) {
+          const ref = activeSessionRefFromRow(row);
+          postActiveSession("click", {
+            sessionId: ref.sessionId || "",
+            title: ref.title || "",
+            url: activeSessionRowUrl(row),
+          });
+          scheduleActiveSessionReport("click-followup");
+        }
+      };
+      document.addEventListener("click", window[activeSessionClickHandlerName], true);
+    }
+    installActiveSessionHistoryPatch();
+    startActiveSessionBootstrapObserver();
+    scheduleActiveSessionReport("payload");
   }
 
   function settingsPathLabel() {
@@ -2292,6 +2604,61 @@ RENDERER_HUD_SCRIPT = r"""
   function workOverlaySelectableMax() {
     const value = Number(currentPayload()?.workOverlaySelectableMax ?? 6);
     return Number.isFinite(value) && value >= 1 ? Math.round(value) : 6;
+  }
+
+  function desktopOverlayDependency() {
+    const raw = currentPayload()?.desktopOverlayDependency || {};
+    return raw && typeof raw === "object" ? raw : {};
+  }
+
+  function desktopOverlayDependencyHtml() {
+    const dependency = desktopOverlayDependency();
+    const installed = !!dependency.installed;
+    const installing = !!dependency.installing;
+    const requiresRestart = !!dependency.requiresRestart;
+    const canInstall = !!dependency.canInstall;
+    const version = String(dependency.version || "").trim();
+    const installCommand = String(dependency.installCommand || "python -m pip install \"PySide6>=6.8\"");
+    if (installed) {
+      return `
+        <div class="codex-usage-hud-overlay-dependency" data-installed="true">
+          <div class="codex-usage-hud-overlay-dependency-head">
+            <span class="codex-usage-hud-overlay-dependency-state">已安装</span>
+            <span class="codex-usage-hud-overlay-dependency-version">${escapeHtml(version ? `PySide6 ${version}` : "PySide6 可用")}</span>
+          </div>
+          <div class="codex-usage-hud-overlay-dependency-note">修改左侧数量后保存，桌面气泡会自动生效。</div>
+        </div>
+      `;
+    }
+    const actions = [];
+    if (canInstall && !installing) {
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-install-desktop-overlay">立即安装</button>');
+    }
+    if (!requiresRestart) {
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-enable-desktop-overlay">已安装，立即启用</button>');
+    } else {
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-restart">立即重启</button>');
+    }
+    return `
+      <div class="codex-usage-hud-overlay-dependency" data-installed="false">
+        <div class="codex-usage-hud-overlay-dependency-head">
+          <span class="codex-usage-hud-overlay-dependency-state">${installing ? "正在安装" : (requiresRestart ? "需要重启" : "需要安装环境")}</span>
+        </div>
+        <div class="codex-usage-hud-overlay-dependency-note">${
+          installing
+            ? "PySide6 正在后台安装；完成后点击“已安装，立即启用”。"
+            : (requiresRestart
+              ? "安装完成后需要重启 HUD，才能加载桌面气泡环境。"
+              : `桌面气泡依赖 PySide6。命令：${escapeHtml(installCommand)}`)
+        }</div>
+        <div class="codex-usage-hud-overlay-dependency-actions">${actions.join("")}</div>
+      </div>
+    `;
+  }
+
+  function syncDesktopOverlayDependency() {
+    const node = document.querySelector(`#${settingsModalId} [data-desktop-overlay-dependency="true"]`);
+    if (node) node.innerHTML = desktopOverlayDependencyHtml();
   }
 
   function updateStateFromPayload(payload) {
@@ -2383,11 +2750,6 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function settingsPanelHtml(settings, bridge, path) {
-    const currentMode = activeDisplayMode();
-    const configuredDisplayMode = String(settings.display_mode || "auto");
-    const selectedDisplayMode = ["auto", "renderer", "qt", "tk"].includes(configuredDisplayMode)
-      ? configuredDisplayMode
-      : currentMode;
     const overlaySelectableMax = workOverlaySelectableMax();
     const overlayValue = Math.min(
       overlaySelectableMax,
@@ -2421,17 +2783,12 @@ RENDERER_HUD_SCRIPT = r"""
           </div>
         </div>
         <div class="codex-usage-hud-settings-field">
-          <label>HUD 显示方案</label>
-          <select data-setting-key="display_mode" data-configured-display-mode="${escapeHtml(settings.display_mode)}" data-active-display-mode="${currentMode}" data-touched="false">
-            <option value="auto" ${selectedDisplayMode === "auto" ? "selected" : ""}>自动：Renderer -> Qt -> Tk</option>
-            <option value="renderer" ${selectedDisplayMode === "renderer" ? "selected" : ""}>Renderer 内嵌 HUD</option>
-            <option value="qt" ${selectedDisplayMode === "qt" ? "selected" : ""}>Qt 独立窗口</option>
-            <option value="tk" ${selectedDisplayMode === "tk" ? "selected" : ""}>Tk 独立窗口</option>
-          </select>
+          <label>PySide6 桌面气泡数量（0 为关闭）</label>
+          <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
         </div>
         <div class="codex-usage-hud-settings-field">
-          <label>会话气泡最大显示数（0 表示不启用）</label>
-          <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
+          <label>气泡依赖 PySide6</label>
+          <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
         </div>
         <div class="codex-usage-hud-settings-field">
           <label>超额提醒阈值</label>
@@ -2610,6 +2967,7 @@ RENDERER_HUD_SCRIPT = r"""
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden) return;
     updateAboutActionButtons(updateStateFromPayload(payload));
+    syncDesktopOverlayDependency();
     syncSettingsUpdateLoading(payload);
     const status = payload?.settingsCommandStatus;
     if (!status || typeof status !== "object") return;
@@ -2629,6 +2987,17 @@ RENDERER_HUD_SCRIPT = r"""
       setSettingsStatus(`无法提交设置命令：${error?.message || error}`, "error");
       return false;
     }
+    const bridge = settingsBridgeUrl();
+    if (bridge) {
+      try {
+        fetch(`${bridge}/command`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          keepalive: true,
+        }).catch(() => {});
+      } catch (_) {}
+    }
     setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
     setSettingsRestartVisible(false);
     if (!preserveOverlay) closeSettingsConfirm();
@@ -2642,28 +3011,6 @@ RENDERER_HUD_SCRIPT = r"""
   function closeSettingsConfirm() {
     const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
     if (layer) layer.remove();
-  }
-
-  function openSettingsConfirm({ kicker = "立即应用", title = "", body = "" } = {}) {
-    const dialog = settingsDialogRoot();
-    if (!dialog) return;
-    closeSettingsConfirm();
-    const layer = document.createElement("div");
-    layer.className = "codex-usage-hud-settings-confirm-layer";
-    layer.dataset.settingsConfirm = "true";
-    layer.innerHTML = `
-      <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="${escapeHtml(title || "确认切换显示方案")}">
-        <div class="codex-usage-hud-settings-confirm-kicker">${escapeHtml(kicker)}</div>
-        <div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div>
-        <div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div>
-        <div class="codex-usage-hud-settings-confirm-actions">
-          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-cancel" data-variant="ghost">取消</button>
-          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-confirm-save" data-variant="subtle">仅保存为默认</button>
-          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-apply-display-mode" data-primary="true">立即切换</button>
-        </div>
-      </div>
-    `;
-    dialog.appendChild(layer);
   }
 
   function openSettingsLoading({ kicker = "正在处理", title = "", body = "", mode = "" } = {}) {
@@ -2693,7 +3040,6 @@ RENDERER_HUD_SCRIPT = r"""
     const settings = hudSettingsFromPayload();
     const settingNode = (key) => modal?.querySelector(`[data-setting-key="${key}"]`);
     const read = (key) => settingNode(key)?.value;
-    const displayNode = settingNode("display_mode");
     const numberValue = (key, fallback) => {
       const value = Number(read(key));
       return Number.isFinite(value) && value >= 0 ? value : fallback;
@@ -2718,10 +3064,7 @@ RENDERER_HUD_SCRIPT = r"""
         reasoning: field("reasoning"),
       };
     });
-    const configuredDisplayMode = String(displayNode?.dataset.configuredDisplayMode || settings.display_mode);
-    const displayMode = displayNode?.dataset.touched === "true"
-      ? String(displayNode?.value || settings.display_mode)
-      : configuredDisplayMode;
+    const displayMode = "renderer";
     return {
       ...settings,
       daily_budget_usd: numberValue("daily_budget_usd", settings.daily_budget_usd),
@@ -2755,24 +3098,6 @@ RENDERER_HUD_SCRIPT = r"""
     );
   }
 
-  function applyDisplayModeFromModal() {
-    const settings = collectSettingsForm();
-    const nextMode = effectiveRuntimeMode(settings.display_mode);
-    const standaloneLabel = nextMode === "qt" ? "Qt" : "Tk";
-    openSettingsLoading({
-      kicker: "正在切换",
-      title: nextMode === "renderer" ? "正在切换到 Renderer 内嵌 HUD" : `正在切换到 ${standaloneLabel} 独立窗口`,
-      body: nextMode === "renderer"
-        ? "HUD 正在切回 Codex 内嵌显示。通常只需 1 到 3 秒。"
-        : `HUD 正在关闭当前内嵌面板，并启动独立的 ${standaloneLabel} 悬浮窗。通常只需 1 到 3 秒。`,
-    });
-    submitSettingsCommand(
-      { action: "applyDisplayMode", settings },
-      "正在应用显示方案，等待 HUD 切换...",
-      { preserveOverlay: true }
-    );
-  }
-
   function fetchPricesFromModal() {
     const settings = collectSettingsForm();
     submitSettingsCommand(
@@ -2785,6 +3110,20 @@ RENDERER_HUD_SCRIPT = r"""
     submitSettingsCommand(
       { action: "restart", reason: "settings" },
       "重启请求已提交，等待 HUD daemon 处理..."
+    );
+  }
+
+  function installDesktopOverlayFromModal() {
+    submitSettingsCommand(
+      { action: "installDesktopOverlay" },
+      "正在准备安装 PySide6..."
+    );
+  }
+
+  function enableDesktopOverlayFromModal() {
+    submitSettingsCommand(
+      { action: "enableDesktopOverlay" },
+      "正在重新检测 PySide6..."
     );
   }
 
@@ -2811,39 +3150,6 @@ RENDERER_HUD_SCRIPT = r"""
         document.getElementById(styleId)?.remove();
       }, 120);
     }
-  }
-
-  function promptForDisplayModeChange(select) {
-    if (!(select instanceof HTMLSelectElement)) return;
-    select.dataset.touched = "true";
-    const currentMode = String(select.dataset.activeDisplayMode || activeDisplayMode());
-    const selectedMode = String(select.value || "auto");
-    const nextMode = effectiveRuntimeMode(selectedMode);
-    if (nextMode === currentMode) {
-      if (selectedMode !== String(select.dataset.configuredDisplayMode || "")) {
-        setSettingsStatus(
-          selectedMode === "auto"
-            ? "已改为自动模式；当前 Renderer 已在运行，点击保存后会写入新的启动偏好。"
-            : "当前显示方案无需立即切换，点击保存后会写入新的启动偏好。"
-        );
-      }
-      setSettingsRestartVisible(false);
-      closeSettingsConfirm();
-      return;
-    }
-    if (nextMode === "qt" || nextMode === "tk") {
-      const standaloneLabel = nextMode === "qt" ? "Qt" : "Tk";
-      setSettingsRestartVisible(false);
-      setSettingsStatus(`已选择 ${standaloneLabel} 方案。请确认是现在切换，还是只把它保存为下次默认值。`);
-      openSettingsConfirm({
-        kicker: "切换显示方案",
-        title: `立即切换到 ${standaloneLabel} 独立窗口？`,
-        body: `当前 HUD 正显示在 Codex 窗口里。\n\n立即切换后，会关闭当前内嵌 HUD，并打开独立的 ${standaloneLabel} 悬浮窗。\n\n如果你只是想修改下次启动时的默认方案，可以点“仅保存为默认”。`,
-      });
-      return;
-    }
-    setSettingsRestartVisible(false);
-    closeSettingsConfirm();
   }
 
   function checkUpdateFromModal() {
@@ -3025,11 +3331,6 @@ RENDERER_HUD_SCRIPT = r"""
         top: event.deltaY,
       });
     }, { capture: true, passive: false });
-    root.addEventListener("change", (event) => {
-      const displaySelect = event.target?.closest?.(`[data-setting-key="display_mode"]`);
-      if (!displaySelect || !root.contains(displaySelect)) return;
-      promptForDisplayModeChange(displaySelect);
-    });
     root.addEventListener("click", (event) => {
       if (event.target?.id === settingsModalId) {
         event.preventDefault();
@@ -3089,26 +3390,6 @@ RENDERER_HUD_SCRIPT = r"""
         void saveSettingsFromModal();
         return;
       }
-      if (action.dataset.action === "settings-apply-display-mode") {
-        event.preventDefault();
-        event.stopPropagation();
-        void applyDisplayModeFromModal();
-        return;
-      }
-      if (action.dataset.action === "settings-confirm-save") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsConfirm();
-        void saveSettingsFromModal();
-        return;
-      }
-      if (action.dataset.action === "settings-confirm-cancel") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsConfirm();
-        setSettingsStatus("已取消立即切换；如需只改默认值，也可以直接点保存。");
-        return;
-      }
       if (action.dataset.action === "settings-exit") {
         event.preventDefault();
         event.stopPropagation();
@@ -3132,6 +3413,18 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         void restartHudFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-install-desktop-overlay") {
+        event.preventDefault();
+        event.stopPropagation();
+        void installDesktopOverlayFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-enable-desktop-overlay") {
+        event.preventDefault();
+        event.stopPropagation();
+        void enableDesktopOverlayFromModal();
         return;
       }
       if (action.dataset.action === "settings-fetch-prices") {
@@ -3325,6 +3618,19 @@ RENDERER_HUD_SCRIPT = r"""
     panel.style.height = px(height);
   }
 
+  function anchorUsable(node) {
+    return node instanceof HTMLElement && node.isConnected && !node.closest?.(`#${rootId}`) && visible(node);
+  }
+
+  function invalidateHeaderAnchor() {
+    cachedHeaderNode = null;
+    topSlotCache = null;
+  }
+
+  function invalidateComposerAnchor() {
+    cachedComposerNode = null;
+  }
+
   function candidateHeaders() {
     return Array.from(document.querySelectorAll([
       "header.app-header-tint",
@@ -3353,12 +3659,18 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function conversationHeaderElement() {
+    if (anchorUsable(cachedHeaderNode)) return cachedHeaderNode;
+    cachedHeaderNode = null;
     const surface = document.querySelector('[data-testid="app-shell-header-context-menu-surface"]');
     const surfaceHeader = surface?.closest?.("header.app-header-tint, header, .app-header-tint");
-    if (visible(surfaceHeader)) return surfaceHeader;
-    return candidateHeaders()
+    if (anchorUsable(surfaceHeader)) {
+      cachedHeaderNode = surfaceHeader;
+      return cachedHeaderNode;
+    }
+    cachedHeaderNode = candidateHeaders()
       .map((node, index) => ({ node, index, score: scoreHeader(node) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.node || null;
+    return cachedHeaderNode;
   }
 
   function conversationHeaderRect() {
@@ -3388,6 +3700,8 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function composerElement() {
+    if (anchorUsable(cachedComposerNode)) return cachedComposerNode;
+    cachedComposerNode = null;
     const candidates = new Set();
     const composerClasses = [
       "relative",
@@ -3415,7 +3729,8 @@ RENDERER_HUD_SCRIPT = r"""
     const best = Array.from(candidates)
       .map((node, index) => ({ node, index, score: scoreComposer(node) }))
       .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]?.node;
-    return visible(best) ? best : null;
+    cachedComposerNode = anchorUsable(best) ? best : null;
+    return cachedComposerNode;
   }
 
   function composerRect() {
@@ -3769,6 +4084,8 @@ RENDERER_HUD_SCRIPT = r"""
       applyRect(panel, left, top, width, height);
     }
     refreshAllMarquees(root);
+    refreshLayoutObservers();
+    startBootstrapObserver();
   }
 
   function syncPositionSettled(names = Object.keys(PANEL)) {
@@ -3799,6 +4116,105 @@ RENDERER_HUD_SCRIPT = r"""
       window[composerSettleTimerName] = 0;
       scheduleForPanels(["request"]);
     }, 180);
+  }
+
+  function layoutMutationTouchesTextInput(mutation) {
+    const element = elementFromMutationNode(mutation.target);
+    return !!element?.closest?.("textarea, [contenteditable='true'], [role='textbox']");
+  }
+
+  function layoutMutationTarget(mutation, headerNode, composerNode) {
+    const element = elementFromMutationNode(mutation.target);
+    if (!element || element.closest?.(`#${rootId}`)) return "";
+    if (headerNode && (element === headerNode || headerNode.contains(element))) return "header";
+    if (composerNode && (element === composerNode || composerNode.contains(element))) return "composer";
+    return "";
+  }
+
+  function handleLayoutMutations(mutations) {
+    const headerNode = cachedHeaderNode;
+    const composerNode = cachedComposerNode;
+    let touchesHeader = false;
+    let touchesComposer = false;
+    let touchesTextInput = false;
+    for (const mutation of mutations) {
+      const target = layoutMutationTarget(mutation, headerNode, composerNode);
+      if (target === "header") touchesHeader = true;
+      if (target === "composer") {
+        touchesComposer = true;
+        if (layoutMutationTouchesTextInput(mutation)) touchesTextInput = true;
+      }
+    }
+    if (touchesHeader) {
+      invalidateHeaderAnchor();
+      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
+      return;
+    }
+    if (!touchesComposer) return;
+    if (touchesTextInput) {
+      scheduleRequestAfterComposerSettles();
+      return;
+    }
+    invalidateComposerAnchor();
+    scheduleForPanels(["request"]);
+  }
+
+  function refreshLayoutObservers() {
+    const headerNode = conversationHeaderElement();
+    const composerNode = composerElement();
+    if (
+      headerNode === observedHeaderNode
+      && composerNode === observedComposerNode
+      && window[mutationObserverName]
+      && window[resizeObserverName]
+    ) return;
+    observedHeaderNode = headerNode;
+    observedComposerNode = composerNode;
+    window[mutationObserverName]?.disconnect?.();
+    window[resizeObserverName]?.disconnect?.();
+    window[mutationObserverName] = new MutationObserver(handleLayoutMutations);
+    const mutationOptions = {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["aria-label", "title", "data-thread-title", "class"],
+    };
+    if (headerNode) window[mutationObserverName].observe(headerNode, mutationOptions);
+    if (composerNode && composerNode !== headerNode) window[mutationObserverName].observe(composerNode, mutationOptions);
+    if (typeof ResizeObserver === "function") {
+      window[resizeObserverName] = new ResizeObserver(() => scheduleForPanels(Object.keys(PANEL), { invalidateTop: true }));
+      if (headerNode) window[resizeObserverName].observe(headerNode);
+      if (composerNode && composerNode !== headerNode) window[resizeObserverName].observe(composerNode);
+    } else {
+      window[resizeObserverName] = { disconnect() {} };
+    }
+  }
+
+  function stopBootstrapObserver() {
+    window[bootstrapObserverName]?.disconnect?.();
+    clearTimeout(window[bootstrapTimerName] || 0);
+    delete window[bootstrapObserverName];
+    delete window[bootstrapTimerName];
+  }
+
+  function startBootstrapObserver() {
+    if (cachedHeaderNode && cachedComposerNode) {
+      stopBootstrapObserver();
+      return;
+    }
+    if (window[bootstrapObserverName] || !document.body) return;
+    window[bootstrapObserverName] = new MutationObserver(() => {
+      invalidateHeaderAnchor();
+      invalidateComposerAnchor();
+      const headerNode = conversationHeaderElement();
+      const composerNode = composerElement();
+      if (!headerNode && !composerNode) return;
+      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
+      if (headerNode && composerNode) stopBootstrapObserver();
+    });
+    window[bootstrapObserverName].observe(document.body, { childList: true, subtree: true });
+    window[bootstrapTimerName] = setTimeout(stopBootstrapObserver, 5000);
   }
 
   function headerScopeSelector() {
@@ -4569,25 +4985,28 @@ RENDERER_HUD_SCRIPT = r"""
     const payload = state.payload || {};
     const updatedAt = Number(state.updatedAt || 0);
     if (!root || !updatedAt || Date.now() - updatedAt < staleUpdateMs) return;
-    const title = String(payload?.topDetails?.title || payload?.session || "").trim();
+    if (!payloadNeedsStaleGuard(payload)) return;
     const ageSeconds = Math.max(10, Math.floor((Date.now() - updatedAt) / 1000));
-    setText(root, "topLine", `HUD 更新暂停 | ${title ? `上次 ${title}` : "等待后端恢复"}`);
-    setText(root, "requestLine", "后端未继续刷新，正在显示旧数据");
-    setText(root, "requestLineExpanded", "后端未继续刷新，正在显示旧数据");
-    setText(root, "topTitle", "HUD 更新暂停");
-    setText(root, "topSession", title ? `上次显示 ${title}` : "");
-    setText(root, "topWarnings", `后端 ${ageSeconds}s 未更新，当前内容可能不是所选会话`);
+    const existingWarning = String(payload?.topDetails?.warnings || "").trim();
+    const staleWarning = `数据可能不是最新，已 ${ageSeconds}s 未同步`;
+    setText(root, "topWarnings", existingWarning ? `${existingWarning}\n${staleWarning}` : staleWarning);
     root.querySelectorAll('[data-field-panel="topWarnings"]').forEach((node) => {
       node.hidden = false;
     });
-    renderTopProgress(root, { topProgress: {} });
-    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+    root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
       node.classList.add(warningClass);
     });
   }
 
-  function scheduleStaleGuard() {
+  function payloadNeedsStaleGuard(payload) {
+    const requestStatus = String(payload?.requestStatus || "").toLowerCase();
+    const updatePhase = String(payload?.updateState?.phase || "").toLowerCase();
+    return requestStatus === "running" || updatePhase === "downloading" || updatePhase === "installing";
+  }
+
+  function scheduleStaleGuard(payload) {
     clearTimeout(window[staleTimerName] || 0);
+    if (!payloadNeedsStaleGuard(payload)) return;
     window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250);
   }
 
@@ -4601,12 +5020,18 @@ RENDERER_HUD_SCRIPT = r"""
       nextPayload.supportImages = previousPayload.supportImages;
     }
     window[stateName] = { payload: nextPayload, updatedAt: Date.now() };
+    try {
+      ensureActiveSessionWatchers();
+    } catch (_) {}
     const root = ensureRoot();
     if (!root) return false;
     applyTheme(root, nextPayload);
     setText(root, "topLine", nextPayload?.topLine || "codex-usage-hud 等待数据");
     setText(root, "requestLine", nextPayload?.requestLine || "本次请求 等待");
     setText(root, "requestLineExpanded", nextPayload?.requestLine || "最近模型请求轮次");
+    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+      node.classList.remove(warningClass);
+    });
     root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
       node.classList.toggle(warningClass, !!nextPayload?.warning);
     });
@@ -4619,7 +5044,7 @@ RENDERER_HUD_SCRIPT = r"""
     applySettingsCommandStatus(nextPayload || {});
     syncPosition();
     syncPositionSettled();
-    scheduleStaleGuard();
+    scheduleStaleGuard(nextPayload);
     return true;
   };
 
@@ -4631,12 +5056,22 @@ RENDERER_HUD_SCRIPT = r"""
     window.removeEventListener("resize", window[resizeHandlerName]);
     window.removeEventListener("scroll", window[scrollHandlerName], true);
     window[mutationObserverName]?.disconnect?.();
+    window[resizeObserverName]?.disconnect?.();
+    try {
+      removeActiveSessionWatchers();
+    } catch (_) {}
+    stopBootstrapObserver();
+    observedHeaderNode = null;
+    observedComposerNode = null;
     cancelAnimationFrame(window[rafName] || 0);
     clearInterval(window[runningTimerName] || 0);
     clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
     for (const timer of (window[settleTimerName] || [])) clearTimeout(timer);
     delete window[mutationObserverName];
+    delete window[resizeObserverName];
+    delete window[bootstrapObserverName];
+    delete window[bootstrapTimerName];
     delete window[resizeHandlerName];
     delete window[scrollHandlerName];
     delete window[scheduleName];
@@ -4655,26 +5090,6 @@ RENDERER_HUD_SCRIPT = r"""
   window[scrollHandlerName] = () => scheduleForPanels(["request"]);
   window.addEventListener("resize", window[resizeHandlerName]);
   window.addEventListener("scroll", window[scrollHandlerName], true);
-  window[mutationObserverName] = new MutationObserver((mutations) => {
-    const touchesHeader = mutations.some(mutationTouchesHeaderScope);
-    if (touchesHeader) {
-      scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
-      return;
-    }
-    if (!mutations.some(mutationTouchesComposerScope)) return;
-    if (mutations.some(mutationTouchesTextInput)) {
-      scheduleRequestAfterComposerSettles();
-      return;
-    }
-    scheduleForPanels(["request"]);
-  });
-  window[mutationObserverName].observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: ["aria-label", "title", "data-thread-title", "class"],
-  });
   const boot = () => {
     const state = window[stateName];
     if (state?.payload) {
@@ -4682,6 +5097,7 @@ RENDERER_HUD_SCRIPT = r"""
     } else {
       ensureRoot();
       syncPosition();
+      refreshLayoutObservers();
     }
   };
   if (document.body) {
@@ -4715,6 +5131,7 @@ class RendererHudPayload:
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
     work_overlay_selectable_max: int = 6
+    desktop_overlay_dependency: dict[str, object] = field(default_factory=dict)
     support_images: list[dict[str, str]] = field(default_factory=list)
     theme: dict[str, object] = field(default_factory=dict)
     update_state: dict[str, object] = field(default_factory=dict)
@@ -4742,6 +5159,7 @@ class RendererHudPayload:
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
             "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
+            "desktopOverlayDependency": dict(self.desktop_overlay_dependency),
             "supportImages": [dict(item) for item in self.support_images],
             "theme": dict(self.theme),
             "updateState": dict(self.update_state),
@@ -4794,6 +5212,7 @@ class RendererHudClient:
         settings_command_status: dict[str, object] | None = None,
         update_state: dict[str, object] | None = None,
         work_overlay_selectable_max: int = 6,
+        desktop_overlay_dependency: dict[str, object] | None = None,
     ) -> bool:
         support_images = [] if self._support_images_sent else support_qr_payload()
         theme_snapshot = self._theme_probe.snapshot()
@@ -4808,6 +5227,7 @@ class RendererHudClient:
             theme=_renderer_theme_payload(theme_snapshot),
             update_state=update_state,
             work_overlay_selectable_max=work_overlay_selectable_max,
+            desktop_overlay_dependency=desktop_overlay_dependency,
         ).to_json()
         if self.update_payload(payload):
             if support_images:
@@ -5053,6 +5473,7 @@ def payload_from_snapshot(
     theme: dict[str, object] | None = None,
     update_state: dict[str, object] | None = None,
     work_overlay_selectable_max: int = 6,
+    desktop_overlay_dependency: dict[str, object] | None = None,
 ) -> RendererHudPayload:
     session_cost = _session_cost(snapshot)
     warnings_dismissed = (
@@ -5107,6 +5528,7 @@ def payload_from_snapshot(
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},
         work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),
+        desktop_overlay_dependency=desktop_overlay_dependency or {},
         support_images=support_images or [],
         theme=theme or {},
         update_state=update_state or {},

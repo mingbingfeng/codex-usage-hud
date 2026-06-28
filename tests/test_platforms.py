@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -98,6 +99,36 @@ class PlatformFactoryTests(unittest.TestCase):
             self.assertIsInstance(platform, LinuxPlatform)
         else:
             self.fail(f"Unexpected platform under test: {sys.platform}")
+
+    def test_cross_platform_imports_do_not_require_winfunctype(self) -> None:
+        env = os.environ.copy()
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(SRC_ROOT)
+            if not existing_pythonpath
+            else str(SRC_ROOT) + os.pathsep + existing_pythonpath
+        )
+        script = (
+            "import ctypes\n"
+            "if hasattr(ctypes, 'WINFUNCTYPE'):\n"
+            "    delattr(ctypes, 'WINFUNCTYPE')\n"
+            "import codex_usage_hud.cli\n"
+            "import codex_usage_hud.platforms.windows\n"
+            "import codex_usage_hud.platforms.windows_tracker\n"
+            "print('cross-platform-import-ok')\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=PROJECT_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cross-platform-import-ok", result.stdout)
 
 
 class SessionSwitchControllerTests(unittest.TestCase):
@@ -378,6 +409,52 @@ class WindowsActiveTitleTests(unittest.TestCase):
             platform.get_active_app_error(),
             "exceeded retry limit, last status: 429 Too Many Requests",
         )
+
+
+class MacOSActiveTitleTests(unittest.TestCase):
+    def test_macos_platform_initializes_cdp_probe_by_default(self) -> None:
+        with mock.patch(
+            "codex_usage_hud.platforms.macos.CodexCdpProbe",
+            return_value=object(),
+        ) as cdp_probe:
+            platform = MacOSPlatform()
+
+        self.assertIsNotNone(platform._cdp_probe)
+        self.assertTrue(platform.supports_active_title_polling())
+        cdp_probe.assert_called_once()
+
+    def test_macos_platform_reads_active_ref_from_cdp_snapshot(self) -> None:
+        class _FakeCdpProbe:
+            def snapshot(self) -> object | None:
+                return SimpleNamespace(
+                    session_id=" session-123 ",
+                    title=" 当前会话 ",
+                    app_error="",
+                )
+
+        platform = object.__new__(MacOSPlatform)
+        platform._last_observed_title = ""
+        platform._last_observed_session_id = ""
+        platform._cdp_probe = _FakeCdpProbe()
+
+        self.assertEqual(platform.get_active_conversation_ref(), ("session-123", "当前会话"))
+        self.assertEqual(platform.get_active_conversation_title(), "当前会话")
+        self.assertEqual(platform._last_observed_session_id, "session-123")
+        self.assertEqual(platform._last_observed_title, "当前会话")
+
+    def test_macos_platform_exposes_visible_cdp_app_error(self) -> None:
+        class _FakeCdpProbe:
+            def snapshot(self) -> object | None:
+                return SimpleNamespace(
+                    session_id="",
+                    title="",
+                    app_error="rate limit exceeded",
+                )
+
+        platform = object.__new__(MacOSPlatform)
+        platform._cdp_probe = _FakeCdpProbe()
+
+        self.assertEqual(platform.get_active_app_error(), "rate limit exceeded")
 
 
 if __name__ == "__main__":

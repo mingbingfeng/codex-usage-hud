@@ -7,7 +7,7 @@
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
 
-`codex-usage-hud` 是面向 Codex App 的本地实时用量 HUD。它读取本机 Codex JSONL / SQLite 日志，在 Codex 界面、Qt 独立窗口或最终兜底的 Tk 窗口里显示当前会话 token、缓存命中率、实时金额、日/周预算和等待状态，不上传任何会话内容。
+`codex-usage-hud` 是面向 Codex App 的本地实时用量 HUD。它读取本机 Codex JSONL / SQLite 日志，并通过 Codex renderer / CDP 注入在 Codex 界面里显示当前会话 token、缓存命中率、实时金额、日/周预算和等待状态，不上传任何会话内容。
 
 ## 快速使用
 
@@ -17,7 +17,7 @@
 
 安装后会有几个入口：
 
-- `Codex Usage HUD`：后台 daemon 入口；如果 Codex App 未启动，会提示选择 Renderer 注入或 Qt 独立窗口，并按所选模式拉起 Codex App；Tk 模式保留为最终兜底。开机自启动入口会保持静默等待。
+- `Codex Usage HUD`：后台 daemon 入口；如果 Codex App 未启动，会提示以调试/CDP 模式拉起 Codex App 并注入 renderer HUD。开机自启动入口会保持静默等待。
 - `Stop Codex Usage HUD`：关闭正在运行的 HUD。
 - `Check for Updates`：检查 GitHub Release 是否有新安装包。
 
@@ -51,9 +51,9 @@ codex-hud --update
 
 ## 主要功能
 
-- Renderer 注入优先：Codex 暴露本地 CDP target 时，HUD 直接显示在 Codex App 内部。
-- Qt fallback + Tk 最终兜底：CDP 不可用时自动回退到本地 Qt HUD；Qt 不可用或显式选择 `tk` 时使用 Tk HUD。
-- Codex 主题跟随：Renderer 模式优先跟随 live 主题；无 CDP 时，Qt / Tk / overlay 会读取 Codex App 已保存的主题设置，继续区分浅色/深色并尽量复用自定义配色。
+- Renderer-only：Codex 暴露本地 CDP target 时，HUD 直接显示在 Codex App 内部；CDP 不可用时输出诊断，不再回退到 Qt/Tk 独立窗口。
+- PySide6 桌面会话气泡：源码 / pip 安装时可通过 `codex-usage-hud[desktop-overlay]` 启用桌面级方形运行气泡和完成态圆气泡；主 HUD 仍保持 renderer-only。
+- Codex 主题跟随：Renderer 模式优先跟随 live 主题；没有可用 CDP target 时会保留诊断，提示重新以调试端口启动 Codex App。
 - 实时 token 与金额：输入、缓存输入、输出、推理、合计、缓存率和实时 USD 估算同屏展示。
 - 日/周预算：自定义日额度、周额度、刷新时间、周起始日和提醒阈值。
 - 工作状态观察：显示当前活动、最长等待、最慢工具和请求轮次流水。
@@ -97,6 +97,12 @@ codex-hud --update
 
 安装器会在替换文件前先运行 `codex-hud --stop`，避免旧 HUD 进程占用可执行文件。
 
+当前发行策略：
+
+- 官方发布仍以 Windows 安装包为主，默认安装包不内置 PySide6 桌面气泡依赖。
+- 需要桌面会话气泡时，当前推荐源码 / pip 环境安装 `codex-usage-hud[desktop-overlay]`。
+- macOS 当前不发布安装包，只保留源码 / pip 路径和 `macOS Smoke` 代码级验证；详见 [docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md](docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md)。
+
 ## 数据位置
 
 - Codex 会话日志：`~/.codex/sessions/`
@@ -119,7 +125,11 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 
 ### HUD 没有出现在 Codex 里
 
-先确认是从 `Codex Usage HUD` 或 `codex-hud --daemon` 启动。手动启动且未检测到 Codex App 时，HUD 会提示选择 Renderer 注入或 Tk 模式；Renderer 会尝试以调试/CDP 模式拉起 Codex App，并持续等待/重试 Renderer 注入；Tk 会普通拉起 Codex App 并打开独立窗口。如果 Windows 阻止直接启动，可能会出现一次权限确认。开机自启动使用 `--no-startup-prompt`，不会弹出选择框。
+先确认是从 `Codex Usage HUD` 或 `codex-hud --daemon` 启动。HUD 需要 Codex App 暴露本地 CDP/debug target；未检测到 Codex App 时会提示以调试/CDP 模式拉起 Codex App，并持续等待/重试 renderer 注入。如果 Windows 阻止直接启动，可能会出现一次权限确认。开机自启动使用 `--no-startup-prompt`，不会弹出选择框。
+
+### 桌面会话气泡没有显示
+
+设置里的 `work_overlay_max_items` 表示 PySide6 桌面级会话气泡数量；设为 `0` 会关闭桌面气泡。未安装 `codex-usage-hud[desktop-overlay]` 时，renderer HUD 仍会正常运行，只会记录一次 `work_overlay_unavailable` 诊断。
 
 ### 会上传我的提示词或日志吗？
 
@@ -128,12 +138,18 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 ## 开发
 
 ```powershell
+python -m pip install -e ".[desktop-overlay]"  # 可选：启用 PySide6 桌面会话气泡
 python -m compileall -q src tools tests
 python -m pytest
-python -m pytest -m ui        # 可选：真实 Tk/Qt 窗口回归
+python -m pytest -m ui        # 可选：旧 Tk/Qt 模块的真实窗口回归
 python tools/build_exe.py
 python tools/build_installer.py
 ```
+
+macOS 无本机验证路径：
+
+- GitHub Actions `macOS Smoke` workflow 会在 `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`，并执行 lazy import、`compileall` 与任务相关 pytest。
+- 这条 workflow 只覆盖代码级 smoke，不替代真实桌面交互验证；当前轮次不使用远程 Mac，因此 macOS 桌面气泡仍属于“待实机确认”。人工验证 checklist 见 [docs/MACOS_VALIDATION.md](docs/MACOS_VALIDATION.md)。
 
 主要结构：
 
@@ -142,8 +158,9 @@ src/codex_usage_hud/
   cli.py                 CLI、daemon、更新命令入口
   daemon.py              Windows Codex 进程监听
   ui/renderer_hud.py     Codex renderer 注入 HUD
-  ui/qt_hud.py           Qt 独立 fallback HUD
-  ui/tk_hud.py           Tk 最终兜底 HUD
+  ui/work_overlay_qt.py  可选 PySide6 桌面会话气泡 helper
+  ui/qt_hud.py           旧 Qt 独立窗口模块（默认不加载）
+  ui/tk_hud.py           旧 Tk 独立窗口模块（默认不加载）
   updater.py             GitHub Release 更新检测与安装器启动
 tools/
   build_exe.py           PyInstaller 单文件 exe 构建

@@ -283,6 +283,7 @@ class ActiveSessionTracker:
         self.session_index_path = session_index_path
         self.poll_ms = max(250, int(poll_ms))
         self.enabled = bool(enabled)
+        self.latest_session_id = ""
         self.latest_title = ""
         self.latest_path: Path | None = None
         self.latest_source = "ui-waiting" if self.enabled else "activity"
@@ -297,6 +298,23 @@ class ActiveSessionTracker:
         self._lock = threading.Lock()
         self.latest_response_ms = 0.0
         self.latest_event_source = ""
+        self._renderer_session_id = ""
+        self._renderer_title = ""
+        self._renderer_path: Path | None = None
+        self._change_callback: Callable[[], None] | None = None
+
+    def set_change_callback(self, callback: Callable[[], None] | None) -> None:
+        """Notify the renderer loop when the background active-session watcher moves."""
+        self._change_callback = callback
+
+    def _notify_change(self) -> None:
+        callback = self._change_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:
+            return
 
     def start(self) -> None:
         """Begin best-effort platform tracking for the selected Codex conversation."""
@@ -354,6 +372,9 @@ class ActiveSessionTracker:
         """Resolve the latest observed Codex conversation title to a JSONL path."""
         if not self.enabled:
             return None
+        renderer_selected, renderer_path = self._current_renderer_selection()
+        if renderer_selected:
+            return renderer_path
         ref = self.platform.get_active_conversation_ref()
         if ref is not None:
             session_id, title = ref
@@ -369,6 +390,7 @@ class ActiveSessionTracker:
                 )
             if path is not None or display_title or session_id:
                 with self._lock:
+                    self.latest_session_id = session_id
                     self.latest_title = display_title or self.latest_title
                     self.latest_path = path
                     self._mapped_title = display_title or self._mapped_title
@@ -396,6 +418,7 @@ class ActiveSessionTracker:
                 return event_path
             with self._lock:
                 self.latest_title = polled_title
+                self.latest_session_id = ""
                 self.latest_path = path
                 self._mapped_title = polled_title
                 self.latest_source = (
@@ -410,6 +433,7 @@ class ActiveSessionTracker:
                 had_cached_title = bool(self.latest_title)
                 if had_cached_title:
                     self.latest_title = ""
+                    self.latest_session_id = ""
                     self.latest_path = None
                     self._mapped_title = ""
                     self.latest_source = "ui-unmatched"
@@ -431,6 +455,82 @@ class ActiveSessionTracker:
             f"ui:{compact_text(title)}" if path is not None else "ui-unmatched"
         )
         return path
+
+    def observe_conversation_ref(
+        self,
+        session_id: str = "",
+        title: str = "",
+        *,
+        source: str = "renderer",
+        detected_at: float | None = None,
+    ) -> bool:
+        """Accept an active conversation ref pushed by the renderer bridge."""
+        if not self.enabled:
+            return False
+        session_id = str(session_id or "").strip()
+        title = str(title or "").strip()
+        if not session_id and not title:
+            return False
+        detected = detected_at if detected_at is not None else time.monotonic()
+
+        path = self.path_from_thread_id(session_id) if session_id else None
+        display_title = title
+        if session_id and path is not None:
+            display_title = (
+                self.title_from_session_index_id(session_id)
+                or self.title_from_thread_id(session_id)
+                or title
+            )
+        if path is None and title:
+            path = self.path_for_title(title)
+        if not display_title and session_id:
+            display_title = self.title_from_session_index_id(session_id)
+
+        response_ms = (time.monotonic() - detected) * 1000.0
+        source_label = compact_text(display_title or session_id)
+        latest_source = (
+            f"{source}:{source_label}"
+            if path is not None
+            else f"{source}-unmatched"
+        )
+        with self._lock:
+            previous_title = self.latest_title
+            previous_path = self.latest_path
+            previous_source = self.latest_source
+            previous_session_id = self.latest_session_id
+            previous_renderer_session_id = self._renderer_session_id
+            previous_renderer_title = self._renderer_title
+            previous_renderer_path = self._renderer_path
+            self._renderer_session_id = session_id
+            self._renderer_title = display_title
+            self._renderer_path = path
+            self.latest_session_id = session_id
+            self.latest_title = display_title
+            self.latest_path = path
+            self._mapped_title = display_title
+            self.latest_source = latest_source
+            self.latest_response_ms = response_ms
+            self.latest_event_source = source
+
+        changed = (
+            display_title != previous_title
+            or path != previous_path
+            or latest_source != previous_source
+            or session_id != previous_session_id
+            or session_id != previous_renderer_session_id
+            or display_title != previous_renderer_title
+            or path != previous_renderer_path
+        )
+        if changed:
+            _LOGGER.info(
+                "ACTIVE_SESSION_SWITCH source=%s matched=%s response_ms=%.1f title=%r",
+                source,
+                path is not None,
+                response_ms,
+                compact_text(display_title or session_id, 80),
+            )
+            self._notify_change()
+        return changed
 
     def path_for_title(self, title: str) -> Path | None:
         """Map a visible Codex conversation title to a session JSONL path."""
@@ -656,6 +756,13 @@ class ActiveSessionTracker:
             return ""
         return str(row[0] or "").strip()
 
+    def invalidate_mapping_cache(self) -> None:
+        """Clear title/thread lookup caches after session mapping files change."""
+        with self._lock:
+            self._title_cache_key = None
+            self._title_cache_value = ""
+            self._thread_path_cache.clear()
+
     def _handle_title_candidate(
         self,
         title: str,
@@ -684,6 +791,7 @@ class ActiveSessionTracker:
         response_ms = (time.monotonic() - detected) * 1000.0
         with self._lock:
             self.latest_title = title
+            self.latest_session_id = ""
             self.latest_path = path
             self._mapped_title = title
             self.latest_source = (
@@ -700,6 +808,49 @@ class ActiveSessionTracker:
                 response_ms,
                 compact_text(title, 80),
             )
+            self._notify_change()
+
+    def _current_renderer_selection(self) -> tuple[bool, Path | None]:
+        with self._lock:
+            if not self._renderer_session_id and not self._renderer_title:
+                return False, None
+            title = self._renderer_title
+            session_id = self._renderer_session_id
+            path = self._renderer_path
+        if path is not None and path.exists():
+            with self._lock:
+                self.latest_session_id = session_id
+                self.latest_title = title
+                self.latest_path = path
+                self._mapped_title = title
+                self.latest_source = f"renderer:{compact_text(title or session_id)}"
+                self.latest_event_source = "renderer"
+            return True, path
+        if session_id:
+            path = self.path_from_thread_id(session_id)
+            if path is not None and not title:
+                title = self.title_from_session_index_id(
+                    session_id
+                ) or self.title_from_thread_id(session_id)
+        if path is None and not title:
+            return True, None
+        if path is None:
+            path = self.path_for_title(title)
+        with self._lock:
+            self._renderer_session_id = session_id
+            self._renderer_title = title
+            self._renderer_path = path
+            self.latest_session_id = session_id
+            self.latest_title = title
+            self.latest_path = path
+            self._mapped_title = title
+            self.latest_source = (
+                f"renderer:{compact_text(title or session_id)}"
+                if path is not None
+                else "renderer-unmatched"
+            )
+            self.latest_event_source = "renderer"
+        return True, path
 
     def _normalize_rollout_path(self, path_text: str) -> Path | None:
         text = path_text[4:] if path_text.startswith("\\\\?\\") else path_text
@@ -747,7 +898,11 @@ class SessionPathResolver:
 
     @staticmethod
     def _has_unresolved_tracker_selection(source: str) -> bool:
-        return source.startswith("ui-unmatched") or source.startswith("cdp-unmatched")
+        return (
+            source.startswith("ui-unmatched")
+            or source.startswith("cdp-unmatched")
+            or source.startswith("renderer-unmatched")
+        )
 
     def resolve(self) -> tuple[Path | None, str]:
         """Resolve the current session path plus a short source label."""

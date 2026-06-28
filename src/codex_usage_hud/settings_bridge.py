@@ -22,11 +22,15 @@ class SettingsBridgeServer:
         host: str = "127.0.0.1",
         port: int = DEFAULT_SETTINGS_BRIDGE_PORT,
         restart_callback: Callable[[], None] | None = None,
+        command_callback: Callable[[dict[str, Any]], None] | None = None,
+        active_session_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.store = store
         self.host = host
         self.port = max(0, int(port))
         self.restart_callback = restart_callback
+        self.command_callback = command_callback
+        self.active_session_callback = active_session_callback
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
         self.url = ""
@@ -64,6 +68,8 @@ class SettingsBridgeServer:
     def _handler_type(self) -> type[BaseHTTPRequestHandler]:
         store = self.store
         restart_callback = self.restart_callback
+        command_callback = self.command_callback
+        active_session_callback = self.active_session_callback
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "codex-usage-hud-settings"
@@ -91,6 +97,12 @@ class SettingsBridgeServer:
                     return
                 if path == "/restart":
                     self._request_restart()
+                    return
+                if path == "/command":
+                    self._receive_command()
+                    return
+                if path == "/active-session":
+                    self._receive_active_session()
                     return
                 self._send_json({"status": "failed", "message": "not found"}, 404)
 
@@ -157,6 +169,60 @@ class SettingsBridgeServer:
                         "message": "HUD restart requested; daemon mode will relaunch it shortly",
                     }
                 )
+
+            def _receive_command(self) -> None:
+                if command_callback is None:
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": "renderer command callback is not available",
+                        },
+                        503,
+                    )
+                    return
+                body = self._read_json()
+                if not body:
+                    self._send_json(
+                        {"status": "failed", "message": "empty command"},
+                        400,
+                    )
+                    return
+                try:
+                    command_callback(body)
+                except Exception as exc:
+                    self._send_json(
+                        {"status": "failed", "message": f"command failed: {exc}"},
+                        500,
+                    )
+                    return
+                self._send_json({"status": "ok", "message": "command accepted"})
+
+            def _receive_active_session(self) -> None:
+                if active_session_callback is None:
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": "active session callback is not available",
+                        },
+                        503,
+                    )
+                    return
+                body = self._read_json()
+                if not body:
+                    self._send_json(
+                        {"status": "failed", "message": "empty active session payload"},
+                        400,
+                    )
+                    return
+                try:
+                    active_session_callback(body)
+                except Exception as exc:
+                    self._send_json(
+                        {"status": "failed", "message": f"active session failed: {exc}"},
+                        500,
+                    )
+                    return
+                self._send_json({"status": "ok", "message": "active session accepted"})
 
             def _read_json(self) -> dict[str, Any]:
                 length = int(self.headers.get("Content-Length") or 0)
