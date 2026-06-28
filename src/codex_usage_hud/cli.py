@@ -67,6 +67,7 @@ from .platforms import (
     CdpSessionSwitchBackend,
     SessionPathResolver,
     SessionSwitchController,
+    SessionSwitchResult,
     WindowsSearchSessionSwitchBackend,
     get_current_platform,
 )
@@ -100,6 +101,7 @@ WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS = 0.7
 WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS = 0.8
 WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS = 0.8
 WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS = 0.08
+WORK_OVERLAY_SWITCH_COMPLETED_HOLD_SECONDS = 1.4
 WORK_OVERLAY_CURRENT_SESSION_REFOCUS_DELAY_SECONDS = (
     WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS
 )
@@ -696,6 +698,39 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
     }
 
 
+def _normalized_overlay_match_text(value: object) -> str:
+    return " ".join(str(value or "").split()).strip().casefold()
+
+
+def _work_overlay_command_matches_item(
+    command: Mapping[str, object],
+    item: Mapping[str, object],
+) -> bool:
+    command_session = str(command.get("sessionId") or "").strip()
+    item_sessions = {
+        str(item.get("sessionId") or "").strip(),
+        str(item.get("id") or "").strip(),
+    }
+    if command_session and command_session in item_sessions:
+        return True
+
+    command_title = _normalized_overlay_match_text(
+        command.get("targetTitle") or command.get("title")
+    )
+    if not command_title:
+        return False
+    item_titles = {
+        _normalized_overlay_match_text(item.get("targetTitle")),
+        _normalized_overlay_match_text(item.get("title")),
+    }
+    if command_title not in item_titles:
+        return False
+
+    command_workdir = _normalized_overlay_match_text(command.get("workdir"))
+    item_workdir = _normalized_overlay_match_text(item.get("workdir"))
+    return not command_workdir or not item_workdir or command_workdir == item_workdir
+
+
 class DesktopWorkOverlay:
     """Optional PySide6 primary-screen desktop overlay for work bubbles."""
 
@@ -722,6 +757,8 @@ class DesktopWorkOverlay:
         self._last_payload_items: list[dict[str, object]] | None = None
         self._last_theme_payload: dict[str, object] = {}
         self._last_state_write_at = 0.0
+        self._switch_completed_command: dict[str, object] | None = None
+        self._switch_completed_until = 0.0
         self._theme_probe = CodexThemeProbe(
             timeout_seconds=0.08,
             cache_seconds=0.8,
@@ -752,6 +789,7 @@ class DesktopWorkOverlay:
             self._report_unavailable_once(self._unavailable_reason)
             return
         payload_items = [work_item_to_overlay_dict(item) for item in items]
+        payload_items = self._apply_switch_completed_override(payload_items)
         theme_payload = self._theme_payload()
         if not payload_items and self._process is None:
             return
@@ -802,6 +840,63 @@ class DesktopWorkOverlay:
         )
         if self._process is None and now >= self._restart_blocked_until:
             self._start()
+
+    def mark_switch_completed(self, command: Mapping[str, object]) -> bool:
+        """Tell the helper that a clicked bubble has become the active session."""
+        if self._closed or not self.enabled or not self._last_payload_items:
+            return False
+        match_index = next(
+            (
+                index
+                for index, item in enumerate(self._last_payload_items)
+                if _work_overlay_command_matches_item(command, item)
+            ),
+            -1,
+        )
+        if match_index < 0:
+            return False
+        self._switch_completed_command = dict(command)
+        self._switch_completed_until = (
+            time.monotonic() + WORK_OVERLAY_SWITCH_COMPLETED_HOLD_SECONDS
+        )
+        payload_items: list[dict[str, object]] = []
+        for index, item in enumerate(self._last_payload_items):
+            next_item = dict(item)
+            next_item["current"] = index == match_index
+            payload_items.append(next_item)
+        self._last_payload_items = payload_items
+        self._write_state(
+            payload_items,
+            theme=self._last_theme_payload,
+            close=False,
+        )
+        return True
+
+    def _apply_switch_completed_override(
+        self,
+        payload_items: Sequence[Mapping[str, object]],
+    ) -> list[dict[str, object]]:
+        items = [dict(item) for item in payload_items]
+        command = self._switch_completed_command
+        if command is None:
+            return items
+        if time.monotonic() > self._switch_completed_until:
+            self._switch_completed_command = None
+            self._switch_completed_until = 0.0
+            return items
+        match_index = next(
+            (
+                index
+                for index, item in enumerate(items)
+                if _work_overlay_command_matches_item(command, item)
+            ),
+            -1,
+        )
+        if match_index < 0:
+            return items
+        for index, item in enumerate(items):
+            item["current"] = index == match_index
+        return items
 
     def next_keep_alive_seconds(self) -> float | None:
         """Return when the helper state file needs its next refresh."""
@@ -878,6 +973,8 @@ class DesktopWorkOverlay:
         self._last_payload_items = None
         self._last_theme_payload = {}
         self._last_state_write_at = 0.0
+        self._switch_completed_command = None
+        self._switch_completed_until = 0.0
 
     def _start(self) -> None:
         try:
@@ -2487,16 +2584,16 @@ def _handle_work_overlay_command(
     session_controller: SessionSwitchController,
     *,
     prepare_window: bool = True,
-) -> None:
+) -> SessionSwitchResult | None:
     action = str(command.get("action") or "").strip()
     if action != "activateSession":
-        return
+        return None
     is_current = bool(command.get("current"))
     session_id = str(command.get("sessionId") or "").strip()
     target_title = str(command.get("targetTitle") or command.get("title") or "").strip()
     if not session_id and not target_title:
         _LOGGER.info("work_overlay_command_ignored reason=missing_target")
-        return
+        return None
 
     if prepare_window:
         window_ready, window_status, window_reason, window_hwnd = (
@@ -2536,6 +2633,7 @@ def _handle_work_overlay_command(
             window_hwnd,
             window_reason or "-",
         )
+    return result
 
 
 def _handle_work_overlay_commands(
@@ -2549,11 +2647,17 @@ def _handle_work_overlay_commands(
         return 0
     handled = 0
     for command in take_commands():
-        _handle_work_overlay_command(
+        result = _handle_work_overlay_command(
             command,
             session_controller,
             prepare_window=prepare_window,
         )
+        if result is not None and (
+            bool(command.get("current")) or result.ok or result.status == "already-active"
+        ):
+            mark_completed = getattr(work_overlay, "mark_switch_completed", None)
+            if callable(mark_completed):
+                mark_completed(command)
         handled += 1
     return handled
 

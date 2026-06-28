@@ -1064,16 +1064,16 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(overlay.take_commands(), [])
 
     def test_tk_work_overlay_command_pump_prepares_window_before_switching_session(self) -> None:
+        command = {
+            "action": "activateSession",
+            "sessionId": "thread-1",
+            "targetTitle": "Thread One",
+        }
         overlay = SimpleNamespace(
             take_commands=MagicMock(
-                return_value=[
-                    {
-                        "action": "activateSession",
-                        "sessionId": "thread-1",
-                        "targetTitle": "Thread One",
-                    }
-                ]
-            )
+                return_value=[command]
+            ),
+            mark_switch_completed=MagicMock(),
         )
         session_controller = SimpleNamespace(
             activate_session=MagicMock(
@@ -1097,6 +1097,7 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(handled, 1)
         overlay.take_commands.assert_called_once()
+        overlay.mark_switch_completed.assert_called_once_with(command)
         session_controller.activate_session.assert_called_once_with(
             session_id="thread-1",
             title="Thread One",
@@ -1188,6 +1189,90 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["items"], [{"id": "thread-1"}])
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
+
+    def test_desktop_work_overlay_marks_switch_completed_in_cached_state(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=2)
+        overlay._last_payload_items = [
+            {
+                "id": "thread-1",
+                "sessionId": "thread-1",
+                "targetTitle": "Thread One",
+                "current": False,
+            },
+            {
+                "id": "thread-2",
+                "sessionId": "thread-2",
+                "targetTitle": "Thread Two",
+                "current": True,
+            },
+        ]
+        overlay._last_theme_payload = {"variant": "dark"}
+
+        with patch("codex_usage_hud.cli.write_json_object") as write_json:
+            marked = overlay.mark_switch_completed(
+                {
+                    "action": "activateSession",
+                    "sessionId": "thread-1",
+                    "targetTitle": "Thread One",
+                }
+            )
+
+        self.assertTrue(marked)
+        written_items = write_json.call_args.args[1]["items"]
+        self.assertTrue(written_items[0]["current"])
+        self.assertFalse(written_items[1]["current"])
+        self.assertEqual(write_json.call_args.args[1]["theme"], {"variant": "dark"})
+        self.assertEqual(overlay._last_payload_items, written_items)
+
+    def test_desktop_work_overlay_holds_switch_completed_for_next_update(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=2)
+        overlay._last_payload_items = [
+            {"id": "thread-1", "sessionId": "thread-1", "targetTitle": "Thread One"},
+            {"id": "thread-2", "sessionId": "thread-2", "targetTitle": "Thread Two"},
+        ]
+        next_items = [
+            WorkStatusItem(
+                id="thread-1",
+                title="Thread One",
+                session_id="thread-1",
+                target_title="Thread One",
+                status="recent",
+                status_label="刚完成",
+                detail="done",
+                current=False,
+            ),
+            WorkStatusItem(
+                id="thread-2",
+                title="Thread Two",
+                session_id="thread-2",
+                target_title="Thread Two",
+                status="running",
+                status_label="运行中",
+                detail="running",
+                current=True,
+            ),
+        ]
+
+        with (
+            patch.object(overlay, "_runtime_available", return_value=True),
+            patch.object(overlay, "_theme_payload", return_value={}),
+            patch.object(overlay, "_start"),
+            patch("codex_usage_hud.cli.write_json_object") as write_json,
+        ):
+            self.assertTrue(
+                overlay.mark_switch_completed(
+                    {
+                        "action": "activateSession",
+                        "sessionId": "thread-1",
+                        "targetTitle": "Thread One",
+                    }
+                )
+            )
+            overlay.update(next_items)
+
+        written_items = write_json.call_args_list[-1].args[1]["items"]
+        self.assertTrue(written_items[0]["current"])
+        self.assertFalse(written_items[1]["current"])
 
     def test_desktop_work_overlay_skips_when_pyside6_unavailable(self) -> None:
         item = WorkStatusItem(
