@@ -181,12 +181,14 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _overlay_payload_signature,
     _overlay_hover_hit_test,
     _ordered_overlay_items,
+    _overlay_items_required_height,
     _pending_workdir_window_rect,
     _point_in_inscribed_circle,
     _round_badge_palette,
     _remembered_card_rect_for_layout,
     _transition_palette,
     _transition_clearance_offset,
+    _transition_layout_width,
     _transition_rect_for_progress,
     _transition_required_height,
     _transition_slot_shift_progress,
@@ -2693,6 +2695,33 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         self.assertRectAlmostEqual(moves["oldest"][0], (0.0, 0.0, 168.0, 168.0))
         self.assertRectAlmostEqual(moves["oldest"][1], (0.0, 0.0, 168.0, 168.0))
         self.assertRectAlmostEqual(moves["oldest"][2], (176.0, 0.0, 168.0, 168.0))
+
+    def test_transition_layout_width_keeps_wider_completed_row_during_restore(self) -> None:
+        old_items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "restoring", "status": "recent"},
+            {"id": "latest", "status": "recent"},
+            {"id": "active", "status": "tool"},
+        ]
+        new_items = [
+            {"id": "oldest", "status": "recent"},
+            {"id": "restoring", "status": "tool"},
+            {"id": "latest", "status": "recent"},
+            {"id": "active", "status": "tool"},
+        ]
+
+        self.assertEqual(_transition_layout_width(old_items, new_items), 520)
+
+    def test_overlay_required_height_includes_cards_pushed_down_by_restore(self) -> None:
+        items = [
+            {"id": "remaining", "status": "recent"},
+            {"id": "restoring", "status": "tool"},
+            {"id": "first", "status": "tool"},
+            {"id": "second", "status": "tool"},
+            {"id": "third", "status": "tool"},
+        ]
+
+        self.assertEqual(_overlay_items_required_height(items, layout_width=430), 652)
 
     def test_card_to_completed_morphs_to_right_edge_before_vertical_rise(self) -> None:
         source = (0.0, 188.0, 430.0, 110.0)
