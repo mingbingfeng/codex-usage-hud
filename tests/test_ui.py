@@ -179,6 +179,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _card_yield_rect_for_circle_path,
     _detect_transition,
     _detect_transition_item_id,
+    _energy_ring_rect_for_completed_rect,
     _find_item_rect,
     _find_item_position,
     _item_dismiss_key,
@@ -935,6 +936,15 @@ class BudgetHelperTests(unittest.TestCase):
         )
 
         self.assertGreater(upper_delay, lower_delay)
+
+    def test_work_overlay_energy_ring_rect_expands_completed_widget(self) -> None:
+        source = (262.0, 0.0, 168.0, 180.0)
+
+        ring_rect = _energy_ring_rect_for_completed_rect(source)
+
+        self.assertEqual(ring_rect, (236.0, -26.0, 220.0, 220.0))
+        self.assertLess(ring_rect[0], source[0])
+        self.assertGreater(ring_rect[0] + ring_rect[2], source[0] + source[2])
 
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()

@@ -37,6 +37,7 @@ TRANSITION_DURATION_NAMES = (
     "WORK_OVERLAY_RESTORE_SHIFT_MS",
     "WORK_OVERLAY_RESTORE_FADE_IN_MS",
     "WORK_OVERLAY_RESTORE_DESCEND_MS",
+    "WORK_OVERLAY_COMPLETED_ANNIHILATION_MS",
 )
 BASE_TRANSITION_DURATIONS = {
     name: int(getattr(work_overlay_qt, name))
@@ -454,10 +455,13 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
 
             reset_button = QPushButton("重置初始状态")
             reset_button.clicked.connect(self.reset_state)
+            dismiss_button = QPushButton("关闭首个圆")
+            dismiss_button.clicked.connect(self.dismiss_completed_item)
             close_button = QPushButton("关闭演示")
             close_button.clicked.connect(self.close_demo)
             action_row = QHBoxLayout()
             action_row.addWidget(reset_button)
+            action_row.addWidget(dismiss_button)
             action_row.addWidget(close_button)
             layout.addLayout(action_row)
 
@@ -475,6 +479,7 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             self._log_state("init")
             self._update_status()
             self._schedule_auto_toggles()
+            self._schedule_auto_dismiss()
 
         def _schedule_auto_toggles(self) -> None:
             sequence = [
@@ -505,6 +510,21 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             if args.auto_close_ms > 0:
                 QTimer.singleShot(
                     delay_ms + len(sequence) * interval_ms + int(args.auto_close_ms),
+                    self.close_demo,
+                )
+
+        def _schedule_auto_dismiss(self) -> None:
+            item_id = str(args.auto_dismiss or "").strip()
+            if not item_id:
+                return
+            delay_ms = max(0, int(args.auto_dismiss_delay_ms))
+            QTimer.singleShot(delay_ms, lambda: self.dismiss_completed_item(item_id))
+            if args.auto_close_ms > 0 and not str(args.auto_toggle or "").strip():
+                QTimer.singleShot(
+                    delay_ms
+                    + work_overlay_qt.WORK_OVERLAY_COMPLETED_ANNIHILATION_MS
+                    + work_overlay_qt.WORK_OVERLAY_RESTORE_SHIFT_MS
+                    + int(args.auto_close_ms),
                     self.close_demo,
                 )
 
@@ -555,6 +575,63 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             self._log_items = None
             _write_state(state_path, items=self.items)
             self._log_state("reset")
+            self._update_status()
+
+        def dismiss_completed_item(self, item_id: str = "") -> None:
+            if self._is_animating():
+                self._log_state("animation.force_reset", reason="动画运行中，忽略关闭")
+                return
+            circles = _circles(self.items)
+            item = (
+                next((candidate for candidate in circles if _item_id(candidate) == item_id), None)
+                if item_id
+                else None
+            )
+            if item is None and circles:
+                item = circles[0]
+            if item is None:
+                self._log_state("circle_dismiss.skip", reason="没有可关闭圆形")
+                return
+
+            old_items = _clone_items(self.items)
+            dismissed_id = _item_id(item)
+            new_items = [candidate for candidate in old_items if _item_id(candidate) != dismissed_id]
+            self._log_items = old_items
+            self._next_items_after_animation = new_items
+            self._animation_started_at = time.perf_counter()
+            self._animation_seen_active = False
+            self._animation_item_id = dismissed_id
+            layout_width = work_overlay_qt._transition_layout_width(old_items, new_items)
+            source_circle = work_overlay_qt._find_item_rect(
+                old_items,
+                dismissed_id,
+                "completed",
+                layout_width=layout_width,
+            )
+            source_widget_rect = (
+                source_circle[0],
+                source_circle[1],
+                source_circle[2],
+                float(work_overlay_qt.WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT),
+            )
+            energy_rect = work_overlay_qt._energy_ring_rect_for_completed_rect(
+                source_widget_rect
+            )
+            self._log_state("click", clicked=dismissed_id, shape="circle.check")
+            self._log_state(
+                "circle_dismiss.start",
+                clicked=dismissed_id,
+                annihilation=_overlay_rect_text(energy_rect),
+                next_circles=_ids_text(_circles(new_items)),
+                next_rects=_ids_text(_rects(new_items)),
+            )
+            self._start_sampling("circle_dismiss")
+
+            overlay = self._overlay_window()
+            if overlay is not None and hasattr(overlay, "dismiss_item"):
+                getattr(overlay, "dismiss_item")(item)
+            self.items = new_items
+            _write_state(state_path, items=self.items)
             self._update_status()
 
         def _overlay_window(self) -> QWidget | None:
@@ -1052,7 +1129,14 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             label = self._animation_label
             item_id = self._animation_item_id
             next_items = self._next_items_after_animation or self.items
-            if label == "circle_to_rect":
+            if label == "circle_dismiss":
+                self._log_state(
+                    "circle_dismiss.finished",
+                    clicked=item_id,
+                    next_circles=_ids_text(_circles(next_items)),
+                    next_rects=_ids_text(_rects(next_items)),
+                )
+            elif label == "circle_to_rect":
                 self._log_state(
                     "circle_to_rect.phase3.finished",
                     clicked=item_id,
@@ -1170,6 +1254,17 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=800,
         help="Delay before --auto-toggle starts. Default: 800.",
+    )
+    parser.add_argument(
+        "--auto-dismiss",
+        default="",
+        help="Completed item id to dismiss after the interactive demo starts.",
+    )
+    parser.add_argument(
+        "--auto-dismiss-delay-ms",
+        type=int,
+        default=800,
+        help="Delay before --auto-dismiss starts. Default: 800.",
     )
     parser.add_argument(
         "--auto-close-ms",

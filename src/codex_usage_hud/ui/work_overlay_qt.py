@@ -39,6 +39,8 @@ WORK_OVERLAY_RESTORE_FADE_OUT_MS = 200
 WORK_OVERLAY_RESTORE_SHIFT_MS = 300
 WORK_OVERLAY_RESTORE_FADE_IN_MS = 150
 WORK_OVERLAY_RESTORE_DESCEND_MS = 400
+WORK_OVERLAY_COMPLETED_ANNIHILATION_MS = 1200
+WORK_OVERLAY_COMPLETED_ANNIHILATION_MARGIN = 16
 WORK_OVERLAY_TRANSITION_CLEARANCE_PX = (
     WORK_OVERLAY_COMPLETED_BADGE_SIZE + WORK_OVERLAY_COMPLETED_BADGE_SPACING
 )
@@ -450,6 +452,27 @@ def _card_yield_delay_ms(
     progress = abs(source_center_y - card_center_y) / travel
     progress = max(0.0, min(0.82, progress))
     return max(0, int(round(max(1, duration_ms) * progress)))
+
+
+def _energy_ring_rect_for_completed_rect(rect: OverlayRect) -> OverlayRect:
+    circle_size = max(
+        1.0,
+        min(
+            float(rect[2]),
+            float(rect[3]),
+            float(WORK_OVERLAY_COMPLETED_BADGE_SIZE),
+        ),
+    )
+    max_radius = circle_size / 2.0 + float(WORK_OVERLAY_COMPLETED_ANNIHILATION_MARGIN)
+    half_size = max_radius + 10.0
+    center_x = float(rect[0]) + circle_size / 2.0
+    center_y = float(rect[1]) + circle_size / 2.0
+    return (
+        center_x - half_size,
+        center_y - half_size,
+        half_size * 2.0,
+        half_size * 2.0,
+    )
 
 
 def _transition_required_height(
@@ -1210,6 +1233,7 @@ def run_work_overlay_helper_qt(
             QPauseAnimation,
             QPoint,
             QPointF,
+            Property,
             QPropertyAnimation,
             QRect,
             QRectF,
@@ -1227,6 +1251,7 @@ def run_work_overlay_helper_qt(
             QPainter,
             QPainterPath,
             QPen,
+            QRadialGradient,
             QTextLayout,
             QTextOption,
         )
@@ -1699,6 +1724,96 @@ def run_work_overlay_helper_qt(
             else:
                 painter.drawRoundedRect(self.rect(), 6, 6)
 
+    class EnergyRingAnnihilationWidget(QWidget):
+        """Transient completion-circle disappearance effect."""
+
+        def __init__(
+            self,
+            *,
+            max_radius: float,
+            center: QPointF,
+        ) -> None:
+            flags = (
+                window_type.Tool
+                | window_type.FramelessWindowHint
+                | window_type.WindowStaysOnTopHint
+            )
+            transparent_input = getattr(window_type, "WindowTransparentForInput", 0)
+            if transparent_input:
+                flags |= transparent_input
+            super().__init__(None, flags)
+            self._progress = 0.0
+            self._max_radius = max(10.0, float(max_radius))
+            self._center = QPointF(center) if center is not None else QPointF(0.0, 0.0)
+            self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
+            self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
+            self.setFocusPolicy(focus_policy.NoFocus)
+
+        def set_core_center(self, center: QPointF) -> None:
+            self._center = QPointF(center)
+            self.update()
+
+        def get_progress(self) -> float:
+            return self._progress
+
+        def set_progress(self, value: float) -> None:
+            value = _clamp01(value)
+            if abs(self._progress - value) < 0.00001:
+                return
+            self._progress = value
+            self.update()
+
+        progress = Property(float, get_progress, set_progress)
+
+        def paintEvent(self, event: object) -> None:
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            center = self._center
+            if center.isNull():
+                center = QPointF(self.width() / 2.0, self.height() / 2.0)
+
+            progress = _clamp01(self._progress)
+            outer_radius = 10.0 + (self._max_radius - 10.0) * progress
+            inner_radius = 0.0
+            if progress > 0.1:
+                inner_radius = (outer_radius * 0.85) * ((progress - 0.1) / 0.9)
+
+            alpha = max(0, int(255 * (1.0 - progress * progress)))
+            if outer_radius <= inner_radius or alpha <= 0:
+                return
+
+            ring_path = QPainterPath()
+            ring_path.addEllipse(center, outer_radius, outer_radius)
+            if inner_radius > 0.0:
+                inner_path = QPainterPath()
+                inner_path.addEllipse(center, inner_radius, inner_radius)
+                ring_path = ring_path.subtracted(inner_path)
+
+            gradient = QRadialGradient(center, outer_radius)
+            mid_point = _clamp01(inner_radius / max(1.0, outer_radius))
+            core_color = QColor(0, 191, 255, alpha)
+            edge_color = QColor(135, 206, 250, int(alpha * 0.3))
+            transparent_color = QColor(135, 206, 250, 0)
+            gradient.setColorAt(0.0, QColor(0, 0, 0, 0))
+            gradient.setColorAt(mid_point, QColor(0, 0, 0, 0))
+            gradient.setColorAt(mid_point + (1.0 - mid_point) * 0.3, core_color)
+            gradient.setColorAt(0.95, edge_color)
+            gradient.setColorAt(1.0, transparent_color)
+
+            painter.setBrush(gradient)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPath(ring_path)
+
+            if progress > 0.4:
+                delayed = _clamp01(progress - 0.4)
+                delayed_outer = 10.0 + (self._max_radius - 10.0) * delayed
+                delayed_alpha = max(0, int(100 * (1.0 - delayed)))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(0, 191, 255, delayed_alpha), 1.5))
+                painter.drawEllipse(center, delayed_outer, delayed_outer)
+
     class CompletedBadgeWidget(QWidget):
         """Animated circular summary for finished work."""
 
@@ -2001,6 +2116,7 @@ def run_work_overlay_helper_qt(
             self._transition_required_height = 0
             self._transition_card_widget: QWidget | None = None
             self._transition_badge_widget: QWidget | None = None
+            self._transition_annihilation_widget: QWidget | None = None
             self._transition_animation_group: Any | None = None
             self._transition_source_effect: QGraphicsOpacityEffect | None = None
             self._transition_source_widget: QWidget | None = None
@@ -2028,6 +2144,14 @@ def run_work_overlay_helper_qt(
 
         def dismiss_item(self, item: Mapping[str, object]) -> None:
             item_id = str(item.get("id") or "")
+            if (
+                item_id
+                and _item_is_completed(item)
+                and not self._transition_in_progress
+                and self._record_widget_for_kind(item_id, "completed") is not None
+            ):
+                self._start_completed_dismiss_transition(dict(item))
+                return
             if item_id:
                 self._dismissed_instances[item_id] = _item_dismiss_key(item)
             self._last_payload_signature = ""
@@ -2839,8 +2963,61 @@ def run_work_overlay_helper_qt(
             animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
             return animation
 
+        def _build_annihilation_widget(self, source_widget: QWidget) -> EnergyRingAnnihilationWidget:
+            source_top_left = source_widget.mapToGlobal(QPoint(0, 0))
+            circle_size = float(
+                max(
+                    1,
+                    min(
+                        source_widget.width(),
+                        source_widget.height(),
+                        WORK_OVERLAY_COMPLETED_BADGE_SIZE,
+                    ),
+                )
+            )
+            max_radius = circle_size / 2.0 + float(WORK_OVERLAY_COMPLETED_ANNIHILATION_MARGIN)
+            side = int(math.ceil(max_radius * 2.0 + 20.0))
+            center_global = QPointF(
+                float(source_top_left.x()) + circle_size / 2.0,
+                float(source_top_left.y()) + circle_size / 2.0,
+            )
+            x = int(round(center_global.x() - side / 2.0))
+            y = int(round(center_global.y() - side / 2.0))
+            screen = app.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                if side <= available.width():
+                    x = max(available.left(), min(x, available.right() - side + 1))
+                if side <= available.height():
+                    y = max(available.top(), min(y, available.bottom() - side + 1))
+            center = QPointF(center_global.x() - float(x), center_global.y() - float(y))
+            widget = EnergyRingAnnihilationWidget(max_radius=max_radius, center=center)
+            widget.setGeometry(x, y, side, side)
+            widget.setWindowOpacity(self.windowOpacity())
+            widget.show()
+            widget.raise_()
+            return widget
+
+        def _build_annihilation_animation(
+            self,
+            widget: EnergyRingAnnihilationWidget,
+        ) -> QParallelAnimationGroup:
+            duration_ms = WORK_OVERLAY_COMPLETED_ANNIHILATION_MS
+            group = QParallelAnimationGroup(self)
+            animation = QPropertyAnimation(widget, b"progress")
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+            animation.setDuration(duration_ms)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            group.addAnimation(animation)
+            return group
+
         def _hide_transition_interactive_windows(self) -> None:
-            for window in [*self._close_windows, *self._completed_check_windows]:
+            for window in [
+                *self._close_windows,
+                *self._workdir_windows,
+                *self._completed_check_windows,
+            ]:
                 window.hide()
 
         def _transition_item_payload(
@@ -2919,6 +3096,97 @@ def run_work_overlay_helper_qt(
             )
             self._sync_overlay_geometry()
 
+        def _start_completed_dismiss_transition(
+            self,
+            item: Mapping[str, object],
+        ) -> None:
+            item_id = _item_id(item)
+            clicked_record = self._record_for_item_kind(item_id, "completed")
+            source_widget = (
+                self._record_visual_widget(clicked_record)
+                if clicked_record is not None
+                else None
+            )
+            if not item_id or clicked_record is None or source_widget is None:
+                if item_id:
+                    self._dismissed_instances[item_id] = _item_dismiss_key(item)
+                self._last_payload_signature = ""
+                self._last_structure_signature = ""
+                self.render_items(self._raw_items)
+                return
+
+            try:
+                self._transition_in_progress = True
+                self._transition_type = "completed_dismiss"
+                self._transition_item_id = item_id
+                self._transition_started_at = time.monotonic()
+                self._hide_transition_interactive_windows()
+                self._transition_source_widget = source_widget
+                self._transition_hidden_widget = source_widget
+
+                effect = QGraphicsOpacityEffect(source_widget)
+                effect.setOpacity(1.0)
+                source_widget.setGraphicsEffect(effect)
+                source_widget.show()
+                source_widget.raise_()
+                self._transition_source_effect = effect
+
+                annihilation_widget = self._build_annihilation_widget(source_widget)
+                self._transition_annihilation_widget = annihilation_widget
+
+                duration_ms = WORK_OVERLAY_COMPLETED_ANNIHILATION_MS
+                self._start_transition_watchdog(duration_ms)
+                self._touch_transition_watchdog(duration_ms)
+                group = QParallelAnimationGroup(self)
+                group.addAnimation(
+                    self._animate_effect_opacity(
+                        effect,
+                        1.0,
+                        0.0,
+                        duration_ms,
+                    )
+                )
+                group.addAnimation(self._build_annihilation_animation(annihilation_widget))
+
+                circles, rects = self._transition_records_for_current_layout()
+                remaining_circles = [record for record in circles if record is not clicked_record]
+                completed_count_after = len(remaining_circles)
+                self._set_transition_height_for_counts(len(circles), len(rects))
+                self._set_transition_height_for_counts(completed_count_after, len(rects))
+                shift_delay_ms = max(0, duration_ms - WORK_OVERLAY_RESTORE_SHIFT_MS)
+                for list_idx, record in enumerate(remaining_circles):
+                    widget = self._record_visual_widget(record)
+                    if widget is None:
+                        continue
+                    index_from_right = completed_count_after - 1 - list_idx
+                    sequence = QSequentialAnimationGroup(self)
+                    if shift_delay_ms > 0:
+                        sequence.addAnimation(QPauseAnimation(shift_delay_ms, self))
+                    sequence.addAnimation(
+                        self._animate_widget_geometry(
+                            widget,
+                            self._completed_record_geometry(
+                                index_from_right,
+                                completed_count_after,
+                            ),
+                            WORK_OVERLAY_RESTORE_SHIFT_MS,
+                            QEasingCurve.Type.InOutQuad,
+                        )
+                    )
+                    group.addAnimation(sequence)
+
+                group.finished.connect(lambda: self._finish_completed_dismiss(item))
+                self._transition_animation_group = group
+                group.start()
+            except Exception:
+                self._end_transition()
+
+        def _finish_completed_dismiss(self, item: Mapping[str, object]) -> None:
+            item_id = _item_id(item)
+            if item_id:
+                self._dismissed_instances[item_id] = _item_dismiss_key(item)
+            self._end_transition()
+
         def _start_completed_to_card_transition(
             self,
             item_id: str,
@@ -2974,7 +3242,10 @@ def run_work_overlay_helper_qt(
             rects: list[dict[str, Any]],
         ) -> None:
             try:
-                duration_ms = max(WORK_OVERLAY_RESTORE_FADE_OUT_MS, WORK_OVERLAY_RESTORE_SHIFT_MS)
+                duration_ms = max(
+                    WORK_OVERLAY_RESTORE_FADE_OUT_MS,
+                    WORK_OVERLAY_RESTORE_SHIFT_MS,
+                )
                 self._touch_transition_watchdog(duration_ms)
                 phase1 = QParallelAnimationGroup(self)
                 if self._transition_source_effect is not None:
@@ -3511,7 +3782,11 @@ def run_work_overlay_helper_qt(
             self._stop_transition_animation_group()
             if self._transition_source_widget is not None:
                 self._transition_source_widget.setGraphicsEffect(None)
-                if finished_transition_type not in {"card_to_completed", "completed_to_card"}:
+                if finished_transition_type not in {
+                    "card_to_completed",
+                    "completed_to_card",
+                    "completed_dismiss",
+                }:
                     self._transition_source_widget.show()
             self._transition_source_widget = None
             self._transition_source_effect = None
@@ -3525,6 +3800,13 @@ def run_work_overlay_helper_qt(
                 self._transition_badge_widget.setParent(None)
                 self._transition_badge_widget.deleteLater()
                 self._transition_badge_widget = None
+            if self._transition_annihilation_widget is not None:
+                try:
+                    self._transition_annihilation_widget.close()
+                    self._transition_annihilation_widget.deleteLater()
+                except RuntimeError:
+                    pass
+                self._transition_annihilation_widget = None
             self._transition_hidden_widget = None
             self._transition_required_height = 0
             self._last_payload_signature = ""
