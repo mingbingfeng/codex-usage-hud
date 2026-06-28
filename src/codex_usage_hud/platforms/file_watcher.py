@@ -123,7 +123,7 @@ class FileChangeWatcher:
                 workers = _build_windows_workers(specs, stop_event, self._callback)
                 if workers:
                     return workers, True
-            if sys.platform == "darwin":
+            if sys.platform == "darwin" and not _needs_recursive_tree_polling(specs):
                 worker = _build_kqueue_worker(specs, stop_event, self._callback)
                 if worker is not None:
                     return [worker], True
@@ -538,6 +538,11 @@ def _build_kqueue_worker(
     if not hasattr(select, "kqueue") or not hasattr(select, "kevent"):
         return None
     return _KqueueWorker(specs, stop_event, callback)
+
+
+def _needs_recursive_tree_polling(specs: tuple[FileWatchSpec, ...]) -> bool:
+    """Return whether native kqueue would miss recursive tree changes."""
+    return any(spec.kind == "tree" and spec.recursive for spec in specs)
 
 
 if sys.platform.startswith("win"):

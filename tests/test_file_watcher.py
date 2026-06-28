@@ -7,12 +7,14 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from codex_usage_hud.platforms import file_watcher as fw
 from codex_usage_hud.platforms.file_watcher import FileChangeWatcher, FileWatchSpec
 
 
@@ -93,6 +95,28 @@ class FileChangeWatcherTests(unittest.TestCase):
             finally:
                 watcher.close()
         self.assertTrue(any(session_path in paths for _reasons, paths in events))
+
+    def test_macos_recursive_tree_uses_polling_even_when_kqueue_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            root.mkdir()
+            watcher = FileChangeWatcher(
+                lambda _reasons, _paths: None,
+                fallback_poll_seconds=0.05,
+            )
+            try:
+                with (
+                    patch.object(sys, "platform", "darwin"),
+                    patch.object(fw.select, "kqueue", MagicMock(), create=True) as kqueue,
+                    patch.object(fw.select, "kevent", MagicMock(), create=True),
+                ):
+                    watcher.update(
+                        [FileWatchSpec.tree(root, "sessions-root", suffixes=(".jsonl",))]
+                    )
+                    self.assertFalse(watcher.event_driven)
+                    kqueue.assert_not_called()
+            finally:
+                watcher.close()
 
 
 if __name__ == "__main__":

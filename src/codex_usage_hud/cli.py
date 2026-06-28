@@ -122,10 +122,8 @@ ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
 DAEMON_RESTART_REQUESTED = 10
 RENDERER_HUD_UNAVAILABLE = 20
-HUD_SWITCH_TO_TK = 30
 HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
-HUD_SWITCH_TO_QT = 33
 RENDERER_CDP_TIMEOUT_SECONDS = 1.0
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
 RENDERER_INITIAL_TIMEOUT_SECONDS = 6.0
@@ -143,8 +141,6 @@ CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
 CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
 DAEMON_STARTUP_WAIT = "wait"
 DAEMON_STARTUP_RENDERER = "renderer"
-DAEMON_STARTUP_QT = "qt"
-DAEMON_STARTUP_TK = "tk"
 DAEMON_STARTUP_CANCEL = "cancel"
 LOADING_FEEDBACK_STALE_SECONDS = 20.0
 ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
@@ -166,26 +162,6 @@ _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 _CRASH_DIAGNOSTIC_FILE: Any | None = None
 _DESKTOP_OVERLAY_INSTALL_PROCESS: subprocess.Popen[Any] | None = None
-QtHudWindow: Any | None = None
-TokenHudWindow: Any | None = None
-
-
-def _qt_hud_window_class() -> Any:
-    global QtHudWindow
-    if QtHudWindow is None:
-        from .ui.qt_hud import QtHudWindow as qt_hud_window_class
-
-        QtHudWindow = qt_hud_window_class
-    return QtHudWindow
-
-
-def _token_hud_window_class() -> Any:
-    global TokenHudWindow
-    if TokenHudWindow is None:
-        from .ui.tk_hud import TokenHudWindow as tk_hud_window_class
-
-        TokenHudWindow = tk_hud_window_class
-    return TokenHudWindow
 
 
 def _work_overlay_helper_qt() -> Any:
@@ -2426,91 +2402,12 @@ def _prepare_codex_window_for_standalone(
     poll_seconds: float = 0.25,
     launch_if_missing: bool = False,
 ) -> tuple[bool, str, str, int]:
-    """Best-effort restore/focus of Codex before opening a standalone HUD."""
-    if not sys.platform.startswith("win"):
-        return True, "unsupported", "", 0
-    try:
-        tracker = CodexWindowTracker(enable_uia=False)
-    except Exception:
-        return True, "tracker-error", "", 0
-    if not getattr(tracker, "enabled", False):
-        return True, "disabled", "", 0
-
-    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-    launch_attempted = False
-    activation_attempted = False
-    last_status = "not_found"
-    last_reason = ""
-    last_hwnd = 0
-    while True:
-        snapshot = tracker.get_window_snapshot()
-        last_status = str(getattr(snapshot, "status", "") or "")
-        last_reason = str(getattr(snapshot, "reason", "") or "")
-        last_hwnd = int(getattr(snapshot, "hwnd", 0) or 0)
-        is_active = False
-        if last_hwnd:
-            try:
-                is_active = bool(tracker.is_active(last_hwnd))
-            except Exception:
-                is_active = False
-
-        if last_status == "visible" and is_active:
-            return True, last_status, last_reason, last_hwnd
-
-        if (
-            not activation_attempted
-            and _codex_processes_running()
-            and (last_status != "visible" or not is_active)
-        ):
-            activation_attempted = True
-            activated = _activate_running_codex_app()
-            _LOGGER.info(
-                "standalone_codex_shell_activation_requested activated=%s status=%s hwnd=%s reason=%s",
-                activated,
-                last_status,
-                last_hwnd,
-                last_reason,
-            )
-            if activated:
-                time.sleep(max(0.05, float(poll_seconds)))
-                continue
-
-        try:
-            activated_hwnd = int(tracker.activate_main_window() or 0)
-        except Exception:
-            activated_hwnd = 0
-        if activated_hwnd:
-            snapshot = tracker.get_window_snapshot()
-            last_status = str(getattr(snapshot, "status", "") or "")
-            last_reason = str(getattr(snapshot, "reason", "") or "")
-            last_hwnd = int(getattr(snapshot, "hwnd", 0) or activated_hwnd)
-            activated_is_active = False
-            if last_hwnd and last_status == "visible":
-                try:
-                    activated_is_active = bool(tracker.is_active(last_hwnd))
-                except Exception:
-                    activated_is_active = False
-            if last_status == "visible" and activated_is_active:
-                return True, last_status, last_reason, last_hwnd
-
-        if (
-            launch_if_missing
-            and not launch_attempted
-            and last_status in {"not_found", "hidden", "cloaked"}
-        ):
-            launch_attempted = True
-            launched = launch_codex_app(debugger=False)
-            _LOGGER.info(
-                "standalone_codex_window_restore_requested launched=%s status=%s hwnd=%s reason=%s",
-                launched,
-                last_status,
-                last_hwnd,
-                last_reason,
-            )
-
-        if time.monotonic() >= deadline:
-            return False, last_status, last_reason, last_hwnd
-        time.sleep(max(0.01, float(poll_seconds)))
+    """Deprecated compatibility alias for renderer window preparation."""
+    return _prepare_codex_window_for_renderer(
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        launch_if_missing=launch_if_missing,
+    )
 
 
 def _prepare_codex_window_for_tk(
@@ -2519,7 +2416,7 @@ def _prepare_codex_window_for_tk(
     poll_seconds: float = 0.25,
     launch_if_missing: bool = False,
 ) -> tuple[bool, str, str, int]:
-    """Compatibility wrapper for older tests and integrations."""
+    """Deprecated compatibility alias for renderer window preparation."""
     return _prepare_codex_window_for_standalone(
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
@@ -4473,27 +4370,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--qt-hud",
-        dest="hud_mode",
-        action="store_const",
-        const="renderer",
-        help="Deprecated compatibility flag; renderer HUD is always used.",
-    )
-    parser.add_argument(
-        "--tk-hud",
-        "--no-renderer-hud",
-        dest="hud_mode",
-        action="store_const",
-        const="renderer",
-        help="Deprecated compatibility flag; renderer HUD is always used.",
-    )
-    parser.add_argument(
         "--hud-mode",
-        choices=["auto", "renderer", "qt", "tk"],
-        help=(
-            "Override the configured HUD display mode for this run. "
-            "Legacy values auto, qt, and tk are accepted but treated as renderer."
-        ),
+        choices=["renderer"],
+        help="Override the configured HUD display mode for this run.",
     )
     parser.add_argument(
         "--session-file",
@@ -4684,11 +4563,7 @@ def run_hud_session(
             loading_feedback=loading_feedback,
             launched_codex=True,
         )
-    if renderer_exit in {
-        HUD_SWITCH_TO_QT,
-        HUD_SWITCH_TO_TK,
-        HUD_SWITCH_TO_RENDERER,
-    }:
+    if renderer_exit == HUD_SWITCH_TO_RENDERER:
         _LOGGER.info("renderer_hud_legacy_switch_ignored code=%s", renderer_exit)
         return RENDERER_HUD_UNAVAILABLE
     return renderer_exit
@@ -5068,16 +4943,14 @@ def run_renderer_hud_session(
                         )
                         update_state = update_manager.status().to_dict()
                     mode_switch = str(settings_command_status.get("switchMode") or "").strip()
-                    if mode_switch == "qt":
-                        local_loading.close()
-                        _prepare_runtime_for_display_mode_switch(context)
-                        _LOGGER.info("renderer_hud_switch_requested mode=qt")
-                        return HUD_SWITCH_TO_QT
-                    if mode_switch == "tk":
-                        local_loading.close()
-                        _prepare_runtime_for_display_mode_switch(context)
-                        _LOGGER.info("renderer_hud_switch_requested mode=tk")
-                        return HUD_SWITCH_TO_TK
+                    if mode_switch and mode_switch != "renderer":
+                        _LOGGER.info(
+                            "renderer_hud_legacy_switch_ignored mode=%s",
+                            mode_switch,
+                        )
+                        settings_command_status = _renderer_settings_status(
+                            "Renderer-only 版本不再切换到 Qt/Tk。",
+                        )
                     if exit_requested.is_set():
                         _LOGGER.info("renderer_hud_exit_requested")
                         return 0
@@ -5234,128 +5107,25 @@ def run_renderer_hud_session(
         return 2
 
 
+def _legacy_hud_session_unavailable(surface: str) -> int:
+    _LOGGER.info("legacy_hud_session_unavailable surface=%s renderer_only=true", surface)
+    return RENDERER_HUD_UNAVAILABLE
+
+
 def _run_tk_window_session(
     context: RuntimeContext,
     args: argparse.Namespace,
     *,
     daemon_manager: CodexDaemonManager | None = None,
-    existing_window: TokenHudWindow | None = None,
+    existing_window: Any | None = None,
     close_context: bool = True,
     update_manager: AutoUpdateManager | None = None,
 ) -> int:
-    snapshot_pump = _TkSnapshotPump(context)
-    snapshot_pump_closed = False
-    work_overlay = DesktopWorkOverlay(
-        item_limit=_work_overlay_item_limit_for_context(context),
-    )
-    command_pump: _WorkOverlayCommandPump | None = None
-    session_controller = _build_session_switch_controller(
-        getattr(context, "platform", get_current_platform()),
-        prefer_native_search=True,
-    )
-    window: TokenHudWindow | None = None
-    try:
-        try:
-            window = existing_window or _token_hud_window_class()(
-                compact=args.compact,
-                hide_until_attached=True,
-                tombstone_follow_ms=(
-                    100 if daemon_manager is not None else 500
-                ),
-                user_settings_store=getattr(context, "settings_store", None),
-                update_manager=update_manager,
-            )
-        except Exception as exc:
-            _eprint(f"codex-usage-hud: unable to open Tkinter HUD: {exc}")
-            return 1
-        command_pump = _WorkOverlayCommandPump(work_overlay, session_controller)
-        command_pump.start()
-        latest_snapshot = ParsedSession(status="waiting")
-
-        def refresh() -> None:
-            nonlocal latest_snapshot
-            defer_background_work = bool(
-                getattr(window, "should_defer_background_work", lambda: False)()
-            )
-            next_delay_ms = window.refresh_delay_ms(context.poll_ms)
-            if not defer_background_work:
-                overlay_item_limit = _work_overlay_item_limit_for_context(context)
-                refresh_snapshot = window.should_refresh_snapshot()
-                if refresh_snapshot or overlay_item_limit > 0:
-                    snapshot = snapshot_pump.take_latest()
-                    if snapshot is not None:
-                        latest_snapshot = snapshot
-                        if not refresh_snapshot:
-                            snapshot_pump.request_refresh()
-                    else:
-                        refresh_started = snapshot_pump.request_refresh()
-                        if refresh_snapshot and (refresh_started or snapshot_pump.is_refreshing()):
-                            next_delay_ms = 80
-                if refresh_snapshot:
-                    window.update_display(
-                        latest_snapshot,
-                        update_state=update_manager.tick() if update_manager is not None else None,
-                    )
-                work_overlay.configure(
-                    item_limit=overlay_item_limit,
-                )
-                work_overlay.update(latest_snapshot.active_work_items)
-            try:
-                window.root.after(next_delay_ms, refresh)
-            except Exception:
-                return
-
-        def codex_watchdog() -> None:
-            poll_ms = 500
-            if daemon_manager is not None:
-                poll_ms = daemon_manager.poll_ms
-                try:
-                    if not daemon_manager.codex_is_running():
-                        _LOGGER.info("daemon_codex_exited")
-                        window.close("daemon_codex_exited")
-                        return
-                except ProcessListenerError as exc:
-                    _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
-                    return
-            elif _codex_processes_exited():
-                _LOGGER.info("codex_exited")
-                window.close("codex_exited")
-                return
-            try:
-                window.root.after(poll_ms, codex_watchdog)
-            except Exception:
-                return
-
-        refresh()
-        window.root.after(daemon_manager.poll_ms if daemon_manager is not None else 500, codex_watchdog)
-        window.run()
-        if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
-            return DAEMON_RESTART_REQUESTED
-        mode_switch = str(getattr(window, "mode_switch_request", "") or "")
-        if mode_switch:
-            snapshot_pump_closed = _prepare_runtime_for_display_mode_switch(
-                context,
-                snapshot_pump,
-            )
-        if mode_switch == "qt":
-            return HUD_SWITCH_TO_QT
-        if mode_switch == "renderer":
-            if getattr(window, "restart_codex_for_renderer", False):
-                return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
-            return HUD_SWITCH_TO_RENDERER
-        return 0
-    finally:
-        if command_pump is not None:
-            command_pump.close()
-        work_overlay.close()
-        if not snapshot_pump_closed:
-            snapshot_pump.close()
-        switching_modes = bool(getattr(window, "mode_switch_request", "") or "")
-        window = None
-        if not switching_modes:
-            gc.collect()
-        if close_context:
-            context.close()
+    """Deprecated compatibility stub; Tk HUD runtime has been removed."""
+    del args, daemon_manager, existing_window, update_manager
+    if close_context:
+        context.close()
+    return _legacy_hud_session_unavailable("tk")
 
 
 def _run_qt_window_session(
@@ -5363,144 +5133,15 @@ def _run_qt_window_session(
     args: argparse.Namespace,
     *,
     daemon_manager: CodexDaemonManager | None = None,
-    existing_window: QtHudWindow | None = None,
+    existing_window: Any | None = None,
     close_context: bool = True,
     update_manager: AutoUpdateManager | None = None,
 ) -> int:
-    try:
-        from PySide6.QtCore import QTimer
-    except Exception as exc:
-        _eprint(f"codex-usage-hud: unable to import Qt timer: {exc}")
-        if close_context:
-            context.close()
-        return HUD_SWITCH_TO_TK
-
-    snapshot_pump = _TkSnapshotPump(context)
-    snapshot_pump_closed = False
-    work_overlay = DesktopWorkOverlay(
-        item_limit=_work_overlay_item_limit_for_context(context),
-    )
-    command_pump: _WorkOverlayCommandPump | None = None
-    refresh_timer: Any | None = None
-    daemon_timer: Any | None = None
-    session_controller = _build_session_switch_controller(
-        getattr(context, "platform", get_current_platform()),
-        prefer_native_search=True,
-    )
-    try:
-        try:
-            qt_window_class = _qt_hud_window_class()
-            window = existing_window or qt_window_class(
-                compact=bool(getattr(args, "compact", False)),
-                hide_until_attached=True,
-                tombstone_follow_ms=(
-                    100 if daemon_manager is not None else 500
-                ),
-                user_settings_store=getattr(context, "settings_store", None),
-                update_manager=update_manager,
-            )
-        except Exception as exc:
-            _eprint(f"codex-usage-hud: unable to open Qt HUD; falling back to Tk: {exc}")
-            return HUD_SWITCH_TO_TK
-        command_pump = _WorkOverlayCommandPump(work_overlay, session_controller)
-        command_pump.start()
-        latest_snapshot = ParsedSession(status="waiting")
-        refresh_timer = QTimer()
-        refresh_timer.setSingleShot(True)
-
-        def schedule_refresh(delay_ms: int) -> None:
-            try:
-                refresh_timer.start(max(80, int(delay_ms)))
-            except Exception:
-                return
-
-        def refresh() -> None:
-            nonlocal latest_snapshot
-            defer_background_work = bool(
-                getattr(window, "should_defer_background_work", lambda: False)()
-            )
-            next_delay_ms = window.refresh_delay_ms(context.poll_ms)
-            if not defer_background_work:
-                overlay_item_limit = _work_overlay_item_limit_for_context(context)
-                refresh_snapshot = window.should_refresh_snapshot()
-                if refresh_snapshot or overlay_item_limit > 0:
-                    snapshot = snapshot_pump.take_latest()
-                    if snapshot is not None:
-                        latest_snapshot = snapshot
-                        if not refresh_snapshot:
-                            snapshot_pump.request_refresh()
-                    else:
-                        refresh_started = snapshot_pump.request_refresh()
-                        if refresh_snapshot and (refresh_started or snapshot_pump.is_refreshing()):
-                            next_delay_ms = 80
-                if refresh_snapshot:
-                    window.update_display(
-                        latest_snapshot,
-                        update_state=update_manager.tick() if update_manager is not None else None,
-                    )
-                work_overlay.configure(
-                    item_limit=overlay_item_limit,
-                )
-                work_overlay.update(latest_snapshot.active_work_items)
-            schedule_refresh(next_delay_ms)
-
-        refresh_timer.timeout.connect(refresh)
-
-        daemon_timer = QTimer()
-
-        def codex_watchdog() -> None:
-            if daemon_manager is not None:
-                try:
-                    if not daemon_manager.codex_is_running():
-                        _LOGGER.info("daemon_codex_exited")
-                        window.close("daemon_codex_exited")
-                        return
-                except ProcessListenerError as exc:
-                    _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
-                    return
-            elif _codex_processes_exited():
-                _LOGGER.info("codex_exited")
-                window.close("codex_exited")
-                return
-
-        daemon_timer.timeout.connect(codex_watchdog)
-        daemon_timer.start(daemon_manager.poll_ms if daemon_manager is not None else 500)
-
-        refresh()
-        window.run()
-        if daemon_manager is not None and window.exit_reason == "daemon_codex_exited":
-            return DAEMON_RESTART_REQUESTED
-        mode_switch = str(getattr(window, "mode_switch_request", "") or "")
-        if mode_switch:
-            snapshot_pump_closed = _prepare_runtime_for_display_mode_switch(
-                context,
-                snapshot_pump,
-            )
-        if mode_switch == "tk":
-            return HUD_SWITCH_TO_TK
-        if mode_switch == "renderer":
-            if getattr(window, "restart_codex_for_renderer", False):
-                return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
-            return HUD_SWITCH_TO_RENDERER
-        return 0
-    finally:
-        if refresh_timer is not None:
-            try:
-                refresh_timer.stop()
-            except Exception:
-                pass
-        if daemon_timer is not None:
-            try:
-                daemon_timer.stop()
-            except Exception:
-                pass
-        if command_pump is not None:
-            command_pump.close()
-        work_overlay.close()
-        if not snapshot_pump_closed:
-            snapshot_pump.close()
-        if close_context:
-            context.close()
+    """Deprecated compatibility stub; Qt HUD runtime has been removed."""
+    del args, daemon_manager, existing_window, update_manager
+    if close_context:
+        context.close()
+    return _legacy_hud_session_unavailable("qt")
 
 
 def run_qt_hud_session(
@@ -5511,52 +5152,15 @@ def run_qt_hud_session(
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
-    """Run one Qt HUD session, falling back to Tk when Qt is unavailable."""
-    lock_context = nullcontext() if lock_already_held else HudInstanceLock()
+    """Deprecated compatibility stub; renderer HUD is the only supported HUD."""
+    del args, hide_until_attached, daemon_manager
+    if loading_feedback is not None:
+        loading_feedback.close()
+    if lock_already_held:
+        return _legacy_hud_session_unavailable("qt")
     try:
-        with lock_context:
-            context = build_runtime_context(args)
-            update_manager = AutoUpdateManager(current_version=__version__)
-            try:
-                remove_renderer_hud_from_pages(
-                    timeout_seconds=min(RENDERER_CDP_TIMEOUT_SECONDS, 0.5),
-                )
-                _prepare_codex_window_for_standalone(
-                    timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
-                    launch_if_missing=True,
-                )
-                try:
-                    qt_window_class = _qt_hud_window_class()
-                    window = qt_window_class(
-                        compact=bool(getattr(args, "compact", False)),
-                        hide_until_attached=hide_until_attached,
-                        tombstone_follow_ms=(
-                            100 if daemon_manager is not None else 500
-                        ),
-                        user_settings_store=getattr(context, "settings_store", None),
-                        update_manager=update_manager,
-                    )
-                except Exception as exc:
-                    _LOGGER.info("qt_hud_unavailable fallback=tk error=%s", exc)
-                    _eprint(
-                        f"codex-usage-hud: unable to open Qt HUD; falling back to Tk: {exc}"
-                    )
-                    return HUD_SWITCH_TO_TK
-                if loading_feedback is not None:
-                    loading_feedback.close()
-                return _run_qt_window_session(
-                    context,
-                    args,
-                    daemon_manager=daemon_manager,
-                    existing_window=window,
-                    close_context=False,
-                    update_manager=update_manager,
-                )
-            finally:
-                if loading_feedback is not None:
-                    loading_feedback.close()
-                update_manager.close()
-                context.close()
+        with HudInstanceLock():
+            return _legacy_hud_session_unavailable("qt")
     except HudAlreadyRunningError as exc:
         _eprint(f"codex-usage-hud: {exc}")
         return 2
@@ -5570,49 +5174,15 @@ def run_tk_hud_session(
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
-    """Run one Tk HUD session with optional daemon process supervision."""
-    lock_context = nullcontext() if lock_already_held else HudInstanceLock()
+    """Deprecated compatibility stub; renderer HUD is the only supported HUD."""
+    del args, hide_until_attached, daemon_manager
+    if loading_feedback is not None:
+        loading_feedback.close()
+    if lock_already_held:
+        return _legacy_hud_session_unavailable("tk")
     try:
-        with lock_context:
-            context = build_runtime_context(args)
-            update_manager = AutoUpdateManager(current_version=__version__)
-            try:
-                remove_renderer_hud_from_pages(
-                    timeout_seconds=min(RENDERER_CDP_TIMEOUT_SECONDS, 0.5),
-                )
-                _prepare_codex_window_for_tk(
-                    timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
-                    launch_if_missing=True,
-                )
-                window = _token_hud_window_class()(
-                    compact=args.compact,
-                    hide_until_attached=hide_until_attached,
-                    tombstone_follow_ms=(
-                        100 if daemon_manager is not None else 500
-                    ),
-                    user_settings_store=getattr(context, "settings_store", None),
-                    update_manager=update_manager,
-                )
-                try:
-                    window.root.update_idletasks()
-                    window.request_root.update_idletasks()
-                except Exception:
-                    pass
-                if loading_feedback is not None:
-                    loading_feedback.close()
-                return _run_tk_window_session(
-                    context,
-                    args,
-                    daemon_manager=daemon_manager,
-                    existing_window=window,
-                    close_context=False,
-                    update_manager=update_manager,
-                )
-            finally:
-                if loading_feedback is not None:
-                    loading_feedback.close()
-                update_manager.close()
-                context.close()
+        with HudInstanceLock():
+            return _legacy_hud_session_unavailable("tk")
     except HudAlreadyRunningError as exc:
         _eprint(f"codex-usage-hud: {exc}")
         return 2
@@ -5642,12 +5212,6 @@ def run_daemon(args: argparse.Namespace) -> int:
             if startup.mode == DAEMON_STARTUP_CANCEL:
                 _LOGGER.info("daemon_startup_cancelled")
                 return 0
-            if startup.mode in {DAEMON_STARTUP_TK, DAEMON_STARTUP_QT}:
-                _LOGGER.info("daemon_startup_legacy_mode_normalized mode=%s", startup.mode)
-                startup = DaemonStartupDecision(
-                    DAEMON_STARTUP_RENDERER,
-                    launch_codex=startup.launch_codex,
-                )
             startup_loading: HudLoadingFeedback | None = None
             if startup.mode == DAEMON_STARTUP_RENDERER and startup.launch_codex:
                 startup_loading = _create_loading_feedback(
@@ -5690,14 +5254,6 @@ def run_daemon(args: argparse.Namespace) -> int:
                         loading_feedback=startup_loading,
                     )
                 startup_loading = None
-                if exit_code == HUD_SWITCH_TO_QT:
-                    preferred_runtime_mode = "renderer"
-                    force_renderer_retry = False
-                    continue
-                if exit_code == HUD_SWITCH_TO_TK:
-                    preferred_runtime_mode = "renderer"
-                    force_renderer_retry = False
-                    continue
                 if exit_code == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
                     startup_loading = _create_loading_feedback(
                         args,
