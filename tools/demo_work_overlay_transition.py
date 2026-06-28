@@ -664,37 +664,39 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             if self._is_animating():
                 self._log_state("pending.skip", reason="动画运行中，忽略前往模拟")
                 return
-            circles = _circles(self.items)
+            candidates = _circles(self.items) + _rects(self.items)
             item = (
-                next((candidate for candidate in circles if _item_id(candidate) == item_id), None)
+                next((candidate for candidate in candidates if _item_id(candidate) == item_id), None)
                 if item_id
                 else None
             )
-            if item is None and circles:
-                item = circles[0]
+            if item is None and candidates:
+                item = candidates[0]
             overlay = self._overlay_window()
             if item is None or overlay is None or not hasattr(overlay, "_set_switch_pending"):
-                self._log_state("pending.skip", reason="没有可用圆形或 overlay 未就绪")
+                self._log_state("pending.skip", reason="没有可用气泡或 overlay 未就绪")
                 return
             getattr(overlay, "_set_switch_pending")(item)
             if hasattr(overlay, "reposition_interactive_windows"):
                 getattr(overlay, "reposition_interactive_windows")()
-            self._log_state("circle_pending.start", item=_item_id(item))
+            shape = "circle" if item in _circles(self.items) else "card"
+            self._log_state(f"{shape}_pending.start", item=_item_id(item))
 
         def complete_pending_switch(self, item_id: str = "") -> None:
-            circles = _circles(self.items)
+            candidates = _circles(self.items) + _rects(self.items)
             item = (
-                next((candidate for candidate in circles if _item_id(candidate) == item_id), None)
+                next((candidate for candidate in candidates if _item_id(candidate) == item_id), None)
                 if item_id
                 else None
             )
-            if item is None and circles:
-                item = circles[0]
+            if item is None and candidates:
+                item = candidates[0]
             if item is None:
-                self._log_state("pending.complete.skip", reason="没有可完成的圆形")
+                self._log_state("pending.complete.skip", reason="没有可完成的气泡")
                 return
 
             target_id = _item_id(item)
+            was_circle = item in _circles(self.items)
             self.items = [
                 {
                     **dict(candidate),
@@ -706,7 +708,8 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             overlay = self._overlay_window()
             if overlay is not None and hasattr(overlay, "_sync_switch_pending"):
                 getattr(overlay, "_sync_switch_pending")(self.items)
-            self._log_state("circle_pending.complete", item=target_id)
+            shape = "circle" if was_circle else "card"
+            self._log_state(f"{shape}_pending.complete", item=target_id)
             self._update_status()
 
         def _overlay_window(self) -> QWidget | None:

@@ -206,6 +206,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _transition_slot_shift_progress,
     _theme_contrast_ratio,
     _visible_overlay_items,
+    _workdir_link_hover_visible_for_item,
     _workdir_link_pending_for_item,
     _work_overlay_header_text,
     _workdir_display_name,
@@ -997,8 +998,12 @@ class BudgetHelperTests(unittest.TestCase):
 
     def test_work_overlay_completed_workdir_pending_uses_badge_not_link(self) -> None:
         self.assertFalse(_workdir_link_pending_for_item({"status": "recent"}, True))
-        self.assertTrue(_workdir_link_pending_for_item({"status": "running"}, True))
+        self.assertFalse(_workdir_link_pending_for_item({"status": "running"}, True))
         self.assertFalse(_workdir_link_pending_for_item({"status": "running"}, False))
+
+    def test_work_overlay_completed_workdir_hover_stays_invisible(self) -> None:
+        self.assertFalse(_workdir_link_hover_visible_for_item({"status": "recent"}))
+        self.assertTrue(_workdir_link_hover_visible_for_item({"status": "running"}))
 
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()

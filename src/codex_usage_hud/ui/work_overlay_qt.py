@@ -540,7 +540,12 @@ def _workdir_link_pending_for_item(
     item: Mapping[str, object],
     pending: bool,
 ) -> bool:
-    return bool(pending) and not _item_is_completed(item)
+    del item, pending
+    return False
+
+
+def _workdir_link_hover_visible_for_item(item: Mapping[str, object]) -> bool:
+    return not _item_is_completed(item)
 
 
 def _transition_required_height(
@@ -1680,7 +1685,7 @@ def run_work_overlay_helper_qt(
             # Keep a near-transparent fill so Windows still treats the hot area
             # as a hit-testable layered window instead of letting clicks pass through.
             fill = QColor(255, 255, 255, 1)
-            if self._hover:
+            if self._hover and _workdir_link_hover_visible_for_item(self._item):
                 fill = QColor(156, 203, 255, 18)
             if self._pending:
                 fill = QColor(156, 203, 255, 42)
@@ -1707,6 +1712,266 @@ def run_work_overlay_helper_qt(
             )
             text_rect = self.rect().adjusted(side + 12, 0, -4, 0)
             painter.drawText(text_rect, alignment.AlignVCenter | alignment.AlignLeft, label)
+
+    class CardSwitchPendingOverlayWidget(QWidget):
+        def __init__(self, parent: QWidget) -> None:
+            super().__init__(parent)
+            self._switch_pending = False
+            self._switch_pending_started_at = 0.0
+            self._switch_pending_completed = False
+            self._switch_pending_completed_at = 0.0
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._advance)
+            self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
+            self.hide()
+
+        def set_switch_pending(
+            self,
+            pending: bool,
+            started_at: float,
+            *,
+            completed: bool = False,
+            completed_at: float = 0.0,
+        ) -> None:
+            pending = bool(pending)
+            started_at = float(started_at or 0.0)
+            completed = bool(completed)
+            completed_at = float(completed_at or 0.0)
+            if self._switch_pending == pending and (
+                not pending
+                or abs(self._switch_pending_started_at - started_at) < 0.001
+            ) and self._switch_pending_completed == completed and (
+                not completed
+                or abs(self._switch_pending_completed_at - completed_at) < 0.001
+            ):
+                return
+            self._switch_pending = pending
+            self._switch_pending_started_at = started_at if pending else 0.0
+            self._switch_pending_completed = completed if pending else False
+            self._switch_pending_completed_at = completed_at if pending and completed else 0.0
+            if pending:
+                self.show()
+                self.raise_()
+                if not self._timer.isActive():
+                    self._timer.start(24)
+            else:
+                self._timer.stop()
+                self.hide()
+            self.update()
+
+        def _advance(self) -> None:
+            if not self._switch_pending:
+                self._timer.stop()
+                self.hide()
+                return
+            if (
+                self._switch_pending_completed
+                and self._switch_pending_completed_at > 0.0
+                and time.monotonic() - self._switch_pending_completed_at
+                > WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS
+            ):
+                self._timer.stop()
+                self.hide()
+                return
+            self.update()
+
+        def paintEvent(self, event: object) -> None:
+            del event
+            if not self._switch_pending:
+                return
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+            now = time.monotonic()
+            started_at = self._switch_pending_started_at or now
+            elapsed = max(0.0, now - started_at)
+            completed = self._switch_pending_completed
+            finish_elapsed = (
+                max(0.0, now - self._switch_pending_completed_at)
+                if completed and self._switch_pending_completed_at > 0.0
+                else 0.0
+            )
+            finish_progress = (
+                _completed_pending_finish_progress(finish_elapsed)
+                if completed
+                else 0.0
+            )
+            motion_alpha = 1.0 - _ease_out_cubic(finish_progress)
+            launch_progress = 1.0 if completed else _completed_pending_launch_progress(elapsed)
+
+            rect = QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5)
+            center = QPointF(rect.center())
+            painter.setPen(Qt.PenStyle.NoPen)
+            veil_opacity = _completed_pending_caption_opacity(
+                elapsed,
+                completed=completed,
+                finish_elapsed_seconds=finish_elapsed,
+            )
+            painter.setBrush(QColor(3, 17, 27, int(54 * veil_opacity)))
+            painter.drawRoundedRect(rect, 10.0, 10.0)
+
+            self._draw_card_quantum_frame(
+                painter,
+                rect,
+                elapsed,
+                launch_progress=launch_progress,
+                finish_progress=finish_progress,
+                motion_alpha=motion_alpha,
+                completed=completed,
+            )
+            self._draw_card_caption(
+                painter,
+                center,
+                elapsed,
+                completed=completed,
+                finish_elapsed=finish_elapsed,
+            )
+
+        def _draw_card_quantum_frame(
+            self,
+            painter: QPainter,
+            rect: QRectF,
+            elapsed: float,
+            *,
+            launch_progress: float,
+            finish_progress: float,
+            motion_alpha: float,
+            completed: bool,
+        ) -> None:
+            frame_rect = rect.adjusted(8.0, 7.0, -8.0, -7.0)
+            painter.save()
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if launch_progress < 1.0:
+                alpha = int(155 * (1.0 - launch_progress))
+                launch_rect = frame_rect.adjusted(
+                    -10.0 * _ease_out_cubic(launch_progress),
+                    -5.0 * _ease_out_cubic(launch_progress),
+                    10.0 * _ease_out_cubic(launch_progress),
+                    5.0 * _ease_out_cubic(launch_progress),
+                )
+                painter.setPen(QPen(QColor(82, 218, 255, alpha), 1.6))
+                painter.drawRoundedRect(launch_rect, 12.0, 12.0)
+
+            if completed:
+                eased = _ease_out_cubic(finish_progress)
+                alpha = int(185 * (1.0 - finish_progress))
+                finish_rect = frame_rect.adjusted(
+                    -18.0 * eased,
+                    -8.0 * eased,
+                    18.0 * eased,
+                    8.0 * eased,
+                )
+                painter.setPen(QPen(QColor(102, 255, 218, alpha), 2.0))
+                painter.drawRoundedRect(finish_rect, 14.0, 14.0)
+
+            painter.setPen(QPen(QColor(93, 216, 255, int(128 * motion_alpha)), 1.1))
+            painter.drawRoundedRect(frame_rect, 10.0, 10.0)
+
+            points: list[QPointF] = []
+            pulses: list[float] = []
+            count = 3
+            for index in range(count):
+                angle, jitter, pulse = _completed_pending_particle_state(elapsed, index, count)
+                points.append(self._card_perimeter_point(frame_rect, angle / math.tau, jitter))
+                pulses.append(pulse)
+
+            for index, point in enumerate(points):
+                next_index = (index + 1) % len(points)
+                strength = min(pulses[index], pulses[next_index])
+                if strength <= 0.08:
+                    continue
+                pen = QPen(
+                    QColor(102, 255, 218, int(120 * strength * motion_alpha)),
+                    max(0.45, 1.0 * strength),
+                )
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                painter.drawLine(point, points[next_index])
+
+            for index, point in enumerate(points):
+                pulse = pulses[index]
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(66, 225, 255, int((78 + pulse * 80) * motion_alpha)))
+                painter.drawEllipse(point, 4.7 + pulse * 1.8, 4.7 + pulse * 1.8)
+                painter.setBrush(QColor(238, 255, 255, int(238 * motion_alpha)))
+                painter.drawEllipse(point, 1.7, 1.7)
+            painter.restore()
+
+        def _card_perimeter_point(
+            self,
+            rect: QRectF,
+            progress: float,
+            jitter: float,
+        ) -> QPointF:
+            width = max(1.0, rect.width())
+            height = max(1.0, rect.height())
+            distance = (float(progress) % 1.0) * (width + height) * 2.0
+            if distance <= width:
+                point = QPointF(rect.left() + distance, rect.top())
+            elif distance <= width + height:
+                point = QPointF(rect.right(), rect.top() + distance - width)
+            elif distance <= width * 2.0 + height:
+                point = QPointF(rect.right() - (distance - width - height), rect.bottom())
+            else:
+                point = QPointF(rect.left(), rect.bottom() - (distance - width * 2.0 - height))
+            center = rect.center()
+            dx = point.x() - center.x()
+            dy = point.y() - center.y()
+            length = max(1.0, math.hypot(dx, dy))
+            return QPointF(
+                point.x() + (dx / length) * jitter * 2.8,
+                point.y() + (dy / length) * jitter * 2.8,
+            )
+
+        def _draw_card_caption(
+            self,
+            painter: QPainter,
+            center: QPointF,
+            pending_elapsed: float,
+            *,
+            completed: bool,
+            finish_elapsed: float,
+        ) -> None:
+            opacity = _completed_pending_caption_opacity(
+                pending_elapsed,
+                completed=completed,
+                finish_elapsed_seconds=finish_elapsed,
+            )
+            if opacity <= 0.001:
+                return
+            finish_progress = (
+                _completed_pending_finish_progress(finish_elapsed)
+                if completed
+                else 0.0
+            )
+            scale = 1.0 + (0.055 * math.sin(math.pi * min(1.0, finish_progress)) if completed else 0.0)
+            text = "已跳转" if completed else "正在跳转"
+            panel_rect = QRectF(center.x() - 47.0, center.y() - 16.0, 94.0, 32.0)
+
+            painter.save()
+            painter.translate(center)
+            painter.scale(scale, scale)
+            painter.translate(-center)
+            painter.setPen(
+                QPen(
+                    QColor(118, 255, 202, int(210 * opacity))
+                    if completed
+                    else QColor(76, 213, 255, int(180 * opacity)),
+                    1.0,
+                )
+            )
+            painter.setBrush(QColor(5, 23, 34, int(152 * opacity)))
+            painter.drawRoundedRect(panel_rect, 10.0, 10.0)
+            painter.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.DemiBold))
+            painter.setPen(
+                QColor(204, 255, 232, int(245 * opacity))
+                if completed
+                else QColor(229, 250, 255, int(245 * opacity))
+            )
+            painter.drawText(panel_rect, alignment.AlignCenter, text)
+            painter.restore()
 
     class ClickHotspotWindow(QWidget):
         def __init__(
@@ -2615,11 +2880,6 @@ def run_work_overlay_helper_qt(
 
         def _sync_completed_pending_animations(self) -> None:
             for record in self._item_widgets:
-                if record.get("kind") != "completed":
-                    continue
-                badge = record.get("badge")
-                if not isinstance(badge, CompletedBadgeWidget):
-                    continue
                 item = record.get("item")
                 pending = (
                     isinstance(item, Mapping)
@@ -2629,12 +2889,30 @@ def run_work_overlay_helper_qt(
                     isinstance(item, Mapping)
                     and self._switch_pending_completed_for_item(item)
                 )
-                badge.set_switch_pending(
-                    pending,
-                    self._switch_pending_started_at if pending else 0.0,
-                    completed=completed,
-                    completed_at=self._switch_pending_completed_at if completed else 0.0,
-                )
+                if record.get("kind") == "completed":
+                    badge = record.get("badge")
+                    if isinstance(badge, CompletedBadgeWidget):
+                        badge.set_switch_pending(
+                            pending,
+                            self._switch_pending_started_at if pending else 0.0,
+                            completed=completed,
+                            completed_at=self._switch_pending_completed_at if completed else 0.0,
+                        )
+                    continue
+                if record.get("kind") == "card":
+                    switch_overlay = record.get("switch_overlay")
+                    card = record.get("card")
+                    if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):
+                        if isinstance(card, QWidget):
+                            switch_overlay.setGeometry(card.rect())
+                        switch_overlay.set_switch_pending(
+                            pending,
+                            self._switch_pending_started_at if pending else 0.0,
+                            completed=completed,
+                            completed_at=self._switch_pending_completed_at if completed else 0.0,
+                        )
+                        if pending:
+                            switch_overlay.raise_()
 
         def switch_item(self, item: Mapping[str, object]) -> None:
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
@@ -2970,6 +3248,7 @@ def run_work_overlay_helper_qt(
             footer_layout.addWidget(round_badge, 0)
 
             card_layout.addWidget(footer_container)
+            switch_overlay = CardSwitchPendingOverlayWidget(card)
 
             record = {
                 "kind": "card",
@@ -2981,6 +3260,7 @@ def run_work_overlay_helper_qt(
                 "status_label": status_label,
                 "round_badge": round_badge,
                 "workdir_label": workdir_label,
+                "switch_overlay": switch_overlay,
                 "close_anchor": close_anchor,
             }
             self._item_widgets.append(record)
@@ -2993,6 +3273,7 @@ def run_work_overlay_helper_qt(
             *,
             collect_anchors: bool = True,
         ) -> None:
+            record["item"] = dict(item)
             status = str(item.get("status") or "")
             accent, pill_bg, card_bg, border_color = _color_for(
                 status,
@@ -3112,6 +3393,19 @@ def run_work_overlay_helper_qt(
                 )
                 if workdir_clickable:
                     self._workdir_anchors.append((record["workdir_label"], dict(item)))
+            switch_overlay = record.get("switch_overlay")
+            if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):
+                pending = self._switch_pending_active_for_item(item)
+                completed = self._switch_pending_completed_for_item(item)
+                switch_overlay.setGeometry(card.rect())
+                switch_overlay.set_switch_pending(
+                    pending,
+                    self._switch_pending_started_at if pending else 0.0,
+                    completed=completed,
+                    completed_at=self._switch_pending_completed_at if completed else 0.0,
+                )
+                if pending:
+                    switch_overlay.raise_()
 
         def _build_transition_card_widget(self, item: Mapping[str, object]) -> QFrame:
             card = QFrame(self._shell)
@@ -3362,6 +3656,11 @@ def run_work_overlay_helper_qt(
                 widget.setGeometry(
                     self._card_record_geometry(index_from_top, completed_count)
                 )
+                switch_overlay = record.get("switch_overlay")
+                if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):
+                    switch_overlay.setGeometry(widget.rect())
+                    if switch_overlay.isVisible():
+                        switch_overlay.raise_()
                 widget.show()
 
         def _animate_widget_geometry(
