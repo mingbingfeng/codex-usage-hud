@@ -168,6 +168,7 @@ from codex_usage_hud.ui.tk_hud import (
     _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
+    WORK_OVERLAY_TOP_OFFSET,
     _completed_badge_palette,
     _completed_badge_restore_slot_moves,
     _completed_badge_slot_moves,
@@ -182,6 +183,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _overlay_hover_hit_test,
     _ordered_overlay_items,
     _overlay_items_required_height,
+    _overlay_window_top_y,
     _pending_workdir_window_rect,
     _point_in_inscribed_circle,
     _round_badge_palette,
@@ -885,6 +887,11 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(str(payload["taskStartedAt"]).startswith("2026-06-16T10:00:00"))
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
+
+    def test_work_overlay_top_offset_uses_screen_geometry_top(self) -> None:
+        self.assertEqual(_overlay_window_top_y(0), WORK_OVERLAY_TOP_OFFSET)
+        self.assertEqual(_overlay_window_top_y(48), 48 + WORK_OVERLAY_TOP_OFFSET)
+        self.assertEqual(_overlay_window_top_y(-120), -120 + WORK_OVERLAY_TOP_OFFSET)
 
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()

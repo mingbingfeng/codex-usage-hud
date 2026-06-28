@@ -24,8 +24,25 @@ from codex_usage_hud.ui import work_overlay_qt  # noqa: E402
 
 
 DEFAULT_SCALE = 6.0
+DEFAULT_SPEED = 1.0
 SAMPLE_INTERVAL_MS = 60
 DEFAULT_LOG_PATH = ROOT / "tmp" / "work_overlay_transition_demo.log"
+TRANSITION_DURATION_NAMES = (
+    "WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS",
+    "WORK_OVERLAY_TRANSITION_SHRINK_MS",
+    "WORK_OVERLAY_TRANSITION_PAUSE_MS",
+    "WORK_OVERLAY_TRANSITION_MOVE_MS",
+    "WORK_OVERLAY_TRANSITION_SHIFT_MS",
+    "WORK_OVERLAY_RESTORE_FADE_OUT_MS",
+    "WORK_OVERLAY_RESTORE_SHIFT_MS",
+    "WORK_OVERLAY_RESTORE_FADE_IN_MS",
+    "WORK_OVERLAY_RESTORE_DESCEND_MS",
+)
+BASE_TRANSITION_DURATIONS = {
+    name: int(getattr(work_overlay_qt, name))
+    for name in TRANSITION_DURATION_NAMES
+    if hasattr(work_overlay_qt, name)
+}
 
 
 def _now_iso(offset_seconds: int = 0) -> str:
@@ -87,19 +104,14 @@ def _write_state(
 
 def _apply_transition_scale(scale: float) -> None:
     scale = max(0.1, float(scale))
-    for name in (
-        "WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS",
-        "WORK_OVERLAY_TRANSITION_SHRINK_MS",
-        "WORK_OVERLAY_TRANSITION_PAUSE_MS",
-        "WORK_OVERLAY_TRANSITION_MOVE_MS",
-        "WORK_OVERLAY_TRANSITION_SHIFT_MS",
-        "WORK_OVERLAY_RESTORE_FADE_OUT_MS",
-        "WORK_OVERLAY_RESTORE_SHIFT_MS",
-        "WORK_OVERLAY_RESTORE_FADE_IN_MS",
-        "WORK_OVERLAY_RESTORE_DESCEND_MS",
-    ):
-        if hasattr(work_overlay_qt, name):
-            setattr(work_overlay_qt, name, int(getattr(work_overlay_qt, name) * scale))
+    for name, base_value in BASE_TRANSITION_DURATIONS.items():
+        setattr(work_overlay_qt, name, max(1, int(round(base_value * scale))))
+
+
+def _effective_transition_scale(args: argparse.Namespace) -> float:
+    scale = max(0.1, float(args.scale))
+    speed = max(0.1, float(args.speed))
+    return max(0.1, scale / speed)
 
 
 def _updated_key(item: Mapping[str, object]) -> str:
@@ -275,14 +287,17 @@ def _run_auto_demo(args: argparse.Namespace) -> int:
         target=_timeline,
         kwargs={
             "state_path": state_path,
-            "scale": args.scale,
+            "scale": args.effective_scale,
             "loop": not args.once,
         },
         daemon=True,
     )
     thread.start()
     print(f"demo: state file {state_path}")
-    print(f"demo: transition scale {args.scale:g}x")
+    print(
+        "demo: transition "
+        f"scale={args.scale:g}x speed={args.speed:g}x effective={args.effective_scale:g}x"
+    )
     print("demo: press Ctrl+C in this terminal to stop")
     try:
         return work_overlay_qt.run_work_overlay_helper_qt(
@@ -305,9 +320,11 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
     from PySide6.QtGui import QColor, QPainter, QPen
     from PySide6.QtWidgets import (
         QApplication,
+        QDoubleSpinBox,
         QHBoxLayout,
         QLabel,
         QPushButton,
+        QSlider,
         QVBoxLayout,
         QWidget,
     )
@@ -384,6 +401,7 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             self._animation_seen_active = False
             self._hotspots: list[DemoHotspotWindow] = []
             self._started_at = time.perf_counter()
+            self._speed = max(0.1, float(args.speed))
 
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(
@@ -402,6 +420,28 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             layout.addWidget(QLabel(f"日志：{log_path}"))
             self._status_label = QLabel("")
             layout.addWidget(self._status_label)
+
+            speed_row = QHBoxLayout()
+            speed_row.addWidget(QLabel("速度"))
+            self._speed_slider = QSlider(Qt.Orientation.Horizontal)
+            self._speed_slider.setRange(25, 400)
+            self._speed_slider.setSingleStep(25)
+            self._speed_slider.setPageStep(50)
+            self._speed_slider.setValue(int(round(self._speed * 100)))
+            self._speed_spin = QDoubleSpinBox()
+            self._speed_spin.setRange(0.25, 4.0)
+            self._speed_spin.setDecimals(2)
+            self._speed_spin.setSingleStep(0.25)
+            self._speed_spin.setSuffix("x")
+            self._speed_spin.setValue(min(4.0, max(0.25, self._speed)))
+            self._speed_detail_label = QLabel("")
+            speed_row.addWidget(self._speed_slider, 1)
+            speed_row.addWidget(self._speed_spin)
+            speed_row.addWidget(self._speed_detail_label)
+            layout.addLayout(speed_row)
+            self._speed_slider.valueChanged.connect(self._set_speed_from_slider)
+            self._speed_spin.valueChanged.connect(self._set_speed)
+            self._apply_speed(log_change=False)
 
             button_row = QHBoxLayout()
             self._buttons: dict[str, QPushButton] = {}
@@ -434,6 +474,36 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
 
             self._log_state("init")
             self._update_status()
+
+        def _set_speed_from_slider(self, value: int) -> None:
+            self._set_speed(max(0.25, min(4.0, float(value) / 100.0)))
+
+        def _set_speed(self, speed: float) -> None:
+            self._speed = max(0.25, min(4.0, float(speed)))
+            self._apply_speed(log_change=True)
+
+        def _apply_speed(self, *, log_change: bool) -> None:
+            effective_scale = max(0.1, float(args.scale) / self._speed)
+            args.speed = self._speed
+            args.effective_scale = effective_scale
+            _apply_transition_scale(effective_scale)
+
+            slider_value = int(round(self._speed * 100))
+            if self._speed_slider.value() != slider_value:
+                self._speed_slider.blockSignals(True)
+                self._speed_slider.setValue(slider_value)
+                self._speed_slider.blockSignals(False)
+            if abs(self._speed_spin.value() - self._speed) > 0.001:
+                self._speed_spin.blockSignals(True)
+                self._speed_spin.setValue(self._speed)
+                self._speed_spin.blockSignals(False)
+            self._speed_detail_label.setText(f"effective {effective_scale:g}x")
+            if log_change:
+                self._log_state(
+                    "speed.change",
+                    speed=f"{self._speed:g}x",
+                    effective_scale=f"{effective_scale:g}x",
+                )
 
         def close_demo(self) -> None:
             _write_state(state_path, items=self.items, close=True)
@@ -508,34 +578,57 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
                 except RuntimeError:
                     pass
 
-            transition_widget = getattr(overlay, "_transition_widget", None)
-            if transition_widget is not None and transition_item_id:
+            transition_badge = getattr(overlay, "_transition_badge_widget", None)
+            if transition_badge is not None and transition_item_id:
                 try:
-                    transition_type = str(getattr(transition_widget, "_transition_type", "") or "")
-                    if transition_widget.isVisible() and transition_type:
-                        source = getattr(transition_widget, "_source_rect")
-                        target = getattr(transition_widget, "_target_rect")
-                        progress = float(getattr(transition_widget, "_progress", 0.0))
-                        current = work_overlay_qt._transition_rect_for_progress(
-                            transition_type,
-                            (source.x(), source.y(), source.width(), source.height()),
-                            (target.x(), target.y(), target.width(), target.height()),
-                            progress,
-                        )
+                    if transition_badge.isVisible():
+                        top_left = transition_badge.mapTo(getattr(overlay, "_shell"), QPoint(0, 0))
+                        rect = transition_badge.geometry()
+                        effect = transition_badge.graphicsEffect()
+                        opacity = float(effect.opacity()) if effect is not None else 1.0
                         records[transition_item_id] = (
-                            "C" if transition_type == "card_to_completed" else "R",
-                            type(source)(
-                                int(round(current[0])),
-                                int(round(current[1])),
-                                int(round(current[2])),
-                                int(round(current[3])),
-                            ).toRect(),
-                            1.0,
+                            "C",
+                            type(rect)(top_left.x(), top_left.y(), rect.width(), rect.height()),
+                            opacity,
                         )
-                except Exception:
+                except RuntimeError:
                     pass
 
             return records
+
+        def _overlay_geometry_text(self) -> str:
+            overlay = self._overlay_window()
+            if overlay is None:
+                return "none"
+            try:
+                rect = overlay.geometry()
+                shell = getattr(overlay, "_shell")
+                shell_rect = shell.geometry()
+                shell_top_left = shell.mapToGlobal(QPoint(0, 0))
+                shell_global = (
+                    f"({shell_top_left.x()},{shell_top_left.y()},"
+                    f"{shell.width()},{shell.height()})"
+                )
+                first_bubble = "none"
+                for record in getattr(overlay, "_item_widgets", []):
+                    kind = str(record.get("kind") or "")
+                    item_id = str(record.get("item_id") or "")
+                    widget = record.get("badge") if kind == "completed" else record.get("card")
+                    if not item_id or widget is None or not widget.isVisible():
+                        continue
+                    top_left = widget.mapToGlobal(QPoint(0, 0))
+                    shape = "C" if kind == "completed" else "R"
+                    first_bubble = (
+                        f"{item_id}:{shape}@({top_left.x()},{top_left.y()},"
+                        f"{widget.width()},{widget.height()})"
+                    )
+                    break
+            except RuntimeError:
+                return "deleted"
+            return (
+                f"overlay={_rect_text(rect)},shell={_rect_text(shell_rect)},"
+                f"shell_global={shell_global},first_global={first_bubble}"
+            )
 
         def _bubble_text(
             self,
@@ -576,6 +669,7 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             self._log(
                 event,
                 **fields,
+                overlay=self._overlay_geometry_text(),
                 circles=_ids_text(circles),
                 rects=_ids_text(rects),
                 circle_state=";".join(self._bubble_text(item, records) for item in circles),
@@ -893,7 +987,10 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
     controller.show()
     print(f"demo: state file {state_path}")
     print(f"demo: log file {log_path}")
-    print(f"demo: transition scale {args.scale:g}x")
+    print(
+        "demo: transition "
+        f"scale={args.scale:g}x speed={args.speed:g}x effective={args.effective_scale:g}x"
+    )
     print("demo: click real bubbles or the controller buttons; Ctrl+C stops")
 
     try:
@@ -921,6 +1018,15 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Transition time multiplier. Default: {DEFAULT_SCALE:g}.",
     )
     parser.add_argument(
+        "--speed",
+        type=float,
+        default=DEFAULT_SPEED,
+        help=(
+            "Initial UI speed multiplier. Higher is faster; "
+            f"default: {DEFAULT_SPEED:g}."
+        ),
+    )
+    parser.add_argument(
         "--auto",
         action="store_true",
         help="Run the old automatic timeline instead of the interactive click demo.",
@@ -944,7 +1050,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    _apply_transition_scale(args.scale)
+    args.effective_scale = _effective_transition_scale(args)
+    _apply_transition_scale(args.effective_scale)
     if args.auto:
         return _run_auto_demo(args)
     return _run_interactive_demo(args)
