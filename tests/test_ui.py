@@ -8736,6 +8736,53 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertTrue(args.renderer_hud)
         self.assertEqual(args.runtime_hud_mode, "renderer")
 
+    def test_build_runtime_context_uses_renderer_bridge_instead_of_native_title_watcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            platform = SimpleNamespace(
+                get_codex_data_dir=MagicMock(return_value=temp_root),
+                suspend_native_active_title=MagicMock(),
+            )
+            settings_store = SimpleNamespace(
+                load=MagicMock(return_value=UserConfig.defaults()),
+                mtime=MagicMock(return_value=None),
+            )
+            tracker = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            args = SimpleNamespace(
+                sessions_root=None,
+                sse_db=None,
+                state_db=None,
+                active_session_poll_ms=250,
+                no_follow_active_session=False,
+                session_id=None,
+                session_file=None,
+                auto_switch_idle_seconds=30.0,
+                no_sse=True,
+                poll_ms=500,
+                hud_mode="renderer",
+                runtime_hud_mode="renderer",
+            )
+
+            with (
+                patch("codex_usage_hud.cli.get_current_platform", return_value=platform),
+                patch("codex_usage_hud.cli.UserConfigStore", return_value=settings_store),
+                patch(
+                    "codex_usage_hud.cli.ActiveSessionTracker",
+                    return_value=tracker,
+                ) as tracker_class,
+            ):
+                context = cli_module.build_runtime_context(args)
+
+            try:
+                platform.suspend_native_active_title.assert_called_once_with(True)
+                tracker.start.assert_called_once()
+                self.assertIs(context.active_session_tracker, tracker)
+                self.assertFalse(
+                    tracker_class.call_args.kwargs["start_background_watcher"]
+                )
+            finally:
+                context.close()
+
     def test_hud_mode_renderer_overrides_tk_config_for_renderer_first(self) -> None:
         config = UserConfig.defaults()
         config.display_mode = "tk"
@@ -9345,7 +9392,11 @@ class DaemonLifecycleTests(unittest.TestCase):
                     return None
 
             with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
-                source = cli_module._RendererFileEventSource(context, wake_event)
+                source = cli_module._RendererFileEventSource(
+                    context,
+                    wake_event,
+                    debounce_seconds=0,
+                )
                 watcher = created[0]
                 watcher.callback({"session-map", "settings"}, {root / "state_5.sqlite"})
                 session_path = root / "sessions" / "session.jsonl"
@@ -9356,6 +9407,92 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertTrue(wake_event.is_set())
         self.assertEqual(source.take_reasons(), {"session-map", "settings"})
         self.assertTrue(any(spec.path == session_path for spec in specs))
+
+    def test_renderer_file_event_source_debounces_native_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wake_event = threading.Event()
+            context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=root / "hud_settings.json"),
+                session_index_path=root / "session_index.jsonl",
+                state_db_path=root / "state_5.sqlite",
+                sessions_root=root / "sessions",
+            )
+            created: list[object] = []
+
+            class FakeWatcher:
+                event_driven = True
+
+                def __init__(self, callback, **kwargs):
+                    del kwargs
+                    self.callback = callback
+                    self.specs = []
+                    created.append(self)
+
+                def update(self, specs):
+                    self.specs = list(specs)
+
+                def close(self):
+                    return None
+
+            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
+                source = cli_module._RendererFileEventSource(
+                    context,
+                    wake_event,
+                    debounce_seconds=0.05,
+                )
+                watcher = created[0]
+                watcher.callback({"session"}, {root / "sessions" / "one.jsonl"})
+                watcher.callback({"settings"}, {root / "hud_settings.json"})
+                self.assertFalse(wake_event.is_set())
+                self.assertTrue(wake_event.wait(0.5))
+                reasons, paths = source.take_changes()
+                source.close()
+
+        self.assertEqual(reasons, {"session", "settings"})
+        self.assertEqual(
+            paths,
+            {root / "sessions" / "one.jsonl", root / "hud_settings.json"},
+        )
+
+    def test_renderer_event_idle_wait_uses_native_watcher_while_running(self) -> None:
+        snapshot = ParsedSession(status="parsed")
+        snapshot.request.status = "running"
+        file_events = SimpleNamespace(event_driven=True)
+
+        self.assertTrue(
+            cli_module._renderer_event_idle_wait_enabled(
+                file_events,
+                snapshot,
+                {"phase": "idle"},
+                0.5,
+                force_fast=False,
+            )
+        )
+        self.assertFalse(
+            cli_module._renderer_event_idle_wait_enabled(
+                file_events,
+                snapshot,
+                {"phase": "idle"},
+                0.5,
+                force_fast=True,
+            )
+        )
+
+    def test_renderer_active_session_click_prefers_parent_identity_row(self) -> None:
+        renderer_source = Path(payload_from_snapshot.__code__.co_filename).read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("activeSessionIdentitySelector", renderer_source)
+        self.assertIn("activeSessionBindingName", renderer_source)
+        self.assertIn("binding(JSON.stringify(payload));", renderer_source)
+        self.assertIn(
+            "const identityRow = event.target?.closest?.(activeSessionIdentitySelector);",
+            renderer_source,
+        )
+        self.assertIn("const row = identityRow || event.target?.closest?.", renderer_source)
+        self.assertIn("cleanActiveSessionTitle", renderer_source)
 
     def test_renderer_loop_skips_snapshot_when_runtime_signature_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -386,6 +386,53 @@ class ActiveSessionTrackerTests(unittest.TestCase):
 
         finder.assert_called_once_with("thread-123", root)
 
+    def test_path_from_thread_id_prefers_state_db_before_file_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-thread-123.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+
+            state_db = root / "state_5.sqlite"
+            con = sqlite3.connect(state_db)
+            try:
+                con.execute(
+                    "create table threads ("
+                    "id text primary key, "
+                    "rollout_path text not null, "
+                    "archived integer not null default 0, "
+                    "updated_at_ms integer, "
+                    "updated_at integer)"
+                )
+                con.execute(
+                    "insert into threads (id, rollout_path, archived, updated_at_ms, updated_at) "
+                    "values (?, ?, 0, 10, 10)",
+                    ("thread-123", "\\\\?\\" + str(session_path)),
+                )
+                con.commit()
+            finally:
+                con.close()
+
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=500,
+                enabled=False,
+            )
+
+            with patch(
+                "codex_usage_hud.platforms.active_session.find_session_file",
+                side_effect=AssertionError("recursive file scan should not run"),
+            ) as finder:
+                self.assertEqual(tracker.path_from_thread_id("thread-123"), session_path)
+                tracker.invalidate_mapping_cache()
+                self.assertEqual(tracker.path_from_thread_id("local:thread-123"), session_path)
+
+        finder.assert_not_called()
+
     def test_start_uses_in_process_title_polling_without_command_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -415,6 +462,36 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(title, "Selected Thread")
             self.assertFalse(platform.command_requested)
             self.assertIsNone(tracker._proc)
+
+    def test_start_can_skip_background_watcher_for_renderer_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_path = root / "rollout-thread-123.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            platform = FakeInProcessTitlePlatform(["Selected Thread"])
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=root / "state_5.sqlite",
+                sessions_root=root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            tracker.start()
+
+            self.assertIsNone(tracker._watcher)
+            self.assertIsNone(tracker._thread)
+            self.assertFalse(platform.command_requested)
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "thread-123",
+                    "Renderer Selected Thread",
+                )
+            )
+            self.assertEqual(tracker.current_path(), session_path)
+            self.assertEqual(tracker.latest_source, "renderer:Renderer Selected Thread")
 
     def test_start_prefers_event_stream_over_polling(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

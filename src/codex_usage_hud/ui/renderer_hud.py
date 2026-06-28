@@ -8,13 +8,19 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from .. import __version__
 from ..config import UserConfig, warning_dismissed_today
 from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
 from ..platforms.cdp_probe import (
+    _receive_text_message,
+    _send_text_frame,
+    _websocket_handshake,
     cdp_port_from_env,
     install_new_document_script,
     list_targets,
@@ -26,10 +32,11 @@ from ..platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "17"
+RENDERER_HUD_VERSION = "18"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
+ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
 SETTINGS_COMMAND_STORAGE_KEY = "codexUsageHudSettingsCommand:v1"
@@ -74,7 +81,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "17";
+  const version = "18";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -103,6 +110,7 @@ RENDERER_HUD_SCRIPT = r"""
   const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";
   const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
   const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
+  const activeSessionBindingName = "codexUsageHudActiveSession";
   const staleUpdateMs = 10000;
   let topSlotCache = null;
   let pendingSyncPanels = null;
@@ -2334,12 +2342,15 @@ RENDERER_HUD_SCRIPT = r"""
     return match ? normalize(match[1]) : text;
   }
 
-  const activeSessionRowSelector = [
+  const activeSessionIdentitySelector = [
     "[data-app-action-sidebar-thread-id]",
     "[data-session-id]",
     "a[href*='thread']",
     "a[href*='conversation']",
     "a[href*='session']",
+  ].join(",");
+  const activeSessionRowSelector = [
+    activeSessionIdentitySelector,
     "[role='link']",
     "[role='button']",
   ].join(",");
@@ -2366,19 +2377,33 @@ RENDERER_HUD_SCRIPT = r"""
     }
   }
 
+  function activeSessionIdentityRow(row) {
+    if (!row) return row;
+    if (row.matches?.(activeSessionIdentitySelector)) return row;
+    return row.closest?.(activeSessionIdentitySelector) || row;
+  }
+
+  function cleanActiveSessionTitle(value) {
+    return normalize(String(value || "").replace(
+      /\s*\d+\s*(秒|分|分钟|小时|天|周|个月|月|年|sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s*$/i,
+      ""
+    ));
+  }
+
   function activeSessionRefFromRow(row) {
-    const href = activeSessionRowHref(row);
+    const sourceRow = activeSessionIdentityRow(row);
+    const href = activeSessionRowHref(sourceRow);
     const idMatch = href.match(/(?:session|conversation|thread)[=/:-]([A-Za-z0-9_.-]+)/i)
       || href.match(/([A-Za-z0-9_-]{8,})$/);
-    const rawSessionId = row?.getAttribute?.("data-app-action-sidebar-thread-id")
+    const rawSessionId = sourceRow?.getAttribute?.("data-app-action-sidebar-thread-id")
       || (idMatch && idMatch[1])
-      || row?.getAttribute?.("data-session-id")
-      || row?.getAttribute?.("data-testid")
+      || sourceRow?.getAttribute?.("data-session-id")
+      || sourceRow?.getAttribute?.("data-testid")
       || "";
     const sessionId = normalizeThreadId(rawSessionId);
-    const titleNode = row?.querySelector?.("[data-thread-title], .truncate.select-none, .truncate.text-base");
-    const rawTitle = titleNode?.textContent || (titleNode ? "" : (row?.textContent || ""));
-    const title = normalize(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
+    const titleNode = sourceRow?.querySelector?.("[data-thread-title], .truncate.select-none, .truncate.text-base");
+    const rawTitle = titleNode?.textContent || (titleNode ? "" : (sourceRow?.textContent || row?.textContent || ""));
+    const title = cleanActiveSessionTitle(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
     return { rawSessionId: normalize(rawSessionId), sessionId, title };
   }
 
@@ -2439,7 +2464,6 @@ RENDERER_HUD_SCRIPT = r"""
 
   function postActiveSession(reason = "event", overrideRef = null) {
     const bridge = settingsBridgeUrl();
-    if (!bridge) return;
     const ref = overrideRef || readActiveSessionRef();
     if (!ref.sessionId && !ref.title) return;
     const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href]);
@@ -2452,6 +2476,14 @@ RENDERER_HUD_SCRIPT = r"""
       reason,
       observedAt: Date.now(),
     };
+    const binding = window[activeSessionBindingName];
+    if (typeof binding === "function") {
+      try {
+        binding(JSON.stringify(payload));
+        return;
+      } catch (_) {}
+    }
+    if (!bridge) return;
     fetch(`${bridge}/active-session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2568,8 +2600,9 @@ RENDERER_HUD_SCRIPT = r"""
     if (!window[activeSessionClickHandlerName]) {
       window[activeSessionClickHandlerName] = (event) => {
         const container = event.target?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]");
-        const row = event.target?.closest?.(activeSessionRowSelector);
-        const explicitRow = row?.matches?.("[data-app-action-sidebar-thread-id], [data-session-id], a[href*='thread'], a[href*='conversation'], a[href*='session'], [role='link']");
+        const identityRow = event.target?.closest?.(activeSessionIdentitySelector);
+        const row = identityRow || event.target?.closest?.(activeSessionRowSelector);
+        const explicitRow = !!identityRow || row?.matches?.("[role='link']");
         if (row && !container && !explicitRow) return;
         if (row && (!container || container.contains(row))) {
           const ref = activeSessionRefFromRow(row);
@@ -5167,6 +5200,170 @@ class RendererHudPayload:
         }
 
 
+class _RendererActiveSessionBinding:
+    """Receive active-session events from the renderer over a CDP binding."""
+
+    def __init__(
+        self,
+        binding_name: str,
+        callback: Any,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        self.binding_name = str(binding_name or "").strip()
+        self.callback = callback
+        self.timeout_seconds = max(0.05, float(timeout_seconds))
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._ready_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._sock: socket.socket | None = None
+        self._websocket_url = ""
+        self._target_id = ""
+
+    def ensure(self, websocket_url: str, target_id: str) -> None:
+        """Start or restart the binding listener for the current page target."""
+        if not self.binding_name or not callable(self.callback) or not websocket_url:
+            return
+        with self._lock:
+            thread = self._thread
+            if (
+                thread is not None
+                and thread.is_alive()
+                and websocket_url == self._websocket_url
+                and target_id == self._target_id
+            ):
+                return
+        self.close(join_timeout=0.3)
+        with self._lock:
+            self._stop_event = threading.Event()
+            self._ready_event = threading.Event()
+            self._websocket_url = websocket_url
+            self._target_id = target_id
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(websocket_url,),
+                name="codex-hud-active-session-cdp",
+                daemon=True,
+            )
+            self._thread.start()
+            ready_event = self._ready_event
+        ready_event.wait(min(0.35, self.timeout_seconds))
+
+    def close(self, *, join_timeout: float = 1.0) -> None:
+        self._stop_event.set()
+        with self._lock:
+            sock = self._sock
+            thread = self._thread
+            self._sock = None
+            self._thread = None
+            self._websocket_url = ""
+            self._target_id = ""
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if (
+            thread is not None
+            and thread is not threading.current_thread()
+            and thread.is_alive()
+        ):
+            thread.join(timeout=max(0.0, float(join_timeout)))
+
+    def _run(self, websocket_url: str) -> None:
+        sock: socket.socket | None = None
+        try:
+            sock = self._connect(websocket_url)
+            with self._lock:
+                if self._stop_event.is_set():
+                    return
+                self._sock = sock
+            self._send_command(sock, 1, "Runtime.enable", {})
+            self._send_command(
+                sock,
+                2,
+                "Runtime.addBinding",
+                {"name": self.binding_name},
+            )
+            pending = {1, 2}
+            while not self._stop_event.is_set():
+                try:
+                    message = _receive_text_message(sock)
+                except socket.timeout:
+                    continue
+                payload = json.loads(message)
+                command_id = payload.get("id")
+                if command_id in pending:
+                    pending.remove(int(command_id))
+                    if not pending:
+                        self._ready_event.set()
+                    continue
+                if payload.get("method") != "Runtime.bindingCalled":
+                    continue
+                params = payload.get("params") or {}
+                if str(params.get("name") or "") != self.binding_name:
+                    continue
+                self._handle_binding_payload(str(params.get("payload") or ""))
+        except Exception:
+            self._ready_event.set()
+            return
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            with self._lock:
+                if self._sock is sock:
+                    self._sock = None
+
+    def _connect(self, websocket_url: str) -> socket.socket:
+        parsed = urlparse(websocket_url)
+        if parsed.scheme != "ws":
+            raise RuntimeError("Only local ws:// CDP endpoints are supported")
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 80
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        sock = socket.create_connection((host, port), timeout=self.timeout_seconds)
+        sock.settimeout(0.25)
+        _websocket_handshake(sock, host, port, path)
+        return sock
+
+    @staticmethod
+    def _send_command(
+        sock: socket.socket,
+        command_id: int,
+        method: str,
+        params: dict[str, object],
+    ) -> None:
+        _send_text_frame(
+            sock,
+            json.dumps(
+                {"id": command_id, "method": method, "params": params},
+                separators=(",", ":"),
+            ),
+        )
+
+    def _handle_binding_payload(self, raw_payload: str) -> None:
+        try:
+            value = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(value, dict):
+            return
+        try:
+            self.callback(value)
+        except Exception:
+            return
+
+
 class RendererHudClient:
     """Install and update the in-renderer HUD through a local CDP target."""
 
@@ -5194,12 +5391,25 @@ class RendererHudClient:
         self._target_cache_at = 0.0
         self._next_settings_poll_at = 0.0
         self._support_images_sent = False
+        self._active_session_binding: _RendererActiveSessionBinding | None = None
         self._theme_probe = CodexThemeProbe(
             port=self.port,
             timeout_seconds=max(0.08, min(self.timeout_seconds, 0.25)),
             cache_seconds=max(0.35, self.target_cache_seconds),
             failure_cooldown_seconds=4.0,
         )
+
+    def set_active_session_callback(self, callback: Any) -> None:
+        """Receive renderer active-session events over CDP instead of HTTP fetch."""
+        if self._active_session_binding is not None:
+            self._active_session_binding.close()
+            self._active_session_binding = None
+        if callable(callback):
+            self._active_session_binding = _RendererActiveSessionBinding(
+                ACTIVE_SESSION_BINDING_NAME,
+                callback,
+                timeout_seconds=self.timeout_seconds,
+            )
 
     def update(
         self,
@@ -5251,6 +5461,8 @@ class RendererHudClient:
                 self._install(websocket_url, target_id, force=True)
                 if not self._send_update(websocket_url, payload):
                     raise RuntimeError("renderer update function did not acknowledge payload")
+            if self._active_session_binding is not None:
+                self._active_session_binding.ensure(websocket_url, target_id)
         except Exception as exc:
             self._clear_target_cache(clear_script=True)
             self.last_status = "failed"
@@ -5308,6 +5520,9 @@ class RendererHudClient:
         return value if isinstance(value, dict) else None
 
     def close(self) -> None:
+        if self._active_session_binding is not None:
+            self._active_session_binding.close()
+            self._active_session_binding = None
         if not self.enabled:
             return
         try:

@@ -276,6 +276,8 @@ class ActiveSessionTracker:
         session_index_path: Path,
         poll_ms: int,
         enabled: bool,
+        *,
+        start_background_watcher: bool = True,
     ) -> None:
         self.platform = platform
         self.state_db = state_db
@@ -283,6 +285,7 @@ class ActiveSessionTracker:
         self.session_index_path = session_index_path
         self.poll_ms = max(250, int(poll_ms))
         self.enabled = bool(enabled)
+        self.start_background_watcher = bool(start_background_watcher)
         self.latest_session_id = ""
         self.latest_title = ""
         self.latest_path: Path | None = None
@@ -318,7 +321,11 @@ class ActiveSessionTracker:
 
     def start(self) -> None:
         """Begin best-effort platform tracking for the selected Codex conversation."""
-        if not self.enabled or self._watcher is not None:
+        if (
+            not self.enabled
+            or not self.start_background_watcher
+            or self._watcher is not None
+        ):
             return
 
         self._stop_event.clear()
@@ -357,7 +364,7 @@ class ActiveSessionTracker:
 
     def wait_for_title(self, timeout_ms: int = 1200) -> None:
         """Give the background title probe a short chance to produce an initial title."""
-        if not self.enabled:
+        if not self.enabled or not self.start_background_watcher:
             return
         deadline = time.time() + (max(0, timeout_ms) / 1000.0)
         while time.time() < deadline:
@@ -664,6 +671,16 @@ class ActiveSessionTracker:
 
     def path_from_thread_id(self, thread_id: str) -> Path | None:
         """Resolve a known thread id to a local rollout JSONL path."""
+        thread_id = str(thread_id or "").strip()
+        if not thread_id:
+            return None
+        direct = Path(thread_id)
+        if direct.exists():
+            return direct
+        if ":" in thread_id:
+            prefix, suffix = thread_id.split(":", 1)
+            if prefix.lower() in {"local", "remote", "thread", "session", "conversation"}:
+                thread_id = suffix.strip()
         if not thread_id:
             return None
         now = time.monotonic()
@@ -677,30 +694,30 @@ class ActiveSessionTracker:
                 and now - cached_at <= _THREAD_PATH_NEGATIVE_CACHE_SECONDS
             ):
                 return None
+
+        path = None
+        if self.state_db.exists():
+            try:
+                con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+                try:
+                    row = con.execute(
+                        "select rollout_path from threads where id = ? limit 1",
+                        (thread_id,),
+                    ).fetchone()
+                finally:
+                    con.close()
+            except sqlite3.Error:
+                row = None
+            if row is not None:
+                path = self._normalize_rollout_path(str(row[0] or ""))
+                if path is not None:
+                    self._thread_path_cache[thread_id] = (path, now)
+                    return path
+
         path = find_session_file(thread_id, self.sessions_root)
         if path is not None:
             self._thread_path_cache[thread_id] = (path, now)
             return path
-        if not self.state_db.exists():
-            self._thread_path_cache[thread_id] = (None, now)
-            return None
-        try:
-            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
-            try:
-                row = con.execute(
-                    "select rollout_path from threads where id = ? limit 1",
-                    (thread_id,),
-                ).fetchone()
-            finally:
-                con.close()
-        except sqlite3.Error:
-            self._thread_path_cache[thread_id] = (None, now)
-            return None
-
-        if row is None:
-            self._thread_path_cache[thread_id] = (None, now)
-            return None
-        path = self._normalize_rollout_path(str(row[0] or ""))
         self._thread_path_cache[thread_id] = (path, now)
         return path
 

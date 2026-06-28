@@ -115,7 +115,9 @@ NATIVE_SEARCH_SESSION_SWITCH_ENV = "CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH"
 DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
 RENDERER_IDLE_POLL_MS = 1500
 RENDERER_FILE_WATCHER_FALLBACK_SECONDS = 5.0
+RENDERER_FILE_EVENT_DEBOUNCE_SECONDS = 0.75
 RENDERER_EVENT_IDLE_WAIT_SECONDS = 30.0
+RENDERER_ACTIVE_WORK_RESCAN_SECONDS = 5.0
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
 HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
@@ -2161,13 +2163,22 @@ def _renderer_file_watch_specs(
 class _RendererFileEventSource:
     """Coalesce filesystem invalidations for the renderer loop."""
 
-    def __init__(self, context: "RuntimeContext", wake_event: Event) -> None:
+    def __init__(
+        self,
+        context: "RuntimeContext",
+        wake_event: Event,
+        *,
+        debounce_seconds: float = RENDERER_FILE_EVENT_DEBOUNCE_SECONDS,
+    ) -> None:
         self._context = context
         self._wake_event = wake_event
+        self._debounce_seconds = max(0.0, float(debounce_seconds))
         self._lock = threading.Lock()
         self._reasons: set[str] = set()
         self._paths: set[Path] = set()
         self._session_path: Path | None = None
+        self._timer: threading.Timer | None = None
+        self._closed = False
         self._watcher = FileChangeWatcher(
             self._on_change,
             fallback_poll_seconds=RENDERER_FILE_WATCHER_FALLBACK_SECONDS,
@@ -2199,12 +2210,40 @@ class _RendererFileEventSource:
         return reasons, paths
 
     def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            timer = self._timer
+            self._timer = None
+        if timer is not None:
+            timer.cancel()
         self._watcher.close()
 
     def _on_change(self, reasons: set[str], paths: set[Path]) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._reasons.update(reasons)
             self._paths.update(paths)
+            if self._debounce_seconds <= 0:
+                wake_now = True
+            elif self._timer is None:
+                self._timer = threading.Timer(
+                    self._debounce_seconds,
+                    self._flush_debounced_change,
+                )
+                self._timer.daemon = True
+                self._timer.start()
+                wake_now = False
+            else:
+                wake_now = False
+        if wake_now:
+            self._wake_event.set()
+
+    def _flush_debounced_change(self) -> None:
+        with self._lock:
+            self._timer = None
+            if self._closed or not self._reasons:
+                return
         self._wake_event.set()
 
     @staticmethod
@@ -2229,12 +2268,8 @@ def _renderer_event_idle_wait_enabled(
     *,
     force_fast: bool,
 ) -> bool:
+    del snapshot, delay
     if file_events is None or not file_events.event_driven or force_fast:
-        return False
-    if delay < (RENDERER_IDLE_POLL_MS / 1000.0) - 0.05:
-        return False
-    request_status = str(getattr(snapshot.request, "status", "") or "")
-    if request_status == "running":
         return False
     update_phase = str(update_state.get("phase") or "")
     return update_phase not in {"checking", "downloading"}
@@ -4093,6 +4128,17 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
     sqlite_log_path = _discover_path(platform, args.sse_db, DEFAULT_SQLITE_LOG)
     state_db_path = _discover_path(platform, args.state_db, DEFAULT_STATE_DB)
     session_index_path = _discover_path(platform, None, DEFAULT_SESSION_INDEX)
+    runtime_display_mode = _runtime_display_mode(
+        getattr(args, "runtime_hud_mode", None)
+        or getattr(args, "hud_mode", None)
+        or user_config.display_mode
+    )
+    renderer_active_session_bridge = runtime_display_mode == "renderer"
+    if renderer_active_session_bridge:
+        try:
+            platform.suspend_native_active_title(True)
+        except Exception:
+            pass
     active_session_tracker = ActiveSessionTracker(
         platform=platform,
         state_db=state_db_path,
@@ -4104,6 +4150,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
             and not args.session_id
             and not args.session_file
         ),
+        start_background_watcher=not renderer_active_session_bridge,
     )
     active_session_tracker.start()
     session_resolver = SessionPathResolver(
@@ -4647,6 +4694,14 @@ def run_renderer_hud_session(
                 if changed:
                     wake_active_session_refresh()
 
+            active_session_callback_setter = getattr(
+                client,
+                "set_active_session_callback",
+                None,
+            )
+            if callable(active_session_callback_setter):
+                active_session_callback_setter(observe_renderer_active_session)
+
             def take_renderer_bridge_command() -> dict[str, object] | None:
                 with bridge_command_lock:
                     if not bridge_commands:
@@ -4894,6 +4949,7 @@ def run_renderer_hud_session(
                 latest_snapshot: ParsedSession | None = None
                 latest_signature: tuple[object, ...] | None = None
                 latest_budget_signature: tuple[object, ...] | None = None
+                latest_active_work_refresh_at = 0.0
                 active_work_refresh_pending = False
                 while True:
                     started = time.monotonic()
@@ -4924,12 +4980,16 @@ def run_renderer_hud_session(
                     command = take_renderer_bridge_command()
                     if command is None and not bridge_wakeup:
                         command = client.take_settings_command()
+                    file_refresh_requested = bool(file_change_reasons)
+                    wake_without_file_change = bool(
+                        bridge_wakeup and not file_refresh_requested
+                    )
                     force_fast_refresh = bool(
                         command
                         or settings_command_status
                         or update_state.get("phase") == "downloading"
-                        or file_change_reasons
-                        or bridge_wakeup
+                        or wake_without_file_change
+                        or active_session_wakeup
                         or active_work_refresh_pending
                     )
                     if command:
@@ -4968,6 +5028,7 @@ def run_renderer_hud_session(
                     )
                     refresh_required = (
                         force_fast_refresh
+                        or file_refresh_requested
                         or latest_snapshot is None
                         or signature != latest_signature
                     )
@@ -4980,6 +5041,14 @@ def run_renderer_hud_session(
                             file_change_reasons=file_change_reasons,
                             file_change_paths=file_change_paths,
                         )
+                        refresh_active_work_items = bool(
+                            latest_snapshot is None
+                            or active_work_refresh_pending
+                            or (
+                                time.monotonic() - latest_active_work_refresh_at
+                                >= RENDERER_ACTIVE_WORK_RESCAN_SECONDS
+                            )
+                        )
                         lightweight_active_session_refresh = bool(
                             active_session_wakeup
                             and latest_snapshot is not None
@@ -4991,14 +5060,22 @@ def run_renderer_hud_session(
                         )
                         snapshot = snapshot_or_error(
                             refresh_budget_aggregate=refresh_budget_aggregate,
-                            refresh_active_work_items=not lightweight_active_session_refresh,
+                            refresh_active_work_items=(
+                                refresh_active_work_items
+                                and not lightweight_active_session_refresh
+                            ),
                         )
                         if lightweight_active_session_refresh:
                             snapshot.active_work_items = list(
                                 latest_snapshot.active_work_items
                             )
                             active_work_refresh_pending = True
+                        elif not refresh_active_work_items and latest_snapshot is not None:
+                            snapshot.active_work_items = list(
+                                latest_snapshot.active_work_items
+                            )
                         else:
+                            latest_active_work_refresh_at = time.monotonic()
                             active_work_refresh_pending = False
                         latest_snapshot = snapshot
                         latest_signature = signature

@@ -197,7 +197,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(payload["theme"]["variant"], "dark")
         self.assertEqual(payload["theme"]["tokens"]["accent"], "#339cff")
         self.assertIn("updateState", payload)
-        self.assertEqual(payload["appVersion"], "1.0.4")
+        self.assertEqual(payload["appVersion"], "1.0.5")
         self.assertIn("本会话用量", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("符号说明", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -469,7 +469,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "17";', script)
+        self.assertIn('const version = "18";', script)
         self.assertIn(
             "scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);",
             script,
@@ -970,6 +970,76 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertEqual(list_calls, 1)
         self.assertIn("__codexUsageHudUpdate", update_expressions[0])
         self.assertIn('"topLine": "C"', update_expressions[1])
+
+    def test_client_starts_active_session_binding_after_update(self) -> None:
+        ensure_calls: list[tuple[str, str]] = []
+        close_calls = 0
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+            renderer_hud._RendererActiveSessionBinding,
+        )
+
+        class FakeBinding:
+            def __init__(self, binding_name, callback, *, timeout_seconds):
+                self.binding_name = binding_name
+                self.callback = callback
+                self.timeout_seconds = timeout_seconds
+
+            def ensure(self, websocket_url: str, target_id: str) -> None:
+                ensure_calls.append((websocket_url, target_id))
+
+            def close(self) -> None:
+                nonlocal close_calls
+                close_calls += 1
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            return [
+                {
+                    "id": "target-1",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://codex",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+                }
+            ]
+
+        def fake_install(websocket_url: str, script: str, timeout_seconds: float) -> str:
+            del websocket_url, script, timeout_seconds
+            return "script-1"
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, method, params, timeout_seconds
+            return {"result": {"result": {"value": True}}}
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+            renderer_hud._RendererActiveSessionBinding,
+        ) = (fake_list_targets, fake_install, fake_send, FakeBinding)
+        try:
+            client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+            client.set_active_session_callback(lambda payload: payload)
+            self.assertTrue(client.update_payload({"topLine": "A", "requestLine": "B"}))
+            client.close()
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.install_new_document_script,
+                renderer_hud.send_cdp_command,
+                renderer_hud._RendererActiveSessionBinding,
+            ) = originals
+
+        self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
+        self.assertEqual(close_calls, 1)
 
     def test_client_consumes_renderer_settings_command_over_cdp(self) -> None:
         expressions: list[str] = []

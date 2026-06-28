@@ -7,6 +7,20 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-06-28
+
+Renderer Session Follow Hotfix.
+
+### Fixed
+
+- Moved renderer active-session tracking off the Windows native title/UIA hot
+  path and onto a CDP binding emitted from the Codex renderer, so sidebar
+  clicks and conversation switches can update the HUD without native polling.
+- Debounced renderer filesystem wakeups and throttled active work rescans to
+  reduce HUD CPU spikes while Codex is being clicked or sessions are switching.
+- Resolved renderer thread ids through `state_5.sqlite` before falling back to
+  recursive session-file scans, avoiding avoidable disk work during switches.
+
 ## [1.0.4] - 2026-06-28
 
 macOS Smoke Workflow Patch.
