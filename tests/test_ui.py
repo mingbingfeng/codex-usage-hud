@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import json
+import math
 import tempfile
 import subprocess
 import threading
@@ -170,6 +171,7 @@ from codex_usage_hud.ui.tk_hud import (
 from codex_usage_hud.ui.work_overlay_qt import (
     WORK_OVERLAY_TOP_OFFSET,
     _completed_badge_palette,
+    _completed_pending_particle_state,
     _completed_badge_restore_slot_moves,
     _completed_badge_slot_moves,
     _completed_badge_slot_rects,
@@ -200,6 +202,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _transition_slot_shift_progress,
     _theme_contrast_ratio,
     _visible_overlay_items,
+    _workdir_link_pending_for_item,
     _work_overlay_header_text,
     _workdir_display_name,
 )
@@ -945,6 +948,24 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(ring_rect, (236.0, -26.0, 220.0, 220.0))
         self.assertLess(ring_rect[0], source[0])
         self.assertGreater(ring_rect[0] + ring_rect[2], source[0] + source[2])
+
+    def test_work_overlay_completed_pending_particle_state_jitters_on_orbit(self) -> None:
+        angle_a, jitter_a, pulse_a = _completed_pending_particle_state(0.2, 1, 3)
+        angle_b, jitter_b, pulse_b = _completed_pending_particle_state(0.6, 1, 3)
+
+        self.assertGreaterEqual(angle_a, 0.0)
+        self.assertLess(angle_a, math.tau)
+        self.assertNotEqual(angle_a, angle_b)
+        self.assertNotEqual(jitter_a, jitter_b)
+        self.assertGreaterEqual(pulse_a, 0.0)
+        self.assertLessEqual(pulse_a, 1.0)
+        self.assertGreaterEqual(pulse_b, 0.0)
+        self.assertLessEqual(pulse_b, 1.0)
+
+    def test_work_overlay_completed_workdir_pending_uses_badge_not_link(self) -> None:
+        self.assertFalse(_workdir_link_pending_for_item({"status": "recent"}, True))
+        self.assertTrue(_workdir_link_pending_for_item({"status": "running"}, True))
+        self.assertFalse(_workdir_link_pending_for_item({"status": "running"}, False))
 
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()

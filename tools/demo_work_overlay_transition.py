@@ -455,12 +455,15 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
 
             reset_button = QPushButton("重置初始状态")
             reset_button.clicked.connect(self.reset_state)
+            pending_button = QPushButton("模拟圆形前往")
+            pending_button.clicked.connect(self.demo_pending_switch)
             dismiss_button = QPushButton("关闭首个圆")
             dismiss_button.clicked.connect(self.dismiss_completed_item)
             close_button = QPushButton("关闭演示")
             close_button.clicked.connect(self.close_demo)
             action_row = QHBoxLayout()
             action_row.addWidget(reset_button)
+            action_row.addWidget(pending_button)
             action_row.addWidget(dismiss_button)
             action_row.addWidget(close_button)
             layout.addLayout(action_row)
@@ -480,6 +483,7 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             self._update_status()
             self._schedule_auto_toggles()
             self._schedule_auto_dismiss()
+            self._schedule_auto_pending()
 
         def _schedule_auto_toggles(self) -> None:
             sequence = [
@@ -527,6 +531,17 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
                     + int(args.auto_close_ms),
                     self.close_demo,
                 )
+
+        def _schedule_auto_pending(self) -> None:
+            item_id = str(args.auto_pending or "").strip()
+            if not item_id:
+                return
+            delay_ms = max(0, int(args.auto_pending_delay_ms))
+            QTimer.singleShot(delay_ms, lambda: self.demo_pending_switch(item_id))
+            has_auto_toggle = bool(str(args.auto_toggle or "").strip())
+            has_auto_dismiss = bool(str(args.auto_dismiss or "").strip())
+            if args.auto_close_ms > 0 and not has_auto_toggle and not has_auto_dismiss:
+                QTimer.singleShot(delay_ms + int(args.auto_close_ms), self.close_demo)
 
         def _set_speed_from_slider(self, value: int) -> None:
             self._set_speed(max(0.25, min(4.0, float(value) / 100.0)))
@@ -633,6 +648,27 @@ def _run_interactive_demo(args: argparse.Namespace) -> int:
             self.items = new_items
             _write_state(state_path, items=self.items)
             self._update_status()
+
+        def demo_pending_switch(self, item_id: str = "") -> None:
+            if self._is_animating():
+                self._log_state("pending.skip", reason="动画运行中，忽略前往模拟")
+                return
+            circles = _circles(self.items)
+            item = (
+                next((candidate for candidate in circles if _item_id(candidate) == item_id), None)
+                if item_id
+                else None
+            )
+            if item is None and circles:
+                item = circles[0]
+            overlay = self._overlay_window()
+            if item is None or overlay is None or not hasattr(overlay, "_set_switch_pending"):
+                self._log_state("pending.skip", reason="没有可用圆形或 overlay 未就绪")
+                return
+            getattr(overlay, "_set_switch_pending")(item)
+            if hasattr(overlay, "reposition_interactive_windows"):
+                getattr(overlay, "reposition_interactive_windows")()
+            self._log_state("circle_pending.start", item=_item_id(item))
 
         def _overlay_window(self) -> QWidget | None:
             for widget in QApplication.topLevelWidgets():
@@ -1265,6 +1301,17 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=800,
         help="Delay before --auto-dismiss starts. Default: 800.",
+    )
+    parser.add_argument(
+        "--auto-pending",
+        default="",
+        help="Completed item id to show the whole-circle pending animation.",
+    )
+    parser.add_argument(
+        "--auto-pending-delay-ms",
+        type=int,
+        default=800,
+        help="Delay before --auto-pending starts. Default: 800.",
     )
     parser.add_argument(
         "--auto-close-ms",

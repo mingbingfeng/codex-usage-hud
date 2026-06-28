@@ -475,6 +475,37 @@ def _energy_ring_rect_for_completed_rect(rect: OverlayRect) -> OverlayRect:
     )
 
 
+def _completed_pending_particle_state(
+    elapsed_seconds: float,
+    index: int,
+    count: int,
+) -> tuple[float, float, float]:
+    elapsed = max(0.0, float(elapsed_seconds))
+    count = max(1, int(count))
+    index = max(0, int(index))
+    base = (math.tau / float(count)) * float(index)
+    speed = 4.8 + 0.58 * math.sin(elapsed * 3.4 + index * 1.37)
+    angle = (
+        base
+        + elapsed * speed
+        + 0.18 * math.sin(elapsed * 11.5 + index * 2.1)
+        + 0.05 * math.sin(elapsed * 24.0 + index * 0.73)
+    ) % math.tau
+    radial_jitter = (
+        0.62 * math.sin(elapsed * 15.0 + index * 1.91)
+        + 0.34 * math.sin(elapsed * 27.0 + index * 0.43)
+    )
+    link_pulse = _clamp01((math.sin(elapsed * 9.0 + index * 2.2) - 0.35) / 0.65)
+    return angle, radial_jitter, link_pulse
+
+
+def _workdir_link_pending_for_item(
+    item: Mapping[str, object],
+    pending: bool,
+) -> bool:
+    return bool(pending) and not _item_is_completed(item)
+
+
 def _transition_required_height(
     transition_type: str,
     source_rect: OverlayRect,
@@ -1830,6 +1861,8 @@ def run_work_overlay_helper_qt(
             self._theme_tokens = _resolved_overlay_theme(theme_tokens)
             self._started_at = time.monotonic()
             self._progress = 0.0 if animate_intro else 1.0
+            self._switch_pending = False
+            self._switch_pending_started_at = 0.0
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._advance)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -1853,6 +1886,26 @@ def run_work_overlay_helper_qt(
             self._theme_tokens = _resolved_overlay_theme(theme_tokens)
             self.update()
 
+        def set_switch_pending(
+            self,
+            pending: bool,
+            started_at: float,
+        ) -> None:
+            pending = bool(pending)
+            started_at = float(started_at or 0.0)
+            if self._switch_pending == pending and (
+                not pending
+                or abs(self._switch_pending_started_at - started_at) < 0.001
+            ):
+                return
+            self._switch_pending = pending
+            self._switch_pending_started_at = started_at if pending else 0.0
+            if pending and not self._timer.isActive():
+                self._timer.start(24)
+            elif not pending and self._progress >= 1.0:
+                self._timer.stop()
+            self.update()
+
         def sizeHint(self) -> QSize:
             return QSize(
                 WORK_OVERLAY_COMPLETED_BADGE_SIZE,
@@ -1861,8 +1914,9 @@ def run_work_overlay_helper_qt(
 
         def _advance(self) -> None:
             elapsed_ms = (time.monotonic() - self._started_at) * 1000.0
-            self._progress = min(1.0, elapsed_ms / WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS)
-            if self._progress >= 1.0:
+            if self._progress < 1.0:
+                self._progress = min(1.0, elapsed_ms / WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS)
+            if self._progress >= 1.0 and not self._switch_pending:
                 self._timer.stop()
             self.update()
 
@@ -2007,6 +2061,8 @@ def run_work_overlay_helper_qt(
                 painter.drawText(box.adjusted(1.0, 13.0, -1.0, -1.0), alignment.AlignCenter, label)
 
             painter.restore()
+            if self._switch_pending:
+                self._draw_switch_pending_quantum(painter, end_rect)
 
         def _arc_limited_text(self, text: str, font: QFont, max_width: float) -> str:
             compact = " ".join(str(text or "").split())
@@ -2073,6 +2129,71 @@ def run_work_overlay_helper_qt(
                 )
                 painter.restore()
                 current += direction * (width + tracking_px) * degrees_per_px
+            painter.restore()
+
+        def _draw_switch_pending_quantum(
+            self,
+            painter: QPainter,
+            rect: QRectF,
+        ) -> None:
+            started_at = self._switch_pending_started_at or time.monotonic()
+            elapsed = max(0.0, time.monotonic() - started_at)
+            center = QPointF(rect.center())
+            orbit_radius = min(rect.width(), rect.height()) / 2.0 - 7.0
+
+            painter.save()
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            ring_color = QColor(93, 216, 255, 170)
+            painter.setPen(QPen(ring_color, 1.6))
+            painter.drawEllipse(center, orbit_radius, orbit_radius)
+
+            collapse_color = QColor(119, 255, 210, 60)
+            collapse_pen = QPen(collapse_color, 0.9)
+            collapse_pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(collapse_pen)
+            wobble = 1.8 * math.sin(elapsed * 5.5)
+            painter.drawEllipse(center, orbit_radius - 10.0 + wobble, orbit_radius - 10.0 + wobble)
+
+            points: list[QPointF] = []
+            pulses: list[float] = []
+            count = 3
+            for index in range(count):
+                angle, radial_jitter, link_pulse = _completed_pending_particle_state(
+                    elapsed,
+                    index,
+                    count,
+                )
+                particle_radius = orbit_radius + radial_jitter * 4.2
+                point = QPointF(
+                    center.x() + math.cos(angle) * particle_radius,
+                    center.y() + math.sin(angle) * particle_radius,
+                )
+                points.append(point)
+                pulses.append(link_pulse)
+
+            for index, point in enumerate(points):
+                next_index = (index + 1) % len(points)
+                strength = min(pulses[index], pulses[next_index])
+                if strength <= 0.08:
+                    continue
+                filament = QColor(102, 255, 218, int(150 * strength))
+                pen = QPen(filament, max(0.55, 1.15 * strength))
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(pen)
+                painter.drawLine(point, points[next_index])
+
+            for index, point in enumerate(points):
+                pulse = pulses[index]
+                glow_radius = 5.8 + pulse * 2.2
+                glow = QColor(66, 225, 255, int(95 + pulse * 90))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(glow)
+                painter.drawEllipse(point, glow_radius, glow_radius)
+
+                core = QColor(238, 255, 255, 242)
+                painter.setBrush(core)
+                painter.drawEllipse(point, 2.0, 2.0)
+
             painter.restore()
 
     class OverlayWindow(QWidget):
@@ -2176,12 +2297,14 @@ def run_work_overlay_helper_qt(
             self._switch_pending_started_at = time.monotonic()
             if not self._switch_pending_timer.isActive():
                 self._switch_pending_timer.start(WORK_OVERLAY_SWITCH_PENDING_TIMER_MS)
+            self._sync_completed_pending_animations()
             self.reposition_interactive_windows()
 
         def _clear_switch_pending(self) -> None:
             self._switch_pending_key = ""
             self._switch_pending_started_at = 0.0
             self._switch_pending_timer.stop()
+            self._sync_completed_pending_animations()
             for window in self._workdir_windows:
                 window.update()
 
@@ -2215,6 +2338,24 @@ def run_work_overlay_helper_qt(
                 return
             for window in self._workdir_windows:
                 window.update()
+            self._sync_completed_pending_animations()
+
+        def _sync_completed_pending_animations(self) -> None:
+            for record in self._item_widgets:
+                if record.get("kind") != "completed":
+                    continue
+                badge = record.get("badge")
+                if not isinstance(badge, CompletedBadgeWidget):
+                    continue
+                item = record.get("item")
+                pending = (
+                    isinstance(item, Mapping)
+                    and self._switch_pending_active_for_item(item)
+                )
+                badge.set_switch_pending(
+                    pending,
+                    self._switch_pending_started_at if pending else 0.0,
+                )
 
         def switch_item(self, item: Mapping[str, object]) -> None:
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
@@ -2445,8 +2586,14 @@ def run_work_overlay_helper_qt(
             item: Mapping[str, object],
         ) -> None:
             badge = record["badge"]
+            record["item"] = dict(item)
             badge.set_theme_tokens(self._theme_tokens)
             badge.set_item(item)
+            pending = self._switch_pending_active_for_item(item)
+            badge.set_switch_pending(
+                pending,
+                self._switch_pending_started_at if pending else 0.0,
+            )
             self._completed_hover_anchors.append(record["hover_anchor"])
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
             target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
@@ -3984,11 +4131,12 @@ def run_work_overlay_helper_qt(
                     continue
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
                 pending = self._switch_pending_active_for_item(item)
+                hotspot_pending = _workdir_link_pending_for_item(item, pending)
                 workdir_window.configure(
                     item,
                     opacity=current_opacity,
-                    pending=pending,
-                    pending_started_at=self._switch_pending_started_at if pending else 0.0,
+                    pending=hotspot_pending,
+                    pending_started_at=self._switch_pending_started_at if hotspot_pending else 0.0,
                 )
                 screen = app.primaryScreen()
                 geometry = screen.availableGeometry() if screen is not None else self.geometry()
@@ -3998,7 +4146,7 @@ def run_work_overlay_helper_qt(
                         anchor_top_left.y(),
                         anchor.width(),
                         anchor.height(),
-                        pending=pending,
+                        pending=hotspot_pending,
                         screen_left=geometry.left(),
                     )
                 )
