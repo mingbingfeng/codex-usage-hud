@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
@@ -2954,6 +2954,24 @@ def _merge_usage(target: UsageSummary, addition: UsageSummary) -> None:
     target.cost_usd = round(target.cost_usd + addition.cost_usd, 6)
 
 
+def _replace_usage(
+    total: UsageSummary,
+    old: UsageSummary,
+    new: UsageSummary,
+) -> UsageSummary:
+    return UsageSummary(
+        tokens=max(0, total.tokens - old.tokens + new.tokens),
+        input_tokens=max(0, total.input_tokens - old.input_tokens + new.input_tokens),
+        cached_tokens=max(0, total.cached_tokens - old.cached_tokens + new.cached_tokens),
+        output_tokens=max(0, total.output_tokens - old.output_tokens + new.output_tokens),
+        reasoning_tokens=max(
+            0,
+            total.reasoning_tokens - old.reasoning_tokens + new.reasoning_tokens,
+        ),
+        cost_usd=round(max(0.0, total.cost_usd - old.cost_usd + new.cost_usd), 6),
+    )
+
+
 def usage_before_today_in_week(
     week_total: UsageSummary,
     today_total: UsageSummary,
@@ -3001,6 +3019,14 @@ class UsageSummaryCache:
         self._last_week_total = UsageSummary()
 
     @staticmethod
+    def _cache_path(path: Path) -> Path:
+        expanded = Path(path).expanduser()
+        try:
+            return expanded.resolve(strict=False)
+        except OSError:
+            return expanded.absolute()
+
+    @staticmethod
     def _scan_roots(sessions_root: Path) -> tuple[Path, ...]:
         roots = [sessions_root]
         if sessions_root.name == "sessions":
@@ -3022,10 +3048,23 @@ class UsageSummaryCache:
         *,
         allow_stale: bool = False,
         force_rescan: bool = False,
+        refresh_paths: Iterable[Path] = (),
     ) -> tuple[UsageSummary, UsageSummary]:
         now = time.monotonic()
+        sessions_root = self._cache_path(sessions_root)
         scan_roots = self._scan_roots(sessions_root)
         scan_key = (scan_roots, day_start, week_start)
+        refresh_path_tuple = tuple(
+            dict.fromkeys(self._cache_path(path) for path in refresh_paths)
+        )
+        if not force_rescan and self._last_scan_key == scan_key and refresh_path_tuple:
+            self._refresh_paths(
+                refresh_path_tuple,
+                scan_roots,
+                day_start,
+                week_start,
+            )
+            self._last_scan_at = now
         if allow_stale and self._last_scan_key == scan_key:
             return replace(self._last_day_total), replace(self._last_week_total)
         if (
@@ -3049,6 +3088,7 @@ class UsageSummaryCache:
         seen_paths: set[Path] = set()
         for root in existing_roots:
             for path in root.rglob("*.jsonl"):
+                path = self._cache_path(path)
                 seen_paths.add(path)
                 summary_day, summary_week = self._summaries_for_file(
                     path, day_start, week_start
@@ -3066,11 +3106,75 @@ class UsageSummaryCache:
         self._last_week_total = replace(week_total)
         return day_total, week_total
 
+    def _path_under_scan_roots(self, path: Path, scan_roots: Sequence[Path]) -> bool:
+        resolved = self._cache_path(path)
+        for root in scan_roots:
+            root_resolved = self._cache_path(root)
+            try:
+                resolved.relative_to(root_resolved)
+            except ValueError:
+                continue
+            return True
+        return False
+
+    def _entry_for_window(
+        self,
+        path: Path,
+        day_start: datetime,
+        week_start: datetime,
+    ) -> _UsageCacheEntry | None:
+        entry = self._entries.get(path)
+        if (
+            entry is not None
+            and entry.day_start == day_start
+            and entry.week_start == week_start
+        ):
+            return entry
+        return None
+
+    def _refresh_paths(
+        self,
+        paths: Sequence[Path],
+        scan_roots: Sequence[Path],
+        day_start: datetime,
+        week_start: datetime,
+    ) -> None:
+        day_total = replace(self._last_day_total)
+        week_total = replace(self._last_week_total)
+        empty = UsageSummary()
+
+        for path in paths:
+            if not self._path_under_scan_roots(path, scan_roots):
+                continue
+            old_entry = self._entry_for_window(path, day_start, week_start)
+            old_day = old_entry.summary_day if old_entry is not None else empty
+            old_week = old_entry.summary_week if old_entry is not None else empty
+
+            if path.exists():
+                new_day, new_week = self._summaries_for_file(
+                    path,
+                    day_start,
+                    week_start,
+                    force=True,
+                )
+            else:
+                self._entries.pop(path, None)
+                new_day = empty
+                new_week = empty
+
+            day_total = _replace_usage(day_total, old_day, new_day)
+            week_total = _replace_usage(week_total, old_week, new_week)
+
+        self._last_day_total = day_total
+        self._last_week_total = week_total
+
     def _summaries_for_file(
         self,
         path: Path,
         day_start: datetime,
         week_start: datetime,
+        *,
+        force: bool = False,
     ) -> tuple[UsageSummary, UsageSummary]:
         try:
             stat = path.stat()
@@ -3079,7 +3183,8 @@ class UsageSummaryCache:
 
         entry = self._entries.get(path)
         if (
-            entry is not None
+            not force
+            and entry is not None
             and entry.mtime == stat.st_mtime
             and entry.file_size == stat.st_size
             and entry.day_start == day_start
@@ -4258,12 +4363,18 @@ def build_snapshot(
     _apply_visible_app_error(snapshot, app_error)
 
     day_start, week_start = current_budget_windows(context.user_config)
+    refresh_budget_paths = (
+        (session_path,)
+        if refresh_budget_aggregate is False and session_path is not None
+        else ()
+    )
     today_total, week_total = context.usage_cache.summarize(
         context.sessions_root,
         day_start,
         week_start,
         allow_stale=refresh_budget_aggregate is False,
         force_rescan=refresh_budget_aggregate is True,
+        refresh_paths=refresh_budget_paths,
     )
     week_adjustment_usd = max(0.0, float(context.user_config.weekly_adjustment_usd))
     snapshot.today_tokens = today_total.tokens

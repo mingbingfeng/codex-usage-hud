@@ -348,6 +348,30 @@ class _FakeUsageParser:
         return UsageSummary(tokens=start.day)
 
 
+class _FileBackedUsageParser:
+    def __init__(self) -> None:
+        self.loads: list[Path] = []
+
+    def load_records_lenient(self, path: Path) -> list[dict[str, float]]:
+        self.loads.append(path)
+        tokens, cost = path.read_text(encoding="utf-8").strip().split(",", 1)
+        return [{"tokens": float(tokens), "cost": float(cost)}]
+
+    def usage_events(self, records: list[dict[str, float]]) -> list[dict[str, float]]:
+        return records
+
+    def summarize_usage_events(
+        self,
+        events: list[dict[str, float]],
+        start: datetime,
+    ) -> UsageSummary:
+        del start
+        return UsageSummary(
+            tokens=sum(int(event["tokens"]) for event in events),
+            cost_usd=round(sum(float(event["cost"]) for event in events), 6),
+        )
+
+
 def _walk_widgets(widget: tk.Misc) -> list[tk.Misc]:
     widgets = [widget]
     for child in widget.winfo_children():
@@ -576,6 +600,39 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(forced.tokens, 28)
         self.assertEqual(parser.loads, 2)
 
+    def test_usage_summary_cache_refreshes_current_file_without_full_rescan(self) -> None:
+        parser = _FileBackedUsageParser()
+        cache = UsageSummaryCache(  # type: ignore[arg-type]
+            parser,
+            min_rescan_seconds=60.0,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            sessions_root.mkdir()
+            current = sessions_root / "current.jsonl"
+            other = sessions_root / "other.jsonl"
+            current.write_text("3190737,4.744937", encoding="utf-8")
+            other.write_text("100,0.01", encoding="utf-8")
+            day_start = datetime(2026, 6, 30, 0, 0)
+            week_start = datetime(2026, 6, 29, 0, 0)
+
+            first, _ = cache.summarize(sessions_root, day_start, week_start)
+            current.write_text("3764042,5.165528", encoding="utf-8")
+            refreshed, _ = cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                allow_stale=True,
+                refresh_paths=(current,),
+            )
+
+        self.assertEqual(first.tokens, 3_190_837)
+        self.assertEqual(first.cost_usd, 4.754937)
+        self.assertEqual(refreshed.tokens, 3_764_142)
+        self.assertEqual(refreshed.cost_usd, 5.175528)
+        self.assertEqual(parser.loads.count(current), 2)
+        self.assertEqual(parser.loads.count(other), 1)
+
     def test_usage_summary_cache_includes_archived_sessions_sibling(self) -> None:
         parser = _FakeUsageParser()
         cache = UsageSummaryCache(parser)  # type: ignore[arg-type]
@@ -670,6 +727,10 @@ class BudgetHelperTests(unittest.TestCase):
 
         active_work.assert_not_called()
         self.assertEqual(result.active_work_items, [])
+        summarize_kwargs = context.usage_cache.summarize.call_args.kwargs
+        self.assertTrue(summarize_kwargs["allow_stale"])
+        self.assertFalse(summarize_kwargs["force_rescan"])
+        self.assertEqual(summarize_kwargs["refresh_paths"], (session_path,))
 
     def test_renderer_budget_aggregate_refreshes_for_non_current_session_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
