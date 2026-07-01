@@ -67,6 +67,78 @@ class UsageCalculatorTests(unittest.TestCase):
         self.assertEqual(fallback_cost, base_cost)
         self.assertEqual(fallback_cost, MODEL_PRICES["gpt-5.5"]["cached_input"])
 
+    def test_base_url_specific_price_wins_for_same_model_name(self) -> None:
+        calculator = UsageCalculator(
+            {
+                "shared-model": {
+                    "input": 1.0,
+                    "cached_input": 1.0,
+                    "output": 1.0,
+                    "reasoning": 1.0,
+                },
+                "vendor-a/shared-model": {
+                    "model": "shared-model",
+                    "provider": "vendor-a",
+                    "base_url": "https://api.vendor-a.example/v1",
+                    "input": 3.0,
+                    "cached_input": 3.0,
+                    "output": 3.0,
+                    "reasoning": 3.0,
+                },
+                "vendor-b/shared-model": {
+                    "model": "shared-model",
+                    "provider": "vendor-b",
+                    "base_url": "https://api.vendor-b.example/v1",
+                    "input": 7.0,
+                    "cached_input": 7.0,
+                    "output": 7.0,
+                    "reasoning": 7.0,
+                },
+            }
+        )
+
+        vendor_a_cost = calculator.calculate_cost_usd(
+            model_name="shared-model",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            provider="vendor-a",
+            base_url="https://api.vendor-a.example/v1",
+        )
+        fallback_cost = calculator.calculate_cost_usd(
+            model_name="shared-model",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            provider="unknown",
+            base_url="https://unknown.example/v1",
+        )
+
+        self.assertEqual(vendor_a_cost, 3.0)
+        self.assertEqual(fallback_cost, 1.0)
+
+    def test_wildcard_model_profile_matches_unknown_model_prefix(self) -> None:
+        calculator = UsageCalculator(
+            {
+                "custom-family": {
+                    "model": "custom-*",
+                    "input": 2.0,
+                    "cached_input": 2.0,
+                    "output": 2.0,
+                    "reasoning": 2.0,
+                }
+            }
+        )
+
+        cost = calculator.calculate_cost_usd(
+            model_name="custom-large",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+        )
+
+        self.assertEqual(cost, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

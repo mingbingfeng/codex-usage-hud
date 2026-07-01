@@ -74,6 +74,30 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(prices["custom-model"].output, 7.5)
         self.assertEqual(prices["custom-model"].reasoning, 8.0)
 
+    def test_model_price_profiles_preserve_optional_provider_scope(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "model_prices": {
+                    "vendor-a/custom-model": {
+                        "model": "custom-model",
+                        "provider": "vendor-a",
+                        "base_url": "https://api.vendor-a.example/v1/",
+                        "input": 1.25,
+                        "cached_input": 0.125,
+                        "output": 7.5,
+                        "reasoning": 8.0,
+                    }
+                }
+            }
+        )
+
+        payload = config.to_dict()["model_prices"]["vendor-a/custom-model"]
+
+        self.assertEqual(payload["model"], "custom-model")
+        self.assertEqual(payload["provider"], "vendor-a")
+        self.assertEqual(payload["base_url"], "https://api.vendor-a.example/v1")
+        self.assertEqual(payload["input"], 1.25)
+
     def test_user_config_normalizes_work_overlay_settings(self) -> None:
         config = UserConfig.from_dict(
             {

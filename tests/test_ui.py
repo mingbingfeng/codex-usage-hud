@@ -3444,12 +3444,12 @@ class AutoScrollHelpersTests(unittest.TestCase):
         ]
         widths = _round_entry_widths(rows, "gpt-5.4")
 
-        first = _round_entry(rows[0], "gpt-5.4", index_width=widths[0], money_width=widths[1], total_width=widths[2])
-        second = _round_entry(rows[1], "gpt-5.4", index_width=widths[0], money_width=widths[1], total_width=widths[2])
+        first = _round_entry(rows[0], "gpt-5.4", widths=widths)
+        second = _round_entry(rows[1], "gpt-5.4", widths=widths)
 
         self.assertTrue(first.startswith("#  9 $0.100 --:--:-- ↑1,000"))
         self.assertTrue(first.endswith("↻0 ∑2,000"))
-        self.assertTrue(second.startswith("#128 $12.34 --:--:-- ↑1.0M"))
+        self.assertTrue(second.startswith("#128 $12.34 --:--:-- ↑ 1.0M"))
         self.assertTrue(second.endswith("↻0 ∑ 1.2M"))
 
 

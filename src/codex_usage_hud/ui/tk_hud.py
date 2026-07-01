@@ -18,7 +18,7 @@ from tkinter import messagebox, ttk
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from .. import __version__
 from ..config import (
@@ -4496,10 +4496,14 @@ def _display_cached_tokens(
 
 
 def _format_rate_marker(value: float | None, estimated: bool) -> str:
+    return f"{CACHE_HIT_RATE_SYMBOL}{_format_rate_value(value, estimated)}"
+
+
+def _format_rate_value(value: float | None, estimated: bool) -> str:
     if value is None:
-        return f"{CACHE_HIT_RATE_SYMBOL}-"
+        return "-"
     clamped = max(0.0, min(float(value), 1.0))
-    return f"{CACHE_HIT_RATE_SYMBOL}{'~' if estimated else ''}{clamped:.0%}"
+    return f"{'~' if estimated else ''}{clamped:.0%}"
 
 
 def _session_cache_hit_rate(snapshot: ParsedSession) -> tuple[float | None, bool]:
@@ -4787,12 +4791,12 @@ def _format_notice(
     return "  |  ".join(parts)
 
 
-def _round_cache_hit_rate_label(item: RequestRound) -> str:
+def _round_cache_hit_rate_value(item: RequestRound) -> str:
     input_tokens = item.input_tokens
     if input_tokens is None or int(input_tokens) <= 0:
-        return _format_rate_marker(None, item.estimated)
+        return _format_rate_value(None, item.estimated)
     cached_tokens = max(0, min(int(item.cached_tokens or 0), int(input_tokens)))
-    return _format_rate_marker(cached_tokens / max(1, int(input_tokens)), item.estimated)
+    return _format_rate_value(cached_tokens / max(1, int(input_tokens)), item.estimated)
 
 
 def _request_cost(snapshot: ParsedSession) -> tuple[float | None, bool]:
@@ -5006,9 +5010,7 @@ def _round_entry(
     item: RequestRound,
     fallback_model: str,
     *,
-    index_width: int | None = None,
-    money_width: int | None = None,
-    total_width: int | None = None,
+    widths: "_RoundColumnWidths | None" = None,
     now: datetime | None = None,
 ) -> str:
     cost = item.cost_usd
@@ -5025,27 +5027,51 @@ def _round_entry(
     index_text = str(item.index)
     money_text = _format_fixed_money(cost, estimated)
     total_text = _fixed_token_total(item.total_tokens)
-    if index_width is not None:
-        index_text = index_text.rjust(index_width)
-    if money_width is not None:
-        money_text = money_text.rjust(money_width)
-    if total_width is not None:
-        total_text = total_text.rjust(total_width)
+    input_text = _short_num(item.input_tokens)
+    rate_text = _round_cache_hit_rate_value(item)
+    output_text = _short_num(item.output_tokens)
+    reasoning_text = _short_num(item.reasoning_tokens)
+    cached_text = _short_num(item.cached_tokens)
+    if widths is not None:
+        index_text = index_text.rjust(widths.index)
+        money_text = money_text.rjust(widths.money)
+        total_text = total_text.rjust(widths.total)
+        input_text = input_text.rjust(widths.input)
+        rate_text = rate_text.rjust(widths.rate)
+        output_text = output_text.rjust(widths.output)
+        reasoning_text = reasoning_text.rjust(widths.reasoning)
+        cached_text = cached_text.rjust(widths.cached)
     return (
         f"#{index_text} {money_text} {time_text} "
-        f"↑{_short_num(item.input_tokens)} {_round_cache_hit_rate_label(item)} "
-        f"↓{_short_num(item.output_tokens)} ◇{_short_num(item.reasoning_tokens)} "
-        f"↻{_short_num(item.cached_tokens)} ∑{total_text}"
+        f"↑{input_text} {CACHE_HIT_RATE_SYMBOL}{rate_text} "
+        f"↓{output_text} ◇{reasoning_text} "
+        f"↻{cached_text} ∑{total_text}"
     )
+
+
+class _RoundColumnWidths(NamedTuple):
+    index: int = 1
+    money: int = 1
+    total: int = 1
+    input: int = 1
+    rate: int = 1
+    output: int = 1
+    reasoning: int = 1
+    cached: int = 1
 
 
 def _round_entry_widths(
     rows: list[RequestRound],
     fallback_model: str,
-) -> tuple[int, int, int]:
+) -> _RoundColumnWidths:
     index_width = max((len(str(item.index)) for item in rows), default=1)
     money_width = 1
     total_width = 1
+    input_width = 1
+    rate_width = 1
+    output_width = 1
+    reasoning_width = 1
+    cached_width = 1
     for item in rows:
         cost = item.cost_usd
         estimated = item.estimated or cost is None
@@ -5059,7 +5085,21 @@ def _round_entry_widths(
             )
         money_width = max(money_width, len(_format_fixed_money(cost, estimated)))
         total_width = max(total_width, len(_fixed_token_total(item.total_tokens)))
-    return index_width, money_width, total_width
+        input_width = max(input_width, len(_short_num(item.input_tokens)))
+        rate_width = max(rate_width, len(_round_cache_hit_rate_value(item)))
+        output_width = max(output_width, len(_short_num(item.output_tokens)))
+        reasoning_width = max(reasoning_width, len(_short_num(item.reasoning_tokens)))
+        cached_width = max(cached_width, len(_short_num(item.cached_tokens)))
+    return _RoundColumnWidths(
+        index=index_width,
+        money=money_width,
+        total=total_width,
+        input=input_width,
+        rate=rate_width,
+        output=output_width,
+        reasoning=reasoning_width,
+        cached=cached_width,
+    )
 
 
 def _token_value_text(value: int | None, estimated: bool = False) -> str:
@@ -11303,7 +11343,7 @@ class TokenHudWindow:
         if not rows:
             rows = [_round_from_snapshot(snapshot)]
         display_rows = list(reversed(rows))
-        index_width, money_width, total_width = _round_entry_widths(
+        column_widths = _round_entry_widths(
             display_rows,
             snapshot.request.model,
         )
@@ -11311,9 +11351,7 @@ class TokenHudWindow:
             _round_entry(
                 item,
                 snapshot.request.model,
-                index_width=index_width,
-                money_width=money_width,
-                total_width=total_width,
+                widths=column_widths,
             )
             for item in display_rows
         ]

@@ -11,7 +11,7 @@ import re
 import socket
 import threading
 import time
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
 from .. import __version__
@@ -1534,10 +1534,28 @@ RENDERER_HUD_SCRIPT = r"""
         gap: 6px;
         align-items: center;
       }
+      #${rootId} .codex-usage-hud-price-table[data-advanced="true"] .codex-usage-hud-price-row,
+      #${rootId} .codex-usage-hud-price-table[data-advanced="true"] .codex-usage-hud-price-header {
+        grid-template-columns: minmax(130px, 1.2fr) repeat(4, minmax(68px, 1fr)) minmax(92px, .9fr) minmax(150px, 1.3fr);
+      }
+      #${rootId} .codex-usage-hud-price-advanced {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-price-table[data-advanced="true"] .codex-usage-hud-price-advanced {
+        display: block;
+      }
       #${rootId} .codex-usage-hud-price-header {
         color: #8492a6;
         font-size: 10px;
         font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-price-detected {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        color: #8492a6;
+        font-size: 11px;
       }
       #${rootId} .codex-usage-hud-settings-status {
         min-width: 0;
@@ -2332,6 +2350,58 @@ RENDERER_HUD_SCRIPT = r"""
     return { ...defaultHudSettings(), ...(raw && typeof raw === "object" ? raw : {}) };
   }
 
+  function normalizePriceModel(value) {
+    return String(value || "").trim().toLowerCase().replace(/-\\d{4}-\\d{2}-\\d{2}$/, "");
+  }
+
+  function priceModelPatternMatches(pattern, model) {
+    const normalizedPattern = normalizePriceModel(pattern);
+    const normalizedModel = normalizePriceModel(model);
+    if (!normalizedPattern || !normalizedModel) return false;
+    if (normalizedPattern.includes("*") || normalizedPattern.includes("?")) {
+      const regexText = Array.from(normalizedPattern).map((char) => {
+        if (char === "*") return ".*";
+        if (char === "?") return ".";
+        return char.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+      }).join("");
+      const regex = new RegExp(`^${regexText}$`);
+      return regex.test(normalizedModel);
+    }
+    return normalizedModel === normalizedPattern || normalizedModel.startsWith(`${normalizedPattern}-`);
+  }
+
+  function configuredPriceModels(settings) {
+    const prices = settings?.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
+    return Object.entries(prices).map(([key, price]) => String(price?.model || key || "").trim()).filter(Boolean);
+  }
+
+  function observedPriceModels() {
+    const payload = currentPayload() || {};
+    const values = [];
+    if (payload.model) values.push(payload.model);
+    if (Array.isArray(payload.observedModels)) values.push(...payload.observedModels);
+    const seen = new Set();
+    return values.map((item) => String(item || "").trim()).filter((item) => {
+      if (!item || item === "n/a") return false;
+      const key = normalizePriceModel(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function unknownPriceModels(settings) {
+    const configured = configuredPriceModels(settings);
+    return observedPriceModels().filter(
+      (model) => !configured.some((pattern) => priceModelPatternMatches(pattern, model))
+    );
+  }
+
+  function hasAdvancedPriceRows(settings) {
+    const prices = settings?.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
+    return Object.values(prices).some((price) => !!String(price?.provider || price?.base_url || price?.baseUrl || "").trim());
+  }
+
   function settingsBridgeUrl() {
     return String(currentPayload()?.settingsBridgeUrl || "").replace(/\/+$/, "");
   }
@@ -2734,15 +2804,35 @@ RENDERER_HUD_SCRIPT = r"""
     const prices = settings.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
     const entries = Object.entries(prices);
     if (!entries.length) entries.push(["gpt-5.5", { input: 5, cached_input: 0.5, output: 30, reasoning: 30 }]);
-    return entries.map(([model, price]) => `
-      <div class="codex-usage-hud-price-row" data-price-row="true">
+    const advanced = hasAdvancedPriceRows(settings);
+    return entries.map(([key, price]) => {
+      const model = String(price?.model || key || "");
+      const provider = String(price?.provider || "");
+      const baseUrl = String(price?.base_url || price?.baseUrl || "");
+      const rowAdvanced = advanced || provider || baseUrl;
+      return `
+      <div class="codex-usage-hud-price-row" data-price-row="true" data-price-key="${escapeHtml(key)}" data-advanced="${rowAdvanced ? "true" : "false"}">
         <input data-price-field="model" value="${escapeHtml(model)}" aria-label="模型">
         <input data-price-field="input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.input ?? 0)}" aria-label="输入单价">
         <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cached_input ?? 0)}" aria-label="缓存输入单价">
         <input data-price-field="output" type="number" min="0" step="0.000001" value="${escapeHtml(price?.output ?? 0)}" aria-label="输出单价">
         <input data-price-field="reasoning" type="number" min="0" step="0.000001" value="${escapeHtml(price?.reasoning ?? 0)}" aria-label="推理单价">
+        <input class="codex-usage-hud-price-advanced" data-price-field="provider" value="${escapeHtml(provider)}" aria-label="渠道">
+        <input class="codex-usage-hud-price-advanced" data-price-field="base_url" value="${escapeHtml(baseUrl)}" aria-label="Base URL">
       </div>
-    `).join("");
+    `;
+    }).join("");
+  }
+
+  function detectedPriceModelsHtml(settings) {
+    const models = unknownPriceModels(settings);
+    if (!models.length) return "";
+    return `
+      <div class="codex-usage-hud-price-detected">
+        <span>检测到未计价模型</span>
+        ${models.slice(0, 4).map((model) => `<button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-detected-model" data-model="${escapeHtml(model)}">${escapeHtml(model)}</button>`).join("")}
+      </div>
+    `;
   }
 
   function renderSettingsModal(tab = "settings", status = "") {
@@ -2838,12 +2928,13 @@ RENDERER_HUD_SCRIPT = r"""
             <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取</button>
           </div>
         </div>
-        <div class="codex-usage-hud-price-table">
+        <div class="codex-usage-hud-price-table" data-advanced="${hasAdvancedPriceRows(settings) ? "true" : "false"}">
           <div class="codex-usage-hud-price-title">模型单价（USD / 1M tokens）</div>
           <div class="codex-usage-hud-price-header">
-            <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div>
+            <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
           </div>
           <div data-price-rows="true">${priceRowsHtml(settings)}</div>
+          ${detectedPriceModelsHtml(settings)}
           <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model" style="justify-self:start;margin-top:6px">添加模型</button>
         </div>
         <div class="codex-usage-hud-settings-footnote">
@@ -3086,16 +3177,22 @@ RENDERER_HUD_SCRIPT = r"""
     modal?.querySelectorAll("[data-price-row='true']").forEach((row) => {
       const model = String(row.querySelector("[data-price-field='model']")?.value || "").trim();
       if (!model) return;
+      const provider = String(row.querySelector("[data-price-field='provider']")?.value || "").trim().toLowerCase();
+      const baseUrl = String(row.querySelector("[data-price-field='base_url']")?.value || "").trim().replace(/\/+$/, "");
       const field = (name) => {
         const value = Number(row.querySelector(`[data-price-field="${name}"]`)?.value);
         return Number.isFinite(value) && value >= 0 ? value : 0;
       };
-      modelPrices[model] = {
+      const key = provider ? `${provider}/${model}` : (baseUrl ? `${baseUrl}/${model}` : model);
+      modelPrices[key] = {
+        model,
         input: field("input"),
         cached_input: field("cached_input"),
         output: field("output"),
         reasoning: field("reasoning"),
       };
+      if (provider) modelPrices[key].provider = provider;
+      if (baseUrl) modelPrices[key].base_url = baseUrl;
     });
     const displayMode = "renderer";
     return {
@@ -3279,21 +3376,25 @@ RENDERER_HUD_SCRIPT = r"""
     setSettingsStatus("已导出 JSON");
   }
 
-  function addModelPriceRow() {
+  function addModelPriceRow(initialModel = "") {
     const rows = document.querySelector(`#${settingsModalId} [data-price-rows="true"]`);
     if (!rows) return;
     const row = document.createElement("div");
     row.className = "codex-usage-hud-price-row";
     row.dataset.priceRow = "true";
+    row.dataset.advanced = "false";
     row.innerHTML = `
-      <input data-price-field="model" value="" aria-label="模型">
+      <input data-price-field="model" value="${escapeHtml(initialModel)}" aria-label="模型">
       <input data-price-field="input" type="number" min="0" step="0.000001" value="0" aria-label="输入单价">
       <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="0" aria-label="缓存输入单价">
       <input data-price-field="output" type="number" min="0" step="0.000001" value="0" aria-label="输出单价">
       <input data-price-field="reasoning" type="number" min="0" step="0.000001" value="0" aria-label="推理单价">
+      <input class="codex-usage-hud-price-advanced" data-price-field="provider" value="" aria-label="渠道">
+      <input class="codex-usage-hud-price-advanced" data-price-field="base_url" value="" aria-label="Base URL">
     `;
     rows.appendChild(row);
-    row.querySelector("input")?.focus?.();
+    const target = initialModel ? row.querySelector('[data-price-field="input"]') : row.querySelector("input");
+    target?.focus?.();
   }
 
   function closeSettingsModal() {
@@ -3415,6 +3516,12 @@ RENDERER_HUD_SCRIPT = r"""
         event.preventDefault();
         event.stopPropagation();
         addModelPriceRow();
+        return;
+      }
+      if (action.dataset.action === "settings-add-detected-model") {
+        event.preventDefault();
+        event.stopPropagation();
+        addModelPriceRow(action.dataset.model || "");
         return;
       }
       if (action.dataset.action === "settings-save") {
@@ -5158,6 +5265,7 @@ class RendererHudPayload:
     top_copies: dict[str, str] = field(default_factory=dict)
     request_rows: list[str] = field(default_factory=list)
     request_row_details: list[dict[str, object]] = field(default_factory=list)
+    observed_models: list[str] = field(default_factory=list)
     settings: dict[str, object] = field(default_factory=dict)
     active_display_mode: str = "renderer"
     settings_path: str = ""
@@ -5186,6 +5294,7 @@ class RendererHudPayload:
             "topCopies": dict(self.top_copies),
             "requestRows": list(self.request_rows),
             "requestRowDetails": [dict(item) for item in self.request_row_details],
+            "observedModels": list(self.observed_models),
             "settings": dict(self.settings),
             "activeDisplayMode": self.active_display_mode,
             "settingsPath": self.settings_path,
@@ -5737,6 +5846,7 @@ def payload_from_snapshot(
         top_copies=_top_copy_texts(snapshot),
         request_rows=_request_rows(snapshot),
         request_row_details=_request_row_details(snapshot),
+        observed_models=_observed_models(snapshot),
         settings=(settings or UserConfig.defaults()).to_dict(),
         active_display_mode=str(active_display_mode or "renderer"),
         settings_path=str(settings_path or ""),
@@ -5749,6 +5859,24 @@ def payload_from_snapshot(
         update_state=update_state or {},
         app_version=__version__,
     )
+
+
+def _observed_models(snapshot: ParsedSession) -> list[str]:
+    seen: set[str] = set()
+    models: list[str] = []
+    candidates = [snapshot.request.model]
+    candidates.extend(item.model for item in _task_rows(snapshot))
+    candidates.extend(
+        item.model for item in getattr(snapshot, "session_request_history", []) or []
+    )
+    for model in candidates:
+        text = str(model or "").strip()
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        models.append(text)
+    return models
 
 
 def wait_for_renderer(
@@ -5990,10 +6118,14 @@ def _display_cached_tokens(
 
 
 def _format_rate_marker(value: float | None, estimated: bool) -> str:
+    return f"◎{_format_rate_value(value, estimated)}"
+
+
+def _format_rate_value(value: float | None, estimated: bool) -> str:
     if value is None:
-        return "◎-"
+        return "-"
     clamped = max(0.0, min(float(value), 1.0))
-    return f"◎{'~' if estimated else ''}{clamped:.0%}"
+    return f"{'~' if estimated else ''}{clamped:.0%}"
 
 
 def _session_cache_hit_rate(snapshot: ParsedSession) -> tuple[float | None, bool]:
@@ -6205,12 +6337,12 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
     }
 
 
-def _round_cache_hit_rate_label(item: RequestRound) -> str:
+def _round_cache_hit_rate_value(item: RequestRound) -> str:
     input_tokens = item.input_tokens
     if input_tokens is None or int(input_tokens) <= 0:
-        return _format_rate_marker(None, item.estimated)
+        return _format_rate_value(None, item.estimated)
     cached_tokens = max(0, min(int(item.cached_tokens or 0), int(input_tokens)))
-    return _format_rate_marker(cached_tokens / max(1, int(input_tokens)), item.estimated)
+    return _format_rate_value(cached_tokens / max(1, int(input_tokens)), item.estimated)
 
 
 def _request_cost(snapshot: ParsedSession) -> tuple[float | None, bool]:
@@ -6431,17 +6563,13 @@ def _round_entry(
     item: RequestRound,
     fallback_model: str,
     *,
-    index_width: int | None = None,
-    money_width: int | None = None,
-    total_width: int | None = None,
+    widths: "_RoundColumnWidths | None" = None,
     now: datetime | None = None,
 ) -> str:
     parts = _round_entry_parts(
         item,
         fallback_model,
-        index_width=index_width,
-        money_width=money_width,
-        total_width=total_width,
+        widths=widths,
         now=now,
     )
     return f"{parts['prefix']}{parts['time']}{parts['suffix']}"
@@ -6451,9 +6579,7 @@ def _round_entry_parts(
     item: RequestRound,
     fallback_model: str,
     *,
-    index_width: int | None = None,
-    money_width: int | None = None,
-    total_width: int | None = None,
+    widths: "_RoundColumnWidths | None" = None,
     now: datetime | None = None,
 ) -> dict[str, str]:
     cost = item.cost_usd
@@ -6470,31 +6596,54 @@ def _round_entry_parts(
     index_text = str(item.index)
     money_text = _format_fixed_money(cost, estimated)
     total_text = _fixed_token_total(item.total_tokens)
-    if index_width is not None:
-        index_text = index_text.rjust(index_width)
-    if money_width is not None:
-        money_text = money_text.rjust(money_width)
-    if total_width is not None:
-        total_text = total_text.rjust(total_width)
+    input_text = _short_num(item.input_tokens)
+    rate_text = _round_cache_hit_rate_value(item)
+    output_text = _short_num(item.output_tokens)
+    reasoning_text = _short_num(item.reasoning_tokens)
+    cached_text = _short_num(item.cached_tokens)
+    if widths is not None:
+        index_text = index_text.rjust(widths.index)
+        money_text = money_text.rjust(widths.money)
+        total_text = total_text.rjust(widths.total)
+        input_text = input_text.rjust(widths.input)
+        rate_text = rate_text.rjust(widths.rate)
+        output_text = output_text.rjust(widths.output)
+        reasoning_text = reasoning_text.rjust(widths.reasoning)
+        cached_text = cached_text.rjust(widths.cached)
     return {
         "prefix": f"#{index_text} {money_text} ",
         "time": time_text,
         "suffix": (
-            f" ↑{_short_num(item.input_tokens)} "
-            f"{_round_cache_hit_rate_label(item)} "
-            f"↓{_short_num(item.output_tokens)} ◇{_short_num(item.reasoning_tokens)} "
-            f"↻{_short_num(item.cached_tokens)} ∑{total_text}"
+            f" ↑{input_text} ◎{rate_text} "
+            f"↓{output_text} ◇{reasoning_text} "
+            f"↻{cached_text} ∑{total_text}"
         ),
     }
+
+
+class _RoundColumnWidths(NamedTuple):
+    index: int = 1
+    money: int = 1
+    total: int = 1
+    input: int = 1
+    rate: int = 1
+    output: int = 1
+    reasoning: int = 1
+    cached: int = 1
 
 
 def _round_entry_widths(
     rows: list[RequestRound],
     fallback_model: str,
-) -> tuple[int, int, int]:
+) -> _RoundColumnWidths:
     index_width = max((len(str(item.index)) for item in rows), default=1)
     money_width = 1
     total_width = 1
+    input_width = 1
+    rate_width = 1
+    output_width = 1
+    reasoning_width = 1
+    cached_width = 1
     for item in rows:
         cost = item.cost_usd
         estimated = item.estimated or cost is None
@@ -6508,18 +6657,30 @@ def _round_entry_widths(
             )
         money_width = max(money_width, len(_format_fixed_money(cost, estimated)))
         total_width = max(total_width, len(_fixed_token_total(item.total_tokens)))
-    return index_width, money_width, total_width
+        input_width = max(input_width, len(_short_num(item.input_tokens)))
+        rate_width = max(rate_width, len(_round_cache_hit_rate_value(item)))
+        output_width = max(output_width, len(_short_num(item.output_tokens)))
+        reasoning_width = max(reasoning_width, len(_short_num(item.reasoning_tokens)))
+        cached_width = max(cached_width, len(_short_num(item.cached_tokens)))
+    return _RoundColumnWidths(
+        index=index_width,
+        money=money_width,
+        total=total_width,
+        input=input_width,
+        rate=rate_width,
+        output=output_width,
+        reasoning=reasoning_width,
+        cached=cached_width,
+    )
 
 
 def _request_rows(snapshot: ParsedSession) -> list[str]:
-    display_rows, index_width, money_width, total_width = _display_request_rows(snapshot)
+    display_rows, widths = _display_request_rows(snapshot)
     return [
         _round_entry(
             item,
             snapshot.request.model,
-            index_width=index_width,
-            money_width=money_width,
-            total_width=total_width,
+            widths=widths,
         )
         for item in display_rows
     ]
@@ -6527,28 +6688,26 @@ def _request_rows(snapshot: ParsedSession) -> list[str]:
 
 def _display_request_rows(
     snapshot: ParsedSession,
-) -> tuple[list[RequestRound], int, int, int]:
+) -> tuple[list[RequestRound], _RoundColumnWidths]:
     rows = _task_rows(snapshot)[-30:]
     if not rows:
         rows = [_round_from_snapshot(snapshot)]
     display_rows = list(reversed(rows))
-    index_width, money_width, total_width = _round_entry_widths(
+    widths = _round_entry_widths(
         display_rows,
         snapshot.request.model,
     )
-    return display_rows, index_width, money_width, total_width
+    return display_rows, widths
 
 
 def _request_row_details(snapshot: ParsedSession) -> list[dict[str, object]]:
-    display_rows, index_width, money_width, total_width = _display_request_rows(snapshot)
+    display_rows, widths = _display_request_rows(snapshot)
     details: list[dict[str, object]] = []
     for item in display_rows:
         parts = _round_entry_parts(
             item,
             snapshot.request.model,
-            index_width=index_width,
-            money_width=money_width,
-            total_width=total_width,
+            widths=widths,
         )
         details.append(
             {

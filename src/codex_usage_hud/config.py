@@ -11,6 +11,7 @@ import sys
 import time
 from typing import Any, Mapping
 from urllib.error import URLError
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .core.calculator import MODEL_PRICES
@@ -61,6 +62,9 @@ class ModelPrice:
     cached_input: float
     output: float
     reasoning: float
+    model: str = ""
+    provider: str = ""
+    base_url: str = ""
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ModelPrice | None":
@@ -79,15 +83,30 @@ class ModelPrice:
             cached_input=cached_input,
             output=prices["output"],
             reasoning=reasoning,
+            model=_optional_str(
+                value.get("model") or value.get("model_pattern") or value.get("pattern")
+            )
+            or "",
+            provider=normalize_provider(value.get("provider")),
+            base_url=normalize_base_url(
+                value.get("base_url") or value.get("baseUrl") or value.get("api_base")
+            ),
         )
 
-    def to_dict(self) -> dict[str, float]:
-        return {
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
             "input": float(self.input),
             "cached_input": float(self.cached_input),
             "output": float(self.output),
             "reasoning": float(self.reasoning),
         }
+        if self.model:
+            payload["model"] = self.model
+        if self.provider:
+            payload["provider"] = self.provider
+        if self.base_url:
+            payload["base_url"] = self.base_url
+        return payload
 
 
 def default_model_prices() -> dict[str, ModelPrice]:
@@ -198,7 +217,7 @@ class UserConfig:
             },
         }
 
-    def price_table(self) -> dict[str, dict[str, float]]:
+    def price_table(self) -> dict[str, dict[str, object]]:
         return {name: price.to_dict() for name, price in self.model_prices.items()}
 
     def with_price_updates(
@@ -344,6 +363,29 @@ def parse_thresholds(
         if amount > 0:
             thresholds.append(amount)
     return sorted(set(thresholds)) or list(default or DEFAULT_BUDGET_THRESHOLDS)
+
+
+def normalize_provider(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text
+
+
+def normalize_base_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parts = urlsplit(text)
+    if not parts.scheme or not parts.netloc:
+        return text.rstrip("/").lower()
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            parts.path.rstrip("/"),
+            "",
+            "",
+        )
+    )
 
 
 def normalize_model_prices(value: Any) -> dict[str, ModelPrice]:
