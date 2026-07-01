@@ -5,9 +5,6 @@
 > **Live token usage, cache hit rate, and real cost inside Codex App — fully local, no data uploaded.**
 > Stop API relay "background spending" and blind-waiting on long tasks.
 
-![Live HUD Demo](docs/images/demo-hud-animation.gif)
-![Completion Badge Demo](docs/images/demo-completion-badges.gif)
-
 [![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?label=release)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![License](https://img.shields.io/github/license/mingbingfeng/codex-usage-hud)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
@@ -52,14 +49,7 @@ codex-hud --update
 
 ## Community and Support
 
-For questions, suggestions, or discussions, head to [GitHub Discussions](https://github.com/mingbingfeng/codex-usage-hud/discussions). I actively monitor and respond there.
-
-If this HUD saves you time while checking token usage and cost, you can support ongoing maintenance with the bundled Alipay or WeChat QR codes.
-
-<p>
-  <img src="src/codex_usage_hud/assets/sponsor_alipay.jpg" alt="Alipay QR code" width="210">
-  <img src="src/codex_usage_hud/assets/sponsor_wechat.jpg" alt="WeChat reward QR code" width="210">
-</p>
+For questions, suggestions, or discussions, head to [GitHub Issues](https://github.com/mingbingfeng/codex-usage-hud/issues). I actively monitor and respond there.
 
 ## Main Features
 
@@ -77,13 +67,15 @@ If this HUD saves you time while checking token usage and cost, you can support 
 
 Relay token usage and billing can be opaque, and background spending is hard to notice. `codex-usage-hud` keeps session, daily, and weekly cost next to Codex, with cache hit rate and estimated cost visible in real time.
 
-![Real-time usage HUD](docs/images/codex-usage-hud-v1-dashboard.png)
+![Live HUD Demo](docs/images/demo-hud-animation.gif)
 
-Long Codex tasks can feel like blind waiting. The HUD shows whether the current request is still running, when it last refreshed, which tool was slowest, and where time is being spent.
+Long Codex tasks can feel like blind waiting. The HUD shows whether the current request is still running, when it last refreshed, which tool was slowest, and where time is being spent. Desktop bubbles show task completion status in real time.
+
+![Completion Badge Demo](docs/images/demo-completion-badges.gif)
 
 Budget windows differ between users and providers. You can customize daily/weekly limits, reset dates, reset times, thresholds, and manual weekly adjustments to mirror your own relay or team budget.
 
-![Settings panel](docs/images/codex-usage-hud-v1-settings.png)
+![Settings panel](docs/images/demo-settings-panel.png)
 
 Older script-based startup and shutdown flows were awkward. v1.0.0 adds a Windows installer, Start Menu daemon shortcut, stop shortcut, and update shortcut so daily use no longer depends on remembering Python commands.
 

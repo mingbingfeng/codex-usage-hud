@@ -5,9 +5,6 @@
 > **在 Codex App 里实时看到 token 消耗、缓存命中率和真实花费 —— 纯本地运行，不上传任何会话内容。**
 > 专治中转站用量「偷跑」和长任务盲等。
 
-![实时用量 HUD 演示](docs/images/demo-hud-animation.gif)
-![完成态动画演示](docs/images/demo-completion-badges.gif)
-
 [![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?label=release)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![License](https://img.shields.io/github/license/mingbingfeng/codex-usage-hud)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
@@ -52,14 +49,7 @@ codex-hud --update
 
 ## 交流与支持
 
-有问题、建议或想交流，欢迎去 [GitHub Discussions](https://github.com/mingbingfeng/codex-usage-hud/discussions) 发帖，我会持续跟进。
-
-如果这个 HUD 帮你节省了排查 token 和费用的时间，可以请作者喝杯咖啡，或者随手赞赏支持一下继续维护。
-
-<p>
-  <img src="src/codex_usage_hud/assets/sponsor_alipay.jpg" alt="支付宝收款码" width="210">
-  <img src="src/codex_usage_hud/assets/sponsor_wechat.jpg" alt="微信赞赏码" width="210">
-</p>
+有问题、建议或想交流，欢迎去 [GitHub Issues](https://github.com/mingbingfeng/codex-usage-hud/issues) 发帖，我会持续跟进。
 
 ## 主要功能
 
@@ -77,13 +67,15 @@ codex-hud --update
 
 中转站 tokens 用量和计费不透明，最怕后台请求“偷跑”到很久才发现。`codex-usage-hud` 把当前会话、今日、本周用量和金额直接挂在 Codex 旁边，缓存命中率和估算金额也会同步显示，方便及时判断费用是否异常。
 
-![实时用量 HUD](docs/images/codex-usage-hud-v1-dashboard.png)
+![实时用量 HUD 演示](docs/images/demo-hud-animation.gif)
 
-Codex App 执行长任务时，等待过程很容易变成盲等。HUD 会显示当前请求是否还在运行、最新刷新时间、最慢工具和最长响应等待，让你知道它是在工作、等待工具，还是已经需要介入。
+Codex App 执行长任务时，等待过程很容易变成盲等。HUD 会显示当前请求是否还在运行、最新刷新时间、最慢工具和最长响应等待，让你知道它是在工作、等待工具，还是已经需要介入。桌面气泡实时展示任务完成状态。
+
+![完成态动画演示](docs/images/demo-completion-badges.gif)
 
 不同用户的额度周期并不一样。你可以在设置里定制自己的日/周额度、刷新日期时间点、提醒阈值和本周补充额度，把第三方中转站、团队预算或个人限额统一映射到本地提醒里。
 
-![设置面板](docs/images/codex-usage-hud-v1-settings.png)
+![设置面板](docs/images/demo-settings-panel.png)
 
 旧版脚本启动和关闭不够顺手。v1.0.0 提供 Windows 安装器、开始菜单入口、停止入口和更新入口，日常使用不再需要记一串 Python 命令。
 
