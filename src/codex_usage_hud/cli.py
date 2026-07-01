@@ -148,6 +148,7 @@ LOADING_FEEDBACK_STALE_SECONDS = 20.0
 ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
+FINAL_ANSWER_COMPLETION_GRACE_SECONDS = 1.0
 VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_KEEPALIVE_SECONDS = 5.0
@@ -648,6 +649,42 @@ def _work_overlay_command_path(state_path: Path) -> Path:
     return state_path.with_name(f"{state_path.stem}-commands.jsonl")
 
 
+def _work_overlay_transition_audit_path() -> Path:
+    return hud_runtime_dir() / "work-overlay-transitions.jsonl"
+
+
+def _overlay_payload_status(item: Mapping[str, object]) -> str:
+    return str(item.get("status") or "").strip()
+
+
+def _overlay_payload_pending_accounting(item: Mapping[str, object]) -> bool:
+    return bool(item.get("pendingAccounting"))
+
+
+def _overlay_payload_kind(item: Mapping[str, object]) -> str:
+    return "completed" if _overlay_payload_status(item) == "recent" else "card"
+
+
+def _overlay_payload_transition_name(
+    old_item: Mapping[str, object],
+    new_item: Mapping[str, object],
+) -> str:
+    old_kind = _overlay_payload_kind(old_item)
+    new_kind = _overlay_payload_kind(new_item)
+    if old_kind == "card" and new_kind == "completed":
+        return "card_to_completed"
+    if old_kind == "completed" and new_kind == "card":
+        return "completed_to_card"
+    if (
+        old_kind == "completed"
+        and new_kind == "completed"
+        and _overlay_payload_pending_accounting(old_item)
+        and not _overlay_payload_pending_accounting(new_item)
+    ):
+        return "accounting_finalized"
+    return "status_changed"
+
+
 def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
     return {
         "id": item.id,
@@ -673,6 +710,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "startedAt": _iso_or_empty(item.started_at),
         "updatedAt": _iso_or_empty(item.updated_at),
         "current": item.current,
+        "pendingAccounting": item.pending_accounting,
     }
 
 
@@ -724,6 +762,7 @@ class DesktopWorkOverlay:
             hud_runtime_dir() / f"work-overlay-{os.getpid()}-{int(time.time() * 1000)}.json"
         )
         self._command_path = _work_overlay_command_path(self._state_path)
+        self._transition_audit_path = _work_overlay_transition_audit_path()
         self._command_offset = 0
         self._process: subprocess.Popen[str] | None = None
         self._closed = False
@@ -1003,6 +1042,76 @@ class DesktopWorkOverlay:
         except Exception:
             return
 
+    def _append_transition_audit(
+        self,
+        items: Sequence[Mapping[str, object]],
+        *,
+        close: bool,
+    ) -> None:
+        if close or self._last_payload_items is None:
+            return
+        old_by_id = {
+            str(item.get("id") or item.get("sessionId") or "").strip(): item
+            for item in self._last_payload_items
+            if str(item.get("id") or item.get("sessionId") or "").strip()
+        }
+        if not old_by_id:
+            return
+        now = datetime.now().astimezone().isoformat()
+        events: list[dict[str, object]] = []
+        for item in items:
+            item_id = str(item.get("id") or item.get("sessionId") or "").strip()
+            if not item_id or item_id not in old_by_id:
+                continue
+            old_item = old_by_id[item_id]
+            old_status = _overlay_payload_status(old_item)
+            new_status = _overlay_payload_status(item)
+            old_pending = _overlay_payload_pending_accounting(old_item)
+            new_pending = _overlay_payload_pending_accounting(item)
+            old_kind = _overlay_payload_kind(old_item)
+            new_kind = _overlay_payload_kind(item)
+            if (
+                old_status == new_status
+                and old_pending == new_pending
+                and old_kind == new_kind
+            ):
+                continue
+            events.append(
+                {
+                    "time": now,
+                    "ownerPid": os.getpid(),
+                    "stateFile": str(self._state_path),
+                    "id": item_id,
+                    "sessionId": str(item.get("sessionId") or old_item.get("sessionId") or ""),
+                    "title": str(
+                        item.get("targetTitle")
+                        or item.get("title")
+                        or old_item.get("targetTitle")
+                        or old_item.get("title")
+                        or ""
+                    ),
+                    "transition": _overlay_payload_transition_name(old_item, item),
+                    "oldKind": old_kind,
+                    "newKind": new_kind,
+                    "oldStatus": old_status,
+                    "newStatus": new_status,
+                    "oldPendingAccounting": old_pending,
+                    "newPendingAccounting": new_pending,
+                    "oldUpdatedAt": str(old_item.get("updatedAt") or ""),
+                    "newUpdatedAt": str(item.get("updatedAt") or ""),
+                }
+            )
+        if not events:
+            return
+        try:
+            self._transition_audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._transition_audit_path.open("a", encoding="utf-8") as handle:
+                for event in events:
+                    handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True))
+                    handle.write("\n")
+        except OSError:
+            return
+
     def _write_state(
         self,
         items: Sequence[Mapping[str, object]],
@@ -1011,18 +1120,20 @@ class DesktopWorkOverlay:
         close: bool,
     ) -> None:
         try:
+            payload_items = list(items)
             write_json_object(
                 self._state_path,
                 {
                     "ownerPid": os.getpid(),
                     "itemLimit": int(self.item_limit),
                     "commandPath": str(self._command_path),
-                    "items": list(items),
+                    "items": payload_items,
                     "theme": dict(theme or {}),
                     "updatedAt": time.time(),
                     "close": bool(close),
                 },
             )
+            self._append_transition_audit(payload_items, close=close)
             self._last_state_write_at = time.monotonic()
         except OSError:
             return
@@ -2126,6 +2237,28 @@ def _renderer_should_refresh_budget_aggregate(
     return not _paths_only_current_session(
         file_change_paths,
         latest_snapshot.session_path,
+    )
+
+
+def _renderer_should_refresh_active_work_items(
+    *,
+    latest_snapshot: ParsedSession | None,
+    latest_active_work_refresh_at: float,
+    now_monotonic: float,
+    active_work_refresh_pending: bool,
+    file_change_reasons: set[str],
+    file_change_paths: set[Path],
+) -> bool:
+    if latest_snapshot is None or active_work_refresh_pending:
+        return True
+    if "session" in file_change_reasons or (
+        "sessions-root" in file_change_reasons
+        and _paths_only_current_session(file_change_paths, latest_snapshot.session_path)
+    ):
+        return True
+    return (
+        now_monotonic - latest_active_work_refresh_at
+        >= RENDERER_ACTIVE_WORK_RESCAN_SECONDS
     )
 
 
@@ -3387,25 +3520,30 @@ def _work_status_from_snapshot(
     snapshot: ParsedSession,
     *,
     now: datetime,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, bool] | None:
     if snapshot.task_aborted_at is not None:
         return None
     activity_detail = snapshot.activity.detail.lower()
     request_status = snapshot.request.status
     if request_status == "error" or snapshot.request.error:
-        return "error", "出错"
+        return "error", "出错", False
     if snapshot.task_completed_at is not None:
-        return "recent", "刚完成"
+        return "recent", "刚完成", False
+    if snapshot.final_answer_at is not None and (
+        _datetime_age_seconds(snapshot.final_answer_at, now)
+        >= FINAL_ANSWER_COMPLETION_GRACE_SECONDS
+    ):
+        return "recent", "刚完成", True
     if request_status == "running":
-        return "running", "运行中"
+        return "running", "运行中", False
     if snapshot.activity.kind == "tool call" and activity_detail.startswith(
         "request_user_input"
     ):
-        return "waiting_user", "等待用户"
+        return "waiting_user", "等待用户", False
     if snapshot.activity.kind == "tool call":
-        return "tool", "工具执行"
+        return "tool", "工具执行", False
     if snapshot.slow.current_gap_active:
-        return "active", "处理中"
+        return "active", "处理中", False
     return None
 
 
@@ -3421,7 +3559,7 @@ def _work_item_from_snapshot(
     status = _work_status_from_snapshot(snapshot, now=current_time)
     if status is None:
         return None
-    status_value, status_label = status
+    status_value, status_label, pending_accounting = status
 
     updated_at = (
         snapshot.request.updated_at
@@ -3499,6 +3637,7 @@ def _work_item_from_snapshot(
         started_at=started_at,
         updated_at=updated_at,
         current=current,
+        pending_accounting=pending_accounting,
     )
 
 
@@ -5152,13 +5291,13 @@ def run_renderer_hud_session(
                             file_change_reasons=file_change_reasons,
                             file_change_paths=file_change_paths,
                         )
-                        refresh_active_work_items = bool(
-                            latest_snapshot is None
-                            or active_work_refresh_pending
-                            or (
-                                time.monotonic() - latest_active_work_refresh_at
-                                >= RENDERER_ACTIVE_WORK_RESCAN_SECONDS
-                            )
+                        refresh_active_work_items = _renderer_should_refresh_active_work_items(
+                            latest_snapshot=latest_snapshot,
+                            latest_active_work_refresh_at=latest_active_work_refresh_at,
+                            now_monotonic=time.monotonic(),
+                            active_work_refresh_pending=active_work_refresh_pending,
+                            file_change_reasons=file_change_reasons,
+                            file_change_paths=file_change_paths,
                         )
                         lightweight_active_session_refresh = bool(
                             active_session_wakeup

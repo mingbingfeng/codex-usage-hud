@@ -14,6 +14,19 @@ from typing import Any
 from ..config import normalize_work_overlay_max_items
 from ..core import parse_timestamp
 
+try:  # pragma: no cover - optional desktop overlay runtime dependency
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtGui import QFont as _QFont
+    from PySide6.QtGui import QFontMetrics as _QFontMetrics
+    from PySide6.QtGui import QTextLayout as _QTextLayout
+    from PySide6.QtGui import QTextOption as _QTextOption
+except Exception:  # pragma: no cover - depends on local runtime
+    _Qt = None
+    _QFont = None
+    _QFontMetrics = None
+    _QTextLayout = None
+    _QTextOption = None
+
 WORK_OVERLAY_POINTER_SYNC_MS = 60
 WORK_OVERLAY_POLL_MS = 160
 WORK_OVERLAY_WIDTH = 430
@@ -21,6 +34,7 @@ WORK_OVERLAY_MARGIN = 16
 WORK_OVERLAY_TOP_OFFSET = 56
 WORK_OVERLAY_CLOSE_SIZE = 22
 WORK_OVERLAY_TEXT_WRAP_WIDTH = WORK_OVERLAY_WIDTH - 28
+WORK_OVERLAY_BODY_MAX_LINES = 3
 WORK_OVERLAY_CARD_X_PADDING = 10
 WORK_OVERLAY_CARD_Y_PADDING = 8
 WORK_OVERLAY_CARD_SPACING = 7
@@ -112,6 +126,61 @@ def _workdir_leaf(value: object) -> str:
 
 def _workdir_display_name(item: Mapping[str, object]) -> str:
     return _workdir_leaf(item.get("workdir")) or _workdir_leaf(item.get("workdirName"))
+
+
+def _multiline_elided_text(
+    value: object,
+    *,
+    font: object,
+    width: int,
+    max_lines: int = WORK_OVERLAY_BODY_MAX_LINES,
+) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if (
+        _QTextLayout is None
+        or _QTextOption is None
+        or _QFontMetrics is None
+        or _Qt is None
+        or not isinstance(font, _QFont)
+        or width <= 0
+        or max_lines <= 0
+    ):
+        return text
+
+    option = _QTextOption()
+    option.setWrapMode(_QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout = _QTextLayout(text, font)
+    layout.setTextOption(option)
+    visible_lines: list[tuple[int, int]] = []
+    layout.beginLayout()
+    try:
+        while len(visible_lines) < max_lines:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(max(1, int(width)))
+            visible_lines.append((line.textStart(), line.textLength()))
+    finally:
+        layout.endLayout()
+
+    if not visible_lines:
+        return text
+
+    consumed = sum(length for _start, length in visible_lines)
+    if consumed >= len(text):
+        return text
+
+    metrics = _QFontMetrics(font)
+    lines: list[str] = []
+    for index, (start, length) in enumerate(visible_lines):
+        if index < len(visible_lines) - 1:
+            lines.append(text[start : start + length].rstrip())
+            continue
+        remaining = text[start:].lstrip()
+        lines.append(metrics.elidedText(remaining, _Qt.TextElideMode.ElideRight, max(1, int(width))))
+    return "\n".join(line for line in lines if line)
 
 
 def _item_is_completed(item: Mapping[str, object]) -> bool:
@@ -896,6 +965,15 @@ def _item_dismiss_key(item: Mapping[str, object]) -> str:
     )
 
 
+def _mark_item_dismissed(
+    dismissed_instances: dict[str, str],
+    item: Mapping[str, object],
+) -> None:
+    item_id = _item_id(item)
+    if item_id:
+        dismissed_instances[item_id] = _item_dismiss_key(item)
+
+
 def _visible_overlay_items(
     items: Sequence[Mapping[str, object]],
     dismissed_instances: dict[str, str],
@@ -918,6 +996,10 @@ def _visible_overlay_items(
         if item_id not in live_ids:
             dismissed_instances.pop(item_id, None)
     return visible
+
+
+def _transition_hides_source_before_effect_reset(transition_type: str) -> bool:
+    return transition_type == "completed_dismiss"
 
 
 def _theme_hex(value: object, fallback: str) -> str:
@@ -2765,7 +2847,7 @@ def run_work_overlay_helper_qt(
                 self._start_completed_dismiss_transition(dict(item))
                 return
             if item_id:
-                self._dismissed_instances[item_id] = _item_dismiss_key(item)
+                _mark_item_dismissed(self._dismissed_instances, item)
             self._last_payload_signature = ""
             self._last_structure_signature = ""
             self.render_items(self._raw_items)
@@ -3334,8 +3416,14 @@ def run_work_overlay_helper_qt(
 
             body_text = str(item.get("lastText") or item.get("detail") or "").strip()
             detail = record["detail"]
-            detail.setText(body_text)
-            detail.setMinimumHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
+            detail_text = _multiline_elided_text(
+                body_text,
+                font=detail.font(),
+                width=WORK_OVERLAY_TEXT_WRAP_WIDTH,
+            )
+            detail.setText(detail_text)
+            detail.setToolTip(body_text if detail_text and detail_text != body_text else "")
+            detail.setFixedHeight(self._wrapped_label_height(detail, WORK_OVERLAY_TEXT_WRAP_WIDTH))
             detail.setStyleSheet(
                 "QLabel {"
                 f"color: {theme['requestText']};"
@@ -3836,14 +3924,14 @@ def run_work_overlay_helper_qt(
                 else None
             )
             if not item_id or clicked_record is None or source_widget is None:
-                if item_id:
-                    self._dismissed_instances[item_id] = _item_dismiss_key(item)
+                _mark_item_dismissed(self._dismissed_instances, item)
                 self._last_payload_signature = ""
                 self._last_structure_signature = ""
                 self.render_items(self._raw_items)
                 return
 
             try:
+                _mark_item_dismissed(self._dismissed_instances, item)
                 self._transition_in_progress = True
                 self._transition_type = "completed_dismiss"
                 self._transition_item_id = item_id
@@ -3910,9 +3998,7 @@ def run_work_overlay_helper_qt(
                 self._end_transition()
 
         def _finish_completed_dismiss(self, item: Mapping[str, object]) -> None:
-            item_id = _item_id(item)
-            if item_id:
-                self._dismissed_instances[item_id] = _item_dismiss_key(item)
+            _mark_item_dismissed(self._dismissed_instances, item)
             self._end_transition()
 
         def _start_completed_to_card_transition(
@@ -4509,6 +4595,8 @@ def run_work_overlay_helper_qt(
             self._transition_watchdog.stop()
             self._stop_transition_animation_group()
             if self._transition_source_widget is not None:
+                if _transition_hides_source_before_effect_reset(finished_transition_type):
+                    self._transition_source_widget.hide()
                 self._transition_source_widget.setGraphicsEffect(None)
                 if finished_transition_type not in {
                     "card_to_completed",

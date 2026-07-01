@@ -2,12 +2,24 @@
 
 中文 | [English](README_EN.md)
 
+> **在 Codex App 里实时看到 token 消耗、缓存命中率和真实花费 —— 纯本地运行，不上传任何会话内容。**
+> 专治中转站用量「偷跑」和长任务盲等。
+
+![实时用量 HUD 演示](docs/images/demo-hud-animation.gif)
+![完成态动画演示](docs/images/demo-completion-badges.gif)
+
 [![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?label=release)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![License](https://img.shields.io/github/license/mingbingfeng/codex-usage-hud)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
+[![GitHub Stars](https://img.shields.io/github/stars/mingbingfeng/codex-usage-hud?style=social)](https://github.com/mingbingfeng/codex-usage-hud/stargazers)
 
-`codex-usage-hud` 是面向 Codex App 的本地实时用量 HUD。它读取本机 Codex JSONL / SQLite 日志，并通过 Codex renderer / CDP 注入在 Codex 界面里显示当前会话 token、缓存命中率、实时金额、日/周预算和等待状态，不上传任何会话内容。
+`codex-usage-hud` 直接把用量面板注入 Codex 界面（renderer 注入，不是另开窗口）：当前会话 token、缓存命中率、实时 USD 估算、日/周预算、等待状态一屏可见。所有数据只读取本机 Codex JSONL / SQLite 日志，**无遥测、不上传 prompt/response、不需要云端账号**。
+
+### 为什么需要它
+- 💸 **成本透明，防偷跑** — 中转站计费不透明，后台请求容易悄悄跑很久才发现。HUD 把当前/今日/本周用量和金额挂在 Codex 旁边，异常一眼看出。
+- ⏳ **长任务不盲等** — 实时显示请求是否在跑、最慢工具、最长等待，知道它在工作还是该介入了。
+- 🔒 **隐私优先** — 纯本地，零遥测，代码开源可审计。
 
 ## 快速使用
 
@@ -40,7 +52,7 @@ codex-hud --update
 
 ## 交流与支持
 
-交流与支持：敬请期待。
+有问题、建议或想交流，欢迎去 [GitHub Discussions](https://github.com/mingbingfeng/codex-usage-hud/discussions) 发帖，我会持续跟进。
 
 如果这个 HUD 帮你节省了排查 token 和费用的时间，可以请作者喝杯咖啡，或者随手赞赏支持一下继续维护。
 

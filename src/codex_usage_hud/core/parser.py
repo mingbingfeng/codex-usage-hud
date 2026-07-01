@@ -360,6 +360,7 @@ class WorkStatusItem:
     started_at: datetime | None = None
     updated_at: datetime | None = None
     current: bool = False
+    pending_accounting: bool = False
 
 
 @dataclass
@@ -444,6 +445,7 @@ class ParsedSession:
     task_started_at: datetime | None = None
     task_completed_at: datetime | None = None
     task_aborted_at: datetime | None = None
+    final_answer_at: datetime | None = None
     selection_source: str = "activity"
     today_tokens: int = 0
     today_cost_usd: float = 0.0
@@ -566,6 +568,10 @@ class JsonlSessionParser:
             task_started_index,
         )
         parsed.task_aborted_at = self.latest_task_aborted_after(
+            records,
+            task_started_index,
+        )
+        parsed.final_answer_at = self.latest_final_answer_after(
             records,
             task_started_index,
         )
@@ -749,6 +755,34 @@ class JsonlSessionParser:
                 and payload.get("type") == "turn_aborted"
             ):
                 return record.get("_dt")
+        return None
+
+    def latest_final_answer_after(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+    ) -> datetime | None:
+        start_index = 0 if task_started_index is None else task_started_index + 1
+        for record in reversed(records[start_index:]):
+            payload = record.get("payload") or {}
+            if not isinstance(payload, Mapping):
+                continue
+            if str(payload.get("phase") or "") != "final_answer":
+                continue
+            record_type = record.get("type")
+            payload_type = payload.get("type")
+            if (
+                record_type == "event_msg"
+                and payload_type == "agent_message"
+                and compact_text(payload.get("message"), 8)
+            ):
+                return record.get("_dt")
+            if record_type == "response_item" and payload_type == "message":
+                role = response_message_role(payload)
+                if role and role != "assistant":
+                    continue
+                if compact_text(message_text(payload), 8):
+                    return record.get("_dt")
         return None
 
     def latest_model(self, records: Sequence[Mapping[str, Any]]) -> str:

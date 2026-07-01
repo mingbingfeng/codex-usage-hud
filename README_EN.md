@@ -2,12 +2,24 @@
 
 [中文](README.md) | English
 
+> **Live token usage, cache hit rate, and real cost inside Codex App — fully local, no data uploaded.**
+> Stop API relay "background spending" and blind-waiting on long tasks.
+
+![Live HUD Demo](docs/images/demo-hud-animation.gif)
+![Completion Badge Demo](docs/images/demo-completion-badges.gif)
+
 [![Release](https://img.shields.io/github/v/release/mingbingfeng/codex-usage-hud?label=release)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![License](https://img.shields.io/github/license/mingbingfeng/codex-usage-hud)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-supported-0078D4)](https://github.com/mingbingfeng/codex-usage-hud/releases)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](pyproject.toml)
+[![GitHub Stars](https://img.shields.io/github/stars/mingbingfeng/codex-usage-hud?style=social)](https://github.com/mingbingfeng/codex-usage-hud/stargazers)
 
-`codex-usage-hud` is a local real-time usage HUD for Codex App. It reads local Codex JSONL / SQLite logs and injects a renderer/CDP HUD into Codex to show session tokens, cache hit rate, live cost, day/week budgets, and waiting status. It does not upload conversation content.
+`codex-usage-hud` injects a usage panel directly into the Codex UI (renderer injection, not a separate floating window): session tokens, cache hit rate, live USD estimate, daily/weekly budgets, and waiting status all on one screen. All data is read from your local Codex JSONL / SQLite logs only. **No telemetry, no prompt/response upload, no cloud account required.**
+
+### Why you need it
+- 💸 **Cost transparency, stop hidden spending** — API relays have opaque billing, and background requests can quietly run for hours before you notice. The HUD keeps your session/daily/weekly cost visible right next to Codex so you catch anomalies immediately.
+- ⏳ **No more blind waiting on long tasks** — see in real-time if a request is running, which tool is slowest, and how long you've been waiting. Know if it's still working or if you should intervene.
+- 🔒 **Privacy first** — fully local, zero telemetry, open-source and auditable.
 
 ## Quick Start
 
@@ -40,7 +52,7 @@ codex-hud --update
 
 ## Community and Support
 
-Community and support: coming soon.
+For questions, suggestions, or discussions, head to [GitHub Discussions](https://github.com/mingbingfeng/codex-usage-hud/discussions). I actively monitor and respond there.
 
 If this HUD saves you time while checking token usage and cost, you can support ongoing maintenance with the bundled Alipay or WeChat QR codes.
 

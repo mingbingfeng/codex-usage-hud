@@ -56,6 +56,7 @@ from codex_usage_hud.cli import (
     _prepare_codex_window_for_renderer,
     _prepare_codex_window_for_tk,
     _renderer_refresh_delay_seconds,
+    _renderer_should_refresh_active_work_items,
     _wait_for_visible_codex_window,
     _renderer_update_failure_limit,
     _handle_renderer_settings_command,
@@ -165,6 +166,7 @@ from codex_usage_hud.ui.tk_hud import (
     _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
+    WORK_OVERLAY_TEXT_WRAP_WIDTH,
     WORK_OVERLAY_TOP_OFFSET,
     _completed_badge_palette,
     _completed_pending_caption_opacity,
@@ -185,6 +187,8 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _find_item_rect,
     _find_item_position,
     _item_dismiss_key,
+    _mark_item_dismissed,
+    _multiline_elided_text,
     _overlay_payload_signature,
     _overlay_hover_hit_test,
     _ordered_overlay_items,
@@ -196,6 +200,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _remembered_card_rect_for_layout,
     _transition_palette,
     _transition_clearance_offset,
+    _transition_hides_source_before_effect_reset,
     _transition_layout_width,
     _transition_rect_for_progress,
     _transition_required_height,
@@ -1252,6 +1257,46 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
 
+    def test_desktop_work_overlay_appends_transition_audit_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay._transition_audit_path = root / "work-overlay-transitions.jsonl"
+            overlay._last_payload_items = [
+                {
+                    "id": "thread-1",
+                    "sessionId": "thread-1",
+                    "title": "Thread One",
+                    "status": "running",
+                    "pendingAccounting": False,
+                }
+            ]
+
+            overlay._write_state(
+                [
+                    {
+                        "id": "thread-1",
+                        "sessionId": "thread-1",
+                        "title": "Thread One",
+                        "status": "recent",
+                        "pendingAccounting": True,
+                    }
+                ],
+                close=False,
+            )
+
+            lines = overlay._transition_audit_path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(lines), 1)
+        event = json.loads(lines[0])
+        self.assertEqual(event["transition"], "card_to_completed")
+        self.assertEqual(event["sessionId"], "thread-1")
+        self.assertEqual(event["oldStatus"], "running")
+        self.assertEqual(event["newStatus"], "recent")
+        self.assertTrue(event["newPendingAccounting"])
+
     def test_desktop_work_overlay_marks_switch_completed_in_cached_state(self) -> None:
         overlay = DesktopWorkOverlay(item_limit=2)
         overlay._last_payload_items = [
@@ -1633,6 +1678,26 @@ class BudgetHelperTests(unittest.TestCase):
         )
         self.assertEqual(dismissed, {})
 
+    def test_work_overlay_dismissal_filters_refresh_while_item_is_still_live(self) -> None:
+        completed = {
+            "id": "session-a",
+            "taskStartedAt": "2026-06-16T10:00:00+08:00",
+            "startedAt": "2026-06-16T10:00:00+08:00",
+            "status": "recent",
+            "statusText": "已完成",
+            "lastText": "这轮做完了",
+            "current": True,
+        }
+        dismissed: dict[str, str] = {}
+
+        _mark_item_dismissed(dismissed, completed)
+
+        self.assertEqual(
+            _visible_overlay_items([completed], dismissed, item_limit=4),
+            [],
+        )
+        self.assertEqual(dismissed, {"session-a": _item_dismiss_key(completed)})
+
     def test_work_overlay_error_does_not_inherit_running_dismissal(self) -> None:
         running = {
             "id": "session-a",
@@ -1750,6 +1815,21 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(snapshot.request.status, "error")
         self.assertEqual(snapshot.request.source, "app")
         self.assertIn("429 Too Many Requests", snapshot.request.error)
+
+    def test_renderer_refreshes_active_work_items_for_current_session_file_change(self) -> None:
+        session_path = Path("session-current.jsonl")
+        snapshot = ParsedSession(session_path=session_path)
+
+        refresh = _renderer_should_refresh_active_work_items(
+            latest_snapshot=snapshot,
+            latest_active_work_refresh_at=100.0,
+            now_monotonic=101.0,
+            active_work_refresh_pending=False,
+            file_change_reasons={"session"},
+            file_change_paths={session_path},
+        )
+
+        self.assertTrue(refresh)
 
     def test_work_overlay_recent_item_keeps_last_output_text(self) -> None:
         parser = JsonlSessionParser()
@@ -1886,6 +1966,64 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(items[0].status_label, "处理中")
         self.assertNotEqual(items[0].status_text, "已完成")
+
+    def test_work_overlay_final_answer_marks_pending_completed_after_running_seen(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def row(offset: int, row_type: str, payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "timestamp": (now + timedelta(seconds=offset)).isoformat(),
+                "type": row_type,
+                "payload": payload,
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-current.jsonl"
+            running_rows = [
+                row(-8, "session_meta", {"id": "session-current"}),
+                row(-7, "event_msg", {"type": "task_started"}),
+                row(-6, "event_msg", {"type": "user_message", "message": "answer quickly"}),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in running_rows),
+                encoding="utf-8",
+            )
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+            running_snapshot = parser.parse_file(path)
+            running_items = active_work_items_for_snapshot(context, running_snapshot, path)
+
+            rows = [
+                *running_rows,
+                row(
+                    -3,
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "1",
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                encoding="utf-8",
+            )
+            snapshot = parser.parse_file(path)
+            items = active_work_items_for_snapshot(context, snapshot, path)
+
+        self.assertIn(running_items[0].status, {"running", "active"})
+        self.assertIsNone(snapshot.task_completed_at)
+        self.assertEqual(items[0].status, "recent")
+        self.assertEqual(items[0].status_label, "刚完成")
+        self.assertEqual(items[0].status_text, "已完成")
+        self.assertTrue(items[0].pending_accounting)
+        self.assertTrue(work_item_to_overlay_dict(items[0])["pendingAccounting"])
 
     def test_current_completed_task_hides_without_prior_running_overlay(self) -> None:
         parser = JsonlSessionParser()
@@ -2497,6 +2635,41 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(text.startswith("09:08:07 | 已处理 42s | "))
         self.assertIn("...", text)
 
+    def test_work_overlay_multiline_elided_text_limits_body_to_three_lines(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+            from PySide6.QtGui import QFont
+            from PySide6.QtWidgets import QApplication
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            app = QApplication.instance() or QApplication(sys.argv[:1])
+            app.setQuitOnLastWindowClosed(False)
+            text = (
+                "结论：有残留，而且 Codex App 现在确实还会尝试调用已卸载的 OMX，"
+                "主要命中点是配置和启动目录、环境变量、探测缓存以及旧的依赖回退逻辑，"
+                "这一段需要被压成三行以内，否则就会和底部状态栏发生重叠，"
+                "而且长路径和长命令在窄卡片里很容易把第四行挤出来。"
+            )
+            display = _multiline_elided_text(
+                text,
+                font=QFont("Microsoft YaHei UI", 8),
+                width=WORK_OVERLAY_TEXT_WRAP_WIDTH,
+                max_lines=3,
+            )
+
+            self.assertLessEqual(len(display.splitlines()), 3)
+            self.assertNotEqual(display, text)
+            self.assertTrue(display.endswith("…"))
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_pending_workdir_window_expands_short_anchor_leftward(self) -> None:
         x, y, width, height = _pending_workdir_window_rect(
             300,
@@ -2756,6 +2929,11 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         ]
         result = _detect_transition(old_items, new_items)
         self.assertIsNone(result)
+
+    def test_completed_dismiss_hides_source_before_effect_reset(self) -> None:
+        self.assertTrue(_transition_hides_source_before_effect_reset("completed_dismiss"))
+        self.assertFalse(_transition_hides_source_before_effect_reset("card_to_completed"))
+        self.assertFalse(_transition_hides_source_before_effect_reset("completed_to_card"))
 
     def test_overlay_payload_signature_changes_when_theme_changes(self) -> None:
         items = [{"id": "1", "status": "tool", "title": "正在执行"}]
