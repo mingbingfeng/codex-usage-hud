@@ -45,7 +45,7 @@ codex-hud --update
 
 ## 赞助商
 
-[想显示在下方？](mailto:512145547@qq.com?subject=codex-usage-hud%20Sponsor)
+[想显示在下方？](https://github.com/mingbingfeng/codex-usage-hud/issues)
 
 | 赞助商 | 介绍 |
 | --- | --- |

@@ -36,7 +36,7 @@ codex-usage-hud-v1.0.0-windows-x64-setup.exe
 
 - Makes Chinese the default GitHub README and adds `README_EN.md`.
 - Keeps an empty sponsors table with the sponsor contact link:
-  `512145547@qq.com`.
+  via GitHub Issues.
 - Keeps the community/support section as "敬请期待" and uses bundled Alipay /
   WeChat support QR assets.
 - Adds v1.0.0 HUD screenshots and a pain-points section focused on token/cost

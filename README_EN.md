@@ -45,7 +45,7 @@ codex-hud --update
 
 ## Sponsors
 
-[Want to be listed below?](mailto:512145547@qq.com?subject=codex-usage-hud%20Sponsor)
+[Want to be listed below?](https://github.com/mingbingfeng/codex-usage-hud/issues)
 
 | Sponsor | Description |
 | --- | --- |
