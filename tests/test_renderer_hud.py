@@ -905,7 +905,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_script_resizes_request_panel_from_fixed_bottom(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('beginGesture(event, name, action.dataset.action, action.dataset.edge || "")', script)
+        self.assertIn('beginGesture(event, name, "resize", action.dataset.edge || "", false)', script)
         self.assertIn('const resizeFromLeft = gesture.edge === "left" || gesture.edge.endsWith("-left")', script)
         self.assertIn('const left = resizeFromLeft ? (gesture.left + gesture.width - width) : gesture.left', script)
         self.assertIn("height = clamp(gesture.height - dy", script)

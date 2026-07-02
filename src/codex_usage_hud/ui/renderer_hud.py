@@ -285,6 +285,9 @@ RENDERER_HUD_SCRIPT = r"""
         align-items: center;
         gap: 4px;
       }
+      #${rootId} .codex-usage-hud-collapsed[data-has-settings="false"] {
+        grid-template-columns: minmax(0, 1fr);
+      }
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-update-button,
       #${rootId} .codex-usage-hud-settings-button {
@@ -2156,14 +2159,14 @@ RENDERER_HUD_SCRIPT = r"""
     const updateButtonMarkup = name === "top"
       ? `<button class="codex-usage-hud-update-button" data-action="update-action" title="" aria-label="" hidden>↓</button>`
       : "";
+    const leftControlsMarkup = name === "top"
+      ? `<div class="codex-usage-hud-left-controls">${updateButtonMarkup}</div>`
+      : "";
     return `
       <div class="codex-usage-hud-panel ${PANEL[name].className}" data-panel="${name}" data-expanded="false" role="status" aria-live="polite">
         ${resizeEdgesMarkup()}
         <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}">
-          <div class="codex-usage-hud-left-controls">
-            <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
-            ${updateButtonMarkup}
-          </div>
+          ${leftControlsMarkup}
           <button class="codex-usage-hud-main" data-action="toggle" data-has-glyph="${glyph ? "true" : "false"}" aria-label="${ariaLabel}">
             ${glyphMarkup}
             ${name === "top" ? `<span class="codex-usage-hud-progress-strip-viewport"><span class="codex-usage-hud-progress-strip" data-field="topCollapsedProgress"></span></span>` : ""}
@@ -3607,6 +3610,14 @@ RENDERER_HUD_SCRIPT = r"""
       const panel = action.closest("[data-panel]");
       const name = panel?.dataset.panel;
       if (!name || !PANEL[name]) return;
+      // A drag on a collapsed panel emits a trailing click; swallow it so the
+      // panel does not toggle after being moved.
+      if (window.__codexHudDragSuppressClick) {
+        window.__codexHudDragSuppressClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       const expanded = panel.dataset.expanded !== "true";
@@ -3616,18 +3627,37 @@ RENDERER_HUD_SCRIPT = r"""
       syncPositionSettled();
     });
     root.addEventListener("pointerdown", (event) => {
-      const action = event.target?.closest?.("[data-action='move'], [data-action='resize']");
+      if (event.button !== undefined && event.button !== 0) return;
+      const action = event.target?.closest?.("[data-action='move'], [data-action='resize'], [data-action='toggle']");
       if (!action || !root.contains(action)) return;
       const panel = action.closest("[data-panel]");
       const name = panel?.dataset.panel;
       if (!name || !PANEL[name]) return;
-      event.preventDefault();
-      event.stopPropagation();
-      beginGesture(event, name, action.dataset.action, action.dataset.edge || "");
+      const rawAction = action.dataset.action;
+      if (rawAction === "resize") {
+        event.preventDefault();
+        event.stopPropagation();
+        beginGesture(event, name, "resize", action.dataset.edge || "", false);
+        return;
+      }
+      const collapsed = panel.dataset.expanded !== "true";
+      // Collapsed panels drag from anywhere; a tap without movement still toggles.
+      // Expanded panels keep dragging via the header handle only.
+      if (rawAction === "toggle" && !collapsed) return;
+      // Reset any stale suppress flag from a prior interrupted gesture.
+      window.__codexHudDragSuppressClick = false;
+      // For the tap-toggle target we must NOT preventDefault here — doing so
+      // suppresses the compatibility click event and would break toggling.
+      // A real drag is detected via the movement threshold in beginGesture.
+      if (rawAction !== "toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      beginGesture(event, name, "move", "", rawAction === "toggle");
     });
   }
 
-  function beginGesture(event, name, action, edge = "") {
+  function beginGesture(event, name, action, edge = "", toggleOnTap = false) {
     const panel = document.querySelector(`#${rootId} [data-panel="${name}"]`);
     if (!panel) return;
     const rect = panel.getBoundingClientRect();
@@ -3637,6 +3667,7 @@ RENDERER_HUD_SCRIPT = r"""
     const startAnchor = name === "top"
       ? topAnchor(startHeight, startState.width)
       : requestAnchor(startHeight, startState.width);
+    const DRAG_THRESHOLD = 4;
     const gesture = {
       action,
       edge: edge || "right",
@@ -3649,10 +3680,20 @@ RENDERER_HUD_SCRIPT = r"""
       top: rect.top,
       width: rect.width,
       height: rect.height,
+      toggleOnTap,
+      moved: !toggleOnTap,
     };
     const move = (nextEvent) => {
       const dx = nextEvent.clientX - gesture.startX;
       const dy = nextEvent.clientY - gesture.startY;
+      // When the gesture started on a tap-toggle target, wait for real movement
+      // before treating it as a drag, so a plain click still toggles.
+      if (!gesture.moved) {
+        if (Math.abs(dx) <= DRAG_THRESHOLD && Math.abs(dy) <= DRAG_THRESHOLD) return;
+        gesture.moved = true;
+        // Real drag started: swallow the trailing click so it doesn't toggle.
+        if (gesture.toggleOnTap) window.__codexHudDragSuppressClick = true;
+      }
       if (gesture.action === "move") {
         const width = desiredWidth(name, getPanelState(name), gesture.expanded, gesture.width, gesture.anchor.maxWidth);
         const height = desiredHeight(name, getPanelState(name), gesture.expanded, gesture.height);
@@ -3697,6 +3738,8 @@ RENDERER_HUD_SCRIPT = r"""
       document.removeEventListener("pointermove", move, true);
       document.removeEventListener("pointerup", done, true);
       document.removeEventListener("pointercancel", done, true);
+      // A pure tap (no movement) falls through to the click handler, which
+      // toggles the panel. Only a real drag persists a new position.
       syncPosition();
     };
     document.addEventListener("pointermove", move, true);
