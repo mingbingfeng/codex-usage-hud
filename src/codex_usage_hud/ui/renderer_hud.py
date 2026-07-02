@@ -295,6 +295,7 @@ RENDERER_HUD_SCRIPT = r"""
         grid-template-columns: minmax(0, 1fr) auto;
       }
       #${rootId} .codex-usage-hud-token-badge {
+        position: relative;
         display: none;
         align-items: center;
         box-sizing: border-box;
@@ -307,17 +308,78 @@ RENDERER_HUD_SCRIPT = r"""
         color: #9ccbff;
         font: 700 11px/1 Consolas, "Cascadia Mono", ui-monospace, monospace;
         white-space: nowrap;
-        overflow: hidden;
-        pointer-events: none;
+        cursor: default;
+        pointer-events: auto;
       }
       #${rootId} .codex-usage-hud-token-badge[data-composer-badge="active"] {
         display: inline-flex;
+      }
+      #${rootId} .codex-usage-hud-token-badge[data-badge-state="warning"] {
+        display: inline-flex;
+        max-width: 240px;
+        border-color: rgba(255, 196, 84, .55);
+        background: rgba(255, 196, 84, .16);
+        color: #ffca54;
+        animation: codex-usage-hud-badge-pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes codex-usage-hud-badge-pulse {
+        0%, 100% { opacity: .62; }
+        50% { opacity: 1; }
       }
       #${rootId} .codex-usage-hud-token-badge-text {
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown {
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 6px);
+        z-index: 30;
+        min-width: 172px;
+        max-width: 260px;
+        padding: 8px 10px;
+        border: 1px solid rgba(156, 203, 255, .28);
+        border-radius: 10px;
+        background: rgba(20, 26, 34, .98);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+        color: #c7d4e4;
+        font: 600 11px/1.5 Consolas, "Cascadia Mono", ui-monospace, monospace;
+        white-space: nowrap;
+        opacity: 0;
+        transform: translateY(4px);
+        pointer-events: none;
+        transition: opacity .12s ease, transform .12s ease;
+      }
+      #${rootId} .codex-usage-hud-token-badge:hover .codex-usage-hud-token-breakdown {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      #${rootId} .codex-usage-hud-token-badge[data-badge-state="warning"] .codex-usage-hud-token-breakdown {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-row[data-total="true"] {
+        margin-top: 5px;
+        padding-top: 5px;
+        border-top: 1px solid rgba(156, 203, 255, .2);
+        color: #9ccbff;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-key {
+        color: #7f8ea3;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-row[data-total="true"] .codex-usage-hud-token-breakdown-key {
+        color: #9ccbff;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-val {
+        font-variant-numeric: tabular-nums;
       }
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-update-button,
@@ -2188,7 +2250,7 @@ RENDERER_HUD_SCRIPT = r"""
       ? `<button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>`
       : "";
     const tokenBadgeMarkup = name === "request"
-      ? `<span class="codex-usage-hud-token-badge" data-composer-badge="idle" aria-hidden="true"><span class="codex-usage-hud-token-badge-text" data-field="requestComposerTokens">TikToken:0 Ts</span></span>`
+      ? `<span class="codex-usage-hud-token-badge" data-composer-badge="idle" aria-hidden="true"><span class="codex-usage-hud-token-badge-text" data-field="requestComposerTokens">TikToken:0 Ts</span><span class="codex-usage-hud-token-breakdown" data-field="requestComposerBreakdown" role="tooltip"></span></span>`
       : "";
     const updateButtonMarkup = name === "top"
       ? `<button class="codex-usage-hud-update-button" data-action="update-action" title="" aria-label="" hidden>↓</button>`
@@ -2767,7 +2829,7 @@ RENDERER_HUD_SCRIPT = r"""
             <span class="codex-usage-hud-overlay-dependency-state">已安装</span>
             <span class="codex-usage-hud-overlay-dependency-version">${escapeHtml(version ? `PySide6 ${version}` : "PySide6 可用")}</span>
           </div>
-          <div class="codex-usage-hud-overlay-dependency-note">修改左侧数量后保存，桌面气泡会自动生效。</div>
+          <div class="codex-usage-hud-overlay-dependency-note">保存后显示方形进度气泡；会话完成后收起为圆形总结。</div>
         </div>
       `;
     }
@@ -2776,7 +2838,7 @@ RENDERER_HUD_SCRIPT = r"""
       actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-install-desktop-overlay">立即安装</button>');
     }
     if (!requiresRestart) {
-      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-enable-desktop-overlay">已安装，立即启用</button>');
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-enable-desktop-overlay">已安装，启用气泡</button>');
     } else {
       actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-restart">立即重启</button>');
     }
@@ -2787,10 +2849,10 @@ RENDERER_HUD_SCRIPT = r"""
         </div>
         <div class="codex-usage-hud-overlay-dependency-note">${
           installing
-            ? "PySide6 正在后台安装；完成后点击“已安装，立即启用”。"
+            ? "气泡组件正在后台安装；完成后点击“已安装，启用气泡”。"
             : (requiresRestart
-              ? "安装完成后需要重启 HUD，才能加载桌面气泡环境。"
-              : `桌面气泡依赖 PySide6。命令：${escapeHtml(installCommand)}`)
+              ? "安装完成后重启 HUD，才能显示会话进度气泡。"
+              : `会话进度气泡需要 PySide6 桌面组件。命令：${escapeHtml(installCommand)}`)
         }</div>
         <div class="codex-usage-hud-overlay-dependency-actions">${actions.join("")}</div>
       </div>
@@ -2944,11 +3006,11 @@ RENDERER_HUD_SCRIPT = r"""
           </div>
         </div>
         <div class="codex-usage-hud-settings-field">
-          <label>PySide6 桌面气泡数量（0 为关闭）</label>
+          <label>会话进度气泡数量（0 为关闭）</label>
           <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
         </div>
         <div class="codex-usage-hud-settings-field">
-          <label>气泡依赖 PySide6</label>
+          <label>气泡运行环境</label>
           <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
         </div>
         <div class="codex-usage-hud-settings-field">
@@ -3284,14 +3346,14 @@ RENDERER_HUD_SCRIPT = r"""
   function installDesktopOverlayFromModal() {
     submitSettingsCommand(
       { action: "installDesktopOverlay" },
-      "正在准备安装 PySide6..."
+      "正在准备安装气泡组件..."
     );
   }
 
   function enableDesktopOverlayFromModal() {
     submitSettingsCommand(
       { action: "enableDesktopOverlay" },
-      "正在重新检测 PySide6..."
+      "正在重新检测气泡组件..."
     );
   }
 
@@ -3977,11 +4039,80 @@ RENDERER_HUD_SCRIPT = r"""
     return Array.from(normalized).length;
   }
 
+  function humanizeTokens(value) {
+    const n = Math.max(0, Math.round(Number(value) || 0));
+    if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+    return String(n);
+  }
+
+  function currentPayload() {
+    return window[stateName]?.payload || {};
+  }
+
   function updateComposerBadgeText(root = document.getElementById(rootId)) {
     if (!root) return;
+    const payload = currentPayload();
+    // 运行中：黄灯优先，滚动显示 AI 正在读取的文件。
+    if (payload.activityWarning && payload.activityReadingFile) {
+      setText(root, "requestComposerTokens", String(payload.activityReadingFile));
+      return;
+    }
+    // 未发送：静态底价（B+C+D+F，来自 Python）+ 实时输入文本（A，浏览器侧）。
+    const base = Math.max(0, Number(payload.preSendBaseTokens) || 0);
     const input = window[composerInputNodeName];
-    const count = composerTokenCount(composerInputText(input));
-    setText(root, "requestComposerTokens", `TikToken:${count} Ts`);
+    const live = composerTokenCount(composerInputText(input));
+    const total = base + live;
+    const label = total < 50000 ? "Cache友好" : "大量上下文";
+    setText(root, "requestComposerTokens", `预估 ~${humanizeTokens(total)} Ts (${label})`);
+    renderComposerBreakdown(root, payload, live, total);
+  }
+
+  function renderComposerBreakdown(root, payload, liveInputTokens, total) {
+    const node = root.querySelector('[data-field="requestComposerBreakdown"]');
+    if (!node) return;
+    const rows = Array.isArray(payload.preSendBreakdown) ? payload.preSendBreakdown : [];
+    if (!rows.length) {
+      node.innerHTML = "";
+      return;
+    }
+    const rowHtml = rows.map((row) => {
+      const key = String(row?.key || "");
+      // A（当前输入）用浏览器侧实时值覆盖 Python 的占位。
+      const tokens = key === "A" ? liveInputTokens : Number(row?.tokens) || 0;
+      const display = humanizeTokens(tokens);
+      return `<span class="codex-usage-hud-token-breakdown-row">`
+        + `<span class="codex-usage-hud-token-breakdown-key">${escapeHtml(key)} ${escapeHtml(String(row?.label || ""))}</span>`
+        + `<span class="codex-usage-hud-token-breakdown-val">${escapeHtml(display)} Ts</span>`
+        + `</span>`;
+    }).join("");
+    const totalHtml = `<span class="codex-usage-hud-token-breakdown-row" data-total="true">`
+      + `<span class="codex-usage-hud-token-breakdown-key">合计</span>`
+      + `<span class="codex-usage-hud-token-breakdown-val">${escapeHtml(humanizeTokens(total))} Ts</span>`
+      + `</span>`;
+    node.innerHTML = rowHtml + totalHtml;
+  }
+
+  function badgeWarningActive() {
+    const payload = currentPayload();
+    return !!(payload.activityWarning && payload.activityReadingFile);
+  }
+
+  function refreshComposerBadgeState(root = document.getElementById(rootId)) {
+    if (!root) return;
+    const warning = badgeWarningActive();
+    const focused = !!window[composerFocusStateName];
+    root.querySelectorAll('[data-composer-badge]').forEach((node) => {
+      if (warning) {
+        node.dataset.badgeState = "warning";
+        node.dataset.composerBadge = "active";
+      } else {
+        delete node.dataset.badgeState;
+        node.dataset.composerBadge = focused ? "active" : "idle";
+      }
+    });
+    // 黄灯运行时或输入框聚焦时都需要刷新文案。
+    if (warning || focused) updateComposerBadgeText(root);
   }
 
   function setComposerBadgeActive(active) {
@@ -3989,10 +4120,7 @@ RENDERER_HUD_SCRIPT = r"""
     if (!root) return;
     const changed = window[composerFocusStateName] !== !!active;
     window[composerFocusStateName] = !!active;
-    root.querySelectorAll('[data-composer-badge]').forEach((node) => {
-      node.dataset.composerBadge = active ? "active" : "idle";
-    });
-    if (active) updateComposerBadgeText(root);
+    refreshComposerBadgeState(root);
     // Showing/hiding the badge changes the marquee line's available width, so
     // re-evaluate scrolling without disturbing the marquee logic itself.
     if (changed) requestAnimationFrame(() => refreshAllMarquees(root));
@@ -5344,6 +5472,7 @@ RENDERER_HUD_SCRIPT = r"""
     renderRequestRows(root, nextPayload?.requestRows || [], nextPayload?.requestRowDetails || []);
     renderUpdateButtons(root, nextPayload || {});
     applySettingsCommandStatus(nextPayload || {});
+    refreshComposerBadgeState(root);
     syncPosition();
     syncPositionSettled();
     scheduleStaleGuard(nextPayload);
@@ -5443,6 +5572,11 @@ class RendererHudPayload:
     theme: dict[str, object] = field(default_factory=dict)
     update_state: dict[str, object] = field(default_factory=dict)
     app_version: str = __version__
+    pre_send_estimate: str = ""
+    pre_send_base_tokens: int = 0
+    pre_send_breakdown: list[dict[str, object]] = field(default_factory=list)
+    activity_warning: bool = False
+    activity_reading_file: str = ""
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -5472,6 +5606,11 @@ class RendererHudPayload:
             "theme": dict(self.theme),
             "updateState": dict(self.update_state),
             "appVersion": self.app_version,
+            "preSendEstimate": self.pre_send_estimate,
+            "preSendBaseTokens": int(self.pre_send_base_tokens),
+            "preSendBreakdown": [dict(item) for item in self.pre_send_breakdown],
+            "activityWarning": bool(self.activity_warning),
+            "activityReadingFile": self.activity_reading_file,
         }
 
 
@@ -6024,6 +6163,11 @@ def payload_from_snapshot(
         theme=theme or {},
         update_state=update_state or {},
         app_version=__version__,
+        pre_send_estimate=snapshot.estimate_base.short_label(),
+        pre_send_base_tokens=int(snapshot.estimate_base.total_tokens or 0),
+        pre_send_breakdown=snapshot.estimate_base.breakdown_rows(),
+        activity_warning=bool(snapshot.reading_activity.active),
+        activity_reading_file=snapshot.reading_activity.warning_label(),
     )
 
 

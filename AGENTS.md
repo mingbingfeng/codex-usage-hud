@@ -15,8 +15,8 @@ Use codebase-memory-mcp to narrow scope before reading source. Do not treat the 
 After large pulls, branch switches, or broad refactors, refresh the index manually:
 
 ```powershell
-codebase-memory-mcp cli index_repository '{"repo_path":"D:/AI/codex-hud/codex-usage-hud","mode":"full","persistence":false}'
-codebase-memory-mcp cli index_status '{"project":"D-AI-codex-hud-codex-usage-hud"}'
+codebase-memory-mcp cli index_repository '{"repo_path":"E:/Project/codex-usage-hud","mode":"full","persistence":false}'
+codebase-memory-mcp cli index_status '{"project":"E-Project-codex-usage-hud"}'
 ```
 
 If codebase-memory-mcp is unavailable in the current client, continue with normal local source inspection and state that the MCP graph was unavailable.

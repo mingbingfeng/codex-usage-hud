@@ -46,11 +46,13 @@ from .core import (
     CostEstimator,
     JsonlSessionParser,
     ParsedSession,
+    PreSendEstimator,
     RequestRound,
     SseRequestStateMachine,
     UsageCalculator,
     UsageSummary,
     WorkStatusItem,
+    detect_reading_activity,
 )
 from .daemon import (
     CodexDaemonManager,
@@ -3879,6 +3881,7 @@ class RuntimeContext:
     active_session_tracker: ActiveSessionTracker | None
     session_resolver: SessionPathResolver
     usage_cache: UsageSummaryCache
+    pre_send_estimator: PreSendEstimator | None = None
     visible_app_error_cache: _VisibleAppErrorCache = field(
         default_factory=_VisibleAppErrorCache
     )
@@ -3886,6 +3889,8 @@ class RuntimeContext:
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
         _stop_active_session_tracker(self)
+        if self.pre_send_estimator is not None:
+            self.pre_send_estimator.close()
 
     def reload_user_config(self) -> None:
         """Reload user config and reset cost caches when pricing changes."""
@@ -4230,21 +4235,21 @@ def _handle_renderer_settings_command(
             if bool(status.get("installed")):
                 version = str(status.get("version") or "").strip()
                 return _renderer_settings_status(
-                    f"PySide6 已可用{f'（{version}）' if version else ''}；可直接启用桌面气泡。",
+                    f"气泡组件已可用{f'（PySide6 {version}）' if version else ''}；可直接启用会话进度气泡。",
                 )
             if bool(status.get("installing")):
                 return _renderer_settings_status(
-                    "正在安装 PySide6；完成后点击“已安装，立即启用”。",
+                    "气泡组件正在安装；完成后点击“已安装，启用气泡”。",
                 )
             if not bool(status.get("canInstall")):
                 return _renderer_settings_status(
-                    "当前运行环境不能在线安装 PySide6；请安装带桌面气泡的版本后重启 HUD。",
+                    "当前运行环境不能在线安装气泡组件；请安装带会话进度气泡的版本后重启 HUD。",
                     kind="error",
                     restart_visible=bool(status.get("requiresRestart")),
                 )
             if _start_desktop_overlay_install():
                 return _renderer_settings_status(
-                    "已开始安装 PySide6；完成后点击“已安装，立即启用”。",
+                    "已开始安装气泡组件；完成后点击“已安装，启用气泡”。",
                 )
             return _renderer_settings_status(
                 "无法启动 PySide6 安装；请在终端运行 pip install PySide6>=6.8。",
@@ -4254,7 +4259,7 @@ def _handle_renderer_settings_command(
             status = _desktop_overlay_dependency_status()
             if not bool(status.get("installed")):
                 return _renderer_settings_status(
-                    "还没检测到 PySide6；安装完成后再点一次“已安装，立即启用”。",
+                    "还没检测到气泡组件；安装完成后再点一次“已安装，启用气泡”。",
                     kind="error",
                     restart_visible=bool(status.get("requiresRestart")),
                 )
@@ -4274,7 +4279,7 @@ def _handle_renderer_settings_command(
                 work_overlay.reset_runtime_availability()
             version = str(status.get("version") or "").strip()
             return _renderer_settings_status(
-                f"桌面气泡已启用{f'（PySide6 {version}）' if version else ''}。",
+                f"会话进度气泡已启用{f'（PySide6 {version}）' if version else ''}。",
             )
         if action == "updateAction":
             if update_manager is None:
@@ -4410,6 +4415,10 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         if args.no_sse
         else SseRequestStateMachine(db_path=sqlite_log_path, cost_estimator=estimator)
     )
+    pre_send_estimator = PreSendEstimator(
+        project_roots=[str(sessions_root.parent)],
+    )
+    pre_send_estimator.start()
     return RuntimeContext(
         platform=platform,
         sessions_root=sessions_root,
@@ -4429,6 +4438,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         active_session_tracker=active_session_tracker,
         session_resolver=session_resolver,
         usage_cache=UsageSummaryCache(parser),
+        pre_send_estimator=pre_send_estimator,
     )
 
 
@@ -4547,7 +4557,30 @@ def build_snapshot(
             snapshot,
             session_path,
         )
+    _apply_pre_send_and_activity(context, snapshot)
     return snapshot
+
+
+def _apply_pre_send_and_activity(
+    context: RuntimeContext,
+    snapshot: ParsedSession,
+) -> None:
+    """Attach the static pre-send base estimate and live reading-activity light.
+
+    The base estimate (C context files + D MCP schema + F padding) is produced
+    off-thread by ``PreSendEstimator``; the session-history term (B) comes for
+    free from the API-confirmed input tokens so it stays exact and needs no
+    re-tokenization. Reading activity (E) is derived from the just-parsed
+    snapshot at zero extra I/O.
+    """
+    estimator = getattr(context, "pre_send_estimator", None)
+    if estimator is not None:
+        # Keep the context-file scan anchored to the active session's cwd.
+        if snapshot.cwd:
+            estimator.set_project_roots([snapshot.cwd])
+        history_tokens = int(snapshot.confirmed.cumulative_input or 0)
+        snapshot.estimate_base = estimator.latest().with_session_history(history_tokens)
+    snapshot.reading_activity = detect_reading_activity(snapshot)
 
 
 def snapshot_to_text(snapshot: ParsedSession, compact: bool = False) -> str:

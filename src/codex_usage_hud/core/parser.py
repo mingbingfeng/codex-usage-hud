@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .calculator import UsageCalculator, estimate_tokens
+from .pre_send_estimator import BaseEstimate
+from .activity_monitor import ReadingActivity
 
 DEFAULT_MODEL = "gpt-5.5"
 MAX_REQUEST_HISTORY = 500
@@ -461,6 +463,8 @@ class ParsedSession:
     budget_warnings: list[str] = field(default_factory=list)
     budget_error: str = ""
     active_work_items: list[WorkStatusItem] = field(default_factory=list)
+    estimate_base: BaseEstimate = field(default_factory=BaseEstimate)
+    reading_activity: ReadingActivity = field(default_factory=ReadingActivity)
 
 
 class CostEstimator:

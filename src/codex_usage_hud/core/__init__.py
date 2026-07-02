@@ -1,6 +1,8 @@
 """Core helpers for codex-usage-hud."""
 
+from .activity_monitor import CodexActivityMonitor, ReadingActivity, detect_reading_activity
 from .calculator import MODEL_PRICES, UsageCalculator, estimate_tokens
+from .pre_send_estimator import BaseEstimate, PreSendEstimator
 from .parser import (
     Activity,
     ConfirmedTokens,
@@ -23,12 +25,16 @@ from .parser import (
 
 __all__ = [
     "Activity",
+    "BaseEstimate",
+    "CodexActivityMonitor",
     "ConfirmedTokens",
     "CostEstimator",
     "EstimateTokens",
     "JsonlSessionParser",
     "MODEL_PRICES",
     "ParsedSession",
+    "PreSendEstimator",
+    "ReadingActivity",
     "RequestRound",
     "RequestTokens",
     "SlowSummary",
@@ -37,6 +43,7 @@ __all__ = [
     "UsageSummary",
     "WorkStatusItem",
     "UsageCalculator",
+    "detect_reading_activity",
     "estimate_tokens",
     "extract_log_field",
     "message_text",

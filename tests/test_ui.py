@@ -8717,7 +8717,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
 
         self.assertEqual(status["kind"], "")
-        self.assertIn("已开始安装 PySide6", status["message"])
+        self.assertIn("已开始安装气泡组件", status["message"])
         install.assert_called_once()
         restart_requested.set.assert_not_called()
         exit_requested.set.assert_not_called()
@@ -8761,7 +8761,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             saved = store.load()
 
         self.assertEqual(status["kind"], "")
-        self.assertIn("桌面气泡已启用", status["message"])
+        self.assertIn("会话进度气泡已启用", status["message"])
         self.assertEqual(saved.work_overlay_max_items, 4)
         overlay.reset_runtime_availability.assert_called_once()
         restart_requested.set.assert_not_called()

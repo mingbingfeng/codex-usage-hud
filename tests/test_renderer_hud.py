@@ -264,12 +264,14 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("请作者喝咖啡链接", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-setting-key="support_url"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-setting-key="work_overlay_max_items"', renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("PySide6 桌面气泡数量", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("会话进度气泡数量", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("0 为关闭", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("气泡依赖 PySide6", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("气泡运行环境", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("方形进度气泡", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("圆形总结", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("需要安装环境", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("立即安装", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("已安装，立即启用", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("已安装，启用气泡", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-install-desktop-overlay", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-enable-desktop-overlay", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("desktopOverlayDependency", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -440,6 +442,57 @@ class RendererHudPayloadTests(unittest.TestCase):
         request_row_details = payload["requestRowDetails"]
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
+
+    def test_payload_exposes_pre_send_estimate_and_activity_light(self) -> None:
+        from codex_usage_hud.core.pre_send_estimator import BaseEstimate
+        from codex_usage_hud.core.activity_monitor import ReadingActivity
+
+        snapshot = ParsedSession(status="parsed")
+        snapshot.estimate_base = BaseEstimate(total_tokens=152000)
+        snapshot.reading_activity = ReadingActivity(
+            active=True, file_name="ScanClient.cs", tool_name="read_file"
+        )
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        self.assertIn("大量上下文", payload["preSendEstimate"])
+        self.assertEqual(payload["preSendBaseTokens"], 152000)
+        self.assertTrue(payload["activityWarning"])
+        self.assertIn("ScanClient.cs", payload["activityReadingFile"])
+
+    def test_payload_activity_light_off_by_default(self) -> None:
+        payload = payload_from_snapshot(ParsedSession(status="waiting")).to_json()
+        self.assertFalse(payload["activityWarning"])
+        self.assertEqual(payload["activityReadingFile"], "")
+
+    def test_renderer_script_defines_pre_send_badge_helpers(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+        self.assertIn("preSendBaseTokens", script)
+        self.assertIn("activityReadingFile", script)
+        self.assertIn("humanizeTokens", script)
+        self.assertIn('data-badge-state="warning"', script)
+        self.assertIn("renderComposerBreakdown", script)
+        self.assertIn("requestComposerBreakdown", script)
+        self.assertIn("codex-usage-hud-token-breakdown", script)
+
+    def test_payload_exposes_pre_send_breakdown_rows(self) -> None:
+        from codex_usage_hud.core.pre_send_estimator import BaseEstimate
+
+        snapshot = ParsedSession(status="parsed")
+        snapshot.estimate_base = BaseEstimate(
+            total_tokens=48981,
+            input_text_tokens=6,
+            session_history_tokens=48000,
+            context_files_tokens=920,
+            mcp_schema_tokens=5,
+            padding_tokens=50,
+        )
+        payload = payload_from_snapshot(snapshot).to_json()
+        rows = payload["preSendBreakdown"]
+        self.assertEqual([r["key"] for r in rows], ["A", "B", "C", "D", "F"])
+        by_key = {r["key"]: r["tokens"] for r in rows}
+        self.assertEqual(by_key["B"], 48000)
+        self.assertEqual(by_key["F"], 50)
 
     def test_payload_from_snapshot_exposes_overflow_progress_style(self) -> None:
         snapshot = ParsedSession(status="parsed")
