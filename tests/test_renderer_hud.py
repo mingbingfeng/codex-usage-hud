@@ -475,7 +475,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "18";', script)
+        self.assertIn('const version = "19";', script)
         self.assertIn(
             "scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);",
             script,

@@ -81,7 +81,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "18";
+  const version = "19";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -99,6 +99,9 @@ RENDERER_HUD_SCRIPT = r"""
   const rafName = "__codexUsageHudRaf";
   const settleTimerName = "__codexUsageHudSettleTimers";
   const composerSettleTimerName = "__codexUsageHudComposerSettleTimer";
+  const composerInputNodeName = "__codexUsageHudComposerInputNode";
+  const composerInputHandlersName = "__codexUsageHudComposerInputHandlers";
+  const composerFocusStateName = "__codexUsageHudComposerFocused";
   const runningTimerName = "__codexUsageHudRunningTimer";
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
@@ -287,6 +290,34 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-collapsed[data-has-settings="false"] {
         grid-template-columns: minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-collapsed[data-has-badge="true"] {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+      #${rootId} .codex-usage-hud-token-badge {
+        display: none;
+        align-items: center;
+        box-sizing: border-box;
+        max-width: 160px;
+        height: 20px;
+        padding: 0 8px;
+        border: 1px solid rgba(156, 203, 255, .28);
+        border-radius: 999px;
+        background: rgba(156, 203, 255, .12);
+        color: #9ccbff;
+        font: 700 11px/1 Consolas, "Cascadia Mono", ui-monospace, monospace;
+        white-space: nowrap;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-token-badge[data-composer-badge="active"] {
+        display: inline-flex;
+      }
+      #${rootId} .codex-usage-hud-token-badge-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-update-button,
@@ -2156,6 +2187,9 @@ RENDERER_HUD_SCRIPT = r"""
     const settingsButtonMarkup = name === "top"
       ? `<button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>`
       : "";
+    const tokenBadgeMarkup = name === "request"
+      ? `<span class="codex-usage-hud-token-badge" data-composer-badge="idle" aria-hidden="true"><span class="codex-usage-hud-token-badge-text" data-field="requestComposerTokens">TikToken:0 Ts</span></span>`
+      : "";
     const updateButtonMarkup = name === "top"
       ? `<button class="codex-usage-hud-update-button" data-action="update-action" title="" aria-label="" hidden>↓</button>`
       : "";
@@ -2165,7 +2199,7 @@ RENDERER_HUD_SCRIPT = r"""
     return `
       <div class="codex-usage-hud-panel ${PANEL[name].className}" data-panel="${name}" data-expanded="false" role="status" aria-live="polite">
         ${resizeEdgesMarkup()}
-        <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}">
+        <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}" data-has-badge="${name === "request" ? "true" : "false"}">
           ${leftControlsMarkup}
           <button class="codex-usage-hud-main" data-action="toggle" data-has-glyph="${glyph ? "true" : "false"}" aria-label="${ariaLabel}">
             ${glyphMarkup}
@@ -2173,6 +2207,7 @@ RENDERER_HUD_SCRIPT = r"""
             <span class="codex-usage-hud-line" data-field="${name}Line"></span>
           </button>
           ${settingsButtonMarkup}
+          ${tokenBadgeMarkup}
         </div>
         ${name === "top" ? topExpandedMarkup() : requestExpandedMarkup()}
       </div>
@@ -3921,6 +3956,89 @@ RENDERER_HUD_SCRIPT = r"""
     return visible(best) ? best.getBoundingClientRect() : null;
   }
 
+  function composerInputElement() {
+    const composer = composerElement();
+    if (!composer) return null;
+    const input = composer.querySelector("textarea, [contenteditable='true'], [role='textbox']");
+    return visible(input) ? input : null;
+  }
+
+  function composerInputText(input) {
+    if (!input) return "";
+    if (input.tagName === "TEXTAREA" || typeof input.value === "string") {
+      return String(input.value || "");
+    }
+    return String(input.innerText || input.textContent || "");
+  }
+
+  function composerTokenCount(text) {
+    const normalized = String(text || "").replace(/\r\n/g, "\n");
+    // Count by Unicode code points so CJK characters and emoji each read as one.
+    return Array.from(normalized).length;
+  }
+
+  function updateComposerBadgeText(root = document.getElementById(rootId)) {
+    if (!root) return;
+    const input = window[composerInputNodeName];
+    const count = composerTokenCount(composerInputText(input));
+    setText(root, "requestComposerTokens", `TikToken:${count} Ts`);
+  }
+
+  function setComposerBadgeActive(active) {
+    const root = document.getElementById(rootId);
+    if (!root) return;
+    const changed = window[composerFocusStateName] !== !!active;
+    window[composerFocusStateName] = !!active;
+    root.querySelectorAll('[data-composer-badge]').forEach((node) => {
+      node.dataset.composerBadge = active ? "active" : "idle";
+    });
+    if (active) updateComposerBadgeText(root);
+    // Showing/hiding the badge changes the marquee line's available width, so
+    // re-evaluate scrolling without disturbing the marquee logic itself.
+    if (changed) requestAnimationFrame(() => refreshAllMarquees(root));
+  }
+
+  function detachComposerInputWatchers() {
+    const input = window[composerInputNodeName];
+    const handlers = window[composerInputHandlersName];
+    if (input && handlers) {
+      input.removeEventListener("focus", handlers.focus, true);
+      input.removeEventListener("blur", handlers.blur, true);
+      input.removeEventListener("input", handlers.input, true);
+    }
+    window[composerInputNodeName] = null;
+    window[composerInputHandlersName] = null;
+  }
+
+  function ensureComposerInputWatchers() {
+    const input = composerInputElement();
+    if (input === window[composerInputNodeName]) {
+      if (input && window[composerFocusStateName]) updateComposerBadgeText();
+      return;
+    }
+    detachComposerInputWatchers();
+    if (!input) {
+      setComposerBadgeActive(false);
+      return;
+    }
+    const handlers = {
+      focus: () => setComposerBadgeActive(true),
+      blur: () => setComposerBadgeActive(false),
+      input: () => {
+        if (window[composerFocusStateName]) updateComposerBadgeText();
+      },
+    };
+    input.addEventListener("focus", handlers.focus, true);
+    input.addEventListener("blur", handlers.blur, true);
+    input.addEventListener("input", handlers.input, true);
+    window[composerInputNodeName] = input;
+    window[composerInputHandlersName] = handlers;
+    // The composer may already hold focus when we (re)attach after a re-inject.
+    const focused = document.activeElement === input
+      || (input.contains?.(document.activeElement) ?? false);
+    setComposerBadgeActive(focused);
+  }
+
   function headerLeftControlEdge(headerNode, header, controls = headerControlButtons(headerNode, header)) {
     const leftControls = controls
       .map((item) => item.rect)
@@ -4372,6 +4490,7 @@ RENDERER_HUD_SCRIPT = r"""
     } else {
       window[resizeObserverName] = { disconnect() {} };
     }
+    ensureComposerInputWatchers();
   }
 
   function stopBootstrapObserver() {
@@ -5243,6 +5362,7 @@ RENDERER_HUD_SCRIPT = r"""
     try {
       removeActiveSessionWatchers();
     } catch (_) {}
+    detachComposerInputWatchers();
     stopBootstrapObserver();
     observedHeaderNode = null;
     observedComposerNode = null;
@@ -5263,6 +5383,9 @@ RENDERER_HUD_SCRIPT = r"""
     delete window[staleTimerName];
     delete window[composerSettleTimerName];
     delete window[settleTimerName];
+    delete window[composerInputNodeName];
+    delete window[composerInputHandlersName];
+    delete window[composerFocusStateName];
     delete window.__codexUsageHudUpdate;
     delete window.__codexUsageHudRemove;
     return true;
