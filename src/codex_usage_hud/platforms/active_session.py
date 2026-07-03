@@ -66,6 +66,30 @@ def _title_matches(name: str, title: str) -> bool:
     return False
 
 
+def is_new_session_source(source: str) -> bool:
+    """Return whether an active-session source represents Codex's new-chat page."""
+    text = str(source or "").strip()
+    return text.startswith(
+        (
+            "renderer-new-session",
+            "cdp-new-session",
+            "ui-new-session",
+        )
+    )
+
+
+def _is_new_session_title(title: str) -> bool:
+    text = compact_text(title, 80).casefold()
+    return text in {
+        "new chat",
+        "new conversation",
+        "new session",
+        "新对话",
+        "新会话",
+        "新聊天",
+    }
+
+
 def find_session_file(session_id: str, sessions_root: Path) -> Path | None:
     """Find a session JSONL by id substring or direct path."""
     direct = Path(session_id)
@@ -289,7 +313,11 @@ class ActiveSessionTracker:
         self.latest_session_id = ""
         self.latest_title = ""
         self.latest_path: Path | None = None
-        self.latest_source = "ui-waiting" if self.enabled else "activity"
+        self.latest_source = (
+            "renderer-waiting"
+            if self.enabled and not self.start_background_watcher
+            else ("ui-waiting" if self.enabled else "activity")
+        )
         self._mapped_title = ""
         self._title_cache_key: tuple[str, str] | None = None
         self._title_cache_value = ""
@@ -304,6 +332,7 @@ class ActiveSessionTracker:
         self._renderer_session_id = ""
         self._renderer_title = ""
         self._renderer_path: Path | None = None
+        self._renderer_new_session = False
         self._change_callback: Callable[[], None] | None = None
 
     def set_change_callback(self, callback: Callable[[], None] | None) -> None:
@@ -382,9 +411,27 @@ class ActiveSessionTracker:
         renderer_selected, renderer_path = self._current_renderer_selection()
         if renderer_selected:
             return renderer_path
+        if not self.start_background_watcher:
+            with self._lock:
+                self.latest_session_id = ""
+                self.latest_title = ""
+                self.latest_path = None
+                self._mapped_title = ""
+                self.latest_source = "renderer-waiting"
+                self.latest_event_source = "renderer"
+            return None
         ref = self.platform.get_active_conversation_ref()
         if ref is not None:
             session_id, title = ref
+            if not session_id and _is_new_session_title(title):
+                with self._lock:
+                    self.latest_session_id = ""
+                    self.latest_title = ""
+                    self.latest_path = None
+                    self._mapped_title = ""
+                    self.latest_source = "cdp-new-session"
+                    self.latest_event_source = "cdp"
+                return None
             path = self.path_from_thread_id(session_id) if session_id else None
             if path is None and title:
                 path = self.path_for_title(title)
@@ -470,13 +517,20 @@ class ActiveSessionTracker:
         *,
         source: str = "renderer",
         detected_at: float | None = None,
+        new_session: bool = False,
     ) -> bool:
         """Accept an active conversation ref pushed by the renderer bridge."""
         if not self.enabled:
             return False
         session_id = str(session_id or "").strip()
         title = str(title or "").strip()
-        if not session_id and not title:
+        new_session = bool(new_session) or (
+            not session_id and _is_new_session_title(title)
+        )
+        if new_session:
+            session_id = ""
+            title = ""
+        if not session_id and not title and not new_session:
             return False
         detected = detected_at if detected_at is not None else time.monotonic()
 
@@ -496,9 +550,13 @@ class ActiveSessionTracker:
         response_ms = (time.monotonic() - detected) * 1000.0
         source_label = compact_text(display_title or session_id)
         latest_source = (
-            f"{source}:{source_label}"
-            if path is not None
-            else f"{source}-unmatched"
+            f"{source}-new-session"
+            if new_session
+            else (
+                f"{source}:{source_label}"
+                if path is not None
+                else f"{source}-unmatched"
+            )
         )
         with self._lock:
             previous_title = self.latest_title
@@ -508,9 +566,11 @@ class ActiveSessionTracker:
             previous_renderer_session_id = self._renderer_session_id
             previous_renderer_title = self._renderer_title
             previous_renderer_path = self._renderer_path
+            previous_renderer_new_session = self._renderer_new_session
             self._renderer_session_id = session_id
             self._renderer_title = display_title
             self._renderer_path = path
+            self._renderer_new_session = new_session
             self.latest_session_id = session_id
             self.latest_title = display_title
             self.latest_path = path
@@ -527,14 +587,17 @@ class ActiveSessionTracker:
             or session_id != previous_renderer_session_id
             or display_title != previous_renderer_title
             or path != previous_renderer_path
+            or new_session != previous_renderer_new_session
         )
         if changed:
             _LOGGER.info(
                 "ACTIVE_SESSION_SWITCH source=%s matched=%s response_ms=%.1f title=%r",
                 source,
-                path is not None,
+                path is not None and not new_session,
                 response_ms,
-                compact_text(display_title or session_id, 80),
+                "new-session"
+                if new_session
+                else compact_text(display_title or session_id, 80),
             )
             self._notify_change()
         return changed
@@ -829,6 +892,14 @@ class ActiveSessionTracker:
 
     def _current_renderer_selection(self) -> tuple[bool, Path | None]:
         with self._lock:
+            if self._renderer_new_session:
+                self.latest_session_id = ""
+                self.latest_title = ""
+                self.latest_path = None
+                self._mapped_title = ""
+                self.latest_source = "renderer-new-session"
+                self.latest_event_source = "renderer"
+                return True, None
             if not self._renderer_session_id and not self._renderer_title:
                 return False, None
             title = self._renderer_title
@@ -857,6 +928,7 @@ class ActiveSessionTracker:
             self._renderer_session_id = session_id
             self._renderer_title = title
             self._renderer_path = path
+            self._renderer_new_session = False
             self.latest_session_id = session_id
             self.latest_title = title
             self.latest_path = path
@@ -918,7 +990,6 @@ class SessionPathResolver:
         return (
             source.startswith("ui-unmatched")
             or source.startswith("cdp-unmatched")
-            or source.startswith("renderer-unmatched")
         )
 
     def resolve(self) -> tuple[Path | None, str]:
@@ -943,6 +1014,15 @@ class SessionPathResolver:
 
         if self.active_session_tracker is not None and self.active_session_tracker.enabled:
             self.selection_source = tracker_source
+            if is_new_session_source(tracker_source):
+                self.auto_session_file = None
+                return None, self.selection_source
+            if tracker_source.startswith("renderer-unmatched"):
+                self.auto_session_file = None
+                return None, self.selection_source
+            if tracker_source.startswith("renderer-waiting"):
+                self.auto_session_file = None
+                return None, self.selection_source
 
         latest = self.platform.detect_active_session(self.sessions_root)
         if latest is None:

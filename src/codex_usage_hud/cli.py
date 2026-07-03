@@ -43,6 +43,7 @@ from .config import (
     write_json_object,
 )
 from .core import (
+    BaseEstimate,
     CostEstimator,
     JsonlSessionParser,
     ParsedSession,
@@ -54,6 +55,8 @@ from .core import (
     WorkStatusItem,
     detect_reading_activity,
 )
+from .core.runtime_events import RuntimeEventBus
+from .core.runtime_errors import RuntimeErrorRegistry
 from .daemon import (
     CodexDaemonManager,
     DEFAULT_DAEMON_POLL_MS,
@@ -72,6 +75,7 @@ from .platforms import (
     SessionSwitchResult,
     WindowsSearchSessionSwitchBackend,
     get_current_platform,
+    is_new_session_source,
 )
 from .platforms.base import BasePlatform
 from .platforms.cdp_probe import (
@@ -140,6 +144,7 @@ RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
 RENDERER_CDP_STATE_FILENAME = "renderer_cdp_state.json"
 CRASH_DIAGNOSTIC_FILENAME = "crash.log"
 CRASH_DIAGNOSTICS_ENV = "CODEX_USAGE_HUD_CRASH_DIAGNOSTICS"
+RUNTIME_DEBUG_ENV = "CODEX_USAGE_HUD_DEBUG"
 CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
 CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
 CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
@@ -1157,11 +1162,13 @@ class _WorkOverlayCommandPump:
         *,
         poll_ms: int = WORK_OVERLAY_COMMAND_POLL_MS,
         command_event: Event | None = None,
+        runtime_events: RuntimeEventBus | None = None,
     ) -> None:
         self._work_overlay = work_overlay
         self._session_controller = session_controller
         self._poll_seconds = max(0.05, float(poll_ms) / 1000.0)
         self._command_event = command_event
+        self._runtime_events = runtime_events
         self._stop_event = Event()
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
@@ -1192,6 +1199,7 @@ class _WorkOverlayCommandPump:
             self._work_overlay,
             self._session_controller,
             prepare_window=True,
+            runtime_events=self._runtime_events,
         )
         if handled and self._command_event is not None:
             self._command_event.set()
@@ -2298,6 +2306,8 @@ def _renderer_file_watch_specs(
 class _RendererFileEventSource:
     """Coalesce filesystem invalidations for the renderer loop."""
 
+    _OVERFLOW_REASON = "file_watcher.overflow"
+
     def __init__(
         self,
         context: "RuntimeContext",
@@ -2328,9 +2338,9 @@ class _RendererFileEventSource:
         if self._same_path(self._session_path, session_path):
             return
         self._session_path = Path(session_path) if session_path is not None else None
-        self._watcher.update(
-            _renderer_file_watch_specs(self._context, self._session_path)
-        )
+        specs = _renderer_file_watch_specs(self._context, self._session_path)
+        self._watcher.update(specs)
+        self._record_degraded_state(specs)
 
     def take_reasons(self) -> set[str]:
         reasons, _paths = self.take_changes()
@@ -2354,6 +2364,11 @@ class _RendererFileEventSource:
         self._watcher.close()
 
     def _on_change(self, reasons: set[str], paths: set[Path]) -> None:
+        reasons = set(reasons)
+        overflow = self._OVERFLOW_REASON in reasons
+        if overflow:
+            reasons.discard(self._OVERFLOW_REASON)
+            self._record_overflow(reasons, paths)
         with self._lock:
             if self._closed:
                 return
@@ -2372,6 +2387,7 @@ class _RendererFileEventSource:
             else:
                 wake_now = False
         if wake_now:
+            self._publish_runtime_events(reasons, paths)
             self._wake_event.set()
 
     def _flush_debounced_change(self) -> None:
@@ -2379,7 +2395,70 @@ class _RendererFileEventSource:
             self._timer = None
             if self._closed or not self._reasons:
                 return
+            reasons = set(self._reasons)
+            paths = set(self._paths)
+        self._publish_runtime_events(reasons, paths)
         self._wake_event.set()
+
+    def _publish_runtime_events(self, reasons: set[str], paths: set[Path]) -> None:
+        event_bus = getattr(self._context, "runtime_events", None)
+        publish = getattr(event_bus, "publish", None)
+        if not callable(publish):
+            return
+        context = {
+            "reasons": sorted(reasons),
+            "paths": sorted(_session_path_key(path) for path in paths),
+        }
+        session = None
+        if paths:
+            session = _session_path_key(sorted(paths, key=_session_path_key)[0])
+        if reasons.intersection({"session", "sessions-root"}):
+            publish(
+                "session_file_changed",
+                source="file_watcher",
+                session=session,
+                context=context,
+            )
+        if "settings" in reasons:
+            publish(
+                "settings_changed",
+                source="file_watcher",
+                context=context,
+            )
+
+    def _record_overflow(self, reasons: set[str], paths: set[Path]) -> None:
+        registry = getattr(self._context, "runtime_errors", None)
+        if registry is None:
+            return
+        registry.record(
+            source="file_watcher",
+            severity="warning",
+            code="overflow",
+            message="Windows file watcher overflowed; reconciled watched paths.",
+            context={
+                "reasons": sorted(reasons),
+                "paths": sorted(_session_path_key(path) for path in paths),
+            },
+        )
+
+    def _record_degraded_state(self, specs: list[FileWatchSpec]) -> None:
+        registry = getattr(self._context, "runtime_errors", None)
+        if registry is None:
+            return
+        if specs and not self._watcher.event_driven:
+            registry.record(
+                source="file_watcher",
+                severity="warning",
+                code="degraded",
+                message="Renderer file watcher is using polling fallback.",
+                context={
+                    "reasons": sorted({spec.reason for spec in specs}),
+                    "specs": len(specs),
+                    "fallbackPollSeconds": RENDERER_FILE_WATCHER_FALLBACK_SECONDS,
+                },
+            )
+            return
+        registry.resolve(source="file_watcher", code="degraded")
 
     @staticmethod
     def _same_path(left: Path | None, right: Path | None) -> bool:
@@ -2708,6 +2787,7 @@ def _handle_work_overlay_commands(
     session_controller: SessionSwitchController,
     *,
     prepare_window: bool = True,
+    runtime_events: RuntimeEventBus | None = None,
 ) -> int:
     take_commands = getattr(work_overlay, "take_commands", None)
     if not callable(take_commands):
@@ -2719,6 +2799,7 @@ def _handle_work_overlay_commands(
             session_controller,
             prepare_window=prepare_window,
         )
+        _publish_work_overlay_command_event(runtime_events, command, result)
         if result is not None and (
             bool(command.get("current")) or result.ok or result.status == "already-active"
         ):
@@ -2727,6 +2808,30 @@ def _handle_work_overlay_commands(
                 mark_completed(command)
         handled += 1
     return handled
+
+
+def _publish_work_overlay_command_event(
+    runtime_events: RuntimeEventBus | None,
+    command: Mapping[str, object],
+    result: SessionSwitchResult | None,
+) -> None:
+    publish = getattr(runtime_events, "publish", None)
+    if not callable(publish):
+        return
+    publish(
+        "overlay_command_received",
+        source="work_overlay",
+        session=str(command.get("sessionId") or "") or None,
+        context={
+            "action": str(command.get("action") or ""),
+            "sessionId": str(command.get("sessionId") or ""),
+            "title": str(command.get("targetTitle") or command.get("title") or ""),
+            "current": bool(command.get("current")),
+            "handled": result is not None,
+            "ok": bool(getattr(result, "ok", False)) if result is not None else False,
+            "status": str(getattr(result, "status", "") or "") if result is not None else "",
+        },
+    )
 
 
 def _read_pid(path: Path) -> int | None:
@@ -3882,9 +3987,15 @@ class RuntimeContext:
     session_resolver: SessionPathResolver
     usage_cache: UsageSummaryCache
     pre_send_estimator: PreSendEstimator | None = None
+    runtime_events: RuntimeEventBus = field(default_factory=RuntimeEventBus)
+    runtime_errors: RuntimeErrorRegistry = field(default_factory=RuntimeErrorRegistry)
     visible_app_error_cache: _VisibleAppErrorCache = field(
         default_factory=_VisibleAppErrorCache
     )
+
+    def __post_init__(self) -> None:
+        if self.runtime_errors.event_bus is None:
+            self.runtime_errors.event_bus = self.runtime_events
 
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
@@ -4439,6 +4550,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         session_resolver=session_resolver,
         usage_cache=UsageSummaryCache(parser),
         pre_send_estimator=pre_send_estimator,
+        runtime_errors=RuntimeErrorRegistry(),
     )
 
 
@@ -4461,6 +4573,80 @@ def _apply_visible_app_error(snapshot: ParsedSession, message: str) -> None:
         snapshot.request.started_at = snapshot.task_started_at
 
 
+def _runtime_debug_enabled() -> bool:
+    value = os.environ.get(RUNTIME_DEBUG_ENV)
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    return normalized not in {"", "0", "false", "no", "off"}
+
+
+def _record_active_session_runtime_error(
+    context: RuntimeContext,
+    selection_source: str,
+    session_path: Path | None,
+) -> None:
+    registry = getattr(context, "runtime_errors", None)
+    if registry is None:
+        return
+    source = str(selection_source or "")
+    if source.startswith("renderer-unmatched"):
+        tracker = getattr(context, "active_session_tracker", None)
+        registry.record(
+            source="active_session",
+            severity="error",
+            code="unmatched_thread",
+            message="Renderer active session could not be mapped to a local JSONL session.",
+            context={
+                "selectionSource": source,
+                "sessionPath": str(session_path or ""),
+                "threadId": str(getattr(tracker, "latest_session_id", "") or ""),
+                "title": str(getattr(tracker, "latest_title", "") or ""),
+                "trackerSource": str(getattr(tracker, "latest_source", "") or ""),
+            },
+        )
+        return
+    if source.startswith("renderer:") or is_new_session_source(source):
+        registry.resolve(source="active_session", code="unmatched_thread")
+
+
+def _record_cdp_update_failure(
+    context: RuntimeContext,
+    client: RendererHudClient,
+    *,
+    failures: int,
+) -> None:
+    registry = getattr(context, "runtime_errors", None)
+    if registry is None:
+        return
+    registry.record(
+        source="cdp",
+        severity="error",
+        code="update_failed",
+        message="Renderer HUD payload update failed.",
+        context={
+            "failures": int(failures),
+            "status": str(getattr(client, "last_status", "") or ""),
+            "error": str(getattr(client, "last_error", "") or ""),
+            "timeoutSeconds": float(getattr(client, "timeout_seconds", 0.0) or 0.0),
+        },
+    )
+
+
+def _resolve_cdp_update_failure(context: RuntimeContext) -> None:
+    registry = getattr(context, "runtime_errors", None)
+    if registry is not None:
+        registry.resolve(source="cdp", code="update_failed")
+
+
+def _runtime_errors_payload_for_context(context: RuntimeContext) -> list[dict[str, object]]:
+    registry = getattr(context, "runtime_errors", None)
+    if registry is None:
+        return []
+    payload = getattr(registry, "to_payload", None)
+    return payload() if callable(payload) else []
+
+
 def build_snapshot(
     context: RuntimeContext,
     *,
@@ -4469,9 +4655,12 @@ def build_snapshot(
 ) -> ParsedSession:
     context.reload_user_config()
     session_path, selection_source = context.session_resolver.resolve()
+    _record_active_session_runtime_error(context, selection_source, session_path)
 
     if session_path is None:
-        if context.session_resolver.session_id:
+        if is_new_session_source(selection_source):
+            snapshot = ParsedSession(status="waiting")
+        elif context.session_resolver.session_id:
             snapshot = ParsedSession(
                 status="missing",
                 error=(
@@ -4578,9 +4767,53 @@ def _apply_pre_send_and_activity(
         # Keep the context-file scan anchored to the active session's cwd.
         if snapshot.cwd:
             estimator.set_project_roots([snapshot.cwd])
-        history_tokens = int(snapshot.confirmed.cumulative_input or 0)
-        snapshot.estimate_base = estimator.latest().with_session_history(history_tokens)
+        base = estimator.latest()
+        confirmed = snapshot.confirmed
+        if confirmed.last_input > 0:
+            # 已有真实请求：`last_input` 就是上一次实际发送的完整上下文（历史 +
+            # 系统提示 + 工具 + 协议开销都已包含在内），直接用它作为"会话上下文"，
+            # 不再另加 C/D/F，否则会重复计算。缓存拆分也用实测的命中/未命中量。
+            base = base.with_confirmed_context(
+                cached_tokens=confirmed.last_cached,
+                uncached_tokens=max(0, confirmed.last_input - confirmed.last_cached),
+            )
+        else:
+            # 会话首条消息：无真实 token_count，用冷启动估算（历史累加=0，仅 C/D/F）。
+            base = base.with_session_history(int(confirmed.cumulative_input or 0))
+        snapshot.estimate_base = _apply_pre_send_pricing(context, snapshot, base)
     snapshot.reading_activity = detect_reading_activity(snapshot)
+
+
+def _apply_pre_send_pricing(
+    context: RuntimeContext,
+    snapshot: ParsedSession,
+    base: "BaseEstimate",
+) -> "BaseEstimate":
+    """Attach per-token input/cached prices and the real cache-hit rate.
+
+    Prices come from the user-configured cost estimator (so custom price tables
+    apply). The cache-hit rate is the ratio measured on the most recent real
+    request (``last_cached / last_input``); it is 0 on the very first turn.
+    """
+    model = snapshot.request.model or ""
+    estimator = context.parser.cost_estimator
+    million = 1_000_000
+    # input 单价：100 万个全未命中 input token 的成本 / 100 万。
+    input_cost = estimator.calculate(model, million, 0, 0, 0)
+    # cached 单价：100 万个全命中 input token 的成本 / 100 万。
+    cached_cost = estimator.calculate(model, million, million, 0, 0)
+    if input_cost is None or cached_cost is None:
+        return base
+    confirmed = snapshot.confirmed
+    cache_rate = 0.0
+    if confirmed.last_input > 0:
+        cache_rate = min(1.0, max(0.0, confirmed.last_cached / confirmed.last_input))
+    return base.with_pricing(
+        input_price_per_token=input_cost / million,
+        cached_price_per_token=cached_cost / million,
+        cache_hit_rate=cache_rate,
+        model_name=model,
+    )
 
 
 def snapshot_to_text(snapshot: ParsedSession, compact: bool = False) -> str:
@@ -4944,11 +5177,64 @@ def run_renderer_hud_session(
             command_refresh_requested = Event()
             active_session_refresh_requested = Event()
             command_pump: _WorkOverlayCommandPump | None = None
+            runtime_event_unsubscribe = None
             bridge_commands: deque[dict[str, object]] = deque()
             bridge_command_lock = threading.Lock()
 
-            def wake_active_session_refresh() -> None:
+            def request_active_session_refresh() -> None:
                 active_session_refresh_requested.set()
+                command_refresh_requested.set()
+
+            pre_send_estimator = getattr(context, "pre_send_estimator", None)
+            if pre_send_estimator is not None:
+                pre_send_estimator.update_callback = (
+                    lambda _estimate: request_active_session_refresh()
+                )
+
+            runtime_event_bus = getattr(context, "runtime_events", None)
+            runtime_event_subscribe = getattr(runtime_event_bus, "subscribe", None)
+            runtime_event_publish = getattr(runtime_event_bus, "publish", None)
+            if callable(runtime_event_subscribe):
+
+                def wake_for_runtime_event(event: object) -> None:
+                    event_type = str(getattr(event, "type", "") or "")
+                    if event_type in {
+                        "runtime_error",
+                        "overlay_command_received",
+                        "session_file_changed",
+                        "settings_command_received",
+                        "settings_changed",
+                    }:
+                        command_refresh_requested.set()
+                    elif event_type == "active_session_changed":
+                        request_active_session_refresh()
+
+                runtime_event_unsubscribe = runtime_event_subscribe(
+                    wake_for_runtime_event
+                )
+
+            def publish_active_session_changed(reason: str) -> None:
+                if callable(runtime_event_publish):
+                    runtime_event_publish(
+                        "active_session_changed",
+                        source="active_session",
+                        context={"reason": reason},
+                    )
+                    return
+                request_active_session_refresh()
+
+            def publish_settings_command_received(command: dict[str, object]) -> None:
+                if callable(runtime_event_publish):
+                    runtime_event_publish(
+                        "settings_command_received",
+                        source="settings_bridge",
+                        context={
+                            "action": str(command.get("action") or ""),
+                            "id": str(command.get("id") or ""),
+                            "command": dict(command),
+                        },
+                    )
+                    return
                 command_refresh_requested.set()
 
             tracker_change_callback = getattr(
@@ -4957,25 +5243,32 @@ def run_renderer_hud_session(
                 None,
             )
             if callable(tracker_change_callback):
-                tracker_change_callback(wake_active_session_refresh)
+                tracker_change_callback(
+                    lambda: publish_active_session_changed("tracker_callback")
+                )
 
             def enqueue_renderer_command(command: dict[str, object]) -> None:
                 with bridge_command_lock:
                     bridge_commands.append(dict(command))
-                command_refresh_requested.set()
+                publish_settings_command_received(dict(command))
 
             def observe_renderer_active_session(payload: dict[str, object]) -> None:
                 tracker = getattr(context, "active_session_tracker", None)
                 observer = getattr(tracker, "observe_conversation_ref", None)
                 if not callable(observer):
                     return
-                changed = observer(
-                    session_id=str(payload.get("sessionId") or payload.get("session_id") or ""),
-                    title=str(payload.get("title") or ""),
-                    source="renderer",
-                )
+                observer_kwargs = {
+                    "session_id": str(
+                        payload.get("sessionId") or payload.get("session_id") or ""
+                    ),
+                    "title": str(payload.get("title") or ""),
+                    "source": "renderer",
+                }
+                if bool(payload.get("newSession") or payload.get("new_session")):
+                    observer_kwargs["new_session"] = True
+                changed = observer(**observer_kwargs)
                 if changed:
-                    wake_active_session_refresh()
+                    publish_active_session_changed("renderer_bridge")
 
             active_session_callback_setter = getattr(
                 client,
@@ -4984,6 +5277,24 @@ def run_renderer_hud_session(
             )
             if callable(active_session_callback_setter):
                 active_session_callback_setter(observe_renderer_active_session)
+
+            def observe_renderer_attachments(payload: dict[str, object]) -> None:
+                estimator = getattr(context, "pre_send_estimator", None)
+                if estimator is None:
+                    return
+                estimator.set_attachments(payload)
+                # 附件变化通常伴随 token 变化，唤醒一次刷新让浮窗尽快重绘。
+                wake_active_session_refresh()
+
+            # 页面 CSP 拦截了到本地桥的 fetch，因此优先用 CDP binding 接收附件，
+            # HTTP 桥作兜底（非渲染模式或旧版页面仍可用）。
+            attachments_callback_setter = getattr(
+                client,
+                "set_attachments_callback",
+                None,
+            )
+            if callable(attachments_callback_setter):
+                attachments_callback_setter(observe_renderer_attachments)
 
             def take_renderer_bridge_command() -> dict[str, object] | None:
                 with bridge_command_lock:
@@ -4996,6 +5307,7 @@ def run_renderer_hud_session(
                 restart_callback=restart_requested.set,
                 command_callback=enqueue_renderer_command,
                 active_session_callback=observe_renderer_active_session,
+                attachments_callback=observe_renderer_attachments,
             )
             bridge_url = bridge.start()
 
@@ -5218,6 +5530,7 @@ def run_renderer_hud_session(
                     work_overlay,
                     session_controller,
                     command_event=command_refresh_requested,
+                    runtime_events=getattr(context, "runtime_events", None),
                 )
                 file_events = _RendererFileEventSource(
                     context,
@@ -5376,14 +5689,22 @@ def run_renderer_hud_session(
                             settings_bridge_url=bridge_url,
                             settings_command_status=settings_command_status,
                             update_state=update_state,
+                            debug=_runtime_debug_enabled(),
+                            runtime_errors=_runtime_errors_payload_for_context(context),
                             work_overlay_selectable_max=_work_overlay_screen_max_items(),
                             desktop_overlay_dependency=_desktop_overlay_dependency_status(),
                         ):
                             settings_command_status = {}
                             failures = 0
                             runtime_failure_reported = False
+                            _resolve_cdp_update_failure(context)
                         else:
                             failures += 1
+                            _record_cdp_update_failure(
+                                context,
+                                client,
+                                failures=failures,
+                            )
                             _LOGGER.info(
                                 "renderer_hud_update_failed failures=%s status=%s error=%s",
                                 failures,
@@ -5451,6 +5772,8 @@ def run_renderer_hud_session(
                 local_loading.close()
                 return 130
             finally:
+                if callable(runtime_event_unsubscribe):
+                    runtime_event_unsubscribe()
                 if callable(tracker_change_callback):
                     tracker_change_callback(None)
                 client.close()

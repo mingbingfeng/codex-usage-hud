@@ -18,6 +18,7 @@ from typing import Any
 FileChangeCallback = Callable[[set[str], set[Path]], None]
 _LOGGER = logging.getLogger("codex_usage_hud.file_watcher")
 _LOGGER.addHandler(logging.NullHandler())
+_OVERFLOW_REASON = "file_watcher.overflow"
 
 
 @dataclass(frozen=True)
@@ -259,10 +260,26 @@ class _WindowsDirectoryWorker(_ThreadWorker):
                 )
                 if not ok or self._stop_event.is_set():
                     break
+                if bytes_returned.value == 0:
+                    _LOGGER.warning(
+                        "file_watcher_windows_overflow directory=%s recursive=%s",
+                        self._directory,
+                        self._recursive,
+                    )
+                    self._emit_overflow_reconciliation()
+                    continue
                 changed = _parse_windows_notifications(self._directory, buffer)
                 self._emit_matching(changed)
         finally:
             self.close()
+
+    def _emit_overflow_reconciliation(self) -> None:
+        reasons = {spec.reason for spec in self._specs}
+        paths: set[Path] = set()
+        for spec in self._specs:
+            paths.update(_reconciliation_paths_for_spec(spec))
+        if reasons:
+            self._callback(reasons | {_OVERFLOW_REASON}, paths)
 
     def _emit_matching(self, changed_paths: set[Path]) -> None:
         reasons: set[str] = set()
@@ -434,6 +451,35 @@ def _poll_token_for_spec(spec: FileWatchSpec) -> object:
             ]
         )
     return tuple(_stat_token(path) for path in paths)
+
+
+def _reconciliation_paths_for_spec(spec: FileWatchSpec) -> set[Path]:
+    if spec.kind == "tree":
+        return _tree_paths(spec.path, spec.suffixes)
+    paths = {spec.path}
+    if spec.path.suffix.lower() in {".sqlite", ".db"}:
+        paths.update(
+            {
+                spec.path.with_name(spec.path.name + "-wal"),
+                spec.path.with_name(spec.path.name + "-shm"),
+            }
+        )
+    return paths
+
+
+def _tree_paths(path: Path, suffixes: tuple[str, ...]) -> set[Path]:
+    if not path.exists():
+        return set()
+    values: set[Path] = set()
+    try:
+        for candidate in path.rglob("*"):
+            if suffixes and candidate.suffix.lower() not in suffixes:
+                continue
+            if candidate.is_file():
+                values.add(candidate)
+    except OSError:
+        return set()
+    return values
 
 
 def _tree_token(path: Path, suffixes: tuple[str, ...]) -> tuple[tuple[str, int, int], ...]:

@@ -28,12 +28,14 @@ from codex_usage_hud.platforms.base import BasePlatform
 class FakePlatform(BasePlatform):
     def __init__(self, latest_session: Path | None = None) -> None:
         self.latest_session = latest_session
+        self.detect_calls = 0
 
     def get_codex_data_dir(self) -> Path:
         return Path.home() / ".codex"
 
     def detect_active_session(self, sessions_root: Path) -> Path | None:
         del sessions_root
+        self.detect_calls += 1
         return self.latest_session
 
 
@@ -671,6 +673,67 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(platform.ref_calls, 0)
             self.assertEqual(tracker.latest_source, "renderer:Renderer Selected Thread")
 
+    def test_renderer_authoritative_tracker_skips_cdp_ref_without_renderer_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-cdp-thread-123.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            platform = FakeCdpRefPlatform("cdp-thread-123", "CDP Thread")
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            self.assertIsNone(tracker.current_path())
+            self.assertEqual(platform.ref_calls, 0)
+            self.assertEqual(tracker.latest_source, "renderer-waiting")
+
+    def test_renderer_new_session_clears_previous_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            stale_path = sessions_root / "rollout-stale-thread.jsonl"
+            stale_path.write_text("{}\n", encoding="utf-8")
+            platform = FakeCdpRefPlatform("stale-thread", "Stale CDP Thread")
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+            )
+            tracker.latest_title = "Stale Thread"
+            tracker.latest_session_id = "stale-thread"
+            tracker.latest_path = stale_path
+            tracker._mapped_title = "Stale Thread"
+            tracker._renderer_session_id = "stale-thread"
+            tracker._renderer_title = "Stale Thread"
+            tracker._renderer_path = stale_path
+
+            changed = tracker.observe_conversation_ref(
+                "",
+                "",
+                source="renderer",
+                new_session=True,
+            )
+
+            self.assertTrue(changed)
+            self.assertIsNone(tracker.current_path())
+            self.assertEqual(platform.ref_calls, 0)
+            self.assertEqual(tracker.latest_title, "")
+            self.assertEqual(tracker.latest_session_id, "")
+            self.assertIsNone(tracker.latest_path)
+            self.assertEqual(tracker.latest_source, "renderer-new-session")
+
     def test_active_session_change_callback_runs_for_background_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -783,6 +846,59 @@ class SessionPathResolverTests(unittest.TestCase):
             self.assertEqual(path, selected)
             self.assertEqual(source, "ui:selected")
 
+    def test_resolver_does_not_fallback_to_activity_for_renderer_new_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            latest = root / "latest.jsonl"
+            latest.write_text("{}\n", encoding="utf-8")
+            resolver = SessionPathResolver(
+                platform=FakePlatform(latest_session=latest),
+                sessions_root=root,
+                active_session_tracker=_TrackerStub(
+                    None,
+                    source="renderer-new-session",
+                ),
+            )
+            resolver.auto_session_file = latest
+
+            path, source = resolver.resolve()
+
+            self.assertIsNone(path)
+            self.assertEqual(source, "renderer-new-session")
+            self.assertIsNone(resolver.auto_session_file)
+
+    def test_resolver_does_not_fallback_to_activity_while_renderer_tracker_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            latest = sessions_root / "latest.jsonl"
+            latest.write_text("{}\n", encoding="utf-8")
+            platform = FakeCdpRefPlatform("cdp-thread-123", "CDP Thread")
+            platform.latest_session = latest
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+            resolver = SessionPathResolver(
+                platform=platform,
+                sessions_root=sessions_root,
+                active_session_tracker=tracker,
+            )
+
+            path, source = resolver.resolve()
+
+            self.assertIsNone(path)
+            self.assertEqual(source, "renderer-waiting")
+            self.assertIsNone(resolver.auto_session_file)
+            self.assertEqual(platform.ref_calls, 0)
+            self.assertEqual(platform.detect_calls, 0)
+
     def test_resolver_waits_for_idle_before_switching_to_newer_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -854,7 +970,7 @@ class SessionPathResolverTests(unittest.TestCase):
             self.assertEqual(path, latest)
             self.assertEqual(source, "ui-unmatched+activity")
 
-    def test_resolver_bypasses_idle_gate_for_unresolved_renderer_switch(self) -> None:
+    def test_resolver_does_not_fallback_to_activity_for_unresolved_renderer_switch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             current = root / "current.jsonl"
@@ -866,8 +982,9 @@ class SessionPathResolverTests(unittest.TestCase):
             os.utime(current, (now, now))
             os.utime(latest, (now + 5, now + 5))
 
+            platform = FakePlatform(latest_session=latest)
             resolver = SessionPathResolver(
-                platform=FakePlatform(latest_session=latest),
+                platform=platform,
                 sessions_root=root,
                 active_session_tracker=_TrackerStub(None, source="renderer-unmatched"),
                 auto_switch_idle_seconds=30.0,
@@ -876,8 +993,10 @@ class SessionPathResolverTests(unittest.TestCase):
 
             path, source = resolver.resolve()
 
-            self.assertEqual(path, latest)
-            self.assertEqual(source, "renderer-unmatched+activity")
+            self.assertIsNone(path)
+            self.assertEqual(source, "renderer-unmatched")
+            self.assertIsNone(resolver.auto_session_file)
+            self.assertEqual(platform.detect_calls, 0)
 
     def test_resolver_switches_to_archived_latest_when_tracker_is_unmatched(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

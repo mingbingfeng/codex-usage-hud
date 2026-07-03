@@ -1,0 +1,72 @@
+{
+  "schema": "codex-usage-hud.renderer-latency-baseline.v1",
+  "measured_at": "2026-07-03T06:53:50.480779Z",
+  "project_root": "E:\\Project\\codex-usage-hud",
+  "sessions_root": "C:\\Users\\zjxqm\\.codex\\sessions",
+  "session_file": "C:\\Users\\zjxqm\\.codex\\sessions\\2026\\07\\03\\rollout-2026-07-03T14-48-53-019f26bc-b231-7181-8ed6-25525ea3cf54.jsonl",
+  "used_synthetic_session": false,
+  "session_bytes": 545644,
+  "session_lines": 132,
+  "payload_keys": 35,
+  "operations": [
+    {
+      "name": "current_session_parse_full",
+      "iterations": 1,
+      "min_ms": 7.111,
+      "median_ms": 7.111,
+      "p90_ms": 7.111,
+      "max_ms": 7.111,
+      "mean_ms": 7.111
+    },
+    {
+      "name": "renderer_payload_build",
+      "iterations": 1,
+      "min_ms": 1.141,
+      "median_ms": 1.141,
+      "p90_ms": 1.141,
+      "max_ms": 1.141,
+      "mean_ms": 1.141
+    },
+    {
+      "name": "usage_summary_full_scan",
+      "iterations": 1,
+      "min_ms": 69.765,
+      "median_ms": 69.765,
+      "p90_ms": 69.765,
+      "max_ms": 69.765,
+      "mean_ms": 69.765
+    },
+    {
+      "name": "usage_summary_refresh_current_file",
+      "iterations": 1,
+      "min_ms": 2.708,
+      "median_ms": 2.708,
+      "p90_ms": 2.708,
+      "max_ms": 2.708,
+      "mean_ms": 2.708
+    },
+    {
+      "name": "file_watcher_poll_signature",
+      "iterations": 1,
+      "min_ms": 55.724,
+      "median_ms": 55.724,
+      "p90_ms": 55.724,
+      "max_ms": 55.724,
+      "mean_ms": 55.724
+    },
+    {
+      "name": "append_then_parse_and_payload",
+      "iterations": 1,
+      "min_ms": 20.158,
+      "median_ms": 20.158,
+      "p90_ms": 20.158,
+      "max_ms": 20.158,
+      "mean_ms": 20.158
+    }
+  ],
+  "notes": [
+    "This local harness does not measure live CDP transport, renderer DOM paint, or user-visible end-to-end latency.",
+    "append_then_parse_and_payload writes only to a temporary copy of the selected session file.",
+    "file_watcher_poll_signature represents the polling fallback scan cost, not native watcher delivery latency."
+  ]
+}

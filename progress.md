@@ -1,136 +1,172 @@
-# 进度日志：PySide6 桌面级会话气泡恢复
+# 进度日志：Renderer HUD 运行时重构与性能调优
 
-## 会话：2026-06-26
+## 会话：2026-07-03
 
-### 本次推进目标
-按用户给定计划恢复 PySide6 桌面级会话气泡：主 HUD 继续 renderer-only，会话方形气泡/完成态圆气泡通过可选 PySide6 helper 恢复；未安装 PySide6 时不影响 renderer HUD。
+### 本次目标
+响应用户要求，把后续 HUD 工作从补丁式修复切换为长期重构：提升响应速度、降低维护复杂度、删除默认 fallback 链路，并在 DEBUG 模式下通过错误 HUD 暴露失败。
 
-### 本次已完成
-- **状态：** 自动化实现完成；Windows 实机 PySide6 overlay 验证已通过，macOS 实机验证待做。
-- 读取 `$guihua`、`$zhongwen` 技能说明。
-- 恢复并修正三份任务文档：
-  - `task_plan.md`
-  - `findings.md`
-  - `progress.md`
-- 确认用户最终方向：后续长期采用 Qt/PySide6 桌面级气泡，不采用沿 Codex App 边框绘制方案。
-- `DesktopWorkOverlay` 恢复为 optional PySide6 desktop overlay。
-- renderer 会话重新按 `_work_overlay_item_limit_for_context(context)` 创建 overlay。
-- `work_overlay_max_items <= 0` 时桌面气泡保持关闭。
-- PySide6 不可用时不启动 helper，并记录一次 `work_overlay_unavailable` renderer diagnostic。
-- helper 异常退出或启动失败后增加 60s backoff。
-- `work_overlay_qt.py` 改为 helper 路径惰性导入，默认 CLI import 不加载 PySide6 / Qt overlay 模块。
-- `pyproject.toml` 新增 optional extra：`desktop-overlay = ["PySide6>=6.8"]`。
-- README / README_EN 明确 `codex-usage-hud[desktop-overlay]` 和 `work_overlay_max_items` 的含义。
-- renderer 设置页文案改为“PySide6 桌面气泡数量（0 为关闭）”，并新增“气泡依赖 PySide6”状态块。
-- 增加 PySide6 可用时 helper 启动单测。
-- 移除 renderer 设置页里的“HUD 显示方案”字段和选项。
-- “PySide6 桌面气泡数量（0 为关闭）”字段已左移占用原显示方案位置。
-- 新增“气泡依赖 PySide6”状态块：
-  - 已安装时显示 PySide6 版本号。
-  - 未安装时显示“需要安装环境”、立即安装、已安装立即启用。
-  - 需要重启时显示“立即重启”。
-- 新增 `installDesktopOverlay` 和 `enableDesktopOverlay` 设置命令。
-- 已提交并推送 `d597be3`：`恢复可选 PySide6 桌面气泡` 到 `origin/renderer-only`。
-- 用户确认 Windows PySide6 桌面气泡实机验证通过。
+### 已完成
+- 使用 `guihua` 规划技能恢复并切换规划上下文。
+- 确认 codebase-memory-mcp canonical 项目：
+  - `E-Project-codex-usage-hud`
+  - root path `E:/Project/codex-usage-hud`
+- 清理项目根目录无关临时截图文件：
+  - `.clip_composer.png`
+  - `.clip_now.png`
+  - `.clipboard_shot.png`
+- 将 `task_plan.md` 切换为本次长期重构计划。
+- 将 `findings.md` 切换为本次 renderer/session/usage/overlay 链路发现。
+- 新增正式项目文档：
+  - `docs/HUD_RUNTIME_REFACTOR_PLAN.md`
+- 记录长期方向：
+  - renderer 权威
+  - 事件驱动
+  - 失败显式
+  - DEBUG 错误 HUD
+  - JSONL 增量解析
+  - overlay IPC push 化
+- 新增阶段 0 性能基线工具：
+  - `tools/measure_renderer_latency.py`
+  - `tests/test_measure_renderer_latency.py`
+- 运行本机低迭代 smoke，并输出：
+  - `renderer_latency_baseline.json`
+  - `renderer_latency_baseline.md`
+- 新增 fallback 清单：
+  - `docs/FALLBACK_INVENTORY.md`
+- 新增 runtime error 诊断模型：
+  - `src/codex_usage_hud/core/runtime_errors.py`
+  - `RuntimeErrorEvent`
+  - `RuntimeErrorRegistry`
+- 新增 runtime event bus：
+  - `src/codex_usage_hud/core/runtime_events.py`
+  - `RuntimeEvent`
+  - `RuntimeEventBus`
+- `RuntimeContext` 现在持有共享 `runtime_events`，并把 `runtime_errors` 绑定到同一个 bus。
+- `RuntimeErrorRegistry.record/resolve` 会发布 `runtime_error` event；renderer loop 订阅该事件并唤醒刷新。
+- Renderer payload 新增 DEBUG 诊断字段：
+  - `debug`
+  - `runtimeErrors`
+- Renderer 注入脚本新增 DEBUG runtime error panel：
+  - `codex-usage-hud-runtime-errors`
+  - `renderRuntimeErrors`
+- 接入首批 runtime error 来源：
+  - `active_session.unmatched_thread`
+  - `file_watcher.degraded`
+  - `file_watcher.overflow`
+  - `cdp.update_failed`
+- Windows file watcher 现在处理 `ReadDirectoryChangesW` 的 `bytes_returned == 0` 溢出信号：
+  - 立即枚举当前 worker specs 的匹配路径作为补偿。
+  - 回调业务 reasons 和补偿 paths。
+  - 通过 `_RendererFileEventSource` 记录 `file_watcher.overflow` runtime error。
+  - overflow 哨兵不会进入普通 `file_change_reasons`，避免污染刷新分支判断。
+- Active session resolver 现在不再让 `renderer-unmatched` 落到 latest JSONL activity fallback：
+  - 不调用 `platform.detect_active_session()`。
+  - 清空 `auto_session_file`。
+  - 返回 `(None, "renderer-unmatched")`。
+  - `build_snapshot()` 继续记录 `active_session.unmatched_thread` runtime error。
+- Renderer-authoritative tracker 现在不再让等待态落到 CDP/native/latest fallback：
+  - `start_background_watcher=False` 且无 renderer selection 时返回 `renderer-waiting`。
+  - 不调用 `platform.get_active_conversation_ref()`。
+  - resolver 看到 `renderer-waiting` 时不调用 `platform.detect_active_session()`。
+- 新增/扩展测试：
+  - `tests/test_runtime_errors.py`
+  - `tests/test_renderer_hud.py`
+  - `tests/test_ui.py`
+  - `tests/test_file_watcher.py`
 
-### 已验证
-| 验证 | 结果 | 备注 |
-|------|------|------|
-| `python -m pytest tests/test_renderer_hud.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_install_desktop_overlay_starts_optional_dependency_install tests/test_ui.py::DaemonLifecycleTests::test_renderer_enable_desktop_overlay_rechecks_and_enables_without_restart tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available -q` | passed | 覆盖设置页脚本、新安装/启用命令和 overlay 可用性分支 |
-| `python -m pytest tests/test_config.py tests/test_renderer_hud.py tests/test_build_exe.py tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_starts_when_pyside6_available tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep tests/test_ui.py::DaemonLifecycleTests::test_cli_import_does_not_eagerly_import_qt_hud -q` | passed | 覆盖 optional overlay、导入隔离、renderer 会话创建 overlay |
-| `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py tests/test_platforms.py -q` | passed | 覆盖 renderer 设置、UI 回归、打包命令、平台 mock |
-| `python -m pytest tests/test_renderer_hud.py tests/test_ui.py tests/test_build_exe.py -q` | passed | 设置页调整后的 UI/打包相关回归 |
-| `python -m pytest -q` | passed | 默认全量单测通过 |
-| `python -m compileall -q src tests tools` | passed | Python 编译检查通过 |
-| `git diff --check` | passed | 无 whitespace 错误 |
-| Windows 手动验证：`codex-hud --daemon` + PySide6 desktop overlay | passed | 用户实机确认桌面气泡无问题 |
+### 当前结论
+- 当前实现已有事件驱动雏形，但仍保留周期性刷新和多层 fallback。
+- 用户明确希望失败直接暴露，所以后续应先建设可观察性和错误 HUD，再逐步删除 fallback。
+- 这次重构的第一刀不应直接删兜底，而应先定义 runtime error model、latency markers 和 fallback inventory，确保删除时问题能被看见。
+- 阶段 0 已完成：已有可重复运行的本地基线 harness 和 fallback inventory。
+- 低迭代本机基线显示：当前 session full parse 约 7.1ms，payload build 约 1.1ms，usage full scan 约 69.8ms，polling fallback scan 约 55.7ms，append 后 full parse+payload 约 20.2ms。
+- DEBUG 错误 HUD 的基础链路已存在：runtime registry -> payload -> renderer panel。
+- 当前 `runtime_error` 已接入 event bus 并可唤醒 renderer loop。
+- `active_session_changed` 已接入 event bus，tracker callback 和 renderer bridge changed 都会发布事件并唤醒 renderer loop。
+- `_RendererFileEventSource` 已接入 event bus，coalesced file watcher wake 会发布 `session_file_changed` / `settings_changed`，renderer loop 会订阅并唤醒。
+- settings bridge command 已接入 event bus，会发布 `settings_command_received`。
+- work overlay command pump 已接入 event bus，会发布 `overlay_command_received`。
+- settings command 的 localStorage polling fallback 和 overlay command pump 的 60ms polling 仍未删除。
+- renderer mode 下的 CDP/native active ref 和 latest JSONL fallback 已隔离；后续应继续拆 polling fallback，并调研 app-server active thread 能力。
 
-### 剩余工作
-- macOS 手动验证：安装 PySide6 后运行 `codex-hud --daemon`，验证 Codex debug/CDP 启动、PySide6 overlay 置顶、点击切换会话、renderer HUD 注入。
-- 后续发行策略：决定 Windows/macOS 安装包是否内置 PySide6，或继续只通过 optional extra 提供桌面气泡。
-- 后续平台化自动更新 UI/逻辑，避免 macOS 复用 Windows installer 语义。
+### 未执行
+- 未将 renderer 主循环改成事件总线 dispatcher。
+- 未做真实 CDP/DOM paint 端到端延迟测量；当前 harness 只覆盖本地 parser/payload/cache/fallback scan。
+- 已删除 `renderer-unmatched+activity` fallback；renderer-unmatched 现在直接进入显式错误路径。
 
-### macOS 手动验证命令
-```powershell
-python -m pip install -e ".[desktop-overlay]"
-codex-hud --daemon
-```
+### 下一步
+1. 继续拆 settings command polling 和 overlay command polling。
+2. 调研 Codex app-server active thread 能力，决定是否作为显式权威源候选。
 
-确认项：
-- renderer HUD 注入 Codex App。
-- 运行中的会话显示方形桌面气泡。
-- 完成会话收缩为圆形完成态气泡。
-- dismiss 后不会重复出现已关闭气泡。
-- 点击气泡触发 `activateSession` 并切换到目标会话。
-- 关闭 HUD 后 helper 子进程和 state file 清理正常。
+### 本轮验证
+- `python -m pytest tests/test_measure_renderer_latency.py -q` 通过。
+- `python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-output renderer_latency_baseline.json --markdown-output renderer_latency_baseline.md` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_measure_renderer_latency.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_file_watcher.py::FileChangeWatcherTests::test_windows_overflow_reconciles_matching_specs -q` 先失败（缺少 `_emit_overflow_reconciliation`），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_overflow_without_polluting_reasons -q` 先失败（overflow 哨兵进入普通 reasons；随后暴露 `_path_key` 作用域问题），实现后通过。
+- `python -m pytest tests/test_file_watcher.py -q` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_degraded_polling tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_overflow_without_polluting_reasons tests/test_runtime_errors.py -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_publishes_runtime_events -q` 先失败（file watcher 未发布 runtime events），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event -q` 先失败（renderer loop 未订阅 `settings_changed`），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_publishes_runtime_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event -q` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_debounces_native_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_publishes_runtime_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_degraded_polling tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_overflow_without_polluting_reasons tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event tests/test_file_watcher.py tests/test_runtime_errors.py -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_bridge_settings_command_without_cdp_poll -q` 先失败（settings bridge command 未发布 `settings_command_received`），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_bridge_settings_command_without_cdp_poll tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_publishes_runtime_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_keeps_wakeup_for_active_session_event_during_wait tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event tests/test_runtime_errors.py -q` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep -q` 先失败（work overlay command pump 未发布 `overlay_command_received`），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_bridge_settings_command_without_cdp_poll tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_publishes_runtime_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep tests/test_ui.py::BudgetHelperTests::test_tk_work_overlay_command_pump_prepares_window_before_switching_session tests/test_ui.py::BudgetHelperTests::test_current_session_overlay_command_refocuses_codex_after_already_active_result tests/test_runtime_errors.py -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_tracker_active_session_callback -q` 先失败（缺少 `active_session_changed` 事件发布），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_keeps_wakeup_for_active_session_event_during_wait tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_tracker_active_session_callback -q` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_active_session_bridge_event_without_cdp_poll tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_forwards_renderer_new_session_marker tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_keeps_wakeup_for_active_session_event_during_wait tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_tracker_active_session_callback tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event -q` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_active_session_bridge_event_without_cdp_poll tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_forwards_renderer_new_session_marker tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_keeps_wakeup_for_active_session_event_during_wait tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_tracker_active_session_callback tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event tests/test_runtime_errors.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_active_session.py::SessionPathResolverTests::test_resolver_does_not_fallback_to_activity_for_unresolved_renderer_switch -q` 先失败（旧逻辑选中 latest JSONL），实现后通过。
+- `python -m pytest tests/test_active_session.py::SessionPathResolverTests -q` 通过。
+- `python -m pytest tests/test_active_session.py::SessionPathResolverTests tests/test_ui.py::BudgetHelperTests::test_build_snapshot_records_renderer_unmatched_runtime_error -q` 通过。
+- `python -m pytest tests/test_active_session.py -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_active_session.py::ActiveSessionTrackerTests::test_renderer_authoritative_tracker_skips_cdp_ref_without_renderer_selection -q` 先失败（旧逻辑调用 CDP ref 并选中 session），实现后通过。
+- `python -m pytest tests/test_active_session.py::SessionPathResolverTests::test_resolver_does_not_fallback_to_activity_while_renderer_tracker_waits -q` 先失败（旧逻辑选中 latest JSONL），实现后通过。
+- `python -m pytest tests/test_active_session.py -q` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_uses_renderer_bridge_instead_of_native_title_watcher -q` 通过。
+- `python -m pytest tests/test_runtime_errors.py -q` 先失败（缺少 `codex_usage_hud.core.runtime_events`），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_uses_renderer_bridge_instead_of_native_title_watcher -q` 先失败（`RuntimeContext` 缺少 `runtime_events`），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event -q` 先失败（runtime error event 不唤醒 renderer loop），实现后通过。
+- `python -m pytest tests/test_runtime_errors.py tests/test_renderer_hud.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_tracker_active_session_callback tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_uses_renderer_bridge_instead_of_native_title_watcher -q` 通过。
+- `python -m pytest tests/test_file_watcher.py -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
 
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
-| 2026-06-26 | PowerShell 不支持 Bash here-doc `python - <<'PY'` | 1 | 改用 PowerShell here-string：`@' ... '@ \| python -` |
-| 2026-06-26 | README 精确补丁上下文不匹配 | 1 | 读取局部上下文后改用更小补丁 |
+| 2026-07-03 | pytest node id 类名写错：`WorkOverlayTests` 不存在 | 1 | 用 `rg` 查到测试属于 `BudgetHelperTests`，改用正确 node id 后通过 |
 
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 自动化实现、提交推送和 Windows 手动验证已完成，等待 macOS PySide6 overlay 实机验证 |
-| 我要去哪里？ | 在 macOS 做同样实机验证，之后再决定安装包是否内置 PySide6 |
-| 目标是什么？ | 主 HUD renderer-only，同时恢复 PySide6 桌面级会话气泡 |
-| 我学到了什么？ | PySide6 可以作为 optional helper 恢复，不需要破坏默认 CLI 导入图和 renderer-only 主路径 |
-| 我做了什么？ | 恢复 DesktopWorkOverlay、添加 optional extra、更新设置/文档/测试并记录验证结果 |
-
-## 会话：2026-06-27
-
-### 本次推进目标
-在没有本地 Mac 的前提下继续推进 `task_plan.md`，先补 macOS CI smoke，再给出后续人工验证路径。
-
-### 本次已完成
-- **状态：** macOS CI smoke workflow 已补齐；当前轮次不使用远程 Mac，真实 macOS 桌面交互验证留待未来真实设备执行。
-- 更新 `task_plan.md`：
-  - 当前阶段改为“无本地 Mac 的推进方案”。
-  - 新增“没有本地 Mac 的推荐方案”和推荐顺序。
-  - 将下一步改为“保留 GitHub Actions macOS smoke，macOS 桌面交互待未来真实设备确认”。
-- 新增 GitHub Actions workflow：
-  - `.github/workflows/macos-smoke.yml`
-  - 在 `macos-latest` 上安装 `codex-usage-hud[desktop-overlay]`
-  - 验证 lazy CLI import
-  - 运行 `python -m compileall -q src tests tools`
-  - 运行与本任务相关的 pytest 集合
-
-### 剩余工作
-- 当前轮次不使用远程 Mac。
-- 保留 macOS checklist 供未来真实 Mac 环境使用。
-- 在文档和后续发布说明里继续明确：macOS 目前只有 CI smoke，没有桌面交互实机确认。
-
-## 会话：2026-06-27（续）
-
-### 本次推进目标
-在 `macOS Smoke` 真实跑通后，把结果写回计划，并收口 Windows/macOS 的桌面气泡发行策略。
-
-### 本次已完成
-- **状态：** macOS 代码级验证已通过，发行策略已文档化。
-- GitHub Actions `macOS Smoke` run `28283179999` 通过：
-  - `python -m pip install -e ".[desktop-overlay]"`
-  - lazy `import codex_usage_hud.cli`
-  - `python -m compileall -q src tests tools`
-  - 任务相关 pytest，结果 `54 passed`
-- 修复跨平台导入边界：
-  - Windows-only platform modules 不再在非 Windows 导入时要求 `ctypes.WINFUNCTYPE`
-  - 新增对应回归测试
-- 新增发行策略文档：
-  - `docs/DESKTOP_OVERLAY_RELEASE_STRATEGY.md`
-- 更新发布相关说明：
-  - `docs/RELEASE_PLAYBOOK.md`
-  - `docs/MACOS_VALIDATION.md`
-  - `README.md`
-  - `README_EN.md`
-  - `CHANGELOG.md`
-  - `task_plan.md`
-  - `findings.md`
-
-### 剩余工作
-- 当前轮次仍不做真实 Mac 桌面交互验证。
-- 后续若要发布 macOS 安装包或内置 PySide6，再单独开启新阶段。
+| 我在哪里？ | 阶段 0 完成；runtime error model / DEBUG 错误 HUD 已落地，事件总线仍在阶段 1 |
+| 我要去哪里？ | 把普通 active/session/settings/file events 迁移到 event bus，并继续拆 settings/overlay polling |
+| 目标是什么？ | renderer 权威、事件驱动、失败显式、响应速度优先 |
+| 我学到了什么？ | DEBUG 错误 HUD 可以先挂在现有 snapshot/payload 流上，后续再被事件总线驱动 |
+| 我做了什么？ | 新增 runtime error 模型、DEBUG 错误面板、三类错误来源接入和测试 |
 
 ---
 *每个阶段完成后或遇到错误时更新此文件。*

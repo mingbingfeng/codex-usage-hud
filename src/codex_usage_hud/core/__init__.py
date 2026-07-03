@@ -2,7 +2,14 @@
 
 from .activity_monitor import CodexActivityMonitor, ReadingActivity, detect_reading_activity
 from .calculator import MODEL_PRICES, UsageCalculator, estimate_tokens
-from .pre_send_estimator import BaseEstimate, PreSendEstimator
+from .pre_send_estimator import (
+    AttachmentEstimate,
+    BaseEstimate,
+    PreSendEstimator,
+    estimate_attachments,
+)
+from .runtime_events import RuntimeEvent, RuntimeEventBus
+from .runtime_errors import RuntimeErrorEvent, RuntimeErrorRegistry
 from .parser import (
     Activity,
     ConfirmedTokens,
@@ -25,6 +32,7 @@ from .parser import (
 
 __all__ = [
     "Activity",
+    "AttachmentEstimate",
     "BaseEstimate",
     "CodexActivityMonitor",
     "ConfirmedTokens",
@@ -37,6 +45,10 @@ __all__ = [
     "ReadingActivity",
     "RequestRound",
     "RequestTokens",
+    "RuntimeEvent",
+    "RuntimeEventBus",
+    "RuntimeErrorEvent",
+    "RuntimeErrorRegistry",
     "SlowSummary",
     "SseRequestStateMachine",
     "UsageEvent",
@@ -44,6 +56,7 @@ __all__ = [
     "WorkStatusItem",
     "UsageCalculator",
     "detect_reading_activity",
+    "estimate_attachments",
     "estimate_tokens",
     "extract_log_field",
     "message_text",

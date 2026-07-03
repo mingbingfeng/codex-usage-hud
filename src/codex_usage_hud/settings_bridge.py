@@ -24,6 +24,7 @@ class SettingsBridgeServer:
         restart_callback: Callable[[], None] | None = None,
         command_callback: Callable[[dict[str, Any]], None] | None = None,
         active_session_callback: Callable[[dict[str, Any]], None] | None = None,
+        attachments_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.store = store
         self.host = host
@@ -31,6 +32,7 @@ class SettingsBridgeServer:
         self.restart_callback = restart_callback
         self.command_callback = command_callback
         self.active_session_callback = active_session_callback
+        self.attachments_callback = attachments_callback
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
         self.url = ""
@@ -70,6 +72,7 @@ class SettingsBridgeServer:
         restart_callback = self.restart_callback
         command_callback = self.command_callback
         active_session_callback = self.active_session_callback
+        attachments_callback = self.attachments_callback
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "codex-usage-hud-settings"
@@ -103,6 +106,9 @@ class SettingsBridgeServer:
                     return
                 if path == "/active-session":
                     self._receive_active_session()
+                    return
+                if path == "/composer-attachments":
+                    self._receive_attachments()
                     return
                 self._send_json({"status": "failed", "message": "not found"}, 404)
 
@@ -223,6 +229,28 @@ class SettingsBridgeServer:
                     )
                     return
                 self._send_json({"status": "ok", "message": "active session accepted"})
+
+            def _receive_attachments(self) -> None:
+                if attachments_callback is None:
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": "attachments callback is not available",
+                        },
+                        503,
+                    )
+                    return
+                body = self._read_json()
+                # 空附件也需要上报（用户清空了输入框附件），故不拒绝空 body。
+                try:
+                    attachments_callback(body)
+                except Exception as exc:
+                    self._send_json(
+                        {"status": "failed", "message": f"attachments failed: {exc}"},
+                        500,
+                    )
+                    return
+                self._send_json({"status": "ok", "message": "attachments accepted"})
 
             def _read_json(self) -> dict[str, Any]:
                 length = int(self.headers.get("Content-Length") or 0)

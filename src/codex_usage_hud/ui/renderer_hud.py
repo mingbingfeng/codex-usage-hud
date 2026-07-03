@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from .. import __version__
 from ..config import UserConfig, warning_dismissed_today
 from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
+from ..core.runtime_errors import RuntimeErrorEvent
 from ..platforms.cdp_probe import (
     _receive_text_message,
     _send_text_frame,
@@ -28,6 +29,7 @@ from ..platforms.cdp_probe import (
     remove_new_document_script,
     send_cdp_command,
 )
+from ..platforms.active_session import is_new_session_source
 from ..platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from ..support_assets import support_qr_payload
 
@@ -37,6 +39,7 @@ DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
 ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
+COMPOSER_ATTACHMENTS_BINDING_NAME = "codexUsageHudComposerAttachments"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
 SETTINGS_COMMAND_STORAGE_KEY = "codexUsageHudSettingsCommand:v1"
@@ -81,7 +84,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "19";
+  const version = "22";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -102,6 +105,10 @@ RENDERER_HUD_SCRIPT = r"""
   const composerInputNodeName = "__codexUsageHudComposerInputNode";
   const composerInputHandlersName = "__codexUsageHudComposerInputHandlers";
   const composerFocusStateName = "__codexUsageHudComposerFocused";
+  const composerBadgeRafName = "__codexUsageHudComposerBadgeRaf";
+  const composerAttachmentsTimerName = "__codexUsageHudComposerAttachmentsTimer";
+  const composerAttachmentsSignatureName = "__codexUsageHudComposerAttachmentsSignature";
+  const composerAttachmentsObserverName = "__codexUsageHudComposerAttachmentsObserver";
   const runningTimerName = "__codexUsageHudRunningTimer";
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
@@ -114,7 +121,9 @@ RENDERER_HUD_SCRIPT = r"""
   const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
   const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
   const activeSessionBindingName = "codexUsageHudActiveSession";
+  const composerAttachmentsBindingName = "codexUsageHudComposerAttachments";
   const staleUpdateMs = 10000;
+  const composerAttachmentsDebounceMs = 80;
   let topSlotCache = null;
   let pendingSyncPanels = null;
   let cachedHeaderNode = null;
@@ -333,53 +342,114 @@ RENDERER_HUD_SCRIPT = r"""
         white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-token-breakdown {
-        position: absolute;
-        right: 0;
-        bottom: calc(100% + 6px);
-        z-index: 30;
-        min-width: 172px;
-        max-width: 260px;
-        padding: 8px 10px;
-        border: 1px solid rgba(156, 203, 255, .28);
-        border-radius: 10px;
-        background: rgba(20, 26, 34, .98);
-        box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
-        color: #c7d4e4;
-        font: 600 11px/1.5 Consolas, "Cascadia Mono", ui-monospace, monospace;
-        white-space: nowrap;
+        position: fixed !important;
+        z-index: 2147483647 !important;
+        display: block !important;
+        width: max-content !important;
+        min-width: 208px !important;
+        max-width: 340px !important;
+        box-sizing: border-box !important;
+        margin: 0 !important;
+        padding: 8px 11px !important;
+        border: 1px solid rgba(156, 203, 255, .35) !important;
+        border-radius: 9px !important;
+        background: rgba(20, 26, 34, .98) !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, .55) !important;
+        color: #c7d4e4 !important;
+        font: 600 10.5px/1.55 Consolas, "Cascadia Mono", ui-monospace, monospace !important;
+        white-space: nowrap !important;
+        pointer-events: none !important;
         opacity: 0;
         transform: translateY(4px);
-        pointer-events: none;
         transition: opacity .12s ease, transform .12s ease;
       }
-      #${rootId} .codex-usage-hud-token-badge:hover .codex-usage-hud-token-breakdown {
+      #${rootId} .codex-usage-hud-token-breakdown[hidden] {
+        display: none !important;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown[data-open="true"] {
         opacity: 1;
         transform: translateY(0);
       }
-      #${rootId} .codex-usage-hud-token-badge[data-badge-state="warning"] .codex-usage-hud-token-breakdown {
-        display: none;
+      /* 全量样式重置 + !important，彻底隔离 Codex 页面样式污染 */
+      #${rootId} .codex-usage-hud-token-breakdown > * {
+        box-sizing: border-box !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        float: none !important;
+        position: static !important;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-title {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: baseline !important;
+        justify-content: space-between !important;
+        gap: 18px !important;
+        width: 100% !important;
+        color: #9ccbff !important;
+        font: 700 11px/1.35 Consolas, "Cascadia Mono", ui-monospace, monospace !important;
+        margin: 0 0 6px !important;
+        padding: 0 0 5px !important;
+        border-bottom: 1px solid rgba(156, 203, 255, .22) !important;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-title-cost {
+        color: #7fd7a6 !important;
+        font-weight: 700 !important;
+        font-variant-numeric: tabular-nums !important;
       }
       #${rootId} .codex-usage-hud-token-breakdown-row {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 12px;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: baseline !important;
+        column-gap: 12px !important;
+        width: 100% !important;
+        line-height: 1.6 !important;
+        text-align: left !important;
       }
       #${rootId} .codex-usage-hud-token-breakdown-row[data-total="true"] {
-        margin-top: 5px;
-        padding-top: 5px;
-        border-top: 1px solid rgba(156, 203, 255, .2);
-        color: #9ccbff;
+        margin-top: 4px !important;
+        padding-top: 5px !important;
+        border-top: 1px solid rgba(156, 203, 255, .25) !important;
+        color: #9ccbff !important;
       }
-      #${rootId} .codex-usage-hud-token-breakdown-key {
-        color: #7f8ea3;
-        font-weight: 700;
+      #${rootId} .codex-usage-hud-token-breakdown-name {
+        flex: 1 1 auto !important;
+        color: #b8c4d4 !important;
+        font-weight: 600 !important;
+        line-height: inherit !important;
+        text-align: left !important;
+        white-space: nowrap !important;
       }
-      #${rootId} .codex-usage-hud-token-breakdown-row[data-total="true"] .codex-usage-hud-token-breakdown-key {
-        color: #9ccbff;
+      #${rootId} .codex-usage-hud-token-breakdown-note {
+        margin-left: 6px !important;
+        color: #6f7d90 !important;
+        font-size: 9.5px !important;
+        font-weight: 600 !important;
       }
-      #${rootId} .codex-usage-hud-token-breakdown-val {
-        font-variant-numeric: tabular-nums;
+      #${rootId} .codex-usage-hud-token-breakdown-row[data-total="true"] .codex-usage-hud-token-breakdown-name {
+        color: #9ccbff !important;
+        font-weight: 700 !important;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-tok {
+        flex: 0 0 auto !important;
+        margin-left: auto !important;
+        color: #8492a6 !important;
+        font-variant-numeric: tabular-nums !important;
+        line-height: inherit !important;
+        text-align: right !important;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-cost {
+        flex: 0 0 auto !important;
+        min-width: 54px !important;
+        color: #7fd7a6 !important;
+        font-variant-numeric: tabular-nums !important;
+        line-height: inherit !important;
+        text-align: right !important;
+      }
+      #${rootId} .codex-usage-hud-token-breakdown-row[data-total="true"] .codex-usage-hud-token-breakdown-cost {
+        font-weight: 700 !important;
       }
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-update-button,
@@ -1441,6 +1511,53 @@ RENDERER_HUD_SCRIPT = r"""
       #${rootId} .${errorClass} {
         color: #ff6b6b !important;
       }
+      #${rootId} .codex-usage-hud-runtime-errors[hidden] {
+        display: none !important;
+      }
+      #${rootId} .codex-usage-hud-runtime-errors {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 2147482760;
+        width: min(520px, calc(100vw - 32px));
+        max-height: min(360px, calc(100vh - 32px));
+        overflow: auto;
+        box-sizing: border-box;
+        border: 1px solid rgba(255, 107, 107, .45);
+        border-radius: 7px;
+        background: rgba(16, 22, 29, .97);
+        color: #e8eef7;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, .46);
+        pointer-events: auto;
+        padding: 10px;
+        font: 11px/1.45 Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-runtime-errors-title {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 7px;
+        color: #ffb3b3;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-runtime-error {
+        display: grid;
+        gap: 3px;
+        padding: 7px 0;
+        border-top: 1px solid rgba(255, 107, 107, .18);
+      }
+      #${rootId} .codex-usage-hud-runtime-error-code {
+        color: #ff8f8f;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-runtime-error-meta {
+        color: #8492a6;
+      }
+      #${rootId} .codex-usage-hud-runtime-error-context {
+        color: #b8c6d8;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
       #${rootId} .codex-usage-hud-settings-modal[hidden] {
         display: none !important;
       }
@@ -2250,7 +2367,7 @@ RENDERER_HUD_SCRIPT = r"""
       ? `<button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>`
       : "";
     const tokenBadgeMarkup = name === "request"
-      ? `<span class="codex-usage-hud-token-badge" data-composer-badge="idle" aria-hidden="true"><span class="codex-usage-hud-token-badge-text" data-field="requestComposerTokens">TikToken:0 Ts</span><span class="codex-usage-hud-token-breakdown" data-field="requestComposerBreakdown" role="tooltip"></span></span>`
+      ? `<span class="codex-usage-hud-token-badge" data-composer-badge="idle"><span class="codex-usage-hud-token-badge-text" data-field="requestComposerTokens">TikToken:0 Ts</span></span>`
       : "";
     const updateButtonMarkup = name === "top"
       ? `<button class="codex-usage-hud-update-button" data-action="update-action" title="" aria-label="" hidden>↓</button>`
@@ -2411,6 +2528,8 @@ RENDERER_HUD_SCRIPT = r"""
   function settingsChromeMarkup() {
     return `
       <div id="${settingsModalId}" class="codex-usage-hud-settings-modal" hidden></div>
+      <div class="codex-usage-hud-token-breakdown" data-field="requestComposerBreakdown" role="tooltip" hidden></div>
+      <div class="codex-usage-hud-runtime-errors" data-field="runtimeErrorsPanel" hidden></div>
     `;
   }
 
@@ -2560,6 +2679,105 @@ RENDERER_HUD_SCRIPT = r"""
     ));
   }
 
+  function activeSessionTitleIsNewSession(value) {
+    return /^(新对话|新会话|新聊天|new chat|new conversation|new session)$/i.test(cleanActiveSessionTitle(value));
+  }
+
+  function activeSessionHeaderElement() {
+    try {
+      const header = conversationHeaderElement();
+      if (visible(header)) return header;
+    } catch (_) {}
+    const surface = document.querySelector('[data-testid="app-shell-header-context-menu-surface"]');
+    const surfaceHeader = surface?.closest?.("header.app-header-tint, header, .app-header-tint");
+    if (visible(surfaceHeader)) return surfaceHeader;
+    return Array.from(document.querySelectorAll([
+      "header.app-header-tint",
+      "[data-testid='app-shell-header']",
+      "[data-testid='app-shell-header-context-menu-surface']",
+      ".app-header-tint",
+    ].join(","))).filter(visible)[0] || null;
+  }
+
+  function activeSessionHeaderTitleIgnored(value) {
+    const text = cleanActiveSessionTitle(value);
+    if (!text) return true;
+    return /^(File\s*Edit\s*View\s*Window\s*Help|FileEditViewWindowHelp|文件|编辑|视图|帮助|切换底部面板显示|显示\/隐藏侧边栏|chat actions|open in)$/i.test(text);
+  }
+
+  function activeSessionHeaderTitleText() {
+    const header = activeSessionHeaderElement();
+    if (!visible(header)) return "";
+    const candidates = Array.from(header.querySelectorAll([
+      "[data-thread-title]",
+      "h1",
+      "h2",
+      ".truncate",
+      "[class*='truncate']",
+    ].join(","))).filter((node) => (
+      visible(node)
+      && !node.closest?.(`#${rootId}`)
+      && !node.closest?.("button, [role='button'], a")
+    ));
+    for (const node of candidates) {
+      const text = cleanActiveSessionTitle(node.textContent || "").slice(0, 160);
+      if (!activeSessionHeaderTitleIgnored(text)) return text;
+    }
+    const clone = header.cloneNode(true);
+    clone.querySelectorAll([
+      "button",
+      "[role='button']",
+      "a",
+      "svg",
+      `#${rootId}`,
+      ".codex-usage-hud-panel",
+    ].join(",")).forEach((node) => node.remove());
+    const fallback = cleanActiveSessionTitle(clone.textContent || "").slice(0, 160);
+    return activeSessionHeaderTitleIgnored(fallback) ? "" : fallback;
+  }
+
+  function activeSessionComposerVisible() {
+    try {
+      const composer = composerElement();
+      if (visible(composer)) {
+        const rect = composer.getBoundingClientRect();
+        if (
+          rect.width >= 240
+          && rect.height >= 20
+          && rect.left > 200
+          && rect.top > 80
+          && rect.bottom <= innerHeight + 4
+        ) return true;
+      }
+    } catch (_) {}
+    return Array.from(document.querySelectorAll([
+      "textarea",
+      "[contenteditable='true']",
+      "[role='textbox']",
+      ".ProseMirror",
+    ].join(","))).some((node) => {
+      if (!visible(node)) return false;
+      const rect = node.getBoundingClientRect();
+      return (
+        rect.width >= 120
+        && rect.height >= 18
+        && rect.left > 200
+        && rect.top > 80
+        && rect.bottom <= innerHeight + 4
+      );
+    });
+  }
+
+  function activeSessionHeaderLooksNewSession(rows) {
+    const header = activeSessionHeaderElement();
+    if (!visible(header)) return false;
+    if (activeSessionHeaderTitleText()) return false;
+    if (activeSessionLocationId()) return false;
+    const activeRows = Array.isArray(rows) ? rows : activeSessionRows();
+    if (activeRows.some(activeSessionRowSelected)) return false;
+    return activeSessionComposerVisible();
+  }
+
   function activeSessionRefFromRow(row) {
     const sourceRow = activeSessionIdentityRow(row);
     const href = activeSessionRowHref(sourceRow);
@@ -2574,6 +2792,9 @@ RENDERER_HUD_SCRIPT = r"""
     const titleNode = sourceRow?.querySelector?.("[data-thread-title], .truncate.select-none, .truncate.text-base");
     const rawTitle = titleNode?.textContent || (titleNode ? "" : (sourceRow?.textContent || row?.textContent || ""));
     const title = cleanActiveSessionTitle(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
+    if (activeSessionTitleIsNewSession(title)) {
+      return { rawSessionId: "", sessionId: "", title };
+    }
     return { rawSessionId: normalize(rawSessionId), sessionId, title };
   }
 
@@ -2615,12 +2836,23 @@ RENDERER_HUD_SCRIPT = r"""
 
   function readActiveSessionRef() {
     const rows = activeSessionRows();
+    if (activeSessionHeaderLooksNewSession(rows)) {
+      return {
+        sessionId: "",
+        title: "",
+        url: location.href,
+        newSession: true,
+        matchedBy: "header-empty",
+      };
+    }
     const row = rows.find(activeSessionRowSelected) || rows.find(activeSessionRowMatchesLocation) || null;
     const ref = row ? activeSessionRefFromRow(row) : { sessionId: activeSessionLocationId(), title: "" };
+    const newSession = !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
     return {
-      sessionId: ref.sessionId || "",
-      title: ref.title || "",
+      sessionId: newSession ? "" : (ref.sessionId || ""),
+      title: newSession ? "" : (ref.title || ""),
       url: location.href,
+      newSession,
     };
   }
 
@@ -2635,15 +2867,18 @@ RENDERER_HUD_SCRIPT = r"""
   function postActiveSession(reason = "event", overrideRef = null) {
     const bridge = settingsBridgeUrl();
     const ref = overrideRef || readActiveSessionRef();
-    if (!ref.sessionId && !ref.title) return;
-    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href]);
+    const newSession = !!ref.newSession || reason === "new-session";
+    if (!ref.sessionId && !ref.title && !newSession) return;
+    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href, newSession]);
     if (window[activeSessionLastSignatureName] === signature) return;
     window[activeSessionLastSignatureName] = signature;
     const payload = {
       sessionId: ref.sessionId,
       title: ref.title,
       url: ref.url || location.href,
-      reason,
+      reason: newSession ? "new-session" : reason,
+      newSession,
+      matchedBy: ref.matchedBy || "",
       observedAt: Date.now(),
     };
     const binding = window[activeSessionBindingName];
@@ -2672,12 +2907,13 @@ RENDERER_HUD_SCRIPT = r"""
 
   function refreshActiveSessionObserver() {
     const container = activeSessionContainer();
+    const header = activeSessionHeaderElement();
     window[activeSessionObserverName]?.disconnect?.();
-    if (!container) return false;
+    if (!container && !header) return false;
     window[activeSessionObserverName] = new MutationObserver(() => {
-      scheduleActiveSessionReport("sidebar");
+      scheduleActiveSessionReport("active-session-dom");
     });
-    window[activeSessionObserverName].observe(container, {
+    if (container) window[activeSessionObserverName].observe(container, {
       subtree: true,
       childList: true,
       attributes: true,
@@ -2692,6 +2928,21 @@ RENDERER_HUD_SCRIPT = r"""
         "href",
       ],
     });
+    if (header && header !== container && !container?.contains?.(header)) {
+      window[activeSessionObserverName].observe(header, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: [
+          "aria-label",
+          "class",
+          "data-thread-title",
+          "data-testid",
+          "title",
+        ],
+      });
+    }
     return true;
   }
 
@@ -2776,10 +3027,12 @@ RENDERER_HUD_SCRIPT = r"""
         if (row && !container && !explicitRow) return;
         if (row && (!container || container.contains(row))) {
           const ref = activeSessionRefFromRow(row);
+          const newSession = !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
           postActiveSession("click", {
-            sessionId: ref.sessionId || "",
-            title: ref.title || "",
+            sessionId: newSession ? "" : (ref.sessionId || ""),
+            title: newSession ? "" : (ref.title || ""),
             url: activeSessionRowUrl(row),
+            newSession,
           });
           scheduleActiveSessionReport("click-followup");
         }
@@ -3555,6 +3808,18 @@ RENDERER_HUD_SCRIPT = r"""
   function bindRoot(root) {
     if (root.dataset.bound === "true") return;
     root.dataset.bound = "true";
+    // 悬浮徽章 → 展开 A/B/C/D/F 明细；移开 → 收起（事件委托，徽章重建也生效）。
+    root.addEventListener("mouseover", (event) => {
+      if (event.target?.closest?.(".codex-usage-hud-token-badge")) {
+        showComposerBreakdown(root);
+      }
+    });
+    root.addEventListener("mouseout", (event) => {
+      const from = event.target?.closest?.(".codex-usage-hud-token-badge");
+      if (from && !from.contains(event.relatedTarget)) {
+        hideComposerBreakdown(root);
+      }
+    });
     root.addEventListener("wheel", (event) => {
       const select = event.target?.closest?.(`#${settingsModalId} select[data-setting-key]`);
       if (!select || !root.contains(select)) return;
@@ -4039,6 +4304,198 @@ RENDERER_HUD_SCRIPT = r"""
     return Array.from(normalized).length;
   }
 
+  // ── 输入框附件采集 ──────────────────────────────────────────────
+  // 通过 CDP 实测确认的选择器（见 docs/token_badge_integration.md）：
+  //   图片：div.composer-attachment-surface[aria-label] 内含 <img>，取 naturalWidth/Height
+  //   文件：button[aria-label]（class 含 group-hover/file-attachment），取文件名
+  //   @引用/技能：span.inline-mention-brand-aware 或 chip/pill 文本，按 @ / $ 前缀分类
+  function collectComposerAttachments() {
+    const composer = composerElement();
+    const empty = { images: [], files: [], mentions: [], skills: [] };
+    if (!composer) return empty;
+
+    const images = [];
+    const collectImageAttachment = (surface) => {
+      const img = surface.querySelector("img");
+      if (!img) return;
+      const name = String(surface.getAttribute("aria-label") || img.getAttribute("alt") || "").trim();
+      images.push({
+        name,
+        width: Math.max(0, Math.round(Number(img.naturalWidth) || 0)),
+        height: Math.max(0, Math.round(Number(img.naturalHeight) || 0)),
+      });
+    };
+    composer.querySelectorAll("div.composer-attachment-surface").forEach(collectImageAttachment);
+    composer.querySelectorAll("img[src^='blob:'], img[src^='data:image']").forEach((img) => {
+      if (img.closest("div.composer-attachment-surface")) return;
+      const surface = img.closest("[aria-label], button, [role='button'], div") || img.parentElement || img;
+      collectImageAttachment(surface);
+    });
+
+    const files = [];
+    const normalizeFileAttachmentName = (label) => {
+      let value = normalize(label || "");
+      value = value.replace(/^(remove|delete|open|preview|download)\s+(file|attachment)\s+/i, "");
+      value = value.replace(/^(remove|delete|open|preview|download)\s+/i, "");
+      value = value.replace(/^(file|attachment):?\s+/i, "");
+      return value.trim();
+    };
+    // Codex 文件引用 chip 的 React fiber 暴露 resourcePath（绝对路径），
+    // 桌面/仓库外文件靠文件名根本搜不到，必须直接拿这个路径读盘才准。
+    // mention 场景（inline `@file` chip）是 ProseMirror 节点，路径挂在 pmViewDesc.node.attrs 上。
+    const readFiberFilePath = (node) => {
+      if (!node) return "";
+      // 先看 ProseMirror atMention 节点（span.inline-mention-brand-aware）：
+      // node.pmViewDesc.node.attrs 里通常有 { label, path, fsPath }，path 是相对项目根的路径。
+      const pmDesc = node.pmViewDesc;
+      if (pmDesc && pmDesc.node && pmDesc.node.attrs) {
+        const attrs = pmDesc.node.attrs;
+        for (const key of ["fsPath", "path", "absolutePath", "resourcePath"]) {
+          const value = attrs[key];
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+      }
+      const fiberKey = Object.keys(node).find((k) => k.startsWith("__reactFiber$"));
+      let fiber = fiberKey ? node[fiberKey] : null;
+      for (let depth = 0; fiber && depth < 15; depth += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        if (!props || typeof props !== "object") continue;
+        for (const key of ["resourcePath", "localPath", "absolutePath", "filePath"]) {
+          const value = props[key];
+          if (typeof value === "string" && value.trim()) return value.trim();
+        }
+      }
+      return "";
+    };
+    composer.querySelectorAll("button[aria-label]").forEach((button) => {
+      if (!/file-attachment/.test(String(button.className || ""))) return;
+      const name = normalizeFileAttachmentName(button.getAttribute("aria-label"));
+      if (!name) return;
+      const path = readFiberFilePath(button);
+      files.push(path ? { name, path } : name);
+    });
+
+    const mentions = [];
+    const mentionSeen = new Set();
+    const skills = [];
+    const looksLikeFileReferenceText = (value) => (
+      /^[\w.() -]+\.[A-Za-z0-9]{1,12}$/.test(value)
+      || /^\[[^\]]+\]\([^)]+\)$/.test(value)
+      || /[/\\][^/\\]+\.[A-Za-z0-9]{1,12}$/.test(value)
+    );
+    // 复制 mention chip 出来是 `[name](abs-path)`，直接解析出绝对路径最省事；
+    // 页面里 mention 还只是 chip 元素，无 markdown 文本，靠 fiber 兜底。
+    const parseMarkdownFileRef = (value) => {
+      const match = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(String(value || "").trim());
+      if (!match) return null;
+      const name = match[1].trim();
+      const path = match[2].trim();
+      return name ? { name, path } : null;
+    };
+    const pushMentionEntry = (name, path) => {
+      const cleanName = String(name || "").trim();
+      if (!cleanName) return;
+      const cleanPath = String(path || "").trim();
+      const key = `${cleanName}|${cleanPath}`;
+      if (mentionSeen.has(key)) return;
+      mentionSeen.add(key);
+      mentions.push(cleanPath ? { name: cleanName, path: cleanPath } : cleanName);
+    };
+    const addMentionOrSkill = (text, defaultKind = "", fiberPath = "") => {
+      const raw = normalize(text || "");
+      if (!raw) return;
+      const parsed = parseMarkdownFileRef(raw);
+      if (parsed) {
+        pushMentionEntry(parsed.name, parsed.path);
+        return;
+      }
+      if (raw.startsWith("$")) {
+        if (!skills.includes(raw)) skills.push(raw);
+      } else if (raw.startsWith("@")) {
+        pushMentionEntry(raw, fiberPath);
+      } else if (defaultKind === "mention" && looksLikeFileReferenceText(raw)) {
+        pushMentionEntry(raw, fiberPath);
+      }
+    };
+    const collectMentionOrSkillText = (node) => {
+      if (!node || node.closest?.(`#${rootId}`)) return;
+      // 带图标的工具开关（浏览器/电脑等）是 composer 控件装饰，不进 prompt，跳过。
+      const text = normalize(node.textContent || "");
+      const defaultKind = looksLikeFileReferenceText(text) ? "mention" : "";
+      if (node.querySelector?.("img, svg") && !/^[@$]/.test(text) && defaultKind !== "mention") return;
+      // mention chip 的 React fiber 与 file-attachment 一样带 resourcePath，
+      // 只有拿到绝对路径才能让 Python 端跨仓库读盘算真实 token（否则退化成按名估算）。
+      const fiberPath = readFiberFilePath(node);
+      addMentionOrSkill(node.getAttribute?.("aria-label"), defaultKind, fiberPath);
+      addMentionOrSkill(node.getAttribute?.("title"), defaultKind, fiberPath);
+      addMentionOrSkill(text, defaultKind, fiberPath);
+    };
+    composer.querySelectorAll([
+      "span.inline-mention-brand-aware",
+      "[data-testid*='mention']",
+      "[data-testid*='skill']",
+      "[class*='mention']",
+      "[class*='skill']",
+      "[aria-label^='@']",
+      "[aria-label^='$']",
+    ].join(",")).forEach(collectMentionOrSkillText);
+
+    return { images, files, mentions, skills };
+  }
+
+  function composerAttachmentsSignature(attachments) {
+    return JSON.stringify([
+      attachments.images.map((item) => `${item.name}|${item.width}x${item.height}`),
+      attachments.files.map((item) =>
+        (item && typeof item === "object") ? `${item.name}|${item.path || ""}` : String(item)
+      ),
+      attachments.mentions.map((item) =>
+        (item && typeof item === "object") ? `${item.name}|${item.path || ""}` : String(item)
+      ),
+      attachments.skills,
+    ]);
+  }
+
+  function reportComposerAttachments(force = false) {
+    const attachments = collectComposerAttachments();
+    const signature = composerAttachmentsSignature(attachments);
+    if (!force && window[composerAttachmentsSignatureName] === signature) return;
+    window[composerAttachmentsSignatureName] = signature;
+    const ref = readActiveSessionRef();
+    const payload = {
+      sessionId: ref.sessionId || "",
+      images: attachments.images,
+      files: attachments.files,
+      mentions: attachments.mentions,
+      skills: attachments.skills,
+      observedAt: Date.now(),
+    };
+    // 页面 CSP 的 connect-src 不含 http://127.0.0.1，fetch 到本地桥会被拦，
+    // 因此优先走 CDP binding（与 active-session 一致），fetch 仅作兜底。
+    const binding = window[composerAttachmentsBindingName];
+    if (typeof binding === "function") {
+      try {
+        binding(JSON.stringify(payload));
+        return;
+      } catch (_) {}
+    }
+    const bridge = settingsBridgeUrl();
+    if (!bridge) return;
+    fetch(`${bridge}/composer-attachments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function scheduleComposerAttachmentsReport(force = false) {
+    clearTimeout(window[composerAttachmentsTimerName] || 0);
+    window[composerAttachmentsTimerName] = setTimeout(() => {
+      reportComposerAttachments(force);
+    }, composerAttachmentsDebounceMs);
+  }
+
   function humanizeTokens(value) {
     const n = Math.max(0, Math.round(Number(value) || 0));
     if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
@@ -4050,7 +4507,13 @@ RENDERER_HUD_SCRIPT = r"""
     return window[stateName]?.payload || {};
   }
 
+  function formatMoney3(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return "";
+    return `$${(Number(value) || 0).toFixed(3)}`;
+  }
+
   function updateComposerBadgeText(root = document.getElementById(rootId)) {
+    window[composerBadgeRafName] = 0;
     if (!root) return;
     const payload = currentPayload();
     // 运行中：黄灯优先，滚动显示 AI 正在读取的文件。
@@ -4058,39 +4521,107 @@ RENDERER_HUD_SCRIPT = r"""
       setText(root, "requestComposerTokens", String(payload.activityReadingFile));
       return;
     }
-    // 未发送：静态底价（B+C+D+F，来自 Python）+ 实时输入文本（A，浏览器侧）。
+    // 未发送：静态底价（会话/规则/工具/协议，来自 Python）+ 实时输入文本（浏览器侧）。
     const base = Math.max(0, Number(payload.preSendBaseTokens) || 0);
     const input = window[composerInputNodeName];
     const live = composerTokenCount(composerInputText(input));
-    const total = base + live;
-    const label = total < 50000 ? "Cache友好" : "大量上下文";
-    setText(root, "requestComposerTokens", `预估 ~${humanizeTokens(total)} Ts (${label})`);
-    renderComposerBreakdown(root, payload, live, total);
+    const totalTokens = base + live;
+    // 合计金额 = Python 预算(不含实时输入) + 实时输入 × input 单价。
+    const hasPrices = !!payload.preSendHasPrices;
+    const liveCost = live * (Number(payload.preSendInputPrice) || 0);
+    const totalCost = hasPrices ? (Number(payload.preSendTotalCost) || 0) + liveCost : null;
+    const money = hasPrices ? formatMoney3(totalCost) : "";
+    const badgeText = money
+      ? `预估 ${money} · ${humanizeTokens(totalTokens)} Ts`
+      : `预估 ~${humanizeTokens(totalTokens)} Ts`;
+    setText(root, "requestComposerTokens", badgeText);
+    renderComposerBreakdown(root, payload, live, totalTokens, totalCost);
   }
 
-  function renderComposerBreakdown(root, payload, liveInputTokens, total) {
+  function scheduleComposerBadgeUpdate() {
+    if (window[composerBadgeRafName]) return;
+    window[composerBadgeRafName] = requestAnimationFrame(() => updateComposerBadgeText());
+  }
+
+  function renderComposerBreakdown(root, payload, liveInputTokens, totalTokens, totalCost) {
     const node = root.querySelector('[data-field="requestComposerBreakdown"]');
     if (!node) return;
     const rows = Array.isArray(payload.preSendBreakdown) ? payload.preSendBreakdown : [];
     if (!rows.length) {
       node.innerHTML = "";
+      hideComposerBreakdown(root);
       return;
     }
-    const rowHtml = rows.map((row) => {
-      const key = String(row?.key || "");
-      // A（当前输入）用浏览器侧实时值覆盖 Python 的占位。
-      const tokens = key === "A" ? liveInputTokens : Number(row?.tokens) || 0;
-      const display = humanizeTokens(tokens);
+    const hasPrices = !!payload.preSendHasPrices;
+    const inputPrice = Number(payload.preSendInputPrice) || 0;
+    const rowHtml = rows.map((row, index) => {
+      // 第一行「输入框内容」用浏览器侧实时值覆盖 Python 的占位（token 与金额都实时）。
+      const isLiveInput = index === 0;
+      const tokens = isLiveInput ? liveInputTokens : (Number(row?.tokens) || 0);
+      const cost = isLiveInput
+        ? (hasPrices ? tokens * inputPrice : null)
+        : (row?.cost ?? null);
+      const label = escapeHtml(String(row?.label || ""));
+      const note = row?.note ? `<span class="codex-usage-hud-token-breakdown-note">${escapeHtml(String(row.note))}</span>` : "";
+      const money = hasPrices ? escapeHtml(formatMoney3(cost)) : "—";
       return `<span class="codex-usage-hud-token-breakdown-row">`
-        + `<span class="codex-usage-hud-token-breakdown-key">${escapeHtml(key)} ${escapeHtml(String(row?.label || ""))}</span>`
-        + `<span class="codex-usage-hud-token-breakdown-val">${escapeHtml(display)} Ts</span>`
+        + `<span class="codex-usage-hud-token-breakdown-name">${label}${note}</span>`
+        + `<span class="codex-usage-hud-token-breakdown-tok">${escapeHtml(humanizeTokens(tokens))} Ts</span>`
+        + `<span class="codex-usage-hud-token-breakdown-cost">${money}</span>`
         + `</span>`;
     }).join("");
-    const totalHtml = `<span class="codex-usage-hud-token-breakdown-row" data-total="true">`
-      + `<span class="codex-usage-hud-token-breakdown-key">合计</span>`
-      + `<span class="codex-usage-hud-token-breakdown-val">${escapeHtml(humanizeTokens(total))} Ts</span>`
+    const titleMoney = hasPrices ? formatMoney3(totalCost) : "";
+    const titleHtml = `<div class="codex-usage-hud-token-breakdown-title">`
+      + `<span>发送底价预估</span>`
+      + `<span class="codex-usage-hud-token-breakdown-title-cost">${escapeHtml(titleMoney)}</span>`
+      + `</div>`;
+    const footHtml = `<span class="codex-usage-hud-token-breakdown-row" data-total="true">`
+      + `<span class="codex-usage-hud-token-breakdown-name">合计</span>`
+      + `<span class="codex-usage-hud-token-breakdown-tok">${escapeHtml(humanizeTokens(totalTokens))} Ts</span>`
+      + `<span class="codex-usage-hud-token-breakdown-cost">${hasPrices ? escapeHtml(formatMoney3(totalCost)) : "—"}</span>`
       + `</span>`;
-    node.innerHTML = rowHtml + totalHtml;
+    node.innerHTML = titleHtml + rowHtml + footHtml;
+    // 若正处于展开态，内容刷新后重新定位（打字时金额/合计会变）。
+    if (node.dataset.open === "true") positionComposerBreakdown(root, node);
+  }
+
+  function composerBadgeElement(root = document.getElementById(rootId)) {
+    return root?.querySelector(".codex-usage-hud-token-badge") || null;
+  }
+
+  function positionComposerBreakdown(root, node) {
+    const badge = composerBadgeElement(root);
+    if (!badge) return;
+    const rect = badge.getBoundingClientRect();
+    // 先显示以取得尺寸，再定位到徽章正上方、右对齐。
+    const width = node.offsetWidth || 200;
+    const height = node.offsetHeight || 80;
+    const margin = 6;
+    let left = rect.right - width;
+    let top = rect.top - height - margin;
+    if (top < 4) top = rect.bottom + margin;         // 顶部空间不足则翻到下方
+    if (left < 4) left = 4;                            // 防止溢出左边界
+    const maxLeft = window.innerWidth - width - 4;
+    if (left > maxLeft) left = Math.max(4, maxLeft);
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(top)}px`;
+  }
+
+  function showComposerBreakdown(root = document.getElementById(rootId)) {
+    if (!root) return;
+    if (badgeWarningActive()) return;                  // 黄灯态不显示底价明细
+    const node = root.querySelector('[data-field="requestComposerBreakdown"]');
+    if (!node || !node.innerHTML) return;
+    node.hidden = false;
+    node.dataset.open = "true";
+    positionComposerBreakdown(root, node);
+  }
+
+  function hideComposerBreakdown(root = document.getElementById(rootId)) {
+    const node = root?.querySelector('[data-field="requestComposerBreakdown"]');
+    if (!node) return;
+    node.dataset.open = "false";
+    node.hidden = true;
   }
 
   function badgeWarningActive() {
@@ -4112,7 +4643,9 @@ RENDERER_HUD_SCRIPT = r"""
       }
     });
     // 黄灯运行时或输入框聚焦时都需要刷新文案。
-    if (warning || focused) updateComposerBadgeText(root);
+    if (warning || focused) scheduleComposerBadgeUpdate();
+    // 徽章隐藏（idle）或黄灯态时，强制收起底价明细浮层。
+    if (warning || !focused) hideComposerBreakdown(root);
   }
 
   function setComposerBadgeActive(active) {
@@ -4136,12 +4669,14 @@ RENDERER_HUD_SCRIPT = r"""
     }
     window[composerInputNodeName] = null;
     window[composerInputHandlersName] = null;
+    window[composerAttachmentsObserverName]?.disconnect?.();
+    window[composerAttachmentsObserverName] = null;
   }
 
   function ensureComposerInputWatchers() {
     const input = composerInputElement();
     if (input === window[composerInputNodeName]) {
-      if (input && window[composerFocusStateName]) updateComposerBadgeText();
+      if (input && window[composerFocusStateName]) scheduleComposerBadgeUpdate();
       return;
     }
     detachComposerInputWatchers();
@@ -4153,7 +4688,9 @@ RENDERER_HUD_SCRIPT = r"""
       focus: () => setComposerBadgeActive(true),
       blur: () => setComposerBadgeActive(false),
       input: () => {
-        if (window[composerFocusStateName]) updateComposerBadgeText();
+        if (window[composerFocusStateName]) scheduleComposerBadgeUpdate();
+        // 粘贴/删除文本也可能带走 @ 引用，顺带核对附件。
+        scheduleComposerAttachmentsReport();
       },
     };
     input.addEventListener("focus", handlers.focus, true);
@@ -4165,6 +4702,15 @@ RENDERER_HUD_SCRIPT = r"""
     const focused = document.activeElement === input
       || (input.contains?.(document.activeElement) ?? false);
     setComposerBadgeActive(focused);
+    // 附件（图片/文件/@引用）是异步插入的 DOM 节点，靠 MutationObserver 捕获增删。
+    const composer = composerElement();
+    if (composer) {
+      const observer = new MutationObserver(() => scheduleComposerAttachmentsReport());
+      observer.observe(composer, { subtree: true, childList: true });
+      window[composerAttachmentsObserverName] = observer;
+    }
+    // 首次挂载立即上报一次（可能已带附件，例如重注入后）。
+    scheduleComposerAttachmentsReport(true);
   }
 
   function headerLeftControlEdge(headerNode, header, controls = headerControlButtons(headerNode, header)) {
@@ -5111,13 +5657,17 @@ RENDERER_HUD_SCRIPT = r"""
     list.appendChild(row);
   }
 
-  function renderRequestRows(root, rows, rowDetails) {
+  function renderRequestRows(root, rows, rowDetails, newSession = false) {
     const list = root.querySelector('[data-field="requestRows"]');
     if (!list) return;
     list.textContent = "";
     const details = Array.isArray(rowDetails) && rowDetails.length ? rowDetails : [];
     if (details.length) {
       details.forEach((item, index) => appendStructuredRequestRow(list, item, index));
+      syncRunningRowsTimer(root);
+      return;
+    }
+    if (newSession && (!Array.isArray(rows) || !rows.length)) {
       syncRunningRowsTimer(root);
       return;
     }
@@ -5409,6 +5959,54 @@ RENDERER_HUD_SCRIPT = r"""
     configureCopy(root, "topExecuting", details.executing || "", `点击复制${details.executingLabel || "当前活动"}\n${details.executing || ""}`, "executing");
   }
 
+  function renderRuntimeErrors(root, payload) {
+    const runtimeErrorsPanel = root.querySelector('[data-field="runtimeErrorsPanel"]');
+    if (!runtimeErrorsPanel) return;
+    const debug = !!payload?.debug;
+    const items = Array.isArray(payload?.runtimeErrors) ? payload.runtimeErrors.filter(Boolean) : [];
+    runtimeErrorsPanel.hidden = !debug || !items.length;
+    if (runtimeErrorsPanel.hidden) {
+      runtimeErrorsPanel.replaceChildren();
+      return;
+    }
+    runtimeErrorsPanel.replaceChildren();
+    const title = document.createElement("div");
+    title.className = "codex-usage-hud-runtime-errors-title";
+    const heading = document.createElement("span");
+    heading.textContent = "Runtime errors";
+    const count = document.createElement("span");
+    count.textContent = `${items.length}`;
+    title.append(heading, count);
+    runtimeErrorsPanel.appendChild(title);
+    for (const item of items.slice(0, 6)) {
+      const row = document.createElement("div");
+      row.className = "codex-usage-hud-runtime-error";
+      row.dataset.severity = String(item.severity || "error");
+      const code = document.createElement("div");
+      code.className = "codex-usage-hud-runtime-error-code";
+      code.textContent = String(item.code || "runtime.unknown");
+      const message = document.createElement("div");
+      message.textContent = String(item.message || "");
+      const meta = document.createElement("div");
+      meta.className = "codex-usage-hud-runtime-error-meta";
+      const source = String(item.source || "runtime");
+      const severity = String(item.severity || "error");
+      const occurrences = Number(item.count || 1);
+      meta.textContent = `${severity} · ${source} · ${occurrences}x`;
+      const context = document.createElement("div");
+      context.className = "codex-usage-hud-runtime-error-context";
+      try {
+        const rawContext = item.context && typeof item.context === "object" ? item.context : {};
+        context.textContent = JSON.stringify(rawContext, null, 2);
+      } catch (_) {
+        context.textContent = "";
+      }
+      row.append(code, message, meta);
+      if (context.textContent && context.textContent !== "{}") row.appendChild(context);
+      runtimeErrorsPanel.appendChild(row);
+    }
+  }
+
   function markHudStale() {
     const root = document.getElementById(rootId);
     const state = window[stateName] || {};
@@ -5469,7 +6067,8 @@ RENDERER_HUD_SCRIPT = r"""
       node.classList.toggle(errorClass, nextPayload?.requestStatus === "error");
     });
     renderTopDetails(root, nextPayload || {});
-    renderRequestRows(root, nextPayload?.requestRows || [], nextPayload?.requestRowDetails || []);
+    renderRuntimeErrors(root, nextPayload || {});
+    renderRequestRows(root, nextPayload?.requestRows || [], nextPayload?.requestRowDetails || [], !!nextPayload?.newSession);
     renderUpdateButtons(root, nextPayload || {});
     applySettingsCommandStatus(nextPayload || {});
     refreshComposerBadgeState(root);
@@ -5496,6 +6095,7 @@ RENDERER_HUD_SCRIPT = r"""
     observedHeaderNode = null;
     observedComposerNode = null;
     cancelAnimationFrame(window[rafName] || 0);
+    cancelAnimationFrame(window[composerBadgeRafName] || 0);
     clearInterval(window[runningTimerName] || 0);
     clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
@@ -5515,6 +6115,7 @@ RENDERER_HUD_SCRIPT = r"""
     delete window[composerInputNodeName];
     delete window[composerInputHandlersName];
     delete window[composerFocusStateName];
+    delete window[composerBadgeRafName];
     delete window.__codexUsageHudUpdate;
     delete window.__codexUsageHudRemove;
     return true;
@@ -5555,6 +6156,7 @@ class RendererHudPayload:
     last_event: str
     refreshed_at: str
     warning: bool = False
+    new_session: bool = False
     top_details: dict[str, object] = field(default_factory=dict)
     top_progress: dict[str, object] = field(default_factory=dict)
     top_copies: dict[str, str] = field(default_factory=dict)
@@ -5575,8 +6177,13 @@ class RendererHudPayload:
     pre_send_estimate: str = ""
     pre_send_base_tokens: int = 0
     pre_send_breakdown: list[dict[str, object]] = field(default_factory=list)
+    pre_send_input_price: float = 0.0
+    pre_send_total_cost: float | None = None
+    pre_send_has_prices: bool = False
     activity_warning: bool = False
     activity_reading_file: str = ""
+    debug: bool = False
+    runtime_errors: list[dict[str, object]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -5589,6 +6196,7 @@ class RendererHudPayload:
             "lastEvent": self.last_event,
             "refreshedAt": self.refreshed_at,
             "warning": self.warning,
+            "newSession": bool(self.new_session),
             "topDetails": dict(self.top_details),
             "topProgress": dict(self.top_progress),
             "topCopies": dict(self.top_copies),
@@ -5609,13 +6217,26 @@ class RendererHudPayload:
             "preSendEstimate": self.pre_send_estimate,
             "preSendBaseTokens": int(self.pre_send_base_tokens),
             "preSendBreakdown": [dict(item) for item in self.pre_send_breakdown],
+            "preSendInputPrice": float(self.pre_send_input_price),
+            "preSendTotalCost": self.pre_send_total_cost,
+            "preSendHasPrices": bool(self.pre_send_has_prices),
             "activityWarning": bool(self.activity_warning),
             "activityReadingFile": self.activity_reading_file,
+            "debug": bool(self.debug),
+            "runtimeErrors": [dict(item) for item in self.runtime_errors],
         }
 
 
-class _RendererActiveSessionBinding:
-    """Receive active-session events from the renderer over a CDP binding."""
+class _RendererBinding:
+    """Receive events from the renderer over a CDP ``Runtime.addBinding`` channel.
+
+    The renderer page runs under a strict CSP whose ``connect-src`` does not
+    allow ``http://127.0.0.1``, so in-page ``fetch``/XHR to the local settings
+    bridge is blocked. A CDP binding is the reliable push channel: the page
+    calls ``window[binding_name](json)`` and we receive it as
+    ``Runtime.bindingCalled``. Used for both active-session and composer
+    attachment events.
+    """
 
     def __init__(
         self,
@@ -5805,7 +6426,8 @@ class RendererHudClient:
         self._target_cache_at = 0.0
         self._next_settings_poll_at = 0.0
         self._support_images_sent = False
-        self._active_session_binding: _RendererActiveSessionBinding | None = None
+        self._active_session_binding: _RendererBinding | None = None
+        self._attachments_binding: _RendererBinding | None = None
         self._theme_probe = CodexThemeProbe(
             port=self.port,
             timeout_seconds=max(0.08, min(self.timeout_seconds, 0.25)),
@@ -5819,8 +6441,24 @@ class RendererHudClient:
             self._active_session_binding.close()
             self._active_session_binding = None
         if callable(callback):
-            self._active_session_binding = _RendererActiveSessionBinding(
+            self._active_session_binding = _RendererBinding(
                 ACTIVE_SESSION_BINDING_NAME,
+                callback,
+                timeout_seconds=self.timeout_seconds,
+            )
+
+    def set_attachments_callback(self, callback: Any) -> None:
+        """Receive renderer composer-attachment events over CDP instead of HTTP fetch.
+
+        The page CSP blocks in-page fetch to the local bridge, so this binding
+        is the reliable channel for delivering attachment token estimates.
+        """
+        if self._attachments_binding is not None:
+            self._attachments_binding.close()
+            self._attachments_binding = None
+        if callable(callback):
+            self._attachments_binding = _RendererBinding(
+                COMPOSER_ATTACHMENTS_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
             )
@@ -5835,6 +6473,8 @@ class RendererHudClient:
         settings_bridge_url: str = "",
         settings_command_status: dict[str, object] | None = None,
         update_state: dict[str, object] | None = None,
+        debug: bool = False,
+        runtime_errors: list[RuntimeErrorEvent | dict[str, object]] | None = None,
         work_overlay_selectable_max: int = 6,
         desktop_overlay_dependency: dict[str, object] | None = None,
     ) -> bool:
@@ -5850,6 +6490,8 @@ class RendererHudClient:
             support_images=support_images,
             theme=_renderer_theme_payload(theme_snapshot),
             update_state=update_state,
+            debug=debug,
+            runtime_errors=runtime_errors,
             work_overlay_selectable_max=work_overlay_selectable_max,
             desktop_overlay_dependency=desktop_overlay_dependency,
         ).to_json()
@@ -5877,6 +6519,8 @@ class RendererHudClient:
                     raise RuntimeError("renderer update function did not acknowledge payload")
             if self._active_session_binding is not None:
                 self._active_session_binding.ensure(websocket_url, target_id)
+            if self._attachments_binding is not None:
+                self._attachments_binding.ensure(websocket_url, target_id)
         except Exception as exc:
             self._clear_target_cache(clear_script=True)
             self.last_status = "failed"
@@ -5937,6 +6581,9 @@ class RendererHudClient:
         if self._active_session_binding is not None:
             self._active_session_binding.close()
             self._active_session_binding = None
+        if self._attachments_binding is not None:
+            self._attachments_binding.close()
+            self._attachments_binding = None
         if not self.enabled:
             return
         try:
@@ -6101,9 +6748,12 @@ def payload_from_snapshot(
     support_images: list[dict[str, str]] | None = None,
     theme: dict[str, object] | None = None,
     update_state: dict[str, object] | None = None,
+    debug: bool = False,
+    runtime_errors: list[RuntimeErrorEvent | dict[str, object]] | None = None,
     work_overlay_selectable_max: int = 6,
     desktop_overlay_dependency: dict[str, object] | None = None,
 ) -> RendererHudPayload:
+    new_session = _is_new_session_snapshot(snapshot)
     session_cost = _session_cost(snapshot)
     warnings_dismissed = (
         warning_dismissed_today(settings_path) if settings_path is not None else False
@@ -6140,6 +6790,7 @@ def payload_from_snapshot(
         request_status=snapshot.request.status or "waiting",
         last_event=_format_time(snapshot.last_event_time),
         refreshed_at=_format_time(snapshot.refreshed_at),
+        new_session=new_session,
         warning=bool(
             snapshot.error
             or snapshot.request.error
@@ -6166,9 +6817,26 @@ def payload_from_snapshot(
         pre_send_estimate=snapshot.estimate_base.short_label(),
         pre_send_base_tokens=int(snapshot.estimate_base.total_tokens or 0),
         pre_send_breakdown=snapshot.estimate_base.breakdown_rows(),
+        pre_send_input_price=float(snapshot.estimate_base.input_price_per_token or 0.0),
+        pre_send_total_cost=snapshot.estimate_base.total_cost(),
+        pre_send_has_prices=bool(snapshot.estimate_base.has_prices),
         activity_warning=bool(snapshot.reading_activity.active),
         activity_reading_file=snapshot.reading_activity.warning_label(),
+        debug=bool(debug),
+        runtime_errors=_runtime_errors_payload(runtime_errors or []),
     )
+
+
+def _runtime_errors_payload(
+    errors: list[RuntimeErrorEvent | dict[str, object]],
+) -> list[dict[str, object]]:
+    payload: list[dict[str, object]] = []
+    for error in errors:
+        if isinstance(error, RuntimeErrorEvent):
+            payload.append(error.to_payload())
+        elif isinstance(error, dict):
+            payload.append(dict(error))
+    return payload
 
 
 def _observed_models(snapshot: ParsedSession) -> list[str]:
@@ -6213,11 +6881,17 @@ def _runtime_expression_params(expression: str) -> dict[str, object]:
 
 
 def _session_label(snapshot: ParsedSession) -> str:
+    if _is_new_session_snapshot(snapshot):
+        return "新会话"
     title = _compact(snapshot.session_title, 36)
     if title:
         return title
     session_id = str(snapshot.session_id or "n/a")
     return session_id[-12:] if len(session_id) > 12 else session_id
+
+
+def _is_new_session_snapshot(snapshot: ParsedSession) -> bool:
+    return is_new_session_source(str(snapshot.selection_source or ""))
 
 
 def _status_label(value: str) -> str:
@@ -6375,6 +7049,8 @@ def _compact(value: Any, limit: int = 120) -> str:
 
 
 def _top_expanded_header_title(snapshot: ParsedSession) -> str:
+    if _is_new_session_snapshot(snapshot):
+        return "新会话"
     title = _compact(snapshot.session_title, 72)
     return title or TOP_EXPANDED_HEADER_FALLBACK
 
@@ -6504,7 +7180,8 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
         request_cost, _request_cost_estimated = _request_cost(snapshot)
         if request_cost is not None:
             total_cost = float(total_cost or 0.0) + float(request_cost)
-    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
+    label = "新会话" if _is_new_session_snapshot(snapshot) else "本会话"
+    return f"{label} {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
 
 
 def _top_cache_progress_label(snapshot: ParsedSession) -> str:
@@ -6713,6 +7390,8 @@ def _round_from_snapshot(snapshot: ParsedSession) -> RequestRound:
 
 
 def _task_rows(snapshot: ParsedSession) -> list[RequestRound]:
+    if _is_new_session_snapshot(snapshot):
+        return []
     return snapshot.request_history or [_round_from_snapshot(snapshot)]
 
 
@@ -6999,6 +7678,8 @@ def _request_rows(snapshot: ParsedSession) -> list[str]:
 def _display_request_rows(
     snapshot: ParsedSession,
 ) -> tuple[list[RequestRound], _RoundColumnWidths]:
+    if _is_new_session_snapshot(snapshot):
+        return [], _RoundColumnWidths()
     rows = _task_rows(snapshot)[-30:]
     if not rows:
         rows = [_round_from_snapshot(snapshot)]
@@ -7203,6 +7884,8 @@ def _round_cost_value(item: RequestRound, fallback_model: str) -> tuple[float | 
 
 
 def _session_round_rows(snapshot: ParsedSession) -> list[RequestRound]:
+    if _is_new_session_snapshot(snapshot):
+        return []
     rows = list(getattr(snapshot, "session_request_history", []) or [])
     if rows:
         return rows
@@ -7390,6 +8073,8 @@ def _top_executing_text(snapshot: ParsedSession) -> str:
 
 
 def _top_current_task(snapshot: ParsedSession) -> str:
+    if _is_new_session_snapshot(snapshot):
+        return "新会话"
     prompt = _compact(getattr(snapshot, "task_prompt", ""), 180)
     if prompt:
         return prompt
@@ -7795,10 +8480,15 @@ def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[st
     confirmed = snapshot.confirmed
     session_parts = _top_session_parts(snapshot)
     activity_labels = _top_activity_labels(snapshot)
+    session_label = (
+        "新会话"
+        if _is_new_session_snapshot(snapshot)
+        else f"会话 {snapshot.session_id[-12:]}"
+    )
     details = {
         "title": _top_expanded_header_title(snapshot),
         "session": (
-            f"会话 {snapshot.session_id[-12:]} | "
+            f"{session_label} | "
             f"行 {snapshot.line_count} | 确认 {snapshot.token_events}"
         ),
         "sessionCost": _format_money(session_cost),

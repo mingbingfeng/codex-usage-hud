@@ -118,6 +118,38 @@ class FileChangeWatcherTests(unittest.TestCase):
             finally:
                 watcher.close()
 
+    def test_windows_overflow_reconciles_matching_specs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings_path = root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            session_path = root / "sessions" / "2026" / "07" / "session.jsonl"
+            session_path.parent.mkdir(parents=True)
+            session_path.write_text("{}\n", encoding="utf-8")
+            ignored_path = root / "sessions" / "ignored.txt"
+            ignored_path.write_text("ignored", encoding="utf-8")
+            events: list[tuple[set[str], set[Path]]] = []
+            specs = (
+                FileWatchSpec.file(settings_path, "settings"),
+                FileWatchSpec.tree(root / "sessions", "sessions-root", suffixes=(".jsonl",)),
+            )
+            worker = fw._WindowsDirectoryWorker(
+                root,
+                True,
+                specs,
+                fw.threading.Event(),
+                lambda reasons, paths: events.append((set(reasons), set(paths))),
+            )
+
+            worker._emit_overflow_reconciliation()
+
+        self.assertEqual(len(events), 1)
+        reasons, paths = events[0]
+        self.assertEqual(reasons, {"settings", "sessions-root", "file_watcher.overflow"})
+        self.assertIn(settings_path, paths)
+        self.assertIn(session_path, paths)
+        self.assertNotIn(ignored_path, paths)
+
 
 if __name__ == "__main__":
     unittest.main()

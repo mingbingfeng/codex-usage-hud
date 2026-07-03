@@ -2,7 +2,12 @@
 
 ## codebase-memory-mcp
 
-Project name: `D-AI-codex-hud-codex-usage-hud`.
+Project name: `E-Project-codex-usage-hud`.
+
+When starting work, confirm the active codebase-memory-mcp project with
+`list_projects` and use the entry whose `root_path` is
+`E:/Project/codex-usage-hud`. If a pasted or remembered project name differs
+from that `root_path` match, treat the `list_projects` result as canonical.
 
 Automatically prefer codebase-memory-mcp for:
 - locating symbols, files, and feature entry points
