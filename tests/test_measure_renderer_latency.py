@@ -33,7 +33,7 @@ class RendererLatencyToolTests(unittest.TestCase):
             if isinstance(item, dict)
         }
         self.assertIn("current_session_parse_full", operation_names)
-        self.assertIn("append_then_parse_and_payload", operation_names)
+        self.assertIn("append_then_incremental_parse_and_payload", operation_names)
 
     def test_format_markdown_includes_operation_table(self) -> None:
         report = {
@@ -45,7 +45,7 @@ class RendererLatencyToolTests(unittest.TestCase):
             "used_synthetic_session": False,
             "operations": [
                 {
-                    "name": "current_session_parse_full",
+                    "name": "append_then_incremental_parse_and_payload",
                     "iterations": 1,
                     "median_ms": 1.2,
                     "p90_ms": 1.3,
@@ -58,7 +58,10 @@ class RendererLatencyToolTests(unittest.TestCase):
         text = measure_renderer_latency.format_markdown(report)
 
         self.assertIn("# Renderer Latency Baseline", text)
-        self.assertIn("| current_session_parse_full | 1.200 | 1.300 | 1.400 | 1 |", text)
+        self.assertIn(
+            "| append_then_incremental_parse_and_payload | 1.200 | 1.300 | 1.400 | 1 |",
+            text,
+        )
         self.assertIn("local only", text)
 
 

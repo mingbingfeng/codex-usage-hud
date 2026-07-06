@@ -263,6 +263,7 @@
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
+| 2026-07-06 | 新增 parser offset 测试在 Windows 上多 2 bytes | 1 | 根因是 `Path.write_text()` 文本模式换行转换；测试改用 `newline="\n"` 固定 LF 后通过 |
 | 2026-07-06 | pytest node id 类名写错：新用例实际属于 `DaemonLifecycleTests`，误写为 `BudgetHelperTests` | 1 | 用 `rg` 定位测试类后改用正确 node id |
 | 2026-07-06 | Codex manual helper 请求 developers.openai.com `HEAD` 返回 403 | 1 | 改用本机 `codex app-server --help` 和 `generate-json-schema --experimental` 做 app-server 协议实测 |
 | 2026-07-03 | pytest node id 类名写错：`WorkOverlayTests` 不存在 | 1 | 用 `rg` 查到测试属于 `BudgetHelperTests`，改用正确 node id 后通过 |
@@ -282,14 +283,42 @@
   - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_legacy_active_session_diagnostics_flag_is_opt_in tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_can_enable_legacy_active_session_diagnostics -q` 先失败（参数不存在；手动诊断仍挂起 native title），实现后通过。
   - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_legacy_active_session_diagnostics_flag_is_opt_in tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_can_enable_legacy_active_session_diagnostics tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_uses_renderer_bridge_instead_of_native_title_watcher -q` 通过。
 
+## 2026-07-06 阶段 4 收口
+- 提交并推送阶段 1-3 收口改动：
+  - commit: `44d1bf5 refactor(renderer): expose runtime errors`
+  - branch/upstream: `codex/renderer-event-dispatcher` -> `origin/codex/renderer-event-dispatcher`
+- 新增当前 session JSONL 增量解析状态：
+  - `JsonlTailState`
+  - `JsonlSessionParser.parse_file_incremental()`
+  - 保存 path、file identity、offset、完整物理行数、最后完整行、records、累计 snapshot。
+- 增量读取行为：
+  - append 只读取上次 offset 之后的新增 bytes。
+  - 只 JSON-decode 新增完整行。
+  - trailing partial line 不推进 offset，等下一次 append 补齐后再解析。
+  - truncate、rotate、session switch 触发 tail state reset。
+- `RuntimeContext` 新增 `current_session_tail_state`。
+- `build_snapshot()` 当前 session 路径改为 `context.parser.parse_file_incremental()`，并把 state 写回 context。
+- 当前请求、会话累计、heavy rounds、activity trail 继续从同一个 `ParsedSession` 读取，因此共享当前 session tail state。
+- 日/周预算聚合继续使用既有 `UsageSummaryCache` per-file contribution replacement：
+  - 当前 session 文件变化且无需全量预算刷新时，只刷新该文件贡献。
+  - 非当前 session 或预算窗口变化仍可触发全量扫描。
+- 性能脚本更新：
+  - append 场景从 `append_then_parse_and_payload` 改为 `append_then_incremental_parse_and_payload`。
+  - append 测量使用临时 session 副本和复用的 `JsonlTailState`。
+- TDD/验证记录：
+  - `python -m pytest tests/test_parser.py::JsonlSessionParserTests::test_incremental_parse_reads_only_appended_complete_records tests/test_parser.py::JsonlSessionParserTests::test_incremental_parse_preserves_incomplete_trailing_line tests/test_parser.py::JsonlSessionParserTests::test_incremental_parse_resets_after_truncate_or_rotation -q` 先失败（`JsonlTailState` 不存在），实现后通过。
+  - `python -m pytest tests/test_ui.py::BudgetHelperTests::test_build_snapshot_uses_incremental_parser_for_current_session -q` 先失败（仍调用 `parse_file`），实现后通过。
+  - `python -m pytest tests/test_measure_renderer_latency.py -q` 先失败（性能脚本仍输出旧 append 指标），实现后通过。
+  - `python -m pytest tests/test_parser.py tests/test_ui.py -q` 通过。
+
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 阶段 1、2、3 完成；renderer active-session 默认权威源已收口到 renderer bridge |
-| 我要去哪里？ | 进入阶段 4，设计 JSONL tail parser 和当前会话增量 state，并继续拆 overlay polling |
+| 我在哪里？ | 阶段 1、2、3、4 完成；当前 session refresh 已切到 JSONL tail state |
+| 我要去哪里？ | 进入阶段 5，收口 macOS sessions tree watcher / fallback polling degraded 标记，并继续拆 overlay polling |
 | 目标是什么？ | renderer 权威、事件驱动、失败显式、响应速度优先 |
-| 我学到了什么？ | app-server 当前 schema 能描述加载/运行线程和 token usage，但未证明能表达当前 UI 选中线程 |
-| 我做了什么？ | 收口阶段 3：新增 legacy active-session 诊断开关、完成 app-server POC、更新阶段计划和文档 |
+| 我学到了什么？ | 当前 session 可以先消除全文件 I/O：append 只读新增完整行；预算聚合已有单文件贡献替换基础 |
+| 我做了什么？ | 提交并推送阶段 1-3；收口阶段 4：新增 `JsonlTailState`、接入 `build_snapshot()`、更新性能 append 基线 |
 
 ---
 *每个阶段完成后或遇到错误时更新此文件。*

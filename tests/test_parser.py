@@ -19,6 +19,7 @@ if str(SRC_ROOT) not in sys.path:
 from codex_usage_hud.core.calculator import estimate_tokens
 from codex_usage_hud.core.parser import (
     JsonlSessionParser,
+    JsonlTailState,
     RequestTokens,
     SseRequestStateMachine,
     extract_log_field,
@@ -82,6 +83,76 @@ class TimestampAndFieldTests(unittest.TestCase):
 
 
 class JsonlSessionParserTests(unittest.TestCase):
+    def test_incremental_parse_reads_only_appended_complete_records(self) -> None:
+        parser = JsonlSessionParser()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            first = record("2026-05-28T00:00:00Z", "session_meta", {"id": "s1"})
+            second = token_count("2026-05-28T00:00:01Z", 10, 2, 3, 1, 13, 13)
+            path.write_text(json.dumps(first) + "\n", encoding="utf-8", newline="\n")
+
+            snapshot, state = parser.parse_file_incremental(path)
+            initial_offset = state.offset
+            path.write_text(
+                json.dumps(first) + "\n" + json.dumps(second) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            snapshot, state = parser.parse_file_incremental(path, state)
+
+        self.assertEqual(snapshot.line_count, 2)
+        self.assertEqual(snapshot.confirmed.cumulative_total, 13)
+        self.assertIsInstance(state, JsonlTailState)
+        self.assertEqual(state.line_count, 2)
+        self.assertGreater(state.offset, initial_offset)
+
+    def test_incremental_parse_preserves_incomplete_trailing_line(self) -> None:
+        parser = JsonlSessionParser()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            first = record("2026-05-28T00:00:00Z", "session_meta", {"id": "s1"})
+            second = record("2026-05-28T00:00:01Z", "event_msg", {"type": "task_started"})
+            complete = json.dumps(first) + "\n"
+            partial = json.dumps(second)[:24]
+            path.write_text(complete + partial, encoding="utf-8", newline="\n")
+
+            snapshot, state = parser.parse_file_incremental(path)
+            path.write_text(
+                complete + json.dumps(second) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            snapshot, state = parser.parse_file_incremental(path, state)
+
+        self.assertEqual(snapshot.line_count, 2)
+        self.assertEqual(snapshot.task_count, 1)
+        self.assertEqual(
+            state.offset,
+            len((complete + json.dumps(second) + "\n").encode("utf-8")),
+        )
+
+    def test_incremental_parse_resets_after_truncate_or_rotation(self) -> None:
+        parser = JsonlSessionParser()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            first = record("2026-05-28T00:00:00Z", "session_meta", {"id": "s1"})
+            second = record("2026-05-28T00:00:01Z", "event_msg", {"type": "task_started"})
+            path.write_text(
+                json.dumps(first) + "\n" + json.dumps(second) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            _snapshot, state = parser.parse_file_incremental(path)
+
+            rotated = record("2026-05-28T01:00:00Z", "session_meta", {"id": "s2"})
+            path.write_text(json.dumps(rotated) + "\n", encoding="utf-8", newline="\n")
+            snapshot, state = parser.parse_file_incremental(path, state)
+
+        self.assertEqual(snapshot.session_id, "s2")
+        self.assertEqual(snapshot.line_count, 1)
+        self.assertEqual(state.line_count, 1)
+
     def test_load_records_lenient_skips_partial_jsonl(self) -> None:
         parser = JsonlSessionParser()
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -46,6 +46,7 @@ from .core import (
     BaseEstimate,
     CostEstimator,
     JsonlSessionParser,
+    JsonlTailState,
     ParsedSession,
     PreSendEstimator,
     RequestRound,
@@ -4021,6 +4022,7 @@ class RuntimeContext:
     visible_app_error_cache: _VisibleAppErrorCache = field(
         default_factory=_VisibleAppErrorCache
     )
+    current_session_tail_state: JsonlTailState | None = None
 
     def __post_init__(self) -> None:
         if self.runtime_errors.event_bus is None:
@@ -4722,10 +4724,13 @@ def build_snapshot(
                 error=f"Sessions directory not found: {context.sessions_root}",
             )
     else:
-        snapshot = context.parser.parse_file(
+        tail_state = getattr(context, "current_session_tail_state", None)
+        snapshot, tail_state = context.parser.parse_file_incremental(
             session_path,
+            tail_state,
             sse_tracker=context.sse_tracker,
         )
+        context.current_session_tail_state = tail_state
     snapshot.selection_source = selection_source
     if context.active_session_tracker is not None and session_path is not None:
         snapshot.session_title = context.active_session_tracker.title_for_session(

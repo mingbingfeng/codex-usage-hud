@@ -216,14 +216,19 @@ def measure_baseline(
         append_sessions_root = append_path.parent
 
         append_counter = {"value": 0}
+        _append_snapshot, append_tail_state = parser.parse_file_incremental(append_path)
 
         def append_parse_payload() -> int:
+            nonlocal append_tail_state
             append_counter["value"] += 1
             _append_jsonl(
                 append_path,
                 _token_count(datetime.now(timezone.utc), 10_000 + append_counter["value"]),
             )
-            append_snapshot = parser.parse_file(append_path)
+            append_snapshot, append_tail_state = parser.parse_file_incremental(
+                append_path,
+                append_tail_state,
+            )
             return len(payload_from_snapshot(append_snapshot).to_json())
 
         append_cache = UsageSummaryCache(parser, min_rescan_seconds=0)
@@ -272,7 +277,7 @@ def measure_baseline(
                 warmups=warmups,
             ),
             _timed_runs(
-                "append_then_parse_and_payload",
+                "append_then_incremental_parse_and_payload",
                 append_parse_payload,
                 iterations=iterations,
                 warmups=warmups,
@@ -297,7 +302,7 @@ def measure_baseline(
             "operations": operations,
             "notes": [
                 "This local harness does not measure live CDP transport, renderer DOM paint, or user-visible end-to-end latency.",
-                "append_then_parse_and_payload writes only to a temporary copy of the selected session file.",
+                "append_then_incremental_parse_and_payload writes only to a temporary copy of the selected session file.",
                 "file_watcher_poll_signature represents the polling fallback scan cost, not native watcher delivery latency.",
             ],
         }

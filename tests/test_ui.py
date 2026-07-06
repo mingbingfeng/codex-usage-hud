@@ -706,7 +706,10 @@ class BudgetHelperTests(unittest.TestCase):
                     resolve=MagicMock(return_value=(session_path, "renderer:thread")),
                 ),
                 sessions_root=root,
-                parser=SimpleNamespace(parse_file=MagicMock(return_value=snapshot)),
+                parser=SimpleNamespace(
+                    parse_file_incremental=MagicMock(return_value=(snapshot, object()))
+                ),
+                current_session_tail_state=None,
                 sse_tracker=None,
                 active_session_tracker=None,
                 visible_app_error_cache=SimpleNamespace(
@@ -738,6 +741,57 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(summarize_kwargs["allow_stale"])
         self.assertFalse(summarize_kwargs["force_rescan"])
         self.assertEqual(summarize_kwargs["refresh_paths"], (session_path,))
+
+    def test_build_snapshot_uses_incremental_parser_for_current_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_path = root / "session.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(status="parsed", session_path=session_path)
+            next_tail_state = object()
+            parser = SimpleNamespace(
+                parse_file=MagicMock(side_effect=AssertionError("full parse used")),
+                parse_file_incremental=MagicMock(return_value=(snapshot, next_tail_state)),
+            )
+            context = SimpleNamespace(
+                reload_user_config=MagicMock(),
+                session_resolver=SimpleNamespace(
+                    session_id="",
+                    session_file=None,
+                    resolve=MagicMock(return_value=(session_path, "renderer:thread")),
+                ),
+                sessions_root=root,
+                parser=parser,
+                current_session_tail_state=None,
+                sse_tracker=None,
+                active_session_tracker=None,
+                visible_app_error_cache=SimpleNamespace(
+                    resolve=MagicMock(return_value="")
+                ),
+                platform=SimpleNamespace(get_active_app_error=MagicMock(return_value="")),
+                user_config=UserConfig.defaults(),
+                usage_cache=SimpleNamespace(
+                    summarize=MagicMock(return_value=(UsageSummary(), UsageSummary()))
+                ),
+                daily_budget_usd=100.0,
+                weekly_budget_usd=400.0,
+                budget_thresholds=[],
+            )
+
+            result = cli_module.build_snapshot(
+                context,
+                refresh_budget_aggregate=False,
+                refresh_active_work_items=False,
+            )
+
+        self.assertIs(result, snapshot)
+        parser.parse_file.assert_not_called()
+        parser.parse_file_incremental.assert_called_once_with(
+            session_path,
+            None,
+            sse_tracker=None,
+        )
+        self.assertIs(context.current_session_tail_state, next_tail_state)
 
     def test_build_snapshot_records_renderer_unmatched_runtime_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

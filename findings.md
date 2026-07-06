@@ -12,7 +12,10 @@
   - 再 title -> session_index / state db。
   - 映射失败时当前仍可能进入 unmatched source，而不是直接错误。
 - 当前 usage snapshot：
-  - 当前会话每次 refresh 调 `JsonlSessionParser.parse_file(session_path)` 全文件读取。
+  - 当前会话 refresh 通过 `JsonlSessionParser.parse_file_incremental()` 复用 `JsonlTailState`。
+  - `JsonlTailState` 保存 offset、file identity、最后完整行、records 和累计 snapshot。
+  - append 时只从上次 offset 之后 JSON-decode 新增完整行；partial trailing line 等下一次补齐。
+  - truncate、rotate、session switch 会重置 tail state 并重新建立当前 session snapshot。
   - 日/周预算聚合走 `UsageSummaryCache`，按 mtime/size 缓存。
   - 当前 session 文件变化时可只替换该文件预算贡献。
 - renderer 主循环已有事件驱动雏形：
@@ -76,7 +79,9 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
 | `usage_summary_full_scan` | 69.765 | sessions + archived_sessions 全量预算扫描 |
 | `usage_summary_refresh_current_file` | 2.708 | 单文件贡献替换 |
 | `file_watcher_poll_signature` | 55.724 | polling fallback 的全树 stat token |
-| `append_then_parse_and_payload` | 20.158 | 临时副本 append 后 full parse + payload |
+| `append_then_parse_and_payload` | 20.158 | 阶段 0 旧基线：临时副本 append 后 full parse + payload |
+
+阶段 4 后，性能脚本把 append 场景改名为 `append_then_incremental_parse_and_payload`，并复用 `JsonlTailState` 测量 append 后增量解析 + payload 构建。
 
 限制：
 - 该 harness 不测真实 CDP transport、renderer DOM paint、用户可见端到端延迟。
@@ -94,7 +99,7 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
 ## 风险与重构机会
 | 风险 | 影响 | 重构方向 |
 |------|------|----------|
-| 当前会话全文件 parse | 大会话下响应慢、CPU 高 | JSONL tail parser / 增量 session state |
+| 当前会话全文件 parse | 已从当前 session refresh 主路径移除；历史/非当前候选仍可能全量解析 | JSONL tail parser / 后续 active work 候选增量化 |
 | 多层 fallback 掩盖失败 | DOM/协议变化不易发现 | DEBUG 错误 HUD + 显式错误事件 |
 | native title / latest JSONL fallback | 可能显示错会话 | renderer mode 单一 active-session 权威源 |
 | Windows watcher 溢出未补偿 | 高写入时漏事件 | 溢出时枚举补偿并报警 |

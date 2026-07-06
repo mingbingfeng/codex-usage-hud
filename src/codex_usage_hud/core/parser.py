@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
@@ -467,6 +468,21 @@ class ParsedSession:
     reading_activity: ReadingActivity = field(default_factory=ReadingActivity)
 
 
+@dataclass
+class JsonlTailState:
+    """Incremental read state for one Codex session JSONL file."""
+
+    path: Path | None = None
+    file_id: tuple[str, int, int] | None = None
+    offset: int = 0
+    line_count: int = 0
+    file_size: int | None = None
+    last_file_mtime: float | None = None
+    last_complete_line: str = ""
+    records: list[dict[str, Any]] = field(default_factory=list)
+    snapshot: ParsedSession = field(default_factory=ParsedSession)
+
+
 class CostEstimator:
     """Small adapter that keeps parsing resilient to unknown model names."""
 
@@ -530,6 +546,114 @@ class JsonlSessionParser:
         except OSError:
             snapshot.last_file_mtime = None
         return self.parse_records(records, path, session_id, sse_tracker, snapshot)
+
+    def parse_file_incremental(
+        self,
+        path: Path,
+        state: JsonlTailState | None = None,
+        *,
+        session_id: str | None = None,
+        sse_tracker: SseRequestStateMachine | None = None,
+    ) -> tuple[ParsedSession, JsonlTailState]:
+        """Parse a session file by reading only bytes appended since ``state``."""
+        snapshot = ParsedSession(session_path=path)
+        if not path.exists():
+            snapshot.status = "missing"
+            snapshot.error = f"Session file not found: {path}"
+            return snapshot, JsonlTailState(path=path, snapshot=snapshot)
+
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            snapshot.status = "missing"
+            snapshot.error = f"Session file unavailable: {exc}"
+            return snapshot, JsonlTailState(path=path, snapshot=snapshot)
+
+        file_id = self._file_id(path, stat)
+        if self._tail_state_matches(path, stat, file_id, state):
+            tail = state
+        else:
+            tail = JsonlTailState(path=path, file_id=file_id)
+
+        try:
+            self._read_tail_records(path, tail)
+        except OSError as exc:
+            snapshot.status = "missing"
+            snapshot.error = f"Session file unavailable: {exc}"
+            tail.snapshot = snapshot
+            return snapshot, tail
+
+        tail.file_id = file_id
+        tail.file_size = stat.st_size
+        tail.last_file_mtime = stat.st_mtime
+        snapshot.last_file_mtime = stat.st_mtime
+        parsed = self.parse_records(tail.records, path, session_id, sse_tracker, snapshot)
+        tail.snapshot = parsed
+        return parsed, tail
+
+    def _file_id(self, path: Path, stat: os.stat_result) -> tuple[str, int, int]:
+        try:
+            resolved = str(path.resolve(strict=False))
+        except OSError:
+            resolved = str(path.absolute())
+        return (
+            resolved,
+            int(getattr(stat, "st_dev", 0) or 0),
+            int(getattr(stat, "st_ino", 0) or 0),
+        )
+
+    def _tail_state_matches(
+        self,
+        path: Path,
+        stat: os.stat_result,
+        file_id: tuple[str, int, int],
+        state: JsonlTailState | None,
+    ) -> bool:
+        if state is None:
+            return False
+        if state.path is None:
+            return False
+        try:
+            same_path = state.path.resolve(strict=False) == path.resolve(strict=False)
+        except OSError:
+            same_path = state.path == path
+        if not same_path:
+            return False
+        if state.file_id is not None and state.file_id != file_id:
+            return False
+        return int(stat.st_size) >= int(state.offset)
+
+    def _read_tail_records(self, path: Path, state: JsonlTailState) -> None:
+        with path.open("rb") as handle:
+            handle.seek(max(0, int(state.offset)))
+            chunk = handle.read()
+        if not chunk:
+            return
+
+        complete_length = len(chunk) if chunk.endswith(b"\n") else chunk.rfind(b"\n") + 1
+        if complete_length <= 0:
+            return
+        complete = chunk[:complete_length]
+        state.offset += complete_length
+        for raw_line in complete.splitlines(keepends=True):
+            state.line_count += 1
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                text = stripped.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            state.last_complete_line = text
+            try:
+                record = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            record["_line"] = state.line_count
+            record["_dt"] = parse_timestamp(record.get("timestamp"))
+            state.records.append(record)
 
     def parse_records(
         self,
