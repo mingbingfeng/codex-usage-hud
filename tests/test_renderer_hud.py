@@ -260,8 +260,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("Tk 独立窗口", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-settings-loading-track", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("openSettingsLoading", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("settingsCommandKey", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("localStorage.setItem", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("settingsCommandKey", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("codexUsageHudSettingsCommand:v1", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("localStorage.setItem(settingsCommandKey", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("请作者喝咖啡链接", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-setting-key="support_url"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-setting-key="work_overlay_max_items"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -508,7 +509,47 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function renderRuntimeErrors", script)
         self.assertIn("codex-usage-hud-runtime-errors", script)
         self.assertIn("runtimeErrors", script)
-        self.assertIn("runtimeErrorsPanel.hidden = !debug || !items.length", script)
+        self.assertIn("DEBUG HUD active", script)
+        self.assertIn("runtimeErrorsPanel.hidden = !debug", script)
+        self.assertIn("debugStatusItem", script)
+        self.assertIn("left: 16px;", script)
+        self.assertNotIn("right: 16px;", script)
+        self.assertIn("user-select: text;", script)
+        self.assertIn('title.dataset.action = "runtime-errors-move";', script)
+        self.assertIn("[data-action='runtime-errors-move']", script)
+        self.assertIn("beginRuntimeErrorsGesture", script)
+        self.assertIn("setRuntimeErrorsPanelState", script)
+
+    def test_update_payload_reports_failed_update_without_reinstall_retry(self) -> None:
+        client = RendererHudClient(port=9229, enabled=True)
+        install_force_flags = []
+        send_payloads = []
+
+        client._page_target = lambda: {  # type: ignore[method-assign]
+            "id": "target-1",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9229/devtools/page/1",
+        }
+
+        def install(websocket_url: str, target_id: str, *, force: bool = False) -> None:
+            install_force_flags.append(force)
+            client._script_identifier = "script-1"
+            client._target_id = target_id
+            client._websocket_url = websocket_url
+
+        def send_update(websocket_url: str, payload: dict[str, object]) -> bool:
+            send_payloads.append((websocket_url, dict(payload)))
+            return False
+
+        client._install = install  # type: ignore[method-assign]
+        client._send_update = send_update  # type: ignore[method-assign]
+
+        result = client.update_payload({"debug": True})
+
+        self.assertFalse(result)
+        self.assertEqual(install_force_flags, [False])
+        self.assertEqual(len(send_payloads), 1)
+        self.assertEqual(client.last_status, "failed")
+        self.assertIn("renderer update function did not acknowledge payload", client.last_error)
 
     def test_renderer_active_session_detects_blank_titlebar_new_session(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -1333,12 +1374,32 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
         self.assertEqual(close_calls, 1)
 
-    def test_client_consumes_renderer_settings_command_over_cdp(self) -> None:
-        expressions: list[str] = []
+    def test_client_starts_layout_binding_after_update(self) -> None:
+        # 布局变更（拖拽/缩放/展开）通过 CDP binding 上报，验证 update 后 binding 被 ensure。
+        ensure_calls: list[tuple[str, str]] = []
+        close_calls = 0
         originals = (
             renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
             renderer_hud.send_cdp_command,
+            renderer_hud._RendererBinding,
         )
+
+        captured: list[str] = []
+
+        class FakeBinding:
+            def __init__(self, binding_name, callback, *, timeout_seconds):
+                self.binding_name = binding_name
+                self.callback = callback
+                self.timeout_seconds = timeout_seconds
+                captured.append(binding_name)
+
+            def ensure(self, websocket_url: str, target_id: str) -> None:
+                ensure_calls.append((websocket_url, target_id))
+
+            def close(self) -> None:
+                nonlocal close_calls
+                close_calls += 1
 
         def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
             del port, timeout_seconds
@@ -1352,48 +1413,46 @@ class RendererHudClientTests(unittest.TestCase):
                 }
             ]
 
+        def fake_install(websocket_url: str, script: str, timeout_seconds: float) -> str:
+            del websocket_url, script, timeout_seconds
+            return "script-1"
+
         def fake_send(
             websocket_url: str,
             method: str,
             params: dict[str, object],
             timeout_seconds: float,
         ) -> dict[str, object]:
-            del websocket_url, timeout_seconds
-            self.assertEqual(method, "Runtime.evaluate")
-            expression = str(params["expression"])
-            expressions.append(expression)
-            self.assertIn(renderer_hud.SETTINGS_COMMAND_STORAGE_KEY, expression)
-            self.assertIn("localStorage.removeItem", expression)
-            self.assertIn("expiresAt", expression)
-            return {
-                "result": {
-                    "result": {
-                        "value": {
-                            "action": "save",
-                            "settings": {"daily_reset_time": "09:30"},
-                        }
-                    }
-                }
-            }
+            del websocket_url, method, params, timeout_seconds
+            return {"result": {"result": {"value": True}}}
 
         (
             renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
             renderer_hud.send_cdp_command,
-        ) = (fake_list_targets, fake_send)
+            renderer_hud._RendererBinding,
+        ) = (fake_list_targets, fake_install, fake_send, FakeBinding)
         try:
             client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
-            command = client.take_settings_command()
-            second = client.take_settings_command()
+            client.set_layout_callback(lambda payload: payload)
+            self.assertTrue(client.update_payload({"topLine": "A", "requestLine": "B"}))
+            client.close()
         finally:
             (
                 renderer_hud.list_targets,
+                renderer_hud.install_new_document_script,
                 renderer_hud.send_cdp_command,
+                renderer_hud._RendererBinding,
             ) = originals
 
-        self.assertEqual(command["action"], "save")
-        self.assertEqual(command["settings"]["daily_reset_time"], "09:30")
-        self.assertIsNone(second)
-        self.assertEqual(len(expressions), 1)
+        self.assertIn(renderer_hud.LAYOUT_BINDING_NAME, captured)
+        self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
+        self.assertEqual(close_calls, 1)
+
+    def test_client_does_not_expose_renderer_settings_polling_fallback(self) -> None:
+        client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+
+        self.assertFalse(hasattr(client, "take_settings_command"))
 
     def test_client_close_uses_cached_target_when_force_lookup_fails(self) -> None:
         calls: list[tuple[str, str]] = []

@@ -26,7 +26,7 @@
 | 错误可见性 | DEBUG 模式下 renderer 注入失败、DOM anchor 缺失、JSONL 解析失败、watcher 溢出、overlay IPC 失败都有错误 HUD 记录 |
 
 ## 当前阶段
-阶段 1/2/3：运行时事件、诊断模型与 active-session 权威源交叉推进。已补 runtime error model、DEBUG 错误 HUD payload/renderer 面板，并接入 renderer-unmatched、file watcher degraded/overflow、CDP update failed 四类错误来源；runtime error 已接入内部事件总线并可唤醒 renderer loop；renderer-authoritative tracker 不再落到 CDP/native title 或 latest JSONL activity fallback。完整事件总线调度器尚未落地。
+阶段 1、阶段 2、阶段 3 完成；阶段 4 准备继续推进。已补 runtime error model、DEBUG 错误 HUD payload/renderer 面板，并接入 renderer-unmatched、file watcher degraded/overflow、CDP update failed 四类错误来源；runtime error 已接入内部事件总线并可唤醒 renderer loop；renderer loop 每次 tick 会计算 `_renderer_budget_window_keys` 并在跨窗口时发 `budget_window_changed`；HUD 面板的 drag/resize/toggle 通过 `codexUsageHudLayout` CDP binding 直接发 `renderer_layout_changed`；renderer-authoritative tracker 不再落到 CDP/native title 或 latest JSONL activity fallback。阶段 1 事件类型全部接入总线；renderer tick 已拆成命名阶段（`sample_tick_inputs → apply_settings_command → 生命周期 → compute_force_fast_refresh → apply_refresh → compute_wait_delay`），跨 tick 状态收拢到 `_RendererLoopState`；runtime events 现在通过 `RuntimeEventBus.drain()` 进入 event type → handler 分派，由 handler 显式请求 snapshot/diagnostics，`renderer_layout_changed` 只唤醒 keepalive 而不重建 snapshot。signature drift 与 legacy bridge wakeup 不再主动触发 snapshot；update-state change、active-work pending 等内部状态也以 runtime event 进入同一 handler 分派。等待循环仍保留为阻塞/keepalive/daemon watchdog 机制，但非初始化 snapshot 决策只来自事件 handler。阶段 2 已完成：normal-mode runtime error diagnostic 会写入 `renderer_fallback.log`；DEBUG HUD 在 debug 开启且无错误时也显示 `DEBUG HUD active` 初始化行；Runtime errors 面板保持 renderer 内实现，默认左下角显示，标题栏可拖动、位置持久化，内容可选中复制；settings command localStorage/CDP polling fallback 已删除；CDP update 失败不再 force reinstall 后重试，直接进入显式 runtime error；已接入错误源都有“不被 fallback 掩盖”的测试。阶段 3 已完成：renderer mode 默认把 renderer bridge 作为唯一 active-session 权威源；`--legacy-active-session-diagnostics` 作为隐藏手动诊断开关，默认不启用；本机 schema/CLI 探测显示 Codex app-server 目前有 `thread/list`、`thread/loaded/list`、thread status/token usage 等能力，但没有能证明“当前 Codex App 窗口正在看的 active thread”的协议字段或通知，因此暂不作为权威源或隐式 fallback。
 
 ## 阶段路线
 
@@ -39,35 +39,39 @@
 - **状态：** complete
 
 ### 阶段 1：运行时事件总线
-- [ ] 新增内部事件总线，事件至少包括：
+- [x] 新增内部事件总线，事件至少包括：
   - [x] `active_session_changed`
   - [x] `session_file_changed`
   - [x] `settings_changed`
   - [x] `settings_command_received`
-  - `budget_window_changed`
-  - `renderer_layout_changed`
+  - [x] `budget_window_changed`
+  - [x] `renderer_layout_changed`
   - [x] `overlay_command_received`
   - [x] `runtime_error`（已接入 `RuntimeEventBus`）
-- [ ] 将 renderer 主循环从 while + timeout wait 改成事件驱动调度器。
-- [ ] 只允许事件处理器请求 snapshot，不允许任意循环主动重建。
-- [ ] 事件 payload 必须包含来源、时间戳、关联 session、错误上下文。
-- **状态：** in_progress
+- [x] 将 renderer 主循环从 while + timeout wait 改成事件驱动调度器。
+  - [x] 将 tick 主体拆成命名阶段（`sample_tick_inputs` → `apply_settings_command` → 生命周期检查 → `compute_force_fast_refresh` → `apply_refresh` / keep_alive → `compute_wait_delay`），并把跨 tick 状态收拢到 `_RendererLoopState`。
+  - [x] runtime event 通过 `RuntimeEventBus.drain()` 进入事件类型 → handler 分派；`runtime_error`、`settings_changed`、`settings_command_received`、`overlay_command_received`、`active_session_changed`、`budget_window_changed` 显式请求 snapshot/diagnostics，`renderer_layout_changed` 不请求 snapshot。
+  - [x] 移除剩余 signature drift / legacy bridge wakeup 的主动 snapshot 保护，让所有非初始化 snapshot 都来自事件 handler 或明确内部状态事件。
+- [x] 只允许事件处理器请求 snapshot，不允许任意循环主动重建。
+- [x] 事件 payload 必须包含来源、时间戳、关联 session、错误上下文。
+- **状态：** complete
 
 ### 阶段 2：错误 HUD 与失败显式化
 - [x] 定义统一错误模型：`source`、`severity`、`code`、`message`、`context`、`first_seen_at`、`last_seen_at`。
 - [x] DEBUG 模式下在 renderer 注入一个错误 HUD panel。
-- [ ] 正常模式只写结构化日志/diagnostic，不吞掉错误。
-- [ ] 删除「失败后静默换路径」逻辑；可恢复动作必须变成用户可见命令。
-- [ ] 为每个错误写测试：错误发生时不会被 fallback 掩盖。
-- **状态：** in_progress
+- [x] Runtime errors 面板默认左下角显示，支持拖动、持久化位置，正文可选中复制。
+- [x] 正常模式只写结构化日志/diagnostic，不吞掉错误。
+- [x] 删除「失败后静默换路径」逻辑；可恢复动作必须变成用户可见命令。
+- [x] 为每个错误写测试：错误发生时不会被 fallback 掩盖。
+- **状态：** complete
 
 ### 阶段 3：active session 单一权威源
-- [ ] 将 renderer bridge 定为 renderer mode 下唯一 active-session 权威源。
+- [x] 将 renderer bridge 定为 renderer mode 下唯一 active-session 权威源。
 - [x] 去掉 renderer mode 下 `platform.get_active_conversation_ref()`、native title、latest JSONL mtime 的自动兜底选择。
 - [x] DOM 选择器找不到或 thread id/title 映射失败时，发 `runtime_error` 并显示错误 HUD。
-- [ ] 调研并实测 Codex app-server 是否能提供当前窗口 active thread；如果能，作为新权威源候选，不做隐式 fallback。
-- [ ] 保留手动配置开关用于 legacy 诊断，但默认不启用。
-- **状态：** pending
+- [x] 调研并实测 Codex app-server 是否能提供当前窗口 active thread；如果能，作为新权威源候选，不做隐式 fallback。
+- [x] 保留手动配置开关用于 legacy 诊断，但默认不启用。
+- **状态：** complete
 
 ### 阶段 4：会话用量增量解析
 - [ ] 新增 JSONL tail parser：保存 offset、文件标识、最后完整行、累计 session summary。
@@ -88,7 +92,7 @@
 - [ ] payload 拆分为 current-session、budget、settings、overlay、diagnostics。
 - [ ] JS 端按局部 payload 更新对应 DOM，避免每次重刷 top/bottom 所有字段。
 - [ ] CDP target discovery 改为长连接/订阅式状态，连接断开直接错误 HUD。
-- [ ] settings command 从 localStorage polling 改为 CDP binding/custom event。
+- [x] settings command 从 localStorage polling 改为 settings bridge callback/runtime event。
 - **状态：** pending
 
 ### 阶段 7：桌面气泡 IPC 重构
@@ -133,10 +137,10 @@ python tools/measure_renderer_latency.py
 ## 遇到的错误
 | 错误 | 尝试次数 | 解决方案 |
 |------|---------|---------|
-| 无 | 0 | 无 |
+| `renderer_fallback.log` 未生成 | 1 | RED 测试发现 runtime error diagnostic 尚未接入 normal mode；为 `RuntimeErrorRegistry` 增加 diagnostic callback，并修复 `_append_renderer_diagnostic` 对 dict 字段的过滤逻辑 |
 
 ## 下一步
-1. 继续拆 settings command polling 和 overlay command polling。
-2. 继续按 `docs/FALLBACK_INVENTORY.md` 逐项删除或隔离 fallback。
-3. 继续拆 settings command polling 和 overlay polling。
-4. 调研 Codex app-server active thread 能力，决定是否作为显式权威源候选。
+1. 进入阶段 4：设计 JSONL tail parser 与当前会话增量 state。
+2. 继续按 `docs/FALLBACK_INVENTORY.md` 逐项删除或隔离 fallback（下一重点：overlay command polling / desktop overlay state polling）。
+3. 使用 `renderer_layout_changed` 事件驱动 renderer payload 拆分（阶段 6），让布局变化只更新局部 DOM。
+4. app-server 只保留为未来显式权威源候选；除非协议出现当前窗口 active thread 字段/通知并经过 POC 验证，不接入默认 active-session 路径。

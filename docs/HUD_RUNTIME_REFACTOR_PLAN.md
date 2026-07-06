@@ -107,8 +107,12 @@ If session id/title cannot be mapped to a JSONL path, the HUD should show a visi
 debug error instead of selecting the latest JSONL or native title. Manual diagnostic
 modes can still exist behind explicit flags.
 
-OpenAI Codex app-server should be evaluated as a future authority only after a POC
-proves it can identify the active Codex App thread.
+OpenAI Codex app-server remains a future authority candidate only. The local
+schema POC found loaded-thread, thread-status, and token-usage APIs, but no
+field or notification that proves which thread is currently selected in the
+Codex App window. Do not use app-server as an implicit fallback for renderer
+active-session failures unless a later POC proves current-window active-thread
+semantics.
 
 ### Usage State
 

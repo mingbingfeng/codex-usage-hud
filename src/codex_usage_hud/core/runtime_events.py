@@ -21,6 +21,17 @@ class RuntimeEvent:
     timestamp: float
     session: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
+    error: dict[str, Any] | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "source": self.source,
+            "timestamp": float(self.timestamp),
+            "session": self.session,
+            "context": dict(self.context),
+            "error": dict(self.error) if self.error is not None else None,
+        }
 
 
 class RuntimeEventBus:
@@ -53,6 +64,7 @@ class RuntimeEventBus:
         timestamp: float | None = None,
         session: str | None = None,
         context: Mapping[str, Any] | None = None,
+        error: Mapping[str, Any] | None = None,
     ) -> RuntimeEvent:
         event = RuntimeEvent(
             type=str(event_type or "runtime"),
@@ -60,6 +72,7 @@ class RuntimeEventBus:
             timestamp=float(self.clock() if timestamp is None else timestamp),
             session=str(session) if session else None,
             context=dict(context or {}),
+            error=dict(error) if error is not None else None,
         )
         with self._lock:
             self._events.append(event)

@@ -140,6 +140,60 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
   - context 包含 `action`、`sessionId`、`title`、`current` 和处理结果状态。
 - 限制：当前主要 runtime 事件已接入 event bus；settings command 的 localStorage polling fallback 和 overlay command pump 的 60ms polling 仍未删除。
 
+## Normal-mode Runtime Error Diagnostic
+- runtime error 现在不只进入 DEBUG HUD payload，也会在 normal mode 写入 `renderer_fallback.log`。
+- 写入入口是 `RuntimeErrorRegistry.diagnostic_callback`：
+  - `record()` 调用 action `recorded`。
+  - `resolve()` 调用 action `resolved`。
+  - callback 异常被 registry 捕获，避免 diagnostic 文件系统问题影响 HUD 主路径。
+- `RuntimeContext.__post_init__` 会把默认 callback 绑定到 `_append_runtime_error_diagnostic()`；针对测试中构造的轻量 context，active-session error、CDP update failure 和 renderer file event source 入口也会再次确保绑定。
+- `_append_runtime_error_diagnostic()` 复用既有 `_append_renderer_diagnostic()`，stage 格式为：
+  - `runtime_error_recorded`
+  - `runtime_error_resolved`
+- diagnostic record 保留结构化字段：
+  - `source`
+  - `severity`
+  - `code`
+  - `message`
+  - `context`
+  - `count`
+  - `firstSeenAt`
+  - `lastSeenAt`
+- `_append_renderer_diagnostic()` 的字段过滤必须使用 `value is not None and value != ""`，不能用 set membership；runtime error context 是 dict，`value not in {"", None}` 会触发 `TypeError` 并导致 callback 被 registry 静默吞掉。
+- 当前已用文件写入测试覆盖：
+  - `active_session.unmatched_thread`
+  - `cdp.update_failed`
+- registry 级别测试覆盖 record/resolve callback。后续仍需为 file watcher degraded/overflow 等错误源补“不被 fallback 掩盖”的测试矩阵。
+
+## 阶段 2 收口：失败显式化
+- DEBUG HUD 现在在 `debug=true` 且没有 runtime error 时也显示初始化行：
+  - `debug.ready`
+  - `DEBUG HUD active`
+  - 用于实测确认 DEBUG HUD 已注入，而不是等出错后才出现。
+- Runtime errors 面板继续留在 renderer HUD 内部，而不是改成 PySide 气泡：
+  - 这符合 renderer mode 为产品主路径的约束。
+  - 可用性问题通过位置、拖动和文本选择解决。
+  - 面板状态复用既有 `codexUsageHudPanelState:v5`，避免新增跨进程 overlay 状态。
+- settings command 的 localStorage/CDP polling fallback 已删除：
+  - renderer JS 不再声明 `settingsCommandKey`。
+  - renderer JS 不再执行 `localStorage.setItem(settingsCommandKey, ...)`。
+  - `RendererHudClient.take_settings_command()` 已删除。
+  - renderer loop 不再调用 `client.take_settings_command()`。
+  - settings command 只通过 settings bridge callback 进入 `settings_command_received` runtime event。
+- CDP payload update 失败后不再 force reinstall HUD script 并重试：
+  - `RendererHudClient.update_payload()` 如果 `__codexUsageHudUpdate(payload)` 未 ack，会直接返回 failed。
+  - Python loop 通过 `_record_cdp_update_failure()` 记录 `cdp.update_failed`。
+  - 旧 `runtime_update_failed_retrying` diagnostic 已删除，避免暗示还有隐藏重试/fallback。
+- 阶段 2 已接入错误源的测试矩阵：
+  - `active_session.unmatched_thread`：不会 fallback 到 latest JSONL activity，并写 normal diagnostic。
+  - `cdp.update_failed`：不会 force reinstall/retry，不切 Qt/Tk，写 normal diagnostic。
+  - `file_watcher.degraded`：polling fallback 标记为 warning，并写 normal diagnostic。
+  - `file_watcher.overflow`：overflow 哨兵不污染业务 reasons，同时记录 warning 和 normal diagnostic。
+- 当前仍保留的 polling/fallback 不属于阶段 2 已删除范围：
+  - file watcher native 不可用时的 degraded polling，后续阶段 5 处理。
+  - desktop overlay state/command polling，后续阶段 7 处理。
+  - renderer failure backoff delay，保留为避免失败时 tight loop；它不切换数据源、不重装脚本、不隐藏错误。
+
 ## Runtime Event Bus 初始实现
 - 新增 `src/codex_usage_hud/core/runtime_events.py`：
   - `RuntimeEvent(type, source, timestamp, session, context)`
@@ -151,7 +205,23 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
   - record: `{"action": "recorded", "error": event.to_payload()}`
   - resolve: `{"action": "resolved", "code": event.code, "error": event.to_payload()}`
 - session 关联从 error context 的 `sessionPath`、`session`、`sessionId`、`threadId` 中提取第一个非空值。
-- renderer loop 目前把 `runtime_error`、`active_session_changed`、`session_file_changed`、`settings_changed`、`settings_command_received` 和 `overlay_command_received` 映射到 wakeup；后续应让调度器按 event type 决定是否构建 snapshot，并删除仍存在的 polling fallback。
+- renderer loop 现在会在 tick 开始时 `RuntimeEventBus.drain()`，并将事件交给显式 handler 汇总 refresh intent：
+  - `runtime_error` -> diagnostics snapshot。
+  - `active_session_changed` -> active-session snapshot，且可走轻量 active-work 复用路径。
+  - `session_file_changed` -> snapshot。
+  - `settings_changed` / `settings_command_received` -> fast snapshot。
+  - `overlay_command_received` -> fast snapshot。
+  - `budget_window_changed` -> fast budget snapshot。
+  - `update_state_changed` -> fast snapshot。
+  - `active_work_refresh_requested` -> fast snapshot。
+  - `renderer_layout_changed` -> 只唤醒 loop/keepalive，不请求 snapshot；拖拽、缩放、展开等布局事件由 renderer 端已完成 DOM 状态处理。
+- `command_refresh_requested` 仍作为跨线程 wake event 使用，但不再意味着“必然 snapshot”。如果 wake 对应已 drain 的 event 且 handler 没有请求 snapshot，则 tick 会复用现有 snapshot 并只调用 overlay keepalive。
+- `RuntimeEvent.to_payload()` 现在显式输出 `type`、`source`、`timestamp`、`session`、`context`、`error`，runtime error registry 同时把错误 payload 放在 `context["error"]` 和事件 `error` 字段中，方便后续诊断/序列化。
+- signature drift / legacy bridge wakeup 不再主动触发 snapshot；`_renderer_runtime_signature()` 已不在 renderer loop 中调用。
+- loop 中 snapshot 决策现在只有两种来源：
+  - 初始化还没有 `latest_snapshot`。
+  - `event_refresh_request.snapshot`，即事件 handler 显式请求。
+- 阻塞 wait 仍用于事件唤醒、overlay keepalive、daemon watchdog 和失败 backoff；它不再代表固定周期 snapshot rebuild。
 
 ## Active Session Fallback 收口
 - `ActiveSessionTracker(start_background_watcher=False)` 现在代表 renderer-authoritative 模式：
@@ -166,6 +236,24 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
 - 这删除了 renderer mode 下的 CDP/native active ref、native title、latest JSONL activity 默认 fallback，避免 renderer DOM/thread 映射失败或等待 renderer 事件时自动显示错误 session。
 - `build_snapshot()` 仍会通过 `_record_active_session_runtime_error()` 记录 `active_session.unmatched_thread`，DEBUG HUD 可显示该错误；普通 payload 会进入 waiting/missing 路径，而不是错误地绑定到另一个 session。
 - 目前 `ui-unmatched` / `cdp-unmatched` 仍可走 legacy activity fallback，用于后续“诊断保留或隔离”阶段；本次只切断 renderer mode 的 unsafe fallback。
+- `--legacy-active-session-diagnostics` 是隐藏手动诊断开关：
+  - 默认 `False`，renderer mode 仍调用 `platform.suspend_native_active_title(True)` 并关闭 background watcher。
+  - 显式开启后不挂起 native active-title，并允许 background watcher 启动，用于对照诊断 legacy active-session 链路。
+  - 该开关不是产品 fallback，不应作为 renderer 问题的默认解决方案。
+
+## Codex app-server Active Thread POC
+- `node .../fetch-codex-manual.mjs` 在本机因 developers.openai.com `HEAD` 403 未能获取 Codex manual；随后使用本机 `codex app-server --help` 和生成的 experimental JSON schema 做协议级实测。
+- 本机 Codex CLI 暴露 `codex app-server`，支持 `stdio://`、`unix://`、`ws://IP:PORT` 以及 `generate-json-schema --experimental`。
+- 本机生成 schema 显示 app-server 有：
+  - `thread/list`
+  - `thread/loaded/list`
+  - `thread/read`
+  - `thread/status/changed`
+  - `thread/tokenUsage/updated`
+- `thread/loaded/list` response 只说明 “Thread ids for sessions currently loaded in memory”，不等价于当前 Codex App 窗口选中的 thread。
+- `ThreadStatus` 的 `active` 表示线程有 active turn，并带 `waitingOnApproval` / `waitingOnUserInput` 等 flag；它不是 UI focus/selected/current-window 语义。
+- schema 未发现可证明当前窗口正在查看的 active thread 字段或通知（如 focused/current/selected window thread）。
+- 结论：app-server 可作为未来 usage/work 数据源候选，但截至本次 POC 不能替换 renderer bridge，也不能作为 renderer active-session 的隐式 fallback。
 
 ## File Watcher Overflow 补偿
 - Windows `ReadDirectoryChangesW` 文档中的缓冲溢出表现为成功返回但 `bytes_returned == 0`；此时原始变更记录已丢失，不能解析 buffer。

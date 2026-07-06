@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
@@ -55,7 +55,7 @@ from .core import (
     WorkStatusItem,
     detect_reading_activity,
 )
-from .core.runtime_events import RuntimeEventBus
+from .core.runtime_events import RuntimeEvent, RuntimeEventBus
 from .core.runtime_errors import RuntimeErrorRegistry
 from .daemon import (
     CodexDaemonManager,
@@ -1895,7 +1895,7 @@ def _append_renderer_diagnostic(stage: str, **fields: object) -> None:
         "stage": stage,
     }
     for key, value in fields.items():
-        if value not in {"", None}:
+        if value is not None and value != "":
             record[key] = value
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1903,6 +1903,31 @@ def _append_renderer_diagnostic(stage: str, **fields: object) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         return
+
+
+def _append_runtime_error_diagnostic(action: str, event: object) -> None:
+    """Persist runtime errors outside DEBUG HUD so normal mode is diagnosable."""
+    to_payload = getattr(event, "to_payload", None)
+    payload = to_payload() if callable(to_payload) else {}
+    _append_renderer_diagnostic(
+        f"runtime_error_{action}",
+        source=str(getattr(event, "source", "") or ""),
+        severity=str(getattr(event, "severity", "") or ""),
+        code=str(getattr(event, "code", "") or ""),
+        message=str(getattr(event, "message", "") or ""),
+        context=payload.get("context") if isinstance(payload, Mapping) else None,
+        count=payload.get("count") if isinstance(payload, Mapping) else None,
+        firstSeenAt=payload.get("firstSeenAt") if isinstance(payload, Mapping) else None,
+        lastSeenAt=payload.get("lastSeenAt") if isinstance(payload, Mapping) else None,
+    )
+
+
+def _ensure_runtime_error_diagnostics(context: object) -> None:
+    registry = getattr(context, "runtime_errors", None)
+    if registry is None:
+        return
+    if getattr(registry, "diagnostic_callback", None) is None:
+        registry.diagnostic_callback = _append_runtime_error_diagnostic
 
 
 def _renderer_update_failure_limit(display_mode: str, last_error: str) -> int:
@@ -2199,18 +2224,21 @@ def _renderer_runtime_signature(
     )
 
 
+def _renderer_budget_window_keys(context: "RuntimeContext") -> tuple[str, str]:
+    """Return normalized (day, week) budget-window keys for change detection."""
+    try:
+        day_start, week_start = current_budget_windows(context.user_config)
+        return day_start.isoformat(), week_start.isoformat()
+    except Exception:
+        return "", ""
+
+
 def _renderer_budget_signature(context: "RuntimeContext") -> tuple[object, ...]:
     try:
         settings_mtime = context.settings_store.mtime()
     except Exception:
         settings_mtime = None
-    try:
-        day_start, week_start = current_budget_windows(context.user_config)
-        day_key = day_start.isoformat()
-        week_key = week_start.isoformat()
-    except Exception:
-        day_key = ""
-        week_key = ""
+    day_key, week_key = _renderer_budget_window_keys(context)
     return (
         _session_path_key(getattr(context, "sessions_root", None)),
         settings_mtime,
@@ -2316,6 +2344,7 @@ class _RendererFileEventSource:
         debounce_seconds: float = RENDERER_FILE_EVENT_DEBOUNCE_SECONDS,
     ) -> None:
         self._context = context
+        _ensure_runtime_error_diagnostics(context)
         self._wake_event = wake_event
         self._debounce_seconds = max(0.0, float(debounce_seconds))
         self._lock = threading.Lock()
@@ -3996,6 +4025,7 @@ class RuntimeContext:
     def __post_init__(self) -> None:
         if self.runtime_errors.event_bus is None:
             self.runtime_errors.event_bus = self.runtime_events
+        _ensure_runtime_error_diagnostics(self)
 
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
@@ -4494,7 +4524,13 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         or user_config.display_mode
     )
     renderer_active_session_bridge = runtime_display_mode == "renderer"
-    if renderer_active_session_bridge:
+    legacy_active_session_diagnostics = bool(
+        getattr(args, "legacy_active_session_diagnostics", False)
+    )
+    renderer_authoritative_active_session = (
+        renderer_active_session_bridge and not legacy_active_session_diagnostics
+    )
+    if renderer_authoritative_active_session:
         try:
             platform.suspend_native_active_title(True)
         except Exception:
@@ -4510,7 +4546,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
             and not args.session_id
             and not args.session_file
         ),
-        start_background_watcher=not renderer_active_session_bridge,
+        start_background_watcher=not renderer_authoritative_active_session,
     )
     active_session_tracker.start()
     session_resolver = SessionPathResolver(
@@ -4586,6 +4622,7 @@ def _record_active_session_runtime_error(
     selection_source: str,
     session_path: Path | None,
 ) -> None:
+    _ensure_runtime_error_diagnostics(context)
     registry = getattr(context, "runtime_errors", None)
     if registry is None:
         return
@@ -4616,6 +4653,7 @@ def _record_cdp_update_failure(
     *,
     failures: int,
 ) -> None:
+    _ensure_runtime_error_diagnostics(context)
     registry = getattr(context, "runtime_errors", None)
     if registry is None:
         return
@@ -4997,6 +5035,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable best-effort tracking of the currently selected Codex conversation.",
     )
     parser.add_argument(
+        "--legacy-active-session-diagnostics",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--no-sse",
         action="store_true",
         help="Disable SQLite SSE tracking and use JSONL-only fallback parsing.",
@@ -5194,6 +5237,7 @@ def run_renderer_hud_session(
             runtime_event_bus = getattr(context, "runtime_events", None)
             runtime_event_subscribe = getattr(runtime_event_bus, "subscribe", None)
             runtime_event_publish = getattr(runtime_event_bus, "publish", None)
+            runtime_event_drain = getattr(runtime_event_bus, "drain", None)
             if callable(runtime_event_subscribe):
 
                 def wake_for_runtime_event(event: object) -> None:
@@ -5204,6 +5248,8 @@ def run_renderer_hud_session(
                         "session_file_changed",
                         "settings_command_received",
                         "settings_changed",
+                        "budget_window_changed",
+                        "renderer_layout_changed",
                     }:
                         command_refresh_requested.set()
                     elif event_type == "active_session_changed":
@@ -5284,7 +5330,7 @@ def run_renderer_hud_session(
                     return
                 estimator.set_attachments(payload)
                 # 附件变化通常伴随 token 变化，唤醒一次刷新让浮窗尽快重绘。
-                wake_active_session_refresh()
+                request_active_session_refresh()
 
             # 页面 CSP 拦截了到本地桥的 fetch，因此优先用 CDP binding 接收附件，
             # HTTP 桥作兜底（非渲染模式或旧版页面仍可用）。
@@ -5295,6 +5341,27 @@ def run_renderer_hud_session(
             )
             if callable(attachments_callback_setter):
                 attachments_callback_setter(observe_renderer_attachments)
+
+            def observe_renderer_layout(payload: dict[str, object]) -> None:
+                if callable(runtime_event_publish):
+                    runtime_event_publish(
+                        "renderer_layout_changed",
+                        source="renderer_layout",
+                        context={
+                            "reason": str(payload.get("reason") or ""),
+                            "panel": str(payload.get("panel") or ""),
+                            "layout": payload.get("layout"),
+                            "observedAt": payload.get("observedAt"),
+                        },
+                    )
+                    return
+                # Runtime bus disabled — still wake the loop so the next tick
+                # sees any settings/state side effects triggered by the drag.
+                command_refresh_requested.set()
+
+            layout_callback_setter = getattr(client, "set_layout_callback", None)
+            if callable(layout_callback_setter):
+                layout_callback_setter(observe_renderer_layout)
 
             def take_renderer_bridge_command() -> dict[str, object] | None:
                 with bridge_command_lock:
@@ -5538,75 +5605,487 @@ def run_renderer_hud_session(
                 )
                 local_loading.close()
                 command_pump.start()
-                failures = 0
-                runtime_failure_reported = False
-                settings_command_status: dict[str, object] = {}
-                next_daemon_check_at = 0.0
-                latest_snapshot: ParsedSession | None = None
-                latest_signature: tuple[object, ...] | None = None
-                latest_budget_signature: tuple[object, ...] | None = None
-                latest_active_work_refresh_at = 0.0
-                active_work_refresh_pending = False
-                while True:
-                    started = time.monotonic()
-                    if (
-                        daemon_manager is not None
-                        and started >= next_daemon_check_at
-                    ):
-                        try:
-                            if not daemon_manager.codex_is_running():
-                                _LOGGER.info("daemon_codex_exited")
-                                return DAEMON_RESTART_REQUESTED
-                            next_daemon_check_at = (
-                                started + daemon_manager.poll_seconds
+
+                @dataclass
+                class _RendererEventRefreshRequest:
+                    """Refresh intent requested by typed runtime event handlers."""
+
+                    snapshot: bool = False
+                    force_fast: bool = False
+                    active_session: bool = False
+                    diagnostics: bool = False
+
+                    def request_snapshot(self, *, force_fast: bool = False) -> None:
+                        self.snapshot = True
+                        self.force_fast = self.force_fast or force_fast
+
+                    def request_active_session(self) -> None:
+                        self.active_session = True
+                        self.request_snapshot(force_fast=True)
+
+                    def request_diagnostics(self) -> None:
+                        self.diagnostics = True
+                        self.request_snapshot(force_fast=True)
+
+                @dataclass
+                class _RendererTickInputs:
+                    """Immutable snapshot of wakeup reasons sampled at tick start."""
+
+                    started: float
+                    update_state: dict[str, object]
+                    bridge_wakeup: bool
+                    active_session_wakeup: bool
+                    file_change_reasons: set[str]
+                    file_change_paths: set[Path]
+                    command: dict[str, object] | None
+                    budget_window_keys: tuple[str, str]
+                    runtime_events: list[object]
+                    event_refresh_request: _RendererEventRefreshRequest
+
+                    @property
+                    def file_refresh_requested(self) -> bool:
+                        return bool(self.file_change_reasons)
+
+                @dataclass
+                class _RendererLoopState:
+                    """State carried across renderer ticks."""
+
+                    failures: int = 0
+                    settings_command_status: dict[str, object] = field(default_factory=dict)
+                    next_daemon_check_at: float = 0.0
+                    latest_snapshot: ParsedSession | None = None
+                    latest_budget_signature: tuple[object, ...] | None = None
+                    latest_budget_window_keys: tuple[str, str] | None = None
+                    latest_update_state_signature: tuple[object, ...] | None = None
+                    latest_update_state: dict[str, object] | None = None
+                    latest_active_work_refresh_at: float = 0.0
+                    active_work_refresh_pending: bool = False
+
+                loop_state = _RendererLoopState()
+
+                def current_event_session() -> str | None:
+                    snapshot = loop_state.latest_snapshot
+                    session_path = getattr(snapshot, "session_path", None)
+                    if session_path is None:
+                        return None
+                    return _session_path_key(session_path)
+
+                def make_internal_runtime_event(
+                    event_type: str,
+                    *,
+                    source: str,
+                    context: Mapping[str, object] | None = None,
+                    session: str | None = None,
+                    error: Mapping[str, object] | None = None,
+                ) -> RuntimeEvent:
+                    clock = getattr(runtime_event_bus, "clock", None)
+                    try:
+                        timestamp = float(clock() if callable(clock) else time.time())
+                    except Exception:
+                        timestamp = time.time()
+                    return RuntimeEvent(
+                        type=event_type,
+                        source=source,
+                        timestamp=timestamp,
+                        session=session,
+                        context=dict(context or {}),
+                        error=dict(error) if error is not None else None,
+                    )
+
+                def handle_session_file_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot()
+
+                def handle_settings_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot(force_fast=True)
+
+                def handle_settings_command_received(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot(force_fast=True)
+
+                def handle_overlay_command_received(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot(force_fast=True)
+
+                def handle_runtime_error(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_diagnostics()
+
+                def handle_active_session_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_active_session()
+
+                def handle_budget_window_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot(force_fast=True)
+
+                def handle_renderer_layout_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event, request
+                    # Layout changes are already handled in the renderer. They
+                    # wake the loop so overlay keepalive/commands are not
+                    # starved, but do not invalidate the Python snapshot.
+                    return
+
+                def handle_update_state_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot(force_fast=True)
+
+                def handle_active_work_refresh_requested(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot(force_fast=True)
+
+                runtime_event_handlers = {
+                    "active_session_changed": handle_active_session_changed,
+                    "active_work_refresh_requested": handle_active_work_refresh_requested,
+                    "budget_window_changed": handle_budget_window_changed,
+                    "overlay_command_received": handle_overlay_command_received,
+                    "renderer_layout_changed": handle_renderer_layout_changed,
+                    "runtime_error": handle_runtime_error,
+                    "session_file_changed": handle_session_file_changed,
+                    "settings_changed": handle_settings_changed,
+                    "settings_command_received": handle_settings_command_received,
+                    "update_state_changed": handle_update_state_changed,
+                }
+
+                def refresh_request_for_events(
+                    events: list[object],
+                ) -> _RendererEventRefreshRequest:
+                    request = _RendererEventRefreshRequest()
+                    for event in events:
+                        event_type = str(getattr(event, "type", "") or "")
+                        handler = runtime_event_handlers.get(event_type)
+                        if handler is None:
+                            continue
+                        handler(event, request)
+                    return request
+
+                def sample_tick_inputs() -> _RendererTickInputs:
+                    started_at = time.monotonic()
+                    update_state_value = update_manager.tick().to_dict()
+                    update_state_signature = _json_signature(update_state_value)
+                    if loop_state.latest_update_state_signature is None:
+                        loop_state.latest_update_state_signature = update_state_signature
+                        loop_state.latest_update_state = dict(update_state_value)
+                    elif update_state_signature != loop_state.latest_update_state_signature:
+                        previous_update_state = dict(loop_state.latest_update_state or {})
+                        if callable(runtime_event_publish):
+                            runtime_event_publish(
+                                "update_state_changed",
+                                source="update_manager",
+                                session=current_event_session(),
+                                context={
+                                    "previous": previous_update_state,
+                                    "current": dict(update_state_value),
+                                },
                             )
-                        except ProcessListenerError as exc:
-                            _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
-                            return RENDERER_HUD_UNAVAILABLE
-                    update_state = update_manager.tick().to_dict()
-                    bridge_wakeup = command_refresh_requested.is_set()
-                    if bridge_wakeup:
-                        command_refresh_requested.clear()
-                    active_session_wakeup = active_session_refresh_requested.is_set()
-                    if active_session_wakeup:
-                        active_session_refresh_requested.clear()
-                    file_change_reasons, file_change_paths = file_events.take_changes()
-                    if "session-map" in file_change_reasons:
-                        _invalidate_active_session_mapping_cache(context)
-                    command = take_renderer_bridge_command()
-                    if command is None and not bridge_wakeup:
-                        command = client.take_settings_command()
-                    file_refresh_requested = bool(file_change_reasons)
-                    wake_without_file_change = bool(
-                        bridge_wakeup and not file_refresh_requested
-                    )
-                    force_fast_refresh = bool(
-                        command
-                        or settings_command_status
-                        or update_state.get("phase") == "downloading"
-                        or wake_without_file_change
-                        or active_session_wakeup
-                        or active_work_refresh_pending
-                    )
-                    if command:
-                        settings_command_status = _handle_renderer_settings_command(
-                            command,
-                            context,
-                            restart_requested,
-                            exit_requested,
-                            update_manager,
-                            work_overlay,
+                        loop_state.latest_update_state_signature = update_state_signature
+                        loop_state.latest_update_state = dict(update_state_value)
+                    current_window_keys = _renderer_budget_window_keys(context)
+                    if (
+                        loop_state.latest_budget_window_keys is not None
+                        and current_window_keys != loop_state.latest_budget_window_keys
+                        and callable(runtime_event_publish)
+                    ):
+                        previous_day, previous_week = loop_state.latest_budget_window_keys
+                        current_day, current_week = current_window_keys
+                        runtime_event_publish(
+                            "budget_window_changed",
+                            source="budget_window",
+                            session=current_event_session(),
+                            context={
+                                "previousDay": previous_day,
+                                "previousWeek": previous_week,
+                                "currentDay": current_day,
+                                "currentWeek": current_week,
+                            },
                         )
-                        update_state = update_manager.status().to_dict()
-                    mode_switch = str(settings_command_status.get("switchMode") or "").strip()
+                    loop_state.latest_budget_window_keys = current_window_keys
+                    bridge_wake = command_refresh_requested.is_set()
+                    if bridge_wake:
+                        command_refresh_requested.clear()
+                    active_session_wake = active_session_refresh_requested.is_set()
+                    if active_session_wake:
+                        active_session_refresh_requested.clear()
+                    reasons, paths = file_events.take_changes()
+                    if "session-map" in reasons:
+                        _invalidate_active_session_mapping_cache(context)
+                    pending_command = take_renderer_bridge_command()
+                    if loop_state.active_work_refresh_pending and callable(
+                        runtime_event_publish
+                    ):
+                        runtime_event_publish(
+                            "active_work_refresh_requested",
+                            source="renderer_loop",
+                            session=current_event_session(),
+                            context={"reason": "pending_after_active_session_refresh"},
+                        )
+                    events = runtime_event_drain() if callable(runtime_event_drain) else []
+                    local_events = list(events)
+                    event_types = {
+                        str(getattr(event, "type", "") or "") for event in local_events
+                    }
+                    paths_payload = sorted(_session_path_key(path) for path in paths)
+                    if (
+                        reasons.intersection({"session", "sessions-root"})
+                        and "session_file_changed" not in event_types
+                    ):
+                        session = (
+                            _session_path_key(sorted(paths, key=_session_path_key)[0])
+                            if paths
+                            else current_event_session()
+                        )
+                        local_events.append(
+                            make_internal_runtime_event(
+                                "session_file_changed",
+                                source="file_watcher",
+                                session=session,
+                                context={
+                                    "reasons": sorted(reasons),
+                                    "paths": paths_payload,
+                                },
+                            )
+                        )
+                    if "settings" in reasons and "settings_changed" not in event_types:
+                        local_events.append(
+                            make_internal_runtime_event(
+                                "settings_changed",
+                                source="file_watcher",
+                                session=current_event_session(),
+                                context={
+                                    "reasons": sorted(reasons),
+                                    "paths": paths_payload,
+                                },
+                            )
+                        )
+                    if active_session_wake and "active_session_changed" not in event_types:
+                        local_events.append(
+                            make_internal_runtime_event(
+                                "active_session_changed",
+                                source="renderer_loop",
+                                session=current_event_session(),
+                                context={"reason": "active_session_wakeup"},
+                            )
+                        )
+                    event_refresh_request = refresh_request_for_events(local_events)
+                    return _RendererTickInputs(
+                        started=started_at,
+                        update_state=update_state_value,
+                        bridge_wakeup=bridge_wake,
+                        active_session_wakeup=active_session_wake,
+                        file_change_reasons=reasons,
+                        file_change_paths=paths,
+                        command=pending_command,
+                        budget_window_keys=current_window_keys,
+                        runtime_events=list(local_events),
+                        event_refresh_request=event_refresh_request,
+                    )
+
+                def apply_settings_command(inputs: _RendererTickInputs) -> None:
+                    if not inputs.command:
+                        return
+                    loop_state.settings_command_status = _handle_renderer_settings_command(
+                        inputs.command,
+                        context,
+                        restart_requested,
+                        exit_requested,
+                        update_manager,
+                        work_overlay,
+                    )
+                    inputs.update_state = update_manager.status().to_dict()
+                    mode_switch = str(
+                        loop_state.settings_command_status.get("switchMode") or ""
+                    ).strip()
                     if mode_switch and mode_switch != "renderer":
                         _LOGGER.info(
                             "renderer_hud_legacy_switch_ignored mode=%s",
                             mode_switch,
                         )
-                        settings_command_status = _renderer_settings_status(
+                        loop_state.settings_command_status = _renderer_settings_status(
                             "Renderer-only 版本不再切换到 Qt/Tk。",
                         )
+
+                def compute_force_fast_refresh(inputs: _RendererTickInputs) -> bool:
+                    return bool(
+                        loop_state.latest_snapshot is None
+                        or inputs.event_refresh_request.force_fast
+                    )
+
+                def apply_refresh(
+                    inputs: _RendererTickInputs, *, force_fast: bool
+                ) -> ParsedSession:
+                    latest = loop_state.latest_snapshot
+                    budget_signature = _renderer_budget_signature(context)
+                    refresh_budget_aggregate = _renderer_should_refresh_budget_aggregate(
+                        latest_snapshot=latest,
+                        latest_budget_signature=loop_state.latest_budget_signature,
+                        budget_signature=budget_signature,
+                        file_change_reasons=inputs.file_change_reasons,
+                        file_change_paths=inputs.file_change_paths,
+                    )
+                    refresh_active_work_items = _renderer_should_refresh_active_work_items(
+                        latest_snapshot=latest,
+                        latest_active_work_refresh_at=loop_state.latest_active_work_refresh_at,
+                        now_monotonic=time.monotonic(),
+                        active_work_refresh_pending=loop_state.active_work_refresh_pending,
+                        file_change_reasons=inputs.file_change_reasons,
+                        file_change_paths=inputs.file_change_paths,
+                    )
+                    lightweight_active_session_refresh = bool(
+                        (
+                            inputs.active_session_wakeup
+                            or inputs.event_refresh_request.active_session
+                        )
+                        and latest is not None
+                        and not loop_state.active_work_refresh_pending
+                        and not inputs.command
+                        and not loop_state.settings_command_status
+                        and not inputs.file_change_reasons
+                        and inputs.update_state.get("phase") != "downloading"
+                    )
+                    del force_fast  # already folded into signature/inputs decisions
+                    fresh = snapshot_or_error(
+                        refresh_budget_aggregate=refresh_budget_aggregate,
+                        refresh_active_work_items=(
+                            refresh_active_work_items
+                            and not lightweight_active_session_refresh
+                        ),
+                    )
+                    if lightweight_active_session_refresh and latest is not None:
+                        fresh.active_work_items = list(latest.active_work_items)
+                        loop_state.active_work_refresh_pending = True
+                    elif not refresh_active_work_items and latest is not None:
+                        fresh.active_work_items = list(latest.active_work_items)
+                    else:
+                        loop_state.latest_active_work_refresh_at = time.monotonic()
+                        loop_state.active_work_refresh_pending = False
+                    loop_state.latest_snapshot = fresh
+                    loop_state.latest_budget_signature = _renderer_budget_signature(context)
+                    work_overlay.configure(
+                        item_limit=_work_overlay_item_limit_for_context(context),
+                    )
+                    work_overlay.update(fresh.active_work_items)
+                    file_events.update_session_path(fresh.session_path)
+                    if client.update(
+                        fresh,
+                        settings=context.user_config,
+                        active_display_mode="renderer",
+                        settings_path=context.settings_store.path,
+                        settings_bridge_url=bridge_url,
+                        settings_command_status=loop_state.settings_command_status,
+                        update_state=inputs.update_state,
+                        debug=_runtime_debug_enabled(),
+                        runtime_errors=_runtime_errors_payload_for_context(context),
+                        work_overlay_selectable_max=_work_overlay_screen_max_items(),
+                        desktop_overlay_dependency=_desktop_overlay_dependency_status(),
+                    ):
+                        loop_state.settings_command_status = {}
+                        loop_state.failures = 0
+                        _resolve_cdp_update_failure(context)
+                    else:
+                        loop_state.failures += 1
+                        _record_cdp_update_failure(
+                            context,
+                            client,
+                            failures=loop_state.failures,
+                        )
+                        _LOGGER.info(
+                            "renderer_hud_update_failed failures=%s status=%s error=%s",
+                            loop_state.failures,
+                            client.last_status,
+                            client.last_error,
+                        )
+                    return fresh
+
+                def compute_wait_delay(
+                    snapshot: ParsedSession,
+                    inputs: _RendererTickInputs,
+                    *,
+                    force_fast: bool,
+                ) -> float:
+                    elapsed_wall = time.monotonic() - inputs.started
+                    delay_value = _renderer_refresh_delay_seconds(
+                        context,
+                        snapshot,
+                        elapsed_wall,
+                        force_fast=force_fast,
+                    )
+                    if _renderer_event_idle_wait_enabled(
+                        file_events,
+                        snapshot,
+                        inputs.update_state,
+                        delay_value,
+                        force_fast=force_fast,
+                    ):
+                        delay_value = max(delay_value, RENDERER_EVENT_IDLE_WAIT_SECONDS)
+                    next_keep_alive = getattr(
+                        work_overlay,
+                        "next_keep_alive_seconds",
+                        lambda: None,
+                    )()
+                    if next_keep_alive is not None:
+                        delay_value = min(delay_value, max(0.1, float(next_keep_alive)))
+                    if daemon_manager is not None:
+                        delay_value = min(
+                            delay_value,
+                            max(0.1, loop_state.next_daemon_check_at - time.monotonic()),
+                        )
+                    if loop_state.failures >= _renderer_update_failure_limit(
+                        display_mode,
+                        client.last_error,
+                    ):
+                        delay_value = max(
+                            delay_value, min(5.0, loop_state.failures * 0.5)
+                        )
+                    return delay_value
+
+                while True:
+                    if (
+                        daemon_manager is not None
+                        and time.monotonic() >= loop_state.next_daemon_check_at
+                    ):
+                        try:
+                            if not daemon_manager.codex_is_running():
+                                _LOGGER.info("daemon_codex_exited")
+                                return DAEMON_RESTART_REQUESTED
+                            loop_state.next_daemon_check_at = (
+                                time.monotonic() + daemon_manager.poll_seconds
+                            )
+                        except ProcessListenerError as exc:
+                            _LOGGER.exception("daemon_watchdog_failed fallback=%s", exc)
+                            return RENDERER_HUD_UNAVAILABLE
+                    tick = sample_tick_inputs()
+                    apply_settings_command(tick)
                     if exit_requested.is_set():
                         _LOGGER.info("renderer_hud_exit_requested")
                         return 0
@@ -5617,156 +6096,19 @@ def run_renderer_hud_session(
                             if daemon_manager is not None
                             else 0
                         )
-                    signature = _renderer_runtime_signature(
-                        context,
-                        update_state=update_state,
-                        settings_command_status=settings_command_status,
+                    force_fast = compute_force_fast_refresh(tick)
+                    snapshot_requested = (
+                        tick.event_refresh_request.snapshot
+                        or loop_state.latest_snapshot is None
                     )
-                    refresh_required = (
-                        force_fast_refresh
-                        or file_refresh_requested
-                        or latest_snapshot is None
-                        or signature != latest_signature
-                    )
-                    if refresh_required:
-                        budget_signature = _renderer_budget_signature(context)
-                        refresh_budget_aggregate = _renderer_should_refresh_budget_aggregate(
-                            latest_snapshot=latest_snapshot,
-                            latest_budget_signature=latest_budget_signature,
-                            budget_signature=budget_signature,
-                            file_change_reasons=file_change_reasons,
-                            file_change_paths=file_change_paths,
-                        )
-                        refresh_active_work_items = _renderer_should_refresh_active_work_items(
-                            latest_snapshot=latest_snapshot,
-                            latest_active_work_refresh_at=latest_active_work_refresh_at,
-                            now_monotonic=time.monotonic(),
-                            active_work_refresh_pending=active_work_refresh_pending,
-                            file_change_reasons=file_change_reasons,
-                            file_change_paths=file_change_paths,
-                        )
-                        lightweight_active_session_refresh = bool(
-                            active_session_wakeup
-                            and latest_snapshot is not None
-                            and not active_work_refresh_pending
-                            and not command
-                            and not settings_command_status
-                            and not file_change_reasons
-                            and update_state.get("phase") != "downloading"
-                        )
-                        snapshot = snapshot_or_error(
-                            refresh_budget_aggregate=refresh_budget_aggregate,
-                            refresh_active_work_items=(
-                                refresh_active_work_items
-                                and not lightweight_active_session_refresh
-                            ),
-                        )
-                        if lightweight_active_session_refresh:
-                            snapshot.active_work_items = list(
-                                latest_snapshot.active_work_items
-                            )
-                            active_work_refresh_pending = True
-                        elif not refresh_active_work_items and latest_snapshot is not None:
-                            snapshot.active_work_items = list(
-                                latest_snapshot.active_work_items
-                            )
-                        else:
-                            latest_active_work_refresh_at = time.monotonic()
-                            active_work_refresh_pending = False
-                        latest_snapshot = snapshot
-                        latest_signature = signature
-                        latest_budget_signature = _renderer_budget_signature(context)
-                        work_overlay.configure(
-                            item_limit=_work_overlay_item_limit_for_context(context),
-                        )
-                        work_overlay.update(snapshot.active_work_items)
-                        file_events.update_session_path(snapshot.session_path)
-                        if client.update(
-                            snapshot,
-                            settings=context.user_config,
-                            active_display_mode="renderer",
-                            settings_path=context.settings_store.path,
-                            settings_bridge_url=bridge_url,
-                            settings_command_status=settings_command_status,
-                            update_state=update_state,
-                            debug=_runtime_debug_enabled(),
-                            runtime_errors=_runtime_errors_payload_for_context(context),
-                            work_overlay_selectable_max=_work_overlay_screen_max_items(),
-                            desktop_overlay_dependency=_desktop_overlay_dependency_status(),
-                        ):
-                            settings_command_status = {}
-                            failures = 0
-                            runtime_failure_reported = False
-                            _resolve_cdp_update_failure(context)
-                        else:
-                            failures += 1
-                            _record_cdp_update_failure(
-                                context,
-                                client,
-                                failures=failures,
-                            )
-                            _LOGGER.info(
-                                "renderer_hud_update_failed failures=%s status=%s error=%s",
-                                failures,
-                                client.last_status,
-                                client.last_error,
-                            )
-                            failure_limit = _renderer_update_failure_limit(
-                                display_mode,
-                                client.last_error,
-                            )
-                            if failures >= failure_limit:
-                                if not runtime_failure_reported:
-                                    _append_renderer_diagnostic(
-                                        "runtime_update_failed_retrying",
-                                        failures=failures,
-                                        failure_limit=failure_limit,
-                                        status=client.last_status,
-                                        error=client.last_error,
-                                        display_mode=display_mode,
-                                        daemon_mode=daemon_manager is not None,
-                                        cdp_timeout_seconds=getattr(
-                                            client, "timeout_seconds", None
-                                        ),
-                                    )
-                                    runtime_failure_reported = True
+                    if snapshot_requested:
+                        snapshot = apply_refresh(tick, force_fast=force_fast)
                     else:
-                        snapshot = latest_snapshot
+                        snapshot = loop_state.latest_snapshot
                         keep_alive = getattr(work_overlay, "keep_alive", None)
                         if callable(keep_alive):
                             keep_alive()
-                    elapsed = time.monotonic() - started
-                    delay = _renderer_refresh_delay_seconds(
-                        context,
-                        snapshot,
-                        elapsed,
-                        force_fast=force_fast_refresh,
-                    )
-                    if _renderer_event_idle_wait_enabled(
-                        file_events,
-                        snapshot,
-                        update_state,
-                        delay,
-                        force_fast=force_fast_refresh,
-                    ):
-                        delay = max(delay, RENDERER_EVENT_IDLE_WAIT_SECONDS)
-                    next_keep_alive = getattr(
-                        work_overlay,
-                        "next_keep_alive_seconds",
-                        lambda: None,
-                    )()
-                    if next_keep_alive is not None:
-                        delay = min(delay, max(0.1, float(next_keep_alive)))
-                    if daemon_manager is not None:
-                        delay = min(
-                            delay,
-                            max(0.1, next_daemon_check_at - time.monotonic()),
-                        )
-                    if failures >= _renderer_update_failure_limit(
-                        display_mode,
-                        client.last_error,
-                    ):
-                        delay = max(delay, min(5.0, failures * 0.5))
+                    delay = compute_wait_delay(snapshot, tick, force_fast=force_fast)
                     command_refresh_requested.wait(delay)
             except KeyboardInterrupt:
                 local_loading.close()

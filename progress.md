@@ -88,15 +88,32 @@
 - work overlay command pump 已接入 event bus，会发布 `overlay_command_received`。
 - settings command 的 localStorage polling fallback 和 overlay command pump 的 60ms polling 仍未删除。
 - renderer mode 下的 CDP/native active ref 和 latest JSONL fallback 已隔离；后续应继续拆 polling fallback，并调研 app-server active thread 能力。
+- 本轮把 renderer loop 从“事件只设置 wake flag”推进到 event type -> handler 分派：
+  - `RuntimeEventBus.drain()` 在 tick 开始时取出待处理事件。
+  - `_RendererEventRefreshRequest` 汇总 handler 请求。
+  - `runtime_error`、`active_session_changed`、`session_file_changed`、`settings_changed`、`settings_command_received`、`overlay_command_received`、`budget_window_changed` 分别显式请求 snapshot/diagnostics。
+  - `renderer_layout_changed` 只唤醒 keepalive，不请求 snapshot，避免拖拽/缩放/展开触发 Python snapshot rebuild。
+- 新增回归测试：
+  - `test_renderer_loop_handles_layout_event_without_snapshot_refresh`
+- 修复附件回调中的旧拼写问题：
+  - `wake_active_session_refresh()` -> `request_active_session_refresh()`
+- 本轮完成阶段 1 收尾：
+  - 移除 renderer loop 中的 `_renderer_runtime_signature()` 刷新保护；signature drift 不再主动重建 snapshot。
+  - 移除 legacy bridge wakeup、`update_state.phase == downloading`、`active_work_refresh_pending` 对 snapshot 的直接布尔触发。
+  - 新增 `update_state_changed` 和 `active_work_refresh_requested` 内部事件，让这些状态变化进入同一个 event -> handler 分派。
+  - `snapshot_requested` 现在只由初始化缺少 snapshot 或 `event_refresh_request.snapshot` 触发。
+  - `RuntimeEvent.to_payload()` 显式包含 `type`、`source`、`timestamp`、`session`、`context`、`error`。
+  - `RuntimeErrorRegistry` 发布 `runtime_error` 时同时填充事件 `error` 字段。
+- 阶段 1 状态已在 `task_plan.md` 标记为 complete。
 
 ### 未执行
-- 未将 renderer 主循环改成事件总线 dispatcher。
 - 未做真实 CDP/DOM paint 端到端延迟测量；当前 harness 只覆盖本地 parser/payload/cache/fallback scan。
 - 已删除 `renderer-unmatched+activity` fallback；renderer-unmatched 现在直接进入显式错误路径。
 
 ### 下一步
-1. 继续拆 settings command polling 和 overlay command polling。
-2. 调研 Codex app-server active thread 能力，决定是否作为显式权威源候选。
+1. 进入阶段 2：正常模式结构化 diagnostic、删除失败后静默换路径逻辑，并补错误不被 fallback 掩盖的测试。
+2. 继续拆 settings command polling 和 overlay command polling。
+3. 调研 Codex app-server active thread 能力，决定是否作为显式权威源候选。
 
 ### 本轮验证
 - `python -m pytest tests/test_measure_renderer_latency.py -q` 通过。
@@ -104,6 +121,83 @@
 - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_measure_renderer_latency.py -q` 通过。
 - `python -m compileall -q src tests tools` 通过。
 - `git diff --check` 通过。
+
+## 会话：2026-07-06
+
+### 本次目标
+继续推进阶段 2，把 runtime error 从 DEBUG HUD 可见扩展为 normal mode 也有结构化 diagnostic 记录。
+
+### 已完成
+- 为 `RuntimeErrorRegistry` 增加 normal-mode diagnostic callback：
+  - `record()` 写 `runtime_error_recorded`。
+  - `resolve()` 写 `runtime_error_resolved`。
+  - callback 异常不会打断业务路径。
+- `RuntimeContext.__post_init__`、active-session error、CDP update failure、renderer file event source 都会确保 registry 绑定 `_append_runtime_error_diagnostic`。
+- `_append_runtime_error_diagnostic()` 把 runtime error payload 写入既有 `renderer_fallback.log`，字段包含：
+  - `source`
+  - `severity`
+  - `code`
+  - `message`
+  - `context`
+  - `count`
+  - `firstSeenAt`
+  - `lastSeenAt`
+- 修复 `_append_renderer_diagnostic()` 对 dict/list 等结构化字段的过滤逻辑，避免 `value not in {"", None}` 在 dict 字段上触发 `TypeError`。
+- 扩展测试：
+  - renderer-unmatched active session 会写入 `renderer_fallback.log`。
+  - CDP update failure 会写入 `renderer_fallback.log`。
+  - registry 级别验证 record/resolve 会调用 diagnostic callback。
+- `task_plan.md` 已将阶段 2 的“正常模式结构化日志/diagnostic”标记为完成。
+
+### 本轮验证
+- `python -m pytest tests/test_ui.py::BudgetHelperTests::test_build_snapshot_records_renderer_unmatched_runtime_error -q` 先失败（`renderer_fallback.log` 不存在），实现 diagnostic callback 和 dict 字段过滤修复后通过。
+- `python -m pytest tests/test_runtime_errors.py tests/test_ui.py::BudgetHelperTests::test_build_snapshot_records_renderer_unmatched_runtime_error tests/test_ui.py::BudgetHelperTests::test_record_cdp_update_failure_adds_runtime_error -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+
+### 下一步
+1. 继续阶段 2：删除「失败后静默换路径」逻辑，优先从 `docs/FALLBACK_INVENTORY.md` 中标为删除的路径开始。
+2. 为每个已接入 runtime error 来源补“不被 fallback 掩盖”的测试矩阵。
+3. 保持 renderer mode 为唯一产品路径，不把 Qt/Tk 或 native title polling 作为性能问题解决方案。
+
+### 继续推进：阶段 2 收口
+- 按用户要求，DEBUG HUD 现在在 debug 开启且无 runtime error 时也显示初始化状态行：
+  - `debug.ready`
+  - `DEBUG HUD active`
+- 按用户批准的方案 A，保留 renderer 内 Runtime errors 面板，不改成 PySide 气泡：
+  - 默认从右下角改到左下角，降低遮挡主视线的概率。
+  - 标题栏支持拖动，拖动后位置写入既有 `codexUsageHudPanelState:v5`。
+  - 正文独立滚动并设置 `user-select: text`，可直接选中复制错误内容。
+- 删除 settings command 的 localStorage/CDP polling fallback：
+  - renderer JS 不再写 `codexUsageHudSettingsCommand:v1`。
+  - Python renderer loop 不再调用 `client.take_settings_command()`。
+  - `RendererHudClient.take_settings_command()` API 已删除。
+  - settings command 保留 settings bridge callback/event path。
+- 删除 CDP update failure 的 hidden reinstall retry：
+  - `_send_update()` 未 ack 时直接 failed。
+  - 不再 `_install(... force=True)` 后二次 `_send_update()`。
+  - 旧 `runtime_update_failed_retrying` diagnostic 已删除。
+  - `cdp.update_failed` runtime error 是该失败的唯一 diagnostic 来源。
+- 补齐已接入 runtime error 来源的“不被 fallback 掩盖”测试：
+  - `active_session.unmatched_thread`
+  - `cdp.update_failed`
+  - `file_watcher.degraded`
+  - `file_watcher.overflow`
+- 更新 `task_plan.md`：阶段 2 标记为 complete。
+- 更新 `docs/FALLBACK_INVENTORY.md`：settings command polling 和 CDP reinstall retry 标记为 Done。
+
+### 阶段 2 targeted 验证
+- `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_renderer_script_renders_debug_error_hud -q` 先失败（脚本没有 `DEBUG HUD active` 初始化行），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_does_not_poll_local_storage_settings_commands_when_idle -q` 先失败（idle tick 调用了 `take_settings_command()`），删除 loop polling 后通过。
+- `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_update_payload_reports_failed_update_without_reinstall_retry -q` 先失败（client 执行 `_install(... force=True)`），删除 hidden reinstall retry 后通过。
+- `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_payload_from_snapshot_formats_compact_hud_lines tests/test_renderer_hud.py::RendererHudClientTests::test_client_does_not_expose_renderer_settings_polling_fallback -q` 先失败（脚本和 client 仍暴露 settings command polling fallback），删除 JS localStorage command fallback 和 client polling API 后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_runtime_failures_retry_without_tk_fallback -q` 先失败（仍写 `runtime_update_failed_retrying`），删除旧 diagnostic 后通过。
+- `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_renderer_script_renders_debug_error_hud tests/test_renderer_hud.py::RendererHudPayloadTests::test_update_payload_reports_failed_update_without_reinstall_retry tests/test_renderer_hud.py::RendererHudClientTests::test_client_does_not_expose_renderer_settings_polling_fallback tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_does_not_poll_local_storage_settings_commands_when_idle tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_bridge_settings_command_without_cdp_poll tests/test_ui.py::BudgetHelperTests::test_build_snapshot_records_renderer_unmatched_runtime_error tests/test_ui.py::BudgetHelperTests::test_record_cdp_update_failure_adds_runtime_error tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_degraded_polling tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_overflow_without_polluting_reasons tests/test_ui.py::DaemonLifecycleTests::test_renderer_runtime_failures_retry_without_tk_fallback -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `rg -n "settingsCommandKey|codexUsageHudSettingsCommand|settings_poll|runtime_update_failed_retrying|_install\\(websocket_url, target_id, force=True\\)|take_settings_command" src\\codex_usage_hud docs` 无匹配。
 - `python -m pytest tests/test_file_watcher.py::FileChangeWatcherTests::test_windows_overflow_reconciles_matching_specs -q` 先失败（缺少 `_emit_overflow_reconciliation`），实现后通过。
 - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_overflow_without_polluting_reasons -q` 先失败（overflow 哨兵进入普通 reasons；随后暴露 `_path_key` 作用域问题），实现后通过。
 - `python -m pytest tests/test_file_watcher.py -q` 通过。
@@ -153,20 +247,49 @@
 - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
 - `python -m compileall -q src tests tools` 通过。
 - `git diff --check` 通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_layout_event_without_snapshot_refresh -q` 先失败（layout event 被 generic bridge wakeup 折叠成第二次 snapshot），实现 event handler 分派后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_layout_event_without_snapshot_refresh tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_keeps_wakeup_for_active_session_event_during_wait tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_tracker_active_session_callback tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_bridge_settings_command_without_cdp_poll tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep -q` 通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
+- `python -m pytest tests/test_runtime_errors.py::RuntimeEventBusTests::test_event_payload_includes_source_timestamp_session_and_error_context -q` 先失败（`RuntimeEventBus.publish()` 不接受 `error` 且 event 没有 `to_payload()`），实现后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_does_not_use_runtime_signature_as_refresh_trigger -q` 先失败（renderer loop 仍调用 `_renderer_runtime_signature()`），移除 signature 驱动后通过。
+- `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_publishes_update_state_event_before_refresh -q` 先失败（update-state 变化没有发布 runtime event），实现 `update_state_changed` 后通过。
+- `python -m pytest tests/test_runtime_errors.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_skips_snapshot_when_runtime_signature_is_unchanged tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_does_not_use_runtime_signature_as_refresh_trigger tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_publishes_update_state_event_before_refresh tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_layout_event_without_snapshot_refresh tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_keeps_wakeup_for_active_session_event_during_wait tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_tracker_active_session_callback tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_bridge_settings_command_without_cdp_poll tests/test_ui.py::DaemonLifecycleTests::test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep -q` 先失败（旧测试未包含新的 `active_work_refresh_requested` 内部事件），更新断言后通过。
+- `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_runtime_errors.py tests/test_file_watcher.py -q` 通过。
+- `python -m compileall -q src tests tools` 通过。
+- `git diff --check` 通过。
 
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
+| 2026-07-06 | pytest node id 类名写错：新用例实际属于 `DaemonLifecycleTests`，误写为 `BudgetHelperTests` | 1 | 用 `rg` 定位测试类后改用正确 node id |
+| 2026-07-06 | Codex manual helper 请求 developers.openai.com `HEAD` 返回 403 | 1 | 改用本机 `codex app-server --help` 和 `generate-json-schema --experimental` 做 app-server 协议实测 |
 | 2026-07-03 | pytest node id 类名写错：`WorkOverlayTests` 不存在 | 1 | 用 `rg` 查到测试属于 `BudgetHelperTests`，改用正确 node id 后通过 |
+
+## 2026-07-06 阶段 3 收口
+- 完成 active-session 单一权威源阶段：
+  - renderer mode 默认继续使用 renderer bridge 作为唯一 active-session 权威源。
+  - 新增隐藏手动诊断开关 `--legacy-active-session-diagnostics`。
+  - 默认不启用 legacy watcher；手动开启时才不挂起 native active-title，并允许 background watcher 启动用于对照诊断。
+- app-server POC：
+  - `codex app-server --help` 显示 app-server 为 experimental，支持 `stdio://`、`unix://`、`ws://IP:PORT`、daemon/proxy/schema 生成。
+  - 本机生成 experimental JSON schema 后确认存在 `thread/list`、`thread/loaded/list`、`thread/read`、`thread/status/changed`、`thread/tokenUsage/updated`。
+  - `thread/loaded/list` 只返回当前加载在内存中的 thread ids；`ThreadStatus.active` 表示 active turn 状态，不表示 UI 当前选中或聚焦窗口。
+  - 未发现 “当前 Codex App 窗口正在看的 active thread” 字段或通知。
+  - 结论：app-server 不接入默认 active-session 路径，只保留为未来显式权威源候选。
+- TDD/验证记录：
+  - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_legacy_active_session_diagnostics_flag_is_opt_in tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_can_enable_legacy_active_session_diagnostics -q` 先失败（参数不存在；手动诊断仍挂起 native title），实现后通过。
+  - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_legacy_active_session_diagnostics_flag_is_opt_in tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_can_enable_legacy_active_session_diagnostics tests/test_ui.py::DaemonLifecycleTests::test_build_runtime_context_uses_renderer_bridge_instead_of_native_title_watcher -q` 通过。
 
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 阶段 0 完成；runtime error model / DEBUG 错误 HUD 已落地，事件总线仍在阶段 1 |
-| 我要去哪里？ | 把普通 active/session/settings/file events 迁移到 event bus，并继续拆 settings/overlay polling |
+| 我在哪里？ | 阶段 1、2、3 完成；renderer active-session 默认权威源已收口到 renderer bridge |
+| 我要去哪里？ | 进入阶段 4，设计 JSONL tail parser 和当前会话增量 state，并继续拆 overlay polling |
 | 目标是什么？ | renderer 权威、事件驱动、失败显式、响应速度优先 |
-| 我学到了什么？ | DEBUG 错误 HUD 可以先挂在现有 snapshot/payload 流上，后续再被事件总线驱动 |
-| 我做了什么？ | 新增 runtime error 模型、DEBUG 错误面板、三类错误来源接入和测试 |
+| 我学到了什么？ | app-server 当前 schema 能描述加载/运行线程和 token usage，但未证明能表达当前 UI 选中线程 |
+| 我做了什么？ | 收口阶段 3：新增 legacy active-session 诊断开关、完成 app-server POC、更新阶段计划和文档 |
 
 ---
 *每个阶段完成后或遇到错误时更新此文件。*

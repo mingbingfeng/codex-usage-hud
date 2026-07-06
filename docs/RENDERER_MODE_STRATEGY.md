@@ -43,6 +43,9 @@ removed once a reliable listener exists.
   fallback scan only when native watching is unavailable.
 - Active session changes: CDP/DOM route, sidebar, title, or URL observation
   before native window title polling.
+- In renderer mode, renderer-observed active session is the default authority.
+  Native title/CDP-ref legacy tracking may only be enabled by explicit diagnostic
+  switches and must not silently replace renderer failures.
 - Renderer layout changes: targeted `MutationObserver` on known header,
   composer, and thread-list nodes rather than whole-document observation.
 - Window and viewport changes: `resize`, relevant `scroll`, visual viewport,

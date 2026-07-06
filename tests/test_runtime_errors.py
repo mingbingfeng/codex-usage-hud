@@ -8,6 +8,34 @@ from codex_usage_hud.core.runtime_events import RuntimeEventBus
 from codex_usage_hud.core.runtime_errors import RuntimeErrorRegistry
 
 
+class RuntimeEventBusTests(unittest.TestCase):
+    def test_event_payload_includes_source_timestamp_session_and_error_context(self) -> None:
+        bus = RuntimeEventBus(clock=lambda: 42.0)
+
+        event = bus.publish(
+            "runtime_error",
+            source="cdp",
+            session="C:/sessions/current.jsonl",
+            context={"action": "recorded"},
+            error={"code": "cdp.update_failed", "message": "CDP update failed"},
+        )
+
+        self.assertEqual(
+            event.to_payload(),
+            {
+                "type": "runtime_error",
+                "source": "cdp",
+                "timestamp": 42.0,
+                "session": "C:/sessions/current.jsonl",
+                "context": {"action": "recorded"},
+                "error": {
+                    "code": "cdp.update_failed",
+                    "message": "CDP update failed",
+                },
+            },
+        )
+
+
 class RuntimeErrorRegistryTests(unittest.TestCase):
     def test_record_merges_same_source_and_code_with_last_context(self) -> None:
         registry = RuntimeErrorRegistry(clock=lambda: 10.0)
@@ -93,6 +121,28 @@ class RuntimeErrorRegistryTests(unittest.TestCase):
         self.assertEqual(event.session, "session-a")
         self.assertEqual(event.context["action"], "resolved")
         self.assertEqual(event.context["code"], "cdp.update_failed")
+
+    def test_record_and_resolve_call_diagnostic_callback(self) -> None:
+        diagnostics = []
+        registry = RuntimeErrorRegistry(
+            clock=lambda: 10.0,
+            diagnostic_callback=lambda action, event: diagnostics.append(
+                (action, event.to_payload())
+            ),
+        )
+
+        registry.record(
+            source="cdp",
+            code="update_failed",
+            message="Update failed",
+            context={"sessionId": "session-a"},
+        )
+        registry.resolve(source="cdp", code="update_failed")
+
+        self.assertEqual([entry[0] for entry in diagnostics], ["recorded", "resolved"])
+        self.assertEqual(diagnostics[0][1]["code"], "cdp.update_failed")
+        self.assertEqual(diagnostics[0][1]["context"], {"sessionId": "session-a"})
+        self.assertEqual(diagnostics[1][1]["code"], "cdp.update_failed")
 
 
 if __name__ == "__main__":

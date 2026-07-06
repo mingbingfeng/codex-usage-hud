@@ -37,12 +37,11 @@ RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
 RENDERER_HUD_VERSION = "18"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
-DEFAULT_RENDERER_SETTINGS_POLL_SECONDS = 1.0
 ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
 COMPOSER_ATTACHMENTS_BINDING_NAME = "codexUsageHudComposerAttachments"
+LAYOUT_BINDING_NAME = "codexUsageHudLayout"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
-SETTINGS_COMMAND_STORAGE_KEY = "codexUsageHudSettingsCommand:v1"
 REMOVE_RENDERER_HUD_SCRIPT = (
     "(() => {"
     "let existed = false;"
@@ -112,7 +111,6 @@ RENDERER_HUD_SCRIPT = r"""
   const runningTimerName = "__codexUsageHudRunningTimer";
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
-  const settingsCommandKey = "codexUsageHudSettingsCommand:v1";
   const settingsModalId = "codex-usage-hud-settings-modal";
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
@@ -122,6 +120,9 @@ RENDERER_HUD_SCRIPT = r"""
   const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
   const activeSessionBindingName = "codexUsageHudActiveSession";
   const composerAttachmentsBindingName = "codexUsageHudComposerAttachments";
+  const layoutBindingName = "codexUsageHudLayout";
+  const layoutReportTimerName = "__codexUsageHudLayoutTimer";
+  const layoutReportSignatureName = "__codexUsageHudLayoutSignature";
   const staleUpdateMs = 10000;
   const composerAttachmentsDebounceMs = 80;
   let topSlotCache = null;
@@ -1516,12 +1517,12 @@ RENDERER_HUD_SCRIPT = r"""
       }
       #${rootId} .codex-usage-hud-runtime-errors {
         position: fixed;
-        right: 16px;
+        left: 16px;
         bottom: 16px;
         z-index: 2147482760;
         width: min(520px, calc(100vw - 32px));
         max-height: min(360px, calc(100vh - 32px));
-        overflow: auto;
+        overflow: hidden;
         box-sizing: border-box;
         border: 1px solid rgba(255, 107, 107, .45);
         border-radius: 7px;
@@ -1529,16 +1530,34 @@ RENDERER_HUD_SCRIPT = r"""
         color: #e8eef7;
         box-shadow: 0 18px 48px rgba(0, 0, 0, .46);
         pointer-events: auto;
-        padding: 10px;
+        padding: 0;
+        user-select: text;
         font: 11px/1.45 Consolas, "Cascadia Mono", ui-monospace, monospace;
       }
       #${rootId} .codex-usage-hud-runtime-errors-title {
         display: flex;
+        align-items: center;
         justify-content: space-between;
         gap: 12px;
-        margin-bottom: 7px;
+        padding: 8px 10px;
+        border-bottom: 1px solid rgba(255, 107, 107, .18);
+        background: rgba(32, 40, 51, .82);
         color: #ffb3b3;
         font-weight: 700;
+        cursor: grab;
+        user-select: none;
+        touch-action: none;
+      }
+      #${rootId} .codex-usage-hud-runtime-errors-title:active {
+        cursor: grabbing;
+      }
+      #${rootId} .codex-usage-hud-runtime-errors-body {
+        max-height: calc(min(360px, calc(100vh - 32px)) - 34px);
+        overflow: auto;
+        padding: 0 10px 8px;
+        scrollbar-width: thin;
+        scrollbar-color: #3b4149 #101821;
+        user-select: text;
       }
       #${rootId} .codex-usage-hud-runtime-error {
         display: grid;
@@ -3458,22 +3477,23 @@ RENDERER_HUD_SCRIPT = r"""
       createdAt: Date.now(),
       ...command,
     };
-    try {
-      localStorage.setItem(settingsCommandKey, JSON.stringify(payload));
-    } catch (error) {
-      setSettingsStatus(`无法提交设置命令：${error?.message || error}`, "error");
+    const bridge = settingsBridgeUrl();
+    if (!bridge) {
+      setSettingsStatus("无法提交设置命令：settings bridge 未连接", "error");
       return false;
     }
-    const bridge = settingsBridgeUrl();
-    if (bridge) {
-      try {
-        fetch(`${bridge}/command`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          keepalive: true,
-        }).catch(() => {});
-      } catch (_) {}
+    try {
+      fetch(`${bridge}/command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      }).catch((error) => {
+        setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
+      });
+    } catch (error) {
+      setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
+      return false;
     }
     setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
     setSettingsRestartVisible(false);
@@ -3797,6 +3817,17 @@ RENDERER_HUD_SCRIPT = r"""
     return states[name];
   }
 
+  function getRuntimeErrorsPanelState() {
+    return { ...(loadStates().runtimeErrors || {}) };
+  }
+
+  function setRuntimeErrorsPanelState(patch) {
+    const states = loadStates();
+    states.runtimeErrors = { ...(states.runtimeErrors || {}), ...patch };
+    saveStates(states);
+    return states.runtimeErrors;
+  }
+
   function applyPanelStates(root) {
     for (const name of Object.keys(PANEL)) {
       const panel = root.querySelector(`[data-panel="${name}"]`);
@@ -3987,9 +4018,17 @@ RENDERER_HUD_SCRIPT = r"""
       setPanelState(name, { expanded });
       syncPosition();
       syncPositionSettled();
+      scheduleLayoutReport(expanded ? "toggle-expand" : "toggle-collapse", name);
     });
     root.addEventListener("pointerdown", (event) => {
       if (event.button !== undefined && event.button !== 0) return;
+      const runtimeMove = event.target?.closest?.("[data-action='runtime-errors-move']");
+      if (runtimeMove && root.contains(runtimeMove)) {
+        event.preventDefault();
+        event.stopPropagation();
+        beginRuntimeErrorsGesture(event);
+        return;
+      }
       const action = event.target?.closest?.("[data-action='move'], [data-action='resize'], [data-action='toggle']");
       if (!action || !root.contains(action)) return;
       const panel = action.closest("[data-panel]");
@@ -4103,6 +4142,52 @@ RENDERER_HUD_SCRIPT = r"""
       // A pure tap (no movement) falls through to the click handler, which
       // toggles the panel. Only a real drag persists a new position.
       syncPosition();
+      if (gesture.moved) {
+        scheduleLayoutReport(
+          gesture.action === "resize" ? "resize" : "move",
+          gesture.name,
+        );
+      }
+    };
+    document.addEventListener("pointermove", move, true);
+    document.addEventListener("pointerup", done, true);
+    document.addEventListener("pointercancel", done, true);
+  }
+
+  function beginRuntimeErrorsGesture(event) {
+    const panel = document.querySelector(`#${rootId} [data-field="runtimeErrorsPanel"]`);
+    if (!panel || panel.hidden) return;
+    const rect = panel.getBoundingClientRect();
+    const gesture = {
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const move = (nextEvent) => {
+      const left = clamp(
+        gesture.left + nextEvent.clientX - gesture.startX,
+        8,
+        Math.max(8, innerWidth - gesture.width - 8),
+      );
+      const top = clamp(
+        gesture.top + nextEvent.clientY - gesture.startY,
+        8,
+        Math.max(8, innerHeight - gesture.height - 8),
+      );
+      panel.style.left = px(left);
+      panel.style.top = px(top);
+      panel.style.right = "auto";
+      panel.style.bottom = "auto";
+      setRuntimeErrorsPanelState({ x: Math.round(left), y: Math.round(top) });
+    };
+    const done = () => {
+      document.removeEventListener("pointermove", move, true);
+      document.removeEventListener("pointerup", done, true);
+      document.removeEventListener("pointercancel", done, true);
+      applyRuntimeErrorsPanelState(panel);
     };
     document.addEventListener("pointermove", move, true);
     document.addEventListener("pointerup", done, true);
@@ -4161,6 +4246,26 @@ RENDERER_HUD_SCRIPT = r"""
     panel.style.bottom = "auto";
     panel.style.width = px(width);
     panel.style.height = px(height);
+  }
+
+  function applyRuntimeErrorsPanelState(panel = document.querySelector(`#${rootId} [data-field="runtimeErrorsPanel"]`)) {
+    if (!panel || panel.hidden) return;
+    const rect = panel.getBoundingClientRect();
+    const state = getRuntimeErrorsPanelState();
+    const hasManual = Number.isFinite(Number(state.x)) && Number.isFinite(Number(state.y));
+    const width = Math.max(1, rect.width || 520);
+    const height = Math.max(1, rect.height || 120);
+    const left = hasManual
+      ? clamp(Number(state.x), 8, Math.max(8, innerWidth - width - 8))
+      : 16;
+    const top = hasManual
+      ? clamp(Number(state.y), 8, Math.max(8, innerHeight - height - 8))
+      : clamp(innerHeight - height - 16, 8, Math.max(8, innerHeight - height - 8));
+    panel.style.left = px(left);
+    panel.style.top = px(top);
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    if (hasManual) setRuntimeErrorsPanelState({ x: Math.round(left), y: Math.round(top) });
   }
 
   function anchorUsable(node) {
@@ -4494,6 +4599,64 @@ RENDERER_HUD_SCRIPT = r"""
     window[composerAttachmentsTimerName] = setTimeout(() => {
       reportComposerAttachments(force);
     }, composerAttachmentsDebounceMs);
+  }
+
+  function collectLayoutSnapshot() {
+    const states = loadStates();
+    const panels = {};
+    for (const name of Object.keys(PANEL)) {
+      const state = states[name] || {};
+      const node = document.querySelector(`#${rootId} [data-panel="${name}"]`);
+      const rect = node ? node.getBoundingClientRect() : null;
+      panels[name] = {
+        expanded: !!state.expanded,
+        manual: !!state.manual,
+        x: Number.isFinite(state.x) ? Math.round(state.x) : (rect ? Math.round(rect.left) : null),
+        y: Number.isFinite(state.y) ? Math.round(state.y) : (rect ? Math.round(rect.top) : null),
+        width: Number.isFinite(state.width) ? Math.round(state.width) : (rect ? Math.round(rect.width) : null),
+        collapsedHeight: Number.isFinite(state.collapsedHeight) ? Math.round(state.collapsedHeight) : null,
+        expandedHeight: Number.isFinite(state.expandedHeight) ? Math.round(state.expandedHeight) : null,
+      };
+    }
+    return {
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      panels,
+    };
+  }
+
+  function reportLayout(reason, panelName) {
+    const snapshot = collectLayoutSnapshot();
+    const signature = JSON.stringify([reason, panelName || "", snapshot.panels]);
+    if (window[layoutReportSignatureName] === signature) return;
+    window[layoutReportSignatureName] = signature;
+    const payload = {
+      reason: String(reason || ""),
+      panel: String(panelName || ""),
+      layout: snapshot,
+      observedAt: Date.now(),
+    };
+    const binding = window[layoutBindingName];
+    if (typeof binding === "function") {
+      try {
+        binding(JSON.stringify(payload));
+        return;
+      } catch (_) {}
+    }
+    const bridge = settingsBridgeUrl();
+    if (!bridge) return;
+    fetch(`${bridge}/layout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function scheduleLayoutReport(reason, panelName) {
+    clearTimeout(window[layoutReportTimerName] || 0);
+    window[layoutReportTimerName] = setTimeout(() => {
+      reportLayout(reason, panelName);
+    }, 80);
   }
 
   function humanizeTokens(value) {
@@ -5059,6 +5222,7 @@ RENDERER_HUD_SCRIPT = r"""
       applyRect(panel, left, top, width, height);
     }
     refreshAllMarquees(root);
+    applyRuntimeErrorsPanelState();
     refreshLayoutObservers();
     startBootstrapObserver();
   }
@@ -5964,7 +6128,7 @@ RENDERER_HUD_SCRIPT = r"""
     if (!runtimeErrorsPanel) return;
     const debug = !!payload?.debug;
     const items = Array.isArray(payload?.runtimeErrors) ? payload.runtimeErrors.filter(Boolean) : [];
-    runtimeErrorsPanel.hidden = !debug || !items.length;
+    runtimeErrorsPanel.hidden = !debug;
     if (runtimeErrorsPanel.hidden) {
       runtimeErrorsPanel.replaceChildren();
       return;
@@ -5972,12 +6136,34 @@ RENDERER_HUD_SCRIPT = r"""
     runtimeErrorsPanel.replaceChildren();
     const title = document.createElement("div");
     title.className = "codex-usage-hud-runtime-errors-title";
+    title.dataset.action = "runtime-errors-move";
+    title.title = "拖动 Runtime errors 面板";
     const heading = document.createElement("span");
     heading.textContent = "Runtime errors";
     const count = document.createElement("span");
     count.textContent = `${items.length}`;
     title.append(heading, count);
     runtimeErrorsPanel.appendChild(title);
+    const body = document.createElement("div");
+    body.className = "codex-usage-hud-runtime-errors-body";
+    runtimeErrorsPanel.appendChild(body);
+    if (!items.length) {
+      const debugStatusItem = document.createElement("div");
+      debugStatusItem.className = "codex-usage-hud-runtime-error";
+      debugStatusItem.dataset.severity = "info";
+      const code = document.createElement("div");
+      code.className = "codex-usage-hud-runtime-error-code";
+      code.textContent = "debug.ready";
+      const message = document.createElement("div");
+      message.textContent = "DEBUG HUD active";
+      const meta = document.createElement("div");
+      meta.className = "codex-usage-hud-runtime-error-meta";
+      meta.textContent = "info · renderer · 1x";
+      debugStatusItem.append(code, message, meta);
+      body.appendChild(debugStatusItem);
+      applyRuntimeErrorsPanelState(runtimeErrorsPanel);
+      return;
+    }
     for (const item of items.slice(0, 6)) {
       const row = document.createElement("div");
       row.className = "codex-usage-hud-runtime-error";
@@ -6003,8 +6189,9 @@ RENDERER_HUD_SCRIPT = r"""
       }
       row.append(code, message, meta);
       if (context.textContent && context.textContent !== "{}") row.appendChild(context);
-      runtimeErrorsPanel.appendChild(row);
+      body.appendChild(row);
     }
+    applyRuntimeErrorsPanelState(runtimeErrorsPanel);
   }
 
   function markHudStale() {
@@ -6408,13 +6595,11 @@ class RendererHudClient:
         port: int | None = None,
         timeout_seconds: float = DEFAULT_RENDERER_TIMEOUT_SECONDS,
         target_cache_seconds: float = DEFAULT_RENDERER_TARGET_CACHE_SECONDS,
-        settings_poll_seconds: float = DEFAULT_RENDERER_SETTINGS_POLL_SECONDS,
         enabled: bool | None = None,
     ) -> None:
         self.port = int(port or cdp_port_from_env())
         self.timeout_seconds = max(0.05, float(timeout_seconds))
         self.target_cache_seconds = max(0.0, float(target_cache_seconds))
-        self.settings_poll_seconds = max(0.0, float(settings_poll_seconds))
         self.enabled = renderer_enabled_from_env() if enabled is None else bool(enabled)
         self.last_status = "idle" if self.enabled else "disabled"
         self.last_error = ""
@@ -6424,10 +6609,10 @@ class RendererHudClient:
         self._cached_target_id = ""
         self._cached_websocket_url = ""
         self._target_cache_at = 0.0
-        self._next_settings_poll_at = 0.0
         self._support_images_sent = False
         self._active_session_binding: _RendererBinding | None = None
         self._attachments_binding: _RendererBinding | None = None
+        self._layout_binding: _RendererBinding | None = None
         self._theme_probe = CodexThemeProbe(
             port=self.port,
             timeout_seconds=max(0.08, min(self.timeout_seconds, 0.25)),
@@ -6459,6 +6644,23 @@ class RendererHudClient:
         if callable(callback):
             self._attachments_binding = _RendererBinding(
                 COMPOSER_ATTACHMENTS_BINDING_NAME,
+                callback,
+                timeout_seconds=self.timeout_seconds,
+            )
+
+    def set_layout_callback(self, callback: Any) -> None:
+        """Receive renderer HUD layout events (drag/resize/toggle) over CDP.
+
+        The renderer JS reports panel geometry changes through a dedicated
+        binding so the Python loop can emit ``renderer_layout_changed`` events
+        without polling localStorage or waiting for the next refresh tick.
+        """
+        if self._layout_binding is not None:
+            self._layout_binding.close()
+            self._layout_binding = None
+        if callable(callback):
+            self._layout_binding = _RendererBinding(
+                LAYOUT_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
             )
@@ -6514,13 +6716,13 @@ class RendererHudClient:
             if target_id != self._target_id or not self._script_identifier:
                 self._install(websocket_url, target_id)
             if not self._send_update(websocket_url, payload):
-                self._install(websocket_url, target_id, force=True)
-                if not self._send_update(websocket_url, payload):
-                    raise RuntimeError("renderer update function did not acknowledge payload")
+                raise RuntimeError("renderer update function did not acknowledge payload")
             if self._active_session_binding is not None:
                 self._active_session_binding.ensure(websocket_url, target_id)
             if self._attachments_binding is not None:
                 self._attachments_binding.ensure(websocket_url, target_id)
+            if self._layout_binding is not None:
+                self._layout_binding.ensure(websocket_url, target_id)
         except Exception as exc:
             self._clear_target_cache(clear_script=True)
             self.last_status = "failed"
@@ -6530,53 +6732,6 @@ class RendererHudClient:
         self.last_error = ""
         return True
 
-    def take_settings_command(self) -> dict[str, object] | None:
-        """Consume one pending settings command from the renderer page."""
-        if not self.enabled:
-            return None
-        now = time.monotonic()
-        if now < self._next_settings_poll_at:
-            return None
-        self._next_settings_poll_at = now + self.settings_poll_seconds
-        expression = (
-            "(() => {"
-            f"const key = {json.dumps(SETTINGS_COMMAND_STORAGE_KEY)};"
-            "try {"
-            "const raw = localStorage.getItem(key);"
-            "if (!raw) return null;"
-            "localStorage.removeItem(key);"
-            "const value = JSON.parse(raw);"
-            "if (value && typeof value === 'object') {"
-            "const expiresAt = Number(value.expiresAt || 0);"
-            "if (expiresAt && Date.now() > expiresAt) return null;"
-            "}"
-            "return value && typeof value === 'object' ? value : { action: 'invalid' };"
-            "} catch (error) {"
-            "return { action: 'invalid', message: String(error && error.message || error) };"
-            "}"
-            "})()"
-        )
-        try:
-            target = self._page_target()
-            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
-            if not websocket_url:
-                return None
-            result = send_cdp_command(
-                websocket_url,
-                "Runtime.evaluate",
-                _runtime_expression_params(expression),
-                self.timeout_seconds,
-            )
-            value = (
-                result.get("result", {})
-                .get("result", {})
-                .get("value")
-            )
-        except Exception:
-            self._clear_target_cache(clear_script=False)
-            return None
-        return value if isinstance(value, dict) else None
-
     def close(self) -> None:
         if self._active_session_binding is not None:
             self._active_session_binding.close()
@@ -6584,6 +6739,9 @@ class RendererHudClient:
         if self._attachments_binding is not None:
             self._attachments_binding.close()
             self._attachments_binding = None
+        if self._layout_binding is not None:
+            self._layout_binding.close()
+            self._layout_binding = None
         if not self.enabled:
             return
         try:
@@ -8518,7 +8676,6 @@ __all__ = [
     "RENDERER_HUD_SCRIPT",
     "RendererHudClient",
     "RendererHudPayload",
-    "SETTINGS_COMMAND_STORAGE_KEY",
     "payload_from_snapshot",
     "remove_renderer_hud_from_pages",
     "renderer_enabled_from_env",

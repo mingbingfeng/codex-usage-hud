@@ -62,9 +62,11 @@ class RuntimeErrorRegistry:
         *,
         clock: Callable[[], float] | None = None,
         event_bus: RuntimeEventBus | None = None,
+        diagnostic_callback: Callable[[str, RuntimeErrorEvent], None] | None = None,
     ) -> None:
         self.clock = clock or time.time
         self.event_bus = event_bus
+        self.diagnostic_callback = diagnostic_callback
         self._events: dict[tuple[str, str], RuntimeErrorEvent] = {}
 
     def record(
@@ -122,20 +124,25 @@ class RuntimeErrorRegistry:
         return [event.to_payload() for event in events]
 
     def _publish_recorded(self, event: RuntimeErrorEvent, timestamp: float) -> None:
+        self._append_diagnostic("recorded", event)
         if self.event_bus is None:
             return
+        error_payload = event.to_payload()
         self.event_bus.publish(
             "runtime_error",
             source=event.source,
             timestamp=timestamp,
             session=_session_from_error_context(event.context),
-            context={"action": "recorded", "error": event.to_payload()},
+            context={"action": "recorded", "error": error_payload},
+            error=error_payload,
         )
 
     def _publish_resolved(self, event: RuntimeErrorEvent) -> None:
+        self._append_diagnostic("resolved", event)
         if self.event_bus is None:
             return
         timestamp = float(self.clock())
+        error_payload = event.to_payload()
         self.event_bus.publish(
             "runtime_error",
             source=event.source,
@@ -144,9 +151,18 @@ class RuntimeErrorRegistry:
             context={
                 "action": "resolved",
                 "code": event.code,
-                "error": event.to_payload(),
+                "error": error_payload,
             },
+            error=error_payload,
         )
+
+    def _append_diagnostic(self, action: str, event: RuntimeErrorEvent) -> None:
+        if self.diagnostic_callback is None:
+            return
+        try:
+            self.diagnostic_callback(action, event)
+        except Exception:
+            return
 
 
 def _session_from_error_context(context: Mapping[str, Any]) -> str | None:
