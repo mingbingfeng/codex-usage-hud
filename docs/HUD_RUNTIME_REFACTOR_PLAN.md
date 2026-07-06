@@ -131,10 +131,11 @@ changed file contribution when possible.
 File watching should be reliable before relying on it for responsiveness:
 
 - Windows `ReadDirectoryChangesW` overflow must trigger directory reconciliation.
-- macOS recursive sessions tree watching needs FSEvents or a narrower watch model.
-- Polling fallback should be marked as degraded state in diagnostics.
-- Current session file append should use a shorter debounce than all-session tree
-  changes.
+- macOS renderer mode now uses the narrower watch model: current session file
+  plus session index/state db/settings, without recursive sessions tree polling.
+- Polling fallback is marked as degraded state in diagnostics.
+- Current session file append wakes immediately; all-session tree, settings, and
+  mapping changes keep slower debounce/coalescing.
 
 ### Renderer Payload
 

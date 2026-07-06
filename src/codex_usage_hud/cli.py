@@ -2316,7 +2316,7 @@ def _renderer_file_watch_specs(
     if state_db_path is not None:
         specs.append(FileWatchSpec.file(Path(state_db_path), "session-map"))
     sessions_root = getattr(context, "sessions_root", None)
-    if sessions_root is not None:
+    if sessions_root is not None and not _renderer_skip_recursive_session_tree_watch():
         root = Path(sessions_root)
         specs.append(FileWatchSpec.tree(root, "sessions-root", suffixes=(".jsonl",)))
         if root.name == "sessions":
@@ -2330,6 +2330,11 @@ def _renderer_file_watch_specs(
     if session_path is not None:
         specs.append(FileWatchSpec.file(Path(session_path), "session"))
     return specs
+
+
+def _renderer_skip_recursive_session_tree_watch() -> bool:
+    """Avoid high-cost polling for recursive session trees on macOS kqueue."""
+    return sys.platform == "darwin"
 
 
 class _RendererFileEventSource:
@@ -2404,7 +2409,9 @@ class _RendererFileEventSource:
                 return
             self._reasons.update(reasons)
             self._paths.update(paths)
-            if self._debounce_seconds <= 0:
+            if self._should_wake_immediately(reasons):
+                wake_now = True
+            elif self._debounce_seconds <= 0:
                 wake_now = True
             elif self._timer is None:
                 self._timer = threading.Timer(
@@ -2419,6 +2426,10 @@ class _RendererFileEventSource:
         if wake_now:
             self._publish_runtime_events(reasons, paths)
             self._wake_event.set()
+
+    @staticmethod
+    def _should_wake_immediately(reasons: set[str]) -> bool:
+        return reasons == {"session"}
 
     def _flush_debounced_change(self) -> None:
         with self._lock:

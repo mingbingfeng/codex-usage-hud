@@ -9809,6 +9809,31 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn(("sessions", "tree"), reasons_by_name)
         self.assertIn(("archived_sessions", "tree"), reasons_by_name)
 
+    def test_renderer_file_watch_specs_skip_recursive_session_trees_on_macos(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "session.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=root / "hud_settings.json"),
+                session_index_path=root / "session_index.jsonl",
+                state_db_path=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+            )
+
+            with patch.object(cli_module.sys, "platform", "darwin"):
+                specs = cli_module._renderer_file_watch_specs(context, session_path)
+
+        self.assertFalse(any(spec.kind == "tree" for spec in specs))
+        self.assertTrue(
+            any(spec.kind == "file" and spec.reason == "session" for spec in specs)
+        )
+        self.assertTrue(
+            any(spec.kind == "file" and spec.reason == "session-map" for spec in specs)
+        )
+
     def test_renderer_file_event_source_coalesces_reasons_and_updates_session_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -9887,18 +9912,61 @@ class DaemonLifecycleTests(unittest.TestCase):
                     debounce_seconds=0.05,
                 )
                 watcher = created[0]
-                watcher.callback({"session"}, {root / "sessions" / "one.jsonl"})
+                watcher.callback({"sessions-root"}, {root / "sessions" / "one.jsonl"})
                 watcher.callback({"settings"}, {root / "hud_settings.json"})
                 self.assertFalse(wake_event.is_set())
                 self.assertTrue(wake_event.wait(0.5))
                 reasons, paths = source.take_changes()
                 source.close()
 
-        self.assertEqual(reasons, {"session", "settings"})
+        self.assertEqual(reasons, {"sessions-root", "settings"})
         self.assertEqual(
             paths,
             {root / "sessions" / "one.jsonl", root / "hud_settings.json"},
         )
+
+    def test_renderer_file_event_source_wakes_immediately_for_current_session_append(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wake_event = threading.Event()
+            context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=root / "hud_settings.json"),
+                session_index_path=root / "session_index.jsonl",
+                state_db_path=root / "state_5.sqlite",
+                sessions_root=root / "sessions",
+            )
+            created: list[object] = []
+
+            class FakeWatcher:
+                event_driven = True
+
+                def __init__(self, callback, **kwargs):
+                    del kwargs
+                    self.callback = callback
+                    self.specs = []
+                    created.append(self)
+
+                def update(self, specs):
+                    self.specs = list(specs)
+
+                def close(self):
+                    return None
+
+            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
+                source = cli_module._RendererFileEventSource(
+                    context,
+                    wake_event,
+                    debounce_seconds=10.0,
+                )
+                watcher = created[0]
+                session_path = root / "sessions" / "one.jsonl"
+                watcher.callback({"session"}, {session_path})
+                reasons, paths = source.take_changes()
+                source.close()
+
+        self.assertTrue(wake_event.is_set())
+        self.assertEqual(reasons, {"session"})
+        self.assertEqual(paths, {session_path})
 
     def test_renderer_file_event_source_publishes_runtime_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

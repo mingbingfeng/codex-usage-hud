@@ -36,9 +36,10 @@
   - layout 用 MutationObserver / ResizeObserver + requestAnimationFrame 合帧。
 - 文件监听：
   - Windows 用 `ReadDirectoryChangesW`。
-  - macOS kqueue 只覆盖非 recursive tree；recursive tree 会 fallback polling。
-  - polling fallback 会全树生成 stat token，sessions 多时成本高。
-  - 当前 Windows watcher 没有显式处理 `bytes_returned == 0` 的缓冲溢出补偿。
+  - macOS renderer mode 不再注册 recursive sessions tree watcher，避免 kqueue 不支持 recursive tree 时落到高成本全树 polling。
+  - macOS renderer mode 显式 watch 当前 session 文件、settings、session_index/state db；全 sessions tree 变化依赖 renderer active-session bridge 和 session-map 文件事件推进。
+  - polling fallback 仍会记录 `file_watcher.degraded` warning，进入 DEBUG HUD 和 normal diagnostic。
+  - Windows watcher 已显式处理 `bytes_returned == 0` 的缓冲溢出补偿。
 
 ## 关键频次
 | 链路 | 当前频次 |
@@ -48,7 +49,7 @@
 | renderer 快档刷新 | `poll_ms`，默认 500ms |
 | renderer 空闲刷新 | 1.5s，event-driven idle 可到 30s |
 | 文件 watcher fallback | 5s polling |
-| 文件事件 debounce | 0.75s |
+| 文件事件 debounce | 当前 session append 立即唤醒；sessions-root/settings/session-map 默认 0.75s 合并 |
 | active work 重扫 | 事件触发或 5s |
 | PySide overlay state poll | 160ms |
 | PySide overlay pointer sync | 60ms |
@@ -103,7 +104,7 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
 | 多层 fallback 掩盖失败 | DOM/协议变化不易发现 | DEBUG 错误 HUD + 显式错误事件 |
 | native title / latest JSONL fallback | 可能显示错会话 | renderer mode 单一 active-session 权威源 |
 | Windows watcher 溢出未补偿 | 高写入时漏事件 | 溢出时枚举补偿并报警 |
-| macOS recursive tree polling | sessions 多时成本高 | FSEvents 或只 watch 当前 session + index |
+| macOS recursive tree polling | 已从 renderer specs 移除 | 显式 watch 当前 session + index/state db/settings；后续如需要全树 native 事件再评估 FSEvents |
 | overlay 160ms 文件 polling | 空闲也有周期 IO | push IPC 或 watcher 唤醒 |
 | settings command localStorage polling | 周期性 CDP evaluate | CDP binding / custom event |
 | payload 单体刷新 | 局部变化也刷新 top/bottom 多字段 | payload 分区和局部 DOM 更新 |
@@ -194,8 +195,10 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
   - `cdp.update_failed`：不会 force reinstall/retry，不切 Qt/Tk，写 normal diagnostic。
   - `file_watcher.degraded`：polling fallback 标记为 warning，并写 normal diagnostic。
   - `file_watcher.overflow`：overflow 哨兵不污染业务 reasons，同时记录 warning 和 normal diagnostic。
-- 当前仍保留的 polling/fallback 不属于阶段 2 已删除范围：
-  - file watcher native 不可用时的 degraded polling，后续阶段 5 处理。
+- 阶段 5 已处理：
+  - macOS renderer specs 不再包含 recursive sessions tree watcher，避免默认落到全树 polling。
+  - 当前 session file event 立即唤醒；sessions-root/settings/session-map 继续 debounce 合并。
+- 当前仍保留的 polling/fallback 不属于阶段 2/5 已删除范围：
   - desktop overlay state/command polling，后续阶段 7 处理。
   - renderer failure backoff delay，保留为避免失败时 tight loop；它不切换数据源、不重装脚本、不隐藏错误。
 

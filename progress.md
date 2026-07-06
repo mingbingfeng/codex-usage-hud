@@ -311,14 +311,25 @@
   - `python -m pytest tests/test_measure_renderer_latency.py -q` 先失败（性能脚本仍输出旧 append 指标），实现后通过。
   - `python -m pytest tests/test_parser.py tests/test_ui.py -q` 通过。
 
+## 2026-07-06 阶段 5 收口
+- 收口文件监听可靠性阶段：
+  - `_renderer_file_watch_specs()` 在 macOS 上不再注册 recursive sessions tree watcher，避免 kqueue 无 recursive tree 能力时落到高成本全树 polling。
+  - macOS renderer mode 只显式 watch settings、session_index/state db 和当前 session 文件。
+  - 全 sessions tree 变化后续依赖 renderer active-session bridge、session-map 文件事件和当前 session file watch 推进。
+  - 保留 `file_watcher.degraded` runtime error：native watcher 不可用或 fallback polling 生效时写 DEBUG HUD payload 和 `renderer_fallback.log`。
+  - 文件事件 debounce 分层：当前 session append (`{"session"}`) 立即唤醒；sessions-root/settings/session-map 等较慢事件继续用默认 debounce 合并。
+- TDD/验证记录：
+  - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_watch_specs_skip_recursive_session_trees_on_macos tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_debounces_native_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_wakes_immediately_for_current_session_append -q` 先失败（macOS specs 仍含 tree；session event 仍被 debounce），实现后通过。
+  - `python -m pytest tests/test_file_watcher.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_watch_specs_cover_session_settings_and_mapping tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_watch_specs_skip_recursive_session_trees_on_macos tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_coalesces_reasons_and_updates_session_path tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_debounces_native_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_wakes_immediately_for_current_session_append tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_publishes_runtime_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_degraded_polling tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_overflow_without_polluting_reasons -q` 通过。
+
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 阶段 1、2、3、4 完成；当前 session refresh 已切到 JSONL tail state |
-| 我要去哪里？ | 进入阶段 5，收口 macOS sessions tree watcher / fallback polling degraded 标记，并继续拆 overlay polling |
+| 我在哪里？ | 阶段 1、2、3、4、5 完成；当前 session refresh 已切到 JSONL tail state，file watcher 阶段已收口 |
+| 我要去哪里？ | 进入阶段 6，拆分 renderer payload 并让 JS 按 current-session/budget/settings/overlay/diagnostics 局部更新 |
 | 目标是什么？ | renderer 权威、事件驱动、失败显式、响应速度优先 |
-| 我学到了什么？ | 当前 session 可以先消除全文件 I/O：append 只读新增完整行；预算聚合已有单文件贡献替换基础 |
-| 我做了什么？ | 提交并推送阶段 1-3；收口阶段 4：新增 `JsonlTailState`、接入 `build_snapshot()`、更新性能 append 基线 |
+| 我学到了什么？ | macOS kqueue 不适合 recursive sessions tree；renderer mode 可以显式 watch 当前 session 和 mapping 文件，避免全树 polling |
+| 我做了什么？ | 提交并推送阶段 1-3；收口阶段 4 和阶段 5：新增 `JsonlTailState`、接入 `build_snapshot()`、更新性能 append 基线、分层 file event debounce |
 
 ---
 *每个阶段完成后或遇到错误时更新此文件。*
