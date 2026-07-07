@@ -204,7 +204,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("实时请求", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("符号说明", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("只看剩余", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("applyTheme(root, nextPayload)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("applySettingsPayload(root", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("--codex-usage-hud-surface", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-update-button", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="update-action"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -214,10 +214,16 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-resize-corner-bottom-right", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-overflow", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-badge", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function normalizePayloadDomains", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("applyPayloadDomains(root, nextPayload, domains)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('if ("currentSession" in domains)', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('if ("diagnostics" in domains)', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("Object.assign(nextPayload, domainPayload);", renderer_hud.RENDERER_HUD_SCRIPT)
 
         self.assertIn("codex-usage-hud-resize-corner-top-left", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-edge="left"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-edge="bottom-right"', renderer_hud.RENDERER_HUD_SCRIPT)
+
         self.assertIn('data-edge="top-left"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('class="codex-usage-hud-resize"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("codex-usage-hud-settings-menu", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -520,6 +526,99 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("beginRuntimeErrorsGesture", script)
         self.assertIn("setRuntimeErrorsPanelState", script)
 
+    def test_renderer_debug_error_hud_defaults_collapsed_and_toggles_width(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('runtimeErrorsPanel.dataset.expanded = String(expanded);', script)
+        self.assertIn('expanded: false', script)
+        self.assertIn("runtime-errors-toggle", script)
+        self.assertIn('body.hidden = !expanded;', script)
+        self.assertIn('heading.textContent = "errors";', script)
+        self.assertIn('setRuntimeErrorsPanelState({ expanded });', script)
+        self.assertIn('.codex-usage-hud-runtime-errors[data-expanded="false"]', script)
+        self.assertIn('.codex-usage-hud-runtime-errors[data-expanded="true"]', script)
+
+    def test_payload_from_snapshot_exposes_update_domains(self) -> None:
+        snapshot = ParsedSession(
+            session_id="session-domain",
+            session_title="Domain Split",
+            status="parsed",
+            selection_source="renderer",
+            refreshed_at=datetime(2026, 7, 6, 10, 0, 0).astimezone(),
+            last_event_time=datetime(2026, 7, 6, 9, 59, 58).astimezone(),
+            confirmed=ConfirmedTokens(cumulative_total=42, cumulative_cost_usd=0.01),
+            request=RequestTokens(status="idle", model="gpt-5", total_tokens=0),
+        )
+        snapshot.today_tokens = 100
+        snapshot.week_tokens = 200
+        snapshot.today_cost_usd = 0.02
+        snapshot.week_cost_usd = 0.04
+
+        payload = payload_from_snapshot(
+            snapshot,
+            settings_bridge_url="http://127.0.0.1:8765",
+            settings_command_status={"lastCommand": "saved"},
+            theme={"variant": "dark"},
+            update_state={"visible": True, "phase": "ready"},
+            debug=True,
+            runtime_errors=[
+                RuntimeErrorEvent(
+                    source="renderer",
+                    severity="error",
+                    code="renderer.anchor_missing",
+                    message="anchor missing",
+                    context={"session": "session-domain"},
+                    first_seen_at=1.0,
+                    last_seen_at=2.0,
+                )
+            ],
+            work_overlay_selectable_max=3,
+            desktop_overlay_dependency={"available": True},
+        ).to_json()
+
+        domains = payload["payloadDomains"]
+        self.assertEqual(
+            set(domains),
+            {"currentSession", "budget", "settings", "overlay", "diagnostics"},
+        )
+        self.assertEqual(domains["currentSession"]["topLine"], payload["topLine"])
+        self.assertEqual(domains["currentSession"]["requestRows"], payload["requestRows"])
+        self.assertEqual(domains["budget"]["topProgress"], payload["topProgress"])
+        self.assertEqual(domains["settings"]["settingsBridgeUrl"], "http://127.0.0.1:8765")
+        self.assertEqual(domains["settings"]["updateState"]["phase"], "ready")
+        self.assertEqual(domains["overlay"]["workOverlaySelectableMax"], 3)
+        self.assertEqual(domains["overlay"]["desktopOverlayDependency"], {"available": True})
+        self.assertTrue(domains["diagnostics"]["debug"])
+        self.assertEqual(
+            domains["diagnostics"]["runtimeErrors"][0]["code"],
+            "renderer.anchor_missing",
+        )
+
+    def test_renderer_payload_can_emit_domain_only_update(self) -> None:
+        payload = payload_from_snapshot(
+            ParsedSession(status="parsed"),
+            debug=True,
+            runtime_errors=[
+                RuntimeErrorEvent(
+                    source="renderer",
+                    severity="warning",
+                    code="renderer.anchor_missing",
+                    message="anchor missing",
+                    first_seen_at=1.0,
+                    last_seen_at=2.0,
+                )
+            ],
+        )
+
+        partial = payload.to_domain_json("diagnostics")
+
+        self.assertEqual(set(partial), {"debug", "runtimeErrors", "payloadDomains"})
+        self.assertEqual(set(partial["payloadDomains"]), {"diagnostics"})
+        self.assertTrue(partial["debug"])
+        self.assertEqual(partial["runtimeErrors"][0]["code"], "renderer.anchor_missing")
+        self.assertNotIn("topLine", partial)
+        self.assertNotIn("requestRows", partial)
+
     def test_update_payload_reports_failed_update_without_reinstall_retry(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
         install_force_flags = []
@@ -559,6 +658,61 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function activeSessionHeaderLooksNewSession(rows)", script)
         self.assertIn("activeSessionHeaderLooksNewSession(rows)", script)
         self.assertIn('matchedBy: "header-empty"', script)
+
+    def test_renderer_active_session_filters_out_folder_rows(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn("function activeSessionRowLooksThread(row)", script)
+        self.assertIn(
+            "sourceRow?.querySelector?.(activeSessionTitleSelector)", script
+        )
+        self.assertIn(
+            ".filter((row) => activeSessionRowLooksThread(row))",
+            script,
+        )
+
+    def test_renderer_active_session_container_prefers_identity_rows(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn(
+            "document.querySelector(activeSessionIdentitySelector)", script
+        )
+        self.assertIn(
+            "document.querySelector(activeSessionTitleSelector)?.closest?.(activeSessionRowSelector)",
+            script,
+        )
+
+    def test_renderer_active_session_follows_composer_submit_from_new_session(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn(
+            "function scheduleActiveSessionSendFollowup(reason = \"composer-send\")",
+            script,
+        )
+        self.assertIn(
+            "function activeSessionComposerSubmitButton(button)",
+            script,
+        )
+        self.assertIn(
+            'scheduleActiveSessionSendFollowup("composer-enter")',
+            script,
+        )
+        self.assertIn(
+            'scheduleActiveSessionSendFollowup("composer-send-click")',
+            script,
+        )
+        self.assertIn(
+            'input.addEventListener("keydown", handlers.keydown, true)',
+            script,
+        )
+
+    def test_renderer_composer_watchers_do_not_redeclare_handlers_binding(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn(
+            "const existingHandlers = window[composerInputHandlersName];",
+            script,
+        )
 
     def test_payload_exposes_pre_send_estimate_and_activity_light(self) -> None:
         from codex_usage_hud.core.pre_send_estimator import BaseEstimate
@@ -727,7 +881,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "22";', script)
+        self.assertIn('const version = "23";', script)
         self.assertIn(
             "scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);",
             script,
@@ -1298,6 +1452,77 @@ class RendererHudClientTests(unittest.TestCase):
 
         self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
         self.assertEqual(close_calls, 1)
+
+    def test_client_bootstraps_active_session_binding_before_payload_update(self) -> None:
+        ensure_calls: list[tuple[str, str]] = []
+        update_expressions: list[str] = []
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+            renderer_hud._RendererBinding,
+        )
+
+        class FakeBinding:
+            def __init__(self, binding_name, callback, *, timeout_seconds):
+                self.binding_name = binding_name
+                self.callback = callback
+                self.timeout_seconds = timeout_seconds
+
+            def ensure(self, websocket_url: str, target_id: str) -> None:
+                ensure_calls.append((websocket_url, target_id))
+
+            def close(self) -> None:
+                pass
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            return [
+                {
+                    "id": "target-1",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://codex",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+                }
+            ]
+
+        def fake_install(websocket_url: str, script: str, timeout_seconds: float) -> str:
+            del websocket_url, script, timeout_seconds
+            return "script-1"
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, timeout_seconds
+            self.assertEqual(method, "Runtime.evaluate")
+            update_expressions.append(str(params["expression"]))
+            return {"result": {"result": {"value": True}}}
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+            renderer_hud._RendererBinding,
+        ) = (fake_list_targets, fake_install, fake_send, FakeBinding)
+        try:
+            client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+            client.set_active_session_callback(lambda payload: payload)
+            self.assertTrue(client.bootstrap_active_session())
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.install_new_document_script,
+                renderer_hud.send_cdp_command,
+                renderer_hud._RendererBinding,
+            ) = originals
+
+        self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
+        self.assertIn("__codexUsageHudReportActiveSession", update_expressions[0])
+        self.assertNotIn("__codexUsageHudUpdate", update_expressions[0])
 
     def test_client_starts_attachments_binding_after_update(self) -> None:
         # 附件走 CDP binding（页面 CSP 拦截 fetch），验证 update 后 binding 被 ensure。

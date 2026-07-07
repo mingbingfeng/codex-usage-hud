@@ -83,7 +83,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "22";
+  const version = "23";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -115,6 +115,7 @@ RENDERER_HUD_SCRIPT = r"""
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
   const activeSessionTimerName = "__codexUsageHudActiveSessionTimer";
+  const activeSessionSendFollowupTimersName = "__codexUsageHudActiveSessionSendTimers";
   const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";
   const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
   const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
@@ -1520,7 +1521,6 @@ RENDERER_HUD_SCRIPT = r"""
         left: 16px;
         bottom: 16px;
         z-index: 2147482760;
-        width: min(520px, calc(100vw - 32px));
         max-height: min(360px, calc(100vh - 32px));
         overflow: hidden;
         box-sizing: border-box;
@@ -1534,12 +1534,20 @@ RENDERER_HUD_SCRIPT = r"""
         user-select: text;
         font: 11px/1.45 Consolas, "Cascadia Mono", ui-monospace, monospace;
       }
+      #${rootId} .codex-usage-hud-runtime-errors[data-expanded="false"] {
+        width: max-content;
+        min-width: 88px;
+        max-width: calc(100vw - 32px);
+      }
+      #${rootId} .codex-usage-hud-runtime-errors[data-expanded="true"] {
+        width: min(520px, calc(100vw - 32px));
+      }
       #${rootId} .codex-usage-hud-runtime-errors-title {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 8px 10px;
+        justify-content: flex-start;
+        gap: 7px;
+        padding: 7px 9px;
         border-bottom: 1px solid rgba(255, 107, 107, .18);
         background: rgba(32, 40, 51, .82);
         color: #ffb3b3;
@@ -1547,9 +1555,36 @@ RENDERER_HUD_SCRIPT = r"""
         cursor: grab;
         user-select: none;
         touch-action: none;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-runtime-errors-title:active {
         cursor: grabbing;
+      }
+      #${rootId} .codex-usage-hud-runtime-errors-toggle {
+        display: inline-grid;
+        place-items: center;
+        flex: 0 0 auto;
+        width: 17px;
+        height: 17px;
+        box-sizing: border-box;
+        border: 1px solid rgba(255, 179, 179, .26);
+        border-radius: 4px;
+        padding: 0;
+        background: rgba(255, 107, 107, .10);
+        color: #ffd2d2;
+        font: 700 10px/1 Consolas, "Cascadia Mono", ui-monospace, monospace;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-runtime-errors-toggle:hover {
+        border-color: rgba(255, 179, 179, .46);
+        background: rgba(255, 107, 107, .18);
+      }
+      #${rootId} .codex-usage-hud-runtime-errors-count {
+        color: #ffd2d2;
+        font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-runtime-errors[data-expanded="false"] .codex-usage-hud-runtime-errors-title {
+        border-bottom: 0;
       }
       #${rootId} .codex-usage-hud-runtime-errors-body {
         max-height: calc(min(360px, calc(100vh - 32px)) - 34px);
@@ -2657,6 +2692,11 @@ RENDERER_HUD_SCRIPT = r"""
     "a[href*='conversation']",
     "a[href*='session']",
   ].join(",");
+  const activeSessionTitleSelector = [
+    "[data-thread-title]",
+    ".truncate.select-none",
+    ".truncate.text-base",
+  ].join(",");
   const activeSessionRowSelector = [
     activeSessionIdentitySelector,
     "[role='link']",
@@ -2689,6 +2729,15 @@ RENDERER_HUD_SCRIPT = r"""
     if (!row) return row;
     if (row.matches?.(activeSessionIdentitySelector)) return row;
     return row.closest?.(activeSessionIdentitySelector) || row;
+  }
+
+  function activeSessionRowLooksThread(row) {
+    const sourceRow = activeSessionIdentityRow(row);
+    if (!sourceRow) return false;
+    if (sourceRow.matches?.(activeSessionIdentitySelector)) return true;
+    if (sourceRow?.querySelector?.(activeSessionTitleSelector)) return true;
+    const href = activeSessionRowHref(sourceRow);
+    return !!href && /(?:session|conversation|thread)/i.test(href);
   }
 
   function cleanActiveSessionTitle(value) {
@@ -2808,8 +2857,9 @@ RENDERER_HUD_SCRIPT = r"""
       || sourceRow?.getAttribute?.("data-testid")
       || "";
     const sessionId = normalizeThreadId(rawSessionId);
-    const titleNode = sourceRow?.querySelector?.("[data-thread-title], .truncate.select-none, .truncate.text-base");
-    const rawTitle = titleNode?.textContent || (titleNode ? "" : (sourceRow?.textContent || row?.textContent || ""));
+    const titleNode = sourceRow?.querySelector?.(activeSessionTitleSelector);
+    const rawTitle = titleNode?.textContent
+      || (titleNode ? "" : (activeSessionRowLooksThread(sourceRow) ? (sourceRow?.textContent || row?.textContent || "") : ""));
     const title = cleanActiveSessionTitle(titleNode ? rawTitle : rawTitle.replace(/\s*(Export|Delete|Move|Remove from project|导出|删除|移动|移出项目)+$/g, "")).slice(0, 160);
     if (activeSessionTitleIsNewSession(title)) {
       return { rawSessionId: "", sessionId: "", title };
@@ -2847,6 +2897,7 @@ RENDERER_HUD_SCRIPT = r"""
     const container = activeSessionContainer();
     const root = container || document;
     return Array.from(root.querySelectorAll(activeSessionRowSelector))
+      .filter((row) => activeSessionRowLooksThread(row))
       .filter((row) => {
         const ref = activeSessionRefFromRow(row);
         return !!(ref.sessionId || ref.title);
@@ -2876,7 +2927,9 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function activeSessionContainer() {
-    const row = document.querySelector(activeSessionRowSelector);
+    const row = document.querySelector(activeSessionIdentitySelector)
+      || document.querySelector(activeSessionTitleSelector)?.closest?.(activeSessionRowSelector)
+      || document.querySelector(activeSessionRowSelector);
     return row?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
       || row?.parentElement
       || document.querySelector("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
@@ -2922,6 +2975,33 @@ RENDERER_HUD_SCRIPT = r"""
       postActiveSession(reason);
       refreshActiveSessionObserver();
     }, 40);
+  }
+
+  function clearActiveSessionSendFollowup() {
+    for (const timer of (window[activeSessionSendFollowupTimersName] || [])) {
+      clearTimeout(timer);
+    }
+    window[activeSessionSendFollowupTimersName] = [];
+  }
+
+  function scheduleActiveSessionSendFollowup(reason = "composer-send") {
+    clearActiveSessionSendFollowup();
+    scheduleActiveSessionReport(reason);
+    window[activeSessionSendFollowupTimersName] = [160, 520, 1200, 2400].map((delay) => setTimeout(() => {
+      postActiveSession(`${reason}-followup`);
+      refreshActiveSessionObserver();
+    }, delay));
+  }
+
+  function activeSessionComposerSubmitButton(button) {
+    if (!(button instanceof HTMLElement) || button.hasAttribute("disabled")) return false;
+    const label = cleanActiveSessionTitle(
+      button.getAttribute("aria-label")
+      || button.getAttribute("title")
+      || button.textContent
+      || ""
+    );
+    return /^(发送|提交|send|submit)$/i.test(label);
   }
 
   function refreshActiveSessionObserver() {
@@ -3019,6 +3099,7 @@ RENDERER_HUD_SCRIPT = r"""
 
   function removeActiveSessionWatchers() {
     clearTimeout(window[activeSessionTimerName] || 0);
+    clearActiveSessionSendFollowup();
     document.removeEventListener("click", window[activeSessionClickHandlerName], true);
     window[activeSessionObserverName]?.disconnect?.();
     window[activeSessionBootstrapObserverName]?.disconnect?.();
@@ -3031,6 +3112,7 @@ RENDERER_HUD_SCRIPT = r"""
     delete window[activeSessionObserverName];
     delete window[activeSessionBootstrapObserverName];
     delete window[activeSessionTimerName];
+    delete window[activeSessionSendFollowupTimersName];
     delete window[activeSessionClickHandlerName];
     delete window[activeSessionHistoryPatchName];
     delete window[activeSessionLastSignatureName];
@@ -3062,6 +3144,12 @@ RENDERER_HUD_SCRIPT = r"""
     startActiveSessionBootstrapObserver();
     scheduleActiveSessionReport("payload");
   }
+
+  window.__codexUsageHudReportActiveSession = (reason = "manual") => {
+    ensureActiveSessionWatchers();
+    postActiveSession(String(reason || "manual"));
+    return true;
+  };
 
   function settingsPathLabel() {
     return String(currentPayload()?.settingsPath || "");
@@ -3818,7 +3906,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function getRuntimeErrorsPanelState() {
-    return { ...(loadStates().runtimeErrors || {}) };
+    return { expanded: false, ...(loadStates().runtimeErrors || {}) };
   }
 
   function setRuntimeErrorsPanelState(patch) {
@@ -3879,6 +3967,23 @@ RENDERER_HUD_SCRIPT = r"""
       }
       const action = event.target?.closest?.("[data-action]");
       if (!action || !root.contains(action)) return;
+      if (action.dataset.action === "runtime-errors-toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        const runtimeErrorsPanel = action.closest('[data-field="runtimeErrorsPanel"]');
+        if (!runtimeErrorsPanel) return;
+        const expanded = runtimeErrorsPanel.dataset.expanded !== "true";
+        runtimeErrorsPanel.dataset.expanded = String(expanded);
+        const body = runtimeErrorsPanel.querySelector(".codex-usage-hud-runtime-errors-body");
+        if (body) body.hidden = !expanded;
+        action.setAttribute("aria-label", expanded ? "收缩 Runtime errors 面板" : "展开 Runtime errors 面板");
+        action.setAttribute("aria-expanded", String(expanded));
+        action.title = expanded ? "收缩 Runtime errors 面板" : "展开 Runtime errors 面板";
+        action.textContent = expanded ? "v" : ">";
+        setRuntimeErrorsPanelState({ expanded });
+        applyRuntimeErrorsPanelState(runtimeErrorsPanel);
+        return;
+      }
       if (action.dataset.action === "activity-load-more") {
         event.preventDefault();
         event.stopPropagation();
@@ -4022,6 +4127,8 @@ RENDERER_HUD_SCRIPT = r"""
     });
     root.addEventListener("pointerdown", (event) => {
       if (event.button !== undefined && event.button !== 0) return;
+      const runtimeToggle = event.target?.closest?.("[data-action='runtime-errors-toggle']");
+      if (runtimeToggle && root.contains(runtimeToggle)) return;
       const runtimeMove = event.target?.closest?.("[data-action='runtime-errors-move']");
       if (runtimeMove && root.contains(runtimeMove)) {
         event.preventDefault();
@@ -4829,6 +4936,10 @@ RENDERER_HUD_SCRIPT = r"""
       input.removeEventListener("focus", handlers.focus, true);
       input.removeEventListener("blur", handlers.blur, true);
       input.removeEventListener("input", handlers.input, true);
+      input.removeEventListener("keydown", handlers.keydown, true);
+    }
+    if (handlers?.composer && handlers?.click) {
+      handlers.composer.removeEventListener("click", handlers.click, true);
     }
     window[composerInputNodeName] = null;
     window[composerInputHandlersName] = null;
@@ -4838,7 +4949,9 @@ RENDERER_HUD_SCRIPT = r"""
 
   function ensureComposerInputWatchers() {
     const input = composerInputElement();
-    if (input === window[composerInputNodeName]) {
+    const composer = composerElement();
+    const existingHandlers = window[composerInputHandlersName];
+    if (input === window[composerInputNodeName] && composer && existingHandlers?.composer === composer) {
       if (input && window[composerFocusStateName]) scheduleComposerBadgeUpdate();
       return;
     }
@@ -4855,10 +4968,32 @@ RENDERER_HUD_SCRIPT = r"""
         // 粘贴/删除文本也可能带走 @ 引用，顺带核对附件。
         scheduleComposerAttachmentsReport();
       },
+      keydown: (event) => {
+        if (
+          event.defaultPrevented
+          || event.isComposing
+          || event.key !== "Enter"
+          || event.shiftKey
+          || event.altKey
+          || event.ctrlKey
+          || event.metaKey
+        ) {
+          return;
+        }
+        scheduleActiveSessionSendFollowup("composer-enter");
+      },
+      click: (event) => {
+        const button = event.target?.closest?.("button, [role='button']");
+        if (!button || !composer?.contains?.(button)) return;
+        if (!activeSessionComposerSubmitButton(button)) return;
+        scheduleActiveSessionSendFollowup("composer-send-click");
+      },
+      composer,
     };
     input.addEventListener("focus", handlers.focus, true);
     input.addEventListener("blur", handlers.blur, true);
     input.addEventListener("input", handlers.input, true);
+    input.addEventListener("keydown", handlers.keydown, true);
     window[composerInputNodeName] = input;
     window[composerInputHandlersName] = handlers;
     // The composer may already hold focus when we (re)attach after a re-inject.
@@ -4866,8 +5001,8 @@ RENDERER_HUD_SCRIPT = r"""
       || (input.contains?.(document.activeElement) ?? false);
     setComposerBadgeActive(focused);
     // 附件（图片/文件/@引用）是异步插入的 DOM 节点，靠 MutationObserver 捕获增删。
-    const composer = composerElement();
     if (composer) {
+      composer.addEventListener("click", handlers.click, true);
       const observer = new MutationObserver(() => scheduleComposerAttachmentsReport());
       observer.observe(composer, { subtree: true, childList: true });
       window[composerAttachmentsObserverName] = observer;
@@ -6133,19 +6268,31 @@ RENDERER_HUD_SCRIPT = r"""
       runtimeErrorsPanel.replaceChildren();
       return;
     }
+    const expanded = getRuntimeErrorsPanelState().expanded === true;
+    runtimeErrorsPanel.dataset.expanded = String(expanded);
     runtimeErrorsPanel.replaceChildren();
     const title = document.createElement("div");
     title.className = "codex-usage-hud-runtime-errors-title";
     title.dataset.action = "runtime-errors-move";
     title.title = "拖动 Runtime errors 面板";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "codex-usage-hud-runtime-errors-toggle";
+    toggle.dataset.action = "runtime-errors-toggle";
+    toggle.setAttribute("aria-label", expanded ? "收缩 Runtime errors 面板" : "展开 Runtime errors 面板");
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.title = expanded ? "收缩 Runtime errors 面板" : "展开 Runtime errors 面板";
+    toggle.textContent = expanded ? "v" : ">";
     const heading = document.createElement("span");
-    heading.textContent = "Runtime errors";
+    heading.textContent = "errors";
     const count = document.createElement("span");
+    count.className = "codex-usage-hud-runtime-errors-count";
     count.textContent = `${items.length}`;
-    title.append(heading, count);
+    title.append(toggle, heading, count);
     runtimeErrorsPanel.appendChild(title);
     const body = document.createElement("div");
     body.className = "codex-usage-hud-runtime-errors-body";
+    body.hidden = !expanded;
     runtimeErrorsPanel.appendChild(body);
     if (!items.length) {
       const debugStatusItem = document.createElement("div");
@@ -6225,14 +6372,85 @@ RENDERER_HUD_SCRIPT = r"""
     window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250);
   }
 
+  function normalizePayloadDomains(payload) {
+    const provided = payload?.payloadDomains && typeof payload.payloadDomains === "object"
+      ? payload.payloadDomains
+      : {};
+    const allDomains = ["currentSession", "budget", "settings", "overlay", "diagnostics"];
+    const domains = {};
+    if (Object.keys(provided).length > 0) {
+      for (const name of allDomains) {
+        if (provided[name] && typeof provided[name] === "object") domains[name] = provided[name];
+      }
+      return domains;
+    }
+    for (const name of allDomains) {
+      domains[name] = payload || {};
+    }
+    return domains;
+  }
+
+  function applyCurrentSessionPayload(root, payload) {
+    setText(root, "topLine", payload?.topLine || "codex-usage-hud 等待数据");
+    setText(root, "requestLine", payload?.requestLine || "本次请求 等待");
+    setText(root, "requestLineExpanded", payload?.requestLine || "最近模型请求轮次");
+    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+      node.classList.remove(warningClass);
+    });
+    root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
+      node.classList.toggle(warningClass, !!payload?.warning);
+    });
+    root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+      node.classList.toggle(errorClass, payload?.requestStatus === "error");
+    });
+    renderTopDetails(root, payload || {});
+    renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!payload?.newSession);
+  }
+
+  function applySettingsPayload(root, payload) {
+    applyTheme(root, payload || {});
+    renderUpdateButtons(root, payload || {});
+    applySettingsCommandStatus(payload || {});
+    refreshComposerBadgeState(root);
+  }
+
+  function applyOverlayPayload(_root, _payload) {
+    // Overlay payload is currently consumed by Python/desktop IPC. Keeping this
+    // domain explicit lets renderer updates skip unrelated DOM work.
+  }
+
+  function applyPayloadDomains(root, payload, domains) {
+    if ("currentSession" in domains) {
+      applyCurrentSessionPayload(root, { ...(payload || {}), ...(domains.currentSession || {}) });
+    }
+    if ("budget" in domains) {
+      renderTopProgress(root, { ...(payload || {}), ...(domains.budget || {}) });
+    }
+    if ("settings" in domains) {
+      applySettingsPayload(root, { ...(payload || {}), ...(domains.settings || {}) });
+    }
+    if ("overlay" in domains) {
+      applyOverlayPayload(root, { ...(payload || {}), ...(domains.overlay || {}) });
+    }
+    if ("diagnostics" in domains) {
+      renderRuntimeErrors(root, { ...(payload || {}), ...(domains.diagnostics || {}) });
+    }
+  }
+
   window.__codexUsageHudUpdate = (payload) => {
     const previousPayload = window[stateName]?.payload || {};
     const nextPayload = { ...previousPayload, ...(payload || {}) };
+    const domains = normalizePayloadDomains(nextPayload);
     if (
       (!payload?.supportImages || !payload.supportImages.length) &&
       previousPayload.supportImages?.length
     ) {
       nextPayload.supportImages = previousPayload.supportImages;
+    }
+    for (const domainPayload of Object.values(domains)) {
+      if (domainPayload && typeof domainPayload === "object") {
+        Object.assign(nextPayload, domainPayload);
+      }
     }
     window[stateName] = { payload: nextPayload, updatedAt: Date.now() };
     try {
@@ -6240,25 +6458,7 @@ RENDERER_HUD_SCRIPT = r"""
     } catch (_) {}
     const root = ensureRoot();
     if (!root) return false;
-    applyTheme(root, nextPayload);
-    setText(root, "topLine", nextPayload?.topLine || "codex-usage-hud 等待数据");
-    setText(root, "requestLine", nextPayload?.requestLine || "本次请求 等待");
-    setText(root, "requestLineExpanded", nextPayload?.requestLine || "最近模型请求轮次");
-    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
-      node.classList.remove(warningClass);
-    });
-    root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
-      node.classList.toggle(warningClass, !!nextPayload?.warning);
-    });
-    root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
-      node.classList.toggle(errorClass, nextPayload?.requestStatus === "error");
-    });
-    renderTopDetails(root, nextPayload || {});
-    renderRuntimeErrors(root, nextPayload || {});
-    renderRequestRows(root, nextPayload?.requestRows || [], nextPayload?.requestRowDetails || [], !!nextPayload?.newSession);
-    renderUpdateButtons(root, nextPayload || {});
-    applySettingsCommandStatus(nextPayload || {});
-    refreshComposerBadgeState(root);
+    applyPayloadDomains(root, nextPayload, domains);
     syncPosition();
     syncPositionSettled();
     scheduleStaleGuard(nextPayload);
@@ -6303,6 +6503,7 @@ RENDERER_HUD_SCRIPT = r"""
     delete window[composerInputHandlersName];
     delete window[composerFocusStateName];
     delete window[composerBadgeRafName];
+    delete window.__codexUsageHudReportActiveSession;
     delete window.__codexUsageHudUpdate;
     delete window.__codexUsageHudRemove;
     return true;
@@ -6373,7 +6574,7 @@ class RendererHudPayload:
     runtime_errors: list[dict[str, object]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "topLine": self.top_line,
             "requestLine": self.request_line,
             "session": self.session,
@@ -6412,6 +6613,80 @@ class RendererHudPayload:
             "debug": bool(self.debug),
             "runtimeErrors": [dict(item) for item in self.runtime_errors],
         }
+        payload["payloadDomains"] = _payload_domains(payload)
+        return payload
+
+    def to_domain_json(self, *domain_names: str) -> dict[str, object]:
+        payload = self.to_json()
+        domains = payload.get("payloadDomains")
+        if not isinstance(domains, dict):
+            return payload
+        selected: dict[str, dict[str, object]] = {}
+        for name in domain_names:
+            key = str(name or "").strip()
+            value = domains.get(key)
+            if isinstance(value, dict):
+                selected[key] = dict(value)
+        if not selected:
+            return {}
+        partial: dict[str, object] = {}
+        for domain_payload in selected.values():
+            partial.update(domain_payload)
+        partial["payloadDomains"] = selected
+        return partial
+
+
+def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
+    current_session_keys = (
+        "topLine",
+        "requestLine",
+        "session",
+        "model",
+        "source",
+        "requestStatus",
+        "lastEvent",
+        "refreshedAt",
+        "warning",
+        "newSession",
+        "topDetails",
+        "topCopies",
+        "requestRows",
+        "requestRowDetails",
+        "observedModels",
+        "preSendEstimate",
+        "preSendBaseTokens",
+        "preSendBreakdown",
+        "preSendInputPrice",
+        "preSendTotalCost",
+        "preSendHasPrices",
+        "activityWarning",
+        "activityReadingFile",
+    )
+    budget_keys = ("topProgress",)
+    settings_keys = (
+        "settings",
+        "activeDisplayMode",
+        "settingsPath",
+        "settingsBridgeUrl",
+        "settingsCommandStatus",
+        "supportImages",
+        "theme",
+        "updateState",
+        "appVersion",
+    )
+    overlay_keys = ("workOverlaySelectableMax", "desktopOverlayDependency")
+    diagnostics_keys = ("debug", "runtimeErrors")
+
+    def pick(keys: tuple[str, ...]) -> dict[str, object]:
+        return {key: payload[key] for key in keys if key in payload}
+
+    return {
+        "currentSession": pick(current_session_keys),
+        "budget": pick(budget_keys),
+        "settings": pick(settings_keys),
+        "overlay": pick(overlay_keys),
+        "diagnostics": pick(diagnostics_keys),
+    }
 
 
 class _RendererBinding:
@@ -6664,6 +6939,49 @@ class RendererHudClient:
                 callback,
                 timeout_seconds=self.timeout_seconds,
             )
+
+    def bootstrap_active_session(self) -> bool:
+        """Install the renderer controller and ask it to report the selected session."""
+        if not self.enabled:
+            self.last_status = "disabled"
+            return False
+        try:
+            target = self._page_target()
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            target_id = str(target.get("id") or websocket_url)
+            if not websocket_url:
+                raise RuntimeError("CDP target has no websocket URL")
+            if target_id != self._target_id or not self._script_identifier:
+                self._install(websocket_url, target_id)
+            if self._active_session_binding is not None:
+                self._active_session_binding.ensure(websocket_url, target_id)
+            expression = (
+                "typeof window.__codexUsageHudReportActiveSession === 'function' && "
+                "window.__codexUsageHudReportActiveSession('bootstrap')"
+            )
+            result = send_cdp_command(
+                websocket_url,
+                "Runtime.evaluate",
+                _runtime_expression_params(expression),
+                self.timeout_seconds,
+            )
+            acknowledged = bool(
+                result.get("result", {})
+                .get("result", {})
+                .get("value", False)
+            )
+            if not acknowledged:
+                raise RuntimeError(
+                    "renderer active session bootstrap did not acknowledge request"
+                )
+        except Exception as exc:
+            self._clear_target_cache(clear_script=True)
+            self.last_status = "failed"
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+        self.last_status = "ok"
+        self.last_error = ""
+        return True
 
     def update(
         self,

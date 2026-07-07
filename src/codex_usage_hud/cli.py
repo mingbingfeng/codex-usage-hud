@@ -91,6 +91,7 @@ from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
 from .settings_bridge import SettingsBridgeServer
 from .ui.renderer_hud import (
     RendererHudClient,
+    payload_from_snapshot,
     remove_renderer_hud_from_pages,
     wait_for_renderer,
 )
@@ -139,6 +140,7 @@ RENDERER_INITIAL_TIMEOUT_SECONDS = 6.0
 RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS = 2.0
 DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 10.0
 DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
+RENDERER_ACTIVE_SESSION_BOOTSTRAP_WAIT_SECONDS = 0.35
 RENDERER_UPDATE_FAILURE_LIMIT = 6
 AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT = 3
 RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
@@ -4711,6 +4713,8 @@ def build_snapshot(
     if session_path is None:
         if is_new_session_source(selection_source):
             snapshot = ParsedSession(status="waiting")
+        elif str(selection_source or "").startswith("renderer-waiting"):
+            snapshot = ParsedSession(status="waiting")
         elif context.session_resolver.session_id:
             snapshot = ParsedSession(
                 status="missing",
@@ -5205,19 +5209,7 @@ def run_renderer_hud_session(
         with lock_context:
             _select_initial_renderer_cdp_port()
             context = build_runtime_context(args)
-            local_loading = loading_feedback or _create_loading_feedback(
-                args,
-                title=(
-                    "正在切换到 Renderer HUD"
-                    if launched_codex
-                    else "正在启动 Renderer HUD"
-                ),
-                message=(
-                    "正在等待 Codex 界面就绪，并把 HUD 注入到窗口里..."
-                    if launched_codex or daemon_manager is not None
-                    else "正在连接 Codex 的本地调试目标..."
-                ),
-            ).start()
+            local_loading = loading_feedback
             display_mode = normalize_display_mode(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
@@ -5394,6 +5386,16 @@ def run_renderer_hud_session(
             )
             bridge_url = bridge.start()
 
+            def bootstrap_renderer_active_session() -> None:
+                bootstrap = getattr(client, "bootstrap_active_session", None)
+                if not callable(bootstrap):
+                    return
+                command_refresh_requested.clear()
+                if bootstrap():
+                    command_refresh_requested.wait(
+                        RENDERER_ACTIVE_SESSION_BOOTSTRAP_WAIT_SECONDS
+                    )
+
             def snapshot_or_error(
                 *,
                 refresh_budget_aggregate: bool | None = None,
@@ -5423,14 +5425,15 @@ def run_renderer_hud_session(
             try:
                 wait_for_window = daemon_manager is not None or launched_codex
                 launch_if_missing = True
-                local_loading.update(
-                    title=(
-                        "正在切换到 Renderer HUD"
-                        if launched_codex
-                        else "正在启动 Renderer HUD"
-                    ),
-                    message="正在拉起 Codex 主窗口并切到前台，确保 Renderer 注入目标正确...",
-                )
+                if local_loading is not None:
+                    local_loading.update(
+                        title=(
+                            "正在切换到 Renderer HUD"
+                            if launched_codex
+                            else "正在启动 Renderer HUD"
+                        ),
+                        message="正在拉起 Codex 主窗口并切到前台，确保 Renderer 注入目标正确...",
+                    )
                 (
                     window_prepared,
                     window_status,
@@ -5448,14 +5451,15 @@ def run_renderer_hud_session(
                         window_reason,
                     )
                 if wait_for_window:
-                    local_loading.update(
-                        title=(
-                            "正在切换到 Renderer HUD"
-                            if launched_codex
-                            else "正在启动 Renderer HUD"
-                        ),
-                        message="正在等待 Codex 主窗口和调试端口准备完成...",
-                    )
+                    if local_loading is not None:
+                        local_loading.update(
+                            title=(
+                                "正在切换到 Renderer HUD"
+                                if launched_codex
+                                else "正在启动 Renderer HUD"
+                            ),
+                            message="正在等待 Codex 主窗口和调试端口准备完成...",
+                        )
                     (
                         window_ready,
                         window_status,
@@ -5465,7 +5469,8 @@ def run_renderer_hud_session(
                         timeout_seconds=DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS
                     )
                     if not window_ready:
-                        local_loading.close()
+                        if local_loading is not None:
+                            local_loading.close()
                         _LOGGER.info(
                             "renderer_hud_window_not_ready status=%s hwnd=%s reason=%s",
                             window_status,
@@ -5490,14 +5495,16 @@ def run_renderer_hud_session(
                     if wait_for_window
                     else RENDERER_INITIAL_TIMEOUT_SECONDS
                 )
-                local_loading.update(
-                    title=(
-                        "正在切换到 Renderer HUD"
-                        if launched_codex
-                        else "正在启动 Renderer HUD"
-                    ),
-                    message="正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...",
-                )
+                if local_loading is not None:
+                    local_loading.update(
+                        title=(
+                            "正在切换到 Renderer HUD"
+                            if launched_codex
+                            else "正在启动 Renderer HUD"
+                        ),
+                        message="正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...",
+                    )
+                bootstrap_renderer_active_session()
                 if not wait_for_renderer(
                     client,
                     snapshot_or_error,
@@ -5522,17 +5529,18 @@ def run_renderer_hud_session(
                                 display_mode=display_mode,
                                 daemon_mode=daemon_manager is not None,
                             )
-                            local_loading.update(
-                                title=(
-                                    "正在切换 Renderer HUD 端口"
-                                    if launched_codex
-                                    else "正在恢复 Renderer HUD 连接"
-                                ),
-                                message=(
-                                    f"当前 CDP 端口无响应，正在改用 {fresh_port} "
-                                    "并重启 Codex App..."
-                                ),
-                            )
+                            if local_loading is not None:
+                                local_loading.update(
+                                    title=(
+                                        "正在切换 Renderer HUD 端口"
+                                        if launched_codex
+                                        else "正在恢复 Renderer HUD 连接"
+                                    ),
+                                    message=(
+                                        f"当前 CDP 端口无响应，正在改用 {fresh_port} "
+                                        "并重启 Codex App..."
+                                    ),
+                                )
                             try:
                                 client.close()
                             except Exception:
@@ -5572,7 +5580,8 @@ def run_renderer_hud_session(
                             getattr(client, "port", None)
                         )
                     else:
-                        local_loading.close()
+                        if local_loading is not None:
+                            local_loading.close()
                         _LOGGER.info(
                             "renderer_hud_initial_connect_failed status=%s error=%s",
                             client.last_status,
@@ -5619,7 +5628,8 @@ def run_renderer_hud_session(
                     context,
                     command_refresh_requested,
                 )
-                local_loading.close()
+                if local_loading is not None:
+                    local_loading.close()
                 command_pump.start()
 
                 @dataclass
@@ -5630,6 +5640,7 @@ def run_renderer_hud_session(
                     force_fast: bool = False
                     active_session: bool = False
                     diagnostics: bool = False
+                    domains: set[str] = field(default_factory=set)
 
                     def request_snapshot(self, *, force_fast: bool = False) -> None:
                         self.snapshot = True
@@ -5641,7 +5652,8 @@ def run_renderer_hud_session(
 
                     def request_diagnostics(self) -> None:
                         self.diagnostics = True
-                        self.request_snapshot(force_fast=True)
+                        self.force_fast = True
+                        self.domains.add("diagnostics")
 
                 @dataclass
                 class _RendererTickInputs:
@@ -6043,6 +6055,47 @@ def run_renderer_hud_session(
                         )
                     return fresh
 
+                def apply_domain_update(inputs: _RendererTickInputs) -> bool:
+                    snapshot = loop_state.latest_snapshot
+                    if snapshot is None or not inputs.event_refresh_request.domains:
+                        return True
+                    payload = payload_from_snapshot(
+                        snapshot,
+                        settings=context.user_config,
+                        active_display_mode="renderer",
+                        settings_path=context.settings_store.path,
+                        settings_bridge_url=bridge_url,
+                        settings_command_status=loop_state.settings_command_status,
+                        update_state=inputs.update_state,
+                        debug=_runtime_debug_enabled(),
+                        runtime_errors=_runtime_errors_payload_for_context(context),
+                        work_overlay_selectable_max=_work_overlay_screen_max_items(),
+                        desktop_overlay_dependency=_desktop_overlay_dependency_status(),
+                    ).to_domain_json(*sorted(inputs.event_refresh_request.domains))
+                    if not payload:
+                        return True
+                    update_payload = getattr(client, "update_payload", None)
+                    if not callable(update_payload):
+                        return False
+                    if update_payload(payload):
+                        loop_state.failures = 0
+                        _resolve_cdp_update_failure(context)
+                        return True
+                    loop_state.failures += 1
+                    _record_cdp_update_failure(
+                        context,
+                        client,
+                        failures=loop_state.failures,
+                    )
+                    _LOGGER.info(
+                        "renderer_hud_domain_update_failed failures=%s status=%s error=%s domains=%s",
+                        loop_state.failures,
+                        getattr(client, "last_status", ""),
+                        getattr(client, "last_error", ""),
+                        sorted(inputs.event_refresh_request.domains),
+                    )
+                    return False
+
                 def compute_wait_delay(
                     snapshot: ParsedSession,
                     inputs: _RendererTickInputs,
@@ -6121,13 +6174,15 @@ def run_renderer_hud_session(
                         snapshot = apply_refresh(tick, force_fast=force_fast)
                     else:
                         snapshot = loop_state.latest_snapshot
+                        apply_domain_update(tick)
                         keep_alive = getattr(work_overlay, "keep_alive", None)
                         if callable(keep_alive):
                             keep_alive()
                     delay = compute_wait_delay(snapshot, tick, force_fast=force_fast)
                     command_refresh_requested.wait(delay)
             except KeyboardInterrupt:
-                local_loading.close()
+                if local_loading is not None:
+                    local_loading.close()
                 return 130
             finally:
                 if callable(runtime_event_unsubscribe):
