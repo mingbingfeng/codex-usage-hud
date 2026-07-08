@@ -10248,6 +10248,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 timeout_seconds=1.0,
                 take_settings_command=MagicMock(return_value=None),
                 update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
                 close=MagicMock(),
             )
             fake_bridge = MagicMock()
@@ -10312,6 +10313,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 timeout_seconds=1.0,
                 take_settings_command=MagicMock(return_value=None),
                 update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
                 close=MagicMock(),
             )
             fake_work_overlay = MagicMock()
@@ -10470,6 +10472,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 last_error="",
                 timeout_seconds=1.0,
                 set_active_session_callback=MagicMock(),
+                set_settings_command_callback=MagicMock(),
                 set_attachments_callback=MagicMock(),
                 set_layout_callback=MagicMock(),
                 bootstrap_active_session=MagicMock(side_effect=bootstrap_active_session),
@@ -10525,6 +10528,7 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 130)
         self.assertEqual(call_order[:2], ["bootstrap", "snapshot"])
+        fake_client.set_settings_command_callback.assert_called_once()
 
     def test_renderer_loop_publishes_update_state_event_before_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10555,6 +10559,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 timeout_seconds=1.0,
                 take_settings_command=MagicMock(return_value=None),
                 update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
                 close=MagicMock(),
             )
             fake_work_overlay = MagicMock()
@@ -10600,7 +10605,13 @@ class DaemonLifecycleTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 130)
-        self.assertEqual(build_snapshot.call_count, 2)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"settings"})
+        self.assertEqual(partial_payload["updateState"]["phase"], "downloading")
+        self.assertNotIn("topLine", partial_payload)
         update_events = [
             event for event in emitted_events if event.type == "update_state_changed"
         ]
@@ -10682,6 +10693,1004 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["settings_command_received"])
         self.assertEqual(events[0].source, "settings_bridge")
         self.assertEqual(events[0].context["action"], "exit")
+
+    def test_renderer_loop_handles_check_update_command_with_settings_only_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                request_check=MagicMock(
+                    return_value=SimpleNamespace(message="正在检查更新...", error="")
+                ),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_command(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["command"]
+                assert callable(callback)
+                callback({"action": "checkUpdate", "id": "bridge-command"})
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_command,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"settings"})
+        self.assertEqual(
+            partial_payload["settingsCommandStatus"]["message"],
+            "正在检查更新...",
+        )
+        self.assertNotIn("topLine", partial_payload)
+        fake_update_manager.request_check.assert_called_once_with(auto_download=False)
+
+    def test_renderer_loop_handles_enable_desktop_overlay_with_settings_and_overlay_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            store = UserConfigStore(settings_path)
+            config = UserConfig.defaults()
+            config.work_overlay_max_items = 0
+            store.save(config)
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                user_config=store.load(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+
+            def reload_user_config() -> None:
+                fake_context.user_config = store.load()
+                fake_context.settings_mtime = store.mtime()
+
+            fake_context.reload_user_config = reload_user_config
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_command(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["command"]
+                assert callable(callback)
+                callback({"action": "enableDesktopOverlay", "id": "bridge-command"})
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch(
+                    "codex_usage_hud.cli._desktop_overlay_dependency_status",
+                    return_value={
+                        "installed": True,
+                        "version": "6.8.1",
+                        "canInstall": True,
+                        "installing": False,
+                        "requiresRestart": False,
+                    },
+                ),
+                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_command,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"settings", "overlay"})
+        self.assertEqual(partial_payload["settings"]["work_overlay_max_items"], 4)
+        self.assertTrue(partial_payload["desktopOverlayDependency"]["installed"])
+        self.assertNotIn("topLine", partial_payload)
+        fake_work_overlay.reset_runtime_availability.assert_called_once()
+
+    def test_renderer_loop_handles_dismiss_warnings_with_current_session_and_settings_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                settings_mtime=None,
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+            fake_context.reload_user_config = MagicMock()
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(
+                status="parsed",
+                session_path=session_file,
+                budget_warnings=["日额度已用 52.00/100 USD (52%)，超过 50% 阈值"],
+                today_cost_usd=52.0,
+                daily_limit_usd=100.0,
+            )
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_command(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["command"]
+                assert callable(callback)
+                callback({"action": "dismissWarningsToday", "id": "bridge-command"})
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_command,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"currentSession", "settings"})
+        self.assertEqual(partial_payload["topDetails"]["warnings"], "")
+        self.assertFalse(partial_payload["warning"])
+        self.assertEqual(
+            partial_payload["settingsCommandStatus"]["message"],
+            "今天不再显示预算预警。",
+        )
+
+    def test_renderer_loop_handles_overlay_only_save_with_settings_and_overlay_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            store = UserConfigStore(settings_path)
+            initial_config = UserConfig.defaults()
+            initial_config.work_overlay_max_items = 1
+            store.save(initial_config)
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                user_config=store.load(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+
+            def reload_user_config() -> None:
+                fake_context.user_config = store.load()
+                fake_context.settings_mtime = store.mtime()
+
+            fake_context.reload_user_config = reload_user_config
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_command(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["command"]
+                assert callable(callback)
+                callback(
+                    {
+                        "action": "save",
+                        "id": "bridge-command",
+                        "settings": {
+                            **fake_context.user_config.to_dict(),
+                            "work_overlay_max_items": 4,
+                        },
+                    }
+                )
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_command,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"settings", "overlay"})
+        self.assertEqual(partial_payload["settings"]["work_overlay_max_items"], 4)
+        self.assertIn("workOverlaySelectableMax", partial_payload)
+        self.assertNotIn("topLine", partial_payload)
+
+    def test_renderer_loop_handles_apply_display_mode_with_settings_only_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            store = UserConfigStore(settings_path)
+            store.save(UserConfig.defaults())
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                user_config=store.load(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+
+            def reload_user_config() -> None:
+                fake_context.user_config = store.load()
+                fake_context.settings_mtime = store.mtime()
+
+            fake_context.reload_user_config = reload_user_config
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_command(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["command"]
+                assert callable(callback)
+                callback(
+                    {
+                        "action": "applyDisplayMode",
+                        "id": "bridge-command",
+                        "settings": {
+                            **fake_context.user_config.to_dict(),
+                            "display_mode": "qt",
+                        },
+                    }
+                )
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_command,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"settings"})
+        self.assertEqual(partial_payload["settings"]["display_mode"], "renderer")
+        self.assertEqual(
+            partial_payload["settingsCommandStatus"]["message"],
+            "Renderer 方案已保存；当前会话已处于内嵌显示，无需重启。",
+        )
+        self.assertNotIn("topLine", partial_payload)
+
+    def test_renderer_loop_handles_fetch_prices_with_current_session_and_settings_payload(
+        self,
+    ) -> None:
+        from codex_usage_hud.config import ModelPrice
+        from codex_usage_hud.core.pre_send_estimator import BaseEstimate
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            store = UserConfigStore(settings_path)
+            initial_config = UserConfig.defaults()
+            initial_config.pricing_url = "https://example.com/prices.json"
+            initial_config.model_prices = {}
+            store.save(initial_config)
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                user_config=store.load(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                parser=SimpleNamespace(
+                    cost_estimator=SimpleNamespace(
+                        calculate=MagicMock(return_value=None),
+                    )
+                ),
+                close=MagicMock(),
+            )
+
+            def reload_user_config() -> None:
+                fake_context.user_config = store.load()
+                fake_context.settings_mtime = store.mtime()
+                prices = fake_context.user_config.price_table()
+
+                def calculate(
+                    model: str,
+                    input_tokens: int,
+                    cached_tokens: int,
+                    output_tokens: int,
+                    reasoning_tokens: int,
+                ) -> float | None:
+                    del output_tokens, reasoning_tokens
+                    model_prices = prices.get(model)
+                    if not model_prices:
+                        return None
+                    input_price = float(model_prices.get("input") or 0.0)
+                    cached_price = float(model_prices.get("cached_input") or 0.0)
+                    uncached_tokens = max(0, int(input_tokens) - int(cached_tokens))
+                    return (
+                        uncached_tokens * input_price + int(cached_tokens) * cached_price
+                    ) / 1_000_000
+
+                fake_context.parser.cost_estimator = SimpleNamespace(calculate=calculate)
+
+            fake_context.reload_user_config = reload_user_config
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            snapshot.request.model = "gpt-5.5"
+            snapshot.estimate_base = BaseEstimate(session_history_tokens=10000, padding_tokens=50)
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_command(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["command"]
+                assert callable(callback)
+                callback(
+                    {
+                        "action": "fetchPrices",
+                        "id": "bridge-command",
+                        "settings": {
+                            **fake_context.user_config.to_dict(),
+                            "pricing_url": "https://example.com/prices.json",
+                        },
+                    }
+                )
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch(
+                    "codex_usage_hud.cli.fetch_model_prices",
+                    return_value={
+                        "gpt-5.5": ModelPrice(
+                            input=5.0,
+                            cached_input=0.5,
+                            output=15.0,
+                            reasoning=15.0,
+                        )
+                    },
+                ),
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_command,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"currentSession", "settings"})
+        self.assertTrue(partial_payload["preSendHasPrices"])
+        self.assertGreater(partial_payload["preSendInputPrice"], 0.0)
+        self.assertIn("gpt-5.5", partial_payload["settings"]["model_prices"])
+        self.assertNotIn("topProgress", partial_payload)
+
+    def test_renderer_loop_handles_budget_only_save_with_current_session_budget_and_settings_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            store = UserConfigStore(settings_path)
+            initial_config = UserConfig.defaults()
+            initial_config.daily_budget_usd = 100.0
+            initial_config.weekly_adjustment_usd = 0.0
+            store.save(initial_config)
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=store,
+                settings_mtime=store.mtime(),
+                user_config=store.load(),
+                daily_budget_usd=100.0,
+                weekly_budget_usd=400.0,
+                budget_thresholds=list(fake_context.user_config.budget_thresholds) if False else [0.5, 0.8, 0.9, 1.0],
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+
+            def reload_user_config() -> None:
+                fake_context.user_config = store.load()
+                fake_context.settings_mtime = store.mtime()
+                fake_context.daily_budget_usd = fake_context.user_config.daily_budget_usd
+                fake_context.weekly_budget_usd = fake_context.user_config.weekly_budget_usd
+                fake_context.budget_thresholds = list(fake_context.user_config.budget_thresholds)
+
+            fake_context.reload_user_config = reload_user_config
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            snapshot.today_tokens = 12000
+            snapshot.today_cost_usd = 60.0
+            snapshot.week_tokens = 40000
+            snapshot.week_cost_usd = 180.0
+            snapshot.week_adjustment_usd = 0.0
+            snapshot.daily_limit_usd = 100.0
+            snapshot.weekly_limit_usd = 400.0
+            snapshot.budget_warnings = ["日额度已用 60.00/100 USD (60%)，超过 50% 阈值"]
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_command(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                callback = callbacks["command"]
+                assert callable(callback)
+                callback(
+                    {
+                        "action": "save",
+                        "id": "bridge-command",
+                        "settings": {
+                            **fake_context.user_config.to_dict(),
+                            "daily_budget_usd": 200.0,
+                            "weekly_adjustment_usd": 20.0,
+                        },
+                    }
+                )
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_command,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(
+            set(partial_payload["payloadDomains"]),
+            {"currentSession", "budget", "settings"},
+        )
+        self.assertIn("200", partial_payload["topProgress"]["budget"][0]["rightText"])
+        self.assertIn("200", partial_payload["topLine"])
+        self.assertEqual(partial_payload["settings"]["daily_budget_usd"], 200.0)
+        self.assertEqual(partial_payload["settings"]["weekly_adjustment_usd"], 20.0)
+
+    def test_renderer_loop_handles_safe_settings_file_change_with_partial_budget_payload(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            runtime_events = RuntimeEventBus()
+
+            old_config = UserConfig.defaults()
+            new_config = UserConfig.defaults()
+            new_config.daily_budget_usd = 200.0
+            new_config.weekly_adjustment_usd = 20.0
+
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=2.0),
+                    load=MagicMock(return_value=new_config),
+                ),
+                settings_mtime=1.0,
+                user_config=old_config,
+                daily_budget_usd=old_config.daily_budget_usd,
+                weekly_budget_usd=old_config.weekly_budget_usd,
+                weekly_adjustment_usd=old_config.weekly_adjustment_usd,
+                budget_thresholds=list(old_config.budget_thresholds),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            snapshot.today_tokens = 12000
+            snapshot.today_cost_usd = 60.0
+            snapshot.week_tokens = 40000
+            snapshot.week_cost_usd = 180.0
+            snapshot.week_adjustment_usd = 0.0
+            snapshot.daily_limit_usd = 100.0
+            snapshot.weekly_limit_usd = 400.0
+            snapshot.budget_warnings = ["日额度已用 60.00/100 USD (60%)，超过 50% 阈值"]
+            delay_calls = 0
+
+            def delay_then_settings_event(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                runtime_events.publish(
+                    "settings_changed",
+                    source="file_watcher",
+                    context={"reasons": ["settings"]},
+                )
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_settings_event,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 1)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(
+            set(partial_payload["payloadDomains"]),
+            {"currentSession", "budget", "settings"},
+        )
+        self.assertIn("200", partial_payload["topProgress"]["budget"][0]["rightText"])
+        self.assertEqual(partial_payload["settings"]["daily_budget_usd"], 200.0)
+        self.assertEqual(fake_context.daily_budget_usd, 200.0)
+        self.assertEqual(fake_context.weekly_adjustment_usd, 20.0)
 
     def test_renderer_loop_does_not_poll_local_storage_settings_commands_when_idle(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

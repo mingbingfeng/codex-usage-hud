@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import sys
+import time
 import unittest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -306,6 +307,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("updateState", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("renderUpdateButtons", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("const submitted = submitSettingsCommand", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codexUsageHudSettingsCommand", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("const binding = window[settingsCommandBindingName];", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("binding(JSON.stringify(payload));", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('setSettingsStatus(state.message || state.title || "", state.error ? "error" : "")', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("window.__codexUsageHudRemove()", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("expiresAt: Date.now() + 10000", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("navigator.clipboard", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -982,6 +987,23 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(payload["supportImages"][1]["label"], "微信赞赏")
         self.assertTrue(payload["supportImages"][0]["src"].startswith("data:image/jpeg;base64,"))
 
+    def test_settings_domain_update_does_not_emit_empty_support_images(self) -> None:
+        snapshot = ParsedSession(status="waiting")
+
+        payload = payload_from_snapshot(snapshot, support_images=[]).to_domain_json("settings")
+
+        self.assertNotIn("supportImages", payload)
+        self.assertNotIn("supportImages", payload["payloadDomains"]["settings"])
+
+    def test_renderer_script_persists_support_images_across_page_reinject(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('supportImagesStorageKey = "codexUsageHudSupportImages:v1"', script)
+        self.assertIn("function loadPersistedSupportImages()", script)
+        self.assertIn("function persistSupportImages(images)", script)
+        self.assertIn("const persistedSupportImages = loadPersistedSupportImages();", script)
+        self.assertIn("nextPayload.supportImages = persistedSupportImages;", script)
+
     def test_payload_marks_request_errors_for_red_renderer_bubble(self) -> None:
         snapshot = ParsedSession(
             request=RequestTokens(
@@ -1383,6 +1405,128 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertIn("__codexUsageHudUpdate", update_expressions[0])
         self.assertIn('"topLine": "C"', update_expressions[1])
 
+    def test_client_uses_subscribed_target_state_after_cache_ttl(self) -> None:
+        install_calls: list[tuple[str, str]] = []
+        list_calls = 0
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+        )
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            nonlocal list_calls
+            del port, timeout_seconds
+            list_calls += 1
+            return [
+                {
+                    "id": "target-1",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://codex",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+                }
+            ]
+
+        def fake_install(websocket_url: str, script: str, timeout_seconds: float) -> str:
+            del timeout_seconds
+            install_calls.append((websocket_url, script))
+            return "script-1"
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, method, params, timeout_seconds
+            return {"result": {"result": {"value": True}}}
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+        ) = (fake_list_targets, fake_install, fake_send)
+        try:
+            client = RendererHudClient(
+                port=9229,
+                timeout_seconds=0.05,
+                target_cache_seconds=0.0,
+                enabled=True,
+            )
+            self.assertTrue(client.update_payload({"topLine": "A"}))
+            time.sleep(0.002)
+            self.assertTrue(client.update_payload({"topLine": "B"}))
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.install_new_document_script,
+                renderer_hud.send_cdp_command,
+            ) = originals
+
+        self.assertEqual(len(install_calls), 1)
+        self.assertEqual(list_calls, 1)
+
+    def test_client_reports_target_discovery_disconnect_without_http_rescan(self) -> None:
+        list_calls = 0
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+        )
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            nonlocal list_calls
+            del port, timeout_seconds
+            list_calls += 1
+            return [
+                {
+                    "id": "target-1",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://codex",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+                }
+            ]
+
+        def fake_install(websocket_url: str, script: str, timeout_seconds: float) -> str:
+            del websocket_url, script, timeout_seconds
+            return "script-1"
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, method, params, timeout_seconds
+            return {"result": {"result": {"value": True}}}
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+        ) = (fake_list_targets, fake_install, fake_send)
+        try:
+            client = RendererHudClient(
+                port=9229,
+                timeout_seconds=0.05,
+                target_cache_seconds=0.0,
+                enabled=True,
+            )
+            self.assertTrue(client.update_payload({"topLine": "A"}))
+            client._target_discovery.mark_disconnected("CDP websocket closed")
+            self.assertFalse(client.update_payload({"topLine": "B"}))
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.install_new_document_script,
+                renderer_hud.send_cdp_command,
+            ) = originals
+
+        self.assertEqual(list_calls, 1)
+        self.assertIn("CDP target discovery disconnected", client.last_error)
+
     def test_client_starts_active_session_binding_after_update(self) -> None:
         ensure_calls: list[tuple[str, str]] = []
         close_calls = 0
@@ -1394,7 +1538,7 @@ class RendererHudClientTests(unittest.TestCase):
         )
 
         class FakeBinding:
-            def __init__(self, binding_name, callback, *, timeout_seconds):
+            def __init__(self, binding_name, callback, *, timeout_seconds, disconnect_callback=None):
                 self.binding_name = binding_name
                 self.callback = callback
                 self.timeout_seconds = timeout_seconds
@@ -1464,7 +1608,7 @@ class RendererHudClientTests(unittest.TestCase):
         )
 
         class FakeBinding:
-            def __init__(self, binding_name, callback, *, timeout_seconds):
+            def __init__(self, binding_name, callback, *, timeout_seconds, disconnect_callback=None):
                 self.binding_name = binding_name
                 self.callback = callback
                 self.timeout_seconds = timeout_seconds
@@ -1538,7 +1682,7 @@ class RendererHudClientTests(unittest.TestCase):
         captured: list[str] = []
 
         class FakeBinding:
-            def __init__(self, binding_name, callback, *, timeout_seconds):
+            def __init__(self, binding_name, callback, *, timeout_seconds, disconnect_callback=None):
                 self.binding_name = binding_name
                 self.callback = callback
                 self.timeout_seconds = timeout_seconds
@@ -1599,6 +1743,80 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
         self.assertEqual(close_calls, 1)
 
+    def test_client_starts_settings_command_binding_after_update(self) -> None:
+        ensure_calls: list[tuple[str, str]] = []
+        close_calls = 0
+        originals = (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+            renderer_hud._RendererBinding,
+        )
+
+        captured: list[str] = []
+
+        class FakeBinding:
+            def __init__(self, binding_name, callback, *, timeout_seconds, disconnect_callback=None):
+                self.binding_name = binding_name
+                self.callback = callback
+                self.timeout_seconds = timeout_seconds
+                captured.append(binding_name)
+
+            def ensure(self, websocket_url: str, target_id: str) -> None:
+                ensure_calls.append((websocket_url, target_id))
+
+            def close(self) -> None:
+                nonlocal close_calls
+                close_calls += 1
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            return [
+                {
+                    "id": "target-1",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://codex",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+                }
+            ]
+
+        def fake_install(websocket_url: str, script: str, timeout_seconds: float) -> str:
+            del websocket_url, script, timeout_seconds
+            return "script-1"
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, method, params, timeout_seconds
+            return {"result": {"result": {"value": True}}}
+
+        (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+            renderer_hud._RendererBinding,
+        ) = (fake_list_targets, fake_install, fake_send, FakeBinding)
+        try:
+            client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+            client.set_settings_command_callback(lambda payload: payload)
+            self.assertTrue(client.update_payload({"topLine": "A", "requestLine": "B"}))
+            client.close()
+        finally:
+            (
+                renderer_hud.list_targets,
+                renderer_hud.install_new_document_script,
+                renderer_hud.send_cdp_command,
+                renderer_hud._RendererBinding,
+            ) = originals
+
+        self.assertIn(renderer_hud.SETTINGS_COMMAND_BINDING_NAME, captured)
+        self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
+        self.assertEqual(close_calls, 1)
+
     def test_client_starts_layout_binding_after_update(self) -> None:
         # 布局变更（拖拽/缩放/展开）通过 CDP binding 上报，验证 update 后 binding 被 ensure。
         ensure_calls: list[tuple[str, str]] = []
@@ -1613,7 +1831,7 @@ class RendererHudClientTests(unittest.TestCase):
         captured: list[str] = []
 
         class FakeBinding:
-            def __init__(self, binding_name, callback, *, timeout_seconds):
+            def __init__(self, binding_name, callback, *, timeout_seconds, disconnect_callback=None):
                 self.binding_name = binding_name
                 self.callback = callback
                 self.timeout_seconds = timeout_seconds

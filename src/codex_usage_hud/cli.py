@@ -4054,19 +4054,7 @@ class RuntimeContext:
         if mtime == self.settings_mtime:
             return
         next_config = self.settings_store.load()
-        prices_changed = next_config.price_table() != self.user_config.price_table()
-        self.user_config = next_config
-        self.settings_mtime = mtime
-        self.daily_budget_usd = max(0.0, float(next_config.daily_budget_usd))
-        self.weekly_budget_usd = max(0.0, float(next_config.weekly_budget_usd))
-        self.budget_thresholds = list(next_config.budget_thresholds)
-        if prices_changed:
-            estimator = _cost_estimator_from_config(next_config)
-            self.parser.cost_estimator = estimator
-            if self.sse_tracker is not None:
-                self.sse_tracker.cost_estimator = estimator
-            self.usage_cache = UsageSummaryCache(self.parser)
-            _configure_ui_cost_estimators(estimator)
+        _apply_user_config_to_runtime_context(self, next_config, mtime=mtime)
 
 
 def _suspend_native_active_title(context: "RuntimeContext") -> None:
@@ -4272,6 +4260,136 @@ def _save_renderer_user_config(context: RuntimeContext, config: UserConfig) -> N
     context.settings_store.save(config)
     context.settings_mtime = None
     context.reload_user_config()
+
+
+def _changed_user_config_keys(
+    previous: UserConfig,
+    current: UserConfig,
+) -> set[str]:
+    previous_payload = previous.to_dict()
+    current_payload = current.to_dict()
+    return {
+        key
+        for key in previous_payload.keys() | current_payload.keys()
+        if previous_payload.get(key) != current_payload.get(key)
+    }
+
+
+def _apply_user_config_to_runtime_context(
+    context: RuntimeContext | object,
+    next_config: UserConfig,
+    *,
+    mtime: float | None,
+) -> None:
+    previous_config = getattr(context, "user_config", UserConfig.defaults())
+    prices_changed = next_config.price_table() != previous_config.price_table()
+    setattr(context, "user_config", next_config)
+    setattr(context, "settings_mtime", mtime)
+    setattr(context, "daily_budget_usd", max(0.0, float(next_config.daily_budget_usd)))
+    setattr(context, "weekly_budget_usd", max(0.0, float(next_config.weekly_budget_usd)))
+    setattr(
+        context,
+        "weekly_adjustment_usd",
+        max(0.0, float(next_config.weekly_adjustment_usd)),
+    )
+    setattr(context, "budget_thresholds", list(next_config.budget_thresholds))
+    if prices_changed:
+        estimator = _cost_estimator_from_config(next_config)
+        parser = getattr(context, "parser", None)
+        if parser is not None:
+            parser.cost_estimator = estimator
+        sse_tracker = getattr(context, "sse_tracker", None)
+        if sse_tracker is not None:
+            sse_tracker.cost_estimator = estimator
+        if parser is not None:
+            setattr(context, "usage_cache", UsageSummaryCache(parser))
+        _configure_ui_cost_estimators(estimator)
+
+
+def _partial_domains_for_changed_user_config(
+    changed_keys: set[str],
+) -> set[str] | None:
+    ui_keys = {"display_mode"}
+    overlay_keys = {"work_overlay_max_items"}
+    pricing_keys = {"pricing_url", "model_prices"}
+    budget_keys = {
+        "daily_budget_usd",
+        "weekly_budget_usd",
+        "budget_thresholds",
+        "weekly_adjustment_usd",
+    }
+    safe_keys = ui_keys | overlay_keys | pricing_keys | budget_keys
+    if changed_keys and not changed_keys.issubset(safe_keys):
+        return None
+    domains = {"settings"}
+    if changed_keys & overlay_keys:
+        domains.add("overlay")
+    if changed_keys & pricing_keys:
+        domains.add("currentSession")
+    if changed_keys & budget_keys:
+        domains.update({"currentSession", "budget"})
+    return domains
+
+
+def _partial_domains_for_settings_command(
+    command: Mapping[str, Any],
+    *,
+    previous_config: UserConfig,
+    current_config: UserConfig,
+) -> set[str] | None:
+    action = str(command.get("action") or "").strip()
+    if action == "save":
+        changed_keys = _changed_user_config_keys(previous_config, current_config)
+        return _partial_domains_for_changed_user_config(changed_keys)
+    if action == "applyDisplayMode":
+        return {"settings"}
+    if action == "fetchPrices":
+        return {"currentSession", "settings"}
+    return None
+
+
+def _refresh_latest_snapshot_for_partial_settings_command(
+    command: Mapping[str, Any],
+    *,
+    snapshot: ParsedSession,
+    context: RuntimeContext,
+    previous_config: UserConfig,
+    current_config: UserConfig,
+) -> None:
+    action = str(command.get("action") or "").strip()
+    changed_keys = _changed_user_config_keys(previous_config, current_config)
+    pricing_keys = {"pricing_url", "model_prices"}
+    budget_keys = {
+        "daily_budget_usd",
+        "weekly_budget_usd",
+        "budget_thresholds",
+        "weekly_adjustment_usd",
+    }
+    if action == "fetchPrices" or (
+        action == "save" and changed_keys and changed_keys.issubset(pricing_keys)
+    ):
+        snapshot.estimate_base = _apply_pre_send_pricing(
+            context,
+            snapshot,
+            snapshot.estimate_base,
+        )
+    if action == "save" and changed_keys & budget_keys:
+        raw_week_cost_usd = max(
+            0.0,
+            float(snapshot.week_cost_usd) - float(snapshot.week_adjustment_usd or 0.0),
+        )
+        week_adjustment_usd = max(0.0, float(current_config.weekly_adjustment_usd))
+        snapshot.week_adjustment_usd = week_adjustment_usd
+        snapshot.week_cost_usd = round(raw_week_cost_usd + week_adjustment_usd, 6)
+        snapshot.daily_limit_usd = max(0.0, float(current_config.daily_budget_usd))
+        snapshot.weekly_limit_usd = max(0.0, float(current_config.weekly_budget_usd))
+        snapshot.budget_warnings = budget_warnings(
+            snapshot.today_cost_usd,
+            snapshot.week_cost_usd,
+            snapshot.daily_limit_usd,
+            snapshot.weekly_limit_usd,
+            list(current_config.budget_thresholds),
+        )
 
 
 def _renderer_settings_status(
@@ -5332,6 +5450,14 @@ def run_renderer_hud_session(
             if callable(active_session_callback_setter):
                 active_session_callback_setter(observe_renderer_active_session)
 
+            settings_command_callback_setter = getattr(
+                client,
+                "set_settings_command_callback",
+                None,
+            )
+            if callable(settings_command_callback_setter):
+                settings_command_callback_setter(enqueue_renderer_command)
+
             def observe_renderer_attachments(payload: dict[str, object]) -> None:
                 estimator = getattr(context, "pre_send_estimator", None)
                 if estimator is None:
@@ -5655,6 +5781,17 @@ def run_renderer_hud_session(
                         self.force_fast = True
                         self.domains.add("diagnostics")
 
+                    def request_domains(
+                        self,
+                        *domain_names: str,
+                        force_fast: bool = False,
+                    ) -> None:
+                        self.force_fast = self.force_fast or force_fast
+                        for name in domain_names:
+                            key = str(name or "").strip()
+                            if key:
+                                self.domains.add(key)
+
                 @dataclass
                 class _RendererTickInputs:
                     """Immutable snapshot of wakeup reasons sampled at tick start."""
@@ -5738,7 +5875,23 @@ def run_renderer_hud_session(
                     event: object,
                     request: _RendererEventRefreshRequest,
                 ) -> None:
-                    del event
+                    action = ""
+                    context = getattr(event, "context", None)
+                    if isinstance(context, Mapping):
+                        action = str(context.get("action") or "").strip()
+                    if action in {"checkUpdate", "installUpdate", "updateAction"}:
+                        request.request_domains("settings", force_fast=True)
+                        return
+                    if action in {"installDesktopOverlay", "enableDesktopOverlay"}:
+                        request.request_domains("settings", "overlay", force_fast=True)
+                        return
+                    if action == "dismissWarningsToday":
+                        request.request_domains(
+                            "currentSession",
+                            "settings",
+                            force_fast=True,
+                        )
+                        return
                     request.request_snapshot(force_fast=True)
 
                 def handle_overlay_command_received(
@@ -5784,7 +5937,7 @@ def run_renderer_hud_session(
                     request: _RendererEventRefreshRequest,
                 ) -> None:
                     del event
-                    request.request_snapshot(force_fast=True)
+                    request.request_domains("settings", force_fast=True)
 
                 def handle_active_work_refresh_requested(
                     event: object,
@@ -5942,6 +6095,7 @@ def run_renderer_hud_session(
                 def apply_settings_command(inputs: _RendererTickInputs) -> None:
                     if not inputs.command:
                         return
+                    previous_config = context.user_config
                     loop_state.settings_command_status = _handle_renderer_settings_command(
                         inputs.command,
                         context,
@@ -5962,6 +6116,87 @@ def run_renderer_hud_session(
                         loop_state.settings_command_status = _renderer_settings_status(
                             "Renderer-only 版本不再切换到 Qt/Tk。",
                         )
+                    partial_domains = _partial_domains_for_settings_command(
+                        inputs.command,
+                        previous_config=previous_config,
+                        current_config=context.user_config,
+                    )
+                    if (
+                        partial_domains
+                        and inputs.event_refresh_request.snapshot
+                        and not inputs.file_change_reasons
+                        and not inputs.active_session_wakeup
+                        and not inputs.event_refresh_request.active_session
+                        and not inputs.event_refresh_request.diagnostics
+                    ):
+                        if loop_state.latest_snapshot is not None:
+                            _refresh_latest_snapshot_for_partial_settings_command(
+                                inputs.command,
+                                snapshot=loop_state.latest_snapshot,
+                                context=context,
+                                previous_config=previous_config,
+                                current_config=context.user_config,
+                            )
+                        inputs.event_refresh_request.snapshot = False
+                        inputs.event_refresh_request.request_domains(
+                            *sorted(partial_domains),
+                            force_fast=True,
+                        )
+
+                def apply_partial_settings_file_change(
+                    inputs: _RendererTickInputs,
+                ) -> None:
+                    event_types = {
+                        str(getattr(event, "type", "") or "")
+                        for event in inputs.runtime_events
+                    }
+                    if (
+                        loop_state.latest_snapshot is None
+                        or inputs.command
+                        or not inputs.event_refresh_request.snapshot
+                        or inputs.active_session_wakeup
+                        or inputs.event_refresh_request.active_session
+                        or inputs.event_refresh_request.diagnostics
+                    ):
+                        return
+                    if inputs.file_change_reasons and inputs.file_change_reasons != {"settings"}:
+                        return
+                    if event_types - {"settings_changed"}:
+                        return
+                    settings_store = getattr(context, "settings_store", None)
+                    load = getattr(settings_store, "load", None)
+                    mtime_fn = getattr(settings_store, "mtime", None)
+                    if not callable(load):
+                        return
+                    previous_config = context.user_config
+                    next_config = load()
+                    mtime = mtime_fn() if callable(mtime_fn) else None
+                    _apply_user_config_to_runtime_context(
+                        context,
+                        next_config,
+                        mtime=mtime,
+                    )
+                    changed_keys = _changed_user_config_keys(
+                        previous_config,
+                        next_config,
+                    )
+                    partial_domains = _partial_domains_for_changed_user_config(
+                        changed_keys,
+                    )
+                    if partial_domains is None:
+                        return
+                    _refresh_latest_snapshot_for_partial_settings_command(
+                        {"action": "save"},
+                        snapshot=loop_state.latest_snapshot,
+                        context=context,
+                        previous_config=previous_config,
+                        current_config=next_config,
+                    )
+                    inputs.event_refresh_request.snapshot = False
+                    inputs.event_refresh_request.request_domains(
+                        *sorted(partial_domains),
+                        force_fast=True,
+                    )
 
                 def compute_force_fast_refresh(inputs: _RendererTickInputs) -> bool:
                     return bool(
@@ -6155,6 +6390,7 @@ def run_renderer_hud_session(
                             return RENDERER_HUD_UNAVAILABLE
                     tick = sample_tick_inputs()
                     apply_settings_command(tick)
+                    apply_partial_settings_file_change(tick)
                     if exit_requested.is_set():
                         _LOGGER.info("renderer_hud_exit_requested")
                         return 0

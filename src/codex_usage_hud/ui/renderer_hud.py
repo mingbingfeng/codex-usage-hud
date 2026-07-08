@@ -38,6 +38,7 @@ RENDERER_HUD_VERSION = "18"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
+SETTINGS_COMMAND_BINDING_NAME = "codexUsageHudSettingsCommand"
 COMPOSER_ATTACHMENTS_BINDING_NAME = "codexUsageHudComposerAttachments"
 LAYOUT_BINDING_NAME = "codexUsageHudLayout"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
@@ -111,6 +112,7 @@ RENDERER_HUD_SCRIPT = r"""
   const runningTimerName = "__codexUsageHudRunningTimer";
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
+  const supportImagesStorageKey = "codexUsageHudSupportImages:v1";
   const settingsModalId = "codex-usage-hud-settings-modal";
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
@@ -118,10 +120,11 @@ RENDERER_HUD_SCRIPT = r"""
   const activeSessionSendFollowupTimersName = "__codexUsageHudActiveSessionSendTimers";
   const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";
   const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
-  const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
-  const activeSessionBindingName = "codexUsageHudActiveSession";
-  const composerAttachmentsBindingName = "codexUsageHudComposerAttachments";
-  const layoutBindingName = "codexUsageHudLayout";
+    const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
+    const activeSessionBindingName = "codexUsageHudActiveSession";
+    const settingsCommandBindingName = "codexUsageHudSettingsCommand";
+    const composerAttachmentsBindingName = "codexUsageHudComposerAttachments";
+    const layoutBindingName = "codexUsageHudLayout";
   const layoutReportTimerName = "__codexUsageHudLayoutTimer";
   const layoutReportSignatureName = "__codexUsageHudLayoutSignature";
   const staleUpdateMs = 10000;
@@ -2597,8 +2600,37 @@ RENDERER_HUD_SCRIPT = r"""
     }[char]));
   }
 
+  function loadPersistedSupportImages() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(supportImagesStorageKey) || "[]");
+      if (!Array.isArray(raw)) return [];
+      return raw.filter((item) => (
+        item
+        && typeof item === "object"
+        && typeof item.src === "string"
+        && item.src.startsWith("data:image/")
+      ));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function persistSupportImages(images) {
+    try {
+      const items = Array.isArray(images) ? images.filter(Boolean) : [];
+      if (!items.length) return;
+      localStorage.setItem(supportImagesStorageKey, JSON.stringify(items));
+    } catch (_) {}
+  }
+
   function currentPayload() {
-    return window[stateName]?.payload || {};
+    const payload = window[stateName]?.payload || {};
+    if (Array.isArray(payload.supportImages) && payload.supportImages.length) {
+      return payload;
+    }
+    const persistedSupportImages = loadPersistedSupportImages();
+    if (!persistedSupportImages.length) return payload;
+    return { ...payload, supportImages: persistedSupportImages };
   }
 
   function defaultHudSettings() {
@@ -3550,13 +3582,18 @@ RENDERER_HUD_SCRIPT = r"""
   function applySettingsCommandStatus(payload) {
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden) return;
-    updateAboutActionButtons(updateStateFromPayload(payload));
+    const state = updateStateFromPayload(payload);
+    updateAboutActionButtons(state);
     syncDesktopOverlayDependency();
     syncSettingsUpdateLoading(payload);
     const status = payload?.settingsCommandStatus;
-    if (!status || typeof status !== "object") return;
-    setSettingsStatus(status.message || "", status.kind || "");
-    setSettingsRestartVisible(!!status.restartVisible);
+    if (status && typeof status === "object" && String(status.message || "")) {
+      setSettingsStatus(status.message || "", status.kind || "");
+      setSettingsRestartVisible(!!status.restartVisible);
+      return;
+    }
+    setSettingsStatus(state.message || state.title || "", state.error ? "error" : "");
+    setSettingsRestartVisible(false);
   }
 
   function submitSettingsCommand(command, pendingMessage, { preserveOverlay = false } = {}) {
@@ -3571,6 +3608,15 @@ RENDERER_HUD_SCRIPT = r"""
       return false;
     }
     try {
+      const binding = window[settingsCommandBindingName];
+      if (typeof binding === "function") {
+        try {
+          binding(JSON.stringify(payload));
+        } catch (error) {
+          setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
+          return false;
+        }
+      } else {
       fetch(`${bridge}/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3579,6 +3625,7 @@ RENDERER_HUD_SCRIPT = r"""
       }).catch((error) => {
         setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
       });
+      }
     } catch (error) {
       setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
       return false;
@@ -4774,7 +4821,13 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function currentPayload() {
-    return window[stateName]?.payload || {};
+    const payload = window[stateName]?.payload || {};
+    if (Array.isArray(payload.supportImages) && payload.supportImages.length) {
+      return payload;
+    }
+    const persistedSupportImages = loadPersistedSupportImages();
+    if (!persistedSupportImages.length) return payload;
+    return { ...payload, supportImages: persistedSupportImages };
   }
 
   function formatMoney3(value) {
@@ -6438,7 +6491,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   window.__codexUsageHudUpdate = (payload) => {
-    const previousPayload = window[stateName]?.payload || {};
+    const previousPayload = currentPayload() || {};
     const nextPayload = { ...previousPayload, ...(payload || {}) };
     const domains = normalizePayloadDomains(nextPayload);
     if (
@@ -6447,10 +6500,20 @@ RENDERER_HUD_SCRIPT = r"""
     ) {
       nextPayload.supportImages = previousPayload.supportImages;
     }
+    const persistedSupportImages = loadPersistedSupportImages();
+    if (
+      (!nextPayload.supportImages || !nextPayload.supportImages.length) &&
+      persistedSupportImages.length
+    ) {
+      nextPayload.supportImages = persistedSupportImages;
+    }
     for (const domainPayload of Object.values(domains)) {
       if (domainPayload && typeof domainPayload === "object") {
         Object.assign(nextPayload, domainPayload);
       }
+    }
+    if (Array.isArray(nextPayload.supportImages) && nextPayload.supportImages.length) {
+      persistSupportImages(nextPayload.supportImages);
     }
     window[stateName] = { payload: nextPayload, updatedAt: Date.now() };
     try {
@@ -6632,6 +6695,11 @@ class RendererHudPayload:
         partial: dict[str, object] = {}
         for domain_payload in selected.values():
             partial.update(domain_payload)
+        if partial.get("supportImages") == []:
+            partial.pop("supportImages", None)
+            settings_domain = selected.get("settings")
+            if isinstance(settings_domain, dict):
+                settings_domain.pop("supportImages", None)
         partial["payloadDomains"] = selected
         return partial
 
@@ -6689,6 +6757,48 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
     }
 
 
+class _RendererTargetDiscovery:
+    """Keep the selected CDP page target as subscribed runtime state."""
+
+    def __init__(
+        self,
+        *,
+        port: int,
+        timeout_seconds: float,
+    ) -> None:
+        self.port = int(port)
+        self.timeout_seconds = max(0.05, float(timeout_seconds))
+        self._lock = threading.Lock()
+        self._target: dict[str, Any] | None = None
+        self._disconnected_reason = ""
+
+    def target(self, *, force: bool = False) -> dict[str, Any]:
+        with self._lock:
+            disconnected_reason = self._disconnected_reason
+            cached = dict(self._target or {}) if self._target is not None else None
+        if disconnected_reason:
+            raise RuntimeError(
+                f"CDP target discovery disconnected: {disconnected_reason}"
+            )
+        if cached is not None and not force:
+            return cached
+        targets = list_targets(self.port, self.timeout_seconds)
+        target = pick_page_target(targets)
+        selected = dict(target)
+        with self._lock:
+            self._target = dict(selected)
+        return selected
+
+    def mark_disconnected(self, reason: object = "") -> None:
+        text = str(reason or "").strip() or "CDP websocket closed"
+        with self._lock:
+            self._disconnected_reason = text
+
+    def clear(self) -> None:
+        with self._lock:
+            self._target = None
+
+
 class _RendererBinding:
     """Receive events from the renderer over a CDP ``Runtime.addBinding`` channel.
 
@@ -6706,10 +6816,12 @@ class _RendererBinding:
         callback: Any,
         *,
         timeout_seconds: float,
+        disconnect_callback: Any = None,
     ) -> None:
         self.binding_name = str(binding_name or "").strip()
         self.callback = callback
         self.timeout_seconds = max(0.05, float(timeout_seconds))
+        self.disconnect_callback = disconnect_callback
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
@@ -6774,6 +6886,7 @@ class _RendererBinding:
 
     def _run(self, websocket_url: str) -> None:
         sock: socket.socket | None = None
+        disconnect_reason = ""
         try:
             sock = self._connect(websocket_url)
             with self._lock:
@@ -6806,7 +6919,8 @@ class _RendererBinding:
                 if str(params.get("name") or "") != self.binding_name:
                     continue
                 self._handle_binding_payload(str(params.get("payload") or ""))
-        except Exception:
+        except Exception as exc:
+            disconnect_reason = f"{self.binding_name} binding closed: {type(exc).__name__}"
             self._ready_event.set()
             return
         finally:
@@ -6818,6 +6932,16 @@ class _RendererBinding:
             with self._lock:
                 if self._sock is sock:
                     self._sock = None
+                stopped = self._stop_event.is_set()
+            if (
+                disconnect_reason
+                and not stopped
+                and callable(self.disconnect_callback)
+            ):
+                try:
+                    self.disconnect_callback(disconnect_reason)
+                except Exception:
+                    pass
 
     def _connect(self, websocket_url: str) -> socket.socket:
         parsed = urlparse(websocket_url)
@@ -6885,7 +7009,12 @@ class RendererHudClient:
         self._cached_websocket_url = ""
         self._target_cache_at = 0.0
         self._support_images_sent = False
+        self._target_discovery = _RendererTargetDiscovery(
+            port=self.port,
+            timeout_seconds=self.timeout_seconds,
+        )
         self._active_session_binding: _RendererBinding | None = None
+        self._settings_command_binding: _RendererBinding | None = None
         self._attachments_binding: _RendererBinding | None = None
         self._layout_binding: _RendererBinding | None = None
         self._theme_probe = CodexThemeProbe(
@@ -6905,6 +7034,20 @@ class RendererHudClient:
                 ACTIVE_SESSION_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
+                disconnect_callback=self._target_discovery.mark_disconnected,
+            )
+
+    def set_settings_command_callback(self, callback: Any) -> None:
+        """Receive renderer settings commands over CDP instead of HTTP fetch."""
+        if self._settings_command_binding is not None:
+            self._settings_command_binding.close()
+            self._settings_command_binding = None
+        if callable(callback):
+            self._settings_command_binding = _RendererBinding(
+                SETTINGS_COMMAND_BINDING_NAME,
+                callback,
+                timeout_seconds=self.timeout_seconds,
+                disconnect_callback=self._target_discovery.mark_disconnected,
             )
 
     def set_attachments_callback(self, callback: Any) -> None:
@@ -6921,6 +7064,7 @@ class RendererHudClient:
                 COMPOSER_ATTACHMENTS_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
+                disconnect_callback=self._target_discovery.mark_disconnected,
             )
 
     def set_layout_callback(self, callback: Any) -> None:
@@ -6938,6 +7082,7 @@ class RendererHudClient:
                 LAYOUT_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
+                disconnect_callback=self._target_discovery.mark_disconnected,
             )
 
     def bootstrap_active_session(self) -> bool:
@@ -7037,6 +7182,8 @@ class RendererHudClient:
                 raise RuntimeError("renderer update function did not acknowledge payload")
             if self._active_session_binding is not None:
                 self._active_session_binding.ensure(websocket_url, target_id)
+            if self._settings_command_binding is not None:
+                self._settings_command_binding.ensure(websocket_url, target_id)
             if self._attachments_binding is not None:
                 self._attachments_binding.ensure(websocket_url, target_id)
             if self._layout_binding is not None:
@@ -7054,6 +7201,9 @@ class RendererHudClient:
         if self._active_session_binding is not None:
             self._active_session_binding.close()
             self._active_session_binding = None
+        if self._settings_command_binding is not None:
+            self._settings_command_binding.close()
+            self._settings_command_binding = None
         if self._attachments_binding is not None:
             self._attachments_binding.close()
             self._attachments_binding = None
@@ -7103,18 +7253,7 @@ class RendererHudClient:
         return urls
 
     def _page_target(self, *, force: bool = False) -> dict[str, Any]:
-        if (
-            not force
-            and self._cached_websocket_url
-            and self._cached_target_id
-            and time.monotonic() - self._target_cache_at <= self.target_cache_seconds
-        ):
-            return {
-                "id": self._cached_target_id,
-                "webSocketDebuggerUrl": self._cached_websocket_url,
-            }
-        targets = list_targets(self.port, self.timeout_seconds)
-        target = pick_page_target(targets)
+        target = self._target_discovery.target(force=force)
         self._cached_target_id = str(
             target.get("id") or target.get("webSocketDebuggerUrl") or ""
         )
@@ -7126,6 +7265,7 @@ class RendererHudClient:
         self._cached_target_id = ""
         self._cached_websocket_url = ""
         self._target_cache_at = 0.0
+        self._target_discovery.clear()
         if clear_script:
             self._target_id = ""
             self._websocket_url = ""
