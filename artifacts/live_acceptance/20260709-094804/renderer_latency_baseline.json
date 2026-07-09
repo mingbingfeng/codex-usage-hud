@@ -1,67 +1,67 @@
 {
   "schema": "codex-usage-hud.renderer-latency-baseline.v1",
-  "measured_at": "2026-07-08T09:36:29.929786Z",
+  "measured_at": "2026-07-09T01:48:22.283478Z",
   "project_root": "E:\\Project\\codex-usage-hud",
   "sessions_root": "C:\\Users\\zjxqm\\.codex\\sessions",
-  "session_file": "C:\\Users\\zjxqm\\.codex\\sessions\\2026\\07\\08\\rollout-2026-07-08T15-36-23-019f40a7-f94f-76d1-97ef-f38ca2695b35.jsonl",
+  "session_file": "C:\\Users\\zjxqm\\.codex\\sessions\\2026\\07\\09\\rollout-2026-07-09T09-24-12-019f4479-98e8-71e1-9104-1855bb3e63e8.jsonl",
   "used_synthetic_session": false,
-  "session_bytes": 3250928,
-  "session_lines": 1938,
+  "session_bytes": 810313,
+  "session_lines": 239,
   "payload_keys": 38,
   "operations": [
     {
       "name": "current_session_parse_full",
       "iterations": 7,
-      "min_ms": 64.975,
-      "median_ms": 65.799,
-      "p90_ms": 70.387,
-      "max_ms": 72.533,
-      "mean_ms": 67.802
+      "min_ms": 6.166,
+      "median_ms": 6.516,
+      "p90_ms": 6.744,
+      "max_ms": 8.328,
+      "mean_ms": 6.736
     },
     {
       "name": "renderer_payload_build",
       "iterations": 7,
-      "min_ms": 2.093,
-      "median_ms": 2.157,
-      "p90_ms": 2.481,
-      "max_ms": 2.761,
-      "mean_ms": 2.274
+      "min_ms": 1.109,
+      "median_ms": 1.139,
+      "p90_ms": 1.23,
+      "max_ms": 1.515,
+      "mean_ms": 1.206
     },
     {
       "name": "usage_summary_full_scan",
       "iterations": 7,
-      "min_ms": 178.942,
-      "median_ms": 203.087,
-      "p90_ms": 237.915,
-      "max_ms": 307.187,
-      "mean_ms": 216.47
+      "min_ms": 66.125,
+      "median_ms": 67.752,
+      "p90_ms": 68.125,
+      "max_ms": 68.266,
+      "mean_ms": 67.528
     },
     {
       "name": "usage_summary_refresh_current_file",
       "iterations": 7,
-      "min_ms": 33.963,
-      "median_ms": 41.139,
-      "p90_ms": 41.538,
-      "max_ms": 44.657,
-      "mean_ms": 39.594
+      "min_ms": 3.306,
+      "median_ms": 3.372,
+      "p90_ms": 3.88,
+      "max_ms": 3.937,
+      "mean_ms": 3.523
     },
     {
       "name": "file_watcher_poll_signature",
       "iterations": 7,
-      "min_ms": 152.405,
-      "median_ms": 167.13,
-      "p90_ms": 176.002,
-      "max_ms": 235.298,
-      "mean_ms": 175.067
+      "min_ms": 53.435,
+      "median_ms": 54.798,
+      "p90_ms": 55.416,
+      "max_ms": 58.903,
+      "mean_ms": 55.088
     },
     {
       "name": "append_then_incremental_parse_and_payload",
       "iterations": 7,
-      "min_ms": 136.26,
-      "median_ms": 155.634,
-      "p90_ms": 163.372,
-      "max_ms": 164.971,
-      "mean_ms": 152.722
+      "min_ms": 9.915,
+      "median_ms": 10.239,
+      "p90_ms": 10.784,
+      "max_ms": 12.053,
+      "mean_ms": 10.565
     }
   ],
   "regression_budgets_ms": {
@@ -75,37 +75,37 @@
   "regression_budget_results": [
     {
       "name": "current_session_parse_full",
-      "p90_ms": 70.387,
+      "p90_ms": 6.744,
       "budget_ms": 50.0,
-      "status": "FAIL"
+      "status": "PASS"
     },
     {
       "name": "renderer_payload_build",
-      "p90_ms": 2.481,
+      "p90_ms": 1.23,
       "budget_ms": 25.0,
       "status": "PASS"
     },
     {
       "name": "usage_summary_full_scan",
-      "p90_ms": 237.915,
+      "p90_ms": 68.125,
       "budget_ms": 250.0,
       "status": "PASS"
     },
     {
       "name": "usage_summary_refresh_current_file",
-      "p90_ms": 41.538,
+      "p90_ms": 3.88,
       "budget_ms": 25.0,
-      "status": "FAIL"
+      "status": "PASS"
     },
     {
       "name": "file_watcher_poll_signature",
-      "p90_ms": 176.002,
+      "p90_ms": 55.416,
       "budget_ms": 250.0,
       "status": "PASS"
     },
     {
       "name": "append_then_incremental_parse_and_payload",
-      "p90_ms": 163.372,
+      "p90_ms": 10.784,
       "budget_ms": 250.0,
       "status": "PASS"
     }

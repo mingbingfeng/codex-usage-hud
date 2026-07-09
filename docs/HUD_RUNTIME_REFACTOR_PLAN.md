@@ -45,18 +45,18 @@ Current renderer mode is already partially event-driven:
 - The injected renderer script observes Codex sidebar/header/location and reports
   active session changes through CDP binding.
 - Python coalesces filesystem changes through `_RendererFileEventSource`.
-- `_renderer_runtime_signature()` skips snapshot rebuilds when important inputs are
-  unchanged.
-- Renderer DOM layout is mostly driven by targeted observers and animation-frame
-  scheduling.
+- Runtime events are dispatched through typed handlers that decide whether a
+  snapshot or domain-only payload is required.
+- Renderer DOM updates are split by payload domain and are mostly driven by
+  targeted observers plus animation-frame scheduling.
 
 The remaining issues are architectural:
 
-- Current-session JSONL parsing is still full-file per refresh.
-- Several paths still degrade into alternate detection mechanisms.
-- Desktop overlay IPC is state-file polling based.
-- Settings commands still have a localStorage polling path.
-- File watcher overflow/degraded states are not visible enough.
+- Some legacy Qt/Tk modules remain in the tree for compatibility tests and
+  removal staging.
+- Some full-budget rebuild paths remain correct but expensive.
+- File watcher polling fallback remains as a degraded diagnostic path when native
+  events are unavailable.
 
 ## Architecture Target
 
@@ -104,8 +104,7 @@ Examples:
 Renderer mode should treat the renderer bridge as the active session authority.
 
 If session id/title cannot be mapped to a JSONL path, the HUD should show a visible
-debug error instead of selecting the latest JSONL or native title. Manual diagnostic
-modes can still exist behind explicit flags.
+debug error instead of selecting the latest JSONL or native title.
 
 OpenAI Codex app-server remains a future authority candidate only. The local
 schema POC found loaded-thread, thread-status, and token-usage APIs, but no
@@ -153,27 +152,27 @@ migration.
 
 ### Desktop Overlay
 
-The PySide desktop overlay should stop reading the state file every 160 ms.
+The PySide desktop overlay no longer reads the state file every 160 ms.
 
 Preferred directions:
 
-1. Push IPC from main process to helper.
-2. Native file watcher in helper that wakes only on state-file changes.
-3. Command channel that wakes the main process instead of 60 ms command polling.
+1. Done: native file watcher in helper wakes only on state-file or directory changes.
+2. Done: command file watcher wakes the main process instead of 60 ms command polling.
+3. Future option: replace the file-backed channel with direct push IPC if needed.
 
 Overlay errors should enter the shared `runtime_error` channel.
 
 ## Migration Phases
 
-1. Baseline and fallback inventory.
-2. Runtime event bus and diagnostic model.
-3. DEBUG error HUD.
-4. Renderer-authoritative active session.
-5. Incremental JSONL parser and budget contribution cache.
-6. Reliable file watcher reconciliation.
-7. Split renderer payloads and remove settings command polling.
-8. Push-based desktop overlay IPC.
-9. Remove or quarantine legacy fallback paths.
+1. Baseline and fallback inventory. Done.
+2. Runtime event bus and diagnostic model. Done.
+3. DEBUG error HUD. Done.
+4. Renderer-authoritative active session. Done.
+5. Incremental JSONL parser and budget contribution cache. Done.
+6. Reliable file watcher reconciliation. Done.
+7. Split renderer payloads and remove settings command polling. Done.
+8. Watcher-based desktop overlay IPC. Done.
+9. Remove or quarantine legacy fallback paths. In progress.
 
 ## Validation Gates
 
@@ -185,8 +184,14 @@ python -m compileall -q src tests tools
 git diff --check
 ```
 
-Performance phases should also run a latency harness. The harness does not exist yet;
-create it before changing the refresh scheduler so baseline data is available.
+Performance-sensitive phases should also run:
+
+```powershell
+python tools/measure_renderer_latency.py --markdown-output renderer_latency_baseline.md
+```
+
+Review the generated `Regression Budgets` table before accepting the phase.
+Manual DEBUG HUD checks live in `docs/HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md`.
 
 ## First Implementation Slice
 

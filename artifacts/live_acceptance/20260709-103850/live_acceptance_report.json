@@ -1,0 +1,149 @@
+{
+  "schema": "codex-usage-hud.live-acceptance.v1",
+  "generated_at": "2026-07-09T02:40:08.857435Z",
+  "project_root": "E:\\Project\\codex-usage-hud",
+  "output_dir": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850",
+  "prepare_mode": "debug",
+  "runtime_paths": {
+    "settings": "C:\\Users\\zjxqm\\AppData\\Local\\codex-usage-hud\\hud_settings.json",
+    "daemon_log": "C:\\Users\\zjxqm\\AppData\\Local\\codex-usage-hud\\daemon.log",
+    "renderer_diagnostic": "C:\\Users\\zjxqm\\AppData\\Local\\codex-usage-hud\\renderer_fallback.log"
+  },
+  "automated_checks": [
+    {
+      "name": "phase_gate_pytest",
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "C:\\Users\\zjxqm\\AppData\\Local\\Programs\\Python\\Python314\\python.exe -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q",
+      "log_path": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850\\phase_gate_pytest.log",
+      "output_tail": "........................................................................ [ 22%]\n........................................................................ [ 44%]\n........................................................................ [ 66%]\n........................................................................ [ 89%]\n...................................                                      [100%]"
+    },
+    {
+      "name": "compileall",
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "C:\\Users\\zjxqm\\AppData\\Local\\Programs\\Python\\Python314\\python.exe -m compileall -q src tests tools",
+      "log_path": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850\\compileall.log",
+      "output_tail": ""
+    },
+    {
+      "name": "git_diff_check",
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "git diff --check",
+      "log_path": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850\\git_diff_check.log",
+      "output_tail": ""
+    },
+    {
+      "name": "latency_harness",
+      "status": "PASS",
+      "artifact": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850\\renderer_latency_baseline.md",
+      "json_artifact": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850\\renderer_latency_baseline.json",
+      "summary": "All regression budgets passed.",
+      "budget_results": [
+        {
+          "name": "current_session_parse_full",
+          "p90_ms": 15.7176,
+          "budget_ms": 50.0,
+          "status": "PASS"
+        },
+        {
+          "name": "renderer_payload_build",
+          "p90_ms": 0.8198,
+          "budget_ms": 25.0,
+          "status": "PASS"
+        },
+        {
+          "name": "usage_summary_full_scan",
+          "p90_ms": 65.6173,
+          "budget_ms": 250.0,
+          "status": "PASS"
+        },
+        {
+          "name": "usage_summary_refresh_current_file",
+          "p90_ms": 8.2944,
+          "budget_ms": 25.0,
+          "status": "PASS"
+        },
+        {
+          "name": "file_watcher_poll_signature",
+          "p90_ms": 52.735,
+          "budget_ms": 250.0,
+          "status": "PASS"
+        },
+        {
+          "name": "append_then_incremental_parse_and_payload",
+          "p90_ms": 15.9222,
+          "budget_ms": 250.0,
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "stop_hud",
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "C:\\Users\\zjxqm\\AppData\\Local\\Programs\\Python\\Python314\\python.exe -m codex_usage_hud --stop",
+      "log_path": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850\\stop_hud.log",
+      "output_tail": "Stopped codex-usage-hud PID 14344."
+    },
+    {
+      "name": "idle_cpu_sample",
+      "status": "PASS",
+      "pid": 36760,
+      "sample_seconds": 60.0,
+      "cpu_percent": 0.7056179194951596,
+      "summary": "HUD process average CPU during idle sample: 0.706%"
+    }
+  ],
+  "hud_prepare": {
+    "name": "start_hud",
+    "status": "PASS",
+    "prepare_mode": "debug",
+    "pid": 36760,
+    "command": "C:\\Users\\zjxqm\\AppData\\Local\\Programs\\Python\\Python314\\python.exe -m codex_usage_hud --daemon",
+    "log_path": "E:\\Project\\codex-usage-hud\\artifacts\\live_acceptance\\20260709-103850\\start_hud.log"
+  },
+  "manual_checks": [
+    {
+      "id": "debug_ready_row",
+      "title": "DEBUG HUD Ready Row",
+      "status": "pending",
+      "instructions": [
+        "Open Codex App with the HUD attached.",
+        "Expand the runtime errors panel and confirm `debug.ready` and `DEBUG HUD active` are visible.",
+        "Drag the panel, then refresh or redraw the HUD and confirm the position persists."
+      ]
+    },
+    {
+      "id": "active_session_latency",
+      "title": "Active Session Switch Latency",
+      "status": "pending",
+      "instructions": [
+        "Open two Codex threads with visibly different titles or totals.",
+        "Record multiple thread switches.",
+        "Confirm the HUD tracks the selected thread within about 9 frames at 60fps (~150ms)."
+      ]
+    },
+    {
+      "id": "current_session_latency",
+      "title": "Current Session Append Latency",
+      "status": "pending",
+      "instructions": [
+        "Open a live Codex thread.",
+        "Submit a short prompt that produces visible request activity.",
+        "Confirm the HUD reacts within about 15 frames at 60fps (~250ms)."
+      ]
+    },
+    {
+      "id": "idle_cpu",
+      "title": "Idle CPU / No Background Work",
+      "status": "pending",
+      "instructions": [
+        "Leave Codex App on a stable idle thread for at least 60 seconds.",
+        "Do not type, switch sessions, resize panels, or trigger overlay commands.",
+        "Confirm there is no sustained HUD CPU usage or obvious periodic bursts."
+      ]
+    }
+  ]
+}

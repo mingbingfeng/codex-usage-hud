@@ -28,7 +28,6 @@ except Exception:  # pragma: no cover - depends on local runtime
     _QTextOption = None
 
 WORK_OVERLAY_POINTER_SYNC_MS = 60
-WORK_OVERLAY_POLL_MS = 160
 WORK_OVERLAY_WIDTH = 430
 WORK_OVERLAY_MARGIN = 16
 WORK_OVERLAY_TOP_OFFSET = 56
@@ -1384,6 +1383,7 @@ def run_work_overlay_helper_qt(
         from PySide6.QtCore import (
             QAbstractAnimation,
             QEasingCurve,
+            QFileSystemWatcher,
             QParallelAnimationGroup,
             QPauseAnimation,
             QPoint,
@@ -2800,6 +2800,8 @@ def run_work_overlay_helper_qt(
             self.rects: list[dict[str, Any]] = []
             self._empty_since = 0.0
             self._state_read_failed_at = 0.0
+            self._last_runtime_error_signature = ""
+            self._last_runtime_error_at = 0.0
             self._layout_width = WORK_OVERLAY_WIDTH
             self._layout_items: list[Mapping[str, object]] = []
             self._transition_in_progress = False
@@ -3018,6 +3020,49 @@ def run_work_overlay_helper_qt(
                 return
             self._set_switch_pending(item)
 
+        def emit_runtime_error(
+            self,
+            *,
+            code: str,
+            message: str,
+            severity: str = "error",
+            context: Mapping[str, object] | None = None,
+        ) -> None:
+            payload = {
+                "action": "runtimeError",
+                "source": "work_overlay_helper",
+                "code": str(code or "helper_error"),
+                "message": str(message or "Desktop work overlay helper error."),
+                "severity": str(severity or "error"),
+                "context": dict(context or {}),
+                "reportedAt": time.time(),
+            }
+            signature = json.dumps(
+                {
+                    "code": payload["code"],
+                    "message": payload["message"],
+                    "severity": payload["severity"],
+                    "context": payload["context"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            now = time.monotonic()
+            if (
+                signature == self._last_runtime_error_signature
+                and (now - self._last_runtime_error_at) < 1.0
+            ):
+                return
+            self._last_runtime_error_signature = signature
+            self._last_runtime_error_at = now
+            command_path = self._command_path or _work_overlay_command_path(path)
+            try:
+                command_path.parent.mkdir(parents=True, exist_ok=True)
+                with command_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            except OSError:
+                return
+
         def hide_overlay(self) -> None:
             self.hide()
             for close_window in self._close_windows:
@@ -3055,6 +3100,11 @@ def run_work_overlay_helper_qt(
                     now - self._state_read_failed_at
                 ) < WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS:
                     return
+                self.emit_runtime_error(
+                    code="state_read_failed",
+                    message="Desktop work overlay helper could not read state file.",
+                    context={"stateFile": str(path)},
+                )
                 self.shutdown()
                 return
             self._state_read_failed_at = 0.0
@@ -4860,15 +4910,49 @@ def run_work_overlay_helper_qt(
                 check_window.raise_()
 
     overlay = OverlayWindow()
-    poll_timer = QTimer()
-    poll_timer.timeout.connect(overlay.poll_state)
-    poll_timer.start(WORK_OVERLAY_POLL_MS)
+    state_watcher = QFileSystemWatcher()
+    state_stale_timer = QTimer()
+    state_stale_timer.setSingleShot(True)
+
+    def watch_state_path() -> None:
+        parent = str(path.parent)
+        if parent and parent not in state_watcher.directories():
+            try:
+                state_watcher.addPath(parent)
+            except RuntimeError:
+                return
+        file_path = str(path)
+        if path.exists() and file_path not in state_watcher.files():
+            try:
+                state_watcher.addPath(file_path)
+            except RuntimeError:
+                return
+
+    def schedule_stale_check() -> None:
+        state_stale_timer.start(
+            max(
+                1000,
+                int((max(0.1, float(stale_seconds)) + 0.25) * 1000),
+            )
+        )
+
+    def refresh_state_from_watcher(*_args: object) -> None:
+        watch_state_path()
+        overlay.poll_state()
+        watch_state_path()
+        schedule_stale_check()
+
+    state_watcher.fileChanged.connect(refresh_state_from_watcher)
+    state_watcher.directoryChanged.connect(refresh_state_from_watcher)
+    state_stale_timer.timeout.connect(refresh_state_from_watcher)
+    watch_state_path()
 
     pointer_timer = QTimer()
     pointer_timer.timeout.connect(overlay.sync_pointer_state)
     pointer_timer.start(WORK_OVERLAY_POINTER_SYNC_MS)
 
     overlay.poll_state()
+    schedule_stale_check()
     overlay.sync_pointer_state()
     app.exec()
     return 0

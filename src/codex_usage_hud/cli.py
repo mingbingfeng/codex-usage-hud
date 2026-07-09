@@ -27,6 +27,7 @@ from typing import Any, Mapping
 
 from . import __version__
 from .config import (
+    DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED,
     DEFAULT_BUDGET_THRESHOLDS,
     DEFAULT_DAILY_BUDGET_USD,
     DEFAULT_WORK_OVERLAY_MAX_ITEMS,
@@ -49,6 +50,7 @@ from .core import (
     JsonlTailState,
     ParsedSession,
     PreSendEstimator,
+    ReadingActivity,
     RequestRound,
     SseRequestStateMachine,
     UsageCalculator,
@@ -93,6 +95,7 @@ from .ui.renderer_hud import (
     RendererHudClient,
     payload_from_snapshot,
     remove_renderer_hud_from_pages,
+    session_switch_payload_from_snapshot,
     wait_for_renderer,
 )
 from .updater import (
@@ -104,7 +107,7 @@ from .updater import (
 )
 
 DEFAULT_POLL_MS = 500
-WORK_OVERLAY_COMMAND_POLL_MS = 60
+WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS = 5.0
 WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS = 0.7
 WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS = 0.8
 WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS = 0.8
@@ -161,7 +164,7 @@ ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
 FINAL_ANSWER_COMPLETION_GRACE_SECONDS = 1.0
 VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
-WORK_OVERLAY_KEEPALIVE_SECONDS = 5.0
+WORK_OVERLAY_KEEPALIVE_SECONDS = 15.0
 WORK_OVERLAY_ALPHA = 0.88
 WORK_OVERLAY_HOVER_ALPHA = 0.52
 WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
@@ -783,6 +786,7 @@ class DesktopWorkOverlay:
         self._last_helper_exit_code: int | None = None
         self._last_payload_items: list[dict[str, object]] | None = None
         self._last_theme_payload: dict[str, object] = {}
+        self._last_state_signature: str | None = None
         self._last_state_write_at = 0.0
         self._switch_completed_command: dict[str, object] | None = None
         self._switch_completed_until = 0.0
@@ -832,7 +836,13 @@ class DesktopWorkOverlay:
                 self._report_unavailable_once(
                     f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
                 )
-        self._write_state(payload_items, theme=theme_payload, close=False)
+        next_signature = self._state_signature(
+            payload_items,
+            theme=theme_payload,
+            close=False,
+        )
+        if next_signature != self._last_state_signature:
+            self._write_state(payload_items, theme=theme_payload, close=False)
         self._last_payload_items = [dict(item) for item in payload_items]
         self._last_theme_payload = dict(theme_payload)
         if self._process is None and time.monotonic() >= self._restart_blocked_until:
@@ -969,6 +979,10 @@ class DesktopWorkOverlay:
             return []
         return commands
 
+    @property
+    def command_path(self) -> Path:
+        return self._command_path
+
     def _stop_runtime(self, *, permanent: bool) -> None:
         if permanent:
             self._closed = True
@@ -999,6 +1013,7 @@ class DesktopWorkOverlay:
         self._command_offset = 0
         self._last_payload_items = None
         self._last_theme_payload = {}
+        self._last_state_signature = None
         self._last_state_write_at = 0.0
         self._switch_completed_command = None
         self._switch_completed_until = 0.0
@@ -1131,6 +1146,11 @@ class DesktopWorkOverlay:
     ) -> None:
         try:
             payload_items = list(items)
+            payload_signature = self._state_signature(
+                payload_items,
+                theme=theme,
+                close=close,
+            )
             write_json_object(
                 self._state_path,
                 {
@@ -1144,9 +1164,29 @@ class DesktopWorkOverlay:
                 },
             )
             self._append_transition_audit(payload_items, close=close)
+            self._last_state_signature = payload_signature
             self._last_state_write_at = time.monotonic()
         except OSError:
             return
+
+    def _state_signature(
+        self,
+        items: Sequence[Mapping[str, object]],
+        *,
+        theme: Mapping[str, object] | None = None,
+        close: bool,
+    ) -> str:
+        return json.dumps(
+            {
+                "itemLimit": int(self.item_limit),
+                "commandPath": str(self._command_path),
+                "items": list(items),
+                "theme": dict(theme or {}),
+                "close": bool(close),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     def _theme_payload(self) -> dict[str, object]:
         snapshot = self._theme_probe.snapshot()
@@ -1156,46 +1196,79 @@ class DesktopWorkOverlay:
 
 
 class _WorkOverlayCommandPump:
-    """Drain work-overlay click commands off the UI thread."""
+    """Drain work-overlay click commands when the helper command file changes."""
 
     def __init__(
         self,
         work_overlay: DesktopWorkOverlay,
         session_controller: SessionSwitchController,
         *,
-        poll_ms: int = WORK_OVERLAY_COMMAND_POLL_MS,
+        poll_ms: int | None = None,
         command_event: Event | None = None,
         runtime_events: RuntimeEventBus | None = None,
+        runtime_errors: RuntimeErrorRegistry | None = None,
     ) -> None:
         self._work_overlay = work_overlay
         self._session_controller = session_controller
-        self._poll_seconds = max(0.05, float(poll_ms) / 1000.0)
+        del poll_ms
         self._command_event = command_event
         self._runtime_events = runtime_events
+        self._runtime_errors = runtime_errors
         self._stop_event = Event()
         self._lock = threading.Lock()
-        self._worker: threading.Thread | None = None
+        self._watcher: FileChangeWatcher | None = None
 
     def start(self) -> bool:
         with self._lock:
-            if self._worker is not None and self._worker.is_alive():
+            if self._watcher is not None:
                 return True
             self._stop_event.clear()
-            worker = threading.Thread(
-                target=self._run,
-                name="codex-usage-hud-work-overlay",
-                daemon=True,
-            )
-            self._worker = worker
-            worker.start()
+        try:
+            self.drain_once()
+        except Exception as exc:
+            _LOGGER.debug("work_overlay_command_initial_drain_failed error=%s", exc)
+        try:
+            command_path = self._command_path()
+        except Exception as exc:
+            _LOGGER.debug("work_overlay_command_path_unavailable error=%s", exc)
             return True
+        with self._lock:
+            if self._watcher is not None:
+                return True
+            watcher = FileChangeWatcher(
+                self._on_command_file_changed,
+                fallback_poll_seconds=WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS,
+            )
+            self._watcher = watcher
+        try:
+            watcher.update(
+                [
+                    FileWatchSpec.file(
+                        command_path,
+                        "work-overlay-command",
+                    )
+                ]
+            )
+            return True
+        except Exception as exc:
+            _LOGGER.debug("work_overlay_command_watcher_start_failed error=%s", exc)
+            with self._lock:
+                if self._watcher is watcher:
+                    self._watcher = None
+            try:
+                watcher.close()
+            except Exception:
+                pass
+            return False
 
     def close(self, timeout_seconds: float = 0.5) -> None:
+        del timeout_seconds
         self._stop_event.set()
         with self._lock:
-            worker = self._worker
-        if worker is not None and worker.is_alive():
-            worker.join(timeout=max(0.0, float(timeout_seconds)))
+            watcher = self._watcher
+            self._watcher = None
+        if watcher is not None:
+            watcher.close()
 
     def drain_once(self) -> int:
         handled = _handle_work_overlay_commands(
@@ -1203,18 +1276,26 @@ class _WorkOverlayCommandPump:
             self._session_controller,
             prepare_window=True,
             runtime_events=self._runtime_events,
+            runtime_errors=self._runtime_errors,
         )
         if handled and self._command_event is not None:
             self._command_event.set()
         return handled
 
-    def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self.drain_once()
-            except Exception as exc:
-                _LOGGER.debug("work_overlay_command_pump_failed error=%s", exc)
-            self._stop_event.wait(self._poll_seconds)
+    def _command_path(self) -> Path:
+        command_path = getattr(self._work_overlay, "command_path", None)
+        if command_path is not None:
+            return Path(command_path)
+        return Path(getattr(self._work_overlay, "_command_path"))
+
+    def _on_command_file_changed(self, reasons: set[str], paths: set[Path]) -> None:
+        del reasons, paths
+        if self._stop_event.is_set():
+            return
+        try:
+            self.drain_once()
+        except Exception as exc:
+            _LOGGER.debug("work_overlay_command_pump_failed error=%s", exc)
 
 
 _TkWorkOverlayCommandPump = _WorkOverlayCommandPump
@@ -2237,14 +2318,9 @@ def _renderer_budget_window_keys(context: "RuntimeContext") -> tuple[str, str]:
 
 
 def _renderer_budget_signature(context: "RuntimeContext") -> tuple[object, ...]:
-    try:
-        settings_mtime = context.settings_store.mtime()
-    except Exception:
-        settings_mtime = None
     day_key, week_key = _renderer_budget_window_keys(context)
     return (
         _session_path_key(getattr(context, "sessions_root", None)),
-        settings_mtime,
         day_key,
         week_key,
     )
@@ -2259,6 +2335,17 @@ def _paths_only_current_session(paths: set[Path], session_path: Path | None) -> 
     return all(_session_path_key(path) == current_key for path in paths)
 
 
+def _renderer_budget_refresh_paths(
+    file_change_paths: Iterable[Path],
+) -> tuple[Path, ...]:
+    paths = tuple(dict.fromkeys(Path(path) for path in file_change_paths))
+    if not paths:
+        return ()
+    if any(path.suffix.lower() != ".jsonl" for path in paths):
+        return ()
+    return tuple(sorted(paths, key=_session_path_key))
+
+
 def _renderer_should_refresh_budget_aggregate(
     *,
     latest_snapshot: ParsedSession | None,
@@ -2271,14 +2358,9 @@ def _renderer_should_refresh_budget_aggregate(
         return True
     if budget_signature != latest_budget_signature:
         return True
-    if "settings" in file_change_reasons:
-        return True
     if "sessions-root" not in file_change_reasons:
         return False
-    return not _paths_only_current_session(
-        file_change_paths,
-        latest_snapshot.session_path,
-    )
+    return not bool(_renderer_budget_refresh_paths(file_change_paths))
 
 
 def _renderer_should_refresh_active_work_items(
@@ -2489,12 +2571,17 @@ class _RendererFileEventSource:
         if registry is None:
             return
         if specs and not self._watcher.event_driven:
+            cause = str(
+                getattr(self._watcher, "polling_cause", "") or "native_unavailable"
+            )
             registry.record(
                 source="file_watcher",
                 severity="warning",
                 code="degraded",
                 message="Renderer file watcher is using polling fallback.",
                 context={
+                    "mode": "polling",
+                    "cause": cause,
                     "reasons": sorted({spec.reason for spec in specs}),
                     "specs": len(specs),
                     "fallbackPollSeconds": RENDERER_FILE_WATCHER_FALLBACK_SECONDS,
@@ -2831,12 +2918,20 @@ def _handle_work_overlay_commands(
     *,
     prepare_window: bool = True,
     runtime_events: RuntimeEventBus | None = None,
+    runtime_errors: RuntimeErrorRegistry | None = None,
 ) -> int:
     take_commands = getattr(work_overlay, "take_commands", None)
     if not callable(take_commands):
         return 0
     handled = 0
     for command in take_commands():
+        if _handle_work_overlay_runtime_error_command(
+            command,
+            runtime_events,
+            runtime_errors,
+        ):
+            handled += 1
+            continue
         result = _handle_work_overlay_command(
             command,
             session_controller,
@@ -2851,6 +2946,50 @@ def _handle_work_overlay_commands(
                 mark_completed(command)
         handled += 1
     return handled
+
+
+def _handle_work_overlay_runtime_error_command(
+    command: Mapping[str, object],
+    runtime_events: RuntimeEventBus | None,
+    runtime_errors: RuntimeErrorRegistry | None = None,
+) -> bool:
+    action = str(command.get("action") or "").strip()
+    if action != "runtimeError":
+        return False
+    context_value = command.get("context")
+    context = dict(context_value) if isinstance(context_value, Mapping) else {}
+    severity = str(command.get("severity") or "error").strip() or "error"
+    code = str(command.get("code") or "helper_error").strip() or "helper_error"
+    message = str(command.get("message") or "Desktop work overlay helper error.").strip()
+    source = str(command.get("source") or "work_overlay_helper").strip()
+    if runtime_errors is not None:
+        if runtime_errors.event_bus is None and runtime_events is not None:
+            runtime_errors.event_bus = runtime_events
+        runtime_errors.record(
+            source=source,
+            severity=severity,
+            code=code,
+            message=message,
+            context=context,
+        )
+        return True
+    publish = getattr(runtime_events, "publish", None)
+    if not callable(publish):
+        return True
+    publish(
+        "runtime_error",
+        source=source,
+        session=str(command.get("sessionId") or "") or None,
+        context=context,
+        error={
+            "source": source,
+            "severity": severity,
+            "code": code,
+            "message": message,
+            "context": context,
+        },
+    )
+    return True
 
 
 def _publish_work_overlay_command_event(
@@ -4657,13 +4796,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         or user_config.display_mode
     )
     renderer_active_session_bridge = runtime_display_mode == "renderer"
-    legacy_active_session_diagnostics = bool(
-        getattr(args, "legacy_active_session_diagnostics", False)
-    )
-    renderer_authoritative_active_session = (
-        renderer_active_session_bridge and not legacy_active_session_diagnostics
-    )
-    if renderer_authoritative_active_session:
+    if renderer_active_session_bridge:
         try:
             platform.suspend_native_active_title(True)
         except Exception:
@@ -4679,7 +4812,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
             and not args.session_id
             and not args.session_file
         ),
-        start_background_watcher=not renderer_authoritative_active_session,
+        start_background_watcher=not renderer_active_session_bridge,
     )
     active_session_tracker.start()
     session_resolver = SessionPathResolver(
@@ -4695,10 +4828,12 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         if args.no_sse
         else SseRequestStateMachine(db_path=sqlite_log_path, cost_estimator=estimator)
     )
-    pre_send_estimator = PreSendEstimator(
-        project_roots=[str(sessions_root.parent)],
-    )
-    pre_send_estimator.start()
+    pre_send_estimator = None
+    if DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED:
+        pre_send_estimator = PreSendEstimator(
+            project_roots=[str(sessions_root.parent)],
+        )
+        pre_send_estimator.start()
     return RuntimeContext(
         platform=platform,
         sessions_root=sessions_root,
@@ -4822,6 +4957,7 @@ def build_snapshot(
     context: RuntimeContext,
     *,
     refresh_budget_aggregate: bool | None = None,
+    refresh_budget_paths: Iterable[Path] = (),
     refresh_active_work_items: bool = True,
 ) -> ParsedSession:
     context.reload_user_config()
@@ -4877,11 +5013,13 @@ def build_snapshot(
     _apply_visible_app_error(snapshot, app_error)
 
     day_start, week_start = current_budget_windows(context.user_config)
-    refresh_budget_paths = (
-        (session_path,)
-        if refresh_budget_aggregate is False and session_path is not None
-        else ()
-    )
+    refresh_budget_paths = tuple(Path(path) for path in refresh_budget_paths)
+    if (
+        refresh_budget_aggregate is False
+        and not refresh_budget_paths
+        and session_path is not None
+    ):
+        refresh_budget_paths = (session_path,)
     today_total, week_total = context.usage_cache.summarize(
         context.sessions_root,
         day_start,
@@ -4938,6 +5076,11 @@ def _apply_pre_send_and_activity(
     re-tokenization. Reading activity (E) is derived from the just-parsed
     snapshot at zero extra I/O.
     """
+    if not DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED:
+        snapshot.estimate_base = BaseEstimate()
+        snapshot.reading_activity = ReadingActivity()
+        return
+
     estimator = getattr(context, "pre_send_estimator", None)
     if estimator is not None:
         # Keep the context-file scan anchored to the active session's cwd.
@@ -5525,6 +5668,7 @@ def run_renderer_hud_session(
             def snapshot_or_error(
                 *,
                 refresh_budget_aggregate: bool | None = None,
+                refresh_budget_paths: Iterable[Path] = (),
                 refresh_active_work_items: bool = True,
             ) -> ParsedSession:
                 try:
@@ -5539,10 +5683,12 @@ def run_renderer_hud_session(
                         return build_snapshot(
                             context,
                             refresh_budget_aggregate=refresh_budget_aggregate,
+                            refresh_budget_paths=refresh_budget_paths,
                         )
                     return build_snapshot(
                         context,
                         refresh_budget_aggregate=refresh_budget_aggregate,
+                        refresh_budget_paths=refresh_budget_paths,
                         refresh_active_work_items=False,
                     )
                 except Exception as exc:
@@ -5749,6 +5895,7 @@ def run_renderer_hud_session(
                     session_controller,
                     command_event=command_refresh_requested,
                     runtime_events=getattr(context, "runtime_events", None),
+                    runtime_errors=getattr(context, "runtime_errors", None),
                 )
                 file_events = _RendererFileEventSource(
                     context,
@@ -6216,6 +6363,11 @@ def run_renderer_hud_session(
                         file_change_reasons=inputs.file_change_reasons,
                         file_change_paths=inputs.file_change_paths,
                     )
+                    refresh_budget_paths = ()
+                    if refresh_budget_aggregate is False:
+                        refresh_budget_paths = _renderer_budget_refresh_paths(
+                            inputs.file_change_paths
+                        )
                     refresh_active_work_items = _renderer_should_refresh_active_work_items(
                         latest_snapshot=latest,
                         latest_active_work_refresh_at=loop_state.latest_active_work_refresh_at,
@@ -6239,6 +6391,7 @@ def run_renderer_hud_session(
                     del force_fast  # already folded into signature/inputs decisions
                     fresh = snapshot_or_error(
                         refresh_budget_aggregate=refresh_budget_aggregate,
+                        refresh_budget_paths=refresh_budget_paths,
                         refresh_active_work_items=(
                             refresh_active_work_items
                             and not lightweight_active_session_refresh
@@ -6259,19 +6412,32 @@ def run_renderer_hud_session(
                     )
                     work_overlay.update(fresh.active_work_items)
                     file_events.update_session_path(fresh.session_path)
-                    if client.update(
-                        fresh,
-                        settings=context.user_config,
-                        active_display_mode="renderer",
-                        settings_path=context.settings_store.path,
-                        settings_bridge_url=bridge_url,
-                        settings_command_status=loop_state.settings_command_status,
-                        update_state=inputs.update_state,
-                        debug=_runtime_debug_enabled(),
-                        runtime_errors=_runtime_errors_payload_for_context(context),
-                        work_overlay_selectable_max=_work_overlay_screen_max_items(),
-                        desktop_overlay_dependency=_desktop_overlay_dependency_status(),
-                    ):
+                    if lightweight_active_session_refresh:
+                        update_payload = getattr(client, "update_payload", None)
+                        update_ok = bool(
+                            callable(update_payload)
+                            and update_payload(
+                                session_switch_payload_from_snapshot(
+                                    fresh,
+                                    settings_path=context.settings_store.path,
+                                )
+                            )
+                        )
+                    else:
+                        update_ok = client.update(
+                            fresh,
+                            settings=context.user_config,
+                            active_display_mode="renderer",
+                            settings_path=context.settings_store.path,
+                            settings_bridge_url=bridge_url,
+                            settings_command_status=loop_state.settings_command_status,
+                            update_state=inputs.update_state,
+                            debug=_runtime_debug_enabled(),
+                            runtime_errors=_runtime_errors_payload_for_context(context),
+                            work_overlay_selectable_max=_work_overlay_screen_max_items(),
+                            desktop_overlay_dependency=_desktop_overlay_dependency_status(),
+                        )
+                    if update_ok:
                         loop_state.settings_command_status = {}
                         loop_state.failures = 0
                         _resolve_cdp_update_failure(context)
@@ -6488,14 +6654,8 @@ def run_qt_hud_session(
     del args, hide_until_attached, daemon_manager
     if loading_feedback is not None:
         loading_feedback.close()
-    if lock_already_held:
-        return _legacy_hud_session_unavailable("qt")
-    try:
-        with HudInstanceLock():
-            return _legacy_hud_session_unavailable("qt")
-    except HudAlreadyRunningError as exc:
-        _eprint(f"codex-usage-hud: {exc}")
-        return 2
+    del lock_already_held
+    return _legacy_hud_session_unavailable("qt")
 
 
 def run_tk_hud_session(
@@ -6510,14 +6670,8 @@ def run_tk_hud_session(
     del args, hide_until_attached, daemon_manager
     if loading_feedback is not None:
         loading_feedback.close()
-    if lock_already_held:
-        return _legacy_hud_session_unavailable("tk")
-    try:
-        with HudInstanceLock():
-            return _legacy_hud_session_unavailable("tk")
-    except HudAlreadyRunningError as exc:
-        _eprint(f"codex-usage-hud: {exc}")
-        return 2
+    del lock_already_held
+    return _legacy_hud_session_unavailable("tk")
 
 
 def run_daemon(args: argparse.Namespace) -> int:

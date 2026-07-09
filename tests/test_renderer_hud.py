@@ -299,7 +299,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("newSession", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("reason === \"new-session\"", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("if (!ref.sessionId && !ref.title) return;", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn('scheduleActiveSessionReport("click-followup")', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('scheduleActiveSessionSendFollowup("click")', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-support-qr-grid", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-support-qr-title", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("previousPayload.supportImages?.length", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -584,9 +584,18 @@ class RendererHudPayloadTests(unittest.TestCase):
         domains = payload["payloadDomains"]
         self.assertEqual(
             set(domains),
-            {"currentSession", "budget", "settings", "overlay", "diagnostics"},
+            {
+                "currentSession",
+                "sessionSwitch",
+                "budget",
+                "settings",
+                "overlay",
+                "diagnostics",
+            },
         )
         self.assertEqual(domains["currentSession"]["topLine"], payload["topLine"])
+        self.assertEqual(domains["sessionSwitch"]["topLine"], payload["topLine"])
+        self.assertNotIn("topDetails", domains["sessionSwitch"])
         self.assertEqual(domains["currentSession"]["requestRows"], payload["requestRows"])
         self.assertEqual(domains["budget"]["topProgress"], payload["topProgress"])
         self.assertEqual(domains["settings"]["settingsBridgeUrl"], "http://127.0.0.1:8765")
@@ -623,6 +632,25 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(partial["runtimeErrors"][0]["code"], "renderer.anchor_missing")
         self.assertNotIn("topLine", partial)
         self.assertNotIn("requestRows", partial)
+
+    def test_renderer_payload_can_emit_session_switch_without_expanded_details(self) -> None:
+        snapshot = ParsedSession(
+            session_id="session-switch",
+            session_title="Switch Target",
+            status="parsed",
+            selection_source="renderer",
+            confirmed=ConfirmedTokens(cumulative_total=42, cumulative_cost_usd=0.01),
+            request=RequestTokens(status="idle", model="gpt-5", total_tokens=10),
+        )
+
+        partial = payload_from_snapshot(snapshot).to_domain_json("sessionSwitch")
+
+        self.assertEqual(set(partial["payloadDomains"]), {"sessionSwitch"})
+        self.assertEqual(partial["topLine"], partial["payloadDomains"]["sessionSwitch"]["topLine"])
+        self.assertIn("requestLine", partial)
+        self.assertNotIn("topDetails", partial)
+        self.assertNotIn("requestRows", partial)
+        self.assertNotIn("requestRowDetails", partial)
 
     def test_update_payload_reports_failed_update_without_reinstall_retry(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
@@ -710,6 +738,14 @@ class RendererHudPayloadTests(unittest.TestCase):
             'input.addEventListener("keydown", handlers.keydown, true)',
             script,
         )
+        self.assertIn(
+            'scheduleActiveSessionSendFollowup("history")',
+            script,
+        )
+        self.assertIn(
+            'scheduleActiveSessionSendFollowup("popstate")',
+            script,
+        )
 
     def test_renderer_composer_watchers_do_not_redeclare_handlers_binding(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -719,7 +755,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
 
-    def test_payload_exposes_pre_send_estimate_and_activity_light(self) -> None:
+    def test_payload_hides_pre_send_estimate_and_activity_light_by_default(self) -> None:
         from codex_usage_hud.core.pre_send_estimator import BaseEstimate
         from codex_usage_hud.core.activity_monitor import ReadingActivity
 
@@ -731,32 +767,26 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         payload = payload_from_snapshot(snapshot).to_json()
 
-        self.assertIn("大量上下文", payload["preSendEstimate"])
-        self.assertEqual(payload["preSendBaseTokens"], 152000)
-        self.assertTrue(payload["activityWarning"])
-        self.assertIn("ScanClient.cs", payload["activityReadingFile"])
+        self.assertEqual(payload["preSendEstimate"], "")
+        self.assertEqual(payload["preSendBaseTokens"], 0)
+        self.assertEqual(payload["preSendBreakdown"], [])
+        self.assertFalse(payload["preSendHasPrices"])
+        self.assertIsNone(payload["preSendTotalCost"])
+        self.assertFalse(payload["activityWarning"])
+        self.assertEqual(payload["activityReadingFile"], "")
 
     def test_payload_activity_light_off_by_default(self) -> None:
         payload = payload_from_snapshot(ParsedSession(status="waiting")).to_json()
         self.assertFalse(payload["activityWarning"])
         self.assertEqual(payload["activityReadingFile"], "")
 
-    def test_renderer_script_defines_pre_send_badge_helpers(self) -> None:
+    def test_renderer_script_disables_pre_send_badge_by_default(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
-        self.assertIn("preSendBaseTokens", script)
-        self.assertIn("activityReadingFile", script)
-        self.assertIn("humanizeTokens", script)
-        self.assertIn('data-badge-state="warning"', script)
-        self.assertIn("renderComposerBreakdown", script)
-        self.assertIn("requestComposerBreakdown", script)
-        self.assertIn("codex-usage-hud-token-breakdown", script)
-        self.assertIn("showComposerBreakdown", script)
-        self.assertIn("positionComposerBreakdown", script)
-        self.assertIn("formatMoney3", script)
-        self.assertIn("preSendInputPrice", script)
-        self.assertIn("codex-usage-hud-token-breakdown-cost", script)
+        self.assertIn("const composerBadgeEnabled = false;", script)
+        self.assertIn('data-has-badge="${name === "request" && composerBadgeEnabled ? "true" : "false"}"', script)
+        self.assertIn("if (!composerBadgeEnabled) return;", script)
 
-    def test_payload_exposes_pre_send_breakdown_rows(self) -> None:
+    def test_payload_hides_pre_send_breakdown_rows_by_default(self) -> None:
         from codex_usage_hud.core.pre_send_estimator import BaseEstimate
 
         snapshot = ParsedSession(status="parsed")
@@ -770,16 +800,12 @@ class RendererHudPayloadTests(unittest.TestCase):
         )
         payload = payload_from_snapshot(snapshot).to_json()
         rows = payload["preSendBreakdown"]
-        labels = [r["label"] for r in rows]
-        self.assertEqual(labels[0], "输入框内容")
-        self.assertIn("会话上下文", labels)
-        self.assertIn("工具定义", labels)
-        # 无单价时金额为 None，且不带 A/B/C/D/F 代号。
+        self.assertEqual(rows, [])
         self.assertFalse(payload["preSendHasPrices"])
         self.assertIsNone(payload["preSendTotalCost"])
-        self.assertNotIn("key", rows[0])
+        self.assertEqual(payload["preSendInputPrice"], 0.0)
 
-    def test_payload_exposes_pre_send_cost_when_priced(self) -> None:
+    def test_payload_ignores_pre_send_cost_when_disabled(self) -> None:
         from codex_usage_hud.core.pre_send_estimator import BaseEstimate
 
         snapshot = ParsedSession(status="parsed")
@@ -793,13 +819,12 @@ class RendererHudPayloadTests(unittest.TestCase):
             model_name="gpt-5.5",
         )
         payload = payload_from_snapshot(snapshot).to_json()
-        self.assertTrue(payload["preSendHasPrices"])
-        self.assertGreater(payload["preSendTotalCost"], 0)
-        self.assertAlmostEqual(payload["preSendInputPrice"], 5e-6)
-        labels = [r["label"] for r in payload["preSendBreakdown"]]
-        self.assertIn("会话上下文·命中缓存", labels)
+        self.assertFalse(payload["preSendHasPrices"])
+        self.assertIsNone(payload["preSendTotalCost"])
+        self.assertEqual(payload["preSendInputPrice"], 0.0)
+        self.assertEqual(payload["preSendBreakdown"], [])
 
-    def test_payload_exposes_attachment_rows(self) -> None:
+    def test_payload_hides_attachment_rows_when_pre_send_disabled(self) -> None:
         from codex_usage_hud.core.pre_send_estimator import (
             AttachmentEstimate,
             BaseEstimate,
@@ -818,10 +843,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             ),
         )
         payload = payload_from_snapshot(snapshot).to_json()
-        labels = [r["label"] for r in payload["preSendBreakdown"]]
-        self.assertTrue(any("图片" in label for label in labels))
-        self.assertTrue(any("引用文件" in label for label in labels))
-        self.assertTrue(any("@引用/名称" in label for label in labels))
+        self.assertEqual(payload["preSendBreakdown"], [])
 
     def test_renderer_script_collects_composer_attachments(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -886,7 +908,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "23";', script)
+        self.assertIn('const version = "24";', script)
         self.assertIn(
             "scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);",
             script,
@@ -1404,6 +1426,51 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertEqual(list_calls, 1)
         self.assertIn("__codexUsageHudUpdate", update_expressions[0])
         self.assertIn('"topLine": "C"', update_expressions[1])
+
+    def test_send_update_records_cdp_and_renderer_apply_timings(self) -> None:
+        client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+        originals = (renderer_hud.send_cdp_command,)
+        expressions: list[str] = []
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, timeout_seconds
+            self.assertEqual(method, "Runtime.evaluate")
+            expressions.append(str(params["expression"]))
+            return {
+                "result": {
+                    "result": {
+                        "value": {
+                            "ok": True,
+                            "applyMs": 812.5,
+                        }
+                    }
+                }
+            }
+
+        (renderer_hud.send_cdp_command,) = (fake_send,)
+        try:
+            self.assertTrue(
+                client._send_update(  # pylint: disable=protected-access
+                    "ws://127.0.0.1/devtools/page/1",
+                    {
+                        "topLine": "A",
+                        "payloadDomains": {"sessionSwitch": {"topLine": "A"}},
+                    },
+                )
+            )
+        finally:
+            (renderer_hud.send_cdp_command,) = originals
+
+        self.assertIn("performance.now", expressions[0])
+        self.assertGreaterEqual(client.last_update_metrics["cdpMs"], 0.0)
+        self.assertEqual(client.last_update_metrics["rendererApplyMs"], 812.5)
+        self.assertGreater(client.last_update_metrics["payloadBytes"], 0)
+        self.assertEqual(client.last_update_metrics["payloadDomains"], ["sessionSwitch"])
 
     def test_client_uses_subscribed_target_state_after_cache_ttl(self) -> None:
         install_calls: list[tuple[str, str]] = []

@@ -47,6 +47,23 @@ class FileChangeWatcherTests(unittest.TestCase):
             finally:
                 watcher.close()
         self.assertTrue(any(path in paths for _reasons, paths in events))
+        self.assertEqual(watcher.polling_cause, "")
+
+    def test_force_polling_exposes_polling_cause(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text("{}", encoding="utf-8")
+            watcher = FileChangeWatcher(
+                lambda _reasons, _paths: None,
+                fallback_poll_seconds=0.05,
+                force_polling=True,
+            )
+            try:
+                watcher.update([FileWatchSpec.file(path, "settings")])
+                self.assertFalse(watcher.event_driven)
+                self.assertEqual(watcher.polling_cause, "force_polling")
+            finally:
+                watcher.close()
 
     def test_polling_fallback_treats_sqlite_wal_as_mapping_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -114,7 +131,46 @@ class FileChangeWatcherTests(unittest.TestCase):
                         [FileWatchSpec.tree(root, "sessions-root", suffixes=(".jsonl",))]
                     )
                     self.assertFalse(watcher.event_driven)
+                    self.assertEqual(
+                        watcher.polling_cause,
+                        "platform_recursive_tree_unsupported",
+                    )
                     kqueue.assert_not_called()
+            finally:
+                watcher.close()
+
+    def test_linux_platform_exposes_platform_unsupported_polling_cause(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text("{}", encoding="utf-8")
+            watcher = FileChangeWatcher(
+                lambda _reasons, _paths: None,
+                fallback_poll_seconds=0.05,
+            )
+            try:
+                with patch.object(sys, "platform", "linux"):
+                    watcher.update([FileWatchSpec.file(path, "settings")])
+                    self.assertFalse(watcher.event_driven)
+                    self.assertEqual(watcher.polling_cause, "platform_unsupported")
+            finally:
+                watcher.close()
+
+    def test_macos_non_recursive_native_failure_exposes_native_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text("{}", encoding="utf-8")
+            watcher = FileChangeWatcher(
+                lambda _reasons, _paths: None,
+                fallback_poll_seconds=0.05,
+            )
+            try:
+                with (
+                    patch.object(sys, "platform", "darwin"),
+                    patch("codex_usage_hud.platforms.file_watcher._build_kqueue_worker", return_value=None),
+                ):
+                    watcher.update([FileWatchSpec.file(path, "settings")])
+                    self.assertFalse(watcher.event_driven)
+                    self.assertEqual(watcher.polling_cause, "native_unavailable")
             finally:
                 watcher.close()
 

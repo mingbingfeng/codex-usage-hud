@@ -26,7 +26,7 @@
 | 错误可见性 | DEBUG 模式下 renderer 注入失败、DOM anchor 缺失、JSONL 解析失败、watcher 溢出、overlay IPC 失败都有错误 HUD 记录 |
 
 ## 当前阶段
-阶段 1、阶段 2、阶段 3、阶段 4、阶段 5 完成。已补 runtime error model、DEBUG 错误 HUD payload/renderer 面板，并接入 renderer-unmatched、file watcher degraded/overflow、CDP update failed 四类错误来源；runtime error 已接入内部事件总线并可唤醒 renderer loop；renderer loop 每次 tick 会计算 `_renderer_budget_window_keys` 并在跨窗口时发 `budget_window_changed`；HUD 面板的 drag/resize/toggle 通过 `codexUsageHudLayout` CDP binding 直接发 `renderer_layout_changed`；renderer-authoritative tracker 不再落到 CDP/native title 或 latest JSONL activity fallback。阶段 1 事件类型全部接入总线；renderer tick 已拆成命名阶段（`sample_tick_inputs → apply_settings_command → 生命周期 → compute_force_fast_refresh → apply_refresh → compute_wait_delay`），跨 tick 状态收拢到 `_RendererLoopState`；runtime events 现在通过 `RuntimeEventBus.drain()` 进入 event type → handler 分派，由 handler 显式请求 snapshot/diagnostics，`renderer_layout_changed` 只唤醒 keepalive 而不重建 snapshot。signature drift 与 legacy bridge wakeup 不再主动触发 snapshot；update-state change、active-work pending 等内部状态也以 runtime event 进入同一 handler 分派。等待循环仍保留为阻塞/keepalive/daemon watchdog 机制，但非初始化 snapshot 决策只来自事件 handler。阶段 2 已完成：normal-mode runtime error diagnostic 会写入 `renderer_fallback.log`；DEBUG HUD 在 debug 开启且无错误时也显示 `DEBUG HUD active` 初始化行；Runtime errors 面板保持 renderer 内实现，默认左下角显示，标题栏可拖动、位置持久化，内容可选中复制；settings command localStorage/CDP polling fallback 已删除；CDP update 失败不再 force reinstall 后重试，直接进入显式 runtime error；已接入错误源都有“不被 fallback 掩盖”的测试。阶段 3 已完成：renderer mode 默认把 renderer bridge 作为唯一 active-session 权威源；`--legacy-active-session-diagnostics` 作为隐藏手动诊断开关，默认不启用；本机 schema/CLI 探测显示 Codex app-server 目前有 `thread/list`、`thread/loaded/list`、thread status/token usage 等能力，但没有能证明“当前 Codex App 窗口正在看的 active thread”的协议字段或通知，因此暂不作为权威源或隐式 fallback。阶段 4 已完成：新增 `JsonlTailState` 与 `JsonlSessionParser.parse_file_incremental()`，当前会话 snapshot 通过 `RuntimeContext.current_session_tail_state` 复用 offset/file identity/last complete line/records/snapshot；append 只 JSON-decode 新增完整行，partial trailing line 等下一次补齐，truncate/rotate/session switch 重置；当前请求、会话累计、heavy rounds、activity trail 共用该 incremental snapshot；日/周预算继续通过 `UsageSummaryCache` 的 per-file contribution replacement 只替换变化文件；性能脚本的 append 场景改为 `append_then_incremental_parse_and_payload`。阶段 5 已完成：renderer mode 在 macOS 不再注册 recursive sessions tree watcher，改为显式 watch 当前 session 文件、settings、session_index/state db；fallback polling 仍记录 `file_watcher.degraded` 并进入 DEBUG HUD/normal diagnostic；当前 session 文件 append 立即唤醒，sessions-root/settings/session-map 等较慢事件继续 debounce 合并。
+阶段 1、阶段 2、阶段 3、阶段 4、阶段 5、阶段 6、阶段 7、阶段 8 完成。阶段 8 已进一步隔离 Qt/Tk 主 HUD 入口：legacy session functions 只返回 renderer-unavailable，不再获取 HUD 单例锁或启动 runtime；renderer mode 始终挂起 native active-title 并关闭 background watcher，旧 `--legacy-active-session-diagnostics` 只作为兼容 no-op；`docs/RENDERER_MODE_STRATEGY.md` 已改成架构约束文档，`docs/HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md` 固化性能回归和 DEBUG 错误 HUD 验收。
 
 ## 阶段路线
 
@@ -89,26 +89,26 @@
 - **状态：** complete
 
 ### 阶段 6：renderer payload 与 DOM 更新收敛
-- [ ] payload 拆分为 current-session、budget、settings、overlay、diagnostics。
-- [ ] JS 端按局部 payload 更新对应 DOM，避免每次重刷 top/bottom 所有字段。
-- [ ] CDP target discovery 改为长连接/订阅式状态，连接断开直接错误 HUD。
+- [x] payload 拆分为 current-session、budget、settings、overlay、diagnostics。
+- [x] JS 端按局部 payload 更新对应 DOM，避免每次重刷 top/bottom 所有字段。
+- [x] CDP target discovery 改为长连接/订阅式状态，连接断开直接错误 HUD。
 - [x] settings command 从 localStorage polling 改为 settings bridge callback/runtime event。
-- **状态：** pending
+- **状态：** complete
 
 ### 阶段 7：桌面气泡 IPC 重构
-- [ ] 用 push IPC 或 watcher 唤醒替代 PySide helper 160ms state file polling。
-- [ ] 主进程只在 `active_work_items` 变化或 keepalive 必要时发送状态。
-- [ ] helper 错误通过统一 `runtime_error` 回传，而不是只写日志。
-- [ ] 气泡点击命令不再靠 60ms command poll；改为事件唤醒。
-- **状态：** pending
+- [x] 用 push IPC 或 watcher 唤醒替代 PySide helper 160ms state file polling。
+- [x] 主进程只在 `active_work_items` 变化或 keepalive 必要时发送状态。
+- [x] helper 错误通过统一 `runtime_error` 回传，而不是只写日志。
+- [x] 气泡点击命令不再靠 60ms command poll；改为事件唤醒。
+- **状态：** complete
 
 ### 阶段 8：删除 legacy fallback 与收口文档
-- [ ] 删除或隔离 Qt/Tk 主 HUD残余入口。
-- [ ] 删除 renderer mode 下不再允许的 native active-title fallback。
-- [ ] 更新 `docs/RENDERER_MODE_STRATEGY.md`，把“愿景”改成“架构约束”。
-- [ ] 增加 `docs/HUD_RUNTIME_REFACTOR_PLAN.md` 到长期路线文档。
-- [ ] 增加性能回归测试和 DEBUG 错误 HUD 验收 checklist。
-- **状态：** pending
+- [x] 删除或隔离 Qt/Tk 主 HUD残余入口。
+- [x] 删除 renderer mode 下不再允许的 native active-title fallback。
+- [x] 更新 `docs/RENDERER_MODE_STRATEGY.md`，把“愿景”改成“架构约束”。
+- [x] 增加 `docs/HUD_RUNTIME_REFACTOR_PLAN.md` 到长期路线文档。
+- [x] 增加性能回归测试和 DEBUG 错误 HUD 验收 checklist。
+- **状态：** complete
 
 ## 关键设计决策
 | 决策 | 理由 |
@@ -138,9 +138,11 @@ python tools/measure_renderer_latency.py
 | 错误 | 尝试次数 | 解决方案 |
 |------|---------|---------|
 | `renderer_fallback.log` 未生成 | 1 | RED 测试发现 runtime error diagnostic 尚未接入 normal mode；为 `RuntimeErrorRegistry` 增加 diagnostic callback，并修复 `_append_renderer_diagnostic` 对 dict 字段的过滤逻辑 |
+| `git diff --check` 因 `renderer_latency_baseline.json/.md` 生成 CRLF 报 trailing whitespace | 1 | `tools/measure_renderer_latency.py` 改为显式 `open(..., newline="\n")` 写出 JSON/Markdown，并重生基线文件 |
 
 ## 下一步
-1. 进入阶段 6：renderer payload 拆分为 current-session、budget、settings、overlay、diagnostics，并让 JS 局部更新对应 DOM。
-2. 继续按 `docs/FALLBACK_INVENTORY.md` 逐项删除或隔离 fallback（下一重点：overlay command polling / desktop overlay state polling）。
-3. 使用 `renderer_layout_changed` 事件驱动 renderer payload 拆分（阶段 6），让布局变化只更新局部 DOM。
+1. `docs/HUD_RUNTIME_COMPLETION_AUDIT.md`、`progress.md`、`HUD_RUNTIME_LIVE_VERIFICATION.md` 收尾为“用户已接受当前 live 行为”的最终状态。
+2. 本轮用于定位 active-session live latency 的临时诊断埋点已删除，不再作为后续待办。
+3. 保持 `budget_window_changed`、真实 session switch 这类会改变语义状态的事件走 snapshot 路径；只对可证明能安全复用 `latest_snapshot` 的字段继续做局部 payload。
 4. app-server 只保留为未来显式权威源候选；除非协议出现当前窗口 active thread 字段/通知并经过 POC 验证，不接入默认 active-session 路径。
+5. 剩余仅为代码整理、提交 / PR / 发布准备，不再继续深挖当前 live latency 差异。

@@ -34,6 +34,16 @@ from codex_usage_hud.platforms.file_watcher import (  # noqa: E402
 from codex_usage_hud.ui.renderer_hud import payload_from_snapshot  # noqa: E402
 
 
+DEFAULT_REGRESSION_BUDGETS_MS = {
+    "current_session_parse_full": 50.0,
+    "renderer_payload_build": 25.0,
+    "usage_summary_full_scan": 250.0,
+    "usage_summary_refresh_current_file": 25.0,
+    "file_watcher_poll_signature": 250.0,
+    "append_then_incremental_parse_and_payload": 250.0,
+}
+
+
 def _default_sessions_root() -> Path:
     return Path.home() / ".codex" / "sessions"
 
@@ -169,6 +179,31 @@ def _round_metrics(value: object) -> object:
     return value
 
 
+def regression_budget_rows(
+    report: dict[str, object],
+    budgets_ms: dict[str, float] | None = None,
+) -> list[dict[str, object]]:
+    budgets = dict(DEFAULT_REGRESSION_BUDGETS_MS if budgets_ms is None else budgets_ms)
+    rows: list[dict[str, object]] = []
+    for item in report.get("operations", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if name not in budgets:
+            continue
+        p90_ms = float(item.get("p90_ms") or 0.0)
+        budget_ms = float(budgets[name])
+        rows.append(
+            {
+                "name": name,
+                "p90_ms": p90_ms,
+                "budget_ms": budget_ms,
+                "status": "PASS" if p90_ms <= budget_ms else "FAIL",
+            }
+        )
+    return rows
+
+
 def _append_measurement_session(source: Path, temp_root: Path) -> Path:
     sessions_root = temp_root / "sessions"
     sessions_root.mkdir(parents=True, exist_ok=True)
@@ -198,10 +233,13 @@ def measure_baseline(
             selected = selected.resolve(strict=False)
             sessions_root = sessions_root.resolve(strict=False)
 
+        parse_temp_root = temp_root / "parse"
+        parse_path = _append_measurement_session(selected, parse_temp_root)
+
         parser = JsonlSessionParser()
         config = UserConfig()
         day_start, week_start = current_budget_windows(config)
-        snapshot = parser.parse_file(selected)
+        snapshot = parser.parse_file(parse_path)
         payload = payload_from_snapshot(snapshot).to_json()
 
         cache = UsageSummaryCache(parser, min_rescan_seconds=0)
@@ -238,7 +276,7 @@ def measure_baseline(
         operations = [
             _timed_runs(
                 "current_session_parse_full",
-                lambda: parser.parse_file(selected),
+                lambda: parser.parse_file(parse_path),
                 iterations=iterations,
                 warmups=warmups,
             ),
@@ -265,6 +303,7 @@ def measure_baseline(
                     append_sessions_root,
                     append_day,
                     append_week,
+                    allow_stale=True,
                     refresh_paths=(append_path,),
                 ),
                 iterations=iterations,
@@ -300,8 +339,11 @@ def measure_baseline(
             "session_lines": int(getattr(snapshot, "line_count", 0) or 0),
             "payload_keys": len(payload),
             "operations": operations,
+            "regression_budgets_ms": dict(DEFAULT_REGRESSION_BUDGETS_MS),
+            "regression_budget_results": regression_budget_rows({"operations": operations}),
             "notes": [
                 "This local harness does not measure live CDP transport, renderer DOM paint, or user-visible end-to-end latency.",
+                "current_session_parse_full and usage_summary_refresh_current_file run against temporary copies of the selected session file to avoid concurrent writes from the live Codex session skewing local parser timings.",
                 "append_then_incremental_parse_and_payload writes only to a temporary copy of the selected session file.",
                 "file_watcher_poll_signature represents the polling fallback scan cost, not native watcher delivery latency.",
             ],
@@ -335,6 +377,26 @@ def format_markdown(report: dict[str, object]) -> str:
                 iterations=item.get("iterations", ""),
             )
         )
+    budget_rows = regression_budget_rows(report)
+    if budget_rows:
+        lines.extend(
+            [
+                "",
+                "## Regression Budgets",
+                "",
+                "| Operation | P90 ms | Budget ms | Status |",
+                "|-----------|--------|-----------|--------|",
+            ]
+        )
+        for item in budget_rows:
+            lines.append(
+                "| {name} | {p90:.3f} | {budget:.3f} | {status} |".format(
+                    name=item["name"],
+                    p90=float(item["p90_ms"]),
+                    budget=float(item["budget_ms"]),
+                    status=item["status"],
+                )
+            )
     notes = report.get("notes") or []
     if notes:
         lines.extend(["", "## Notes", ""])
@@ -377,10 +439,13 @@ def main(argv: list[str] | None = None) -> int:
     print(text)
     if args.json_output is not None:
         args.json_output.parent.mkdir(parents=True, exist_ok=True)
-        args.json_output.write_text(text + "\n", encoding="utf-8")
+        with args.json_output.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.write("\n")
     if args.markdown_output is not None:
         args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
-        args.markdown_output.write_text(format_markdown(report), encoding="utf-8")
+        with args.markdown_output.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(format_markdown(report))
     return 0
 
 

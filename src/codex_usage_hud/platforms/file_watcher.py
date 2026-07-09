@@ -70,10 +70,15 @@ class FileChangeWatcher:
         self._stop_event = threading.Event()
         self._workers: list[_BaseWatchWorker] = []
         self._event_driven = False
+        self._polling_cause = ""
 
     @property
     def event_driven(self) -> bool:
         return self._event_driven
+
+    @property
+    def polling_cause(self) -> str:
+        return self._polling_cause
 
     def update(self, specs: Iterable[FileWatchSpec]) -> None:
         next_specs = _normalize_specs(specs)
@@ -85,13 +90,14 @@ class FileChangeWatcher:
             if not self._specs:
                 return
             self._stop_event = threading.Event()
-            self._workers, self._event_driven = self._build_workers_locked(
+            self._workers, self._event_driven, self._polling_cause = self._build_workers_locked(
                 self._specs,
                 self._stop_event,
             )
             _LOGGER.info(
-                "file_watcher_started mode=%s workers=%s specs=%s reasons=%s",
+                "file_watcher_started mode=%s cause=%s workers=%s specs=%s reasons=%s",
                 "native" if self._event_driven else "polling",
+                self._polling_cause or "native",
                 ",".join(type(worker).__name__ for worker in self._workers),
                 len(self._specs),
                 ",".join(sorted({spec.reason for spec in self._specs})),
@@ -106,6 +112,7 @@ class FileChangeWatcher:
 
     def _stop_locked(self) -> None:
         self._event_driven = False
+        self._polling_cause = ""
         self._stop_event.set()
         workers = self._workers
         self._workers = []
@@ -118,16 +125,24 @@ class FileChangeWatcher:
         self,
         specs: tuple[FileWatchSpec, ...],
         stop_event: threading.Event,
-    ) -> tuple[list["_BaseWatchWorker"], bool]:
-        if not self._force_polling:
+    ) -> tuple[list["_BaseWatchWorker"], bool, str]:
+        polling_cause = "platform_unsupported"
+        if self._force_polling:
+            polling_cause = "force_polling"
+        else:
             if sys.platform.startswith("win"):
                 workers = _build_windows_workers(specs, stop_event, self._callback)
                 if workers:
-                    return workers, True
-            if sys.platform == "darwin" and not _needs_recursive_tree_polling(specs):
-                worker = _build_kqueue_worker(specs, stop_event, self._callback)
-                if worker is not None:
-                    return [worker], True
+                    return workers, True, ""
+                polling_cause = "native_unavailable"
+            elif sys.platform == "darwin":
+                if _needs_recursive_tree_polling(specs):
+                    polling_cause = "platform_recursive_tree_unsupported"
+                else:
+                    worker = _build_kqueue_worker(specs, stop_event, self._callback)
+                    if worker is not None:
+                        return [worker], True, ""
+                    polling_cause = "native_unavailable"
         return [
             _PollingWorker(
                 specs,
@@ -135,7 +150,7 @@ class FileChangeWatcher:
                 self._callback,
                 self._fallback_poll_seconds,
             )
-        ], False
+        ], False, polling_cause
 
 
 class _BaseWatchWorker:

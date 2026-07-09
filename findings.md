@@ -27,8 +27,8 @@
   - 空闲默认 1.5s。
   - event-driven watcher 可把 idle wait 拉到 30s。
   - active work items 最多 5s 重扫。
-  - PySide overlay helper 160ms 读 state file，60ms pointer sync。
-  - settings command 仍有 1s localStorage polling fallback。
+  - PySide overlay helper 仍以 60ms pointer sync 跟随 hover opacity；state file 已改为 watcher 唤醒，不再 160ms 读 state。
+  - work overlay command 已改为 `FileChangeWatcher` 唤醒，不再 60ms command poll。
 - JS 端 HUD 更新：
   - `window.__codexUsageHudUpdate(payload)` 一次刷新 top/bottom 多数 data-field。
   - 运行中 row elapsed 每秒局部 tick。
@@ -51,10 +51,10 @@
 | 文件 watcher fallback | 5s polling |
 | 文件事件 debounce | 当前 session append 立即唤醒；sessions-root/settings/session-map 默认 0.75s 合并 |
 | active work 重扫 | 事件触发或 5s |
-| PySide overlay state poll | 160ms |
+| PySide overlay state update | `QFileSystemWatcher` state-file/directory event；另有 one-shot stale watchdog |
 | PySide overlay pointer sync | 60ms |
 | work overlay keepalive | 5s |
-| renderer settings command poll | 1s |
+| work overlay command drain | `FileChangeWatcher` command-file event；watcher fallback 5s polling only when native events unavailable |
 | JS running row tick | 1s |
 | JS stale guard | 10s |
 
@@ -244,10 +244,10 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
 - 这删除了 renderer mode 下的 CDP/native active ref、native title、latest JSONL activity 默认 fallback，避免 renderer DOM/thread 映射失败或等待 renderer 事件时自动显示错误 session。
 - `build_snapshot()` 仍会通过 `_record_active_session_runtime_error()` 记录 `active_session.unmatched_thread`，DEBUG HUD 可显示该错误；普通 payload 会进入 waiting/missing 路径，而不是错误地绑定到另一个 session。
 - 目前 `ui-unmatched` / `cdp-unmatched` 仍可走 legacy activity fallback，用于后续“诊断保留或隔离”阶段；本次只切断 renderer mode 的 unsafe fallback。
-- `--legacy-active-session-diagnostics` 是隐藏手动诊断开关：
-  - 默认 `False`，renderer mode 仍调用 `platform.suspend_native_active_title(True)` 并关闭 background watcher。
-  - 显式开启后不挂起 native active-title，并允许 background watcher 启动，用于对照诊断 legacy active-session 链路。
-  - 该开关不是产品 fallback，不应作为 renderer 问题的默认解决方案。
+- `--legacy-active-session-diagnostics` 现在只作为隐藏兼容 no-op：
+  - renderer mode 始终调用 `platform.suspend_native_active_title(True)` 并关闭 background watcher。
+  - 显式传入该旧 flag 不再启用 native title watcher，也不能改变 renderer active-session 权威源。
+  - 这避免排障开关重新变成产品 fallback。
 
 ## Codex app-server Active Thread POC
 - `node .../fetch-codex-manual.mjs` 在本机因 developers.openai.com `HEAD` 403 未能获取 Codex manual；随后使用本机 `codex app-server --help` 和生成的 experimental JSON schema 做协议级实测。
@@ -271,6 +271,71 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
   - 从正常 `file_change_reasons` 中移除哨兵，避免污染预算/active-work 刷新判断。
   - 仍保留业务 reasons 和 paths，确保 session/settings/mapping 继续刷新。
 - 该补偿不能精确恢复已丢失的逐条变更，但能保证高写入 burst 后至少触发一次保守刷新，并在 DEBUG HUD/diagnostics 中暴露 watcher 不可靠状态。
+
+## Renderer Payload Domain 收口
+- `RendererHudPayload.to_json()` 同时保留旧顶层 payload 字段和新的 `payloadDomains`，让 renderer JS 可以兼容整包 payload 和局部 payload。
+- `to_domain_json(*domains)` 只输出请求的 domain 字段；当前 domain 包括：
+  - `currentSession`
+  - `budget`
+  - `settings`
+  - `overlay`
+  - `diagnostics`
+- renderer JS 的 `applyPayloadDomains()` 只调用出现 domain 的 DOM 更新函数：
+  - `currentSession` 更新 top/request/details/rows。
+  - `budget` 只重绘 top progress budget rails。
+  - `settings` 更新主题、设置 modal 状态、更新按钮和命令状态。
+  - `diagnostics` 只重绘 DEBUG runtime errors panel。
+  - `overlay` 目前主要给 Python/desktop IPC 保留显式 domain，不做 renderer DOM 工作。
+- 已验证可安全复用 `latest_snapshot` 的局部路径：
+  - `runtime_error` -> diagnostics-only。
+  - `update_state_changed` -> settings-only。
+  - `checkUpdate` / `installUpdate` / `updateAction` -> settings-only。
+  - `installDesktopOverlay` / `enableDesktopOverlay` -> settings+overlay。
+  - `dismissWarningsToday` -> currentSession+settings。
+  - `applyDisplayMode` -> settings-only。
+  - `fetchPrices` -> currentSession+settings，并回填 `snapshot.estimate_base`。
+  - `save` 的安全字段：`display_mode`、`work_overlay_max_items`、`pricing_url`、`model_prices`、预算 limit/threshold/weekly adjustment。
+  - 单纯 settings file 变化且 diff 只落在安全预算字段时 -> currentSession+budget+settings。
+- 不应为追求局部 payload 而复用旧 snapshot 的路径：
+  - `budget_window_changed`：预算窗口边界变化需要重新计算日/周聚合。
+  - `overlay_command_received` 的真实 session switch：会改变 active session 语义，应等待 renderer active-session 事件和 snapshot 链路。
+
+## CDP Target Discovery
+- `RendererHudClient` 现在通过 `_RendererTargetDiscovery` 持有选中的 Codex page target 状态。
+- 初次 discovery 仍使用 HTTP `/json` target list 选择主 Codex page；后续 renderer update 即使 target cache TTL 到期，也复用 discovery state，不再周期性重扫 target list。
+- active-session、composer attachments、layout 三条 `_RendererBinding` 长连接非主动关闭时，会调用 discovery 的 `mark_disconnected()`。
+- discovery disconnected 后，`_page_target()` 直接抛出 `CDP target discovery disconnected: ...`；`update_payload()` 返回 failed，主循环通过既有 `cdp.update_failed` runtime error 进入 DEBUG HUD 和 normal diagnostic。
+- 这是有意的显式失败：连接断开不再静默 HTTP rescan 并尝试继续写旧/新 target，避免掩盖 renderer/CDP target 生命周期问题。
+
+## Renderer Settings Panel
+- settings command 之前仍通过 renderer 页面内 `fetch(${bridge}/command)` 发送；这和 composer attachments 的旧问题相同，都会受到页面 CSP `connect-src` 限制。
+- 现在 settings command 与 active-session / attachments / layout 一样，优先走 CDP binding：
+  - binding name: `codexUsageHudSettingsCommand`
+  - HTTP `/command` 保留为兜底，兼容旧页面或非 binding 场景
+- `RendererHudPayload.to_domain_json("settings")` 不能把 `supportImages: []` 带进局部 payload；否则 renderer 端在 `Object.assign(nextPayload, domainPayload)` 时会把首帧完整 payload 中的赞赏码资源清空。
+- update modal 在 loading flow 结束后，不能只依赖 `settingsCommandStatus`：
+  - `checkUpdate` / `installUpdate` 的最终结果主要体现在 `updateState.message` / `updateState.title`
+  - 因此 renderer modal 需要在没有显式命令状态时回退显示 update state 文案
+- “请作者喝咖啡”页签不能只依赖当前页面内存里的 `window.__codexUsageHudState.payload.supportImages`：
+  - 页面 reload / reinject 后内存 payload 会丢。
+  - 但 `RendererHudClient` 出于 payload 体积考虑不会在每次 update 都重发赞赏码资源。
+  - 现在 renderer script 会把 `supportImages` 持久化到 `localStorage`，并在新页面上下文中把持久化资源回填到 `currentPayload()` / `__codexUsageHudUpdate()`。
+
+## Desktop Overlay IPC
+- PySide helper state 同步不再使用 160ms `QTimer` 读 state file。
+- helper 现在通过 `QFileSystemWatcher` 同时监听 state file 和父目录，兼容 `write_json_object()` 的原子替换写入；文件变更或目录变更时立即 `poll_state()` 并重新注册 watcher path。
+- stale/owner liveness 不再靠高频 state poll；每次 state 更新后安排一次 one-shot stale watchdog，到期只检查一次并按既有 stale/owner 规则关闭。
+- 主进程 `DesktopWorkOverlay.update()` 会计算不含 `updatedAt` 的 state signature；payload、theme、item limit、command path 和 close 标志未变化时不重写 state。
+- `keep_alive()` 仍按 `WORK_OVERLAY_KEEPALIVE_SECONDS` 在可见 items 存在时刷新 state，用于显式 helper liveness。
+- command 侧不再由 `_WorkOverlayCommandPump` 每 60ms 调 `take_commands()`；pump 启动时先补偿 drain 一次，再通过 `FileChangeWatcher` 监听 command JSONL 文件并在文件事件到达时 drain。
+- helper 可向 command JSONL 写入 `{"action": "runtimeError", ...}`；主进程将其发布到统一 `runtime_error` event，进入既有 DEBUG HUD / diagnostics 链路。
+
+## Legacy Surface Quarantine
+- Config 和 CLI display-mode aliases (`auto` / `qt` / `tk`) 都 normalize 到 `renderer`。
+- `--hud-mode` 只接受 `renderer`。
+- `run_hud_session()` 只调用 renderer runtime；renderer unavailable 或未知 renderer exit code 不会转入 Qt/Tk。
+- `run_qt_hud_session()` / `run_tk_hud_session()` 只保留为兼容 stub：关闭 loading feedback 后直接返回 `RENDERER_HUD_UNAVAILABLE`，不获取 HUD 单例锁，也不启动 Qt/Tk runtime。
+- `_run_qt_window_session()` / `_run_tk_window_session()` 仍只作为内部兼容 stub 关闭 context 并返回 renderer-unavailable。
 
 ## 决策
 | 决策 | 状态 | 理由 |

@@ -322,14 +322,975 @@
   - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_watch_specs_skip_recursive_session_trees_on_macos tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_debounces_native_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_wakes_immediately_for_current_session_append -q` 先失败（macOS specs 仍含 tree；session event 仍被 debounce），实现后通过。
   - `python -m pytest tests/test_file_watcher.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_watch_specs_cover_session_settings_and_mapping tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_watch_specs_skip_recursive_session_trees_on_macos tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_coalesces_reasons_and_updates_session_path tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_debounces_native_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_wakes_immediately_for_current_session_append tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_publishes_runtime_events tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_degraded_polling tests/test_ui.py::DaemonLifecycleTests::test_renderer_file_event_source_records_overflow_without_polluting_reasons -q` 通过。
 
+## 2026-07-06 阶段 6 启动
+- 启动 renderer payload 与 DOM 更新收敛：
+  - `RendererHudPayload.to_json()` 保持旧顶层字段兼容，同时新增 `payloadDomains`。
+  - `payloadDomains` 分为 `currentSession`、`budget`、`settings`、`overlay`、`diagnostics`。
+  - 新增 `RendererHudPayload.to_domain_json(*domains)`，可生成只包含指定 domain 字段的局部 payload。
+  - renderer JS 新增 `normalizePayloadDomains()`、`applyCurrentSessionPayload()`、`applySettingsPayload()`、`applyOverlayPayload()`、`applyPayloadDomains()`。
+  - 有 `payloadDomains` 时，JS 只调用出现的 domain 对应 DOM 更新函数；无 `payloadDomains` 时仍按完整 payload 兼容更新。
+  - renderer loop 的 `runtime_error` event 不再要求 snapshot；已有 snapshot 时走 `payload_from_snapshot(...).to_domain_json("diagnostics")` 并调用 `client.update_payload()`。
+  - 因此 runtime error / DEBUG HUD 更新不再重建 current-session snapshot。
+- TDD/验证记录：
+  - `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_payload_from_snapshot_exposes_update_domains -q` 先失败（缺少 `payloadDomains`），实现分区后通过。
+  - `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_renderer_payload_can_emit_domain_only_update -q` 先失败（缺少 `to_domain_json()`），实现后通过。
+  - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event -q` 先失败（runtime error 仍触发第二次 `build_snapshot()`），改为 diagnostics-only update 后通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_runtime_error_event tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_handles_layout_event_without_snapshot_refresh tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_wakes_for_settings_runtime_event -q` 通过。
+
+## 2026-07-06 启动 active-session 修复
+- 根因：
+  - 阶段 3 renderer 权威化后，启动第一帧如果 renderer binding 尚未上报当前 thread，`SessionPathResolver` 会得到 `renderer-waiting`。
+  - `build_snapshot()` 仍把这个正常等待态转成 `No local Codex session JSONL found under ...` 错误。
+  - `payload_from_snapshot()` 又把 `snapshot.error` 放进 warning/topWarnings，所以用户看到的是预警，而不是 DEBUG 诊断。
+- 修复：
+  - `build_snapshot()` 对 `renderer-waiting` 返回纯 `ParsedSession(status="waiting")`，不再写错误文案。
+  - renderer JS 暴露 `window.__codexUsageHudReportActiveSession()`，可在无业务 payload 时主动读取并上报当前会话。
+  - `RendererHudClient.bootstrap_active_session()` 会先安装 renderer controller、ensure active-session binding，再通过 CDP 调用上报函数。
+  - `run_renderer_hud_session()` 在第一次 `wait_for_renderer()` / `build_snapshot()` 前执行 bootstrap，并短暂等待 active-session 事件，让第一帧优先拿到当前会话。
+- TDD/验证记录：
+  - `python -m pytest tests/test_ui.py::BudgetHelperTests::test_build_snapshot_treats_renderer_waiting_as_non_error_waiting_state -q` 先失败（仍写“No local Codex session JSONL found”），实现后通过。
+  - `python -m pytest tests/test_renderer_hud.py::RendererHudClientTests::test_client_bootstraps_active_session_binding_before_payload_update -q` 先失败（无 `bootstrap_active_session()`），实现后通过。
+  - `python -m pytest tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_bootstraps_active_session_before_first_snapshot -q` 先失败（启动顺序为 snapshot 先于 bootstrap），实现后通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+
 ## 五问重启检查
 | 问题 | 答案 |
 |------|------|
-| 我在哪里？ | 阶段 1、2、3、4、5 完成；当前 session refresh 已切到 JSONL tail state，file watcher 阶段已收口 |
-| 我要去哪里？ | 进入阶段 6，拆分 renderer payload 并让 JS 按 current-session/budget/settings/overlay/diagnostics 局部更新 |
+| 我在哪里？ | 阶段 1、2、3、4、5 完成；阶段 6 已完成 payloadDomains 基础、diagnostics-only 局部推送和启动 active-session bootstrap 修复 |
+| 我要去哪里？ | 继续阶段 6，把 settings/budget/overlay 等事件迁移为局部 payload，并处理 CDP target discovery 订阅/断连显式错误 |
 | 目标是什么？ | renderer 权威、事件驱动、失败显式、响应速度优先 |
 | 我学到了什么？ | macOS kqueue 不适合 recursive sessions tree；renderer mode 可以显式 watch 当前 session 和 mapping 文件，避免全树 polling |
-| 我做了什么？ | 提交并推送阶段 1-3；收口阶段 4 和阶段 5：新增 `JsonlTailState`、接入 `build_snapshot()`、更新性能 append 基线、分层 file event debounce |
+| 我做了什么？ | 提交并推送阶段 1-3；收口阶段 4 和阶段 5；阶段 6 新增 payloadDomains / to_domain_json，让 runtime_error 走 diagnostics-only 局部更新，并修复启动第一帧拿不到当前会话的问题 |
+
+## 2026-07-07 阶段 6 局部 payload 细化
+- 本轮范围：
+  - 只处理明确不需要重建 `ParsedSession` 的 runtime 事件。
+  - 先从 `update_state_changed` 下手，不把 `settings_changed` / `settings_command_received` 粗暴改成局部更新。
+- 设计结论：
+  - `update_state_changed` 只影响 renderer settings/update controls/stale guard，对现有 session parse 结果没有直接影响。
+  - `settings_changed` 和多数 settings command 可能影响预算阈值、价格表、warning 展示、overlay 依赖状态，仍需按 reason/action 分类，不能直接复用这次做法。
+- TDD 记录：
+  - 先修改 `tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_publishes_update_state_event_before_refresh`，要求第二个 tick 不再 `build_snapshot()`，而是 `client.update_payload()` 且 `payloadDomains == {"settings"}`。
+  - RED：`python -m pytest tests/test_ui.py -q -k publishes_update_state_event_before_refresh` 失败，原因是 `handle_update_state_changed()` 仍调用 `request_snapshot(force_fast=True)`。
+  - GREEN：
+    - 为 `_RendererEventRefreshRequest` 增加 `request_domains()`。
+    - `handle_update_state_changed()` 改为请求 `settings` domain。
+    - 测试桩补充 `fake_client.update_payload`。
+  - 结果：目标测试通过，局部 payload 保留 `updateState.phase == "downloading"`，且不再包含 `topLine`。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k publishes_update_state_event_before_refresh` 通过。
+  - `python -m pytest tests/test_ui.py -q -k "runtime_error_event or settings_runtime_event or layout_event_without_snapshot_refresh or publishes_update_state_event_before_refresh"` 通过。
+
+## 2026-07-07 阶段 6 action 级分流
+- 本轮目标：
+  - 继续细化 `settings_command_received`，把不需要重建 `ParsedSession` 的命令从全量 snapshot 中剥离出来。
+- 设计结论：
+  - `checkUpdate` / `installUpdate` / `updateAction` 只影响 settings modal 的更新状态与命令反馈，可走 settings-only payload。
+  - `installDesktopOverlay` / `enableDesktopOverlay` 会影响命令反馈、当前 settings 值和 overlay 依赖展示，可走 settings+overlay payload。
+  - `dismissWarningsToday` 会影响 settings 命令反馈与当前会话 warning 展示，但不需要重新 parse session，可走 current-session+settings payload。
+  - `save` / `applyDisplayMode` / `fetchPrices` 仍保留全量 snapshot：它们会影响预算阈值、价格表或会话成本，需要后续单独拆。
+- TDD 记录：
+  - `test_renderer_loop_handles_check_update_command_with_settings_only_payload`
+    - RED：第二次 tick 仍触发 `build_snapshot()`。
+    - GREEN：`handle_settings_command_received()` 对 `checkUpdate` / `installUpdate` / `updateAction` 改为请求 `settings` domain。
+  - `test_renderer_loop_handles_enable_desktop_overlay_with_settings_and_overlay_payload`
+    - RED：第二次 tick 仍触发 `build_snapshot()`。
+    - GREEN：`installDesktopOverlay` / `enableDesktopOverlay` 改为请求 `settings` + `overlay` domains。
+  - `test_renderer_loop_handles_dismiss_warnings_with_current_session_and_settings_payload`
+    - RED：第二次 tick 仍触发 `build_snapshot()`。
+    - GREEN：`dismissWarningsToday` 改为请求 `currentSession` + `settings` domains。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k check_update_command_with_settings_only_payload` 通过。
+  - `python -m pytest tests/test_ui.py -q -k enable_desktop_overlay_with_settings_and_overlay_payload` 通过。
+  - `python -m pytest tests/test_ui.py -q -k dismiss_warnings_with_current_session_and_settings_payload` 通过。
+  - `python -m pytest tests/test_ui.py -q -k "publishes_update_state_event_before_refresh or check_update_command_with_settings_only_payload or enable_desktop_overlay_with_settings_and_overlay_payload or dismiss_warnings_with_current_session_and_settings_payload or runtime_error_event or layout_event_without_snapshot_refresh"` 通过。
+
+## 2026-07-07 阶段 6 save 命令字段分流
+- 本轮目标：
+  - 让 `save` 不再一律触发整包 snapshot，而是先识别“仅影响 renderer settings/overlay 展示”的安全字段。
+- 设计结论：
+  - renderer settings modal 的 `save` 会把整份 settings payload 都带上，因此不能只看 action，必须看命令前后实际配置差异。
+  - `daily_budget_usd`、`weekly_budget_usd`、reset time、阈值、价格表、`weekly_adjustment_usd` 这类字段会回流到 `snapshot.daily_limit_usd`、`snapshot.weekly_limit_usd`、`snapshot.budget_warnings`、`snapshot.estimate_base`，仍需保留全量 snapshot。
+  - 当前已确认安全的 `save` 字段只有：
+    - `work_overlay_max_items` -> `settings` + `overlay`
+    - `display_mode` -> `settings`
+- 实现：
+  - 新增 `_changed_user_config_keys(previous, current)`，比较 `UserConfig.to_dict()` 前后差异。
+  - 新增 `_partial_domains_for_settings_command(...)`，在 `apply_settings_command()` 内根据命令前后配置判断是否可覆盖为局部 payload。
+  - 当 `save` 的变化仅落在安全 UI 字段，且当前 tick 没有其他 snapshot 原因时，清掉事件处理器预先请求的 `snapshot`，改走 `request_domains(...)`。
+- TDD 记录：
+  - `test_renderer_loop_handles_overlay_only_save_with_settings_and_overlay_payload`
+    - RED：第二次 tick 仍触发 `build_snapshot()`。
+    - GREEN：`save` 仅修改 `work_overlay_max_items` 时，改为 `settings` + `overlay` 局部 payload。
+  - `test_renderer_loop_handles_apply_display_mode_with_settings_only_payload`
+    - 验证 renderer-only 路径下 `applyDisplayMode` 也只需要 `settings` 局部 payload，不再重建 snapshot。
+- `fetchPrices` 细化：
+  - 设计上它只影响 settings 中的价格表与 current-session 的 `preSend*` 定价展示，不需要重 parse 当前会话。
+  - 为此新增 `_refresh_latest_snapshot_for_partial_settings_command(...)`，允许在复用 `latest_snapshot` 的前提下，把价格变化回填到 `snapshot.estimate_base`。
+  - `fetchPrices` 现在走 `currentSession` + `settings` 局部 payload；`save` 若变化仅限 `pricing_url` / `model_prices`，也复用同一条 snapshot 修正路径。
+- `settings_changed` 细化：
+  - 新增 `_apply_user_config_to_runtime_context(...)`，把 `reload_user_config()` 的 runtime 同步副作用抽成可复用逻辑。
+  - 安全 settings 文件变更现在也可复用与 `save` 相同的差异判定规则。
+  - 当 file watcher / runtime event 只表明 settings 变化，且变更键仅落在安全预算字段集合时，不再强制 `build_snapshot()`，而是：
+    - 先把新 config 同步进 runtime context。
+    - 再回填 `latest_snapshot` 的预算 limit / weekly adjustment / budget warnings。
+    - 最后走 `currentSession` + `budget` + `settings` 局部 payload。
+- TDD 记录：
+  - `test_renderer_loop_handles_fetch_prices_with_current_session_and_settings_payload`
+    - RED：第二次 tick 仍触发 `build_snapshot()`。
+    - GREEN：`fetchPrices` 改为局部 payload，并刷新 `preSendHasPrices` / `preSendInputPrice` 等 current-session 定价字段。
+  - `test_renderer_loop_handles_safe_settings_file_change_with_partial_budget_payload`
+    - RED：安全 budget settings 文件变更仍触发第二次 `build_snapshot()`。
+    - GREEN：`settings_changed` 在安全预算字段场景下改为局部 payload，并同步 runtime context 的预算配置。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k overlay_only_save_with_settings_and_overlay_payload` 通过。
+  - `python -m pytest tests/test_ui.py -q -k apply_display_mode_with_settings_only_payload` 通过。
+  - `python -m pytest tests/test_ui.py -q -k fetch_prices_with_current_session_and_settings_payload` 通过。
+  - `python -m pytest tests/test_ui.py -q -k safe_settings_file_change_with_partial_budget_payload` 通过。
+  - `python -m pytest tests/test_ui.py -q -k "safe_settings_file_change_with_partial_budget_payload or fetch_prices_with_current_session_and_settings_payload or budget_only_save_with_current_session_budget_and_settings_payload or overlay_only_save_with_settings_and_overlay_payload or apply_display_mode_with_settings_only_payload or publishes_update_state_event_before_refresh or check_update_command_with_settings_only_payload or enable_desktop_overlay_with_settings_and_overlay_payload or dismiss_warnings_with_current_session_and_settings_payload or runtime_error_event or layout_event_without_snapshot_refresh"` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+
+## 2026-07-07 阶段 6 收口：CDP target discovery
+- 本轮目标：
+  - 完成阶段 6 最后一项：target discovery 不再在 cache TTL 后反复 HTTP `/json` 探测；连接断开必须显式失败，进入错误 HUD/diagnostic。
+- 实现：
+  - 新增 `_RendererTargetDiscovery`，初次通过 `list_targets()` 选择 Codex page target 后持有订阅式 runtime state。
+  - `RendererHudClient._page_target()` 改为读取 discovery state；即使 `target_cache_seconds=0`，第二次 payload update 也不会重新 HTTP target scan。
+  - `_RendererBinding` 新增 `disconnect_callback`；active-session、attachments、layout binding 非主动关闭时会标记 target discovery disconnected。
+  - discovery disconnected 后，后续 `update_payload()` 直接失败并设置 `last_error`，renderer loop 既有 `_record_cdp_update_failure()` 会把它送入 `cdp.update_failed` runtime error。
+- TDD 记录：
+  - `test_client_uses_subscribed_target_state_after_cache_ttl`
+    - RED：`target_cache_seconds=0` 时第二次 update 重新调用 `list_targets()`。
+    - GREEN：`RendererHudClient` 使用 `_RendererTargetDiscovery` 持有 target state，`list_targets()` 只调用一次。
+  - `test_client_reports_target_discovery_disconnect_without_http_rescan`
+    - RED：`RendererHudClient` 没有 target discovery state，无法标记断开。
+    - GREEN：`mark_disconnected()` 后下一次 update 失败，且不再 HTTP rescan。
+  - 扩展既有 FakeBinding 测试签名，覆盖新增 `disconnect_callback` 参数。
+- 本轮验证：
+  - `python -m pytest tests/test_renderer_hud.py -q -k "subscribed_target_state_after_cache_ttl or target_discovery_disconnect"` 先失败后通过。
+  - `python -m pytest tests/test_renderer_hud.py -q -k "RendererHudClientTests"` 通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_ui.py -q -k "RendererHudClientTests or safe_settings_file_change_with_partial_budget_payload or fetch_prices_with_current_session_and_settings_payload or budget_only_save_with_current_session_budget_and_settings_payload or overlay_only_save_with_settings_and_overlay_payload or apply_display_mode_with_settings_only_payload or publishes_update_state_event_before_refresh or check_update_command_with_settings_only_payload or enable_desktop_overlay_with_settings_and_overlay_payload or dismiss_warnings_with_current_session_and_settings_payload or runtime_error_event or layout_event_without_snapshot_refresh"` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+- 阶段结论：
+  - 阶段 6 标记 complete。
+  - `budget_window_changed` 和真实 overlay session switch 仍保留 snapshot 路径，因为它们会改变预算窗口聚合或 active session 语义；不能为了局部 payload 目标复用旧 snapshot。
+
+## 2026-07-07 阶段 6 设置面板修复
+- 用户可见问题：
+  - renderer 设置命令提交失败。
+  - “请作者喝咖啡”页签显示“赞赏码资源未加载，请等待 HUD 刷新。”。
+  - “检查更新” loading 结束后没有结果文案。
+- 根因：
+  - settings command 仍走 renderer 页面内 `fetch(/command)`，而同一页面的 CSP 已在附件链路中证明会拦本地 bridge。
+  - `to_domain_json("settings")` 会把空 `supportImages: []` 放进局部 payload，覆盖首帧完整 payload 中的赞赏码资源。
+  - renderer modal 只消费 `settingsCommandStatus`，没有在 update flow 结束后把 `updateState.message/title` 回写到状态栏。
+- 修复：
+  - 新增 `codexUsageHudSettingsCommand` CDP binding；`submitSettingsCommand()` 优先走 binding，HTTP bridge 仅保留兜底。
+  - `RendererHudClient` 新增 `set_settings_command_callback()`，并在 `run_renderer_hud_session()` 里接到 `enqueue_renderer_command()`。
+  - `RendererHudPayload.to_domain_json()` 对空 `supportImages` 做裁剪，避免 settings-only payload 清空赞赏码。
+  - `applySettingsCommandStatus()` 现在在没有显式 `settingsCommandStatus.message` 时，回退显示 `updateState.message/title`，让检查更新/安装更新在 loading 结束后有结果文案。
+- TDD 记录：
+  - `test_settings_domain_update_does_not_emit_empty_support_images`
+    - RED：settings-only payload 仍带 `supportImages: []`。
+    - GREEN：空资源不再写入局部 payload。
+  - `test_client_starts_settings_command_binding_after_update`
+    - RED：`RendererHudClient` 没有 settings command binding。
+    - GREEN：update 后会 ensure `SETTINGS_COMMAND_BINDING_NAME`。
+  - `test_renderer_loop_bootstraps_active_session_before_first_snapshot`
+    - 扩展断言 `set_settings_command_callback()` 已接线，验证 CLI wiring。
+  - 脚本回归：
+    - `test_payload_from_snapshot_formats_compact_hud_lines` 追加断言 renderer script 含 settings command binding 和 updateState status fallback。
+- 本轮验证：
+  - `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_settings_domain_update_does_not_emit_empty_support_images tests/test_renderer_hud.py::RendererHudPayloadTests::test_payload_from_snapshot_formats_compact_hud_lines tests/test_renderer_hud.py::RendererHudClientTests::test_client_starts_settings_command_binding_after_update tests/test_ui.py::DaemonLifecycleTests::test_renderer_loop_bootstraps_active_session_before_first_snapshot -q` 先失败后通过。
+  - `python -m pytest tests/test_renderer_hud.py -q` 通过。
+  - `python -m pytest tests/test_ui.py -q -k "check_update or install_update or fetch_prices or settings_command or bridge_settings_command or bootstraps_active_session_before_first_snapshot or safe_settings_file_change_with_partial_budget_payload"` 通过。
+
+## 2026-07-08 赞赏码资源二次修复
+- 用户反馈：
+  - renderer 设置页“请作者喝咖啡”仍显示“赞赏码资源未加载，请等待 HUD 刷新。”。
+- 新根因：
+  - 前一轮修掉了 settings-only payload 把 `supportImages: []` 覆盖回去的问题，但 renderer 页面一旦 reload / reinject，`window.__codexUsageHudState` 里的 `supportImages` 仍会丢失。
+  - `RendererHudClient` 又不会在后续每次 full update 都重复发送 `supportImages`，因此 support tab 在新页面上下文中会长期为空。
+- 修复：
+  - renderer script 新增 `supportImagesStorageKey = "codexUsageHudSupportImages:v1"`。
+  - 新增 `loadPersistedSupportImages()` / `persistSupportImages()`，收到真实赞赏码资源时写入 localStorage。
+  - `currentPayload()` 在内存 state 没有 `supportImages` 时，会回退读取持久化的赞赏码资源。
+  - `__codexUsageHudUpdate()` 现在也会在内存 payload 缺图时回填持久化资源，并在收到有效图片后重新持久化。
+- TDD 记录：
+  - `test_renderer_script_persists_support_images_across_page_reinject`
+    - RED：脚本没有赞赏码持久化逻辑。
+    - GREEN：脚本包含持久化 key、加载/保存函数，以及缺图时从持久化状态回填。
+- 本轮验证：
+  - `python -m pytest tests/test_renderer_hud.py::RendererHudPayloadTests::test_renderer_script_persists_support_images_across_page_reinject -q` 先失败后通过。
+  - `python -m pytest tests/test_renderer_hud.py -q -k "support_qr or support_images or settings_domain_update or settings_command_binding_after_update or payload_from_snapshot_formats_compact_hud_lines"` 通过。
+  - `python -m pytest tests/test_ui.py -q -k "bootstraps_active_session_before_first_snapshot or bridge_settings_command or check_update or fetch_prices"` 通过。
+
+## 2026-07-08 阶段 7 桌面气泡 IPC 重构
+- 本轮目标：
+  - 替换 desktop overlay helper 的 160ms state file polling 和主进程 60ms command polling。
+  - 保持 renderer mode 为主路径，不把 Qt/Tk 主 HUD 作为 fallback。
+- 实现：
+  - `run_work_overlay_helper_qt()` 引入 `QFileSystemWatcher`，监听 state file 和父目录；兼容 state 文件原子替换写入，变更时重新注册 watcher 并读取 state。
+  - helper stale/owner liveness 改为 one-shot stale watchdog；每次 state 更新后只安排下一次到期检查，不再持续高频读 state。
+  - `DesktopWorkOverlay.update()` 新增 state signature；payload/theme/item limit/command path/close 未变化时不重写 state。
+  - `keep_alive()` 保留为可见 items 的显式 liveness 刷新。
+  - `_WorkOverlayCommandPump` 启动时补偿 drain 一次，之后通过 `FileChangeWatcher` 监听 command JSONL 文件；文件事件到达才 drain commands。
+  - helper 可写入 `runtimeError` command，主进程转换为统一 `runtime_error` event。
+  - 移除旧 `WORK_OVERLAY_POLL_MS` / `WORK_OVERLAY_COMMAND_POLL_MS` 符号，避免误用。
+- TDD 记录：
+  - `test_work_overlay_command_pump_uses_file_watcher_event`
+    - RED：pump 没有创建 `FileChangeWatcher`，仍依赖 polling thread。
+    - GREEN：pump watch command path，startup drain 后由文件事件触发下一次 drain。
+  - `test_work_overlay_command_pump_publishes_helper_runtime_error`
+    - RED：helper error command 被当作普通 overlay command，发布的是 `overlay_command_received`。
+    - GREEN：`runtimeError` command 直接发布 `runtime_error`。
+  - `test_desktop_work_overlay_skips_unchanged_state_until_keepalive`
+    - RED：连续相同 `update()` 写了两次 state。
+    - GREEN：state signature 去重后只写一次。
+  - `test_work_overlay_helper_uses_qfilesystemwatcher_for_state_updates`
+    - RED：helper 源码没有 `QFileSystemWatcher`，仍启动 `poll_timer`。
+    - GREEN：state watcher 替代 160ms state poll。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "work_overlay_command_pump_uses_file_watcher_event or work_overlay_command_pump_publishes_helper_runtime_error or desktop_work_overlay_skips_unchanged_state_until_keepalive or work_overlay_helper_uses_qfilesystemwatcher_for_state_updates"` 先失败后通过。
+  - `python -m pytest tests/test_ui.py -q -k "desktop_work_overlay or work_overlay_command or work_overlay_helper or renderer_loop_wakes or run_renderer_hud_session_drains_work_overlay_commands"` 先失败一次；原因是测试 fake overlay 没有 command path，watcher 初始化前未做 startup drain。修复为先补偿 drain 再注册 watcher 后通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 阶段结论：
+  - 阶段 7 标记 complete。
+  - overlay state/command 固定轮询已删除；仅保留事件 watcher fallback polling 和 keepalive liveness 刷新。
+
+## 2026-07-08 阶段 8 legacy fallback 与文档收口
+- 本轮目标：
+  - 隔离 Qt/Tk 主 HUD 残余入口。
+  - 删除 renderer mode 下仍可启用 native active-title watcher 的诊断残余。
+  - 把 renderer strategy 文档改成架构约束，并补性能/DEBUG 验收 checklist。
+- 实现：
+  - `run_qt_hud_session()` / `run_tk_hud_session()` 现在关闭 loading feedback 后直接返回 `RENDERER_HUD_UNAVAILABLE`，不再获取 `HudInstanceLock`，也不会启动任何 Qt/Tk runtime。
+  - `build_runtime_context()` 在 renderer mode 下始终调用 `platform.suspend_native_active_title(True)`，并始终以 `start_background_watcher=False` 创建 `ActiveSessionTracker`。
+  - 隐藏参数 `--legacy-active-session-diagnostics` 保留为兼容 no-op，不再改变 active-session 权威链路。
+  - `tools/measure_renderer_latency.py` 增加默认 regression budgets，并在 Markdown 中输出 `Regression Budgets` PASS/FAIL 表。
+  - `docs/RENDERER_MODE_STRATEGY.md` 改写为 normative architecture constraints。
+  - 新增 `docs/HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md`，固定性能回归、DEBUG 错误 HUD、normal diagnostics 的验收步骤。
+  - 更新 `docs/HUD_RUNTIME_REFACTOR_PLAN.md`、`docs/FALLBACK_INVENTORY.md`、`findings.md`、`task_plan.md`。
+- TDD 记录：
+  - `test_legacy_tk_hud_session_returns_renderer_only_unavailable` / `test_legacy_qt_hud_session_returns_renderer_only_unavailable`
+    - RED：legacy session stub 仍会获取 `HudInstanceLock`。
+    - GREEN：stub 直接返回 renderer-unavailable。
+  - `test_build_runtime_context_ignores_legacy_active_session_diagnostics`
+    - RED：旧 hidden flag 会阻止 native title suspend，并启用 background watcher。
+    - GREEN：flag 只保留为 no-op，renderer mode 始终 renderer-authoritative。
+  - `test_format_markdown_includes_regression_budget_table`
+    - RED：latency Markdown 没有 regression budget 表。
+    - GREEN：Markdown 输出 budget PASS/FAIL 表，report 同时包含 budget results。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "legacy_tk_hud_session_returns_renderer_only_unavailable or legacy_qt_hud_session_returns_renderer_only_unavailable or build_runtime_context_ignores_legacy_active_session_diagnostics or legacy_active_session_diagnostics_flag_is_accepted_but_noop"` 先失败后通过。
+  - `python -m pytest tests/test_ui.py tests/test_config.py -q -k "legacy or renderer_unavailable or qt_config_normalizes or tk_config_normalizes or display_mode or active_session_diagnostics or renderer_bridge_instead_of_native"` 通过。
+  - `python -m pytest tests/test_measure_renderer_latency.py -q` 先失败后通过。
+- 阶段结论：
+  - 阶段 8 标记 complete。
+  - renderer mode 的 legacy HUD fallback 和 native active-title fallback 均已隔离；后续剩余 fallback 以文档清单中的临时/降级路径为主。
+
+## 2026-07-08 长期维护 acceptance checkpoint
+- 本轮目标：
+  - 按 `docs/HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md` 跑当前工作树的自动门禁和 latency harness。
+  - 同步确认 `task_plan.md` 的“下一步”从阶段开发切到长期维护收口。
+- 已完成：
+  - 确认 `codebase-memory-mcp` canonical 项目仍为 `E-Project-codex-usage-hud`，root path `E:/Project/codex-usage-hud`。
+  - 跑通 acceptance 自动门禁：
+    - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py -q`
+    - `python -m compileall -q src tests tools`
+    - `python tools/measure_renderer_latency.py --json-output renderer_latency_baseline.json --markdown-output renderer_latency_baseline.md`
+  - latency harness 当前本机 `Regression Budgets` 全部 PASS：
+    - `current_session_parse_full`: `7.564ms / 50ms`
+    - `renderer_payload_build`: `2.043ms / 25ms`
+    - `usage_summary_full_scan`: `223.958ms / 250ms`
+    - `usage_summary_refresh_current_file`: `4.962ms / 25ms`
+    - `file_watcher_poll_signature`: `169.074ms / 250ms`
+    - `append_then_incremental_parse_and_payload`: `103.511ms / 250ms`
+  - 修复 acceptance 中暴露的基线文件换行问题：
+    - `tools/measure_renderer_latency.py` 改为显式 `open(..., newline="\n")` 写 JSON/Markdown 输出。
+    - 新增 `test_main_writes_lf_outputs`，防止 Windows 下重新生成 `renderer_latency_baseline.json/.md` 时把 CRLF 带回工作树，导致 `git diff --check` 报 trailing whitespace。
+  - 更新 `task_plan.md`：把长期维护的首个 acceptance checkpoint 视为已执行，下一焦点前移到剩余临时 fallback 收口。
+- 本轮验证：
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py -q` 通过。
+  - `python -m pytest tests/test_measure_renderer_latency.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `python tools/measure_renderer_latency.py --json-output renderer_latency_baseline.json --markdown-output renderer_latency_baseline.md` 通过。
+  - `git diff --check` 初次失败（`renderer_latency_baseline.json/.md` 为 CRLF），修复写出逻辑并重生文件后通过。
+- 当前结论：
+  - `task_plan.md` 里的“下一步 1”中的自动门禁和 latency harness 已完成；`DEBUG Error HUD` / normal-mode diagnostics 手动 smoke 仍需按具体 renderer/runtime 改动执行。
+  - 当前最值得继续推进的是剩余两个临时 fallback 边界：
+    - 预算聚合何时允许 full rebuild，何时必须只做 per-file contribution replace。
+    - file watcher fallback polling 何时进入 degraded，以及何时允许退出 degraded。
+
+## 2026-07-08 长期维护：Option A 第一轮收口
+- 本轮目标：
+  - 先按用户选定的方案 A，收紧两个剩余临时 fallback 的边界：
+    - 非预算 settings 变化不再把 budget aggregate 拉回 full rebuild。
+    - file watcher degraded diagnostic 不再只是“正在 polling”，而是显式写出降级原因。
+- 设计结论：
+  - `UsageSummaryCache` 的 aggregate totals 只依赖 sessions tree 与 budget window，不依赖 `daily_budget_usd` / `weekly_budget_usd` / 阈值 / overlay/UI settings。
+  - 因此 `_renderer_should_refresh_budget_aggregate()` 不应把任意 `settings` 文件变化都视为 full rebuild 信号。
+  - `FileChangeWatcher` 目前能告诉上层“是不是 event-driven”，但不知道为什么退化到 polling；这会让 degraded 边界只能看到结果，看不到原因。
+- 实现：
+  - `src/codex_usage_hud/cli.py`
+    - `_renderer_budget_signature()` 不再把 settings mtime 作为 budget aggregate signature 的一部分。
+    - `_renderer_should_refresh_budget_aggregate()` 删除了“`settings` 一律 full rebuild”的逻辑。
+    - `_RendererFileEventSource._record_degraded_state()` 记录 `file_watcher.degraded` 时新增：
+      - `mode: polling`
+      - `cause`
+  - `src/codex_usage_hud/platforms/file_watcher.py`
+    - `FileChangeWatcher` 新增 `polling_cause`。
+    - polling cause 目前区分：
+      - `force_polling`
+      - `platform_recursive_tree_unsupported`
+      - `native_unavailable`
+      - `platform_unsupported`
+    - watcher startup log 也会带上 cause。
+  - `tests/test_ui.py`
+    - 新增 `test_renderer_budget_aggregate_skips_settings_only_change`
+    - 扩展 `test_renderer_file_event_source_records_degraded_polling`，断言 `mode` 与 `cause`
+  - `tests/test_file_watcher.py`
+    - 新增 `test_force_polling_exposes_polling_cause`
+- TDD 记录：
+  - `test_renderer_budget_aggregate_skips_settings_only_change`
+    - RED：helper 仍返回 `True`，把纯 settings 变化当成 full rebuild。
+    - GREEN：移除 settings 对 aggregate rebuild 的硬绑定后通过。
+  - `test_renderer_file_event_source_records_degraded_polling`
+    - RED：payload context 缺少 `mode`。
+    - GREEN：diagnostic context 现在包含 `mode=polling` 和 `cause`。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "renderer_budget_aggregate_skips_settings_only_change or renderer_file_event_source_records_degraded_polling"` 先失败后通过。
+  - `python -m pytest tests/test_file_watcher.py tests/test_ui.py -q -k "force_polling_exposes_polling_cause or renderer_budget_aggregate_skips_settings_only_change or renderer_file_event_source_records_degraded_polling or renderer_budget_aggregate_skips_current_session_only_change or renderer_budget_aggregate_refreshes_for_non_current_session_change"` 通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 当前结论：
+  - 预算聚合 full rebuild 的触发边界已收紧到：
+    - 无最新 snapshot
+    - budget window signature 变化
+    - `sessions-root` 变化且不只涉及当前 session
+  - watcher degraded 已从“只有结果”推进到“结果 + 原因”。
+  - 下一步不再是泛泛地“明确边界”，而是：
+    - 把 `sessions-root` 的已知 changed paths 从“仅当前 session refresh_paths”扩展到任意已知 JSONL contribution replace。
+    - 为 degraded enter/exit 和真实平台原因补更直接的 smoke/coverage。
+
+## 2026-07-08 长期维护：Option A 第二轮收口
+- 本轮目标：
+  - 把预算聚合的 changed-file contribution replace 从“只优化当前 session”扩展到“任意已知 JSONL changed path”。
+- 设计结论：
+  - `UsageSummaryCache._refresh_paths()` 本身已经支持任意文件贡献替换；真正限制它的是上层 `build_snapshot()` 只会在 `refresh_budget_aggregate=False` 时把当前 session 传给 `refresh_paths`。
+  - 因此最小实现不是重写 cache，而是让 renderer runtime 在已知 `sessions-root` changed paths 都是 `.jsonl` 时，把这些路径直接透传给 `UsageSummaryCache`。
+  - full rebuild 仍然保留给这些场景：
+    - budget window signature 变化
+    - 无法定位 changed paths（unknown tree churn）
+    - changed paths 混入非 `.jsonl`
+    - 未来 rotate / parser-version 等 cache 失效场景
+- 实现：
+  - `src/codex_usage_hud/cli.py`
+    - 新增 `_renderer_budget_refresh_paths()`，把 file watcher 上报的已知 changed paths 规整成可用于 aggregate refresh 的 `.jsonl` 路径集合。
+    - `_renderer_should_refresh_budget_aggregate()` 现在在 `sessions-root` 变化时优先看是否存在一组“已知且全是 JSONL”的 changed paths；有则不再 full rebuild。
+    - `build_snapshot()` 新增 `refresh_budget_paths` 参数。
+    - renderer loop 的 `snapshot_or_error()` / `apply_refresh()` 现在会把 `_renderer_budget_refresh_paths()` 的结果透传到 `build_snapshot()`，最终进入 `UsageSummaryCache.summarize(... refresh_paths=...)`。
+  - `tests/test_ui.py`
+    - 新增 `test_renderer_budget_aggregate_skips_known_non_current_session_change`
+    - 新增 `test_renderer_budget_aggregate_refreshes_for_unknown_sessions_root_change`
+    - 新增 `test_build_snapshot_can_refresh_known_non_current_budget_paths`
+    - 旧的“非当前 session 一律 full rebuild”回归改写为 `test_renderer_budget_aggregate_refreshes_for_non_jsonl_sessions_root_change`
+- TDD 记录：
+  - `test_renderer_budget_aggregate_skips_known_non_current_session_change`
+    - RED：helper 仍返回 `True`。
+    - GREEN：已知 changed paths 全是 `.jsonl` 时改为复用 contribution replace。
+  - `test_build_snapshot_can_refresh_known_non_current_budget_paths`
+    - RED：`build_snapshot()` 不接受 `refresh_budget_paths`。
+    - GREEN：新增参数并把路径透传给 `usage_cache.summarize()`。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "renderer_budget_aggregate_skips_known_non_current_session_change or renderer_budget_aggregate_refreshes_for_unknown_sessions_root_change or build_snapshot_can_refresh_known_non_current_budget_paths or renderer_budget_aggregate_refreshes_for_non_jsonl_sessions_root_change"` 先失败后通过。
+  - `python -m pytest tests/test_ui.py -q -k "usage_summary_cache or build_snapshot_can_skip_active_work_items or build_snapshot_can_refresh_known_non_current_budget_paths or renderer_budget_aggregate_"` 通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q` 先失败一次（`build_snapshot` 断言缺少新参数），补齐测试期望后通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 当前结论：
+  - 预算聚合 full rebuild 的剩余边界已经进一步缩到：
+    - budget window 变化
+    - unknown tree churn
+    - non-JSONL path mix
+    - rotate/parser-version 等后续 cache invalidation 场景
+  - 下一步更值得推进的是 watcher degraded enter/exit 的可验证边界，而不是继续泛化预算聚合路径。
+
+## 2026-07-08 长期维护：Watcher degraded 边界覆盖
+- 本轮目标：
+  - 给 file watcher degraded 的 enter/exit 和剩余 polling cause 补齐自动测试覆盖，避免只验证“进入 degraded”这一半。
+- 设计结论：
+  - 当前实现里 `file_watcher.degraded` 的 enter/exit 逻辑已经存在：
+    - `event_driven == False` 时 record
+    - `event_driven == True` 时 resolve
+  - 缺的是可验证覆盖，而不是新的 runtime 逻辑。
+  - 因此这轮重点是把边界变成明确测试，而不是继续扩实现。
+- 实现：
+  - `tests/test_file_watcher.py`
+    - 扩展 `test_macos_recursive_tree_uses_polling_even_when_kqueue_exists`，断言 `polling_cause == "platform_recursive_tree_unsupported"`
+    - 新增 `test_linux_platform_exposes_platform_unsupported_polling_cause`
+    - 新增 `test_macos_non_recursive_native_failure_exposes_native_unavailable`
+  - `tests/test_ui.py`
+    - 新增 `test_renderer_file_event_source_resolves_degraded_when_event_driven_recovers`
+    - 覆盖 `_RendererFileEventSource` 在先 degraded、后 event-driven recover 时会 resolve `file_watcher.degraded`，并写出 `runtime_error_resolved`
+- TDD / 调试记录：
+  - `test_renderer_file_event_source_resolves_degraded_when_event_driven_recovers`
+    - 首次失败不是实现缺口，而是测试没有先触发 degraded 记录：`_RendererFileEventSource` 初始化时 `None -> None` session path 会直接 no-op。
+    - 修正为先 `update_session_path(first_session_path)` 进入 degraded，再切到 event-driven 并换到第二个 session path 触发 resolve。
+- 本轮验证：
+  - `python -m pytest tests/test_file_watcher.py tests/test_ui.py -q -k "platform_unsupported_polling_cause or macos_recursive_tree_uses_polling_even_when_kqueue_exists or resolves_degraded_when_event_driven_recovers"` 通过。
+  - `python -m pytest tests/test_file_watcher.py tests/test_ui.py -q -k "polling_cause or degraded or macos_recursive_tree_uses_polling_even_when_kqueue_exists or native_unavailable or platform_unsupported"` 通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 当前结论：
+  - degraded 的自动覆盖现在包含：
+    - enter
+    - exit/resolve
+    - `force_polling`
+    - `platform_recursive_tree_unsupported`
+    - `native_unavailable`
+    - `platform_unsupported`
+  - watcher 这块下一步更像手动 smoke/acceptance，而不是缺少单测边界。
+
+## 2026-07-08 长期维护：overlay helper normal-mode diagnostics
+- 本轮目标：
+  - 补齐 acceptance checklist 中 `work_overlay_helper.*` 的 normal-mode structured diagnostic 链路，避免 helper 错误只发 runtime event、不落 `RuntimeErrorRegistry`。
+- 设计结论：
+  - 当前 `_handle_work_overlay_runtime_error_command()` 只向 `RuntimeEventBus` 发布 `runtime_error`，因此 DEBUG HUD 能被唤醒，但 normal-mode `renderer_fallback.log` 缺少这类 structured records。
+  - 最小修复不是新增第三套 diagnostic 逻辑，而是让 overlay helper 错误复用现有 `RuntimeErrorRegistry.record()`，并在需要时把 registry 接到现成的 `runtime_events` 上。
+- 实现：
+  - `src/codex_usage_hud/cli.py`
+    - `_WorkOverlayCommandPump` 新增 `runtime_errors` 依赖并向下透传。
+    - `_handle_work_overlay_commands()` / `_handle_work_overlay_runtime_error_command()` 新增 `runtime_errors` 参数。
+    - overlay helper 的 `runtimeError` 命令现在优先走 `RuntimeErrorRegistry.record()`；若 registry 尚未绑定 event bus 且当前有 `runtime_events`，会先接线再 record。
+    - `run_renderer_hud_session()` 创建 `_WorkOverlayCommandPump` 时，现在把 `context.runtime_errors` 一起传入。
+  - `tests/test_ui.py`
+    - 扩展 `test_work_overlay_command_pump_publishes_helper_runtime_error`
+      - 现在同时断言：
+        - runtime event 仍会发布
+        - registry payload 会新增 `work_overlay_helper.state_read_failed`
+    - 新增 `test_work_overlay_helper_runtime_error_writes_normal_mode_diagnostic`
+      - 直接验证 `renderer_fallback.log` 中出现：
+        - `runtime_error_recorded`
+        - `work_overlay_helper.state_read_failed`
+        - helper 原始错误消息
+- TDD / 调试记录：
+  - 首次 RED：`_handle_work_overlay_commands()` 不接受 `runtime_errors`。
+  - GREEN 后用例又失败一次，但原因是事件 code 经过 registry 规范化成 `work_overlay_helper.state_read_failed`，以及 `stateFile` 进入了 `event.error.context` / `event.context.error.context`，不是逻辑回退。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "work_overlay_command_pump_publishes_helper_runtime_error or work_overlay_helper_runtime_error_writes_normal_mode_diagnostic"` 先失败后通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 当前结论：
+  - `work_overlay_helper.*` 现在已经同时覆盖：
+    - runtime event / DEBUG HUD 唤醒路径
+    - `RuntimeErrorRegistry` 聚合路径
+    - normal-mode `renderer_fallback.log` structured diagnostic
+  - 剩余 acceptance 工作更偏真实 runtime smoke，而不是单测链路缺口。
+
+## 2026-07-08 长期维护：acceptance 证据增强
+- 本轮目标：
+  - 把已有的 normal-mode diagnostic 覆盖从“日志包含关键字”强化成“日志 JSON 记录含 checklist 要求字段”。
+- 实现：
+  - `tests/test_ui.py`
+    - 扩展 `test_work_overlay_helper_runtime_error_writes_normal_mode_diagnostic`
+      - 直接解析 `renderer_fallback.log` 最后一行 JSON。
+      - 断言 `stage/source/severity/code/message/context/firstSeenAt/lastSeenAt`。
+    - 扩展 `test_renderer_file_event_source_resolves_degraded_when_event_driven_recovers`
+      - 同样解析 `runtime_error_resolved` 记录并断言关键字段。
+- 验证结果：
+  - 两条新增字段级断言首次即通过，说明运行时实现已满足 structured payload 要求，之前只是测试证据不够强。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "work_overlay_helper_runtime_error_writes_normal_mode_diagnostic or resolves_degraded_when_event_driven_recovers"` 通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 当前结论：
+  - `HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md` 中 normal-mode diagnostics 的 required fields 现在对 `work_overlay_helper.*` 和 `file_watcher.degraded` 都有更强的自动化证据。
+  - 下一步仍应转向更贴近真实 runtime 的 DEBUG/normal-mode smoke，而不是继续停留在静态/日志字段级测试。
+
+## 2026-07-08 长期维护：normal-mode diagnostic 字段证据补齐
+- 本轮目标：
+  - 把 remaining normal-mode diagnostic 证据从“包含关键字”继续提升到“解析 JSON 记录并校验 required fields”，覆盖 `active_session.*`、`cdp.update_failed`、`file_watcher.degraded`、`work_overlay_helper.*`。
+- 实现：
+  - `tests/test_ui.py`
+    - 新增 `_last_renderer_diagnostic_record()` 测试辅助函数，统一解析 `renderer_fallback.log` 最后一条 JSON record。
+    - 扩展以下测试，直接断言 `stage/source/severity/code/message/context/firstSeenAt/lastSeenAt`：
+      - `test_build_snapshot_records_renderer_unmatched_runtime_error`
+      - `test_record_cdp_update_failure_adds_runtime_error`
+      - `test_renderer_file_event_source_records_degraded_polling`
+      - `test_renderer_file_event_source_resolves_degraded_when_event_driven_recovers`
+      - `test_work_overlay_helper_runtime_error_writes_normal_mode_diagnostic`
+- 调试记录：
+  - 首次新增字段断言时，把 `message` 写死成旧文案失败；diagnostic record 使用的是标准化后的稳定消息。
+  - 修正为对齐 `payload[0]["message"]`，避免把测试耦合到旧字符串。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "build_snapshot_records_renderer_unmatched_runtime_error or record_cdp_update_failure_adds_runtime_error or renderer_file_event_source_records_degraded_polling or work_overlay_helper_runtime_error_writes_normal_mode_diagnostic or resolves_degraded_when_event_driven_recovers"` 先失败后通过。
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 当前结论：
+  - acceptance checklist 里 normal-mode diagnostics 的 required fields 现在对四类关键 runtime errors 都有字段级自动化证据，而不只是字符串匹配。
+  - 后续更有价值的是 runtime 真实 smoke/acceptance，而不是继续增强日志字段断言。
+
+## 2026-07-08 长期维护：in-app browser DEBUG HUD smoke
+- 本轮目标：
+  - 不再只停留在静态脚本断言和日志字段测试，直接在 in-app browser 里跑一轮接近真实 renderer 的 DEBUG HUD smoke。
+- 执行过程：
+  - 读取 browser plugin `control-in-app-browser` 技能并完成 bootstrap。
+  - 尝试直接打开 `file://.../renderer_hud_smoke.html`，被 browser policy 拦截；改走更安全的 `http://127.0.0.1:8123/...` 本地静态页。
+  - 在系统临时目录生成 smoke host：
+    - `renderer_hud_smoke.js`
+    - `renderer_hud_smoke_debug_ready.html`
+    - `renderer_hud_smoke_debug_error.html`
+  - 通过 in-app browser 打开本地 smoke 页并读取 DOM snapshot。
+- 现场结论：
+  - DEBUG ready 页：
+    - runtime errors 面板真实出现。
+    - 展开后可见：
+      - `debug.ready`
+      - `DEBUG HUD active`
+      - `info · renderer · 1x`
+  - DEBUG error 页：
+    - runtime errors 面板会在有错误时真实显示 `count = 1`
+    - 展开后可见：
+      - `file_watcher.degraded`
+      - `Renderer file watcher is using polling fallback.`
+      - `warning · file_watcher · 1x`
+      - `{"cause":"native_unavailable","mode":"polling"}` 上下文
+- 调试记录：
+  - 最初把 `RENDERER_HUD_SCRIPT` 内联进 `<script>`，导致 smoke 行为异常；改成外链 `renderer_hud_smoke.js` 后稳定。
+  - Playwright 的 read-only `evaluate(...)` 环境不暴露完整页面 API（例如看不到 `window.__codexUsageHudUpdate`），因此 smoke payload 最终改成由页面第二个 `<script>` 在真实页面上下文里触发，而不是由 automation 直接调用。
+  - 通过 `window.onerror` 把 smoke host 的页面级异常写回 DOM，避免“页面没更新但没有证据”的情况。
+- 未完成 / 当前限制：
+  - `error rows can be selected/copied`、`panel can be dragged`、`position persists after HUD refresh` 这三项仍未在真实浏览器 smoke 中验证。
+  - 原因不是运行时已知失败，而是当前 in-app browser read-only evaluate 对页面脚本状态和持久化状态的可观察性有限；下一步若继续自动化，需要更专门的 smoke host 或更底层浏览器交互策略。
+- 当前结论：
+  - `HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md` 的 DEBUG Error HUD Smoke 已经从“仅字符串/静态测试”推进到真实浏览器 DOM 证据。
+  - 下一步应优先补：
+    - 真实浏览器下的 copy/select 与 drag/persist smoke
+    - 若自动化仍受限，则记录为本机未完成的 platform-specific smoke，并保留现有自动化证据链。
+
+## 2026-07-08 长期维护：in-app browser runtime errors panel interaction smoke
+- 本轮目标：
+  - 继续把 DEBUG HUD smoke 从“能显示”推进到“可交互”，优先覆盖：
+    - select
+    - copy
+    - drag
+    - refresh 后位置/展开状态保持
+- 执行过程：
+  - 复用本地 `http://127.0.0.1:8123` smoke host。
+  - 确认浏览器自动化的 read-only `evaluate(...)` 对页面全局函数可见性有限，因此把 smoke action 下沉到真实页面上下文：
+    - `renderer_hud_smoke_debug_error.html?smoke=select`
+    - `renderer_hud_smoke_debug_error.html?smoke=copy`
+  - 对 `copy` 额外增加 `document.execCommand('copy')` fallback，避免 browser policy 禁用原生 `Ctrl+C` 快捷键时完全失证。
+- 现场结果：
+  - `drag`
+    - 通过 in-app browser `cua.drag` 把 runtime errors panel 从 `(left=16, top=526)` 拖到约 `(left=136, top=468)`。
+  - `position persist`
+    - 页面 reload 后，panel 仍保持约 `(left=136, top=468)`，且 `data-expanded=\"true\"`、toggle 仍为 `v`。
+  - `select`
+    - 通过真实页面上下文自动执行 `selectRuntimeErrorText()`，DOM 中回写：
+      - `select: { "cause": "native_unavailable", "mode": "polling" }`
+  - `copy`
+    - 浏览器策略禁用了 native `Ctrl+C` 快捷键。
+    - 通过页面内 `document.execCommand('copy')` fallback，DOM 中回写：
+      - `copy: { "cause": "native_unavailable", "mode": "polling" }`
+- 当前结论：
+  - 对 `file_watcher.degraded` 这类 runtime error，DEBUG HUD smoke 现在已有真实浏览器证据覆盖：
+    - ready row
+    - error row
+    - expand/collapse
+    - drag
+    - position persist after reload
+    - select
+    - copy（通过页面内 fallback 路径）
+  - 剩余更值得继续推进的是：
+    - `work_overlay_helper.*` 在更贴近真实 runtime 生命周期里的 DEBUG HUD / normal-mode smoke
+    - 如需最终 completion audit，再把“已由 smoke host 验证”和“仍需真实 Codex App 手工验证”的项分开列清楚。
+
+## 2026-07-08 长期维护：in-app browser work_overlay_helper smoke
+- 本轮目标：
+  - 把真实浏览器 smoke 从 `file_watcher.degraded` 扩到 `work_overlay_helper.*`，避免只在单测和日志里证明 overlay helper 错误链路。
+- 执行过程：
+  - 新增本地 smoke 页：
+    - `renderer_hud_smoke_work_overlay_error.html`
+  - 在真实页面上下文里注入：
+    - `work_overlay_helper.state_read_failed`
+    - `Unable to read overlay state.`
+    - `{"stateFile":"work-overlay.json"}`
+  - 复用与 `file_watcher.degraded` 相同的页面内 `?smoke=select` / `?smoke=copy` 路径，避免依赖受限的浏览器快捷键。
+- 现场结果：
+  - DEBUG HUD 真实渲染：
+    - `work_overlay_helper.state_read_failed`
+    - `Unable to read overlay state.`
+    - `error · work_overlay_helper · 1x`
+    - `{"stateFile":"work-overlay.json"}`
+  - `select`
+    - DOM 中回写：
+      - `select: { "stateFile": "work-overlay.json" }`
+  - `copy`
+    - DOM 中回写：
+      - `copy: { "stateFile": "work-overlay.json" }`
+- 当前结论：
+  - `work_overlay_helper.*` 现在也已经拥有真实浏览器 smoke 证据，不再只停留在：
+    - runtime event / registry / diagnostic 自动化测试
+    - `renderer_fallback.log` 字段级断言
+  - 对 runtime errors panel 的 smoke host 级验证，目前已经覆盖两条关键错误链路：
+    - `file_watcher.degraded`
+    - `work_overlay_helper.state_read_failed`
+  - 下一步更适合进入 final completion audit，把：
+    - smoke host 已验证项
+    - 自动化测试已验证项
+    - 仍需真实 Codex App 手工确认项
+    明确拆开。
+
+## 2026-07-08 长期维护：active_session / cdp browser smoke
+- 本轮目标：
+  - 把 completion audit 里仍标为 `Partially proven` 的两条错误 HUD 证据补到浏览器 smoke：
+    - `active_session.unmatched_thread`
+    - `cdp.update_failed`
+- 已完成：
+  - 新增本地 smoke 页：
+    - `renderer_hud_smoke_active_session_error.html`
+    - `renderer_hud_smoke_cdp_error.html`
+  - in-app browser 真实页面验证结果：
+    - `active_session.unmatched_thread`
+      - 错误行渲染
+      - message 渲染
+      - context 渲染
+      - `select/copy` 均回写：
+        - `threadId`
+        - `selectionSource`
+        - `sessionPath`
+    - `cdp.update_failed`
+      - 错误行渲染
+      - message 渲染
+      - context 渲染
+      - `select/copy` 均回写：
+        - `failures`
+        - `status`
+- 当前结论：
+  - 现在四类关键 runtime errors 都已有两层证据：
+    - 自动化测试/diagnostic 字段级断言
+    - in-app browser smoke host 真实页面渲染与 `select/copy`
+  - 剩余真正难以本机强证的点，主要已经收缩到：
+    - 真实 Codex App end-to-end latency
+    - 真实 Codex App idle CPU / 无事件时无周期性工作
+    - 与 localhost smoke host 不同的真实 Codex App 页面生命周期差异
+
+## 2026-07-08 长期维护：completion audit matrix
+- 本轮目标：
+  - 把当前 worktree 的验收状态从会话式进度记录整理成独立 completion audit，便于最后收尾时逐项判断“已证明 / 部分证明 / 未本机证明”。
+- 已完成：
+  - 新增 [docs/HUD_RUNTIME_COMPLETION_AUDIT.md](/E:/Project/codex-usage-hud/docs/HUD_RUNTIME_COMPLETION_AUDIT.md)
+  - 审计覆盖来源：
+    - `task_plan.md`
+    - `docs/HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md`
+    - 当前自动化测试
+    - `renderer_latency_baseline.md`
+    - in-app browser smoke host 证据
+- 当前结论：
+  - 当前主要剩余项已经从“实现缺口”收敛为“证据强度缺口”：
+    - 真实 Codex App end-to-end latency
+    - 真实 Codex App idle CPU
+    - `active_session.*` / `cdp.update_failed` 的真实页面 smoke
+  - 这份 audit 文档可以直接作为下一轮 final completion audit 的工作底稿。
+
+## 2026-07-08 长期维护：final gate refresh
+- 本轮目标：
+  - 在 current worktree 上重跑最终自动门禁与 latency harness，刷新 final completion audit 的结论。
+- 本轮验证：
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py tests/test_file_watcher.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+  - `python tools/measure_renderer_latency.py --json-output renderer_latency_baseline.json --markdown-output renderer_latency_baseline.md` 通过，但最新 `Regression Budgets` 出现两条 `FAIL`：
+    - `current_session_parse_full`: `53.514ms / 50ms`
+    - `usage_summary_refresh_current_file`: `37.449ms / 25ms`
+- 当前结论：
+  - 这轮最初抓到两条 latency budget FAIL，但后续已定位为 harness 口径问题而不是明显的 runtime 退化。
+
+## 2026-07-08 长期维护：latency harness stabilization
+- 本轮目标：
+  - 调查并修正 `tools/measure_renderer_latency.py` 中导致 `current_session_parse_full` / `usage_summary_refresh_current_file` 偶发性超预算的量测口径问题。
+- 根因调查：
+  - 额外 benchmark 显示：
+    - `parse_file` 在独立量测下约 `30-40ms`
+    - `usage_summary_refresh_current_file` 在 temp copy 场景下约 `18-21ms`
+  - 说明 FAIL 更像 harness 工况而非产品主路径真实退化。
+  - 定位到两个问题：
+    - `current_session_parse_full` 直接量 live session 文件，会把当前 Codex 持续写入带来的抖动混进结果。
+    - `usage_summary_refresh_current_file` 没有显式 `allow_stale=True`，与“只刷新单文件贡献”的语义不完全一致。
+- 实现：
+  - `tools/measure_renderer_latency.py`
+    - `current_session_parse_full` 改为对稳定 temp copy 量测。
+    - `usage_summary_refresh_current_file` 改为显式 `allow_stale=True`。
+    - notes 增加说明：这两项都基于 selected session 的 temp copy，以避免 live session 并发写入污染本地解析基线。
+  - `tests/test_measure_renderer_latency.py`
+    - 新增 `test_measure_baseline_uses_temp_copy_for_full_parse_benchmark`
+    - 新增 `test_measure_baseline_uses_allow_stale_for_current_file_refresh_benchmark`
+- 本轮验证：
+  - `python -m pytest tests/test_measure_renderer_latency.py -q` 通过。
+  - `python tools/measure_renderer_latency.py --json-output renderer_latency_baseline.json --markdown-output renderer_latency_baseline.md` 通过。
+  - 最新 baseline 全 PASS：
+    - `current_session_parse_full`: `32.529 / 50`
+    - `usage_summary_refresh_current_file`: `18.339 / 25`
+    - `append_then_incremental_parse_and_payload`: `148.578 / 250`
+- 当前结论：
+  - 当前已不存在 open 的 regression budget FAIL。
+  - 剩余未完成项重新收缩为真实 Codex App live-runtime 证据，而不是 benchmark 或实现问题。
+
+## 2026-07-08 长期维护：live verification runbook
+- 本轮目标：
+  - 把剩余真实 Codex App 现场验证项从“口头建议”落成可执行 runbook。
+- 已完成：
+  - 新增 [docs/HUD_RUNTIME_LIVE_VERIFICATION.md](/E:/Project/codex-usage-hud/docs/HUD_RUNTIME_LIVE_VERIFICATION.md)
+  - 覆盖：
+    - DEBUG HUD ready row
+    - active-session live latency
+    - current-session live latency
+    - idle CPU / no background work
+    - normal-mode diagnostics
+- 当前结论：
+  - 现在收尾阶段已经有两份清晰文档分工：
+    - [HUD_RUNTIME_COMPLETION_AUDIT.md](/E:/Project/codex-usage-hud/docs/HUD_RUNTIME_COMPLETION_AUDIT.md)
+      说明“哪些已证明、哪些未证明”
+  - [HUD_RUNTIME_LIVE_VERIFICATION.md](/E:/Project/codex-usage-hud/docs/HUD_RUNTIME_LIVE_VERIFICATION.md)
+      说明“未证明项在真实 Codex App 里如何验证”
+
+## 2026-07-09 长期维护：mixed live acceptance automation
+- 本轮目标：
+  - 把现有 `HUD_RUNTIME_LIVE_VERIFICATION.md` 的人工 runbook 收口为一个混合自动化入口，避免每次都靠会话内逐条执行。
+- 已完成：
+  - 新增 `tools/run_live_acceptance.py`
+    - 统一编排 phase gate:
+      - `pytest`
+      - `compileall`
+      - `git diff --check`
+    - 复用 `tools/measure_renderer_latency.py` 输出 latency artifacts 与 regression budget 结论
+    - 汇总 runtime paths:
+      - `hud_settings.json`
+      - `daemon.log`
+      - `renderer_fallback.log`
+    - 支持 `--prepare-mode debug|normal|none`
+      - `debug`:
+        - 先 `codex-hud --stop`
+        - 再后台启动 `python -m codex_usage_hud --daemon`
+        - 自动注入 `CODEX_USAGE_HUD_DEBUG=1`
+      - `normal`:
+        - 同样 stop/start，但显式清掉 DEBUG 环境
+    - 生成：
+      - `live_acceptance_report.json`
+      - `live_acceptance_report.md`
+      - phase gate / latency 相关日志与 artifact
+  - 新增 `tests/test_run_live_acceptance.py`
+    - 覆盖 Markdown 报告格式
+    - 覆盖 `main()` 输出 JSON/Markdown
+    - 覆盖 `debug` prepare mode 的 stop/start orchestration
+  - 更新 `docs/HUD_RUNTIME_LIVE_VERIFICATION.md`
+    - 增加 `python tools/run_live_acceptance.py --prepare-mode debug`
+    - 增加 `python tools/run_live_acceptance.py --prepare-mode normal --skip-automated-checks`
+- 本轮验证：
+  - `python -m pytest tests/test_run_live_acceptance.py tests/test_measure_renderer_latency.py -q` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+  - `python tools/run_live_acceptance.py --skip-automated-checks --output-dir artifacts/live_acceptance/smoke` 通过。
+- 当前结论：
+  - live verification 现在已有一个稳定的一键入口，不再需要由 agent 在会话里逐条抄 runbook。
+  - 这仍然是“混合”验收，而不是全自动 UI 驱动：
+    - 机器负责 phase gate、latency harness、HUD 启停与报告落盘
+    - 人工仍负责真实 Codex App 窗口内的 latency / idle CPU / diagnostics 观察
+  - 后续如果要继续压缩人工步骤，最合理的下一层是在这个入口上追加可选的 Codex App UI 自动化，而不是重写报告与编排逻辑。
+
+## 2026-07-09 长期维护：first mixed live acceptance results
+- 本轮目标：
+  - 把第一次 `python tools/run_live_acceptance.py --prepare-mode debug` 的真实现场观察结果正式落档，并补上工具对人工观测与 idle CPU 采样的支持。
+- 现场结果：
+  - 产物目录：
+    - [artifacts/live_acceptance/20260709-094804](/E:/Project/codex-usage-hud/artifacts/live_acceptance/20260709-094804)
+  - 自动部分：
+    - `phase_gate_pytest` 通过
+    - `compileall` 通过
+    - `git diff --check` 通过
+    - `latency_harness` 全 PASS
+  - 人工部分：
+    - `active_session_latency`
+      - 结论：`fail`
+      - 观察：切换线程后，HUD 顶部“本会话”数据大约 `2-3s` 才切到新会话
+      - 备注：用户怀疑其中一部分可能来自 Codex App 自身线程加载，但从用户可见结果看仍远高于 `<150ms`
+    - `current_session_latency`
+      - 结论：`not-run`
+      - 原因：本轮没有单独量化“请求发出 -> 当前会话用量变化”的现场时延
+    - `idle_cpu`
+      - 结论：`not-run`
+      - 原因：本轮没有 Task Manager / 进程 CPU 采样记录
+- 新证据：
+  - `renderer_fallback.log` 在 `2026-07-09 09:48:10 +08:00` 新增：
+    - `active_session.unmatched_thread`
+  - `daemon.log` 在同日上午后续出现持续的：
+    - `renderer_hud_domain_update_failed`
+    - `CDP target discovery disconnected`
+  - 这说明真实 live run 不只是“人工感觉慢”，renderer/CDP 边界也存在明确异常信号。
+- 工具增强：
+  - `tools/run_live_acceptance.py`
+    - 新增 `--manual-observations`
+      - 可把人工观察结果结构化合并回报告
+    - 新增 `--idle-cpu-sample-seconds`
+      - 可对当前启动的 HUD 进程做简单 idle CPU 百分比采样
+  - 生成本轮人工观察 artifact：
+    - [manual_observations.json](/E:/Project/codex-usage-hud/artifacts/live_acceptance/20260709-094804/manual_observations.json)
+  - 已把该 artifact 内容回写到：
+    - [live_acceptance_report.json](/E:/Project/codex-usage-hud/artifacts/live_acceptance/20260709-094804/live_acceptance_report.json)
+    - [live_acceptance_report.md](/E:/Project/codex-usage-hud/artifacts/live_acceptance/20260709-094804/live_acceptance_report.md)
+- 本轮验证：
+  - `python -m pytest tests/test_run_live_acceptance.py -q` 通过。
+- 当前结论：
+  - “实现已完成、只差证明”的判断需要修正：
+    - 至少 `active session <150ms` 在真实可见路径上已经出现明确失败证据
+  - 下一步重点不再是继续补 smoke-host 证据，而是：
+    - 调查真实窗口里 `2-3s` visible switch latency 的来源
+    - 确认是否与 Codex App 页面加载、renderer bridge 到达时机、或 CDP target/binding 断链有关
+    - 用新工具补 current-session live latency 与 idle CPU 采样证据
+
+## 2026-07-09 长期维护：active-session live latency instrumentation
+- 本轮目标：
+  - 把 `active session` 现场延迟从“用户体感 2-3 秒”推进到可分段诊断的日志证据，同时先做一处低风险前端时序修正。
+- 实现：
+  - `src/codex_usage_hud/ui/renderer_hud.py`
+    - active-session 的 followup 不再只挂在 click/composer-send。
+    - `history.pushState` / `history.replaceState` / `popstate` 现在都走 `scheduleActiveSessionSendFollowup(...)`，而不是只发一次 `scheduleActiveSessionReport(...)`。
+    - sidebar row click 也改为显式 `scheduleActiveSessionSendFollowup("click")`，统一 followup 语义。
+  - `src/codex_usage_hud/cli.py`
+    - `observe_renderer_active_session()` 现在会记录：
+      - `reason`
+      - `matchedBy`
+      - `bridge_delay_ms`（基于 renderer payload 的 `observedAt` 与 Python 收到时刻估算）
+    - 新增 daemon log 行：
+      - `active_session_bridge_received ...`
+  - `src/codex_usage_hud/platforms/active_session.py`
+    - `observe_conversation_ref()` 新增可选参数：
+      - `bridge_delay_ms`
+      - `reason`
+      - `matched_by`
+    - `ACTIVE_SESSION_SWITCH` 日志现在追加：
+      - `bridge_delay_ms`
+      - `reason`
+      - `matched_by`
+    - tracker 现在保留最近一次 bridge 元数据，便于后续 unmatched / slow-switch 排障。
+- 测试：
+  - `tests/test_renderer_hud.py`
+    - 新增断言：history/popstate 也使用 active-session followup
+  - `tests/test_ui.py`
+    - 验证 renderer bridge payload 的 `reason` / `matchedBy` / `observedAt` 会透传到 tracker
+- 本轮验证：
+  - `python -m pytest tests/test_renderer_hud.py tests/test_active_session.py tests/test_ui.py -q -k "active_session or renderer_active_session or renderer_new_session or tracker_active_session_callback"` 通过。
+  - `python -m compileall -q src tests tools` 通过。
+  - `git diff --check` 通过。
+- 当前结论：
+  - 这轮还没有重新跑真实 Codex App，所以不能宣称 visible latency 已修复。
+  - 但下一轮 live run 至少会比之前多出两类高价值证据：
+    - renderer -> Python bridge delay
+    - active-session 上报的 `reason` / `matchedBy`
+  - 如果问题确实是“首次 history 报告太早，真正有效的是后面某个 followup”，这轮前端改动有机会直接缩短那种 `2-3s` 可见切换延迟。
+
+## 2026-07-09 长期维护：second live run latency split
+- 本轮目标：
+  - 用新的 `active_session_bridge_received` / `active_session_refresh_snapshot` / `active_session_refresh_update` 日志，把 `2-3s` visible switch latency 分段定位。
+- 现场结论：
+  - 最新 run:
+    - [artifacts/live_acceptance/20260709-103850/live_acceptance_report.json](/E:/Project/codex-usage-hud/artifacts/live_acceptance/20260709-103850/live_acceptance_report.json)
+  - `renderer -> Python bridge` 不慢：
+    - `active_session_bridge_received` 的 `bridge_delay_ms` 基本都在 `1-6ms`
+    - 说明点击线程后，renderer bridge 几乎立刻把正确的 `session_id/title` 送到了 Python
+  - visible latency 主要卡在 `active_session_changed` 之后：
+    - `10:39:13 -> 10:39:16`
+      - `build_ms = 941.8`
+      - `update_ms = 16.9`
+      - `total_ms = 958.8`
+    - `10:39:18 -> 10:39:19`
+      - `build_ms = 674.2`
+      - `update_ms = 292.6`
+      - `total_ms = 966.9`
+    - `10:39:20 -> 10:39:22`
+      - `build_ms = 1200.2`
+      - `update_ms = 890.9`
+      - `total_ms = 2091.2`
+    - `10:39:23 -> 10:39:25`
+      - `build_ms = 1431.9`
+      - `update_ms = 568.4`
+      - `total_ms = 2000.5`
+    - `10:39:34 -> 10:39:36`
+      - `build_ms = 1139.3`
+      - `update_ms = 571.0`
+      - `total_ms = 1710.4`
+    - `10:39:39 -> 10:39:41`
+      - `build_ms = 954.7`
+      - `update_ms = 803.8`
+      - `total_ms = 1758.6`
+  - 因此：
+    - `2-3s` 不是 bridge 慢
+    - 主要瓶颈是：
+      - `build_snapshot()` 在 session switch 时经常要 `0.6s - 1.4s`
+      - `client.update(...)` / renderer payload apply 还会再吃掉 `0.3s - 0.9s`
+- 额外发现：
+  - 最新 live acceptance 自动采样：
+    - `idle_cpu_sample = 1.235%`
+    - 当前也未满足“空闲无持续 CPU work”的预期
+  - `renderer_fallback.log` 在本轮仍新增：
+    - `active_session.unmatched_thread`
+  - 老的 `CDP target discovery disconnected` 风暴日志仍存在，但从这轮 active-session split 看，它不是导致 thread switch `2-3s` 的唯一主因。
+  - 当前结论：
+  - 下一个真正该做的不是继续补 bridge 日志，而是优化：
+    - session switch 时的 `build_snapshot()` 代价
+    - renderer payload update / apply 代价
+  - 尤其要优先调查为什么某些 thread switch 的 `update_ms` 还能到 `800ms+`，以及为什么切到历史较重会话时 `build_ms` 会稳定到 `1s+`
+
+## 2026-07-09 长期维护：manual sign-off
+- 用户结论：
+  - 对本轮 3 个 live 验收点，用户已明确表示“验收通过，不再深究”：
+    - active-session live switch
+    - current-session live refresh
+    - idle CPU / idle behavior
+- 项目管理结论：
+  - 这意味着后续工作不再需要继续为这些 live 指标做深挖优化或继续补现场证据。
+  - 剩余工作转为收尾：
+    - 更新 audit / plan / runbook，使其反映“用户已接受当前行为”
+    - 删除本轮新增的 active-session 时序 instrumentation
+    - 做最后一次代码整理、提交、PR 或发布准备
+
+## 2026-07-09 长期维护：instrumentation cleanup
+- 本轮目标：
+  - 按用户要求删除这轮为定位 active-session live latency 临时加入的诊断埋点，保留已经进入产品路径的低风险行为修正。
+- 已完成：
+  - 删除 `cli.py` 中的临时 active-session bridge / refresh 时序日志：
+    - `active_session_bridge_received`
+    - `active_session_refresh_snapshot`
+    - `active_session_refresh_update`
+  - 删除 `ActiveSessionTracker` 中仅用于这轮诊断的 bridge 元数据字段与方法参数：
+    - `latest_bridge_delay_ms`
+    - `latest_bridge_reason`
+    - `latest_bridge_matched_by`
+    - `bridge_delay_ms`
+    - `reason`
+    - `matched_by`
+  - 保留前端 active-session followup 的行为修正：
+    - history / replaceState / popstate 继续走 followup
+    - sidebar click 继续使用 `scheduleActiveSessionSendFollowup("click")`
+  - 回收对应测试断言，恢复到无诊断埋点版本。
+- 本轮验证：
+  - `python -m pytest tests/test_ui.py -q -k "active_session_bridge_event_without_cdp_poll or renderer_new_session_marker or active_session_event_during_wait"` 通过。
+- 当前结论：
+  - 收尾状态已经满足：
+    - 用户验收通过
+    - 临时诊断埋点已移除
+    - 剩余仅是整理 diff、提交、PR 或发布准备
 
 ---
 *每个阶段完成后或遇到错误时更新此文件。*

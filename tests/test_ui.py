@@ -503,6 +503,13 @@ class VisualAnchorGeometryTests(unittest.TestCase):
         self.assertEqual((x, y, width, height), (538, 672, 347, 32))
 
 
+def _last_renderer_diagnostic_record(text: str) -> dict[str, object]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        raise AssertionError("renderer_fallback.log had no records")
+    return json.loads(lines[-1])
+
+
 class BudgetHelperTests(unittest.TestCase):
     def test_parse_thresholds_accepts_percent_or_fraction(self) -> None:
         self.assertEqual(parse_thresholds("50,0.8,90"), [0.5, 0.8, 0.9])
@@ -692,6 +699,64 @@ class BudgetHelperTests(unittest.TestCase):
                 )
             )
 
+    def test_renderer_budget_aggregate_skips_settings_only_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            current = Path(temp_dir) / "sessions" / "current.jsonl"
+            current.parent.mkdir()
+            current.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(session_path=current)
+            signature = ("sessions", "day", "week")
+
+            self.assertFalse(
+                cli_module._renderer_should_refresh_budget_aggregate(
+                    latest_snapshot=snapshot,
+                    latest_budget_signature=signature,
+                    budget_signature=signature,
+                    file_change_reasons={"settings"},
+                    file_change_paths={Path(temp_dir) / "hud_settings.json"},
+                )
+            )
+
+    def test_renderer_budget_aggregate_skips_known_non_current_session_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            current = root / "current.jsonl"
+            other = root / "other.jsonl"
+            root.mkdir()
+            current.write_text("{}\n", encoding="utf-8")
+            other.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(session_path=current)
+            signature = ("sessions", 1, "day", "week")
+
+            self.assertFalse(
+                cli_module._renderer_should_refresh_budget_aggregate(
+                    latest_snapshot=snapshot,
+                    latest_budget_signature=signature,
+                    budget_signature=signature,
+                    file_change_reasons={"sessions-root"},
+                    file_change_paths={other},
+                )
+            )
+
+    def test_renderer_budget_aggregate_refreshes_for_unknown_sessions_root_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "sessions"
+            current = root / "current.jsonl"
+            root.mkdir()
+            current.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(session_path=current)
+            signature = ("sessions", 1, "day", "week")
+
+            self.assertTrue(
+                cli_module._renderer_should_refresh_budget_aggregate(
+                    latest_snapshot=snapshot,
+                    latest_budget_signature=signature,
+                    budget_signature=signature,
+                    file_change_reasons={"sessions-root"},
+                    file_change_paths=set(),
+                )
+            )
+
     def test_build_snapshot_can_skip_active_work_items(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -741,6 +806,53 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(summarize_kwargs["allow_stale"])
         self.assertFalse(summarize_kwargs["force_rescan"])
         self.assertEqual(summarize_kwargs["refresh_paths"], (session_path,))
+
+    def test_build_snapshot_can_refresh_known_non_current_budget_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_path = root / "session.jsonl"
+            other_path = root / "other.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            other_path.write_text("{}\n", encoding="utf-8")
+            snapshot = ParsedSession(status="parsed", session_path=session_path)
+            context = SimpleNamespace(
+                reload_user_config=MagicMock(),
+                session_resolver=SimpleNamespace(
+                    session_id="",
+                    session_file=None,
+                    resolve=MagicMock(return_value=(session_path, "renderer:thread")),
+                ),
+                sessions_root=root,
+                parser=SimpleNamespace(
+                    parse_file_incremental=MagicMock(return_value=(snapshot, object()))
+                ),
+                current_session_tail_state=None,
+                sse_tracker=None,
+                active_session_tracker=None,
+                visible_app_error_cache=SimpleNamespace(
+                    resolve=MagicMock(return_value="")
+                ),
+                platform=SimpleNamespace(get_active_app_error=MagicMock(return_value="")),
+                user_config=UserConfig.defaults(),
+                usage_cache=SimpleNamespace(
+                    summarize=MagicMock(return_value=(UsageSummary(), UsageSummary()))
+                ),
+                daily_budget_usd=100.0,
+                weekly_budget_usd=400.0,
+                budget_thresholds=[],
+            )
+
+            cli_module.build_snapshot(
+                context,
+                refresh_budget_aggregate=False,
+                refresh_budget_paths=(other_path,),
+                refresh_active_work_items=False,
+            )
+
+        summarize_kwargs = context.usage_cache.summarize.call_args.kwargs
+        self.assertTrue(summarize_kwargs["allow_stale"])
+        self.assertFalse(summarize_kwargs["force_rescan"])
+        self.assertEqual(summarize_kwargs["refresh_paths"], (other_path,))
 
     def test_build_snapshot_uses_incremental_parser_for_current_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -849,6 +961,16 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("runtime_error_recorded", diagnostic)
         self.assertIn("active_session.unmatched_thread", diagnostic)
         self.assertIn("thread-123", diagnostic)
+        record = _last_renderer_diagnostic_record(diagnostic)
+        self.assertEqual(record["stage"], "runtime_error_recorded")
+        self.assertEqual(record["source"], "active_session")
+        self.assertEqual(record["severity"], "error")
+        self.assertEqual(record["code"], "active_session.unmatched_thread")
+        self.assertEqual(record["message"], payload[0]["message"])
+        self.assertEqual(record["context"]["threadId"], "thread-123")
+        self.assertEqual(record["context"]["selectionSource"], "renderer-unmatched")
+        self.assertIn("firstSeenAt", record)
+        self.assertIn("lastSeenAt", record)
 
     def test_build_snapshot_treats_renderer_waiting_as_non_error_waiting_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -921,15 +1043,25 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("runtime_error_recorded", diagnostic)
         self.assertIn("cdp.update_failed", diagnostic)
         self.assertIn("renderer update function did not acknowledge payload", diagnostic)
+        record = _last_renderer_diagnostic_record(diagnostic)
+        self.assertEqual(record["stage"], "runtime_error_recorded")
+        self.assertEqual(record["source"], "cdp")
+        self.assertEqual(record["severity"], "error")
+        self.assertEqual(record["code"], "cdp.update_failed")
+        self.assertEqual(record["message"], payload[0]["message"])
+        self.assertEqual(record["context"]["failures"], 2)
+        self.assertEqual(record["context"]["status"], "failed")
+        self.assertIn("firstSeenAt", record)
+        self.assertIn("lastSeenAt", record)
 
-    def test_renderer_budget_aggregate_refreshes_for_non_current_session_change(self) -> None:
+    def test_renderer_budget_aggregate_refreshes_for_non_jsonl_sessions_root_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "sessions"
             current = root / "current.jsonl"
-            other = root / "other.jsonl"
+            other = root / "notes.txt"
             root.mkdir()
             current.write_text("{}\n", encoding="utf-8")
-            other.write_text("{}\n", encoding="utf-8")
+            other.write_text("changed\n", encoding="utf-8")
             snapshot = ParsedSession(session_path=current)
             signature = ("sessions", 1, "day", "week")
 
@@ -1315,6 +1447,158 @@ class BudgetHelperTests(unittest.TestCase):
             )
             self.assertEqual(overlay.take_commands(), [])
 
+    def test_work_overlay_command_pump_uses_file_watcher_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay.take_commands = MagicMock(return_value=[])
+            overlay.mark_switch_completed = MagicMock()
+            session_controller = MagicMock()
+            watchers: list[object] = []
+
+            class FakeWatcher:
+                def __init__(self, callback: Callable[[set[str], set[Path]], None], **kwargs: object) -> None:
+                    self.callback = callback
+                    self.kwargs = kwargs
+                    self.specs = []
+                    self.closed = False
+                    watchers.append(self)
+
+                def update(self, specs: object) -> None:
+                    self.specs = list(specs)
+
+                def close(self) -> None:
+                    self.closed = True
+
+            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
+                pump = cli_module._WorkOverlayCommandPump(
+                    overlay,
+                    session_controller,
+                    poll_ms=60,
+                )
+                pump.start()
+
+            self.assertEqual(len(watchers), 1)
+            watcher = watchers[0]
+            self.assertGreaterEqual(watcher.kwargs["fallback_poll_seconds"], 1.0)
+            self.assertEqual(len(watcher.specs), 1)
+            self.assertEqual(watcher.specs[0].path, overlay._command_path)
+            self.assertEqual(watcher.specs[0].reason, "work-overlay-command")
+            overlay.take_commands.assert_called_once()
+
+            watcher.callback({"work-overlay-command"}, {overlay._command_path})
+            self.assertEqual(overlay.take_commands.call_count, 2)
+
+            pump.close()
+            self.assertTrue(watcher.closed)
+
+    def test_work_overlay_command_pump_publishes_helper_runtime_error(self) -> None:
+        runtime_events = RuntimeEventBus(clock=lambda: 123.0)
+        registry = RuntimeErrorRegistry(clock=lambda: 123.0)
+        overlay = SimpleNamespace(
+            command_path=Path(tempfile.gettempdir()) / "work-overlay-commands.jsonl",
+            take_commands=MagicMock(
+                return_value=[
+                    {
+                        "action": "runtimeError",
+                        "source": "work_overlay_helper",
+                        "code": "state_read_failed",
+                        "message": "Unable to read overlay state.",
+                        "severity": "error",
+                        "context": {"stateFile": "work-overlay.json"},
+                    }
+                ]
+            ),
+        )
+        session_controller = MagicMock()
+
+        handled = cli_module._handle_work_overlay_commands(
+            overlay,
+            session_controller,
+            runtime_events=runtime_events,
+            runtime_errors=registry,
+        )
+
+        self.assertEqual(handled, 1)
+        session_controller.activate_session.assert_not_called()
+        events = runtime_events.drain()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].type, "runtime_error")
+        self.assertEqual(events[0].source, "work_overlay_helper")
+        self.assertEqual(
+            events[0].error["code"],
+            "work_overlay_helper.state_read_failed",
+        )
+        self.assertEqual(
+            events[0].error["context"]["stateFile"],
+            "work-overlay.json",
+        )
+        self.assertEqual(
+            events[0].context["error"]["context"]["stateFile"],
+            "work-overlay.json",
+        )
+        payload = registry.to_payload()
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["source"], "work_overlay_helper")
+        self.assertEqual(
+            payload[0]["code"],
+            "work_overlay_helper.state_read_failed",
+        )
+
+    def test_work_overlay_helper_runtime_error_writes_normal_mode_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_events = RuntimeEventBus(clock=lambda: 150.0)
+            registry = RuntimeErrorRegistry(clock=lambda: 150.0)
+            context = SimpleNamespace(runtime_errors=registry)
+            cli_module._ensure_runtime_error_diagnostics(context)
+            overlay = SimpleNamespace(
+                command_path=root / "work-overlay-commands.jsonl",
+                take_commands=MagicMock(
+                    return_value=[
+                        {
+                            "action": "runtimeError",
+                            "source": "work_overlay_helper",
+                            "code": "state_read_failed",
+                            "message": "Unable to read overlay state.",
+                            "severity": "error",
+                            "context": {"stateFile": "work-overlay.json"},
+                        }
+                    ]
+                ),
+            )
+            session_controller = MagicMock()
+
+            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root):
+                handled = cli_module._handle_work_overlay_commands(
+                    overlay,
+                    session_controller,
+                    runtime_events=runtime_events,
+                    runtime_errors=registry,
+                )
+                diagnostic = (root / "renderer_fallback.log").read_text(
+                    encoding="utf-8"
+                )
+
+        self.assertEqual(handled, 1)
+        self.assertIn("runtime_error_recorded", diagnostic)
+        self.assertIn("work_overlay_helper.state_read_failed", diagnostic)
+        self.assertIn("Unable to read overlay state.", diagnostic)
+        record = _last_renderer_diagnostic_record(diagnostic)
+        self.assertEqual(record["stage"], "runtime_error_recorded")
+        self.assertEqual(record["source"], "work_overlay_helper")
+        self.assertEqual(record["severity"], "error")
+        self.assertEqual(
+            record["code"],
+            "work_overlay_helper.state_read_failed",
+        )
+        self.assertEqual(record["message"], "Unable to read overlay state.")
+        self.assertEqual(record["context"], {"stateFile": "work-overlay.json"})
+        self.assertEqual(record["firstSeenAt"], 150.0)
+        self.assertEqual(record["lastSeenAt"], 150.0)
+
     def test_tk_work_overlay_command_pump_prepares_window_before_switching_session(self) -> None:
         command = {
             "action": "activateSession",
@@ -1441,6 +1725,40 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["items"], [{"id": "thread-1"}])
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
+
+    def test_desktop_work_overlay_skips_unchanged_state_until_keepalive(self) -> None:
+        item = WorkStatusItem(
+            id="thread-1",
+            title="Desktop bubble",
+            session_id="thread-1",
+            status="running",
+            status_label="运行中",
+            detail="正在处理",
+        )
+        overlay = DesktopWorkOverlay(item_limit=2)
+
+        with (
+            patch.object(overlay, "_runtime_available", return_value=True),
+            patch.object(overlay, "_theme_payload", return_value={"variant": "dark"}),
+            patch.object(overlay, "_start"),
+            patch("codex_usage_hud.cli.write_json_object") as write_json,
+        ):
+            overlay.update([item])
+            overlay.update([item])
+
+        write_json.assert_called_once()
+
+    def test_work_overlay_helper_uses_qfilesystemwatcher_for_state_updates(self) -> None:
+        source = (
+            PROJECT_ROOT
+            / "src"
+            / "codex_usage_hud"
+            / "ui"
+            / "work_overlay_qt.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("QFileSystemWatcher", source)
+        self.assertNotIn("poll_timer.start(WORK_OVERLAY_POLL_MS)", source)
 
     def test_desktop_work_overlay_appends_transition_audit_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1634,7 +1952,7 @@ class BudgetHelperTests(unittest.TestCase):
             overlay._process = SimpleNamespace(poll=MagicMock(return_value=None))
 
             with (
-                patch("codex_usage_hud.cli.time.monotonic", return_value=7.0),
+                patch("codex_usage_hud.cli.time.monotonic", return_value=17.0),
                 patch("codex_usage_hud.cli.write_json_object") as write_json,
                 patch.object(overlay, "_start") as start,
             ):
@@ -1647,6 +1965,16 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload_arg["theme"], {"variant": "dark"})
         self.assertFalse(payload_arg["close"])
         start.assert_not_called()
+
+    def test_desktop_work_overlay_keep_alive_uses_conservative_idle_interval(self) -> None:
+        self.assertGreaterEqual(
+            cli_module.WORK_OVERLAY_KEEPALIVE_SECONDS,
+            cli_module.WORK_OVERLAY_STALE_SECONDS * 0.5,
+        )
+        self.assertLess(
+            cli_module.WORK_OVERLAY_KEEPALIVE_SECONDS,
+            cli_module.WORK_OVERLAY_STALE_SECONDS,
+        )
 
     def test_desktop_work_overlay_keep_alive_restarts_clean_helper_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1663,7 +1991,7 @@ class BudgetHelperTests(unittest.TestCase):
             )
 
             with (
-                patch("codex_usage_hud.cli.time.monotonic", return_value=7.0),
+                patch("codex_usage_hud.cli.time.monotonic", return_value=17.0),
                 patch("codex_usage_hud.cli.write_json_object"),
                 patch.object(overlay, "_start") as start,
                 patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
@@ -9066,26 +9394,28 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_legacy_tk_hud_session_returns_renderer_only_unavailable(self) -> None:
         loading = SimpleNamespace(close=MagicMock())
 
-        exit_code = run_tk_hud_session(
-            SimpleNamespace(compact=False),
-            lock_already_held=True,
-            loading_feedback=loading,
-        )
+        with patch("codex_usage_hud.cli.HudInstanceLock") as instance_lock:
+            exit_code = run_tk_hud_session(
+                SimpleNamespace(compact=False),
+                loading_feedback=loading,
+            )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         loading.close.assert_called_once_with()
+        instance_lock.assert_not_called()
 
     def test_legacy_qt_hud_session_returns_renderer_only_unavailable(self) -> None:
         loading = SimpleNamespace(close=MagicMock())
 
-        exit_code = run_qt_hud_session(
-            SimpleNamespace(compact=False),
-            lock_already_held=True,
-            loading_feedback=loading,
-        )
+        with patch("codex_usage_hud.cli.HudInstanceLock") as instance_lock:
+            exit_code = run_qt_hud_session(
+                SimpleNamespace(compact=False),
+                loading_feedback=loading,
+            )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         loading.close.assert_called_once_with()
+        instance_lock.assert_not_called()
 
     def test_legacy_tk_window_session_stub_closes_context(self) -> None:
         fake_context = SimpleNamespace(close=MagicMock())
@@ -9218,7 +9548,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             finally:
                 context.close()
 
-    def test_legacy_active_session_diagnostics_flag_is_opt_in(self) -> None:
+    def test_legacy_active_session_diagnostics_flag_is_accepted_but_noop(self) -> None:
         default_args = cli_module.build_parser().parse_args([])
         diagnostic_args = cli_module.build_parser().parse_args(
             ["--legacy-active-session-diagnostics"]
@@ -9227,7 +9557,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertFalse(default_args.legacy_active_session_diagnostics)
         self.assertTrue(diagnostic_args.legacy_active_session_diagnostics)
 
-    def test_build_runtime_context_can_enable_legacy_active_session_diagnostics(self) -> None:
+    def test_build_runtime_context_ignores_legacy_active_session_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             platform = SimpleNamespace(
@@ -9266,11 +9596,53 @@ class DaemonLifecycleTests(unittest.TestCase):
                 context = cli_module.build_runtime_context(args)
 
             try:
-                platform.suspend_native_active_title.assert_not_called()
+                platform.suspend_native_active_title.assert_called_once_with(True)
                 tracker.start.assert_called_once()
-                self.assertTrue(
+                self.assertFalse(
                     tracker_class.call_args.kwargs["start_background_watcher"]
                 )
+            finally:
+                context.close()
+
+    def test_build_runtime_context_disables_pre_send_estimator_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            platform = SimpleNamespace(
+                get_codex_data_dir=MagicMock(return_value=temp_root),
+                suspend_native_active_title=MagicMock(),
+            )
+            settings_store = SimpleNamespace(
+                load=MagicMock(return_value=UserConfig.defaults()),
+                mtime=MagicMock(return_value=None),
+            )
+            tracker = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            args = SimpleNamespace(
+                sessions_root=None,
+                sse_db=None,
+                state_db=None,
+                active_session_poll_ms=250,
+                no_follow_active_session=False,
+                session_id=None,
+                session_file=None,
+                auto_switch_idle_seconds=30.0,
+                no_sse=True,
+                poll_ms=500,
+                hud_mode="renderer",
+                runtime_hud_mode="renderer",
+            )
+
+            with (
+                patch("codex_usage_hud.cli.get_current_platform", return_value=platform),
+                patch("codex_usage_hud.cli.UserConfigStore", return_value=settings_store),
+                patch(
+                    "codex_usage_hud.cli.ActiveSessionTracker",
+                    return_value=tracker,
+                ),
+            ):
+                context = cli_module.build_runtime_context(args)
+
+            try:
+                self.assertIsNone(context.pre_send_estimator)
             finally:
                 context.close()
 
@@ -10117,9 +10489,89 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(payload[0]["code"], "file_watcher.degraded")
         self.assertEqual(payload[0]["severity"], "warning")
         self.assertIn("sessions-root", payload[0]["context"]["reasons"])
+        self.assertEqual(payload[0]["context"]["mode"], "polling")
+        self.assertEqual(payload[0]["context"]["cause"], "native_unavailable")
         self.assertIn("runtime_error_recorded", diagnostic)
         self.assertIn("file_watcher.degraded", diagnostic)
         self.assertIn("Renderer file watcher is using polling fallback.", diagnostic)
+        record = _last_renderer_diagnostic_record(diagnostic)
+        self.assertEqual(record["stage"], "runtime_error_recorded")
+        self.assertEqual(record["source"], "file_watcher")
+        self.assertEqual(record["severity"], "warning")
+        self.assertEqual(record["code"], "file_watcher.degraded")
+        self.assertEqual(
+            record["message"],
+            "Renderer file watcher is using polling fallback.",
+        )
+        self.assertEqual(record["context"]["mode"], "polling")
+        self.assertEqual(record["context"]["cause"], "native_unavailable")
+        self.assertIn("firstSeenAt", record)
+        self.assertIn("lastSeenAt", record)
+
+    def test_renderer_file_event_source_resolves_degraded_when_event_driven_recovers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wake_event = threading.Event()
+            registry = RuntimeErrorRegistry(clock=lambda: 70.0)
+            context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=root / "hud_settings.json"),
+                session_index_path=root / "session_index.jsonl",
+                state_db_path=root / "state_5.sqlite",
+                sessions_root=root / "sessions",
+                runtime_errors=registry,
+            )
+
+            class FakeWatcher:
+                event_driven = False
+                polling_cause = "native_unavailable"
+
+                def __init__(self, callback, **kwargs):
+                    del callback, kwargs
+
+                def update(self, specs):
+                    self.specs = list(specs)
+
+                def close(self):
+                    return None
+
+            with (
+                patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root),
+            ):
+                source = cli_module._RendererFileEventSource(
+                    context,
+                    wake_event,
+                    debounce_seconds=0,
+                )
+                first_session_path = root / "sessions" / "one.jsonl"
+                second_session_path = root / "sessions" / "two.jsonl"
+                source.update_session_path(first_session_path)
+                self.assertEqual(len(registry.to_payload()), 1)
+                source._watcher.event_driven = True
+                source._watcher.polling_cause = ""
+                source.update_session_path(second_session_path)
+                source.close()
+                diagnostic = (root / "renderer_fallback.log").read_text(
+                    encoding="utf-8"
+                )
+
+        self.assertEqual(registry.to_payload(), [])
+        self.assertIn("runtime_error_resolved", diagnostic)
+        self.assertIn("file_watcher.degraded", diagnostic)
+        record = json.loads(diagnostic.strip().splitlines()[-1])
+        self.assertEqual(record["stage"], "runtime_error_resolved")
+        self.assertEqual(record["source"], "file_watcher")
+        self.assertEqual(record["severity"], "warning")
+        self.assertEqual(record["code"], "file_watcher.degraded")
+        self.assertEqual(
+            record["message"],
+            "Renderer file watcher is using polling fallback.",
+        )
+        self.assertEqual(record["context"]["cause"], "native_unavailable")
+        self.assertEqual(record["firstSeenAt"], 70.0)
+        self.assertEqual(record["lastSeenAt"], 70.0)
 
     def test_renderer_file_event_source_records_overflow_without_polluting_reasons(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10283,6 +10735,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         build_snapshot.assert_called_once_with(
             fake_context,
             refresh_budget_aggregate=True,
+            refresh_budget_paths=(),
         )
         fake_client.update.assert_called_once()
         self.assertEqual(fake_work_overlay.update.call_count, 1)
@@ -10388,6 +10841,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 timeout_seconds=1.0,
                 take_settings_command=MagicMock(return_value=None),
                 update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
                 close=MagicMock(),
             )
             fake_work_overlay = MagicMock()
@@ -11429,8 +11883,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(fake_client.update_payload.call_count, 1)
         partial_payload = fake_client.update_payload.call_args.args[0]
         self.assertEqual(set(partial_payload["payloadDomains"]), {"currentSession", "settings"})
-        self.assertTrue(partial_payload["preSendHasPrices"])
-        self.assertGreater(partial_payload["preSendInputPrice"], 0.0)
+        self.assertFalse(partial_payload["preSendHasPrices"])
+        self.assertEqual(partial_payload["preSendInputPrice"], 0.0)
         self.assertIn("gpt-5.5", partial_payload["settings"]["model_prices"])
         self.assertNotIn("topProgress", partial_payload)
 
@@ -11717,6 +12171,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 timeout_seconds=1.0,
                 take_settings_command=MagicMock(return_value=None),
                 update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
                 close=MagicMock(),
             )
             fake_work_overlay = MagicMock()
@@ -11793,6 +12248,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 timeout_seconds=1.0,
                 take_settings_command=MagicMock(return_value=None),
                 update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
                 close=MagicMock(),
             )
             fake_work_overlay = MagicMock()
@@ -11812,7 +12268,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
                 def start() -> str:
                     active_session_callback(
-                        {"sessionId": "thread-1", "title": "Live Thread"}
+                        {
+                            "sessionId": "thread-1",
+                            "title": "Live Thread",
+                            "reason": "click",
+                            "matchedBy": "session-id",
+                            "observedAt": int(time.time() * 1000) - 120,
+                        }
                     )
                     return "http://127.0.0.1:8765"
 
@@ -11983,6 +12445,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 timeout_seconds=1.0,
                 take_settings_command=MagicMock(return_value=None),
                 update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
                 close=MagicMock(),
             )
             fake_work_overlay = MagicMock()
@@ -12048,7 +12511,12 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 130)
         self.assertEqual(build_snapshot.call_count, 3)
-        self.assertEqual(fake_client.update.call_count, 3)
+        self.assertEqual(fake_client.update.call_count, 2)
+        self.assertEqual(fake_client.update_payload.call_count, 1)
+        partial_payload = fake_client.update_payload.call_args.args[0]
+        self.assertEqual(set(partial_payload["payloadDomains"]), {"sessionSwitch"})
+        self.assertNotIn("topDetails", partial_payload)
+        self.assertNotIn("requestRows", partial_payload)
         self.assertEqual(
             build_snapshot.call_args_list[1].kwargs.get("refresh_active_work_items"),
             False,

@@ -1,0 +1,19 @@
+{
+  "debug_ready_row": {
+    "status": "not-run",
+    "note": "This run focused on the three main live checks. No separate ready-row confirmation was recorded."
+  },
+  "active_session_latency": {
+    "status": "fail",
+    "observed_ms": 2500,
+    "note": "User observed that after switching threads, the HUD top-line session data visibly changed only after about 2-3 seconds. Some portion may be Codex App thread loading time, but the visible result is still far above the <150ms target."
+  },
+  "current_session_latency": {
+    "status": "not-run",
+    "note": "No separate quantified observation was captured for current-session request or usage refresh latency in this run."
+  },
+  "idle_cpu": {
+    "status": "not-run",
+    "note": "No Task Manager or process CPU capture was recorded during the 60-second idle window."
+  }
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ from urllib.parse import urlparse
 
 from .. import __version__
 from ..config import UserConfig, warning_dismissed_today
+from ..config import DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED
 from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
 from ..core.runtime_errors import RuntimeErrorEvent
 from ..platforms.cdp_probe import (
@@ -37,12 +39,14 @@ RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
 RENDERER_HUD_VERSION = "18"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
+SLOW_RENDERER_UPDATE_LOG_MS = 250.0
 ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
 SETTINGS_COMMAND_BINDING_NAME = "codexUsageHudSettingsCommand"
 COMPOSER_ATTACHMENTS_BINDING_NAME = "codexUsageHudComposerAttachments"
 LAYOUT_BINDING_NAME = "codexUsageHudLayout"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
+_LOGGER = logging.getLogger("codex_usage_hud.ui.renderer_hud")
 REMOVE_RENDERER_HUD_SCRIPT = (
     "(() => {"
     "let existed = false;"
@@ -64,6 +68,7 @@ REMOVE_RENDERER_HUD_SCRIPT = (
 )
 
 _COST_ESTIMATOR = CostEstimator()
+COMPOSER_TIKTOKEN_BADGE_ENABLED = DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED
 
 
 def set_cost_estimator(estimator: CostEstimator) -> None:
@@ -84,7 +89,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 RENDERER_HUD_SCRIPT = r"""
 (() => {
-  const version = "23";
+  const version = "24";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -129,6 +134,7 @@ RENDERER_HUD_SCRIPT = r"""
   const layoutReportSignatureName = "__codexUsageHudLayoutSignature";
   const staleUpdateMs = 10000;
   const composerAttachmentsDebounceMs = 80;
+  const composerBadgeEnabled = __COMPOSER_TIKTOKEN_BADGE_ENABLED__;
   let topSlotCache = null;
   let pendingSyncPanels = null;
   let cachedHeaderNode = null;
@@ -2424,7 +2430,9 @@ RENDERER_HUD_SCRIPT = r"""
       ? `<button class="codex-usage-hud-settings-button" data-action="settings-open" title="设置" aria-label="设置">⚙</button>`
       : "";
     const tokenBadgeMarkup = name === "request"
-      ? `<span class="codex-usage-hud-token-badge" data-composer-badge="idle"><span class="codex-usage-hud-token-badge-text" data-field="requestComposerTokens">TikToken:0 Ts</span></span>`
+      ? (composerBadgeEnabled
+        ? `<span class="codex-usage-hud-token-badge" data-composer-badge="idle"><span class="codex-usage-hud-token-badge-text" data-field="requestComposerTokens">TikToken:0 Ts</span></span>`
+        : "")
       : "";
     const updateButtonMarkup = name === "top"
       ? `<button class="codex-usage-hud-update-button" data-action="update-action" title="" aria-label="" hidden>↓</button>`
@@ -2435,7 +2443,7 @@ RENDERER_HUD_SCRIPT = r"""
     return `
       <div class="codex-usage-hud-panel ${PANEL[name].className}" data-panel="${name}" data-expanded="false" role="status" aria-live="polite">
         ${resizeEdgesMarkup()}
-        <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}" data-has-badge="${name === "request" ? "true" : "false"}">
+        <div class="codex-usage-hud-collapsed" data-has-settings="${name === "top" ? "true" : "false"}" data-has-badge="${name === "request" && composerBadgeEnabled ? "true" : "false"}">
           ${leftControlsMarkup}
           <button class="codex-usage-hud-main" data-action="toggle" data-has-glyph="${glyph ? "true" : "false"}" aria-label="${ariaLabel}">
             ${glyphMarkup}
@@ -2585,7 +2593,9 @@ RENDERER_HUD_SCRIPT = r"""
   function settingsChromeMarkup() {
     return `
       <div id="${settingsModalId}" class="codex-usage-hud-settings-modal" hidden></div>
-      <div class="codex-usage-hud-token-breakdown" data-field="requestComposerBreakdown" role="tooltip" hidden></div>
+      ${composerBadgeEnabled
+        ? `<div class="codex-usage-hud-token-breakdown" data-field="requestComposerBreakdown" role="tooltip" hidden></div>`
+        : ""}
       <div class="codex-usage-hud-runtime-errors" data-field="runtimeErrorsPanel" hidden></div>
     `;
   }
@@ -3106,15 +3116,15 @@ RENDERER_HUD_SCRIPT = r"""
       originalReplaceState,
       pushState: function(...args) {
         const result = originalPushState.apply(this, args);
-        scheduleActiveSessionReport("history");
+        scheduleActiveSessionSendFollowup("history");
         return result;
       },
       replaceState: function(...args) {
         const result = originalReplaceState.apply(this, args);
-        scheduleActiveSessionReport("history");
+        scheduleActiveSessionSendFollowup("history");
         return result;
       },
-      popstate: () => scheduleActiveSessionReport("popstate"),
+      popstate: () => scheduleActiveSessionSendFollowup("popstate"),
     };
     try {
       history.pushState = patch.pushState;
@@ -3167,7 +3177,7 @@ RENDERER_HUD_SCRIPT = r"""
             url: activeSessionRowUrl(row),
             newSession,
           });
-          scheduleActiveSessionReport("click-followup");
+          scheduleActiveSessionSendFollowup("click");
         }
       };
       document.addEventListener("click", window[activeSessionClickHandlerName], true);
@@ -4569,6 +4579,9 @@ RENDERER_HUD_SCRIPT = r"""
   //   文件：button[aria-label]（class 含 group-hover/file-attachment），取文件名
   //   @引用/技能：span.inline-mention-brand-aware 或 chip/pill 文本，按 @ / $ 前缀分类
   function collectComposerAttachments() {
+    if (!composerBadgeEnabled) {
+      return { images: [], files: [], mentions: [], skills: [] };
+    }
     const composer = composerElement();
     const empty = { images: [], files: [], mentions: [], skills: [] };
     if (!composer) return empty;
@@ -4716,6 +4729,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function reportComposerAttachments(force = false) {
+    if (!composerBadgeEnabled) return;
     const attachments = collectComposerAttachments();
     const signature = composerAttachmentsSignature(attachments);
     if (!force && window[composerAttachmentsSignatureName] === signature) return;
@@ -4749,6 +4763,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function scheduleComposerAttachmentsReport(force = false) {
+    if (!composerBadgeEnabled) return;
     clearTimeout(window[composerAttachmentsTimerName] || 0);
     window[composerAttachmentsTimerName] = setTimeout(() => {
       reportComposerAttachments(force);
@@ -4837,7 +4852,7 @@ RENDERER_HUD_SCRIPT = r"""
 
   function updateComposerBadgeText(root = document.getElementById(rootId)) {
     window[composerBadgeRafName] = 0;
-    if (!root) return;
+    if (!composerBadgeEnabled || !root) return;
     const payload = currentPayload();
     // 运行中：黄灯优先，滚动显示 AI 正在读取的文件。
     if (payload.activityWarning && payload.activityReadingFile) {
@@ -4862,11 +4877,13 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function scheduleComposerBadgeUpdate() {
+    if (!composerBadgeEnabled) return;
     if (window[composerBadgeRafName]) return;
     window[composerBadgeRafName] = requestAnimationFrame(() => updateComposerBadgeText());
   }
 
   function renderComposerBreakdown(root, payload, liveInputTokens, totalTokens, totalCost) {
+    if (!composerBadgeEnabled) return;
     const node = root.querySelector('[data-field="requestComposerBreakdown"]');
     if (!node) return;
     const rows = Array.isArray(payload.preSendBreakdown) ? payload.preSendBreakdown : [];
@@ -4909,6 +4926,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function composerBadgeElement(root = document.getElementById(rootId)) {
+    if (!composerBadgeEnabled) return null;
     return root?.querySelector(".codex-usage-hud-token-badge") || null;
   }
 
@@ -4931,6 +4949,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function showComposerBreakdown(root = document.getElementById(rootId)) {
+    if (!composerBadgeEnabled) return;
     if (!root) return;
     if (badgeWarningActive()) return;                  // 黄灯态不显示底价明细
     const node = root.querySelector('[data-field="requestComposerBreakdown"]');
@@ -4941,6 +4960,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function hideComposerBreakdown(root = document.getElementById(rootId)) {
+    if (!composerBadgeEnabled) return;
     const node = root?.querySelector('[data-field="requestComposerBreakdown"]');
     if (!node) return;
     node.dataset.open = "false";
@@ -4953,6 +4973,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function refreshComposerBadgeState(root = document.getElementById(rootId)) {
+    if (!composerBadgeEnabled) return;
     if (!root) return;
     const warning = badgeWarningActive();
     const focused = !!window[composerFocusStateName];
@@ -4972,6 +4993,7 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function setComposerBadgeActive(active) {
+    if (!composerBadgeEnabled) return;
     const root = document.getElementById(rootId);
     if (!root) return;
     const changed = window[composerFocusStateName] !== !!active;
@@ -5001,6 +5023,10 @@ RENDERER_HUD_SCRIPT = r"""
   }
 
   function ensureComposerInputWatchers() {
+    if (!composerBadgeEnabled) {
+      detachComposerInputWatchers();
+      return;
+    }
     const input = composerInputElement();
     const composer = composerElement();
     const existingHandlers = window[composerInputHandlersName];
@@ -6429,7 +6455,7 @@ RENDERER_HUD_SCRIPT = r"""
     const provided = payload?.payloadDomains && typeof payload.payloadDomains === "object"
       ? payload.payloadDomains
       : {};
-    const allDomains = ["currentSession", "budget", "settings", "overlay", "diagnostics"];
+    const allDomains = ["currentSession", "sessionSwitch", "budget", "settings", "overlay", "diagnostics"];
     const domains = {};
     if (Object.keys(provided).length > 0) {
       for (const name of allDomains) {
@@ -6460,6 +6486,21 @@ RENDERER_HUD_SCRIPT = r"""
     renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!payload?.newSession);
   }
 
+  function applySessionSwitchPayload(root, payload) {
+    setText(root, "topLine", payload?.topLine || "codex-usage-hud 等待数据");
+    setText(root, "requestLine", payload?.requestLine || "本次请求 等待");
+    setText(root, "requestLineExpanded", payload?.requestLine || "最近模型请求轮次");
+    root.querySelectorAll('[data-field="topLine"], [data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+      node.classList.remove(warningClass);
+    });
+    root.querySelectorAll('[data-field="topLine"]').forEach((node) => {
+      node.classList.toggle(warningClass, !!payload?.warning);
+    });
+    root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
+      node.classList.toggle(errorClass, payload?.requestStatus === "error");
+    });
+  }
+
   function applySettingsPayload(root, payload) {
     applyTheme(root, payload || {});
     renderUpdateButtons(root, payload || {});
@@ -6475,6 +6516,9 @@ RENDERER_HUD_SCRIPT = r"""
   function applyPayloadDomains(root, payload, domains) {
     if ("currentSession" in domains) {
       applyCurrentSessionPayload(root, { ...(payload || {}), ...(domains.currentSession || {}) });
+    }
+    if ("sessionSwitch" in domains) {
+      applySessionSwitchPayload(root, { ...(payload || {}), ...(domains.sessionSwitch || {}) });
     }
     if ("budget" in domains) {
       renderTopProgress(root, { ...(payload || {}), ...(domains.budget || {}) });
@@ -6593,7 +6637,10 @@ RENDERER_HUD_SCRIPT = r"""
     document.addEventListener("DOMContentLoaded", boot, { once: true });
   }
 })()
-"""
+""".replace(
+    "__COMPOSER_TIKTOKEN_BADGE_ENABLED__",
+    "true" if COMPOSER_TIKTOKEN_BADGE_ENABLED else "false",
+)
 
 
 @dataclass(frozen=True)
@@ -6705,6 +6752,18 @@ class RendererHudPayload:
 
 
 def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
+    session_switch_keys = (
+        "topLine",
+        "requestLine",
+        "session",
+        "model",
+        "source",
+        "requestStatus",
+        "lastEvent",
+        "refreshedAt",
+        "warning",
+        "newSession",
+    )
     current_session_keys = (
         "topLine",
         "requestLine",
@@ -6750,6 +6809,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
 
     return {
         "currentSession": pick(current_session_keys),
+        "sessionSwitch": pick(session_switch_keys),
         "budget": pick(budget_keys),
         "settings": pick(settings_keys),
         "overlay": pick(overlay_keys),
@@ -7002,6 +7062,7 @@ class RendererHudClient:
         self.enabled = renderer_enabled_from_env() if enabled is None else bool(enabled)
         self.last_status = "idle" if self.enabled else "disabled"
         self.last_error = ""
+        self.last_update_metrics: dict[str, object] = {}
         self._target_id = ""
         self._script_identifier = ""
         self._websocket_url = ""
@@ -7291,21 +7352,63 @@ class RendererHudClient:
         self._support_images_sent = False
 
     def _send_update(self, websocket_url: str, payload: dict[str, object]) -> bool:
+        payload_json = json.dumps(payload, ensure_ascii=False)
         expression = (
-            "typeof window.__codexUsageHudUpdate === 'function' && "
-            f"window.__codexUsageHudUpdate({json.dumps(payload, ensure_ascii=False)})"
+            "(() => {"
+            "const started = performance.now();"
+            "const ok = typeof window.__codexUsageHudUpdate === 'function' && "
+            f"window.__codexUsageHudUpdate({payload_json});"
+            "return { ok: !!ok, applyMs: performance.now() - started };"
+            "})()"
         )
+        started = time.perf_counter()
         result = send_cdp_command(
             websocket_url,
             "Runtime.evaluate",
             _runtime_expression_params(expression),
             self.timeout_seconds,
         )
-        return bool(
-            result.get("result", {})
-            .get("result", {})
-            .get("value", False)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        value = result.get("result", {}).get("result", {}).get("value", False)
+        renderer_apply_ms: float | None = None
+        ok: bool
+        if isinstance(value, dict):
+            ok = bool(value.get("ok", False))
+            try:
+                renderer_apply_ms = float(value.get("applyMs"))
+            except (TypeError, ValueError):
+                renderer_apply_ms = None
+        else:
+            ok = bool(value)
+        domains_value = payload.get("payloadDomains")
+        payload_domains = (
+            sorted(str(key) for key in domains_value)
+            if isinstance(domains_value, dict)
+            else []
         )
+        self.last_update_metrics = {
+            "cdpMs": elapsed_ms,
+            "rendererApplyMs": renderer_apply_ms,
+            "payloadBytes": len(payload_json.encode("utf-8")),
+            "payloadDomains": payload_domains,
+        }
+        if elapsed_ms >= SLOW_RENDERER_UPDATE_LOG_MS or (
+            renderer_apply_ms is not None
+            and renderer_apply_ms >= SLOW_RENDERER_UPDATE_LOG_MS
+        ):
+            _LOGGER.info(
+                "renderer_update_timing cdp_ms=%.1f renderer_apply_ms=%s payload_bytes=%s domains=%s ok=%s",
+                elapsed_ms,
+                (
+                    f"{renderer_apply_ms:.1f}"
+                    if renderer_apply_ms is not None
+                    else "-"
+                ),
+                self.last_update_metrics["payloadBytes"],
+                ",".join(payload_domains),
+                ok,
+            )
+        return ok
 
 
 def remove_renderer_hud_from_pages(
@@ -7397,6 +7500,23 @@ def payload_from_snapshot(
     request_line = _request_total_line(snapshot)
     if snapshot.request.error:
         request_line = f"本次 Token 出错 | {_compact(snapshot.request.error, 120)}"
+    pre_send_estimate = ""
+    pre_send_base_tokens = 0
+    pre_send_breakdown: list[dict[str, object]] = []
+    pre_send_input_price = 0.0
+    pre_send_total_cost: float | None = None
+    pre_send_has_prices = False
+    activity_warning = False
+    activity_reading_file = ""
+    if COMPOSER_TIKTOKEN_BADGE_ENABLED:
+        pre_send_estimate = snapshot.estimate_base.short_label()
+        pre_send_base_tokens = int(snapshot.estimate_base.total_tokens or 0)
+        pre_send_breakdown = snapshot.estimate_base.breakdown_rows()
+        pre_send_input_price = float(snapshot.estimate_base.input_price_per_token or 0.0)
+        pre_send_total_cost = snapshot.estimate_base.total_cost()
+        pre_send_has_prices = bool(snapshot.estimate_base.has_prices)
+        activity_warning = bool(snapshot.reading_activity.active)
+        activity_reading_file = snapshot.reading_activity.warning_label()
     return RendererHudPayload(
         top_line=top_line,
         request_line=request_line,
@@ -7430,17 +7550,59 @@ def payload_from_snapshot(
         theme=theme or {},
         update_state=update_state or {},
         app_version=__version__,
-        pre_send_estimate=snapshot.estimate_base.short_label(),
-        pre_send_base_tokens=int(snapshot.estimate_base.total_tokens or 0),
-        pre_send_breakdown=snapshot.estimate_base.breakdown_rows(),
-        pre_send_input_price=float(snapshot.estimate_base.input_price_per_token or 0.0),
-        pre_send_total_cost=snapshot.estimate_base.total_cost(),
-        pre_send_has_prices=bool(snapshot.estimate_base.has_prices),
-        activity_warning=bool(snapshot.reading_activity.active),
-        activity_reading_file=snapshot.reading_activity.warning_label(),
+        pre_send_estimate=pre_send_estimate,
+        pre_send_base_tokens=pre_send_base_tokens,
+        pre_send_breakdown=pre_send_breakdown,
+        pre_send_input_price=pre_send_input_price,
+        pre_send_total_cost=pre_send_total_cost,
+        pre_send_has_prices=pre_send_has_prices,
+        activity_warning=activity_warning,
+        activity_reading_file=activity_reading_file,
         debug=bool(debug),
         runtime_errors=_runtime_errors_payload(runtime_errors or []),
     )
+
+
+def session_switch_payload_from_snapshot(
+    snapshot: ParsedSession,
+    *,
+    settings_path: Path | str | None = None,
+) -> dict[str, object]:
+    session_cost = _session_cost(snapshot)
+    warnings_dismissed = (
+        warning_dismissed_today(settings_path) if settings_path is not None else False
+    )
+    top_line = (
+        f"{_top_session_usage_summary(snapshot, session_cost)} | "
+        f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)} | "
+        f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)} | "
+        f"状态 {_budget_status(snapshot)}"
+    )
+    if snapshot.error and snapshot.status in {"missing", "error"}:
+        top_line = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
+    request_line = _request_total_line(snapshot)
+    if snapshot.request.error:
+        request_line = f"本次 Token 出错 | {_compact(snapshot.request.error, 120)}"
+    domain = {
+        "topLine": top_line,
+        "requestLine": request_line,
+        "session": _session_label(snapshot),
+        "model": snapshot.request.model or "n/a",
+        "source": snapshot.selection_source or "activity",
+        "requestStatus": snapshot.request.status or "waiting",
+        "lastEvent": _format_time(snapshot.last_event_time),
+        "refreshedAt": _format_time(snapshot.refreshed_at),
+        "warning": bool(
+            snapshot.error
+            or snapshot.request.error
+            or snapshot.budget_error
+            or (snapshot.budget_warnings and not warnings_dismissed)
+        ),
+        "newSession": bool(_is_new_session_snapshot(snapshot)),
+    }
+    payload = dict(domain)
+    payload["payloadDomains"] = {"sessionSwitch": dict(domain)}
+    return payload
 
 
 def _runtime_errors_payload(
