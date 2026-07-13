@@ -28,6 +28,8 @@
 ## 当前阶段
 阶段 1、阶段 2、阶段 3、阶段 4、阶段 5、阶段 6、阶段 7、阶段 8 完成。阶段 8 已进一步隔离 Qt/Tk 主 HUD 入口：legacy session functions 只返回 renderer-unavailable，不再获取 HUD 单例锁或启动 runtime；renderer mode 始终挂起 native active-title 并关闭 background watcher，旧 `--legacy-active-session-diagnostics` 只作为兼容 no-op；`docs/RENDERER_MODE_STRATEGY.md` 已改成架构约束文档，`docs/HUD_RUNTIME_ACCEPTANCE_CHECKLIST.md` 固化性能回归和 DEBUG 错误 HUD 验收。
 
+新增任务进入阶段 9：**Exact Payload 审计 Viewer**。本阶段以“按用户要求新增 detached PySide6 主查看窗，同时保持现有顶部/底部 HUD 完全不变”为硬约束，当前状态为 `planned`。
+
 ## 阶段路线
 
 ### 阶段 0：基线、清理与边界
@@ -110,6 +112,82 @@
 - [x] 增加性能回归测试和 DEBUG 错误 HUD 验收 checklist。
 - **状态：** complete
 
+## 增量任务：Exact Payload 审计 Viewer（2026-07-09）
+
+### 任务目标
+为当前会话新增“精确 payload 审计”能力，让用户看到每轮**真实发出的请求内容**与**真实收到的响应内容**，而不仅是 token 数字。
+
+本轮收敛方案：
+- 以 **方案 B（会话地图）** 作为主导航骨架。
+- 吸收 **方案 C（最终态 / 完整时间序列双层回放）** 作为详情展示方式。
+- Detached PySide6 Viewer 作为本功能主查看面。
+
+### 硬约束
+- **顶部 HUD 与底部 HUD 的现有内容、文案、布局、尺寸、视觉完全不变。**
+- 现有 HUD 只增加交互热区，不新增按钮、不改文案、不改层级。
+- 允许为该功能新增 detached PySide6 主查看窗；这是用户对默认 renderer-first 产品面的显式覆盖。
+- 审计数据只保留**当前会话**，不做跨会话历史库。
+- 审计默认**全程开启**、**不脱敏**。
+- 详情默认显示“最终请求 + 最终回复”，并支持展开到“完整时间序列”。
+
+### 成功标准
+| 维度 | 目标 |
+|------|------|
+| 内容精度 | 对已捕获轮次，Viewer 中展示真实 request/response payload，而不是 JSONL 摘要替身 |
+| HUD 稳定性 | 顶部/底部 HUD 的现有 UI 零变化；只新增打开 Viewer 的交互 |
+| 会话追溯 | 支持当前会话内的任务首轮、Top10 高消耗轮次、全部历史轮次跳转 |
+| 详情层级 | 默认最终态；可展开同一轮内 request / delta / tool call / tool output / final response |
+| 存储边界 | 仅当前会话 sidecar 持久化；切换会话后不保留旧会话完整 payload |
+| 平台 | PySide6 Viewer 代码按 Win/mac 通用行为实现与验证 |
+
+### 阶段 9：精确 payload 捕获链路
+- [ ] 设计新的 renderer/CDP 审计捕获链路，明确“精确 payload”优先于 JSONL/SSE 摘要。
+- [ ] 在 renderer 注入脚本中增加请求拦截点，捕获真实 outbound request body。
+- [ ] 在 renderer 注入脚本中增加响应捕获点，记录 final response，并为后续完整时间序列保留 stream/tool event。
+- [ ] 新增专用 CDP binding，把 audit event 从 renderer 推回 Python。
+- [ ] 对未捕获成功的轮次保留索引，但显式标记 `payload_missing`，不得伪造正文。
+- **状态：** pending
+
+### 阶段 10：当前会话审计持久化与索引
+- [ ] 在 `hud_runtime_dir()` 下新增当前会话 audit sidecar 方案，按 `session_id` 持久化。
+- [ ] 定义 audit event schema，至少包含：
+  - [ ] `session_id`
+  - [ ] `task_index`
+  - [ ] `round_index`
+  - [ ] `event_type`
+  - [ ] `timestamp`
+  - [ ] `request/response correlation id`
+  - [ ] `payload body / stream chunk / tool event`
+- [ ] 新增“任务首轮”显式索引，确保每次新需求都能定位到对应首轮。
+- [ ] 新增会话级 heavy rounds 排名，支持 Top3（HUD 原入口）、Top10（Viewer 导航）和全部历史轮次。
+- [ ] 会话切换时清理非当前会话 sidecar，确保 retention 仍为“仅当前会话”。
+- **状态：** pending
+
+### 阶段 11：HUD 入口联动与 Detached Viewer
+- [ ] 保持顶部 HUD 现有 Top3 重轮次展示不变，仅为现有节点增加打开 Viewer 的交互。
+- [ ] 保持顶部活动轨迹展示不变，仅为现有任务相关节点增加打开 Viewer 的交互。
+- [ ] 保持底部轮次流水展示不变，仅为现有轮次行增加打开 Viewer 的交互。
+- [ ] 新增 detached PySide6 Viewer 主窗：
+  - [ ] 默认打开到最后一轮已确认轮次。
+  - [ ] 支持上一轮 / 下一轮。
+  - [ ] 支持从 Top3 / 任务首轮 / 全部历史 / Top10 锚点进入。
+  - [ ] 左侧导航展示任务首轮、Top10、全部历史轮次。
+  - [ ] 主体默认显示最终请求 / 最终回复。
+  - [ ] 提供“展开完整时间序列”视图。
+- [ ] 明确 Viewer 是新功能主界面，HUD 只承担摘要与入口职责。
+- **状态：** pending
+
+### 阶段 12：验证与交付
+- [ ] 为 audit capture / sidecar / 索引 / Viewer 导航补自动化测试。
+- [ ] 为“HUD UI 零变化”补回归测试，重点覆盖：
+  - [ ] 顶部 heavy rounds 文案与布局不变
+  - [ ] 顶部 activity trail 文案与布局不变
+  - [ ] 底部 request rows 文案与布局不变
+- [ ] 为最终态 / 完整时间序列双层视图补一致性测试。
+- [ ] 为 Win/mac Viewer 生命周期、复制、导航、锚点跳转补验证。
+- [ ] 更新实现文档与验收 runbook，新增 detached Viewer 的启动、跳转和数据边界说明。
+- **状态：** pending
+
 ## 关键设计决策
 | 决策 | 理由 |
 |------|------|
@@ -141,8 +219,8 @@ python tools/measure_renderer_latency.py
 | `git diff --check` 因 `renderer_latency_baseline.json/.md` 生成 CRLF 报 trailing whitespace | 1 | `tools/measure_renderer_latency.py` 改为显式 `open(..., newline="\n")` 写出 JSON/Markdown，并重生基线文件 |
 
 ## 下一步
-1. `docs/HUD_RUNTIME_COMPLETION_AUDIT.md`、`progress.md`、`HUD_RUNTIME_LIVE_VERIFICATION.md` 收尾为“用户已接受当前 live 行为”的最终状态。
-2. 本轮用于定位 active-session live latency 的临时诊断埋点已删除，不再作为后续待办。
-3. 保持 `budget_window_changed`、真实 session switch 这类会改变语义状态的事件走 snapshot 路径；只对可证明能安全复用 `latest_snapshot` 的字段继续做局部 payload。
-4. app-server 只保留为未来显式权威源候选；除非协议出现当前窗口 active thread 字段/通知并经过 POC 验证，不接入默认 active-session 路径。
-5. 剩余仅为代码整理、提交 / PR / 发布准备，不再继续深挖当前 live latency 差异。
+1. 进入阶段 9，先验证“精确 payload”在现有 renderer/CDP 链路里的可捕获性与稳定字段边界。
+2. 明确 audit sidecar schema 与当前会话清理策略，避免一开始就引入跨会话历史库。
+3. 在不改 HUD 现有 UI 的前提下，为 Top3、活动轨迹节点、底部轮次行补打开 Viewer 的锚点交互。
+4. 以“方案 B 主骨架 + 方案 C 双层回放”落地 detached PySide6 Viewer。
+5. 为“HUD UI 零变化”补回归测试，把这条用户约束变成自动化保护。

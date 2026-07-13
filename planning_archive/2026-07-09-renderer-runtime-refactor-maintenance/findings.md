@@ -348,6 +348,36 @@ python tools/measure_renderer_latency.py --iterations 1 --warmups 0 --json-outpu
 | fallback inventory 作为删除顺序来源 | accepted | `docs/FALLBACK_INVENTORY.md` 已把 fallback 分成删除、显式错误、诊断保留、临时 fallback |
 | runtime error 先接入 payload，再迁移到事件总线 | accepted | 可以先让 fallback 失败可见，降低后续删除 fallback 的风险 |
 
+## 2026-07-09 新功能规划：Exact Payload 审计 Viewer
+- 用户目标已从“看到 token 数字”提升为“看到每轮实际 request/response 内容”。
+- 现有 JSONL/SSE 解析链路只够做：
+  - 当前任务轮次索引
+  - 会话级历史轮次索引
+  - task 首轮定位
+  - heavy rounds 排名
+  但**不足以**精确还原真实模型请求体。
+- 因此新功能必须拆成两层：
+  - renderer/CDP：负责精确 payload capture
+  - PySide6 detached viewer：负责主查看体验
+- 已明确的产品决策：
+  - 现有顶部/底部 HUD 内容和 UI **完全不变**
+  - HUD 只增加现有节点的打开 Viewer 交互，不增加任何新控件
+  - detached PySide6 viewer 是本功能主界面；这是用户对默认 renderer-first 产品面的显式覆盖
+  - 当前会话 retention only
+  - 默认全程开启
+  - 默认不脱敏
+  - 默认“最终请求 + 最终回复”，按需展开完整时间序列
+- 方案收敛：
+  - 主导航骨架采用 Figma 概念稿 `B`
+  - 详情层级采用 Figma 概念稿 `C`
+  - 概念稿文件：
+    - `https://www.figma.com/design/5HyDTTmiWrqyfvRew472oW`
+- 关键实现边界：
+  - 顶部 Top3 heavy rounds 保持现状，只作为 Viewer 入口
+  - 顶部 activity trail 保持现状，只作为 Viewer 入口
+  - 底部 request rows 保持现状，只作为 Viewer 入口
+  - Top10 / 全部历史 / 任务首轮 / 完整时间序列全部转移到 Viewer 内部
+
 ## 新会话优先阅读
 1. `docs/RENDERER_MODE_STRATEGY.md`
 2. `docs/HUD_RUNTIME_REFACTOR_PLAN.md`

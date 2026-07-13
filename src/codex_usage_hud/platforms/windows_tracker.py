@@ -137,7 +137,16 @@ _BOTTOM_ROW_MIN_BELOW_INPUT = 84
 _LOGGER_NAME = "codex_usage_hud.windows_tracker"
 _LOG_ENV_PATH = "CODEX_USAGE_HUD_WINDOW_LOG"
 _LOG_ENV_LEVEL = "CODEX_USAGE_HUD_WINDOW_LOG_LEVEL"
-_CODEX_PROCESS_NAMES = {"codex.exe", "openai codex.exe"}
+#
+# Codex Desktop 26.707+ renamed the Electron GUI executable from ``Codex.exe``
+# to ``ChatGPT.exe`` (the Rust ``codex.exe`` under ``resources/`` is now the
+# app-server backend, not the visible window).  We accept both so the HUD keeps
+# tracking users on old installs *and* on the current release.
+_CODEX_PROCESS_NAMES = {
+    "codex.exe",
+    "chatgpt.exe",
+    "openai codex.exe",
+}
 _logger = logging.getLogger(_LOGGER_NAME)
 _logger.addHandler(logging.NullHandler())
 _logging_configured = False
@@ -145,7 +154,11 @@ _logging_configured = False
 
 def _is_codex_process_name(process: str) -> bool:
     process_lower = Path(str(process or "")).name.strip().lower()
-    return process_lower in _CODEX_PROCESS_NAMES or process_lower.startswith("codex")
+    if process_lower in _CODEX_PROCESS_NAMES:
+        return True
+    # Some legacy builds shipped as "Codex Preview.exe" / "codex-desktop.exe";
+    # anything whose stem starts with "codex" is still worth honouring.
+    return process_lower.startswith("codex")
 
 
 def window_tracker_log_path() -> Path:
@@ -3878,7 +3891,7 @@ class CodexWindowTracker:
         if not _is_codex_process_name(process_lower):
             return False
         if class_lower == "chrome_widgetwin_1":
-            return bool(title_lower) or process_lower == "codex.exe"
+            return bool(title_lower) or process_lower in _CODEX_PROCESS_NAMES
         return True
 
     @staticmethod
@@ -3887,7 +3900,7 @@ class CodexWindowTracker:
         class_name = candidate.class_name.strip().lower()
         process = candidate.process.strip().lower()
         score = 0
-        if process == "codex.exe":
+        if process in _CODEX_PROCESS_NAMES:
             score += 100
         elif process.startswith("codex"):
             score += 70

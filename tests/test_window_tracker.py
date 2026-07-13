@@ -1142,6 +1142,29 @@ class CodexWindowTrackerSelectionTests(unittest.TestCase):
             )
         )
 
+    def test_renamed_chatgpt_exe_still_looks_like_codex(self) -> None:
+        # Codex Desktop 26.707+ renamed the Electron GUI to ChatGPT.exe.  The
+        # tracker must still classify that process as the Codex window,
+        # otherwise the HUD will sit forever in "waiting for Codex" state on
+        # freshly-updated installs.
+        self.assertTrue(
+            CodexWindowTracker._looks_like_codex(
+                "Codex",
+                "Chrome_WidgetWin_1",
+                "ChatGPT.exe",
+            )
+        )
+        # A ChatGPT.exe process with no title on the top-level chrome frame
+        # is also acceptable (the main window occasionally reports empty
+        # titles between transitions).
+        self.assertTrue(
+            CodexWindowTracker._looks_like_codex(
+                "",
+                "Chrome_WidgetWin_1",
+                "chatgpt.exe",
+            )
+        )
+
     def test_cached_hidden_window_does_not_block_visible_codex_window(self) -> None:
         tracker = CodexWindowTracker(enable_uia=False)
         hidden = wt._WindowCandidate(

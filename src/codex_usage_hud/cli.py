@@ -788,6 +788,11 @@ class DesktopWorkOverlay:
         self._last_theme_payload: dict[str, object] = {}
         self._last_state_signature: str | None = None
         self._last_state_write_at = 0.0
+        # A HUD launch cannot have an in-progress task.  The first snapshot can
+        # still contain the last task read from Codex's persisted session files,
+        # so never publish that snapshot as a desktop bubble.  The next real
+        # update (session/file event) is allowed to create bubbles normally.
+        self._suppress_initial_items = True
         self._switch_completed_command: dict[str, object] | None = None
         self._switch_completed_until = 0.0
         self._theme_probe = CodexThemeProbe(
@@ -819,7 +824,11 @@ class DesktopWorkOverlay:
             self._stop_runtime(permanent=False)
             self._report_unavailable_once(self._unavailable_reason)
             return
-        payload_items = [work_item_to_overlay_dict(item) for item in items]
+        if self._suppress_initial_items:
+            self._suppress_initial_items = False
+            payload_items: list[dict[str, object]] = []
+        else:
+            payload_items = [work_item_to_overlay_dict(item) for item in items]
         payload_items = self._apply_switch_completed_override(payload_items)
         theme_payload = self._theme_payload()
         if not payload_items and self._process is None:
@@ -1420,6 +1429,11 @@ def _codex_app_executable_candidates() -> list[Path]:
         if path.suffix.lower() == ".exe":
             candidates.append(path)
 
+    # Codex Desktop 26.707+ renamed the Electron GUI executable to
+    # ``ChatGPT.exe`` (the ``Codex.exe`` next to it now launches the Rust
+    # ``app-server`` backend, not the visible window).  Prefer the new name so
+    # we hand ``--remote-debugging-port`` to the real GUI process, but keep the
+    # legacy ``Codex.exe`` paths as a fallback for older installs.
     for root_name in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
         root = os.environ.get(root_name)
         if not root:
@@ -1427,6 +1441,11 @@ def _codex_app_executable_candidates() -> list[Path]:
         base = Path(root)
         candidates.extend(
             [
+                base / "Programs" / "Codex" / "ChatGPT.exe",
+                base / "Programs" / "codex" / "ChatGPT.exe",
+                base / "Programs" / "OpenAI Codex" / "ChatGPT.exe",
+                base / "Codex" / "ChatGPT.exe",
+                base / "OpenAI Codex" / "ChatGPT.exe",
                 base / "Programs" / "Codex" / "Codex.exe",
                 base / "Programs" / "codex" / "Codex.exe",
                 base / "Programs" / "OpenAI Codex" / "Codex.exe",
@@ -1440,11 +1459,17 @@ def _codex_app_executable_candidates() -> list[Path]:
         windows_apps = Path(program_files) / "WindowsApps"
         try:
             candidates.extend(
+                windows_apps.glob(
+                    "OpenAI.Codex_*__2p2nqsd0c76g0/app/ChatGPT.exe"
+                )
+            )
+            candidates.extend(
                 windows_apps.glob("OpenAI.Codex_*__2p2nqsd0c76g0/app/Codex.exe")
             )
         except OSError:
             pass
     for install_location in _codex_appx_install_locations():
+        candidates.append(install_location / "app" / "ChatGPT.exe")
         candidates.append(install_location / "app" / "Codex.exe")
 
     existing = [path for path in candidates if path.exists()]

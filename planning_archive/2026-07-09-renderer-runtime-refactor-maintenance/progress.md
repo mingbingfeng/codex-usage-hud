@@ -1292,5 +1292,28 @@
     - 临时诊断埋点已移除
     - 剩余仅是整理 diff、提交、PR 或发布准备
 
+## 2026-07-09 增量规划：Exact Payload 审计 Viewer
+- 本轮目标：
+  - 按用户新需求，把“精确 payload 审计 Viewer”方案正式写入项目规划文件。
+- 已完成：
+  - 恢复并读取现有 `task_plan.md`、`findings.md`、`progress.md`。
+  - 确认 canonical codebase-memory 项目仍为：
+    - `E-Project-codex-usage-hud`
+    - root path `E:/Project/codex-usage-hud`
+  - 将新增任务并入 `task_plan.md`，作为阶段 9-12：
+    - 阶段 9：精确 payload 捕获链路
+    - 阶段 10：当前会话审计持久化与索引
+    - 阶段 11：HUD 入口联动与 detached Viewer
+    - 阶段 12：验证与交付
+  - 将新功能的关键产品约束写入 `findings.md`：
+    - 顶部/底部 HUD 现有内容和 UI 完全不变
+    - HUD 只增加现有节点的打开 Viewer 交互
+    - detached PySide6 viewer 是主查看面
+    - 当前会话 retention only
+    - 默认全程开启、不脱敏、最终态/完整过程双层视图
+- 当前结论：
+  - 项目规划已从“运行时重构收尾”切换为“在既有 HUD 不变的前提下，新增精确 payload 审计能力”。
+  - 本轮只更新了规划文件，尚未开始实现代码，也未新增验证命令。
+
 ---
 *每个阶段完成后或遇到错误时更新此文件。*

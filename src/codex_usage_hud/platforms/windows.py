@@ -15,6 +15,11 @@ import uuid
 from .base import BasePlatform
 from .cdp_probe import CodexCdpProbe
 
+# Codex Desktop 26.707+ renamed the Electron GUI executable to ``ChatGPT.exe``
+# (the Rust ``codex.exe`` under ``resources/`` became the app-server backend).
+# Keep both names so this module handles fresh installs and legacy builds.
+_CODEX_WINDOW_PROCESS_NAMES = {"codex.exe", "chatgpt.exe", "openai codex.exe"}
+
 _WINFUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 
 _OBJID_CLIENT = 0xFFFFFFFC
@@ -1281,12 +1286,12 @@ class WindowsPlatform(BasePlatform):
             process = self._process_name(kernel32, int(pid.value or 0))
             process_lower = process.lower()
             title_lower = title.lower()
-            if process_lower != "codex.exe" and not (
+            if process_lower not in _CODEX_WINDOW_PROCESS_NAMES and not (
                 process_lower.startswith("codex") and title_lower == "codex"
             ):
                 return True
             score = 0
-            if process_lower == "codex.exe":
+            if process_lower in _CODEX_WINDOW_PROCESS_NAMES:
                 score += 100
             if title_lower == "codex":
                 score += 40
@@ -1677,4 +1682,4 @@ class _WinEventTitleWatcher:
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
         process = self.platform._process_name(kernel32, int(pid.value or 0)).lower()
-        return process == "codex.exe" or process.startswith("codex")
+        return process in _CODEX_WINDOW_PROCESS_NAMES or process.startswith("codex")

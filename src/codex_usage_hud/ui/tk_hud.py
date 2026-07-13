@@ -3960,7 +3960,13 @@ class _WindowsCodexLocator(_BaseLocator):
     @staticmethod
     def _is_codex_process(process: str) -> bool:
         process_lower = Path(str(process or "")).name.strip().lower()
-        return process_lower in {"codex.exe", "openai codex.exe"} or process_lower.startswith("codex")
+        # Codex Desktop 26.707+ ships the Electron GUI as ChatGPT.exe; keep the
+        # legacy Codex.exe/OpenAI Codex.exe names for older installs.
+        return (
+            process_lower
+            in {"codex.exe", "chatgpt.exe", "openai codex.exe"}
+            or process_lower.startswith("codex")
+        )
 
     def _process_name(self, pid: int) -> str:
         if not pid:
@@ -3985,7 +3991,7 @@ class _WindowsCodexLocator(_BaseLocator):
         title = rect.title.lower()
         class_name = rect.class_name.lower()
         score = 0
-        if process == "codex.exe":
+        if process in {"codex.exe", "chatgpt.exe", "openai codex.exe"}:
             score += 100
         if "codex" in process:
             score += 60

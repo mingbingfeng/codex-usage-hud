@@ -31,6 +31,10 @@ _MAX_PATH = 260
 _SW_HIDE = 0
 _HUD_PROCESS_MARKERS = ("hud", "usage-hud", "usage_hud")
 _NON_CLIENT_PROCESS_MARKERS = ("plus-plus", "++", "computer-use")
+# Codex Desktop 26.707+ renamed the Electron GUI to ChatGPT.exe.  ``codex.exe``
+# still exists on disk but now points at the Rust ``app-server`` backend under
+# ``resources/``; both signal a live Codex client to the daemon.
+_CLIENT_PROCESS_ALIASES = ("chatgpt",)
 _LOGGER_NAME = "codex_usage_hud.daemon"
 _logger = logging.getLogger(_LOGGER_NAME)
 _logger.addHandler(logging.NullHandler())
@@ -173,6 +177,8 @@ def is_codex_client_process(process_name: str) -> bool:
     if normalized.startswith("codex-") or normalized.startswith("codex "):
         return True
     if normalized.endswith(" codex"):
+        return True
+    if normalized in _CLIENT_PROCESS_ALIASES:
         return True
     return "codex" in normalized and "python" not in normalized
 

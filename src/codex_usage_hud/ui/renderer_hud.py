@@ -44,6 +44,7 @@ ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
 SETTINGS_COMMAND_BINDING_NAME = "codexUsageHudSettingsCommand"
 COMPOSER_ATTACHMENTS_BINDING_NAME = "codexUsageHudComposerAttachments"
 LAYOUT_BINDING_NAME = "codexUsageHudLayout"
+MODEL_CATALOG_JSON_ENV = "CODEX_USAGE_HUD_MODEL_CATALOG_JSON"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
 _LOGGER = logging.getLogger("codex_usage_hud.ui.renderer_hud")
@@ -87,7 +88,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
         "effectiveTheme": snapshot.effective_theme.to_dict(),
     }
 
-RENDERER_HUD_SCRIPT = r"""
+_RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
   const version = "24";
   const rootId = "codex-usage-hud-root";
@@ -135,6 +136,11 @@ RENDERER_HUD_SCRIPT = r"""
   const staleUpdateMs = 10000;
   const composerAttachmentsDebounceMs = 80;
   const composerBadgeEnabled = __COMPOSER_TIKTOKEN_BADGE_ENABLED__;
+  const codexModelPickerCatalog = __CODEX_MODEL_PICKER_CATALOG__;
+  const modelPickerPatchHandlerName = "__codexUsageHudModelPickerPatchHandler";
+  const modelPickerPatchRafName = "__codexUsageHudModelPickerPatchRaf";
+  const modelPickerPatchTimersName = "__codexUsageHudModelPickerPatchTimers";
+  const modelPickerSelectionName = "__codexUsageHudModelPickerSelection";
   let topSlotCache = null;
   let pendingSyncPanels = null;
   let cachedHeaderNode = null;
@@ -181,6 +187,204 @@ RENDERER_HUD_SCRIPT = r"""
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   };
+  const cssEscape = (value) => {
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(String(value));
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
+  };
+  const codexModelPickerModels = Array.isArray(codexModelPickerCatalog)
+    ? codexModelPickerCatalog.filter((model) => model && typeof model === "object" && model.model)
+    : [];
+
+  function reactFiberForNode(node) {
+    if (!node) return null;
+    const key = Object.getOwnPropertyNames(node).find((name) => name.startsWith("__reactFiber$"));
+    return key ? node[key] : null;
+  }
+
+  function findFiber(node, predicate, limit = 36) {
+    let fiber = reactFiberForNode(node);
+    for (let depth = 0; fiber && depth < limit; depth += 1, fiber = fiber.return) {
+      try {
+        if (predicate(fiber)) return fiber;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  function reasoningEffortLabel(value) {
+    switch (String(value || "")) {
+      case "minimal": return "极简";
+      case "low": return "轻度";
+      case "medium": return "中";
+      case "high": return "高";
+      case "xhigh": return "极高";
+      case "max": return "最大";
+      case "ultra": return "Ultra";
+      default: return String(value || "");
+    }
+  }
+
+  function normalizeReasoningEfforts(model) {
+    const raw = Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+    return raw
+      .map((item) => {
+        const reasoningEffort = String(item?.reasoningEffort || "").trim();
+        if (!reasoningEffort) return null;
+        return {
+          reasoningEffort,
+          description: String(item?.description || reasoningEffortLabel(reasoningEffort)),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function modelOptionFromCatalog(model, prototypeOption = null, forcedReasoningEffort = "") {
+    const efforts = normalizeReasoningEfforts(model);
+    const fallbackEffort = String(model.defaultReasoningEffort || efforts[0]?.reasoningEffort || "medium");
+    const selectedEfforts = forcedReasoningEffort
+      ? [{ reasoningEffort: forcedReasoningEffort, description: reasoningEffortLabel(forcedReasoningEffort) }]
+      : efforts;
+    return {
+      id: String(model.model),
+      model: String(model.model),
+      upgrade: null,
+      upgradeInfo: null,
+      availabilityNux: null,
+      displayName: String(model.displayName || model.model),
+      description: String(model.description || ""),
+      hidden: false,
+      supportedReasoningEfforts: selectedEfforts.length ? selectedEfforts : [{ reasoningEffort: fallbackEffort, description: reasoningEffortLabel(fallbackEffort) }],
+      defaultReasoningEffort: forcedReasoningEffort || fallbackEffort,
+      inputModalities: Array.isArray(model.inputModalities) && model.inputModalities.length
+        ? model.inputModalities.map(String)
+        : (Array.isArray(prototypeOption?.inputModalities) ? prototypeOption.inputModalities : ["text"]),
+      supportsPersonality: prototypeOption?.supportsPersonality ?? true,
+      additionalSpeedTiers: Array.isArray(prototypeOption?.additionalSpeedTiers) ? prototypeOption.additionalSpeedTiers : [],
+      serviceTiers: Array.isArray(prototypeOption?.serviceTiers) ? prototypeOption.serviceTiers : [],
+      defaultServiceTier: prototypeOption?.defaultServiceTier ?? null,
+      isDefault: false,
+    };
+  }
+
+  function modelPickerLeafFiber(node) {
+    return findFiber(node, (fiber) => !!fiber?.memoizedProps?.modelOption);
+  }
+
+  function modelPickerModelItems() {
+    return Array.from(document.querySelectorAll('[role="menuitem"]'))
+      .filter(visible)
+      .map((node) => ({ node, fiber: modelPickerLeafFiber(node) }))
+      .filter((item) => !!item.fiber?.memoizedProps?.modelOption);
+  }
+
+  function selectedCatalogModelFromMenu() {
+    const selection = window[modelPickerSelectionName];
+    const selectedModel = String(selection?.model || "");
+    return codexModelPickerModels.find((model) => model.model === selectedModel) || null;
+  }
+
+  function insertSyntheticModelItem(container, referenceNode, model, modelProps) {
+    if (!container || !referenceNode || !modelProps?.onSelect) return;
+    if (container.querySelector(`[data-codex-usage-hud-model-option="${cssEscape(model.model)}"]`)) return;
+    const prototypeOption = modelProps.modelOption || null;
+    const option = modelOptionFromCatalog(model, prototypeOption);
+    const node = referenceNode.cloneNode(true);
+    node.textContent = option.displayName;
+    node.title = option.description || option.displayName;
+    node.setAttribute("role", "menuitem");
+    node.setAttribute("tabindex", "-1");
+    node.setAttribute("data-codex-usage-hud-model-option", option.model);
+    node.removeAttribute("data-model-selected");
+    if (modelProps.selectedModel === option.model) node.setAttribute("data-model-selected", "true");
+    const select = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window[modelPickerSelectionName] = {
+        model: option.model,
+        option,
+        selectModel: modelProps.onSelect,
+        serviceTier: option.defaultServiceTier ?? null,
+      };
+      modelProps.onSelect(option, option.defaultServiceTier ?? null);
+      scheduleCodexModelPickerPatch();
+    };
+    node.addEventListener("click", select);
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") select(event);
+    });
+    container.insertBefore(node, container.firstChild);
+  }
+
+  function insertSyntheticReasoningItem(container, referenceNode, model, effort) {
+    const selection = window[modelPickerSelectionName];
+    if (!container || !referenceNode || typeof selection?.selectModel !== "function") return;
+    if (container.querySelector(`[data-codex-usage-hud-reasoning-option="${cssEscape(effort.reasoningEffort)}"]`)) return;
+    const node = referenceNode.cloneNode(true);
+    const label = reasoningEffortLabel(effort.reasoningEffort);
+    node.textContent = label;
+    node.title = effort.description || label;
+    node.setAttribute("role", "menuitem");
+    node.setAttribute("tabindex", "-1");
+    node.setAttribute("data-codex-usage-hud-reasoning-option", effort.reasoningEffort);
+    node.removeAttribute("data-reasoning-selected");
+    const select = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const option = modelOptionFromCatalog(model, selection.option, effort.reasoningEffort);
+      window[modelPickerSelectionName] = {
+        model: option.model,
+        option,
+        selectModel: selection.selectModel,
+        serviceTier: option.defaultServiceTier ?? null,
+      };
+      selection.selectModel(option, option.defaultServiceTier ?? null);
+      scheduleCodexModelPickerPatch();
+    };
+    node.addEventListener("click", select);
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") select(event);
+    });
+    container.appendChild(node);
+  }
+
+  function patchCodexModelPicker() {
+    if (!codexModelPickerModels.length) return;
+    const modelItems = modelPickerModelItems();
+    if (modelItems.length) {
+      const first = modelItems[0];
+      const container = first.node.parentElement;
+      const existing = new Set(modelItems.map((item) => String(item.fiber.memoizedProps.modelOption?.model || "")));
+      const modelProps = first.fiber.memoizedProps || {};
+      for (const model of codexModelPickerModels) {
+        if (!existing.has(String(model.model))) {
+          insertSyntheticModelItem(container, first.node, model, modelProps);
+        }
+      }
+    }
+    const selectedModel = selectedCatalogModelFromMenu();
+    if (!selectedModel) return;
+    const reasoningItems = Array.from(document.querySelectorAll('[role="menuitem"]'))
+      .filter(visible)
+      .filter((node) => node.hasAttribute("data-reasoning-selected") || ["轻度", "中", "高", "极高"].includes(normalize(node.textContent)));
+    if (!reasoningItems.length) return;
+    const existingLabels = new Set(reasoningItems.map((node) => normalize(node.textContent)));
+    const container = reasoningItems[0].parentElement;
+    for (const effort of normalizeReasoningEfforts(selectedModel)) {
+      if (!existingLabels.has(reasoningEffortLabel(effort.reasoningEffort))) {
+        insertSyntheticReasoningItem(container, reasoningItems[0], selectedModel, effort);
+      }
+    }
+  }
+
+  function scheduleCodexModelPickerPatch() {
+    if (!codexModelPickerModels.length) return;
+    cancelAnimationFrame(window[modelPickerPatchRafName] || 0);
+    for (const timer of (window[modelPickerPatchTimersName] || [])) clearTimeout(timer);
+    window[modelPickerPatchRafName] = requestAnimationFrame(patchCodexModelPicker);
+    window[modelPickerPatchTimersName] = [60, 180, 360].map((delay) => setTimeout(patchCodexModelPicker, delay));
+  }
 
   function ensureStyle() {
     const existing = document.getElementById(styleId);
@@ -6594,6 +6798,14 @@ RENDERER_HUD_SCRIPT = r"""
     clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
     for (const timer of (window[settleTimerName] || [])) clearTimeout(timer);
+    for (const timer of (window[modelPickerPatchTimersName] || [])) clearTimeout(timer);
+    cancelAnimationFrame(window[modelPickerPatchRafName] || 0);
+    if (window[modelPickerPatchHandlerName]) {
+      document.removeEventListener("pointerdown", window[modelPickerPatchHandlerName], true);
+      document.removeEventListener("pointerover", window[modelPickerPatchHandlerName], true);
+      document.removeEventListener("focusin", window[modelPickerPatchHandlerName], true);
+      document.removeEventListener("keydown", window[modelPickerPatchHandlerName], true);
+    }
     delete window[mutationObserverName];
     delete window[resizeObserverName];
     delete window[bootstrapObserverName];
@@ -6610,6 +6822,10 @@ RENDERER_HUD_SCRIPT = r"""
     delete window[composerInputHandlersName];
     delete window[composerFocusStateName];
     delete window[composerBadgeRafName];
+    delete window[modelPickerPatchHandlerName];
+    delete window[modelPickerPatchRafName];
+    delete window[modelPickerPatchTimersName];
+    delete window[modelPickerSelectionName];
     delete window.__codexUsageHudReportActiveSession;
     delete window.__codexUsageHudUpdate;
     delete window.__codexUsageHudRemove;
@@ -6619,8 +6835,13 @@ RENDERER_HUD_SCRIPT = r"""
   window[scheduleName] = () => scheduleForPanels(Object.keys(PANEL), { invalidateTop: true });
   window[resizeHandlerName] = window[scheduleName];
   window[scrollHandlerName] = () => scheduleForPanels(["request"]);
+  window[modelPickerPatchHandlerName] = scheduleCodexModelPickerPatch;
   window.addEventListener("resize", window[resizeHandlerName]);
   window.addEventListener("scroll", window[scrollHandlerName], true);
+  document.addEventListener("pointerdown", window[modelPickerPatchHandlerName], true);
+  document.addEventListener("pointerover", window[modelPickerPatchHandlerName], true);
+  document.addEventListener("focusin", window[modelPickerPatchHandlerName], true);
+  document.addEventListener("keydown", window[modelPickerPatchHandlerName], true);
   const boot = () => {
     const state = window[stateName];
     if (state?.payload) {
@@ -6630,6 +6851,7 @@ RENDERER_HUD_SCRIPT = r"""
       syncPosition();
       refreshLayoutObservers();
     }
+    scheduleCodexModelPickerPatch();
   };
   if (document.body) {
     boot();
@@ -6641,6 +6863,144 @@ RENDERER_HUD_SCRIPT = r"""
     "__COMPOSER_TIKTOKEN_BADGE_ENABLED__",
     "true" if COMPOSER_TIKTOKEN_BADGE_ENABLED else "false",
 )
+
+
+def _configured_model_catalog_path() -> Path | None:
+    config_path = Path.home() / ".codex" / "config.toml"
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"(?m)^\s*model_catalog_json\s*=\s*(['\"])(.*?)\1", text)
+    if not match:
+        return None
+    raw = match.group(2).strip()
+    if not raw:
+        return None
+    return Path(raw.replace("\\\\", "\\"))
+
+
+def _model_catalog_candidate_paths() -> list[Path]:
+    paths: list[Path] = []
+    env_path = os.environ.get(MODEL_CATALOG_JSON_ENV, "").strip()
+    if env_path:
+        paths.append(Path(env_path))
+    configured = _configured_model_catalog_path()
+    if configured is not None:
+        paths.append(configured)
+    catalog_dir = Path.home() / ".codex" / "model-catalogs"
+    try:
+        catalog_paths = sorted(
+            catalog_dir.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        catalog_paths = []
+    paths.extend(catalog_paths)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path.expanduser()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path.expanduser())
+    return deduped
+
+
+def _as_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def _normalize_catalog_reasoning_levels(model: dict[str, object]) -> list[dict[str, str]]:
+    raw_levels = model.get("supported_reasoning_levels")
+    if raw_levels is None:
+        raw_levels = model.get("supportedReasoningEfforts")
+    if not isinstance(raw_levels, list):
+        return []
+    levels: list[dict[str, str]] = []
+    for item in raw_levels:
+        if not isinstance(item, dict):
+            continue
+        effort = str(item.get("effort") or item.get("reasoningEffort") or "").strip()
+        if not effort:
+            continue
+        description = str(item.get("description") or effort).strip()
+        levels.append({"reasoningEffort": effort, "description": description})
+    return levels
+
+
+def _normalize_catalog_model(model: object) -> dict[str, object] | None:
+    if not isinstance(model, dict):
+        return None
+    visibility = str(model.get("visibility") or "list").strip().lower()
+    if visibility not in {"", "list", "visible"}:
+        return None
+    slug = str(model.get("slug") or model.get("model") or model.get("id") or "").strip()
+    if not slug:
+        return None
+    reasoning_efforts = _normalize_catalog_reasoning_levels(model)
+    default_reasoning = str(
+        model.get("default_reasoning_level")
+        or model.get("defaultReasoningEffort")
+        or (reasoning_efforts[0]["reasoningEffort"] if reasoning_efforts else "medium")
+    ).strip()
+    return {
+        "model": slug,
+        "displayName": str(model.get("display_name") or model.get("displayName") or slug).strip(),
+        "description": str(model.get("description") or "").strip(),
+        "defaultReasoningEffort": default_reasoning,
+        "supportedReasoningEfforts": reasoning_efforts,
+        "inputModalities": _as_string_list(model.get("input_modalities") or model.get("inputModalities")) or ["text"],
+        "priority": int(model.get("priority") or 1000),
+    }
+
+
+def _renderer_model_catalog_payload() -> list[dict[str, object]]:
+    models_by_slug: dict[str, dict[str, object]] = {}
+    for path in _model_catalog_candidate_paths():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        raw_models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(raw_models, list):
+            continue
+        for raw_model in raw_models:
+            model = _normalize_catalog_model(raw_model)
+            if model is None:
+                continue
+            slug = str(model["model"])
+            models_by_slug.setdefault(slug, model)
+    models = sorted(
+        models_by_slug.values(),
+        key=lambda item: (int(item.get("priority") or 1000), str(item.get("model") or "")),
+    )
+    for model in models:
+        model.pop("priority", None)
+    return models
+
+
+def _renderer_hud_script_with_model_catalog(
+    catalog: list[dict[str, object]] | None = None,
+) -> str:
+    payload = _renderer_model_catalog_payload() if catalog is None else catalog
+    return _RENDERER_HUD_SCRIPT_TEMPLATE.replace(
+        "__CODEX_MODEL_PICKER_CATALOG__",
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
+RENDERER_HUD_SCRIPT = _renderer_hud_script_with_model_catalog([])
 
 
 @dataclass(frozen=True)
@@ -7146,6 +7506,14 @@ class RendererHudClient:
                 disconnect_callback=self._target_discovery.mark_disconnected,
             )
 
+    def set_audit_callback(self, callback: Any) -> None:
+        """Deprecated: request/response audit capture has been removed.
+
+        Kept as a no-op so callers set up before wiring is torn down don't
+        crash. Any callback passed here is discarded.
+        """
+        del callback
+
     def bootstrap_active_session(self) -> bool:
         """Install the renderer controller and ask it to report the selected session."""
         if not self.enabled:
@@ -7344,7 +7712,7 @@ class RendererHudClient:
                 pass
         self._script_identifier = install_new_document_script(
             websocket_url,
-            RENDERER_HUD_SCRIPT,
+            _renderer_hud_script_with_model_catalog(),
             self.timeout_seconds,
         )
         self._target_id = target_id
@@ -8670,7 +9038,7 @@ def _session_round_rows(snapshot: ParsedSession) -> list[RequestRound]:
     return _task_rows(snapshot)
 
 
-def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, str]]:
+def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
     rows = [
         item
         for item in _session_round_rows(snapshot)
@@ -9176,7 +9544,14 @@ def _top_activity_trail(snapshot: ParsedSession) -> list[dict[str, object]]:
     ]
     task_start = snapshot.task_started_at or (min(row_times) if row_times else None)
 
-    def add(moment: datetime | None, title: str, detail: str, *, active: bool = False) -> None:
+    def add(
+        moment: datetime | None,
+        title: str,
+        detail: str,
+        *,
+        active: bool = False,
+        round_index: int = 0,
+    ) -> None:
         nonlocal order
         if moment is None:
             return
@@ -9216,6 +9591,7 @@ def _top_activity_trail(snapshot: ParsedSession) -> list[dict[str, object]]:
             title,
             _activity_round_detail(item, snapshot.request.model),
             active=active,
+            round_index=int(item.index or 0),
         )
     add(
         snapshot.request.started_at,

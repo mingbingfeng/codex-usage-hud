@@ -62,6 +62,9 @@ class DaemonProcessMatchingTests(unittest.TestCase):
         self.assertTrue(is_codex_client_process("Codex.exe"))
         self.assertTrue(is_codex_client_process("codex-client.exe"))
         self.assertTrue(is_codex_client_process("OpenAI Codex.exe"))
+        # Codex Desktop 26.707+ renamed the GUI executable to ChatGPT.exe.
+        self.assertTrue(is_codex_client_process("ChatGPT.exe"))
+        self.assertTrue(is_codex_client_process("chatgpt.exe"))
 
     def test_hud_and_python_processes_are_not_detected(self) -> None:
         self.assertFalse(is_codex_client_process("codex-hud.exe"))

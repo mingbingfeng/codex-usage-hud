@@ -308,6 +308,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("renderUpdateButtons", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("const submitted = submitSettingsCommand", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codexUsageHudSettingsCommand", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function patchCodexModelPicker()", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("data-codex-usage-hud-model-option", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("reasoningEffortLabel", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("ultra", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("const binding = window[settingsCommandBindingName];", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("binding(JSON.stringify(payload));", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('setSettingsStatus(state.message || state.title || "", state.error ? "error" : "")', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -1366,6 +1370,75 @@ class RendererHudPayloadTests(unittest.TestCase):
 
 
 class RendererHudClientTests(unittest.TestCase):
+    def test_client_installs_renderer_script_with_model_catalog(self) -> None:
+        install_calls: list[str] = []
+        originals = (
+            renderer_hud._renderer_model_catalog_payload,
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+        )
+
+        def fake_list_targets(port: int, timeout_seconds: float) -> list[dict[str, object]]:
+            del port, timeout_seconds
+            return [
+                {
+                    "id": "target-1",
+                    "type": "page",
+                    "title": "Codex",
+                    "url": "app://codex",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+                }
+            ]
+
+        def fake_install(websocket_url: str, script: str, timeout_seconds: float) -> str:
+            del websocket_url, timeout_seconds
+            install_calls.append(script)
+            return "script-1"
+
+        def fake_send(
+            websocket_url: str,
+            method: str,
+            params: dict[str, object],
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            del websocket_url, method, params, timeout_seconds
+            return {"result": {"result": {"value": True}}}
+
+        renderer_hud._renderer_model_catalog_payload = lambda: [
+            {
+                "model": "gpt-5.6-sol",
+                "displayName": "GPT-5.6-Sol",
+                "description": "New frontier model.",
+                "defaultReasoningEffort": "low",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "Fast"},
+                    {"reasoningEffort": "ultra", "description": "Deep"},
+                ],
+                "inputModalities": ["text", "image"],
+            }
+        ]
+        (
+            renderer_hud.list_targets,
+            renderer_hud.install_new_document_script,
+            renderer_hud.send_cdp_command,
+        ) = (fake_list_targets, fake_install, fake_send)
+        try:
+            client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+            self.assertTrue(client.update_payload({"topLine": "A", "requestLine": "B"}))
+        finally:
+            (
+                renderer_hud._renderer_model_catalog_payload,
+                renderer_hud.list_targets,
+                renderer_hud.install_new_document_script,
+                renderer_hud.send_cdp_command,
+            ) = originals
+
+        self.assertEqual(len(install_calls), 1)
+        self.assertIn("GPT-5.6-Sol", install_calls[0])
+        self.assertIn("gpt-5.6-sol", install_calls[0])
+        self.assertIn("ultra", install_calls[0])
+
     def test_client_installs_renderer_script_once_and_pushes_payloads(self) -> None:
         install_calls: list[tuple[str, str]] = []
         list_calls = 0
@@ -1958,6 +2031,13 @@ class RendererHudClientTests(unittest.TestCase):
         self.assertIn(renderer_hud.LAYOUT_BINDING_NAME, captured)
         self.assertEqual(ensure_calls, [("ws://127.0.0.1/devtools/page/1", "target-1")])
         self.assertEqual(close_calls, 1)
+
+    def test_client_starts_audit_binding_after_update(self) -> None:
+        # audit binding was removed; setter is now a no-op that must accept
+        # any callable without wiring a new binding.
+        client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=False)
+        client.set_audit_callback(lambda payload: payload)
+        self.assertFalse(hasattr(client, "_audit_binding"))
 
     def test_client_does_not_expose_renderer_settings_polling_fallback(self) -> None:
         client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)

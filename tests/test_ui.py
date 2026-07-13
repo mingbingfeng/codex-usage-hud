@@ -1930,6 +1930,11 @@ class BudgetHelperTests(unittest.TestCase):
                 patch("codex_usage_hud.cli.importlib.util.find_spec", return_value=object()),
                 patch("codex_usage_hud.cli.subprocess.Popen", return_value=fake_process) as popen,
             ):
+                # The first HUD snapshot is historical persisted state and
+                # must not open a bubble; the following event may publish it.
+                overlay.update([item])
+                popen.assert_not_called()
+                self.assertFalse(overlay._state_path.exists())
                 overlay.update([item])
 
             popen.assert_called_once()
@@ -1939,6 +1944,30 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertIs(overlay._process, fake_process)
             self.assertTrue(overlay._state_path.exists())
             overlay.close()
+
+    def test_desktop_work_overlay_suppresses_first_snapshot_items(self) -> None:
+        item = WorkStatusItem(
+            id="thread-startup",
+            title="Historical task",
+            session_id="thread-startup",
+            status="running",
+            status_label="运行中",
+            detail="Persisted session state",
+        )
+        overlay = DesktopWorkOverlay(item_limit=2)
+
+        with (
+            patch.object(overlay, "_runtime_available", return_value=True),
+            patch.object(overlay, "_theme_payload", return_value={}),
+            patch.object(overlay, "_start"),
+            patch("codex_usage_hud.cli.write_json_object") as write_json,
+        ):
+            overlay.update([item])
+            write_json.assert_not_called()
+            overlay.update([item])
+
+        write_json.assert_called_once()
+        self.assertEqual(write_json.call_args.args[1]["items"][0]["id"], "thread-startup")
 
     def test_desktop_work_overlay_keep_alive_refreshes_cached_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10983,6 +11012,85 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 130)
         self.assertEqual(call_order[:2], ["bootstrap", "snapshot"])
         fake_client.set_settings_command_callback.assert_called_once()
+
+    def test_renderer_loop_registers_audit_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=RuntimeEventBus(),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                set_active_session_callback=MagicMock(),
+                set_settings_command_callback=MagicMock(),
+                set_attachments_callback=MagicMock(),
+                set_layout_callback=MagicMock(),
+                bootstrap_active_session=MagicMock(return_value=True),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+            snapshot = ParsedSession(status="parsed", session_path=session_file, session_id="session-a")
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=[0.0, KeyboardInterrupt],
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        # audit callback wiring was removed; CLI must not depend on it.
+        self.assertFalse(hasattr(fake_client, "set_audit_callback"))
 
     def test_renderer_loop_publishes_update_state_event_before_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
