@@ -69,6 +69,65 @@ if (!composerBadgeEnabled) {
 ```
 
 The session contract remains active when the visual badge is disabled, while the existing badge-enabled watcher is reused without duplicate keydown/click handlers.
+
+## Scenario: Exact renderer mapping becomes available
+
+### 1. Scope / Trigger
+
+- Trigger: renderer reports a canonical conversation UUID before Codex commits the matching `threads` row in `state_5.sqlite`.
+- Scope: `ActiveSessionTracker` exact lookup, renderer file-event wakeup, and the renderer-loop synthetic `active_session_changed` event.
+
+### 2. Signatures
+
+- `ActiveSessionTracker.path_from_renderer_thread_id(thread_id: str) -> Path | None`.
+- `_RendererFileEventSource._should_wake_immediately(reasons: set[str]) -> bool`.
+- File-watch reason: `session-map` for `state_5.sqlite` or the session index.
+
+### 3. Contracts
+
+- A missing exact row remains `renderer-pending-map`; no title, newest-file, or recursive-session fallback is permitted.
+- Any event set containing `session-map` wakes the renderer loop immediately, even when batched with `settings` or another non-critical reason.
+- The loop invalidates the tracker mapping cache before appending its exact-mapping `active_session_changed` event.
+- `sessions-root` and settings-only events retain their debounce to avoid refresh storms.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Canonical UUID has no DB row | Render pending and record the normal unmatched diagnostic. |
+| State DB/index changes | Clear negative mapping cache and immediately retry that UUID. |
+| `session-map` plus settings in one callback | Wake immediately; preserve both reasons for the single loop pass. |
+| Sessions-root JSONL append only | Retain normal debounce/incremental refresh behavior. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: the row is committed after the renderer click; the next `session-map` event resolves the selected UUID without another click.
+- Base: the row is still absent after the event; HUD stays visibly pending until a later mapping event.
+- Bad: retain the negative cache through the mapping event, debounce that event, or guess another session by title.
+
+### 6. Tests Required
+
+- `tests/test_active_session.py`: cache invalidation clears a negative exact-path result.
+- `tests/test_ui.py`: `session-map` wakes immediately with a long debounce, including a mixed `session-map`/`settings` batch.
+- Renderer regression suite: preserve strict unmapped UUID pending behavior.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+return reasons == {"session"}
+```
+
+This delays an exact mapping becoming available whenever SQLite/index writes are classified as `session-map`.
+
+#### Correct
+
+```python
+return "session" in reasons or "session-map" in reasons
+```
+
+The mapping event is latency-critical while unrelated filesystem writes remain debounced.
 ## Scenario: Pet-inspired session preview and jump boundary
 
 ### 1. Scope / Trigger

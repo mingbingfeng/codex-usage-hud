@@ -2502,7 +2502,10 @@ class _RendererFileEventSource:
 
     @staticmethod
     def _should_wake_immediately(reasons: set[str]) -> bool:
-        return reasons == {"session"}
+        # The renderer can publish a canonical UUID before Codex commits its
+        # state-db row.  A session-map event makes that exact mapping available
+        # and must not inherit the general filesystem debounce.
+        return "session" in reasons or "session-map" in reasons
 
     def _flush_debounced_change(self) -> None:
         with self._lock:

@@ -10786,6 +10786,52 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(reasons, {"session"})
         self.assertEqual(paths, {session_path})
 
+    def test_renderer_file_event_source_wakes_immediately_for_session_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            wake_event = threading.Event()
+            context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=root / "hud_settings.json"),
+                session_index_path=root / "session_index.jsonl",
+                state_db_path=root / "state_5.sqlite",
+                sessions_root=root / "sessions",
+            )
+            created: list[object] = []
+
+            class FakeWatcher:
+                event_driven = True
+
+                def __init__(self, callback, **kwargs):
+                    del kwargs
+                    self.callback = callback
+                    self.specs = []
+                    created.append(self)
+
+                def update(self, specs):
+                    self.specs = list(specs)
+
+                def close(self):
+                    return None
+
+            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
+                source = cli_module._RendererFileEventSource(
+                    context,
+                    wake_event,
+                    debounce_seconds=10.0,
+                )
+                watcher = created[0]
+                state_db_path = root / "state_5.sqlite"
+                watcher.callback(
+                    {"session-map", "settings"},
+                    {state_db_path, root / "hud_settings.json"},
+                )
+                reasons, paths = source.take_changes()
+                source.close()
+
+        self.assertTrue(wake_event.is_set())
+        self.assertEqual(reasons, {"session-map", "settings"})
+        self.assertEqual(paths, {state_db_path, root / "hud_settings.json"})
+
     def test_renderer_file_event_source_publishes_runtime_events(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
