@@ -26,7 +26,7 @@ Download the latest Windows installer from [GitHub Releases](https://github.com/
 
 After installation, Start Menu shortcuts are available:
 
-- `Codex Usage HUD`: daemon entry; when Codex App is not running, it prompts to start Codex App in debug/CDP mode and inject the renderer HUD. Login startup entries keep waiting silently.
+- `Codex Usage HUD`: daemon entry; when Codex App is not running, it launches Codex directly with the fixed debug/CDP port and injects the renderer HUD. If a running Codex instance has no CDP target or uses a different port, the top-right startup panel waits for an explicit **Restart Codex** click and never interrupts current work automatically.
 - `Stop Codex Usage HUD`: stops the running HUD.
 - `Check for Updates`: checks GitHub Releases for a newer installer.
 
@@ -130,7 +130,7 @@ No. `v0.1.0`, `v0.2.0`, and `v0.3.0` remain as historical alpha / preview tags. 
 
 ### The HUD does not appear inside Codex
 
-Start it from `Codex Usage HUD` or `codex-hud --daemon`. The HUD requires Codex App to expose a local CDP/debug target. When Codex App is not running, the HUD prompts to start it with debugging/CDP enabled and keeps waiting/retrying renderer injection. Windows may show one elevation prompt if direct launch is blocked. Login startup uses `--no-startup-prompt`, so it does not show the mode prompt.
+Start it from `Codex Usage HUD` or `codex-hud --daemon`. The HUD uses one fixed local CDP/debug port. If Codex App is not running, the HUD launches it directly with CDP enabled and connects once. If an existing Codex instance exposes the matching port, the HUD connects directly. If CDP is unavailable or the port does not match, the top-right startup panel offers a **Restart Codex** button; Codex is closed and relaunched only after that click. `--no-startup-prompt` remains accepted for compatibility with older startup entries but no longer changes these three paths.
 
 ### Desktop work bubbles do not appear
 

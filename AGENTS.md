@@ -19,6 +19,21 @@ be retired whenever a reliable listener exists.
 See `docs/RENDERER_MODE_STRATEGY.md` before changing renderer injection,
 session tracking, refresh scheduling, or platform integration.
 
+## Optional codebase graph memory
+
+When a cross-file architecture or call-graph question benefits from indexed
+evidence, optionally use `codebase-memory-mcp` before broad manual tracing:
+
+```text
+codebase-memory-mcp cli list_projects '{}'
+codebase-memory-mcp cli index_status '{"project":"<name>"}'
+codebase-memory-mcp cli get_architecture '{"project":"<name>"}'
+codebase-memory-mcp cli search_code '{"project":"<name>","pattern":"<regex>"}'
+```
+
+Use the index as a navigation aid only; verify file paths, lines, and behavior
+against the current workspace. Do not enable automatic indexing by default.
+
 ## Verbose build output
 
 When running verbose build or packaging commands (for example `python tools/build_exe.py`, `python tools/build_installer.py`, PyInstaller, or Inno Setup), redirect full stdout/stderr to a log file and only surface a concise summary or log tail in the conversation. Do not stream full build logs into agent context unless explicitly requested.

@@ -25,6 +25,22 @@ not as a product vision or optional strategy.
 - app-server may become a future explicit authority only after a POC proves it
   exposes current-window active-thread semantics.
 
+### Strict renderer session contract
+
+- The selected renderer row's canonical thread UUID is the only mapping key.
+  Do not title-match, recursively scan session files, or select a newest-file
+  substitute when that UUID is not yet in the local state database.
+- `client-new-thread:*` is a provisional new-session alias, not an unmatched
+  conversation. Render an explicit pending state until Codex publishes the
+  canonical UUID and exact rollout mapping.
+- A state/session-map file event must re-resolve the already selected UUID
+  immediately. It must not wait for another click, title event, or poll.
+- Renderer bootstrap starts with the configured or last successful CDP port.
+  When that port cannot expose a renderer target, one bounded recovery may
+  allocate a fresh local port and restart only the verified Codex desktop
+  process family with CDP enabled. CLI `codex.exe` processes are never part of
+  this restart set.
+
 ## Event-Driven Runtime
 
 The target invariant is:
