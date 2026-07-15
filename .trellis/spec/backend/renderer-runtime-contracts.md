@@ -128,3 +128,65 @@ open_codex_route(item["actionPath"])
 # Keep the local stable command boundary and canonical identity.
 write_overlay_command({"action": "activateSession", "sessionId": item["sessionId"]})
 ```
+
+## Scenario: App-server observer capability gate
+
+### 1. Scope / Trigger
+
+- Trigger: considering Codex app-server as a renderer HUD event source for live thread, turn, item, approval, or token-usage state.
+- Scope: capability discovery and observer safety. This contract does not make app-server the active-session authority and does not replace the rollout/session-file `WorkStatusItem` path.
+
+### 2. Signatures
+
+- Persisted reads: `thread/list`, `thread/read`, `thread/turns/list`, `thread/items/list`, and `thread/loaded/list`.
+- Stateful join: `thread/resume({ threadId, ...optionalOverrides })` followed by `thread/unsubscribe({ threadId })`.
+- Required future capability: a versioned read-only subscribe/attach operation that cannot change stream role, thread configuration, approval routing, permissions, model, cwd, or runtime workspace roots.
+
+### 3. Contracts
+
+- Treat a Desktop-owned `stdio://` app-server as process-private unless that exact process advertises an external listener. Starting another app-server process creates another in-memory server and is not attachment.
+- `thread/list` and `thread/read` prove persisted visibility only. They do not prove that the client receives another process's live notifications or loaded-thread state.
+- Never call `thread/resume` solely to observe HUD status. In the generated 0.144.2 protocol it rejoins a running thread and accepts state-affecting overrides, so it is not a read-only subscription boundary.
+- Do not use Electron IPC, renderer stores, worker bridges, DOM, or React Fiber to fill a missing app-server observer capability.
+- App-server can become a HUD authority only after capability negotiation and live non-interference tests pass on Windows and macOS. Failure must leave the existing event-driven snapshot path unchanged.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Desktop app-server exposes only stdio | Report `observer-unavailable`; do not attempt to attach to inherited handles. |
+| Separate process can read a canonical thread but reports `notLoaded` | Classify as persisted-only visibility; do not claim real-time support. |
+| Schema has `unsubscribe` but live entry requires `resume` | Reject the integration as stateful. |
+| Windows daemon/control socket is unsupported | Reject daemon/proxy as a cross-platform HUD transport. |
+| Versioned read-only attach exists in a future release | Run identity, ordering, disconnect, role, and cross-platform acceptance before enabling it. |
+| Observer changes owner/follower, active session, or thread configuration | Stop immediately, disconnect, and keep app-server disabled. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a future Desktop process advertises a documented observer endpoint; HUD attaches read-only, receives canonical thread events, survives disconnect, and leaves owner/follower unchanged on Windows and macOS.
+- Base: an isolated app-server can list/read rollout history but has no loaded threads or passive live events; retain the local snapshot/watch path.
+- Bad: call `thread/resume` from HUD to make notifications appear, or inject into the Desktop renderer's private conversation store.
+
+### 6. Tests Required
+
+- Capability unit test: no read-only attach method or no external endpoint keeps app-server integration disabled.
+- Protocol test: list/read success without passive events remains `persisted-only`, never `live`.
+- Non-interference integration test: observer connect/disconnect does not change active session, stream role, approval routing, or thread configuration.
+- Cross-platform acceptance: exercise the same capability and fallback on Windows and macOS before changing the default authority.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# Resume is a stateful rejoin, not an observation API.
+client.request("thread/resume", {"threadId": session_id})
+```
+
+#### Correct
+
+```python
+capability = probe_read_only_app_server_observer()
+if not capability.cross_platform_safe:
+    keep_existing_snapshot_authority()
+```
