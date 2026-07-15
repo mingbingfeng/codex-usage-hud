@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import nullcontext
 import gc
 import importlib.metadata as importlib_metadata
@@ -79,14 +80,13 @@ from .platforms import (
     WindowsSearchSessionSwitchBackend,
     get_current_platform,
     is_new_session_source,
+    is_pending_session_source,
 )
 from .platforms.base import BasePlatform
 from .platforms.cdp_probe import (
     CDP_PORT_ENV,
     DEFAULT_CDP_PORT,
     cdp_port_from_env,
-    list_targets,
-    pick_page_target,
 )
 from .platforms.codex_theme import CodexThemeProbe
 from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
@@ -137,13 +137,17 @@ DAEMON_RESTART_REQUESTED = 10
 RENDERER_HUD_UNAVAILABLE = 20
 HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
-RENDERER_CDP_TIMEOUT_SECONDS = 1.0
+RENDERER_CDP_TIMEOUT_SECONDS = 0.35
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
-RENDERER_INITIAL_TIMEOUT_SECONDS = 6.0
+RENDERER_INITIAL_TIMEOUT_SECONDS = 0.75
 RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS = 2.0
 DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 10.0
 DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
 RENDERER_ACTIVE_SESSION_BOOTSTRAP_WAIT_SECONDS = 0.35
+RENDERER_STARTUP_STEP_MIN_VISIBLE_SECONDS = 0.45
+RENDERER_SLOW_OPERATION_LOG_MS = 250.0
+RENDERER_COLD_SESSION_PREVIEW_BYTES = 256 * 1024
+RENDERER_SESSION_SNAPSHOT_CACHE_SIZE = 3
 RENDERER_UPDATE_FAILURE_LIMIT = 6
 AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT = 3
 RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
@@ -277,7 +281,7 @@ class DaemonStartupDecision:
 
 
 class HudLoadingFeedback:
-    """Small topmost startup/loading card for manual launches and mode switches."""
+    """Small topmost startup/loading card for renderer launch and recovery."""
 
     def __init__(
         self,
@@ -291,6 +295,8 @@ class HudLoadingFeedback:
         self.enabled = bool(enabled)
         self._process: subprocess.Popen[str] | None = None
         self._state_path: Path | None = None
+        self._restart_request_path: Path | None = None
+        self._restart_visible = False
         self._closed = False
 
     def start(self) -> "HudLoadingFeedback":
@@ -298,6 +304,7 @@ class HudLoadingFeedback:
             return self
         state_path = hud_runtime_dir() / f"loading-{os.getpid()}-{int(time.time() * 1000)}.json"
         self._state_path = state_path
+        self._restart_request_path = _loading_feedback_restart_path(state_path)
         self._write_state(close=False)
         try:
             self._process = subprocess.Popen(
@@ -326,6 +333,46 @@ class HudLoadingFeedback:
         self.message = self.message if message is None else str(message)
         self._write_state(close=False)
 
+    def offer_codex_restart(
+        self,
+        *,
+        title: str,
+        message: str,
+    ) -> bool:
+        """Keep the launch card open until the user explicitly requests restart."""
+        if not self.enabled or self._closed:
+            return False
+        self._restart_visible = True
+        self.title = str(title)
+        self.message = str(message)
+        self._write_state(close=False)
+        return self._process is not None
+
+    def take_codex_restart_request(self) -> bool:
+        """Consume the restart click written by the lightweight launch card."""
+        path = self._restart_request_path
+        if path is None or self._closed:
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return isinstance(payload, Mapping) and payload.get("action") == "restart_codex"
+
+    def wait_for_codex_restart_request(self) -> bool:
+        """Wait without automatic restart while the user finishes current work."""
+        if not self.enabled or self._closed:
+            return False
+        while not self._closed:
+            if self.take_codex_restart_request():
+                return True
+            time.sleep(0.2)
+        return False
+
     def close(self) -> None:
         if not self.enabled or self._closed:
             return
@@ -345,6 +392,11 @@ class HudLoadingFeedback:
                 self._state_path.unlink()
             except OSError:
                 pass
+        if self._restart_request_path is not None:
+            try:
+                self._restart_request_path.unlink()
+            except OSError:
+                pass
 
     def _write_state(self, *, close: bool) -> None:
         if self._state_path is None:
@@ -356,6 +408,7 @@ class HudLoadingFeedback:
                     "ownerPid": os.getpid(),
                     "title": self.title,
                     "message": self.message,
+                    "restartVisible": self._restart_visible,
                     "updatedAt": time.time(),
                     "close": bool(close),
                 },
@@ -365,11 +418,12 @@ class HudLoadingFeedback:
 
 
 def _loading_feedback_enabled(args: argparse.Namespace | None = None) -> bool:
-    if not sys.platform.startswith("win"):
-        return False
-    if args is not None and getattr(args, "no_startup_prompt", False):
-        return False
-    return True
+    # ``--no-startup-prompt`` used to suppress a modal startup choice.  The
+    # renderer-only flow no longer has that choice: this lightweight status
+    # card is the only place where an already-running, non-CDP Codex asks for
+    # an explicit restart.
+    del args
+    return sys.platform.startswith("win") or sys.platform == "darwin"
 
 
 def _create_loading_feedback(
@@ -410,6 +464,26 @@ def _loading_helper_command(state_path: Path) -> list[str]:
     ]
 
 
+def _loading_feedback_restart_path(state_path: Path) -> Path:
+    """Return the one-shot user-action file owned by a launch feedback card."""
+    return state_path.with_name(f"{state_path.stem}-restart.json")
+
+
+def _loading_feedback_top_right_geometry(
+    *,
+    screen_width: int,
+    screen_height: int,
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    """Place the helper where the in-renderer startup bubble normally sits."""
+    right = 18
+    top = 72
+    x = max(0, int(screen_width) - int(width) - right)
+    y = max(0, min(top, int(screen_height) - int(height)))
+    return x, y
+
+
 def _loading_feedback_owner_pid(path: Path) -> int | None:
     match = re.match(r"loading-(\d+)-\d+\.json$", path.name, re.IGNORECASE)
     if not match:
@@ -436,7 +510,10 @@ def cleanup_stale_loading_feedback_files() -> None:
             continue
         stale = (now - float(mtime)) > LOADING_FEEDBACK_STALE_SECONDS
         owner_alive = _process_exists(owner_pid) if owner_pid is not None else False
-        if owner_pid is not None and owner_alive and not stale:
+        # A live owner is authoritative. In particular, the restart card is a
+        # deliberate user-wait state and must not disappear after the generic
+        # startup staleness window.
+        if owner_pid is not None and owner_alive:
             continue
         if owner_pid is None and not stale:
             continue
@@ -444,6 +521,10 @@ def cleanup_stale_loading_feedback_files() -> None:
             path.unlink()
         except OSError:
             continue
+        try:
+            _loading_feedback_restart_path(path).unlink()
+        except OSError:
+            pass
         try:
             _work_overlay_command_path(path).unlink()
         except OSError:
@@ -478,8 +559,8 @@ def run_loading_feedback_helper(state_file: str | Path) -> int:
         bg="#10161D",
         highlightthickness=1,
         highlightbackground="#263241",
-        padx=18,
-        pady=16,
+        padx=14,
+        pady=13,
     )
     shell.pack(fill="both", expand=True)
 
@@ -488,59 +569,83 @@ def run_loading_feedback_helper(state_file: str | Path) -> int:
 
     tk.Label(
         shell,
-        text="codex-usage-hud",
-        anchor="w",
+        textvariable=title_var,
+        anchor="center",
+        justify="center",
         bg="#10161D",
         fg="#F3D27A",
-        font=("Microsoft YaHei UI", 9, "bold"),
-    ).pack(fill="x")
-    tk.Label(
-        shell,
-        textvariable=title_var,
-        anchor="w",
-        justify="left",
-        bg="#10161D",
-        fg="#F6F9FC",
-        font=("Microsoft YaHei UI", 15, "bold"),
-        pady=4,
+        font=("Microsoft YaHei UI", 11, "bold"),
+        pady=2,
     ).pack(fill="x")
     tk.Label(
         shell,
         textvariable=message_var,
-        anchor="w",
-        justify="left",
+        anchor="center",
+        justify="center",
         bg="#10161D",
-        fg="#B8C6D8",
-        font=("Microsoft YaHei UI", 10),
-        wraplength=324,
+        fg="#8492A6",
+        font=("Microsoft YaHei UI", 9),
+        wraplength=196,
     ).pack(fill="x")
 
     track = tk.Canvas(
         shell,
-        width=324,
-        height=8,
+        width=196,
+        height=6,
         bg="#10161D",
         highlightthickness=0,
         bd=0,
     )
-    track.pack(fill="x", pady=(14, 0))
-    track.create_rectangle(0, 1, 324, 7, fill="#1A2430", outline="")
-    indicator = track.create_rectangle(0, 1, 92, 7, fill="#F3D27A", outline="")
-    accent = track.create_rectangle(0, 1, 48, 7, fill="#FFE7A0", outline="")
+    track.pack(fill="x", pady=(10, 0))
+    track.create_rectangle(0, 0, 196, 6, fill="#1A2430", outline="")
+    indicator = track.create_rectangle(0, 0, 58, 6, fill="#F3D27A", outline="")
+    accent = track.create_rectangle(0, 0, 30, 6, fill="#FFE7A0", outline="")
+
+    restart_path = _loading_feedback_restart_path(path)
+    restart_button = tk.Button(
+        shell,
+        text="重启 Codex",
+        anchor="center",
+        bg="#F3D27A",
+        fg="#10161D",
+        activebackground="#FFE7A0",
+        activeforeground="#10161D",
+        relief="flat",
+        bd=0,
+        padx=10,
+        pady=5,
+        font=("Microsoft YaHei UI", 9, "bold"),
+    )
+
+    def request_restart() -> None:
+        try:
+            write_json_object(
+                restart_path,
+                {"action": "restart_codex", "requestedAt": time.time()},
+            )
+        except OSError:
+            return
+        restart_button.configure(state="disabled", text="正在重启…")
+
+    restart_button.configure(command=request_restart)
 
     root.update_idletasks()
-    width = max(360, int(root.winfo_reqwidth()))
-    height = max(132, int(root.winfo_reqheight()))
+    width = max(228, int(root.winfo_reqwidth()))
+    height = max(118, int(root.winfo_reqheight()))
     screen_width = max(1, int(root.winfo_screenwidth()))
     screen_height = max(1, int(root.winfo_screenheight()))
-    x = max(0, (screen_width - width) // 2)
-    y = max(0, (screen_height - height) // 2)
+    x, y = _loading_feedback_top_right_geometry(
+        screen_width=screen_width,
+        screen_height=screen_height,
+        width=width,
+        height=height,
+    )
     root.geometry(f"{width}x{height}+{x}+{y}")
     root.deiconify()
 
     position = 0
     direction = 1
-    last_signature = ("", "", False)
+    last_signature = ("", "", False, False)
     owner_pid = _loading_feedback_owner_pid(path)
 
     def animate_bar() -> None:
@@ -548,14 +653,14 @@ def run_loading_feedback_helper(state_file: str | Path) -> int:
         if not root.winfo_exists():
             return
         position += 7 * direction
-        if position >= 232:
-            position = 232
+        if position >= 138:
+            position = 138
             direction = -1
         elif position <= 0:
             position = 0
             direction = 1
-        track.coords(indicator, position, 1, position + 92, 7)
-        track.coords(accent, position + 20, 1, position + 60, 7)
+        track.coords(indicator, position, 0, position + 58, 6)
+        track.coords(accent, position + 12, 0, position + 42, 6)
         root.after(34, animate_bar)
 
     def poll_state() -> None:
@@ -569,19 +674,35 @@ def run_loading_feedback_helper(state_file: str | Path) -> int:
         title = str(state.get("title") or "")
         message = str(state.get("message") or "")
         should_close = bool(state.get("close"))
+        restart_visible = bool(state.get("restartVisible"))
         updated_at = float(state.get("updatedAt") or 0.0)
         file_stale = updated_at > 0 and (time.time() - updated_at) > LOADING_FEEDBACK_STALE_SECONDS
-        if owner_pid is not None and not _process_exists(owner_pid):
+        owner_alive = owner_pid is not None and _process_exists(owner_pid)
+        if owner_pid is not None and not owner_alive:
             root.destroy()
             return
-        if file_stale:
+        if file_stale and not owner_alive:
             root.destroy()
             return
-        signature = (title, message, should_close)
+        signature = (title, message, should_close, restart_visible)
         if signature != last_signature:
             last_signature = signature
             title_var.set(title)
             message_var.set(message)
+            if restart_visible:
+                restart_button.pack(fill="x", pady=(10, 0))
+            else:
+                restart_button.pack_forget()
+            root.update_idletasks()
+            width = max(228, int(root.winfo_reqwidth()))
+            height = max(118, int(root.winfo_reqheight()))
+            x, y = _loading_feedback_top_right_geometry(
+                screen_width=screen_width,
+                screen_height=screen_height,
+                width=width,
+                height=height,
+            )
+            root.geometry(f"{width}x{height}+{x}+{y}")
         if should_close:
             root.destroy()
             return
@@ -797,7 +918,10 @@ class DesktopWorkOverlay:
         self._switch_completed_until = 0.0
         self._theme_probe = CodexThemeProbe(
             timeout_seconds=0.08,
-            cache_seconds=0.8,
+            # The renderer binding pushes theme changes.  This cache is only
+            # a fallback for the desktop work overlay, so do not re-run the
+            # expensive DOM probe on every session refresh.
+            cache_seconds=60.0,
             failure_cooldown_seconds=5.0,
         )
 
@@ -830,9 +954,9 @@ class DesktopWorkOverlay:
         else:
             payload_items = [work_item_to_overlay_dict(item) for item in items]
         payload_items = self._apply_switch_completed_override(payload_items)
-        theme_payload = self._theme_payload()
         if not payload_items and self._process is None:
             return
+        theme_payload = self._theme_payload()
         if self._process is not None and self._process.poll() is not None:
             self._last_helper_exit_code = int(self._process.returncode or 0)
             self._process = None
@@ -1429,6 +1553,16 @@ def _codex_app_executable_candidates() -> list[Path]:
         if path.suffix.lower() == ".exe":
             candidates.append(path)
 
+    # ``CodexRelocated`` is the user-approved canonical desktop copy.  Keep it
+    # ahead of AppX and legacy candidates so HUD recovery and normal launches
+    # do not silently start the old WindowsApps installation.
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        relocated_app = Path(local_appdata) / "Programs" / "CodexRelocated" / "app"
+        candidates.extend(
+            [relocated_app / "ChatGPT.exe", relocated_app / "Codex.exe"]
+        )
+
     # Codex Desktop 26.707+ renamed the Electron GUI executable to
     # ``ChatGPT.exe`` (the ``Codex.exe`` next to it now launches the Rust
     # ``app-server`` backend, not the visible window).  Prefer the new name so
@@ -1689,16 +1823,16 @@ def launch_codex_app(*, debugger: bool = False) -> bool:
         _LOGGER.info("codex_app_debugger_launch_unavailable port=%s", port)
         return False
 
-    for target in _codex_app_shell_targets():
-        if _shell_execute_open(target):
-            _LOGGER.info("codex_app_launched mode=normal target=%s", target)
-            return True
     for executable in _codex_app_executable_candidates():
         if _shell_execute_open_with_elevation_fallback(
             executable,
             working_dir=executable.parent,
         ):
             _LOGGER.info("codex_app_launched mode=normal target=%s", executable)
+            return True
+    for target in _codex_app_shell_targets():
+        if _shell_execute_open(target):
+            _LOGGER.info("codex_app_launched mode=normal target=%s", target)
             return True
     _LOGGER.info("codex_app_launch_unavailable")
     return False
@@ -1785,151 +1919,18 @@ def _restart_codex_for_renderer() -> bool:
     return launch_codex_app(debugger=True)
 
 
-def _askyesno_modal(title: str, message: str) -> bool | None:
-    """Show a best-effort cross-platform modal confirmation dialog."""
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-    except Exception:
-        if not sys.platform.startswith("win"):
-            return None
-        try:
-            import ctypes
-
-            MB_YESNO = 0x00000004
-            MB_ICONQUESTION = 0x00000020
-            MB_SETFOREGROUND = 0x00010000
-            MB_TOPMOST = 0x00040000
-            IDYES = 6
-            IDNO = 7
-            result = ctypes.windll.user32.MessageBoxW(
-                None,
-                message,
-                title,
-                MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
-            )
-            if int(result or 0) == IDYES:
-                return True
-            if int(result or 0) == IDNO:
-                return False
-        except Exception as exc:
-            _LOGGER.info("modal_yesno_fallback_failed error=%s", exc)
-        return None
-
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        try:
-            root.attributes("-topmost", True)
-        except Exception:
-            pass
-        root.update_idletasks()
-        return bool(messagebox.askyesno(title, message, parent=root))
-    finally:
-        try:
-            root.destroy()
-        except Exception:
-            pass
-
-
-def _askyesnocancel_modal(title: str, message: str) -> bool | None:
-    """Show a best-effort cross-platform yes/no/cancel modal dialog."""
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-    except Exception:
-        if not sys.platform.startswith("win"):
-            return None
-        try:
-            import ctypes
-
-            MB_YESNOCANCEL = 0x00000003
-            MB_ICONQUESTION = 0x00000020
-            MB_SETFOREGROUND = 0x00010000
-            MB_TOPMOST = 0x00040000
-            IDYES = 6
-            IDNO = 7
-            IDCANCEL = 2
-            result = ctypes.windll.user32.MessageBoxW(
-                None,
-                message,
-                title,
-                MB_YESNOCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST,
-            )
-            if int(result or 0) == IDYES:
-                return True
-            if int(result or 0) == IDNO:
-                return False
-            if int(result or 0) == IDCANCEL:
-                return None
-        except Exception as exc:
-            _LOGGER.info("modal_yesnocancel_fallback_failed error=%s", exc)
-        return None
-
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        try:
-            root.attributes("-topmost", True)
-        except Exception:
-            pass
-        root.update_idletasks()
-        return messagebox.askyesnocancel(title, message, parent=root)
-    finally:
-        try:
-            root.destroy()
-        except Exception:
-            pass
-
-
-def _prompt_missing_codex_startup() -> str:
-    """Ask the user how to continue when daemon startup finds no Codex app."""
-    message = (
-        "未检测到 Codex App。\n\n"
-        "请选择本次启动方式：\n\n"
-        "是：启动 Codex App（调试/CDP 模式），并将 HUD 注入到 Codex 界面里。\n"
-        "否：暂不启动 Codex App，继续等待你手动启动调试/CDP 模式。\n"
-        "取消：退出 HUD。\n\n"
-        "Renderer HUD 需要 Codex 暴露本地调试端口；不会回退到 Qt/Tk 独立窗口。"
-        "\n\n如 Windows 阻止直接启动，HUD 会请求一次权限确认。"
-    )
-    title = "Codex App 未启动"
-    result = _askyesnocancel_modal(title, message)
-    if result is True:
-        return DAEMON_STARTUP_RENDERER
-    if result is False:
-        return DAEMON_STARTUP_WAIT
-    if result is None:
-        return DAEMON_STARTUP_CANCEL
-    return DAEMON_STARTUP_WAIT
-
-
-def _prompt_restart_codex_for_cdp() -> bool | None:
-    """Ask whether Codex should be restarted in debug/CDP mode and retried."""
-    title = "需要重启 Codex 以启用 Renderer HUD"
-    message = (
-        "HUD 未能连接 Codex 的本地调试/CDP 目标。\n\n"
-        "这通常表示当前 Codex 不是以调试/CDP 模式启动，Renderer HUD 无法注入。\n\n"
-        "是：立即以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD。\n"
-        "否：关闭本次 HUD 启动。"
-    )
-    return _askyesno_modal(title, message)
-
-
 def _daemon_startup_decision(
     args: argparse.Namespace,
     manager: CodexDaemonManager,
 ) -> DaemonStartupDecision:
-    """Resolve startup behavior before the daemon enters the invisible wait loop."""
-    if getattr(args, "no_startup_prompt", False):
-        return DaemonStartupDecision(DAEMON_STARTUP_WAIT)
+    """Map daemon startup onto the renderer-only three-scenario contract."""
+    del args
     snapshot = manager.snapshot()
     if snapshot.found:
         return DaemonStartupDecision(DAEMON_STARTUP_WAIT)
-    mode = _prompt_missing_codex_startup()
     return DaemonStartupDecision(
-        mode,
-        launch_codex=mode == DAEMON_STARTUP_RENDERER,
+        DAEMON_STARTUP_RENDERER,
+        launch_codex=True,
     )
 
 
@@ -2152,56 +2153,19 @@ def _remember_successful_renderer_cdp_port(port: int | None) -> None:
         return
 
 
-def _renderer_cdp_port_has_codex_target(
-    port: int,
-    *,
-    timeout_seconds: float = 0.18,
-) -> bool:
-    try:
-        pick_page_target(list_targets(int(port), timeout_seconds))
-    except Exception:
-        return False
-    return True
-
-
-def _unique_ports(*ports: int | None) -> list[int]:
-    result: list[int] = []
-    seen: set[int] = set()
-    for port in ports:
-        if port is None:
-            continue
-        try:
-            value = int(port)
-        except (TypeError, ValueError):
-            continue
-        if value <= 0 or value >= 65536 or value in seen:
-            continue
-        result.append(value)
-        seen.add(value)
-    return result
-
-
 def _select_initial_renderer_cdp_port() -> int:
-    """Pick the renderer CDP port for this process before probes are created."""
+    """Select exactly one configured port; mismatches require user restart."""
     explicit = _explicit_renderer_cdp_port_from_env()
     if explicit is not None:
         return explicit
 
     persisted = _read_persisted_renderer_cdp_port()
-    candidates = _unique_ports(persisted, DEFAULT_CDP_PORT)
-    for port in candidates:
-        if _renderer_cdp_port_has_codex_target(port):
-            os.environ[CDP_PORT_ENV] = str(port)
-            _LOGGER.info("renderer_cdp_port_selected healthy=%s", port)
-            return port
-
     selected = persisted or DEFAULT_CDP_PORT
     os.environ[CDP_PORT_ENV] = str(selected)
     _LOGGER.info(
-        "renderer_cdp_port_selected preferred=%s persisted=%s default=%s",
+        "renderer_cdp_port_selected fixed=%s source=%s",
         selected,
-        persisted or "-",
-        DEFAULT_CDP_PORT,
+        "persisted" if persisted else "default",
     )
     return selected
 
@@ -2780,8 +2744,11 @@ def _prepare_codex_window_for_renderer(
         ):
             launch_attempted = True
             if _codex_processes_running() and last_status == "not_found":
-                launched = _restart_codex_for_renderer()
-                action = "restart_debugger"
+                # Do not restart an existing Codex process as a side effect of
+                # HUD startup. The connection-recovery path asks the user for
+                # confirmation before any restart.
+                launched = False
+                action = "await_restart_confirmation"
             else:
                 _select_initial_renderer_cdp_port()
                 launched = launch_codex_app(debugger=True)
@@ -4200,15 +4167,24 @@ class RuntimeContext:
         default_factory=_VisibleAppErrorCache
     )
     current_session_tail_state: JsonlTailState | None = None
+    session_snapshot_cache: "SessionSnapshotCache | None" = None
 
     def __post_init__(self) -> None:
         if self.runtime_errors.event_bus is None:
             self.runtime_errors.event_bus = self.runtime_events
         _ensure_runtime_error_diagnostics(self)
+        if self.session_snapshot_cache is None:
+            self.session_snapshot_cache = SessionSnapshotCache(
+                self.parser,
+                event_bus=self.runtime_events,
+                sse_tracker=self.sse_tracker,
+            )
 
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
         _stop_active_session_tracker(self)
+        if self.session_snapshot_cache is not None:
+            self.session_snapshot_cache.close()
         if self.pre_send_estimator is not None:
             self.pre_send_estimator.close()
 
@@ -4264,6 +4240,156 @@ def _snapshot_session_key(snapshot: ParsedSession | None) -> str:
     if snapshot is None:
         return ""
     return _session_path_key(snapshot.session_path) or str(snapshot.session_id or "")
+
+
+@dataclass
+class _SessionSnapshotCacheEntry:
+    """A fully parsed JSONL state retained for a recently selected session."""
+
+    state: JsonlTailState
+    snapshot: ParsedSession
+    file_size: int
+    mtime: float
+    accessed_at: float
+
+
+class SessionSnapshotCache:
+    """Keep cold session parsing off the renderer refresh path.
+
+    A selected, uncached session gets a bounded tail preview immediately.  One
+    daemon worker then builds the complete incremental state and publishes an
+    event, so renderer refreshes remain event-driven and never synchronously
+    decode a multi-megabyte historical JSONL file during a sidebar click.
+    """
+
+    def __init__(
+        self,
+        parser: JsonlSessionParser,
+        *,
+        event_bus: RuntimeEventBus | None = None,
+        sse_tracker: SseRequestStateMachine | None = None,
+        max_entries: int = RENDERER_SESSION_SNAPSHOT_CACHE_SIZE,
+        preview_bytes: int = RENDERER_COLD_SESSION_PREVIEW_BYTES,
+    ) -> None:
+        self._parser = parser
+        self._event_bus = event_bus
+        self._sse_tracker = sse_tracker
+        self._max_entries = max(1, int(max_entries))
+        self._preview_bytes = max(1, int(preview_bytes))
+        self._entries: dict[Path, _SessionSnapshotCacheEntry] = {}
+        self._pending: deque[tuple[Path, str]] = deque()
+        self._queued: set[Path] = set()
+        self._lock = threading.Lock()
+        self._wake = Event()
+        self._closed = Event()
+        self._worker = threading.Thread(
+            target=self._run,
+            name="codex-usage-hud-session-cache",
+            daemon=True,
+        )
+        self._worker.start()
+
+    @staticmethod
+    def _cache_path(path: Path) -> Path:
+        try:
+            return path.expanduser().resolve(strict=False)
+        except OSError:
+            return path.expanduser().absolute()
+
+    def snapshot_for(self, path: Path, *, session_id: str = "") -> ParsedSession:
+        """Return a cached complete snapshot or a bounded cold-session preview."""
+        key = self._cache_path(path)
+        try:
+            stat = key.stat()
+        except OSError:
+            return self._parser.parse_file_tail_preview(
+                key,
+                session_id=session_id or None,
+                max_bytes=self._preview_bytes,
+            )
+        with self._lock:
+            entry = self._entries.get(key)
+            if (
+                entry is not None
+                and entry.file_size == int(stat.st_size)
+                and entry.mtime == stat.st_mtime
+            ):
+                entry.accessed_at = time.monotonic()
+                return copy.deepcopy(entry.snapshot)
+            self._enqueue_locked(key, session_id)
+        return self._parser.parse_file_tail_preview(
+            key,
+            session_id=session_id or None,
+            max_bytes=self._preview_bytes,
+        )
+
+    def _enqueue_locked(self, path: Path, session_id: str) -> None:
+        if path in self._queued or self._closed.is_set():
+            return
+        self._queued.add(path)
+        self._pending.append((path, session_id))
+        self._wake.set()
+
+    def _run(self) -> None:
+        while not self._closed.is_set():
+            self._wake.wait()
+            self._wake.clear()
+            while not self._closed.is_set():
+                with self._lock:
+                    if not self._pending:
+                        break
+                    path, session_id = self._pending.popleft()
+                try:
+                    state = None
+                    with self._lock:
+                        previous = self._entries.get(path)
+                        if previous is not None:
+                            state = previous.state
+                    snapshot, state = self._parser.parse_file_incremental(
+                        path,
+                        state,
+                        session_id=session_id or None,
+                        sse_tracker=self._sse_tracker,
+                    )
+                    stat = path.stat()
+                except OSError as exc:
+                    _LOGGER.info("renderer_session_cache_hydrate_failed path=%s error=%s", path, exc)
+                except Exception:
+                    _LOGGER.exception("renderer_session_cache_hydrate_failed path=%s", path)
+                else:
+                    with self._lock:
+                        self._entries[path] = _SessionSnapshotCacheEntry(
+                            state=state,
+                            snapshot=snapshot,
+                            file_size=int(stat.st_size),
+                            mtime=stat.st_mtime,
+                            accessed_at=time.monotonic(),
+                        )
+                        self._trim_locked()
+                    self._publish_hydrated(path)
+                finally:
+                    with self._lock:
+                        self._queued.discard(path)
+
+    def _trim_locked(self) -> None:
+        while len(self._entries) > self._max_entries:
+            oldest = min(self._entries, key=lambda key: self._entries[key].accessed_at)
+            del self._entries[oldest]
+
+    def _publish_hydrated(self, path: Path) -> None:
+        publish = getattr(self._event_bus, "publish", None)
+        if callable(publish):
+            publish(
+                "session_snapshot_hydrated",
+                source="session_snapshot_cache",
+                session=_session_path_key(path),
+            )
+
+    def close(self) -> None:
+        self._closed.set()
+        self._wake.set()
+        if self._worker.is_alive():
+            self._worker.join(timeout=0.2)
 
 
 def _active_session_switch_pending(context: "RuntimeContext", snapshot: ParsedSession | None) -> bool:
@@ -4960,6 +5086,7 @@ def _record_cdp_update_failure(
             "status": str(getattr(client, "last_status", "") or ""),
             "error": str(getattr(client, "last_error", "") or ""),
             "timeoutSeconds": float(getattr(client, "timeout_seconds", 0.0) or 0.0),
+            "metrics": dict(getattr(client, "last_update_metrics", {}) or {}),
         },
     )
 
@@ -4984,6 +5111,7 @@ def build_snapshot(
     refresh_budget_aggregate: bool | None = None,
     refresh_budget_paths: Iterable[Path] = (),
     refresh_active_work_items: bool = True,
+    refresh_current_session_usage: bool = True,
 ) -> ParsedSession:
     context.reload_user_config()
     session_path, selection_source = context.session_resolver.resolve()
@@ -4991,6 +5119,8 @@ def build_snapshot(
 
     if session_path is None:
         if is_new_session_source(selection_source):
+            snapshot = ParsedSession(status="waiting")
+        elif is_pending_session_source(selection_source):
             snapshot = ParsedSession(status="waiting")
         elif str(selection_source or "").startswith("renderer-waiting"):
             snapshot = ParsedSession(status="waiting")
@@ -5018,13 +5148,21 @@ def build_snapshot(
                 error=f"Sessions directory not found: {context.sessions_root}",
             )
     else:
-        tail_state = getattr(context, "current_session_tail_state", None)
-        snapshot, tail_state = context.parser.parse_file_incremental(
-            session_path,
-            tail_state,
-            sse_tracker=context.sse_tracker,
-        )
-        context.current_session_tail_state = tail_state
+        cache = getattr(context, "session_snapshot_cache", None)
+        snapshot_for = getattr(cache, "snapshot_for", None)
+        if callable(snapshot_for):
+            snapshot = snapshot_for(
+                session_path,
+                session_id=str(getattr(context.session_resolver, "session_id", "") or ""),
+            )
+        else:
+            tail_state = getattr(context, "current_session_tail_state", None)
+            snapshot, tail_state = context.parser.parse_file_incremental(
+                session_path,
+                tail_state,
+                sse_tracker=context.sse_tracker,
+            )
+            context.current_session_tail_state = tail_state
     snapshot.selection_source = selection_source
     if context.active_session_tracker is not None and session_path is not None:
         snapshot.session_title = context.active_session_tracker.title_for_session(
@@ -5043,6 +5181,7 @@ def build_snapshot(
         refresh_budget_aggregate is False
         and not refresh_budget_paths
         and session_path is not None
+        and refresh_current_session_usage
     ):
         refresh_budget_paths = (session_path,)
     today_total, week_total = context.usage_cache.summarize(
@@ -5257,8 +5396,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-startup-prompt",
         action="store_true",
         help=(
-            "In daemon mode, skip the Codex-not-running prompt and wait silently. "
-            "Intended for login startup entries."
+            "Deprecated compatibility flag. Renderer startup no longer uses a "
+            "modal startup choice."
         ),
     )
     parser.add_argument(
@@ -5460,20 +5599,14 @@ def run_hud_session(
         loading_feedback=loading_feedback,
     )
     if renderer_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
-        if daemon_manager is not None:
-            try:
-                daemon_manager.close()
-            except Exception:
-                pass
         if not _restart_codex_for_renderer():
-            _LOGGER.info("renderer_hud_restart_requested_but_failed")
             return RENDERER_HUD_UNAVAILABLE
-        return run_hud_session(
-            session_args,
+        return run_renderer_hud_session(
+            _clone_args_with_renderer_preference(args, True),
             lock_already_held=lock_already_held,
             daemon_manager=daemon_manager,
-            loading_feedback=loading_feedback,
             launched_codex=True,
+            loading_feedback=loading_feedback,
         )
     if renderer_exit == HUD_SWITCH_TO_RENDERER:
         _LOGGER.info("renderer_hud_legacy_switch_ignored code=%s", renderer_exit)
@@ -5494,14 +5627,16 @@ def run_renderer_hud_session(
     try:
         with lock_context:
             _select_initial_renderer_cdp_port()
-            context = build_runtime_context(args)
             local_loading = loading_feedback
+            codex_was_running = _codex_processes_running()
+            context = build_runtime_context(args)
             display_mode = normalize_display_mode(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
             renderer_cdp_timeout = (
                 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS
                 if daemon_manager is not None
+                and (launched_codex or not codex_was_running)
                 else RENDERER_CDP_TIMEOUT_SECONDS
             )
             client = RendererHudClient(timeout_seconds=renderer_cdp_timeout)
@@ -5537,13 +5672,14 @@ def run_renderer_hud_session(
                 def wake_for_runtime_event(event: object) -> None:
                     event_type = str(getattr(event, "type", "") or "")
                     if event_type in {
-                        "runtime_error",
                         "overlay_command_received",
                         "session_file_changed",
                         "settings_command_received",
                         "settings_changed",
                         "budget_window_changed",
                         "renderer_layout_changed",
+                        "renderer_theme_changed",
+                        "session_snapshot_hydrated",
                     }:
                         command_refresh_requested.set()
                     elif event_type == "active_session_changed":
@@ -5606,25 +5742,13 @@ def run_renderer_hud_session(
                 }
                 if bool(payload.get("newSession") or payload.get("new_session")):
                     observer_kwargs["new_session"] = True
+                if bool(
+                    payload.get("pendingSession") or payload.get("pending_session")
+                ):
+                    observer_kwargs["pending_session"] = True
                 changed = observer(**observer_kwargs)
                 if changed:
                     publish_active_session_changed("renderer_bridge")
-
-            active_session_callback_setter = getattr(
-                client,
-                "set_active_session_callback",
-                None,
-            )
-            if callable(active_session_callback_setter):
-                active_session_callback_setter(observe_renderer_active_session)
-
-            settings_command_callback_setter = getattr(
-                client,
-                "set_settings_command_callback",
-                None,
-            )
-            if callable(settings_command_callback_setter):
-                settings_command_callback_setter(enqueue_renderer_command)
 
             def observe_renderer_attachments(payload: dict[str, object]) -> None:
                 estimator = getattr(context, "pre_send_estimator", None)
@@ -5636,14 +5760,6 @@ def run_renderer_hud_session(
 
             # 页面 CSP 拦截了到本地桥的 fetch，因此优先用 CDP binding 接收附件，
             # HTTP 桥作兜底（非渲染模式或旧版页面仍可用）。
-            attachments_callback_setter = getattr(
-                client,
-                "set_attachments_callback",
-                None,
-            )
-            if callable(attachments_callback_setter):
-                attachments_callback_setter(observe_renderer_attachments)
-
             def observe_renderer_layout(payload: dict[str, object]) -> None:
                 if callable(runtime_event_publish):
                     runtime_event_publish(
@@ -5661,9 +5777,37 @@ def run_renderer_hud_session(
                 # sees any settings/state side effects triggered by the drag.
                 command_refresh_requested.set()
 
-            layout_callback_setter = getattr(client, "set_layout_callback", None)
-            if callable(layout_callback_setter):
-                layout_callback_setter(observe_renderer_layout)
+            def observe_renderer_theme(payload: dict[str, object]) -> None:
+                if callable(runtime_event_publish):
+                    runtime_event_publish(
+                        "renderer_theme_changed",
+                        source="renderer_theme",
+                        context={"theme": dict(payload)},
+                    )
+                    return
+                command_refresh_requested.set()
+
+            def configure_renderer_client(renderer_client: object) -> None:
+                """Attach every CDP binding to a newly created renderer client.
+
+                Fresh-port recovery replaces the client instance after Codex has
+                restarted.  The bindings are instance-owned, so omitting this
+                step silently loses the renderer session authority and leaves
+                the HUD in its pending/new-session state indefinitely.
+                """
+                bindings = (
+                    ("set_active_session_callback", observe_renderer_active_session),
+                    ("set_settings_command_callback", enqueue_renderer_command),
+                    ("set_attachments_callback", observe_renderer_attachments),
+                    ("set_layout_callback", observe_renderer_layout),
+                    ("set_theme_callback", observe_renderer_theme),
+                )
+                for setter_name, callback in bindings:
+                    setter = getattr(renderer_client, setter_name, None)
+                    if callable(setter):
+                        setter(callback)
+
+            configure_renderer_client(client)
 
             def take_renderer_bridge_command() -> dict[str, object] | None:
                 with bridge_command_lock:
@@ -5680,21 +5824,109 @@ def run_renderer_hud_session(
             )
             bridge_url = bridge.start()
 
-            def bootstrap_renderer_active_session() -> None:
+            def renderer_startup_payload(
+                *,
+                step: str,
+                detail: str,
+                progress: int,
+            ) -> dict[str, object]:
+                return {
+                    "payloadDomains": {
+                        "startup": {
+                            "step": step,
+                            "title": "正在启动 Codex HUD",
+                            "detail": detail,
+                            "progress": max(0, min(100, int(progress))),
+                        }
+                    }
+                }
+
+            def update_renderer_startup(
+                *,
+                step: str,
+                detail: str,
+                progress: int,
+            ) -> bool:
+                show_startup = getattr(client, "show_startup", None)
+                if not callable(show_startup):
+                    return False
+                return bool(
+                    show_startup(
+                        renderer_startup_payload(
+                            step=step,
+                            detail=detail,
+                            progress=progress,
+                        )
+                    )
+                )
+
+            def bootstrap_renderer_active_session(
+                *,
+                step: str,
+                detail: str,
+                progress: int,
+            ) -> bool:
                 bootstrap = getattr(client, "bootstrap_active_session", None)
                 if not callable(bootstrap):
-                    return
+                    return False
                 command_refresh_requested.clear()
-                if bootstrap():
+                startup_payload = renderer_startup_payload(
+                    step=step,
+                    detail=detail,
+                    progress=progress,
+                )
+                try:
+                    bootstrapped = bool(bootstrap(startup_payload=startup_payload))
+                except TypeError:
+                    # Compatibility for third-party/testing clients that still
+                    # expose the old no-argument bootstrap method.
+                    bootstrapped = bool(bootstrap())
+                metrics = dict(
+                    getattr(client, "last_bootstrap_metrics", {}) or {}
+                )
+                _LOGGER.info(
+                    "renderer_active_session_bootstrap ok=%s step=%s progress=%s total_ms=%s failure_stage=%s",
+                    bootstrapped,
+                    step,
+                    progress,
+                    metrics.get("totalMs", "-"),
+                    metrics.get("failureStage", ""),
+                )
+                if bootstrapped:
                     command_refresh_requested.wait(
                         RENDERER_ACTIVE_SESSION_BOOTSTRAP_WAIT_SECONDS
                     )
+                return bootstrapped
+
+            def renderer_startup_progress(stage: str) -> None:
+                stages = {
+                    "reading_session": (
+                        "第 3 步，共 4 步",
+                        "正在识别当前打开的会话…",
+                        62,
+                    ),
+                    "showing_hud": (
+                        "第 4 步，共 4 步",
+                        "会话信息已就绪，正在显示用量与预算…",
+                        88,
+                    ),
+                }
+                step, detail, progress = stages.get(
+                    str(stage or ""),
+                    ("正在启动", "正在准备 HUD…", 40),
+                )
+                update_renderer_startup(
+                    step=step,
+                    detail=detail,
+                    progress=progress,
+                )
 
             def snapshot_or_error(
                 *,
                 refresh_budget_aggregate: bool | None = None,
                 refresh_budget_paths: Iterable[Path] = (),
                 refresh_active_work_items: bool = True,
+                refresh_current_session_usage: bool = True,
             ) -> ParsedSession:
                 try:
                     if refresh_budget_aggregate is None and refresh_active_work_items:
@@ -5704,23 +5936,34 @@ def run_renderer_hud_session(
                             context,
                             refresh_active_work_items=False,
                         )
+                    snapshot_kwargs: dict[str, object] = {
+                        "refresh_budget_aggregate": refresh_budget_aggregate,
+                        "refresh_budget_paths": refresh_budget_paths,
+                    }
+                    if not refresh_current_session_usage:
+                        snapshot_kwargs["refresh_current_session_usage"] = False
                     if refresh_active_work_items:
-                        return build_snapshot(
-                            context,
-                            refresh_budget_aggregate=refresh_budget_aggregate,
-                            refresh_budget_paths=refresh_budget_paths,
-                        )
+                        return build_snapshot(context, **snapshot_kwargs)
                     return build_snapshot(
                         context,
-                        refresh_budget_aggregate=refresh_budget_aggregate,
-                        refresh_budget_paths=refresh_budget_paths,
                         refresh_active_work_items=False,
+                        **snapshot_kwargs,
                     )
                 except Exception as exc:
                     return ParsedSession(status="error", error=str(exc))
 
             try:
-                wait_for_window = daemon_manager is not None or launched_codex
+                # A missing app is launched once through the fixed-port
+                # renderer launcher.  An already-running app is never
+                # restarted or reconfigured by the HUD.
+                # The daemon can observe an already running Codex process, but
+                # that does not mean this invocation launched it.  Only a
+                # process started by the fixed-port launcher may wait for
+                # first-window/CDP readiness.  Existing instances take the
+                # bounded single strict attach path below.
+                wait_for_window = launched_codex or (
+                    sys.platform.startswith("win") and not codex_was_running
+                )
                 launch_if_missing = True
                 if local_loading is not None:
                     local_loading.update(
@@ -5801,111 +6044,144 @@ def run_renderer_hud_session(
                         ),
                         message="正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...",
                     )
-                bootstrap_renderer_active_session()
-                if not wait_for_renderer(
-                    client,
-                    snapshot_or_error,
-                    timeout_seconds=initial_timeout,
-                ):
-                    recovered_with_fresh_port = False
-                    recovery_attempted = False
+                # Install the renderer controller and paint stage 1 before
+                # waiting for the active-session binding.  Binding readiness
+                # may lag script installation briefly on a cold Codex launch;
+                # tying the first visible bubble to that binding caused the
+                # startup panel to be skipped intermittently.
+                renderer_startup_visible = update_renderer_startup(
+                    step="第 1 步，共 4 步",
+                    detail="已连接 Codex，正在准备 HUD…",
+                    progress=18,
+                )
+                if renderer_startup_visible and local_loading is not None:
+                    # The native pre-CDP card occupies the same top-right slot.
+                    # Close it as soon as the in-renderer panel can take over.
+                    local_loading.close()
+                    local_loading = None
+                initial_bootstrapped = False
+                if renderer_startup_visible:
+                    initial_bootstrapped = bootstrap_renderer_active_session(
+                        step="第 1 步，共 4 步",
+                        detail="已连接 Codex，正在准备 HUD…",
+                        progress=18,
+                    )
+                if renderer_startup_visible or initial_bootstrapped:
+                    # The synchronous bootstrap can complete in a single frame.
+                    # Keep the first two stages legible rather than jumping
+                    # straight to session discovery on fast machines.
+                    if getattr(client, "enabled", False) is True:
+                        time.sleep(RENDERER_STARTUP_STEP_MIN_VISIBLE_SECONDS)
+                    update_renderer_startup(
+                        step="第 2 步，共 4 步",
+                        detail="正在建立安全的 HUD 通道…",
+                        progress=35,
+                    )
+                initial_wait_kwargs: dict[str, object] = {
+                    "timeout_seconds": initial_timeout,
+                }
+                if renderer_startup_visible or initial_bootstrapped:
+                    initial_wait_kwargs["progress_callback"] = renderer_startup_progress
+                skip_redundant_existing_attach = bool(
+                    codex_was_running
+                    and not launched_codex
+                    and not renderer_startup_visible
+                    and local_loading is not None
+                )
+                renderer_attached = False
+                if not skip_redundant_existing_attach:
+                    renderer_attached = wait_for_renderer(
+                        client,
+                        snapshot_or_error,
+                        **initial_wait_kwargs,
+                    )
+                if not renderer_attached:
                     original_error = client.last_error
-                    if _renderer_initial_failure_should_recover_cdp_port(original_error):
-                        try:
-                            fresh_port = _assign_fresh_renderer_cdp_port()
-                        except Exception as exc:
-                            _LOGGER.info("renderer_cdp_port_reassign_failed error=%s", exc)
-                            fresh_port = 0
-                        if fresh_port:
-                            _append_renderer_diagnostic(
-                                "initial_connect_recovering_fresh_port",
-                                status=client.last_status,
-                                error=original_error,
-                                old_port=getattr(client, "port", None),
-                                new_port=fresh_port,
-                                display_mode=display_mode,
-                                daemon_mode=daemon_manager is not None,
-                            )
-                            if local_loading is not None:
-                                local_loading.update(
-                                    title=(
-                                        "正在切换 Renderer HUD 端口"
-                                        if launched_codex
-                                        else "正在恢复 Renderer HUD 连接"
-                                    ),
-                                    message=(
-                                        f"当前 CDP 端口无响应，正在改用 {fresh_port} "
-                                        "并重启 Codex App..."
-                                    ),
-                                )
-                            try:
-                                client.close()
-                            except Exception:
-                                pass
-                            recovery_attempted = True
-                            if _restart_codex_for_renderer():
-                                _refresh_renderer_cdp_dependents(context)
-                                client = RendererHudClient(
-                                    timeout_seconds=renderer_cdp_timeout
-                                )
-                                _wait_for_visible_codex_window(
-                                    timeout_seconds=DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS
-                                )
-                                recovered_with_fresh_port = wait_for_renderer(
-                                    client,
-                                    snapshot_or_error,
-                                    timeout_seconds=DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS,
-                                )
-                            else:
-                                _LOGGER.info(
-                                    "renderer_cdp_port_recovery_restart_failed port=%s",
-                                    fresh_port,
-                                )
-                    if recovered_with_fresh_port:
-                        _LOGGER.info(
-                            "renderer_hud_initial_connect_recovered port=%s",
-                            getattr(client, "port", None),
+                    restart_can_help = (
+                        _renderer_initial_failure_should_recover_cdp_port(
+                            original_error
                         )
-                        _append_renderer_diagnostic(
-                            "initial_connect_recovered_fresh_port",
-                            status=client.last_status,
-                            port=getattr(client, "port", None),
-                            display_mode=display_mode,
-                            daemon_mode=daemon_manager is not None,
+                        or _renderer_initial_failure_can_be_fixed_by_restart(
+                            original_error
                         )
-                        _remember_successful_renderer_cdp_port(
-                            getattr(client, "port", None)
-                        )
-                    else:
-                        if local_loading is not None:
-                            local_loading.close()
-                        _LOGGER.info(
-                            "renderer_hud_initial_connect_failed status=%s error=%s",
-                            client.last_status,
-                            client.last_error,
-                        )
-                        _append_renderer_diagnostic(
-                            "initial_connect_failed",
-                            status=client.last_status,
-                            error=client.last_error,
-                            display_mode=display_mode,
-                            daemon_mode=daemon_manager is not None,
-                            initial_timeout_seconds=initial_timeout,
-                            cdp_timeout_seconds=getattr(client, "timeout_seconds", None),
-                        )
-                        if (
-                            not recovery_attempted
-                            and not getattr(args, "no_startup_prompt", False)
-                            and _renderer_initial_failure_can_be_fixed_by_restart(
-                                client.last_error
-                            )
+                    )
+                    if restart_can_help:
+                        fresh_port = 0
+                        if _renderer_initial_failure_should_recover_cdp_port(
+                            original_error
                         ):
-                            restart_requested = _prompt_restart_codex_for_cdp()
-                            if restart_requested is True:
+                            try:
+                                fresh_port = _assign_fresh_renderer_cdp_port()
+                            except Exception as exc:
+                                _LOGGER.info(
+                                    "renderer_cdp_port_reassign_failed error=%s", exc
+                                )
+                        _append_renderer_diagnostic(
+                            "initial_connect_restart_waiting_for_user",
+                            status=client.last_status,
+                            error=original_error,
+                            old_port=getattr(client, "port", None),
+                            new_port=fresh_port or None,
+                            display_mode=display_mode,
+                            daemon_mode=daemon_manager is not None,
+                        )
+                        if local_loading is None:
+                            local_loading = _create_loading_feedback(
+                                args,
+                                title="需要重启 Codex",
+                                message="",
+                            ).start()
+                        offer_restart = getattr(
+                            local_loading,
+                            "offer_codex_restart",
+                            None,
+                        )
+                        wait_for_restart = getattr(
+                            local_loading,
+                            "wait_for_codex_restart_request",
+                            None,
+                        )
+                        restart_offered = bool(
+                            callable(offer_restart)
+                            and offer_restart(
+                                title="需要重启 Codex",
+                                message=(
+                                    "当前 Codex 未使用 HUD 所需的 CDP 端口。"
+                                    "保存好当前工作后，点击下方按钮继续。"
+                                ),
+                            )
+                        )
+                        if restart_offered and callable(wait_for_restart):
+                            _LOGGER.info(
+                                "renderer_cdp_port_restart_waiting_for_user port=%s",
+                                fresh_port or getattr(client, "port", None),
+                            )
+                            if bool(wait_for_restart()):
+                                local_loading.close()
+                                _LOGGER.info(
+                                    "renderer_cdp_port_restart_requested_by_user"
+                                )
                                 return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
-                            if restart_requested is False:
-                                return 0
-                        return RENDERER_HUD_UNAVAILABLE
+                        _LOGGER.info(
+                            "renderer_cdp_port_restart_card_unavailable"
+                        )
+                    if local_loading is not None:
+                        local_loading.close()
+                    _LOGGER.info(
+                        "renderer_hud_initial_connect_failed status=%s error=%s",
+                        client.last_status,
+                        client.last_error,
+                    )
+                    _append_renderer_diagnostic(
+                        "initial_connect_failed",
+                        status=client.last_status,
+                        error=client.last_error,
+                        display_mode=display_mode,
+                        daemon_mode=daemon_manager is not None,
+                        initial_timeout_seconds=initial_timeout,
+                        cdp_timeout_seconds=getattr(client, "timeout_seconds", None),
+                    )
+                    return RENDERER_HUD_UNAVAILABLE
                 else:
                     _remember_successful_renderer_cdp_port(
                         getattr(client, "port", None)
@@ -5939,6 +6215,7 @@ def run_renderer_hud_session(
                     active_session: bool = False
                     diagnostics: bool = False
                     domains: set[str] = field(default_factory=set)
+                    theme_payload: dict[str, object] | None = None
 
                     def request_snapshot(self, *, force_fast: bool = False) -> None:
                         self.snapshot = True
@@ -6087,6 +6364,13 @@ def run_renderer_hud_session(
                     del event
                     request.request_active_session()
 
+                def handle_session_snapshot_hydrated(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_snapshot(force_fast=True)
+
                 def handle_budget_window_changed(
                     event: object,
                     request: _RendererEventRefreshRequest,
@@ -6111,6 +6395,16 @@ def run_renderer_hud_session(
                     del event
                     request.request_domains("settings", force_fast=True)
 
+                def handle_renderer_theme_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    context = getattr(event, "context", None)
+                    theme = context.get("theme") if isinstance(context, Mapping) else None
+                    if isinstance(theme, Mapping) and theme:
+                        request.theme_payload = dict(theme)
+                        request.request_domains("settings", force_fast=True)
+
                 def handle_active_work_refresh_requested(
                     event: object,
                     request: _RendererEventRefreshRequest,
@@ -6126,9 +6420,11 @@ def run_renderer_hud_session(
                     "renderer_layout_changed": handle_renderer_layout_changed,
                     "runtime_error": handle_runtime_error,
                     "session_file_changed": handle_session_file_changed,
+                    "session_snapshot_hydrated": handle_session_snapshot_hydrated,
                     "settings_changed": handle_settings_changed,
                     "settings_command_received": handle_settings_command_received,
                     "update_state_changed": handle_update_state_changed,
+                    "renderer_theme_changed": handle_renderer_theme_changed,
                 }
 
                 def refresh_request_for_events(
@@ -6191,7 +6487,8 @@ def run_renderer_hud_session(
                     if active_session_wake:
                         active_session_refresh_requested.clear()
                     reasons, paths = file_events.take_changes()
-                    if "session-map" in reasons:
+                    session_map_changed = "session-map" in reasons
+                    if session_map_changed:
                         _invalidate_active_session_mapping_cache(context)
                     pending_command = take_renderer_bridge_command()
                     if loop_state.active_work_refresh_pending and callable(
@@ -6209,6 +6506,22 @@ def run_renderer_hud_session(
                         str(getattr(event, "type", "") or "") for event in local_events
                     }
                     paths_payload = sorted(_session_path_key(path) for path in paths)
+                    if session_map_changed:
+                        # A renderer id can arrive before Codex commits its
+                        # exact state-db row.  Re-run only the active-session
+                        # selection after this mapping event; do not title-map
+                        # or scan the session tree.
+                        local_events.append(
+                            make_internal_runtime_event(
+                                "active_session_changed",
+                                source="session_map",
+                                session=current_event_session(),
+                                context={
+                                    "reason": "exact_renderer_mapping_available",
+                                    "paths": paths_payload,
+                                },
+                            )
+                        )
                     if (
                         reasons.intersection({"session", "sessions-root"})
                         and "session_file_changed" not in event_types
@@ -6379,6 +6692,7 @@ def run_renderer_hud_session(
                 def apply_refresh(
                     inputs: _RendererTickInputs, *, force_fast: bool
                 ) -> ParsedSession:
+                    refresh_started = time.perf_counter()
                     latest = loop_state.latest_snapshot
                     budget_signature = _renderer_budget_signature(context)
                     refresh_budget_aggregate = _renderer_should_refresh_budget_aggregate(
@@ -6413,15 +6727,25 @@ def run_renderer_hud_session(
                         and not inputs.file_change_reasons
                         and inputs.update_state.get("phase") != "downloading"
                     )
+                    hydrated_session_refresh = any(
+                        str(getattr(event, "type", "") or "")
+                        == "session_snapshot_hydrated"
+                        for event in inputs.runtime_events
+                    )
                     del force_fast  # already folded into signature/inputs decisions
-                    fresh = snapshot_or_error(
-                        refresh_budget_aggregate=refresh_budget_aggregate,
-                        refresh_budget_paths=refresh_budget_paths,
-                        refresh_active_work_items=(
+                    snapshot_kwargs: dict[str, object] = {
+                        "refresh_budget_aggregate": refresh_budget_aggregate,
+                        "refresh_budget_paths": refresh_budget_paths,
+                        "refresh_active_work_items": (
                             refresh_active_work_items
                             and not lightweight_active_session_refresh
                         ),
-                    )
+                    }
+                    if lightweight_active_session_refresh or hydrated_session_refresh:
+                        snapshot_kwargs["refresh_current_session_usage"] = False
+                    snapshot_started = time.perf_counter()
+                    fresh = snapshot_or_error(**snapshot_kwargs)
+                    snapshot_ms = (time.perf_counter() - snapshot_started) * 1000.0
                     if lightweight_active_session_refresh and latest is not None:
                         fresh.active_work_items = list(latest.active_work_items)
                         loop_state.active_work_refresh_pending = True
@@ -6437,6 +6761,7 @@ def run_renderer_hud_session(
                     )
                     work_overlay.update(fresh.active_work_items)
                     file_events.update_session_path(fresh.session_path)
+                    update_started = time.perf_counter()
                     if lightweight_active_session_refresh:
                         update_payload = getattr(client, "update_payload", None)
                         update_ok = bool(
@@ -6461,6 +6786,30 @@ def run_renderer_hud_session(
                             runtime_errors=_runtime_errors_payload_for_context(context),
                             work_overlay_selectable_max=_work_overlay_screen_max_items(),
                             desktop_overlay_dependency=_desktop_overlay_dependency_status(),
+                        )
+                    update_ms = (time.perf_counter() - update_started) * 1000.0
+                    refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
+                    update_metrics = dict(
+                        getattr(client, "last_update_metrics", {}) or {}
+                    )
+                    if refresh_ms >= RENDERER_SLOW_OPERATION_LOG_MS:
+                        attribution = (
+                            "python_snapshot"
+                            if snapshot_ms >= update_ms
+                            else str(
+                                update_metrics.get("attribution")
+                                or "hud_or_cdp"
+                            )
+                        )
+                        _LOGGER.info(
+                            "renderer_refresh_timing attribution=%s total_ms=%.1f snapshot_ms=%.1f hud_update_ms=%.1f cdp_ms=%s renderer_apply_ms=%s source=%s",
+                            attribution,
+                            refresh_ms,
+                            snapshot_ms,
+                            update_ms,
+                            update_metrics.get("cdpMs", "-"),
+                            update_metrics.get("rendererApplyMs", "-"),
+                            fresh.selection_source,
                         )
                     if update_ok:
                         loop_state.settings_command_status = {}
@@ -6492,6 +6841,7 @@ def run_renderer_hud_session(
                         settings_path=context.settings_store.path,
                         settings_bridge_url=bridge_url,
                         settings_command_status=loop_state.settings_command_status,
+                        theme=inputs.event_refresh_request.theme_payload,
                         update_state=inputs.update_state,
                         debug=_runtime_debug_enabled(),
                         runtime_errors=_runtime_errors_payload_for_context(context),
@@ -6724,6 +7074,16 @@ def run_daemon(args: argparse.Namespace) -> int:
                 _LOGGER.info("daemon_startup_cancelled")
                 return 0
             startup_loading: HudLoadingFeedback | None = None
+            launched_codex_for_renderer = False
+            if startup.mode == DAEMON_STARTUP_WAIT:
+                # Existing Codex: show the same compact top-right progress card
+                # immediately, then turn this exact card into the restart
+                # action if the fixed CDP port is unavailable.
+                startup_loading = _create_loading_feedback(
+                    args,
+                    title="正在启动 Renderer HUD",
+                    message="正在检查 Codex 的 CDP 连接…",
+                ).start()
             if startup.mode == DAEMON_STARTUP_RENDERER and startup.launch_codex:
                 startup_loading = _create_loading_feedback(
                     args,
@@ -6732,6 +7092,11 @@ def run_daemon(args: argparse.Namespace) -> int:
                 ).start()
                 _select_initial_renderer_cdp_port()
                 launch_codex_app(debugger=True)
+                # The daemon has just initiated the fixed-port launch.  Pass
+                # that fact through to the renderer session so it waits for
+                # this one startup instead of treating the process as an old
+                # non-CDP Codex instance and offering a second restart.
+                launched_codex_for_renderer = True
                 _LOGGER.info("daemon_startup_renderer_selected")
             if startup.mode == DAEMON_STARTUP_RENDERER:
                 preferred_runtime_mode = "renderer"
@@ -6755,6 +7120,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                         lock_already_held=True,
                         daemon_manager=manager,
                         loading_feedback=startup_loading,
+                        launched_codex=launched_codex_for_renderer,
                     )
                 else:
                     exit_code = run_hud_session(
@@ -6775,10 +7141,12 @@ def run_daemon(args: argparse.Namespace) -> int:
                         startup_loading.close()
                         _LOGGER.info("daemon_renderer_restart_requested_but_failed")
                         return RENDERER_HUD_UNAVAILABLE
+                    launched_codex_for_renderer = True
                     force_renderer_retry = True
                     _LOGGER.info("daemon_renderer_restart_requested")
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
+                    launched_codex_for_renderer = False
                     _LOGGER.info("daemon_restarting_wait_for_codex")
                     continue
                 if force_renderer_retry and exit_code == RENDERER_HUD_UNAVAILABLE:

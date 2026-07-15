@@ -58,15 +58,15 @@ class _FakeExitMonitor:
 
 
 class DaemonProcessMatchingTests(unittest.TestCase):
-    def test_codex_process_names_are_detected(self) -> None:
-        self.assertTrue(is_codex_client_process("Codex.exe"))
-        self.assertTrue(is_codex_client_process("codex-client.exe"))
-        self.assertTrue(is_codex_client_process("OpenAI Codex.exe"))
-        # Codex Desktop 26.707+ renamed the GUI executable to ChatGPT.exe.
+    def test_chatgpt_desktop_process_names_are_detected(self) -> None:
+        # Codex Desktop 26.707+ uses this name for the Electron process family.
         self.assertTrue(is_codex_client_process("ChatGPT.exe"))
         self.assertTrue(is_codex_client_process("chatgpt.exe"))
 
-    def test_hud_and_python_processes_are_not_detected(self) -> None:
+    def test_cli_and_unrelated_processes_are_not_detected_by_name(self) -> None:
+        self.assertFalse(is_codex_client_process("Codex.exe"))
+        self.assertFalse(is_codex_client_process("codex-client.exe"))
+        self.assertFalse(is_codex_client_process("OpenAI Codex.exe"))
         self.assertFalse(is_codex_client_process("codex-hud.exe"))
         self.assertFalse(is_codex_client_process("codex_usage_hud.exe"))
         self.assertFalse(is_codex_client_process("codex-plus-plus.exe"))
@@ -74,6 +74,34 @@ class DaemonProcessMatchingTests(unittest.TestCase):
         self.assertFalse(is_codex_client_process("codex-computer-use.exe"))
         self.assertFalse(is_codex_client_process("python.exe"))
         self.assertFalse(is_codex_client_process(""))
+
+    def test_desktop_resource_codex_is_detected_by_verified_path(self) -> None:
+        self.assertTrue(
+            is_codex_client_process(
+                "codex.exe",
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_26.707.8479.0_x64__2p2nqsd0c76g0\app\resources\codex.exe",
+            )
+        )
+        self.assertTrue(
+            is_codex_client_process(
+                "Codex.exe",
+                r"C:\Users\person\AppData\Local\Programs\Codex\Codex.exe",
+            )
+        )
+        self.assertTrue(
+            is_codex_client_process(
+                "codex.exe",
+                r"C:\Users\person\AppData\Local\Programs\CodexRelocated\app\resources\codex.exe",
+            )
+        )
+
+    def test_npm_cli_codex_is_rejected_by_path(self) -> None:
+        self.assertFalse(
+            is_codex_client_process(
+                "codex.exe",
+                r"C:\Users\person\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe",
+            )
+        )
 
 
 class DaemonStateMachineTests(unittest.TestCase):

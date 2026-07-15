@@ -591,6 +591,55 @@ class JsonlSessionParser:
         tail.snapshot = parsed
         return parsed, tail
 
+    def parse_file_tail_preview(
+        self,
+        path: Path,
+        *,
+        session_id: str | None = None,
+        max_bytes: int = 256 * 1024,
+    ) -> ParsedSession:
+        """Build a cheap, recent-state preview without decoding a whole log.
+
+        This is intentionally only for a cold renderer session switch.  The
+        complete incremental state is hydrated in the background afterwards;
+        reading the tail keeps the renderer's click path independent of the
+        size of an old conversation log.
+        """
+        snapshot = ParsedSession(session_path=path)
+        try:
+            stat = path.stat()
+            file_size = int(stat.st_size)
+            start = max(0, file_size - max(1, int(max_bytes)))
+            with path.open("rb") as handle:
+                handle.seek(start)
+                chunk = handle.read()
+        except OSError as exc:
+            snapshot.status = "missing"
+            snapshot.error = f"Session file unavailable: {exc}"
+            return snapshot
+
+        if start:
+            first_newline = chunk.find(b"\n")
+            chunk = chunk[first_newline + 1 :] if first_newline >= 0 else b""
+        complete_length = len(chunk) if chunk.endswith(b"\n") else chunk.rfind(b"\n") + 1
+        records: list[dict[str, Any]] = []
+        for line_number, raw_line in enumerate(chunk[:complete_length].splitlines(), 1):
+            try:
+                record = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            record["_line"] = line_number
+            record["_dt"] = parse_timestamp(record.get("timestamp"))
+            records.append(record)
+
+        snapshot.last_file_mtime = stat.st_mtime
+        preview = self.parse_records(records, path, session_id, snapshot=snapshot)
+        if preview.status == "parsed":
+            preview.status = "loading"
+        return preview
+
     def _file_id(self, path: Path, stat: os.stat_result) -> tuple[str, int, int]:
         try:
             resolved = str(path.resolve(strict=False))

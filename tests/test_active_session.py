@@ -25,6 +25,34 @@ from codex_usage_hud.platforms.active_session import (
 from codex_usage_hud.platforms.base import BasePlatform
 
 
+def _write_thread_mapping(
+    state_db: Path,
+    thread_id: str,
+    rollout_path: Path,
+    *,
+    title: str = "",
+) -> None:
+    con = sqlite3.connect(state_db)
+    try:
+        con.execute(
+            "create table threads ("
+            "id text primary key, "
+            "rollout_path text not null, "
+            "title text not null default '', "
+            "archived integer not null default 0, "
+            "updated_at_ms integer, "
+            "updated_at integer)"
+        )
+        con.execute(
+            "insert into threads (id, rollout_path, title, archived, updated_at_ms, updated_at) "
+            "values (?, ?, ?, 0, 10, 10)",
+            (thread_id, "\\\\?\\" + str(rollout_path), title),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 class FakePlatform(BasePlatform):
     def __init__(self, latest_session: Path | None = None) -> None:
         self.latest_session = latest_session
@@ -470,10 +498,17 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             root = Path(temp_dir)
             session_path = root / "rollout-thread-123.jsonl"
             session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(
+                state_db,
+                "thread-123",
+                session_path,
+                title="Renderer Selected Thread",
+            )
             platform = FakeInProcessTitlePlatform(["Selected Thread"])
             tracker = ActiveSessionTracker(
                 platform=platform,
-                state_db=root / "state_5.sqlite",
+                state_db=state_db,
                 sessions_root=root,
                 session_index_path=root / "session_index.jsonl",
                 poll_ms=250,
@@ -648,10 +683,17 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             sessions_root.mkdir()
             session_path = sessions_root / "rollout-renderer-thread-123.jsonl"
             session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(
+                state_db,
+                "renderer-thread-123",
+                session_path,
+                title="Renderer Selected Thread",
+            )
             platform = FakeCdpRefPlatform("stale-cdp-thread", "Stale CDP Thread")
             tracker = ActiveSessionTracker(
                 platform=platform,
-                state_db=root / "state_5.sqlite",
+                state_db=state_db,
                 sessions_root=sessions_root,
                 session_index_path=root / "session_index.jsonl",
                 poll_ms=250,
@@ -694,6 +736,125 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertIsNone(tracker.current_path())
             self.assertEqual(platform.ref_calls, 0)
             self.assertEqual(tracker.latest_source, "renderer-waiting")
+
+    def test_renderer_exact_uuid_mapping_never_uses_title_or_file_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-019f-real-thread.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(
+                state_db,
+                "019f-real-thread",
+                session_path,
+                title="Exact Renderer Thread",
+            )
+            platform = FakePlatform()
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            with (
+                patch.object(
+                    tracker,
+                    "path_for_title",
+                    side_effect=AssertionError("renderer must not title-map"),
+                ),
+                patch(
+                    "codex_usage_hud.platforms.active_session.find_session_file",
+                    side_effect=AssertionError("renderer must not scan session files"),
+                ),
+            ):
+                self.assertTrue(
+                    tracker.observe_conversation_ref(
+                        "local:019f-real-thread",
+                        "Exact Renderer Thread",
+                    )
+                )
+                self.assertEqual(tracker.current_path(), session_path)
+
+            self.assertEqual(platform.detect_calls, 0)
+            self.assertEqual(tracker.latest_source, "renderer:Exact Renderer Thread")
+
+    def test_renderer_provisional_client_new_thread_waits_without_activity_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            stale_path = sessions_root / "rollout-stale.jsonl"
+            stale_path.write_text("{}\n", encoding="utf-8")
+            platform = FakePlatform(latest_session=stale_path)
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=root / "state_5.sqlite",
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+            resolver = SessionPathResolver(
+                platform,
+                sessions_root,
+                active_session_tracker=tracker,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "local:client-new-thread:pending-uuid",
+                    "Pending Renderer Thread",
+                )
+            )
+            self.assertEqual(resolver.resolve(), (None, "renderer-pending-session"))
+            self.assertEqual(platform.detect_calls, 0)
+            self.assertEqual(tracker.latest_title, "Pending Renderer Thread")
+
+    def test_renderer_unmapped_uuid_stays_pending_without_activity_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            stale_path = sessions_root / "rollout-stale.jsonl"
+            stale_path.write_text("{}\n", encoding="utf-8")
+            platform = FakePlatform(latest_session=stale_path)
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(
+                state_db,
+                "different-thread",
+                stale_path,
+                title="Different Thread",
+            )
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+            resolver = SessionPathResolver(
+                platform,
+                sessions_root,
+                active_session_tracker=tracker,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "local:unmapped-thread",
+                    "Unmapped Renderer Thread",
+                )
+            )
+            self.assertEqual(resolver.resolve(), (None, "renderer-pending-map"))
+            self.assertEqual(platform.detect_calls, 0)
 
     def test_renderer_new_session_clears_previous_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

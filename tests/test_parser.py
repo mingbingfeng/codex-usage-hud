@@ -132,6 +132,34 @@ class JsonlSessionParserTests(unittest.TestCase):
             len((complete + json.dumps(second) + "\n").encode("utf-8")),
         )
 
+    def test_tail_preview_is_bounded_and_uses_the_latest_token_state(self) -> None:
+        parser = JsonlSessionParser()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            metadata = record("2026-05-28T00:00:00Z", "session_meta", {"id": "s1"})
+            filler = record("2026-05-28T00:00:01Z", "event_msg", {"type": "notice", "text": "x" * 1024})
+            latest = token_count("2026-05-28T00:10:00Z", 120, 20, 8, 2, 128, 128)
+            path.write_text(
+                json.dumps(metadata)
+                + "\n"
+                + (json.dumps(filler) + "\n") * 32
+                + json.dumps(latest)
+                + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            preview = parser.parse_file_tail_preview(
+                path,
+                session_id="s1",
+                max_bytes=4096,
+            )
+
+        self.assertEqual(preview.status, "loading")
+        self.assertEqual(preview.session_id, "s1")
+        self.assertEqual(preview.confirmed.cumulative_total, 128)
+        self.assertLess(preview.line_count, 33)
+
     def test_incremental_parse_resets_after_truncate_or_rotation(self) -> None:
         parser = JsonlSessionParser()
         with tempfile.TemporaryDirectory() as temp_dir:

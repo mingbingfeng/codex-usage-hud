@@ -19,6 +19,7 @@ _LOGGER = logging.getLogger("codex_usage_hud.active_session")
 _LOGGER.addHandler(logging.NullHandler())
 _THREAD_PATH_NEGATIVE_CACHE_SECONDS = 2.0
 _TITLE_PREFIX_MATCH_MIN_CHARS = 8
+_PROVISIONAL_RENDERER_THREAD_PREFIX = "client-new-thread:"
 
 
 def _session_search_roots(sessions_root: Path) -> tuple[Path, ...]:
@@ -72,10 +73,34 @@ def is_new_session_source(source: str) -> bool:
     return text.startswith(
         (
             "renderer-new-session",
+            "renderer-pending-session",
             "cdp-new-session",
             "ui-new-session",
         )
     )
+
+
+def is_pending_session_source(source: str) -> bool:
+    """Return whether renderer authority has a session whose data is not ready yet.
+
+    This is deliberately distinct from an unmatched session.  Renderer mode
+    receives the selected row immediately, while Codex may publish its exact
+    local rollout mapping a moment later.  The HUD must wait for that exact
+    mapping instead of guessing by title or selecting a different JSONL file.
+    """
+    return str(source or "").strip().startswith(
+        ("renderer-pending-session", "renderer-pending-map")
+    )
+
+
+def is_provisional_renderer_session_id(session_id: str) -> bool:
+    """Whether a renderer id is Codex's pre-persistence new-thread alias."""
+    text = str(session_id or "").strip()
+    if ":" in text:
+        prefix, suffix = text.split(":", 1)
+        if prefix.casefold() in {"local", "remote", "thread", "session", "conversation"}:
+            text = suffix.strip()
+    return text.casefold().startswith(_PROVISIONAL_RENDERER_THREAD_PREFIX)
 
 
 def _is_new_session_title(title: str) -> bool:
@@ -333,6 +358,7 @@ class ActiveSessionTracker:
         self._renderer_title = ""
         self._renderer_path: Path | None = None
         self._renderer_new_session = False
+        self._renderer_pending_session = False
         self._change_callback: Callable[[], None] | None = None
 
     def set_change_callback(self, callback: Callable[[], None] | None) -> None:
@@ -518,23 +544,31 @@ class ActiveSessionTracker:
         source: str = "renderer",
         detected_at: float | None = None,
         new_session: bool = False,
+        pending_session: bool = False,
     ) -> bool:
         """Accept an active conversation ref pushed by the renderer bridge."""
         if not self.enabled:
             return False
         session_id = str(session_id or "").strip()
         title = str(title or "").strip()
+        pending_session = bool(pending_session) or is_provisional_renderer_session_id(
+            session_id
+        )
         new_session = bool(new_session) or (
             not session_id and _is_new_session_title(title)
         )
-        if new_session:
+        if new_session or pending_session:
             session_id = ""
+        if new_session:
             title = ""
-        if not session_id and not title and not new_session:
+        if not session_id and not title and not new_session and not pending_session:
             return False
         detected = detected_at if detected_at is not None else time.monotonic()
 
-        path = self.path_from_thread_id(session_id) if session_id else None
+        # Renderer is the authority. A canonical renderer id may only map via
+        # its exact state-db record; title matching and recursive file searches
+        # can select a different conversation after a sidebar change.
+        path = self.path_from_renderer_thread_id(session_id) if session_id else None
         display_title = title
         if session_id and path is not None:
             display_title = (
@@ -542,8 +576,6 @@ class ActiveSessionTracker:
                 or self.title_from_thread_id(session_id)
                 or title
             )
-        if path is None and title:
-            path = self.path_for_title(title)
         if not display_title and session_id:
             display_title = self.title_from_session_index_id(session_id)
 
@@ -553,9 +585,13 @@ class ActiveSessionTracker:
             f"{source}-new-session"
             if new_session
             else (
-                f"{source}:{source_label}"
-                if path is not None
-                else f"{source}-unmatched"
+                f"{source}-pending-session"
+                if pending_session
+                else (
+                    f"{source}:{source_label}"
+                    if path is not None
+                    else f"{source}-pending-map"
+                )
             )
         )
         with self._lock:
@@ -567,10 +603,12 @@ class ActiveSessionTracker:
             previous_renderer_title = self._renderer_title
             previous_renderer_path = self._renderer_path
             previous_renderer_new_session = self._renderer_new_session
+            previous_renderer_pending_session = self._renderer_pending_session
             self._renderer_session_id = session_id
             self._renderer_title = display_title
             self._renderer_path = path
             self._renderer_new_session = new_session
+            self._renderer_pending_session = pending_session
             self.latest_session_id = session_id
             self.latest_title = display_title
             self.latest_path = path
@@ -588,6 +626,7 @@ class ActiveSessionTracker:
             or display_title != previous_renderer_title
             or path != previous_renderer_path
             or new_session != previous_renderer_new_session
+            or pending_session != previous_renderer_pending_session
         )
         if changed:
             _LOGGER.info(
@@ -597,7 +636,11 @@ class ActiveSessionTracker:
                 response_ms,
                 "new-session"
                 if new_session
-                else compact_text(display_title or session_id, 80),
+                else (
+                    "pending-session"
+                    if pending_session
+                    else compact_text(display_title or session_id, 80)
+                ),
             )
             self._notify_change()
         return changed
@@ -731,6 +774,57 @@ class ActiveSessionTracker:
         except OSError:
             return ""
         return best_title
+
+    def path_from_renderer_thread_id(self, thread_id: str) -> Path | None:
+        """Resolve a canonical renderer id through its exact state-db row.
+
+        This is intentionally narrower than :meth:`path_from_thread_id`.
+        Renderer selection must never fall through to a title or recursive
+        filename heuristic: on a fast sidebar switch either the exact mapping
+        is available, or the HUD remains in an explicit pending state.
+        """
+        thread_id = str(thread_id or "").strip()
+        if not thread_id or is_provisional_renderer_session_id(thread_id):
+            return None
+        if ":" in thread_id:
+            prefix, suffix = thread_id.split(":", 1)
+            if prefix.lower() in {
+                "local",
+                "remote",
+                "thread",
+                "session",
+                "conversation",
+            }:
+                thread_id = suffix.strip()
+        if not thread_id or not self.state_db.exists():
+            return None
+
+        cache_key = f"renderer:{thread_id}"
+        now = time.monotonic()
+        cached = self._thread_path_cache.get(cache_key)
+        if cached is not None:
+            cached_path, cached_at = cached
+            if cached_path is not None and cached_path.exists():
+                return cached_path
+            if (
+                cached_path is None
+                and now - cached_at <= _THREAD_PATH_NEGATIVE_CACHE_SECONDS
+            ):
+                return None
+        try:
+            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    "select rollout_path from threads where id = ? limit 1",
+                    (thread_id,),
+                ).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            row = None
+        path = self._normalize_rollout_path(str(row[0] or "")) if row else None
+        self._thread_path_cache[cache_key] = (path, now)
+        return path
 
     def path_from_thread_id(self, thread_id: str) -> Path | None:
         """Resolve a known thread id to a local rollout JSONL path."""
@@ -900,6 +994,13 @@ class ActiveSessionTracker:
                 self.latest_source = "renderer-new-session"
                 self.latest_event_source = "renderer"
                 return True, None
+            if self._renderer_pending_session:
+                self.latest_session_id = ""
+                self.latest_path = None
+                self._mapped_title = ""
+                self.latest_source = "renderer-pending-session"
+                self.latest_event_source = "renderer"
+                return True, None
             if not self._renderer_session_id and not self._renderer_title:
                 return False, None
             title = self._renderer_title
@@ -915,20 +1016,17 @@ class ActiveSessionTracker:
                 self.latest_event_source = "renderer"
             return True, path
         if session_id:
-            path = self.path_from_thread_id(session_id)
+            path = self.path_from_renderer_thread_id(session_id)
             if path is not None and not title:
                 title = self.title_from_session_index_id(
                     session_id
                 ) or self.title_from_thread_id(session_id)
-        if path is None and not title:
-            return True, None
-        if path is None:
-            path = self.path_for_title(title)
         with self._lock:
             self._renderer_session_id = session_id
             self._renderer_title = title
             self._renderer_path = path
             self._renderer_new_session = False
+            self._renderer_pending_session = False
             self.latest_session_id = session_id
             self.latest_title = title
             self.latest_path = path
@@ -936,7 +1034,7 @@ class ActiveSessionTracker:
             self.latest_source = (
                 f"renderer:{compact_text(title or session_id)}"
                 if path is not None
-                else "renderer-unmatched"
+                else "renderer-pending-map"
             )
             self.latest_event_source = "renderer"
         return True, path
@@ -1015,6 +1113,9 @@ class SessionPathResolver:
         if self.active_session_tracker is not None and self.active_session_tracker.enabled:
             self.selection_source = tracker_source
             if is_new_session_source(tracker_source):
+                self.auto_session_file = None
+                return None, self.selection_source
+            if is_pending_session_source(tracker_source):
                 self.auto_session_file = None
                 return None, self.selection_source
             if tracker_source.startswith("renderer-unmatched"):

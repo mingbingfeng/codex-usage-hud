@@ -97,6 +97,31 @@ class RuntimeErrorRegistryTests(unittest.TestCase):
         self.assertEqual(event.context["error"]["code"], "active_session.unmatched_thread")
         self.assertEqual(event.context["error"]["context"]["threadId"], "thread-a")
 
+    def test_repeated_same_error_aggregates_without_second_wakeup(self) -> None:
+        bus = RuntimeEventBus(clock=lambda: 20.0)
+        events = []
+        bus.subscribe(events.append)
+        registry = RuntimeErrorRegistry(clock=lambda: 10.0, event_bus=bus)
+
+        registry.record(
+            source="cdp",
+            code="update_failed",
+            message="Update failed",
+            context={"failures": 1},
+        )
+        registry.clock = lambda: 11.0
+        registry.record(
+            source="cdp",
+            code="update_failed",
+            message="Update failed",
+            context={"failures": 2},
+        )
+
+        self.assertEqual(len(events), 1)
+        payload = registry.to_payload()
+        self.assertEqual(payload[0]["count"], 2)
+        self.assertEqual(payload[0]["context"], {"failures": 2})
+
     def test_resolve_publishes_runtime_error_resolved_event(self) -> None:
         bus = RuntimeEventBus(clock=lambda: 20.0)
         events = []

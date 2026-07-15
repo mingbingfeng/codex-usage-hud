@@ -103,7 +103,10 @@ class RuntimeErrorRegistry:
         event.context = dict(context or {})
         event.last_seen_at = now
         event.count += 1
-        self._publish_recorded(event, now)
+        # Repeated failures are state aggregation, not fresh runtime work.
+        # Publishing each repeat creates a feedback loop when the consumer's
+        # attempt to render diagnostics is itself the failing operation.
+        # The first record and eventual resolve remain observable.
         return event
 
     def resolve(self, *, source: str, code: str) -> None:

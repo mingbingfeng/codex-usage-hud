@@ -31,12 +31,15 @@ from ..platforms.cdp_probe import (
     remove_new_document_script,
     send_cdp_command,
 )
-from ..platforms.active_session import is_new_session_source
+from ..platforms.active_session import (
+    is_new_session_source,
+    is_pending_session_source,
+)
 from ..platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "18"
+RENDERER_HUD_VERSION = "19"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 SLOW_RENDERER_UPDATE_LOG_MS = 250.0
@@ -44,6 +47,7 @@ ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
 SETTINGS_COMMAND_BINDING_NAME = "codexUsageHudSettingsCommand"
 COMPOSER_ATTACHMENTS_BINDING_NAME = "codexUsageHudComposerAttachments"
 LAYOUT_BINDING_NAME = "codexUsageHudLayout"
+THEME_BINDING_NAME = "codexUsageHudTheme"
 MODEL_CATALOG_JSON_ENV = "CODEX_USAGE_HUD_MODEL_CATALOG_JSON"
 TOKEN_LEGEND_TEXT = "↑ 输入  ↻ 缓存  ↓ 输出\n◇ 推理  ∑ 合计  $ 金额\n◎ 缓存率  ~ 估算"
 TOP_EXPANDED_HEADER_FALLBACK = "Codex 会话 / 预算"
@@ -115,6 +119,12 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   const composerAttachmentsTimerName = "__codexUsageHudComposerAttachmentsTimer";
   const composerAttachmentsSignatureName = "__codexUsageHudComposerAttachmentsSignature";
   const composerAttachmentsObserverName = "__codexUsageHudComposerAttachmentsObserver";
+  const themeObserverName = "__codexUsageHudThemeObserver";
+  const themeMediaQueryName = "__codexUsageHudThemeMediaQuery";
+  const themeMediaQueryHandlerName = "__codexUsageHudThemeMediaQueryHandler";
+  const themeStorageHandlerName = "__codexUsageHudThemeStorageHandler";
+  const themeTimerName = "__codexUsageHudThemeTimer";
+  const themeSignatureName = "__codexUsageHudThemeSignature";
   const runningTimerName = "__codexUsageHudRunningTimer";
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
@@ -124,6 +134,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
   const activeSessionTimerName = "__codexUsageHudActiveSessionTimer";
   const activeSessionSendFollowupTimersName = "__codexUsageHudActiveSessionSendTimers";
+  const activeSessionComposerHandlerName = "__codexUsageHudActiveSessionComposerHandler";
   const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";
   const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
     const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
@@ -131,6 +142,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     const settingsCommandBindingName = "codexUsageHudSettingsCommand";
     const composerAttachmentsBindingName = "codexUsageHudComposerAttachments";
     const layoutBindingName = "codexUsageHudLayout";
+    const themeBindingName = "codexUsageHudTheme";
   const layoutReportTimerName = "__codexUsageHudLayoutTimer";
   const layoutReportSignatureName = "__codexUsageHudLayoutSignature";
   const staleUpdateMs = 10000;
@@ -438,6 +450,84 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         user-select: none;
         color-scheme: dark;
         font-family: "Microsoft YaHei UI", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #${rootId}[data-hud-ready="false"] .codex-usage-hud-panel {
+        display: none !important;
+      }
+      #${rootId} .codex-usage-hud-startup-bubble {
+        position: fixed;
+        top: 72px;
+        right: 18px;
+        bottom: auto;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        width: 196px;
+        min-height: 146px;
+        padding: 15px 16px 14px;
+        border: 1px solid rgba(243, 210, 122, .52);
+        border-radius: 12px;
+        background: linear-gradient(145deg, rgba(32, 40, 51, .96), rgba(16, 22, 29, .96));
+        box-shadow: 0 16px 38px rgba(0, 0, 0, .34), inset 0 1px 0 rgba(255,255,255,.06);
+        color: var(--codex-usage-hud-text, #e8eef7);
+        text-align: center;
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-startup-bubble[hidden] {
+        display: none !important;
+      }
+      #${rootId} .codex-usage-hud-startup-bubble::before {
+        content: "";
+        width: 30px;
+        height: 30px;
+        margin-bottom: 8px;
+        border: 3px solid rgba(243, 210, 122, .24);
+        border-top-color: var(--codex-usage-hud-accent, #f3d27a);
+        border-radius: 50%;
+        animation: codex-usage-hud-startup-spin .85s linear infinite;
+      }
+      #${rootId} .codex-usage-hud-startup-step {
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: .04em;
+      }
+      #${rootId} .codex-usage-hud-startup-title {
+        color: var(--codex-usage-hud-accent, #f3d27a);
+        font-size: 12px;
+        font-weight: 800;
+        line-height: 1.25;
+      }
+      #${rootId} .codex-usage-hud-startup-detail {
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+        line-height: 1.35;
+      }
+      #${rootId} .codex-usage-hud-startup-progress-track {
+        width: 100%;
+        height: 6px;
+        margin-top: 11px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(255,255,255,.10);
+      }
+      #${rootId} .codex-usage-hud-startup-progress-fill {
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--codex-usage-hud-accent, #f3d27a), #ffe7a0);
+        transition: width .22s ease;
+      }
+      #${rootId} .codex-usage-hud-startup-progress-label {
+        align-self: flex-end;
+        margin-top: 5px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font: 700 10px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      @keyframes codex-usage-hud-startup-spin {
+        to { transform: rotate(360deg); }
       }
       #${rootId} .codex-usage-hud-panel {
         position: fixed;
@@ -1835,7 +1925,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         display: grid;
         place-items: center;
         padding: 24px;
-        background: rgba(3, 7, 12, .48);
+        background: color-mix(in srgb, var(--codex-usage-hud-surface, #10161d) 52%, transparent);
         pointer-events: auto;
       }
       #${rootId} .codex-usage-hud-settings-dialog {
@@ -1844,10 +1934,10 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         max-height: min(720px, calc(100vh - 32px));
         display: grid;
         grid-template-rows: auto auto minmax(0, 1fr) auto;
-        border: 1px solid rgba(140, 153, 174, .28);
+        border: 1px solid var(--codex-usage-hud-panel-border, #3a485a);
         border-radius: 8px;
-        background: #10161d;
-        color: #e8eef7;
+        background: var(--codex-usage-hud-surface, #10161d);
+        color: var(--codex-usage-hud-text, #e8eef7);
         box-shadow: 0 24px 70px rgba(0, 0, 0, .44);
         overflow: hidden;
         font: 12px "Microsoft YaHei UI", system-ui, sans-serif;
@@ -1859,7 +1949,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         justify-content: space-between;
         gap: 10px;
         padding: 10px 12px;
-        background: #151d27;
+        background: var(--codex-usage-hud-header-surface, #151d27);
       }
       #${rootId} .codex-usage-hud-settings-title {
         font-size: 13px;
@@ -1869,15 +1959,15 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       #${rootId} .codex-usage-hud-settings-action {
         border: 0;
         border-radius: 5px;
-        background: #2e3846;
-        color: #dde7f2;
+        background: var(--codex-usage-hud-panel-border, #2e3846);
+        color: var(--codex-usage-hud-text, #dde7f2);
         min-height: 28px;
         padding: 4px 9px;
         cursor: pointer;
       }
       #${rootId} .codex-usage-hud-settings-action[data-primary="true"] {
-        background: #f3d27a;
-        color: #10161d;
+        background: var(--codex-usage-hud-accent, #f3d27a);
+        color: var(--codex-usage-hud-progress-day-text, #10161d);
         font-weight: 700;
       }
       #${rootId} .codex-usage-hud-settings-link {
@@ -1885,7 +1975,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         border: 0;
         border-radius: 0;
         background: transparent;
-        color: #f3d27a;
+        color: var(--codex-usage-hud-accent, #f3d27a);
         padding: 0;
         cursor: pointer;
         font: inherit;
@@ -1898,28 +1988,28 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         display: flex;
         gap: 6px;
         padding: 8px 12px;
-        border-top: 1px solid #202833;
-        border-bottom: 1px solid #202833;
-        background: #10161d;
+        border-top: 1px solid var(--codex-usage-hud-divider, #202833);
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #202833);
+        background: var(--codex-usage-hud-surface, #10161d);
       }
       #${rootId} .codex-usage-hud-settings-tab {
         border: 0;
         border-radius: 5px;
         background: transparent;
-        color: #a9bcd2;
+        color: var(--codex-usage-hud-muted, #a9bcd2);
         padding: 5px 9px;
         cursor: pointer;
       }
       #${rootId} .codex-usage-hud-settings-tab[data-active="true"] {
-        background: #202833;
-        color: #f3d27a;
+        background: var(--codex-usage-hud-header-surface, #202833);
+        color: var(--codex-usage-hud-accent, #f3d27a);
       }
       #${rootId} .codex-usage-hud-settings-body {
         min-height: 0;
         overflow: auto;
         padding: 12px;
         scrollbar-width: thin;
-        scrollbar-color: #273241 #10161d;
+        scrollbar-color: var(--codex-usage-hud-divider, #273241) var(--codex-usage-hud-surface, #10161d);
       }
       #${rootId} .codex-usage-hud-settings-grid {
         display: grid;
@@ -1934,7 +2024,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       }
       #${rootId} .codex-usage-hud-settings-field label,
       #${rootId} .codex-usage-hud-price-title {
-        color: #8492a6;
+        color: var(--codex-usage-hud-muted, #8492a6);
         font-size: 10px;
         font-weight: 700;
       }
@@ -1944,10 +2034,10 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         min-width: 0;
         box-sizing: border-box;
         width: 100%;
-        border: 1px solid #273241;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
         border-radius: 5px;
-        background: #141b24;
-        color: #e8eef7;
+        background: var(--codex-usage-hud-panel-surface, #141b24);
+        color: var(--codex-usage-hud-text, #e8eef7);
         min-height: 30px;
         padding: 5px 7px;
         outline: none;
@@ -1955,7 +2045,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       #${rootId} .codex-usage-hud-settings-field input:focus,
       #${rootId} .codex-usage-hud-settings-field select:focus,
       #${rootId} .codex-usage-hud-price-row input:focus {
-        border-color: #f3d27a;
+        border-color: var(--codex-usage-hud-accent, #f3d27a);
       }
       #${rootId} .codex-usage-hud-overlay-dependency {
         min-height: 30px;
@@ -1963,9 +2053,9 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         display: grid;
         gap: 5px;
         padding: 7px 8px;
-        border: 1px solid #273241;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
         border-radius: 5px;
-        background: #141b24;
+        background: var(--codex-usage-hud-panel-surface, #141b24);
       }
       #${rootId} .codex-usage-hud-overlay-dependency-head {
         display: flex;
@@ -1975,16 +2065,16 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         gap: 6px;
       }
       #${rootId} .codex-usage-hud-overlay-dependency-state {
-        color: #e8eef7;
+        color: var(--codex-usage-hud-text, #e8eef7);
         font-size: 11px;
         font-weight: 700;
       }
       #${rootId} .codex-usage-hud-overlay-dependency-version {
-        color: #8fe3a1;
+        color: var(--codex-usage-hud-success, #8fe3a1);
         font: 700 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
       }
       #${rootId} .codex-usage-hud-overlay-dependency-note {
-        color: #8492a6;
+        color: var(--codex-usage-hud-muted, #8492a6);
         font-size: 11px;
         line-height: 1.35;
       }
@@ -2025,7 +2115,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         display: block;
       }
       #${rootId} .codex-usage-hud-price-header {
-        color: #8492a6;
+        color: var(--codex-usage-hud-muted, #8492a6);
         font-size: 10px;
         font-weight: 700;
       }
@@ -2034,12 +2124,12 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         flex-wrap: wrap;
         gap: 6px;
         align-items: center;
-        color: #8492a6;
+        color: var(--codex-usage-hud-muted, #8492a6);
         font-size: 11px;
       }
       #${rootId} .codex-usage-hud-settings-status {
         min-width: 0;
-        color: #a9bcd2;
+        color: var(--codex-usage-hud-request-muted, #a9bcd2);
         font-size: 11px;
       }
       #${rootId} .codex-usage-hud-settings-footnote {
@@ -2055,7 +2145,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         text-align: right;
       }
       #${rootId} .codex-usage-hud-settings-status[data-kind="error"] {
-        color: #ffb86b;
+        color: var(--codex-usage-hud-warning, #ffb86b);
       }
       #${rootId} .codex-usage-hud-settings-confirm-layer {
         position: absolute;
@@ -2064,7 +2154,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         display: grid;
         place-items: center;
         padding: 24px;
-        background: rgba(4, 9, 14, .62);
+        background: color-mix(in srgb, var(--codex-usage-hud-surface, #10161d) 62%, transparent);
         backdrop-filter: blur(4px);
       }
       #${rootId} .codex-usage-hud-settings-confirm-card {
@@ -2072,26 +2162,26 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         display: grid;
         gap: 12px;
         padding: 18px 18px 16px;
-        border: 1px solid rgba(243, 210, 122, .34);
+        border: 1px solid color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 34%, transparent);
         border-radius: 12px;
-        background: linear-gradient(180deg, rgba(30, 39, 49, .98), rgba(16, 22, 29, .98));
+        background: linear-gradient(180deg, var(--codex-usage-hud-header-surface, #1e2731), var(--codex-usage-hud-surface, #10161d));
         box-shadow: 0 22px 46px rgba(0, 0, 0, .45);
       }
       #${rootId} .codex-usage-hud-settings-confirm-kicker {
-        color: #f3d27a;
+        color: var(--codex-usage-hud-accent, #f3d27a);
         font-size: 11px;
         font-weight: 800;
         letter-spacing: .08em;
         text-transform: uppercase;
       }
       #${rootId} .codex-usage-hud-settings-confirm-title {
-        color: #f6f9fc;
+        color: var(--codex-usage-hud-text, #f6f9fc);
         font-size: 18px;
         font-weight: 800;
         line-height: 1.25;
       }
       #${rootId} .codex-usage-hud-settings-confirm-body {
-        color: #c7d4e4;
+        color: var(--codex-usage-hud-request-text, #c7d4e4);
         font-size: 13px;
         line-height: 1.7;
         white-space: pre-wrap;
@@ -2111,7 +2201,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         overflow: hidden;
         height: 10px;
         border-radius: 999px;
-        background: #1A2430;
+        background: var(--codex-usage-hud-progress-track, #1A2430);
       }
       #${rootId} .codex-usage-hud-settings-loading-bar,
       #${rootId} .codex-usage-hud-settings-loading-glow {
@@ -2124,12 +2214,12 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       #${rootId} .codex-usage-hud-settings-loading-bar {
         left: 0;
         width: 34%;
-        background: #F3D27A;
+        background: var(--codex-usage-hud-accent, #F3D27A);
       }
       #${rootId} .codex-usage-hud-settings-loading-glow {
         left: 8%;
         width: 16%;
-        background: #FFE7A0;
+        background: color-mix(in srgb, var(--codex-usage-hud-accent, #FFE7A0) 55%, white);
         animation-duration: 1.2s;
       }
       @keyframes codex-usage-hud-loading-slide {
@@ -2141,26 +2231,26 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         }
       }
       #${rootId} .codex-usage-hud-settings-action[data-variant="subtle"] {
-        background: #202833;
-        color: #f3d27a;
+        background: var(--codex-usage-hud-header-surface, #202833);
+        color: var(--codex-usage-hud-accent, #f3d27a);
         font-weight: 700;
       }
       #${rootId} .codex-usage-hud-settings-action[data-variant="ghost"] {
         background: transparent;
-        border: 1px solid #2e3846;
-        color: #a9bcd2;
+        border: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
+        color: var(--codex-usage-hud-request-muted, #a9bcd2);
       }
       #${rootId} .codex-usage-hud-support {
         display: grid;
         gap: 12px;
-        color: #dde7f2;
+        color: var(--codex-usage-hud-text, #dde7f2);
         line-height: 1.55;
       }
       #${rootId} .codex-usage-hud-support a {
-        color: #9ccbff;
+        color: var(--codex-usage-hud-info, #9ccbff);
       }
       #${rootId} .codex-usage-hud-support-note {
-        color: #a9bcd2;
+        color: var(--codex-usage-hud-request-muted, #a9bcd2);
         font-size: 12px;
       }
       #${rootId} .codex-usage-hud-support-qr-grid {
@@ -2175,9 +2265,9 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         gap: 8px;
         justify-items: center;
         padding: 10px;
-        border: 1px solid #273241;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
         border-radius: 8px;
-        background: #141b24;
+        background: var(--codex-usage-hud-panel-surface, #141b24);
       }
       #${rootId} .codex-usage-hud-support-qr-title {
         width: 100%;
@@ -2185,11 +2275,11 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         align-items: baseline;
         justify-content: space-between;
         gap: 8px;
-        color: #e8eef7;
+        color: var(--codex-usage-hud-text, #e8eef7);
         font-weight: 700;
       }
       #${rootId} .codex-usage-hud-support-qr-title span:last-child {
-        color: #8492a6;
+        color: var(--codex-usage-hud-muted, #8492a6);
         font-size: 10px;
         font-weight: 600;
       }
@@ -2522,8 +2612,12 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 
   function applyTheme(root, payload) {
     if (!root) return;
-    const tokens = payload?.theme?.tokens || {};
-    const variant = String(payload?.theme?.variant || "dark").toLowerCase() === "light" ? "light" : "dark";
+    const themePayload = payload?.theme;
+    if (!themePayload || typeof themePayload !== "object" || Object.keys(themePayload).length === 0) {
+      return;
+    }
+    const tokens = themePayload.tokens || {};
+    const variant = String(themePayload.variant || "dark").toLowerCase() === "light" ? "light" : "dark";
     const defaults = {
       surface: "#10161d",
       panelSurface: "#141b24",
@@ -2925,10 +3019,179 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     return String(currentPayload()?.settingsBridgeUrl || "").replace(/\/+$/, "");
   }
 
+  function readThemeStorage(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseThemeStorageJson(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    try {
+      return JSON.parse(text);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function normalizeThemeHex(value) {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return "";
+    const shortHex = text.match(/^#([0-9a-f]{3})$/i);
+    if (shortHex) {
+      return `#${shortHex[1][0]}${shortHex[1][0]}${shortHex[1][1]}${shortHex[1][1]}${shortHex[1][2]}${shortHex[1][2]}`;
+    }
+    const longHex = text.match(/^#([0-9a-f]{6})$/i);
+    if (longHex) return `#${longHex[1]}`;
+    const rgbMatch = text.match(/^rgba?\(([^)]+)\)$/i);
+    if (!rgbMatch) return "";
+    const parts = rgbMatch[1].split(",").map((item) => item.trim());
+    if (parts.length < 3) return "";
+    const channels = parts.slice(0, 3).map((item) => {
+      if (item.endsWith("%")) {
+        const numeric = Number.parseFloat(item.slice(0, -1));
+        if (!Number.isFinite(numeric)) return null;
+        return Math.max(0, Math.min(255, Math.round((numeric / 100) * 255)));
+      }
+      const numeric = Number.parseFloat(item);
+      if (!Number.isFinite(numeric)) return null;
+      return Math.max(0, Math.min(255, Math.round(numeric)));
+    });
+    if (channels.some((channel) => channel == null)) return "";
+    return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  function rendererThemeSnapshot() {
+    const root = document.documentElement;
+    if (!root) return null;
+    const css = getComputedStyle(root);
+    const cssValue = (...names) => {
+      for (const name of names) {
+        const value = String(css.getPropertyValue(name) || "").trim();
+        if (value) return value;
+      }
+      return "";
+    };
+    const colorValue = (...names) => normalizeThemeHex(cssValue(...names));
+    const rawMode = String(readThemeStorage("appearanceTheme") || "").trim().toLowerCase();
+    const mode = ["system", "light", "dark"].includes(rawMode) ? rawMode : "system";
+    const classList = Array.from(root.classList || []);
+    const classText = classList.join(" ").toLowerCase();
+    const colorScheme = String(css.colorScheme || "").trim().toLowerCase();
+    const prefersDark = !!window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+    let effectiveVariant = prefersDark ? "dark" : "light";
+    if (colorScheme.includes("dark") || classText.includes("dark")) effectiveVariant = "dark";
+    else if (colorScheme.includes("light") || classText.includes("light")) effectiveVariant = "light";
+    return {
+      mode,
+      lightCodeThemeId: String(readThemeStorage("appearanceLightCodeThemeId") || "").trim(),
+      darkCodeThemeId: String(readThemeStorage("appearanceDarkCodeThemeId") || "").trim(),
+      lightTheme: parseThemeStorageJson(readThemeStorage("appearanceLightChromeTheme")),
+      darkTheme: parseThemeStorageJson(readThemeStorage("appearanceDarkChromeTheme")),
+      effectiveVariant,
+      classList,
+      colorScheme,
+      cssTheme: {
+        accent: colorValue("--vscode-focusBorder", "--vscode-button-background", "--vscode-textLink-foreground"),
+        surface: colorValue("--vscode-editor-background", "--vscode-sideBar-background", "--vscode-panel-background", "--vscode-activityBar-background"),
+        ink: colorValue("--vscode-editor-foreground", "--vscode-foreground", "--vscode-sideBarTitle-foreground"),
+        diffAdded: colorValue("--vscode-gitDecoration-addedResourceForeground", "--vscode-terminal-ansiGreen"),
+        diffRemoved: colorValue("--vscode-gitDecoration-deletedResourceForeground", "--vscode-terminal-ansiRed"),
+        skill: colorValue("--vscode-terminal-ansiMagenta", "--vscode-textLink-foreground", "--vscode-terminal-ansiBlue"),
+      },
+    };
+  }
+
+  function reportRendererTheme(reason = "event") {
+    const snapshot = rendererThemeSnapshot();
+    const binding = window[themeBindingName];
+    if (!snapshot || typeof binding !== "function") return false;
+    const signature = JSON.stringify(snapshot);
+    if (window[themeSignatureName] === signature) return false;
+    try {
+      binding(JSON.stringify({ ...snapshot, reason: String(reason || "event"), observedAt: Date.now() }));
+      window[themeSignatureName] = signature;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function scheduleRendererThemeReport(reason = "event") {
+    clearTimeout(window[themeTimerName] || 0);
+    window[themeTimerName] = setTimeout(() => {
+      reportRendererTheme(reason);
+    }, 0);
+  }
+
+  function startRendererThemeObserver() {
+    const root = document.documentElement;
+    if (!root) return false;
+    window[themeObserverName]?.disconnect?.();
+    const previousMediaQuery = window[themeMediaQueryName];
+    const previousMediaQueryHandler = window[themeMediaQueryHandlerName];
+    if (previousMediaQuery && previousMediaQueryHandler) {
+      if (typeof previousMediaQuery.removeEventListener === "function") previousMediaQuery.removeEventListener("change", previousMediaQueryHandler);
+      else previousMediaQuery.removeListener?.(previousMediaQueryHandler);
+    }
+    if (window[themeStorageHandlerName]) window.removeEventListener("storage", window[themeStorageHandlerName]);
+    window[themeObserverName] = new MutationObserver(() => {
+      scheduleRendererThemeReport("dom-theme-change");
+    });
+    window[themeObserverName].observe(root, {
+      attributes: true,
+      attributeFilter: ["class", "style", "data-theme", "data-color-scheme"],
+    });
+    if (document.body) {
+      window[themeObserverName].observe(document.body, {
+        attributes: true,
+        attributeFilter: ["class", "style", "data-theme", "data-color-scheme"],
+      });
+    }
+    const mediaQuery = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (mediaQuery) {
+      const handler = () => scheduleRendererThemeReport("system-theme-change");
+      window[themeMediaQueryName] = mediaQuery;
+      window[themeMediaQueryHandlerName] = handler;
+      if (typeof mediaQuery.addEventListener === "function") mediaQuery.addEventListener("change", handler);
+      else mediaQuery.addListener?.(handler);
+    }
+    const storageHandler = (event) => {
+      if (!event?.key || [
+        "appearanceTheme",
+        "appearanceLightChromeTheme",
+        "appearanceDarkChromeTheme",
+        "appearanceLightCodeThemeId",
+        "appearanceDarkCodeThemeId",
+      ].includes(String(event.key))) {
+        scheduleRendererThemeReport("storage-theme-change");
+      }
+    };
+    window[themeStorageHandlerName] = storageHandler;
+    window.addEventListener("storage", storageHandler);
+    scheduleRendererThemeReport("bootstrap");
+    return true;
+  }
+
+  window.__codexUsageHudReportTheme = (reason = "manual") => {
+    startRendererThemeObserver();
+    return reportRendererTheme(String(reason || "manual"));
+  };
+
   function normalizeThreadId(value) {
     const text = normalize(value);
     const match = text.match(/^(?:[a-z0-9_.-]+:)(.+)$/i);
     return match ? normalize(match[1]) : text;
+  }
+
+  function activeSessionIdIsProvisional(value) {
+    const text = normalize(value);
+    const match = text.match(/^(?:[a-z0-9_.-]+:)(.+)$/i);
+    const normalized = (match ? match[1] : text).toLowerCase();
+    return normalized.startsWith("client-new-thread:");
   }
 
   const activeSessionIdentitySelector = [
@@ -3110,6 +3373,14 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     if (activeSessionTitleIsNewSession(title)) {
       return { rawSessionId: "", sessionId: "", title };
     }
+    if (activeSessionIdIsProvisional(rawSessionId)) {
+      return {
+        rawSessionId: normalize(rawSessionId),
+        sessionId: "",
+        title,
+        pendingSession: true,
+      };
+    }
     return { rawSessionId: normalize(rawSessionId), sessionId, title };
   }
 
@@ -3163,12 +3434,14 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     }
     const row = rows.find(activeSessionRowSelected) || rows.find(activeSessionRowMatchesLocation) || null;
     const ref = row ? activeSessionRefFromRow(row) : { sessionId: activeSessionLocationId(), title: "" };
-    const newSession = !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
+    const pendingSession = !!ref.pendingSession;
+    const newSession = !pendingSession && !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
     return {
-      sessionId: newSession ? "" : (ref.sessionId || ""),
+      sessionId: (newSession || pendingSession) ? "" : (ref.sessionId || ""),
       title: newSession ? "" : (ref.title || ""),
       url: location.href,
       newSession,
+      pendingSession,
     };
   }
 
@@ -3186,16 +3459,17 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     const bridge = settingsBridgeUrl();
     const ref = overrideRef || readActiveSessionRef();
     const newSession = !!ref.newSession || reason === "new-session";
-    if (!ref.sessionId && !ref.title && !newSession) return;
-    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href, newSession]);
+    const pendingSession = !!ref.pendingSession;
+    if (!ref.sessionId && !ref.title && !newSession && !pendingSession) return;
+    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href, newSession, pendingSession]);
     if (window[activeSessionLastSignatureName] === signature) return;
-    window[activeSessionLastSignatureName] = signature;
     const payload = {
       sessionId: ref.sessionId,
       title: ref.title,
       url: ref.url || location.href,
-      reason: newSession ? "new-session" : reason,
+      reason: newSession ? "new-session" : (pendingSession ? "pending-session" : reason),
       newSession,
+      pendingSession,
       matchedBy: ref.matchedBy || "",
       observedAt: Date.now(),
     };
@@ -3203,6 +3477,11 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     if (typeof binding === "function") {
       try {
         binding(JSON.stringify(payload));
+        // Mark an observation as delivered only after the transport accepts
+        // it. The first sidebar click can race binding setup on a cold start;
+        // recording the signature before delivery suppressed every follow-up
+        // until the user clicked a second conversation.
+        window[activeSessionLastSignatureName] = signature;
         return;
       } catch (_) {}
     }
@@ -3212,6 +3491,8 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       keepalive: true,
+    }).then(() => {
+      window[activeSessionLastSignatureName] = signature;
     }).catch(() => {});
   }
 
@@ -3220,7 +3501,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     window[activeSessionTimerName] = setTimeout(() => {
       postActiveSession(reason);
       refreshActiveSessionObserver();
-    }, 40);
+    }, 0);
   }
 
   function clearActiveSessionSendFollowup() {
@@ -3230,13 +3511,29 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     window[activeSessionSendFollowupTimersName] = [];
   }
 
-  function scheduleActiveSessionSendFollowup(reason = "composer-send") {
+  function activeSessionComposerTarget(target) {
+    if (!(target instanceof Node)) return false;
+    const composer = composerElement();
+    if (composer?.contains?.(target)) return true;
+    return !!target.closest?.("textarea, [contenteditable='true'], [role='textbox'], .ProseMirror");
+  }
+
+  function scheduleActiveSessionSendFollowup(reason = "composer-send", expectedSessionId = "") {
     clearActiveSessionSendFollowup();
-    scheduleActiveSessionReport(reason);
-    window[activeSessionSendFollowupTimersName] = [160, 520, 1200, 2400].map((delay) => setTimeout(() => {
-      postActiveSession(`${reason}-followup`);
+    const expected = normalizeThreadId(expectedSessionId);
+    const report = () => {
+      const ref = readActiveSessionRef();
+      if (expected && ref.sessionId !== expected) return;
+      postActiveSession(reason, ref);
       refreshActiveSessionObserver();
-    }, delay));
+    };
+    window[activeSessionSendFollowupTimersName] = [
+      setTimeout(report, 32),
+      setTimeout(report, 120),
+      setTimeout(report, 320),
+      setTimeout(report, 800),
+      setTimeout(report, 1600),
+    ];
   }
 
   function activeSessionComposerSubmitButton(button) {
@@ -3347,6 +3644,11 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     clearTimeout(window[activeSessionTimerName] || 0);
     clearActiveSessionSendFollowup();
     document.removeEventListener("click", window[activeSessionClickHandlerName], true);
+    const composerHandler = window[activeSessionComposerHandlerName];
+    if (composerHandler) {
+      document.removeEventListener("submit", composerHandler.submit, true);
+      document.removeEventListener("keydown", composerHandler.keydown, true);
+    }
     window[activeSessionObserverName]?.disconnect?.();
     window[activeSessionBootstrapObserverName]?.disconnect?.();
     const patch = window[activeSessionHistoryPatchName];
@@ -3359,6 +3661,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     delete window[activeSessionBootstrapObserverName];
     delete window[activeSessionTimerName];
     delete window[activeSessionSendFollowupTimersName];
+    delete window[activeSessionComposerHandlerName];
     delete window[activeSessionClickHandlerName];
     delete window[activeSessionHistoryPatchName];
     delete window[activeSessionLastSignatureName];
@@ -3367,6 +3670,16 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   function ensureActiveSessionWatchers() {
     if (!window[activeSessionClickHandlerName]) {
       window[activeSessionClickHandlerName] = (event) => {
+        const submitButton = event.target?.closest?.("button, [role='button']");
+        if (
+          !composerBadgeEnabled
+          && submitButton
+          && activeSessionComposerTarget(submitButton)
+          && activeSessionComposerSubmitButton(submitButton)
+        ) {
+          scheduleActiveSessionSendFollowup("composer-send");
+          return;
+        }
         const container = event.target?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]");
         const identityRow = event.target?.closest?.(activeSessionIdentitySelector);
         const row = identityRow || event.target?.closest?.(activeSessionRowSelector);
@@ -3374,17 +3687,41 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         if (row && !container && !explicitRow) return;
         if (row && (!container || container.contains(row))) {
           const ref = activeSessionRefFromRow(row);
-          const newSession = !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
+          const pendingSession = !!ref.pendingSession;
+          const newSession = !pendingSession && !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
           postActiveSession("click", {
-            sessionId: newSession ? "" : (ref.sessionId || ""),
+            sessionId: (newSession || pendingSession) ? "" : (ref.sessionId || ""),
             title: newSession ? "" : (ref.title || ""),
             url: activeSessionRowUrl(row),
             newSession,
+            pendingSession,
           });
-          scheduleActiveSessionSendFollowup("click");
+          scheduleActiveSessionSendFollowup("click", ref.sessionId || "");
         }
       };
       document.addEventListener("click", window[activeSessionClickHandlerName], true);
+    }
+    if (!window[activeSessionComposerHandlerName]) {
+      const submit = (event) => {
+        if (activeSessionComposerTarget(event.target)) {
+          scheduleActiveSessionSendFollowup("composer-submit");
+        }
+      };
+      const keydown = (event) => {
+        if (
+          event.key === "Enter"
+          && !event.shiftKey
+          && !event.isComposing
+          && activeSessionComposerTarget(event.target)
+        ) {
+          scheduleActiveSessionSendFollowup("composer-enter");
+        }
+      };
+      window[activeSessionComposerHandlerName] = { submit, keydown };
+      document.addEventListener("submit", submit, true);
+      if (!composerBadgeEnabled) {
+        document.addEventListener("keydown", keydown, true);
+      }
     }
     installActiveSessionHistoryPatch();
     startActiveSessionBootstrapObserver();
@@ -3393,8 +3730,22 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 
   window.__codexUsageHudReportActiveSession = (reason = "manual") => {
     ensureActiveSessionWatchers();
-    postActiveSession(String(reason || "manual"));
-    return true;
+    const reportReason = String(reason || "manual");
+    const ref = readActiveSessionRef();
+    postActiveSession(reportReason, ref);
+    // Return the same renderer-observed reference through Runtime.evaluate.
+    // CDP bindings still keep it live afterwards, but this synchronous result
+    // guarantees that the initial HUD snapshot follows the page already open
+    // when the HUD starts (including the blank-title new-session page).
+    return {
+      sessionId: ref.sessionId || "",
+      title: ref.title || "",
+      newSession: !!ref.newSession,
+      pendingSession: !!ref.pendingSession,
+      matchedBy: ref.matchedBy || "",
+      reason: reportReason,
+      observedAt: Date.now(),
+    };
   };
 
   function settingsPathLabel() {
@@ -4133,7 +4484,18 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     root = document.createElement("div");
     root.id = rootId;
     root.dataset.version = version;
-    root.innerHTML = panelMarkup("top", "", "展开顶部 HUD") + panelMarkup("request", "", "展开请求 HUD") + settingsChromeMarkup();
+    root.dataset.hudReady = "false";
+    root.innerHTML = `
+      <div class="codex-usage-hud-startup-bubble" data-field="startupBubble" role="status" aria-live="polite" hidden>
+        <div class="codex-usage-hud-startup-step" data-field="startupStep"></div>
+        <div class="codex-usage-hud-startup-title" data-field="startupTitle"></div>
+        <div class="codex-usage-hud-startup-detail" data-field="startupDetail"></div>
+        <div class="codex-usage-hud-startup-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" data-field="startupProgressTrack">
+          <div class="codex-usage-hud-startup-progress-fill" data-field="startupProgressFill"></div>
+        </div>
+        <div class="codex-usage-hud-startup-progress-label" data-field="startupProgressLabel"></div>
+      </div>
+    ` + panelMarkup("top", "", "展开顶部 HUD") + panelMarkup("request", "", "展开请求 HUD") + settingsChromeMarkup();
     document.body.appendChild(root);
     applyPanelStates(root);
     bindRoot(root);
@@ -5605,8 +5967,9 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   }
 
   function syncPosition(names = Object.keys(PANEL)) {
-    const root = ensureRoot();
+    const root = document.getElementById(rootId);
     if (!root) return;
+    positionStartupBubble(root);
     applyPanelStates(root);
     const panelNames = Array.isArray(names) ? names.filter((name) => PANEL[name]) : Object.keys(PANEL);
     for (const name of panelNames) {
@@ -5729,6 +6092,14 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     observedComposerNode = composerNode;
     window[mutationObserverName]?.disconnect?.();
     window[resizeObserverName]?.disconnect?.();
+    window[themeObserverName]?.disconnect?.();
+    const themeMediaQuery = window[themeMediaQueryName];
+    const themeMediaQueryHandler = window[themeMediaQueryHandlerName];
+    if (themeMediaQuery && themeMediaQueryHandler) {
+      if (typeof themeMediaQuery.removeEventListener === "function") themeMediaQuery.removeEventListener("change", themeMediaQueryHandler);
+      else themeMediaQuery.removeListener?.(themeMediaQueryHandler);
+    }
+    if (window[themeStorageHandlerName]) window.removeEventListener("storage", window[themeStorageHandlerName]);
     window[mutationObserverName] = new MutationObserver(handleLayoutMutations);
     const mutationOptions = {
       childList: true,
@@ -6651,6 +7022,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 
   function scheduleStaleGuard(payload) {
     clearTimeout(window[staleTimerName] || 0);
+    clearTimeout(window[themeTimerName] || 0);
     if (!payloadNeedsStaleGuard(payload)) return;
     window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250);
   }
@@ -6659,7 +7031,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     const provided = payload?.payloadDomains && typeof payload.payloadDomains === "object"
       ? payload.payloadDomains
       : {};
-    const allDomains = ["currentSession", "sessionSwitch", "budget", "settings", "overlay", "diagnostics"];
+    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "diagnostics"];
     const domains = {};
     if (Object.keys(provided).length > 0) {
       for (const name of allDomains) {
@@ -6671,6 +7043,41 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       domains[name] = payload || {};
     }
     return domains;
+  }
+
+  function renderStartupBubble(root, startup) {
+    const bubble = root.querySelector('[data-field="startupBubble"]');
+    if (!bubble) return;
+    const active = !!startup && typeof startup === "object";
+    bubble.hidden = !active;
+    if (!active) return;
+    const progress = clamp(Number(startup.progress ?? 0) || 0, 0, 100);
+    setText(root, "startupStep", startup.step || "正在启动");
+    setText(root, "startupTitle", startup.title || "正在打开 Codex HUD");
+    setText(root, "startupDetail", startup.detail || "正在准备会话信息");
+    setText(root, "startupProgressLabel", `${Math.round(progress)}%`);
+    const track = root.querySelector('[data-field="startupProgressTrack"]');
+    const fill = root.querySelector('[data-field="startupProgressFill"]');
+    if (track) {
+      track.setAttribute("aria-valuenow", String(Math.round(progress)));
+      track.setAttribute("aria-label", `${startup.step || "启动进度"} ${Math.round(progress)}%`);
+    }
+    if (fill) fill.style.width = `${progress}%`;
+    positionStartupBubble(root);
+  }
+
+  function positionStartupBubble(root = document.getElementById(rootId)) {
+    const bubble = root?.querySelector?.('[data-field="startupBubble"]');
+    if (!bubble || bubble.hidden) return;
+    const header = activeSessionHeaderElement();
+    const rect = visible(header) ? header.getBoundingClientRect() : null;
+    const top = clamp((rect?.bottom || 62) + 10, 12, Math.max(12, innerHeight - 180));
+    const right = rect
+      ? clamp(innerWidth - rect.right + 14, 12, 28)
+      : 16;
+    bubble.style.top = px(top);
+    bubble.style.right = px(right);
+    bubble.style.bottom = "auto";
   }
 
   function applyCurrentSessionPayload(root, payload) {
@@ -6687,7 +7094,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       node.classList.toggle(errorClass, payload?.requestStatus === "error");
     });
     renderTopDetails(root, payload || {});
-    renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!payload?.newSession);
+    renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!(payload?.newSession || payload?.pendingSession));
   }
 
   function applySessionSwitchPayload(root, payload) {
@@ -6739,9 +7146,20 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   }
 
   window.__codexUsageHudUpdate = (payload) => {
+    const previousState = window[stateName] || {};
     const previousPayload = currentPayload() || {};
     const nextPayload = { ...previousPayload, ...(payload || {}) };
     const domains = normalizePayloadDomains(nextPayload);
+    const hasSessionPayload = "currentSession" in domains || "sessionSwitch" in domains;
+    const hudHydrated = previousState.hydrated === true || (
+      "currentSession" in domains && "budget" in domains
+    );
+    const previousDomains = previousState.domains && typeof previousState.domains === "object"
+      ? previousState.domains
+      : (Object.keys(previousPayload).length > 0
+        ? normalizePayloadDomains(previousPayload)
+        : {});
+    const retainedDomains = { ...previousDomains, ...domains };
     if (
       (!payload?.supportImages || !payload.supportImages.length) &&
       previousPayload.supportImages?.length
@@ -6760,18 +7178,50 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         Object.assign(nextPayload, domainPayload);
       }
     }
+    if ("startup" in domains) nextPayload.startup = domains.startup;
+    if (hasSessionPayload) {
+      delete nextPayload.startup;
+      delete retainedDomains.startup;
+    }
     if (Array.isArray(nextPayload.supportImages) && nextPayload.supportImages.length) {
       persistSupportImages(nextPayload.supportImages);
     }
-    window[stateName] = { payload: nextPayload, updatedAt: Date.now() };
+    window[stateName] = {
+      payload: nextPayload,
+      domains: retainedDomains,
+      hydrated: hudHydrated,
+      updatedAt: Date.now(),
+    };
     try {
       ensureActiveSessionWatchers();
     } catch (_) {}
+    const previousRoot = document.getElementById(rootId);
     const root = ensureRoot();
     if (!root) return false;
-    applyPayloadDomains(root, nextPayload, domains);
-    syncPosition();
-    syncPositionSettled();
+    // Codex can replace renderer DOM anchors while the page/JS realm remains
+    // alive during cold startup. If our root was removed, hydrate the new root
+    // from every retained domain before applying future lightweight updates;
+    // otherwise a sessionSwitch-only update produces a text-only HUD with an
+    // empty expanded panel.
+    const renderedDomains = root === previousRoot ? domains : retainedDomains;
+    const renderedSessionPayload = hudHydrated && (
+      "currentSession" in renderedDomains || "sessionSwitch" in renderedDomains
+    );
+    applyPayloadDomains(root, nextPayload, renderedDomains);
+    renderStartupBubble(root, nextPayload.startup);
+    const wasReady = root.dataset.hudReady === "true";
+    // A settings/theme/diagnostics partial update follows the first complete
+    // payload during startup. It must preserve visible HUD panels rather than
+    // treating the absence of a session domain as a new startup state.
+    if (renderedSessionPayload) root.dataset.hudReady = "true";
+    else if (!wasReady && "startup" in domains) root.dataset.hudReady = "false";
+    // Session payloads only need a full anchor calculation when the HUD first
+    // becomes visible. Subsequent session switches update text in place; the
+    // targeted resize/mutation observers own later layout changes.
+    if (renderedSessionPayload && !wasReady) {
+      syncPosition();
+      if (!cachedHeaderNode || !cachedComposerNode) syncPositionSettled();
+    }
     scheduleStaleGuard(nextPayload);
     return true;
   };
@@ -6816,6 +7266,12 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     delete window[rafName];
     delete window[runningTimerName];
     delete window[staleTimerName];
+    delete window[themeObserverName];
+    delete window[themeMediaQueryName];
+    delete window[themeMediaQueryHandlerName];
+    delete window[themeStorageHandlerName];
+    delete window[themeTimerName];
+    delete window[themeSignatureName];
     delete window[composerSettleTimerName];
     delete window[settleTimerName];
     delete window[composerInputNodeName];
@@ -6827,6 +7283,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     delete window[modelPickerPatchTimersName];
     delete window[modelPickerSelectionName];
     delete window.__codexUsageHudReportActiveSession;
+    delete window.__codexUsageHudReportTheme;
     delete window.__codexUsageHudUpdate;
     delete window.__codexUsageHudRemove;
     return true;
@@ -6842,14 +7299,16 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   document.addEventListener("pointerover", window[modelPickerPatchHandlerName], true);
   document.addEventListener("focusin", window[modelPickerPatchHandlerName], true);
   document.addEventListener("keydown", window[modelPickerPatchHandlerName], true);
+  startRendererThemeObserver();
   const boot = () => {
     const state = window[stateName];
     if (state?.payload) {
       window.__codexUsageHudUpdate(state.payload);
     } else {
-      ensureRoot();
-      syncPosition();
-      refreshLayoutObservers();
+      // The new-document script can run before Python has a real session
+      // payload. Do not create top/bottom panels here: a visible empty HUD is
+      // both misleading and needlessly causes layout work while Codex loads.
+      startBootstrapObserver();
     }
     scheduleCodexModelPickerPatch();
   };
@@ -7015,6 +7474,7 @@ class RendererHudPayload:
     refreshed_at: str
     warning: bool = False
     new_session: bool = False
+    pending_session: bool = False
     top_details: dict[str, object] = field(default_factory=dict)
     top_progress: dict[str, object] = field(default_factory=dict)
     top_copies: dict[str, str] = field(default_factory=dict)
@@ -7055,6 +7515,7 @@ class RendererHudPayload:
             "refreshedAt": self.refreshed_at,
             "warning": self.warning,
             "newSession": bool(self.new_session),
+            "pendingSession": bool(self.pending_session),
             "topDetails": dict(self.top_details),
             "topProgress": dict(self.top_progress),
             "topCopies": dict(self.top_copies),
@@ -7107,6 +7568,11 @@ class RendererHudPayload:
             settings_domain = selected.get("settings")
             if isinstance(settings_domain, dict):
                 settings_domain.pop("supportImages", None)
+        if partial.get("theme") == {}:
+            partial.pop("theme", None)
+            settings_domain = selected.get("settings")
+            if isinstance(settings_domain, dict):
+                settings_domain.pop("theme", None)
         partial["payloadDomains"] = selected
         return partial
 
@@ -7123,6 +7589,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "refreshedAt",
         "warning",
         "newSession",
+        "pendingSession",
     )
     current_session_keys = (
         "topLine",
@@ -7135,6 +7602,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "refreshedAt",
         "warning",
         "newSession",
+        "pendingSession",
         "topDetails",
         "topCopies",
         "requestRows",
@@ -7249,13 +7717,21 @@ class _RendererBinding:
         self._sock: socket.socket | None = None
         self._websocket_url = ""
         self._target_id = ""
+        self._disconnected_target_id = ""
 
     def ensure(self, websocket_url: str, target_id: str) -> None:
-        """Start or restart the binding listener for the current page target."""
+        """Start or restart the binding listener for the current page target.
+
+        Subscription setup is intentionally asynchronous.  A renderer payload
+        update must not serially wait for every optional CDP binding to finish
+        its websocket handshake.  The active-session bootstrap is the sole
+        caller that explicitly waits for its critical binding.
+        """
         if not self.binding_name or not callable(self.callback) or not websocket_url:
             return
         with self._lock:
             thread = self._thread
+            disconnected_target_id = self._disconnected_target_id
             if (
                 thread is not None
                 and thread.is_alive()
@@ -7263,12 +7739,22 @@ class _RendererBinding:
                 and target_id == self._target_id
             ):
                 return
+            if (
+                disconnected_target_id
+                and disconnected_target_id == target_id
+                and websocket_url == self._websocket_url
+            ):
+                # Do not turn an auxiliary binding disconnect into a retry
+                # loop.  A real target transition supplies a new target id and
+                # creates a fresh binding explicitly.
+                return
         self.close(join_timeout=0.3)
         with self._lock:
             self._stop_event = threading.Event()
             self._ready_event = threading.Event()
             self._websocket_url = websocket_url
             self._target_id = target_id
+            self._disconnected_target_id = ""
             self._thread = threading.Thread(
                 target=self._run,
                 args=(websocket_url,),
@@ -7276,8 +7762,13 @@ class _RendererBinding:
                 daemon=True,
             )
             self._thread.start()
+
+    def wait_ready(self, timeout_seconds: float | None = None) -> bool:
+        """Wait for this binding only when its first event is correctness-critical."""
+        with self._lock:
             ready_event = self._ready_event
-        ready_event.wait(min(0.35, self.timeout_seconds))
+        timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        return bool(ready_event.wait(max(0.0, float(timeout))))
 
     def close(self, *, join_timeout: float = 1.0) -> None:
         self._stop_event.set()
@@ -7288,6 +7779,7 @@ class _RendererBinding:
             self._thread = None
             self._websocket_url = ""
             self._target_id = ""
+            self._disconnected_target_id = ""
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -7353,6 +7845,8 @@ class _RendererBinding:
                 if self._sock is sock:
                     self._sock = None
                 stopped = self._stop_event.is_set()
+                if disconnect_reason and not stopped:
+                    self._disconnected_target_id = self._target_id
             if (
                 disconnect_reason
                 and not stopped
@@ -7423,6 +7917,8 @@ class RendererHudClient:
         self.last_status = "idle" if self.enabled else "disabled"
         self.last_error = ""
         self.last_update_metrics: dict[str, object] = {}
+        self.last_bootstrap_metrics: dict[str, object] = {}
+        self.last_attach_metrics: dict[str, object] = {}
         self._target_id = ""
         self._script_identifier = ""
         self._websocket_url = ""
@@ -7435,9 +7931,18 @@ class RendererHudClient:
             timeout_seconds=self.timeout_seconds,
         )
         self._active_session_binding: _RendererBinding | None = None
+        self._active_session_callback: Any = None
         self._settings_command_binding: _RendererBinding | None = None
         self._attachments_binding: _RendererBinding | None = None
         self._layout_binding: _RendererBinding | None = None
+        self._theme_binding: _RendererBinding | None = None
+        self._theme_callback: Any = None
+        self._theme_bootstrap_target_id = ""
+        # Theme changes are pushed by the renderer binding.  Keep the last
+        # snapshot here so a normal HUD refresh never has to synchronously
+        # walk the Codex DOM again.  That probe can block the renderer for
+        # hundreds of milliseconds while Codex is busy.
+        self._theme_snapshot: CodexThemeSnapshot | None = None
         self._theme_probe = CodexThemeProbe(
             port=self.port,
             timeout_seconds=max(0.08, min(self.timeout_seconds, 0.25)),
@@ -7450,12 +7955,12 @@ class RendererHudClient:
         if self._active_session_binding is not None:
             self._active_session_binding.close()
             self._active_session_binding = None
+        self._active_session_callback = callback if callable(callback) else None
         if callable(callback):
             self._active_session_binding = _RendererBinding(
                 ACTIVE_SESSION_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
-                disconnect_callback=self._target_discovery.mark_disconnected,
             )
 
     def set_settings_command_callback(self, callback: Any) -> None:
@@ -7468,7 +7973,6 @@ class RendererHudClient:
                 SETTINGS_COMMAND_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
-                disconnect_callback=self._target_discovery.mark_disconnected,
             )
 
     def set_attachments_callback(self, callback: Any) -> None:
@@ -7485,7 +7989,6 @@ class RendererHudClient:
                 COMPOSER_ATTACHMENTS_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
-                disconnect_callback=self._target_discovery.mark_disconnected,
             )
 
     def set_layout_callback(self, callback: Any) -> None:
@@ -7503,8 +8006,34 @@ class RendererHudClient:
                 LAYOUT_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
-                disconnect_callback=self._target_discovery.mark_disconnected,
             )
+
+    def set_theme_callback(self, callback: Any) -> None:
+        """Receive live Codex renderer theme changes over CDP."""
+        if self._theme_binding is not None:
+            self._theme_binding.close()
+            self._theme_binding = None
+        self._theme_callback = callback if callable(callback) else None
+        self._theme_bootstrap_target_id = ""
+        if callable(callback):
+            self._theme_binding = _RendererBinding(
+                THEME_BINDING_NAME,
+                self._handle_theme_binding_payload,
+                timeout_seconds=self.timeout_seconds,
+            )
+
+    def _handle_theme_binding_payload(self, payload: dict[str, object]) -> None:
+        callback = self._theme_callback
+        if not callable(callback):
+            return
+        snapshot = CodexThemeSnapshot.from_probe_result(payload, source="cdp")
+        if snapshot is None:
+            return
+        self._theme_snapshot = snapshot
+        try:
+            callback(_renderer_theme_payload(snapshot))
+        except Exception:
+            return
 
     def set_audit_callback(self, callback: Any) -> None:
         """Deprecated: request/response audit capture has been removed.
@@ -7514,11 +8043,17 @@ class RendererHudClient:
         """
         del callback
 
-    def bootstrap_active_session(self) -> bool:
+    def bootstrap_active_session(
+        self,
+        *,
+        startup_payload: dict[str, object] | None = None,
+    ) -> bool:
         """Install the renderer controller and ask it to report the selected session."""
         if not self.enabled:
             self.last_status = "disabled"
             return False
+        started = time.perf_counter()
+        stage = "target_discovery"
         try:
             target = self._page_target()
             websocket_url = str(target.get("webSocketDebuggerUrl") or "")
@@ -7526,36 +8061,82 @@ class RendererHudClient:
             if not websocket_url:
                 raise RuntimeError("CDP target has no websocket URL")
             if target_id != self._target_id or not self._script_identifier:
+                stage = "script_install"
                 self._install(websocket_url, target_id)
             if self._active_session_binding is not None:
+                stage = "active_session_binding"
                 self._active_session_binding.ensure(websocket_url, target_id)
-            expression = (
+                wait_ready = getattr(self._active_session_binding, "wait_ready", None)
+                if callable(wait_ready) and not wait_ready(self.timeout_seconds):
+                    raise RuntimeError("renderer active-session binding was not ready")
+            active_expression = (
                 "typeof window.__codexUsageHudReportActiveSession === 'function' && "
                 "window.__codexUsageHudReportActiveSession('bootstrap')"
             )
+            stage = "active_session_report"
+            expression = active_expression
+            if startup_payload:
+                startup_json = json.dumps(startup_payload, ensure_ascii=False)
+                expression = (
+                    "(() => {"
+                    "const startup = typeof window.__codexUsageHudUpdate === 'function' && "
+                    f"window.__codexUsageHudUpdate({startup_json});"
+                    f"const active = {active_expression};"
+                    "return { startup: !!startup, active: active || {} };"
+                    "})()"
+                )
             result = send_cdp_command(
                 websocket_url,
                 "Runtime.evaluate",
                 _runtime_expression_params(expression),
                 self.timeout_seconds,
             )
-            acknowledged = bool(
-                result.get("result", {})
-                .get("result", {})
-                .get("value", False)
+            value = result.get("result", {}).get("result", {}).get("value", False)
+            active_value = value.get("active", False) if startup_payload and isinstance(value, dict) else value
+            acknowledged = (
+                True if isinstance(active_value, dict) else bool(active_value)
             )
             if not acknowledged:
                 raise RuntimeError(
                     "renderer active session bootstrap did not acknowledge request"
                 )
+            self._deliver_bootstrap_active_session(active_value)
         except Exception as exc:
+            self.last_bootstrap_metrics = {
+                "totalMs": (time.perf_counter() - started) * 1000.0,
+                "failureStage": stage,
+                "startupBubble": bool(startup_payload),
+            }
             self._clear_target_cache(clear_script=True)
             self.last_status = "failed"
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
+        self.last_bootstrap_metrics = {
+            "totalMs": (time.perf_counter() - started) * 1000.0,
+            "failureStage": "",
+            "startupBubble": bool(startup_payload),
+        }
         self.last_status = "ok"
         self.last_error = ""
         return True
+
+    def _deliver_bootstrap_active_session(self, value: object) -> None:
+        """Synchronously publish the page-active session returned by bootstrap."""
+        callback = self._active_session_callback
+        if not callable(callback) or not isinstance(value, dict):
+            return
+        payload = dict(value)
+        if not (
+            str(payload.get("sessionId") or payload.get("session_id") or "").strip()
+            or str(payload.get("title") or "").strip()
+            or bool(payload.get("newSession") or payload.get("new_session"))
+            or bool(payload.get("pendingSession") or payload.get("pending_session"))
+        ):
+            return
+        try:
+            callback(payload)
+        except Exception:
+            return
 
     def update(
         self,
@@ -7572,8 +8153,14 @@ class RendererHudClient:
         work_overlay_selectable_max: int = 6,
         desktop_overlay_dependency: dict[str, object] | None = None,
     ) -> bool:
+        started = time.perf_counter()
         support_images = [] if self._support_images_sent else support_qr_payload()
-        theme_snapshot = self._theme_probe.snapshot()
+        theme_started = time.perf_counter()
+        theme_snapshot = self._theme_snapshot
+        if theme_snapshot is None:
+            theme_snapshot = self._theme_probe.snapshot()
+            self._theme_snapshot = theme_snapshot
+        theme_probe_ms = (time.perf_counter() - theme_started) * 1000.0
         payload = payload_from_snapshot(
             snapshot,
             settings=settings,
@@ -7589,16 +8176,32 @@ class RendererHudClient:
             work_overlay_selectable_max=work_overlay_selectable_max,
             desktop_overlay_dependency=desktop_overlay_dependency,
         ).to_json()
-        if self.update_payload(payload):
+        update_ok = self.update_payload(payload)
+        metrics = dict(self.last_update_metrics)
+        metrics.update(
+            {
+                "themeProbeMs": theme_probe_ms,
+                "payloadBuildMs": (time.perf_counter() - theme_started) * 1000.0,
+                "totalMs": (time.perf_counter() - started) * 1000.0,
+            }
+        )
+        self.last_update_metrics = metrics
+        if update_ok:
             if support_images:
                 self._support_images_sent = True
             return True
         return False
 
+    def show_startup(self, payload: dict[str, object]) -> bool:
+        """Paint a startup-only payload before normal HUD domain updates begin."""
+        return self.update_payload(payload)
+
     def update_payload(self, payload: dict[str, object]) -> bool:
         if not self.enabled:
             self.last_status = "disabled"
             return False
+        started = time.perf_counter()
+        stage = "target_discovery"
         try:
             target = self._page_target()
             websocket_url = str(target.get("webSocketDebuggerUrl") or "")
@@ -7606,22 +8209,62 @@ class RendererHudClient:
             if not websocket_url:
                 raise RuntimeError("CDP target has no websocket URL")
             if target_id != self._target_id or not self._script_identifier:
+                stage = "script_install"
                 self._install(websocket_url, target_id)
+            if self._theme_binding is not None:
+                stage = "theme_binding"
+                self._theme_binding.ensure(websocket_url, target_id)
+            stage = "payload_apply"
             if not self._send_update(websocket_url, payload):
                 raise RuntimeError("renderer update function did not acknowledge payload")
             if self._active_session_binding is not None:
+                stage = "active_session_binding"
                 self._active_session_binding.ensure(websocket_url, target_id)
             if self._settings_command_binding is not None:
+                stage = "settings_binding"
                 self._settings_command_binding.ensure(websocket_url, target_id)
             if self._attachments_binding is not None:
+                stage = "attachments_binding"
                 self._attachments_binding.ensure(websocket_url, target_id)
             if self._layout_binding is not None:
+                stage = "layout_binding"
                 self._layout_binding.ensure(websocket_url, target_id)
+            if self._theme_binding is not None and self._theme_bootstrap_target_id != target_id:
+                try:
+                    stage = "theme_bootstrap"
+                    send_cdp_command(
+                        websocket_url,
+                        "Runtime.evaluate",
+                        _runtime_expression_params(
+                            "typeof window.__codexUsageHudReportTheme === 'function' "
+                            "&& window.__codexUsageHudReportTheme('binding-ready')"
+                        ),
+                        self.timeout_seconds,
+                    )
+                    self._theme_bootstrap_target_id = target_id
+                except Exception:
+                    pass
         except Exception as exc:
+            metrics = dict(self.last_update_metrics)
+            metrics.update(
+                {
+                    "totalMs": (time.perf_counter() - started) * 1000.0,
+                    "failureStage": stage,
+                }
+            )
+            self.last_update_metrics = metrics
             self._clear_target_cache(clear_script=True)
             self.last_status = "failed"
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
+        metrics = dict(self.last_update_metrics)
+        metrics.update(
+            {
+                "totalMs": (time.perf_counter() - started) * 1000.0,
+                "failureStage": "",
+            }
+        )
+        self.last_update_metrics = metrics
         self.last_status = "ok"
         self.last_error = ""
         return True
@@ -7630,6 +8273,7 @@ class RendererHudClient:
         if self._active_session_binding is not None:
             self._active_session_binding.close()
             self._active_session_binding = None
+        self._active_session_callback = None
         if self._settings_command_binding is not None:
             self._settings_command_binding.close()
             self._settings_command_binding = None
@@ -7639,6 +8283,11 @@ class RendererHudClient:
         if self._layout_binding is not None:
             self._layout_binding.close()
             self._layout_binding = None
+        if self._theme_binding is not None:
+            self._theme_binding.close()
+            self._theme_binding = None
+        self._theme_callback = None
+        self._theme_bootstrap_target_id = ""
         if not self.enabled:
             return
         try:
@@ -7699,8 +8348,12 @@ class RendererHudClient:
             self._target_id = ""
             self._websocket_url = ""
             self._script_identifier = ""
+            self._theme_bootstrap_target_id = ""
+            self._theme_snapshot = None
 
     def _install(self, websocket_url: str, target_id: str, *, force: bool = False) -> None:
+        if target_id != self._target_id:
+            self._theme_snapshot = None
         if force and self._script_identifier:
             try:
                 remove_new_document_script(
@@ -7759,13 +8412,24 @@ class RendererHudClient:
             "rendererApplyMs": renderer_apply_ms,
             "payloadBytes": len(payload_json.encode("utf-8")),
             "payloadDomains": payload_domains,
+            "attribution": (
+                "hud_dom"
+                if renderer_apply_ms is not None
+                and renderer_apply_ms >= SLOW_RENDERER_UPDATE_LOG_MS
+                else (
+                    "codex_renderer_or_cdp"
+                    if elapsed_ms >= SLOW_RENDERER_UPDATE_LOG_MS
+                    else "normal"
+                )
+            ),
         }
         if elapsed_ms >= SLOW_RENDERER_UPDATE_LOG_MS or (
             renderer_apply_ms is not None
             and renderer_apply_ms >= SLOW_RENDERER_UPDATE_LOG_MS
         ):
             _LOGGER.info(
-                "renderer_update_timing cdp_ms=%.1f renderer_apply_ms=%s payload_bytes=%s domains=%s ok=%s",
+                "renderer_update_timing attribution=%s cdp_ms=%.1f renderer_apply_ms=%s payload_bytes=%s domains=%s ok=%s",
+                self.last_update_metrics["attribution"],
                 elapsed_ms,
                 (
                     f"{renderer_apply_ms:.1f}"
@@ -7841,6 +8505,7 @@ def payload_from_snapshot(
     desktop_overlay_dependency: dict[str, object] | None = None,
 ) -> RendererHudPayload:
     new_session = _is_new_session_snapshot(snapshot)
+    pending_session = _is_pending_session_snapshot(snapshot)
     session_cost = _session_cost(snapshot)
     warnings_dismissed = (
         warning_dismissed_today(settings_path) if settings_path is not None else False
@@ -7866,6 +8531,8 @@ def payload_from_snapshot(
             "budget": [],
         }
     request_line = _request_total_line(snapshot)
+    if pending_session:
+        request_line = "会话数据等待首个事件"
     if snapshot.request.error:
         request_line = f"本次 Token 出错 | {_compact(snapshot.request.error, 120)}"
     pre_send_estimate = ""
@@ -7895,6 +8562,7 @@ def payload_from_snapshot(
         last_event=_format_time(snapshot.last_event_time),
         refreshed_at=_format_time(snapshot.refreshed_at),
         new_session=new_session,
+        pending_session=pending_session,
         warning=bool(
             snapshot.error
             or snapshot.request.error
@@ -7949,6 +8617,8 @@ def session_switch_payload_from_snapshot(
     if snapshot.error and snapshot.status in {"missing", "error"}:
         top_line = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
     request_line = _request_total_line(snapshot)
+    if _is_pending_session_snapshot(snapshot):
+        request_line = "会话数据等待首个事件"
     if snapshot.request.error:
         request_line = f"本次 Token 出错 | {_compact(snapshot.request.error, 120)}"
     domain = {
@@ -7967,6 +8637,7 @@ def session_switch_payload_from_snapshot(
             or (snapshot.budget_warnings and not warnings_dismissed)
         ),
         "newSession": bool(_is_new_session_snapshot(snapshot)),
+        "pendingSession": bool(_is_pending_session_snapshot(snapshot)),
     }
     payload = dict(domain)
     payload["payloadDomains"] = {"sessionSwitch": dict(domain)}
@@ -8008,14 +8679,57 @@ def wait_for_renderer(
     snapshot_factory: Any,
     *,
     timeout_seconds: float,
+    progress_callback: Any = None,
 ) -> bool:
-    deadline = time.monotonic() + max(0.0, timeout_seconds)
-    while True:
-        if client.update(snapshot_factory()):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.15)
+    """Attempt one renderer attach without startup polling or retrying.
+
+    ``timeout_seconds`` is retained in the call shape for compatibility and
+    diagnostics; the client owns the one bounded CDP command timeout.  A
+    missing target is a strict, explicit unavailable state rather than a
+    multi-second retry/relaunch sequence.
+    """
+    del timeout_seconds
+    if callable(progress_callback):
+        try:
+            progress_callback("reading_session")
+        except Exception:
+            pass
+    started = time.perf_counter()
+    snapshot_started = time.perf_counter()
+    snapshot = snapshot_factory()
+    snapshot_ms = (time.perf_counter() - snapshot_started) * 1000.0
+    if callable(progress_callback):
+        try:
+            progress_callback("showing_hud")
+        except Exception:
+            pass
+    update_started = time.perf_counter()
+    attached = bool(client.update(snapshot))
+    update_ms = (time.perf_counter() - update_started) * 1000.0
+    metrics = {
+        "totalMs": (time.perf_counter() - started) * 1000.0,
+        "snapshotBuildMs": snapshot_ms,
+        "hudUpdateMs": update_ms,
+        "update": dict(getattr(client, "last_update_metrics", {}) or {}),
+    }
+    client.last_attach_metrics = metrics
+    if metrics["totalMs"] >= SLOW_RENDERER_UPDATE_LOG_MS:
+        update_metrics = metrics["update"]
+        attribution = (
+            "python_snapshot"
+            if snapshot_ms >= update_ms
+            else str(update_metrics.get("attribution") or "hud_or_cdp")
+        )
+        _LOGGER.info(
+            "renderer_attach_timing attribution=%s total_ms=%.1f snapshot_ms=%.1f hud_update_ms=%.1f cdp_ms=%s renderer_apply_ms=%s",
+            attribution,
+            metrics["totalMs"],
+            snapshot_ms,
+            update_ms,
+            update_metrics.get("cdpMs", "-"),
+            update_metrics.get("rendererApplyMs", "-"),
+        )
+    return attached
 
 
 def _runtime_expression_params(expression: str) -> dict[str, object]:
@@ -8029,6 +8743,8 @@ def _runtime_expression_params(expression: str) -> dict[str, object]:
 def _session_label(snapshot: ParsedSession) -> str:
     if _is_new_session_snapshot(snapshot):
         return "新会话"
+    if _is_pending_session_snapshot(snapshot):
+        return "会话加载中"
     title = _compact(snapshot.session_title, 36)
     if title:
         return title
@@ -8040,9 +8756,14 @@ def _is_new_session_snapshot(snapshot: ParsedSession) -> bool:
     return is_new_session_source(str(snapshot.selection_source or ""))
 
 
+def _is_pending_session_snapshot(snapshot: ParsedSession) -> bool:
+    return is_pending_session_source(str(snapshot.selection_source or ""))
+
+
 def _status_label(value: str) -> str:
     labels = {
         "starting": "启动中",
+        "loading": "加载中",
         "waiting": "等待日志",
         "missing": "未找到",
         "error": "出错",
@@ -8197,6 +8918,8 @@ def _compact(value: Any, limit: int = 120) -> str:
 def _top_expanded_header_title(snapshot: ParsedSession) -> str:
     if _is_new_session_snapshot(snapshot):
         return "新会话"
+    if _is_pending_session_snapshot(snapshot):
+        return "会话加载中"
     title = _compact(snapshot.session_title, 72)
     return title or TOP_EXPANDED_HEADER_FALLBACK
 
@@ -8309,6 +9032,10 @@ def _top_session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
 
 
 def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | None = None) -> str:
+    if _is_new_session_snapshot(snapshot):
+        return "新会话 等待首个会话事件"
+    if _is_pending_session_snapshot(snapshot):
+        return "本会话 加载精确会话映射"
     total_tokens = int(snapshot.confirmed.cumulative_total or 0)
     total_cost = _session_cost(snapshot) if session_cost is None else session_cost
     if snapshot.request.status == "running":
@@ -8326,8 +9053,7 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
         request_cost, _request_cost_estimated = _request_cost(snapshot)
         if request_cost is not None:
             total_cost = float(total_cost or 0.0) + float(request_cost)
-    label = "新会话" if _is_new_session_snapshot(snapshot) else "本会话"
-    return f"{label} {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
+    return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
 
 
 def _top_cache_progress_label(snapshot: ParsedSession) -> str:
@@ -8536,7 +9262,7 @@ def _round_from_snapshot(snapshot: ParsedSession) -> RequestRound:
 
 
 def _task_rows(snapshot: ParsedSession) -> list[RequestRound]:
-    if _is_new_session_snapshot(snapshot):
+    if _is_new_session_snapshot(snapshot) or _is_pending_session_snapshot(snapshot):
         return []
     return snapshot.request_history or [_round_from_snapshot(snapshot)]
 
@@ -8824,7 +9550,7 @@ def _request_rows(snapshot: ParsedSession) -> list[str]:
 def _display_request_rows(
     snapshot: ParsedSession,
 ) -> tuple[list[RequestRound], _RoundColumnWidths]:
-    if _is_new_session_snapshot(snapshot):
+    if _is_new_session_snapshot(snapshot) or _is_pending_session_snapshot(snapshot):
         return [], _RoundColumnWidths()
     rows = _task_rows(snapshot)[-30:]
     if not rows:
@@ -9030,7 +9756,7 @@ def _round_cost_value(item: RequestRound, fallback_model: str) -> tuple[float | 
 
 
 def _session_round_rows(snapshot: ParsedSession) -> list[RequestRound]:
-    if _is_new_session_snapshot(snapshot):
+    if _is_new_session_snapshot(snapshot) or _is_pending_session_snapshot(snapshot):
         return []
     rows = list(getattr(snapshot, "session_request_history", []) or [])
     if rows:
@@ -9221,6 +9947,8 @@ def _top_executing_text(snapshot: ParsedSession) -> str:
 def _top_current_task(snapshot: ParsedSession) -> str:
     if _is_new_session_snapshot(snapshot):
         return "新会话"
+    if _is_pending_session_snapshot(snapshot):
+        return "等待 Codex 写入精确会话映射"
     prompt = _compact(getattr(snapshot, "task_prompt", ""), 180)
     if prompt:
         return prompt
@@ -9637,7 +10365,11 @@ def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[st
     session_label = (
         "新会话"
         if _is_new_session_snapshot(snapshot)
-        else f"会话 {snapshot.session_id[-12:]}"
+        else (
+            "会话加载中"
+            if _is_pending_session_snapshot(snapshot)
+            else f"会话 {snapshot.session_id[-12:]}"
+        )
     )
     details = {
         "title": _top_expanded_header_title(snapshot),

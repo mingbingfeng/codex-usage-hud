@@ -25,16 +25,13 @@ MIN_DAEMON_POLL_MS = 100
 
 _TH32CS_SNAPPROCESS = 0x00000002
 _SYNCHRONIZE = 0x00100000
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _WAIT_OBJECT_0 = 0x00000000
 _WAIT_TIMEOUT = 0x00000102
 _MAX_PATH = 260
+_MAX_PROCESS_IMAGE_PATH = 32768
 _SW_HIDE = 0
-_HUD_PROCESS_MARKERS = ("hud", "usage-hud", "usage_hud")
-_NON_CLIENT_PROCESS_MARKERS = ("plus-plus", "++", "computer-use")
-# Codex Desktop 26.707+ renamed the Electron GUI to ChatGPT.exe.  ``codex.exe``
-# still exists on disk but now points at the Rust ``app-server`` backend under
-# ``resources/``; both signal a live Codex client to the daemon.
-_CLIENT_PROCESS_ALIASES = ("chatgpt",)
+_CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
 _LOGGER_NAME = "codex_usage_hud.daemon"
 _logger = logging.getLogger(_LOGGER_NAME)
 _logger.addHandler(logging.NullHandler())
@@ -161,26 +158,56 @@ def hide_console_window() -> None:
         return
 
 
-def is_codex_client_process(process_name: str) -> bool:
-    """Return whether an executable name looks like the Codex desktop client."""
+def _normalized_windows_path(value: str) -> str:
+    return str(value or "").strip().replace("/", "\\").rstrip("\\").lower()
+
+
+def _is_known_codex_desktop_path(executable_path: str) -> bool:
+    """Return whether a Codex.exe path belongs to a desktop installation."""
+    path = _normalized_windows_path(executable_path)
+    if not path or not path.endswith("\\codex.exe"):
+        return False
+
+    configured = _normalized_windows_path(os.environ.get(_CODEX_APP_PATH_ENV, ""))
+    if configured and path == configured:
+        return True
+
+    if "\\windowsapps\\openai.codex_" in path and "\\app\\" in path:
+        return True
+
+    desktop_install_markers = (
+        "\\appdata\\local\\programs\\codexrelocated\\",
+        "\\appdata\\local\\programs\\codex\\",
+        "\\appdata\\local\\programs\\openai codex\\",
+        "\\program files\\codex\\",
+        "\\program files\\openai codex\\",
+        "\\program files (x86)\\codex\\",
+        "\\program files (x86)\\openai codex\\",
+    )
+    return any(marker in path for marker in desktop_install_markers)
+
+
+def is_codex_client_process(
+    process_name: str,
+    executable_path: str = "",
+) -> bool:
+    """Return whether a process belongs to the Codex desktop app.
+
+    ``codex.exe`` by name alone is deliberately ambiguous: npm and standalone
+    CLI installations use exactly that executable name.  Current desktop
+    builds use ``ChatGPT.exe`` for the Electron process family, while their
+    ``resources\\codex.exe`` app-server is accepted only when its full path can
+    be verified as part of a desktop installation.
+    """
     name = Path(str(process_name or "")).name.strip().lower()
     if not name:
         return False
     stem = name[:-4] if name.endswith(".exe") else name
-    normalized = stem.replace("_", "-")
-    if any(marker in normalized for marker in _HUD_PROCESS_MARKERS):
-        return False
-    if any(marker in normalized for marker in _NON_CLIENT_PROCESS_MARKERS):
-        return False
-    if normalized == "codex":
+    if stem == "chatgpt":
         return True
-    if normalized.startswith("codex-") or normalized.startswith("codex "):
-        return True
-    if normalized.endswith(" codex"):
-        return True
-    if normalized in _CLIENT_PROCESS_ALIASES:
-        return True
-    return "codex" in normalized and "python" not in normalized
+    if stem == "codex":
+        return _is_known_codex_desktop_path(executable_path)
+    return False
 
 
 class WindowsProcessListener:
@@ -224,11 +251,39 @@ class WindowsProcessListener:
             wintypes.DWORD,
         ]
         self.kernel32.OpenProcess.restype = wintypes.HANDLE
+        if hasattr(self.kernel32, "QueryFullProcessImageNameW"):
+            self.kernel32.QueryFullProcessImageNameW.argtypes = [
+                wintypes.HANDLE,
+                wintypes.DWORD,
+                wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            self.kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
         self.kernel32.WaitForSingleObject.argtypes = [
             wintypes.HANDLE,
             wintypes.DWORD,
         ]
         self.kernel32.WaitForSingleObject.restype = wintypes.DWORD
+
+    def _process_image_path(self, pid: int) -> str:
+        query = getattr(self.kernel32, "QueryFullProcessImageNameW", None)
+        if not callable(query):
+            return ""
+        process = self.kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            int(pid),
+        )
+        if not process:
+            return ""
+        try:
+            size = wintypes.DWORD(_MAX_PROCESS_IMAGE_PATH)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not query(process, 0, buffer, ctypes.byref(size)):
+                return ""
+            return str(buffer.value or "")
+        finally:
+            self.kernel32.CloseHandle(process)
 
     def snapshot(self) -> ProcessSnapshot:
         """Return whether any Codex client process is currently alive."""
@@ -251,7 +306,13 @@ class WindowsProcessListener:
             while has_entry:
                 pid = int(entry.th32ProcessID)
                 name = str(entry.szExeFile or "")
-                if pid != self.exclude_pid and is_codex_client_process(name):
+                executable_path = ""
+                if Path(name).stem.lower() == "codex":
+                    executable_path = self._process_image_path(pid)
+                if pid != self.exclude_pid and is_codex_client_process(
+                    name,
+                    executable_path,
+                ):
                     pids.append(pid)
                     names.append(name)
                 has_entry = bool(self.kernel32.Process32NextW(handle, ctypes.byref(entry)))

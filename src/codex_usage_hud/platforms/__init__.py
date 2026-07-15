@@ -5,6 +5,7 @@ from .active_session import (
     SessionPathResolver,
     find_session_file,
     is_new_session_source,
+    is_pending_session_source,
 )
 from .base import get_current_platform
 from .session_switch import (
@@ -35,5 +36,6 @@ __all__ = [
     "find_session_file",
     "get_current_platform",
     "is_new_session_source",
+    "is_pending_session_source",
     "window_tracker_log_path",
 ]
