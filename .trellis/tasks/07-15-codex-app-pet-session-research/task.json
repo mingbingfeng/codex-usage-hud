@@ -18,7 +18,9 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "07-15-renderer-session-activation-semantics"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
