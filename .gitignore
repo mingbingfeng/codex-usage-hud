@@ -49,3 +49,26 @@ Thumbs.db
 /[0-9].png
 /docs/mockups/
 /tmp_probe_out.json
+
+# Local Codex/Trellis configuration and generated acceptance artifacts
+.agents/
+.claude/
+.codex/
+artifacts/
+
+# Keep committed Trellis task/spec records, ignore local workflow scaffolding
+.trellis/.gitignore
+.trellis/.template-hashes.json
+.trellis/.version
+.trellis/config.yaml
+.trellis/workflow.md
+.trellis/agents/
+.trellis/scripts/
+.trellis/workspace/
+.trellis/spec/guides/
+.trellis/spec/backend/database-guidelines.md
+.trellis/spec/backend/directory-structure.md
+.trellis/spec/backend/error-handling.md
+.trellis/spec/backend/logging-guidelines.md
+.trellis/spec/backend/quality-guidelines.md
+.trellis/tasks/00-bootstrap-guidelines/
