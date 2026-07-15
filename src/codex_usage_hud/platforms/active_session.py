@@ -551,12 +551,22 @@ class ActiveSessionTracker:
             return False
         session_id = str(session_id or "").strip()
         title = str(title or "").strip()
+        provisional_renderer_id = is_provisional_renderer_session_id(session_id)
         pending_session = bool(pending_session) or is_provisional_renderer_session_id(
             session_id
         )
         new_session = bool(new_session) or (
             not session_id and _is_new_session_title(title)
         )
+        if provisional_renderer_id and title:
+            # 已落库任务行偶尔仍带临时 ID；唯一标题映射成功时恢复 canonical 会话。
+            resolved_id, resolved_path = self.resolve_provisional_renderer_ref(
+                session_id,
+                title,
+            )
+            if resolved_id and resolved_path is not None:
+                session_id = resolved_id
+                pending_session = False
         if new_session or pending_session:
             session_id = ""
         if new_session:
@@ -774,6 +784,42 @@ class ActiveSessionTracker:
         except OSError:
             return ""
         return best_title
+
+    def resolve_provisional_renderer_ref(
+        self,
+        session_id: str,
+        title: str,
+    ) -> tuple[str, Path | None]:
+        """Resolve a temporary sidebar id when it represents a persisted thread.
+
+        Codex can keep ``client-new-thread:*`` in a task row after persistence.
+        Accept only an exact, unique title from session_index.jsonl whose
+        canonical rollout path already exists; otherwise remain pending.
+        """
+        if not is_provisional_renderer_session_id(session_id) or not title:
+            return "", None
+        candidates: dict[str, Path] = {}
+        try:
+            with self.session_index_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if str(item.get("thread_name") or "").strip() != title:
+                        continue
+                    candidate_id = str(item.get("id") or "").strip()
+                    if not candidate_id or is_provisional_renderer_session_id(candidate_id):
+                        continue
+                    path = self.path_from_renderer_thread_id(candidate_id)
+                    if path is not None:
+                        candidates[candidate_id] = path
+        except OSError:
+            return "", None
+        if len(candidates) != 1:
+            return "", None
+        candidate_id, path = next(iter(candidates.items()))
+        return candidate_id, path
 
     def path_from_renderer_thread_id(self, thread_id: str) -> Path | None:
         """Resolve a canonical renderer id through its exact state-db row.

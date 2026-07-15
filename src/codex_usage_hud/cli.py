@@ -2852,6 +2852,7 @@ def _handle_work_overlay_command(
     session_controller: SessionSwitchController,
     *,
     prepare_window: bool = True,
+    activation_meta: dict[str, object] | None = None,
 ) -> SessionSwitchResult | None:
     action = str(command.get("action") or "").strip()
     if action != "activateSession":
@@ -2863,10 +2864,24 @@ def _handle_work_overlay_command(
         _LOGGER.info("work_overlay_command_ignored reason=missing_target")
         return None
 
-    if prepare_window:
+    # CDP can reach a live Codex renderer without first foregrounding the
+    # desktop window.  Defer the expensive window preparation until transport
+    # or backend failure, then retry once as the bounded recovery path.
+    result = session_controller.activate_session(
+        session_id=session_id,
+        title=target_title,
+        workdir=str(command.get("workdir") or "").strip(),
+    )
+    window_prepared = False
+    if (
+        prepare_window
+        and not result.ok
+        and result.status in {"cdp-error", "backend-error", "no-backend"}
+    ):
         window_ready, window_status, window_reason, window_hwnd = (
             _prepare_codex_window_for_work_overlay_switch()
         )
+        window_prepared = True
         if not window_ready:
             _LOGGER.info(
                 "work_overlay_command_window_prepare_best_effort_failed status=%s hwnd=%s reason=%s",
@@ -2874,12 +2889,13 @@ def _handle_work_overlay_command(
                 window_hwnd,
                 window_reason,
             )
-
-    result = session_controller.activate_session(
-        session_id=session_id,
-        title=target_title,
-        workdir=str(command.get("workdir") or "").strip(),
-    )
+        result = session_controller.activate_session(
+            session_id=session_id,
+            title=target_title,
+            workdir=str(command.get("workdir") or "").strip(),
+        )
+    if activation_meta is not None:
+        activation_meta["windowPrepared"] = window_prepared
     _LOGGER.info(
         "work_overlay_command_processed ok=%s status=%s backend=%s requested_session=%s active_session=%s matched_by=%s message=%s",
         result.ok,
@@ -2924,12 +2940,26 @@ def _handle_work_overlay_commands(
         ):
             handled += 1
             continue
+        activation_meta: dict[str, object] = {}
         result = _handle_work_overlay_command(
             command,
             session_controller,
             prepare_window=prepare_window,
+            activation_meta=activation_meta,
         )
-        _publish_work_overlay_command_event(runtime_events, command, result)
+        _publish_work_overlay_command_event(
+            runtime_events,
+            command,
+            result,
+            activation_context=activation_meta,
+        )
+        if result is not None and result.ok:
+            _publish_work_overlay_active_session_changed(
+                runtime_events,
+                command,
+                result,
+                activation_context=activation_meta,
+            )
         if result is not None and (
             bool(command.get("current")) or result.ok or result.status == "already-active"
         ):
@@ -2988,23 +3018,78 @@ def _publish_work_overlay_command_event(
     runtime_events: RuntimeEventBus | None,
     command: Mapping[str, object],
     result: SessionSwitchResult | None,
+    *,
+    activation_context: Mapping[str, object] | None = None,
 ) -> None:
     publish = getattr(runtime_events, "publish", None)
     if not callable(publish):
         return
+    context = _work_overlay_activation_context(command, result)
+    context.update(dict(activation_context or {}))
     publish(
         "overlay_command_received",
         source="work_overlay",
         session=str(command.get("sessionId") or "") or None,
-        context={
-            "action": str(command.get("action") or ""),
-            "sessionId": str(command.get("sessionId") or ""),
-            "title": str(command.get("targetTitle") or command.get("title") or ""),
-            "current": bool(command.get("current")),
-            "handled": result is not None,
-            "ok": bool(getattr(result, "ok", False)) if result is not None else False,
-            "status": str(getattr(result, "status", "") or "") if result is not None else "",
-        },
+        context=context,
+    )
+
+
+def _work_overlay_activation_context(
+    command: Mapping[str, object],
+    result: SessionSwitchResult | None,
+) -> dict[str, object]:
+    """Project one structured local activation result for runtime events."""
+    context: dict[str, object] = {
+        "action": str(command.get("action") or ""),
+        "sessionId": str(command.get("sessionId") or ""),
+        "requestedSessionId": str(command.get("sessionId") or ""),
+        "activeSessionId": str(getattr(result, "active_session_id", "") or ""),
+        "requestedTitle": str(
+            command.get("targetTitle") or command.get("title") or ""
+        ),
+        "activeTitle": str(getattr(result, "active_title", "") or ""),
+        "current": bool(command.get("current")),
+        "handled": result is not None,
+        "ok": bool(getattr(result, "ok", False)) if result is not None else False,
+        "backend": str(getattr(result, "backend", "") or "") if result is not None else "",
+        "status": str(getattr(result, "status", "") or "") if result is not None else "",
+        "matchedBy": str(getattr(result, "matched_by", "") or "") if result is not None else "",
+        "message": str(getattr(result, "message", "") or "") if result is not None else "",
+    }
+    requested_at = command.get("requestedAt")
+    try:
+        requested_timestamp = float(requested_at)
+    except (TypeError, ValueError):
+        requested_timestamp = 0.0
+    if requested_timestamp > 0:
+        context["latencyMs"] = round(
+            max(0.0, (time.time() - requested_timestamp) * 1000.0),
+            1,
+        )
+    return context
+
+
+def _publish_work_overlay_active_session_changed(
+    runtime_events: RuntimeEventBus | None,
+    command: Mapping[str, object],
+    result: SessionSwitchResult,
+    *,
+    activation_context: Mapping[str, object] | None = None,
+) -> None:
+    publish = getattr(runtime_events, "publish", None)
+    if not callable(publish):
+        return
+    context = _work_overlay_activation_context(command, result)
+    context.update(dict(activation_context or {}))
+    publish(
+        "active_session_changed",
+        source="work_overlay",
+        session=(
+            str(result.active_session_id or "").strip()
+            or str(command.get("sessionId") or "").strip()
+            or None
+        ),
+        context={"reason": "overlay_session_activation", **context},
     )
 
 
@@ -6727,6 +6812,10 @@ def run_renderer_hud_session(
                         and not inputs.file_change_reasons
                         and inputs.update_state.get("phase") != "downloading"
                     )
+                    if lightweight_active_session_refresh:
+                        # renderer bridge 与 tracker callback 都表示当前会话已变更；
+                        # 这类事件必须同时刷新气泡，不能只更新 session payload。
+                        refresh_active_work_items = True
                     hydrated_session_refresh = any(
                         str(getattr(event, "type", "") or "")
                         == "session_snapshot_hydrated"
@@ -6736,20 +6825,16 @@ def run_renderer_hud_session(
                     snapshot_kwargs: dict[str, object] = {
                         "refresh_budget_aggregate": refresh_budget_aggregate,
                         "refresh_budget_paths": refresh_budget_paths,
-                        "refresh_active_work_items": (
-                            refresh_active_work_items
-                            and not lightweight_active_session_refresh
-                        ),
+                        # 会话切换仍可使用轻量 session payload，但气泡必须在同一
+                        # 个事件周期重建结构化工作状态，避免先展示旧进度再等待二次刷新。
+                        "refresh_active_work_items": refresh_active_work_items,
                     }
                     if lightweight_active_session_refresh or hydrated_session_refresh:
                         snapshot_kwargs["refresh_current_session_usage"] = False
                     snapshot_started = time.perf_counter()
                     fresh = snapshot_or_error(**snapshot_kwargs)
                     snapshot_ms = (time.perf_counter() - snapshot_started) * 1000.0
-                    if lightweight_active_session_refresh and latest is not None:
-                        fresh.active_work_items = list(latest.active_work_items)
-                        loop_state.active_work_refresh_pending = True
-                    elif not refresh_active_work_items and latest is not None:
+                    if not refresh_active_work_items and latest is not None:
                         fresh.active_work_items = list(latest.active_work_items)
                     else:
                         loop_state.latest_active_work_refresh_at = time.monotonic()

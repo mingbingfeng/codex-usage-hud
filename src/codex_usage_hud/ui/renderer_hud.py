@@ -137,6 +137,9 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   const activeSessionComposerHandlerName = "__codexUsageHudActiveSessionComposerHandler";
   const activeSessionClickHandlerName = "__codexUsageHudActiveSessionClick";
   const activeSessionHistoryPatchName = "__codexUsageHudActiveSessionHistoryPatch";
+  const activeSessionCanonicalIdName = "__codexUsageHudActiveSessionCanonicalId";
+  const activeSessionCanonicalAtName = "__codexUsageHudActiveSessionCanonicalAt";
+  const activeSessionSettledTimerName = "__codexUsageHudActiveSessionSettledTimer";
     const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
     const activeSessionBindingName = "codexUsageHudActiveSession";
     const settingsCommandBindingName = "codexUsageHudSettingsCommand";
@@ -3376,6 +3379,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     if (activeSessionIdIsProvisional(rawSessionId)) {
       return {
         rawSessionId: normalize(rawSessionId),
+        rendererSessionId: normalize(rawSessionId),
         sessionId: "",
         title,
         pendingSession: true,
@@ -3438,6 +3442,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     const newSession = !pendingSession && !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
     return {
       sessionId: (newSession || pendingSession) ? "" : (ref.sessionId || ""),
+      rendererSessionId: ref.rendererSessionId || ref.rawSessionId || "",
       title: newSession ? "" : (ref.title || ""),
       url: location.href,
       newSession,
@@ -3461,10 +3466,34 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     const newSession = !!ref.newSession || reason === "new-session";
     const pendingSession = !!ref.pendingSession;
     if (!ref.sessionId && !ref.title && !newSession && !pendingSession) return;
-    const signature = JSON.stringify([ref.sessionId, ref.title, ref.url || location.href, newSession, pendingSession]);
+    const rendererSessionId = normalizeThreadId(
+      ref.sessionId || ref.rendererSessionId || "",
+    );
+    const canonicalSessionId = activeSessionIdIsProvisional(rendererSessionId)
+      ? ""
+      : rendererSessionId;
+    const lastCanonicalSessionId = normalizeThreadId(
+      window[activeSessionCanonicalIdName] || "",
+    );
+    const lastCanonicalAt = Number(window[activeSessionCanonicalAtName] || 0);
+    const transientWithoutCanonicalId = !canonicalSessionId && (newSession || pendingSession);
+    if (
+      transientWithoutCanonicalId
+      && reason !== "click"
+      && lastCanonicalSessionId
+      && Date.now() - lastCanonicalAt < 2500
+    ) {
+      // 会话切换期间 Codex 会短暂清空选中行；不能让这个瞬态覆盖刚确认的会话。
+      clearTimeout(window[activeSessionSettledTimerName] || 0);
+      window[activeSessionSettledTimerName] = setTimeout(() => {
+        postActiveSession("settled");
+      }, 320);
+      return;
+    }
+    const signature = JSON.stringify([rendererSessionId, ref.title, ref.url || location.href, newSession, pendingSession]);
     if (window[activeSessionLastSignatureName] === signature) return;
     const payload = {
-      sessionId: ref.sessionId,
+      sessionId: rendererSessionId,
       title: ref.title,
       url: ref.url || location.href,
       reason: newSession ? "new-session" : (pendingSession ? "pending-session" : reason),
@@ -3482,6 +3511,13 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         // recording the signature before delivery suppressed every follow-up
         // until the user clicked a second conversation.
         window[activeSessionLastSignatureName] = signature;
+        if (canonicalSessionId) {
+          window[activeSessionCanonicalIdName] = canonicalSessionId;
+          window[activeSessionCanonicalAtName] = Date.now();
+        } else {
+          window[activeSessionCanonicalIdName] = "";
+          window[activeSessionCanonicalAtName] = 0;
+        }
         return;
       } catch (_) {}
     }
@@ -3493,6 +3529,13 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       keepalive: true,
     }).then(() => {
       window[activeSessionLastSignatureName] = signature;
+      if (canonicalSessionId) {
+        window[activeSessionCanonicalIdName] = canonicalSessionId;
+        window[activeSessionCanonicalAtName] = Date.now();
+      } else {
+        window[activeSessionCanonicalIdName] = "";
+        window[activeSessionCanonicalAtName] = 0;
+      }
     }).catch(() => {});
   }
 
@@ -3509,6 +3552,8 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       clearTimeout(timer);
     }
     window[activeSessionSendFollowupTimersName] = [];
+    clearTimeout(window[activeSessionSettledTimerName] || 0);
+    window[activeSessionSettledTimerName] = 0;
   }
 
   function activeSessionComposerTarget(target) {
@@ -3665,6 +3710,9 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     delete window[activeSessionClickHandlerName];
     delete window[activeSessionHistoryPatchName];
     delete window[activeSessionLastSignatureName];
+    delete window[activeSessionCanonicalIdName];
+    delete window[activeSessionCanonicalAtName];
+    delete window[activeSessionSettledTimerName];
   }
 
   function ensureActiveSessionWatchers() {
@@ -3691,6 +3739,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
           const newSession = !pendingSession && !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
           postActiveSession("click", {
             sessionId: (newSession || pendingSession) ? "" : (ref.sessionId || ""),
+            rendererSessionId: ref.rendererSessionId || ref.rawSessionId || "",
             title: newSession ? "" : (ref.title || ""),
             url: activeSessionRowUrl(row),
             newSession,
@@ -3738,7 +3787,8 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
     // guarantees that the initial HUD snapshot follows the page already open
     // when the HUD starts (including the blank-title new-session page).
     return {
-      sessionId: ref.sessionId || "",
+      sessionId: ref.sessionId || ref.rendererSessionId || "",
+      rendererSessionId: ref.rendererSessionId || "",
       title: ref.title || "",
       newSession: !!ref.newSession,
       pendingSession: !!ref.pendingSession,

@@ -817,6 +817,54 @@ class ActiveSessionTrackerTests(unittest.TestCase):
             self.assertEqual(platform.detect_calls, 0)
             self.assertEqual(tracker.latest_title, "Pending Renderer Thread")
 
+    def test_renderer_provisional_id_resolves_unique_persisted_title(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-019f-persisted.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(
+                state_db,
+                "019f-persisted",
+                session_path,
+                title="Persisted Provisional Thread",
+            )
+            session_index = root / "session_index.jsonl"
+            session_index.write_text(
+                json.dumps(
+                    {
+                        "id": "019f-persisted",
+                        "thread_name": "Persisted Provisional Thread",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref(
+                    "local:client-new-thread:pending-uuid",
+                    "Persisted Provisional Thread",
+                )
+            )
+            self.assertEqual(tracker.latest_session_id, "019f-persisted")
+            self.assertEqual(tracker.latest_path, session_path)
+            self.assertEqual(
+                tracker.latest_source,
+                "renderer:Persisted Provisional Thread",
+            )
+
     def test_renderer_unmapped_uuid_stays_pending_without_activity_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

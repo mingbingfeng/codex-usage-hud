@@ -1729,7 +1729,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(record["firstSeenAt"], 150.0)
         self.assertEqual(record["lastSeenAt"], 150.0)
 
-    def test_tk_work_overlay_command_pump_prepares_window_before_switching_session(self) -> None:
+    def test_work_overlay_command_pump_uses_cdp_before_window_prepare(self) -> None:
         command = {
             "action": "activateSession",
             "sessionId": "thread-1",
@@ -1746,7 +1746,7 @@ class BudgetHelperTests(unittest.TestCase):
                 return_value=SessionSwitchResult(
                     ok=True,
                     status="switched",
-                    backend="windows-search",
+                    backend="cdp",
                     requested_session_id="thread-1",
                     requested_title="Thread One",
                     active_title="Thread One",
@@ -1769,15 +1769,147 @@ class BudgetHelperTests(unittest.TestCase):
             title="Thread One",
             workdir="",
         )
-        self.assertEqual(prepare_window.call_count, 2)
+        self.assertEqual(prepare_window.call_count, 1)
         self.assertEqual(
             prepare_window.call_args_list[0].kwargs["timeout_seconds"],
-            cli_module.WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
-        )
-        self.assertEqual(
-            prepare_window.call_args_list[1].kwargs["timeout_seconds"],
             cli_module.WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS,
         )
+
+    def test_work_overlay_command_retries_after_cdp_transport_failure(self) -> None:
+        command = {
+            "action": "activateSession",
+            "sessionId": "thread-1",
+            "targetTitle": "Thread One",
+        }
+        session_controller = SimpleNamespace(
+            activate_session=MagicMock(
+                side_effect=[
+                    SessionSwitchResult(
+                        ok=False,
+                        status="cdp-error",
+                        backend="cdp",
+                        requested_session_id="thread-1",
+                        requested_title="Thread One",
+                        message="target unavailable",
+                    ),
+                    SessionSwitchResult(
+                        ok=True,
+                        status="switch-requested",
+                        backend="cdp",
+                        requested_session_id="thread-1",
+                        requested_title="Thread One",
+                        active_session_id="thread-1",
+                        active_title="Thread One",
+                        matched_by="session-id",
+                    ),
+                ]
+            )
+        )
+        activation_meta: dict[str, object] = {}
+
+        with patch(
+            "codex_usage_hud.cli._prepare_codex_window_for_work_overlay_switch",
+            return_value=(True, "visible", "", 321),
+        ) as prepare_window:
+            result = cli_module._handle_work_overlay_command(
+                command,
+                session_controller,
+                activation_meta=activation_meta,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result.ok)
+        self.assertEqual(session_controller.activate_session.call_count, 2)
+        prepare_window.assert_called_once()
+        self.assertTrue(activation_meta["windowPrepared"])
+
+    def test_work_overlay_activation_event_carries_structured_state_and_wakeup(self) -> None:
+        command = {
+            "action": "activateSession",
+            "sessionId": "thread-1",
+            "targetTitle": "Thread One",
+            "requestedAt": time.time() - 0.05,
+        }
+        overlay = SimpleNamespace(
+            take_commands=MagicMock(return_value=[command]),
+            mark_switch_completed=MagicMock(),
+        )
+        session_controller = SimpleNamespace(
+            activate_session=MagicMock(
+                return_value=SessionSwitchResult(
+                    ok=True,
+                    status="switch-requested",
+                    backend="cdp",
+                    requested_session_id="thread-1",
+                    requested_title="Thread One",
+                    active_session_id="thread-1",
+                    active_title="Thread One",
+                    matched_by="session-id",
+                )
+            )
+        )
+        runtime_events = RuntimeEventBus()
+
+        handled = cli_module._handle_work_overlay_commands(
+            overlay,
+            session_controller,
+            prepare_window=False,
+            runtime_events=runtime_events,
+        )
+
+        self.assertEqual(handled, 1)
+        events = runtime_events.drain()
+        self.assertEqual(
+            [event.type for event in events],
+            ["overlay_command_received", "active_session_changed"],
+        )
+        command_context = events[0].context
+        self.assertEqual(command_context["requestedSessionId"], "thread-1")
+        self.assertEqual(command_context["activeSessionId"], "thread-1")
+        self.assertEqual(command_context["backend"], "cdp")
+        self.assertEqual(command_context["status"], "switch-requested")
+        self.assertEqual(command_context["matchedBy"], "session-id")
+        self.assertFalse(command_context["windowPrepared"])
+        self.assertGreaterEqual(float(command_context["latencyMs"]), 0.0)
+        self.assertEqual(events[1].source, "work_overlay")
+        self.assertEqual(events[1].session, "thread-1")
+        self.assertEqual(events[1].context["reason"], "overlay_session_activation")
+
+    def test_failed_work_overlay_activation_does_not_publish_active_session_wakeup(self) -> None:
+        command = {
+            "action": "activateSession",
+            "sessionId": "thread-1",
+            "targetTitle": "Thread One",
+        }
+        overlay = SimpleNamespace(
+            take_commands=MagicMock(return_value=[command]),
+            mark_switch_completed=MagicMock(),
+        )
+        session_controller = SimpleNamespace(
+            activate_session=MagicMock(
+                return_value=SessionSwitchResult(
+                    ok=False,
+                    status="thread-not-found",
+                    backend="cdp",
+                    requested_session_id="thread-1",
+                    requested_title="Thread One",
+                )
+            )
+        )
+        runtime_events = RuntimeEventBus()
+
+        cli_module._handle_work_overlay_commands(
+            overlay,
+            session_controller,
+            prepare_window=True,
+            runtime_events=runtime_events,
+        )
+
+        self.assertEqual(
+            [event.type for event in runtime_events.drain()],
+            ["overlay_command_received"],
+        )
+        session_controller.activate_session.assert_called_once()
 
     def test_current_session_overlay_command_refocuses_codex_after_already_active_result(self) -> None:
         session_controller = SimpleNamespace(
@@ -1821,11 +1953,7 @@ class BudgetHelperTests(unittest.TestCase):
             title="Thread One",
             workdir="",
         )
-        prepare_window.assert_called_once_with(
-            timeout_seconds=cli_module.WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
-            poll_seconds=0.08,
-            launch_if_missing=True,
-        )
+        prepare_window.assert_not_called()
         refocus_window.assert_called_once()
 
     def test_work_overlay_switch_activates_codex_on_macos(self) -> None:
@@ -13009,18 +13137,17 @@ class DaemonLifecycleTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 130)
-        self.assertEqual(build_snapshot.call_count, 3)
-        self.assertEqual(fake_client.update.call_count, 2)
+        self.assertEqual(build_snapshot.call_count, 2)
+        self.assertEqual(fake_client.update.call_count, 1)
         self.assertEqual(fake_client.update_payload.call_count, 1)
         partial_payload = fake_client.update_payload.call_args.args[0]
         self.assertEqual(set(partial_payload["payloadDomains"]), {"sessionSwitch"})
         self.assertNotIn("topDetails", partial_payload)
         self.assertNotIn("requestRows", partial_payload)
-        self.assertEqual(
+        self.assertNotEqual(
             build_snapshot.call_args_list[1].kwargs.get("refresh_active_work_items"),
             False,
         )
-        self.assertNotIn("refresh_active_work_items", build_snapshot.call_args_list[2].kwargs)
         active_tracker.observe_conversation_ref.assert_called_once_with(
             session_id="thread-2",
             title="Other Thread",
@@ -13028,13 +13155,9 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             [event.type for event in emitted_events],
-            ["active_session_changed", "active_work_refresh_requested"],
+            ["active_session_changed"],
         )
         self.assertEqual(emitted_events[0].context, {"reason": "renderer_bridge"})
-        self.assertEqual(
-            emitted_events[1].context,
-            {"reason": "pending_after_active_session_refresh"},
-        )
 
     def test_renderer_loop_wakes_for_tracker_active_session_callback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -13134,18 +13257,17 @@ class DaemonLifecycleTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 130)
-        self.assertEqual(build_snapshot.call_count, 3)
-        self.assertEqual(
+        self.assertEqual(build_snapshot.call_count, 2)
+        self.assertNotEqual(
             build_snapshot.call_args_list[1].kwargs.get("refresh_active_work_items"),
             False,
         )
         self.assertIsNone(callback_values[-1])
         self.assertEqual(
             [event.type for event in emitted_events],
-            ["active_session_changed", "active_work_refresh_requested"],
+            ["active_session_changed"],
         )
         self.assertEqual(emitted_events[0].source, "active_session")
-        self.assertEqual(emitted_events[1].source, "renderer_loop")
 
     def test_renderer_loop_wakes_for_runtime_error_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -13967,20 +14089,23 @@ class DaemonLifecycleTests(unittest.TestCase):
             timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
             launch_if_missing=True,
         )
-        prepare_overlay_window.assert_called_once_with(
-            timeout_seconds=cli_module.WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
-            poll_seconds=0.08,
-            launch_if_missing=True,
-        )
+        prepare_overlay_window.assert_not_called()
         refocus_overlay_window.assert_called_once()
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
         fake_update_manager.close.assert_called_once()
         fake_context.close.assert_called_once()
-        self.assertEqual([event.type for event in events], ["overlay_command_received"])
+        self.assertEqual(
+            [event.type for event in events],
+            ["overlay_command_received", "active_session_changed"],
+        )
         self.assertEqual(events[0].source, "work_overlay")
         self.assertEqual(events[0].context["action"], "activateSession")
         self.assertEqual(events[0].context["sessionId"], "thread-1")
+        self.assertEqual(events[0].context["activeSessionId"], "")
+        self.assertFalse(events[0].context["windowPrepared"])
+        self.assertEqual(events[1].source, "work_overlay")
+        self.assertEqual(events[1].context["reason"], "overlay_session_activation")
 
     def test_legacy_tk_hud_session_no_longer_prepares_or_opens_tk(self) -> None:
         loading = SimpleNamespace(close=MagicMock())
