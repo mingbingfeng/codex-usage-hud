@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,12 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from codex_usage_hud.config import UserConfig, UserConfigStore
+from codex_usage_hud.config import (
+    ModelPrice,
+    ProviderSettings,
+    UserConfig,
+    UserConfigStore,
+)
 from codex_usage_hud.settings_bridge import SettingsBridgeServer
 
 
@@ -27,6 +33,64 @@ def _available_port() -> int:
 
 
 class SettingsBridgeServerTests(unittest.TestCase):
+    def test_fetch_prices_updates_only_requested_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            existing = UserConfig.defaults()
+            existing.provider_settings = {
+                "custom": ProviderSettings(
+                    model_prices={"gpt-5": ModelPrice(1.0, 1.0, 1.0, 1.0)},
+                    pricing_url="https://pricing.example/custom.json",
+                ),
+                "muyuan": ProviderSettings(
+                    model_prices={"gpt-5": ModelPrice(2.0, 2.0, 2.0, 2.0)},
+                    pricing_url="https://pricing.example/muyuan-old.json",
+                ),
+            }
+            store.save(existing)
+            bridge = SettingsBridgeServer(store, port=0)
+            fetched = {"gpt-5": ModelPrice(9.0, 9.0, 9.0, 9.0)}
+            try:
+                url = bridge.start()
+                request = Request(
+                    f"{url}/prices/fetch",
+                    data=json.dumps(
+                        {
+                            "provider": "muyuan",
+                            "url": "https://pricing.example/muyuan-new.json",
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch(
+                    "codex_usage_hud.settings_bridge.fetch_model_prices",
+                    return_value=fetched,
+                ):
+                    with urlopen(request, timeout=2) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                persisted = store.load()
+            finally:
+                bridge.close()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(
+            persisted.provider_settings["muyuan"].pricing_url,
+            "https://pricing.example/muyuan-new.json",
+        )
+        self.assertEqual(
+            persisted.provider_settings["muyuan"].model_prices["gpt-5"].input,
+            9.0,
+        )
+        self.assertEqual(
+            persisted.provider_settings["custom"].pricing_url,
+            "https://pricing.example/custom.json",
+        )
+        self.assertEqual(
+            persisted.provider_settings["custom"].model_prices["gpt-5"].input,
+            1.0,
+        )
+
     def test_settings_endpoint_loads_and_saves_user_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = UserConfigStore(Path(temp_dir) / "hud_settings.json")

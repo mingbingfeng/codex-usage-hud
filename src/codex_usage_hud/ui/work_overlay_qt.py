@@ -612,8 +612,21 @@ def _workdir_link_pending_for_item(
     return False
 
 
+def _item_is_cli(item: Mapping[str, object]) -> bool:
+    return str(item.get("clientKind") or "").strip().lower() == "cli"
+
+
+def _workdir_clickable_for_item(item: Mapping[str, object]) -> bool:
+    if _item_is_cli(item):
+        return False
+    workdir = str(item.get("workdir") or "").strip()
+    session_id = str(item.get("sessionId") or item.get("id") or "").strip()
+    target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
+    return bool(workdir and (session_id or target_title))
+
+
 def _workdir_link_hover_visible_for_item(item: Mapping[str, object]) -> bool:
-    return not _item_is_completed(item)
+    return not _item_is_cli(item) and not _item_is_completed(item)
 
 
 def _transition_required_height(
@@ -2999,6 +3012,8 @@ def run_work_overlay_helper_qt(
                             switch_overlay.raise_()
 
         def switch_item(self, item: Mapping[str, object]) -> None:
+            if _item_is_cli(item):
+                return
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
             target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
             if not session_id and not target_title:
@@ -3009,6 +3024,7 @@ def run_work_overlay_helper_qt(
                 "targetTitle": target_title,
                 "title": str(item.get("title") or "").strip(),
                 "workdir": str(item.get("workdir") or "").strip(),
+                "clientKind": str(item.get("clientKind") or "unknown").strip().lower(),
                 "requestedAt": time.time(),
                 "current": bool(item.get("current")),
             }
@@ -3287,10 +3303,8 @@ def run_work_overlay_helper_qt(
                 completed_at=self._switch_pending_completed_at if completed else 0.0,
             )
             self._completed_hover_anchors.append(record["hover_anchor"])
-            session_id = str(item.get("sessionId") or item.get("id") or "").strip()
-            target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
             workdir_text = _workdir_display_name(item)
-            if workdir_text and (session_id or target_title):
+            if workdir_text and _workdir_clickable_for_item(item):
                 self._workdir_anchors.append((record["workdir_anchor"], dict(item)))
             self._completed_check_anchors.append((record["check_anchor"], dict(item)))
 
@@ -3484,9 +3498,7 @@ def run_work_overlay_helper_qt(
 
             workdir_text = _workdir_display_name(item)
             full_workdir = str(item.get("workdir") or "").strip()
-            session_id = str(item.get("sessionId") or item.get("id") or "").strip()
-            target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
-            workdir_clickable = bool(full_workdir and (session_id or target_title))
+            workdir_clickable = _workdir_clickable_for_item(item)
             status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
             footer_container = record["footer_container"]
             footer_container.setVisible(bool(status_text or workdir_text))
@@ -3510,7 +3522,7 @@ def run_work_overlay_helper_qt(
             workdir_label = record["workdir_label"]
             if workdir_text:
                 workdir_label.setText(_compact_workdir_text(workdir_text, 40))
-                workdir_label.setToolTip(full_workdir or workdir_text)
+                workdir_label.setToolTip((full_workdir or workdir_text) if workdir_clickable else "")
                 workdir_label.setStyleSheet(
                     "QLabel {"
                     f"color: {theme['info'] if workdir_clickable else theme['requestMuted']};"

@@ -485,7 +485,8 @@ def _parse_codex_config_subset(text: str) -> dict[str, Any]:
     return result
 
 
-def _read_codex_desktop_config(config_path: str | Path | None = None) -> dict[str, Any]:
+def read_codex_config(config_path: str | Path | None = None) -> dict[str, Any]:
+    """Read Codex TOML using the shared full-parser-first compatibility path."""
     path = Path(config_path).expanduser() if config_path is not None else _default_codex_config_path()
     try:
         text = path.read_text(encoding="utf-8")
@@ -494,6 +495,11 @@ def _read_codex_desktop_config(config_path: str | Path | None = None) -> dict[st
     payload = _try_parse_toml(text)
     if payload is None:
         payload = _parse_codex_config_subset(text)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_codex_desktop_config(config_path: str | Path | None = None) -> dict[str, Any]:
+    payload = read_codex_config(config_path)
     desktop = payload.get("desktop") if isinstance(payload, dict) else None
     return desktop if isinstance(desktop, dict) else {}
 
@@ -1179,4 +1185,5 @@ __all__ = [
     "CodexThemeSnapshot",
     "HudThemeTokens",
     "THEME_PROBE_SCRIPT",
+    "read_codex_config",
 ]

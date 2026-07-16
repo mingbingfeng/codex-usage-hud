@@ -18,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from codex_usage_hud.core.calculator import estimate_tokens
 from codex_usage_hud.core.parser import (
+    CostEstimator,
     JsonlSessionParser,
     JsonlTailState,
     RequestTokens,
@@ -25,6 +26,7 @@ from codex_usage_hud.core.parser import (
     extract_log_field,
     parse_timestamp,
 )
+from codex_usage_hud.core.calculator import UsageCalculator
 
 
 def record(
@@ -83,6 +85,89 @@ class TimestampAndFieldTests(unittest.TestCase):
 
 
 class JsonlSessionParserTests(unittest.TestCase):
+    def test_session_meta_exposes_provider_and_cli_client_kind(self) -> None:
+        parser = JsonlSessionParser()
+        snapshot = parser.parse_records(
+            [
+                record(
+                    "2026-05-28T00:00:00Z",
+                    "session_meta",
+                    {
+                        "id": "cli-1",
+                        "model_provider": "Muyuan",
+                        "originator": "codex-tui",
+                        "source": "cli",
+                    },
+                )
+            ]
+        )
+
+        self.assertEqual(snapshot.model_provider, "muyuan")
+        self.assertEqual(snapshot.originator, "codex-tui")
+        self.assertEqual(snapshot.client_kind, "cli")
+
+    def test_session_meta_without_provider_uses_visible_unknown_channel(self) -> None:
+        parser = JsonlSessionParser()
+        snapshot = parser.parse_records(
+            [
+                record(
+                    "2026-05-28T00:00:00Z",
+                    "session_meta",
+                    {"id": "app-1", "originator": "Codex Desktop", "source": "vscode"},
+                )
+            ]
+        )
+
+        self.assertEqual(snapshot.model_provider, "unknown")
+        self.assertEqual(snapshot.client_kind, "app")
+
+    def test_exec_source_uses_originator_instead_of_assuming_app(self) -> None:
+        parser = JsonlSessionParser()
+        cli_snapshot = parser.parse_records(
+            [
+                record(
+                    "2026-05-28T00:00:00Z",
+                    "session_meta",
+                    {
+                        "id": "exec-cli",
+                        "originator": "codex_exec",
+                        "source": "exec",
+                    },
+                )
+            ]
+        )
+        unknown_snapshot = parser.parse_records(
+            [
+                record(
+                    "2026-05-28T00:00:00Z",
+                    "session_meta",
+                    {"id": "exec-unknown", "source": "exec"},
+                )
+            ]
+        )
+
+        self.assertEqual(cli_snapshot.client_kind, "cli")
+        self.assertEqual(unknown_snapshot.client_kind, "unknown")
+
+    def test_cost_estimator_selects_provider_specific_price(self) -> None:
+        estimator = CostEstimator(
+            UsageCalculator(
+                {
+                    "base": {"input": 1, "cached_input": 1, "output": 1, "reasoning": 1},
+                    "muyuan": {
+                        "model": "gpt-5",
+                        "provider": "muyuan",
+                        "input": 9,
+                        "cached_input": 9,
+                        "output": 9,
+                        "reasoning": 9,
+                    },
+                }
+            )
+        )
+
+        self.assertEqual(estimator.calculate("gpt-5", 1_000_000, 0, 0, provider="muyuan"), 9.0)
+
     def test_incremental_parse_reads_only_appended_complete_records(self) -> None:
         parser = JsonlSessionParser()
         with tempfile.TemporaryDirectory() as temp_dir:

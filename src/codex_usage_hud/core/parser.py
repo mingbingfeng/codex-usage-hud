@@ -312,6 +312,7 @@ class UsageEvent:
     reasoning_tokens: int
     total_tokens: int
     cost_usd: float | None = None
+    model_provider: str = "unknown"
 
 
 @dataclass
@@ -358,6 +359,8 @@ class WorkStatusItem:
     workdir_name: str = ""
     source: str = ""
     workdir: str = ""
+    model_provider: str = "unknown"
+    client_kind: str = "unknown"
     session_started_at: datetime | None = None
     task_started_at: datetime | None = None
     started_at: datetime | None = None
@@ -429,6 +432,9 @@ class ParsedSession:
     task_index: int = 0
     task_count: int = 0
     cwd: str = ""
+    model_provider: str = "unknown"
+    originator: str = ""
+    client_kind: str = "unknown"
     status: str = "starting"
     error: str = ""
     refreshed_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
@@ -501,6 +507,9 @@ class CostEstimator:
         cached_tokens: int | None,
         output_tokens: int | None,
         reasoning_tokens: int | None = 0,
+        *,
+        provider: str = "",
+        base_url: str = "",
     ) -> float | None:
         if input_tokens is None or output_tokens is None:
             return None
@@ -511,9 +520,31 @@ class CostEstimator:
                 cached_input_tokens=cached_tokens or 0,
                 output_tokens=output_tokens,
                 reasoning_tokens=reasoning_tokens or 0,
+                provider=provider,
+                base_url=base_url,
             )
         except ValueError:
             return None
+
+
+def classify_session_client(originator: object, source: object) -> str:
+    """Classify session ownership once at the JSONL boundary for all UI consumers."""
+    originator_text = str(originator or "").strip().lower()
+    if "codex desktop" in originator_text:
+        return "app"
+    if (
+        "codex-tui" in originator_text
+        or "codex cli" in originator_text
+        or originator_text == "codex_exec"
+    ):
+        return "cli"
+    if isinstance(source, str):
+        source_text = source.strip().lower()
+        if source_text == "cli":
+            return "cli"
+        if source_text == "vscode":
+            return "app"
+    return "unknown"
 
 
 class JsonlSessionParser:
@@ -725,6 +756,9 @@ class JsonlSessionParser:
         parsed.session_id = session_id or self.session_id_from_records(records, path)
         parsed.session_started_at = self.session_started_at(records)
         parsed.cwd = self.session_cwd(records)
+        parsed.model_provider = self.session_model_provider(records)
+        parsed.originator = self.session_originator(records)
+        parsed.client_kind = classify_session_client(parsed.originator, self.session_source(records))
         parsed.last_event_time = records[-1].get("_dt")
         parsed.activity = self.latest_activity(records)
         parsed.last_output = self.latest_output(records)
@@ -816,6 +850,28 @@ class JsonlSessionParser:
             if isinstance(payload, Mapping) and payload.get("cwd"):
                 return str(payload.get("cwd") or "").strip()
         return ""
+
+    def session_model_provider(self, records: Sequence[Mapping[str, Any]]) -> str:
+        """Return the stable billing channel from session metadata."""
+        payload = self.session_meta_payload(records)
+        return str(payload.get("model_provider") or "").strip().lower() or "unknown"
+
+    def session_originator(self, records: Sequence[Mapping[str, Any]]) -> str:
+        return str(self.session_meta_payload(records).get("originator") or "").strip()
+
+    def session_source(self, records: Sequence[Mapping[str, Any]]) -> object:
+        return self.session_meta_payload(records).get("source")
+
+    def session_meta_payload(
+        self, records: Sequence[Mapping[str, Any]]
+    ) -> Mapping[str, Any]:
+        for record in records:
+            if record.get("type") != "session_meta":
+                continue
+            payload = record.get("payload") or {}
+            if isinstance(payload, Mapping):
+                return payload
+        return {}
 
     def latest_task_started(
         self, records: Sequence[Mapping[str, Any]]
@@ -1038,6 +1094,7 @@ class JsonlSessionParser:
                 last_cached,
                 last_output,
                 last_reasoning,
+                provider=snapshot.model_provider,
             )
             if last_cost is not None:
                 session_cost += last_cost
@@ -1068,6 +1125,7 @@ class JsonlSessionParser:
         """Return deduplicated confirmed token usage events across a session."""
         events: list[UsageEvent] = []
         current_model = ""
+        model_provider = self.session_model_provider(records)
         last_cumulative_seen: int | None = None
         seen_usage_keys: set[tuple[Any, ...]] = set()
 
@@ -1136,7 +1194,9 @@ class JsonlSessionParser:
                         cached_tokens,
                         output_tokens,
                         reasoning_tokens,
+                        provider=model_provider,
                     ),
+                    model_provider=model_provider,
                 )
             )
         return events
@@ -1289,6 +1349,7 @@ class JsonlSessionParser:
         self, records: Sequence[Mapping[str, Any]], task_started_index: int | None
     ) -> list[RequestRound]:
         rounds: list[RequestRound] = []
+        model_provider = self.session_model_provider(records)
         current_model = ""
         start_index = 0 if task_started_index is None else task_started_index + 1
         for record in records[:start_index]:
@@ -1391,6 +1452,7 @@ class JsonlSessionParser:
                         cached_tokens,
                         output_tokens,
                         reasoning_tokens,
+                        provider=model_provider,
                     ),
                     started_at=round_started_at,
                     completed_at=timestamp,
@@ -1702,6 +1764,7 @@ class JsonlSessionParser:
             confirmed.last_cached,
             confirmed.last_output,
             confirmed.last_reasoning,
+            provider=snapshot.model_provider,
         )
         return RequestTokens(
             status="confirmed" if confirmed.last_total else "waiting",
@@ -1787,6 +1850,7 @@ class JsonlSessionParser:
                     cached_tokens,
                     output_tokens or 0,
                     request.reasoning_tokens or 0,
+                    provider=snapshot.model_provider,
                 )
             if snapshot.activity.detail:
                 activity_label = {

@@ -90,6 +90,7 @@ from .platforms.cdp_probe import (
 )
 from .platforms.codex_theme import CodexThemeProbe
 from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
+from .provider_registry import ProviderRegistry, discover_provider_registry
 from .settings_bridge import SettingsBridgeServer
 from .ui.renderer_hud import (
     RendererHudClient,
@@ -840,6 +841,8 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "workdirName": item.workdir_name,
         "source": item.source,
         "workdir": item.workdir,
+        "modelProvider": item.model_provider,
+        "clientKind": item.client_kind,
         "taskStartedAt": _iso_or_empty(item.task_started_at),
         "startedAt": _iso_or_empty(item.started_at),
         "updatedAt": _iso_or_empty(item.updated_at),
@@ -2860,6 +2863,9 @@ def _handle_work_overlay_command(
     action = str(command.get("action") or "").strip()
     if action != "activateSession":
         return None
+    if str(command.get("clientKind") or "").strip().lower() == "cli":
+        _LOGGER.info("work_overlay_command_ignored reason=cli_session")
+        return None
     is_current = bool(command.get("current"))
     session_id = str(command.get("sessionId") or "").strip()
     target_title = str(command.get("targetTitle") or command.get("title") or "").strip()
@@ -3499,6 +3505,7 @@ class _UsageCacheEntry:
     file_size: int | None
     day_start: datetime
     week_start: datetime
+    model_provider: str
     summary_day: UsageSummary
     summary_week: UsageSummary
 
@@ -3551,6 +3558,7 @@ class UsageSummaryCache:
         allow_stale: bool = False,
         force_rescan: bool = False,
         refresh_paths: Iterable[Path] = (),
+        included_providers: Iterable[str] | None = None,
     ) -> tuple[UsageSummary, UsageSummary]:
         now = time.monotonic()
         sessions_root = self._cache_path(sessions_root)
@@ -3568,13 +3576,23 @@ class UsageSummaryCache:
             )
             self._last_scan_at = now
         if allow_stale and self._last_scan_key == scan_key:
-            return replace(self._last_day_total), replace(self._last_week_total)
+            return self._totals_for_providers(
+                scan_roots,
+                day_start,
+                week_start,
+                included_providers,
+            )
         if (
             not force_rescan
             and self._last_scan_key == scan_key
             and now - self._last_scan_at < self._min_rescan_seconds
         ):
-            return replace(self._last_day_total), replace(self._last_week_total)
+            return self._totals_for_providers(
+                scan_roots,
+                day_start,
+                week_start,
+                included_providers,
+            )
 
         day_total = UsageSummary()
         week_total = UsageSummary()
@@ -3606,6 +3624,38 @@ class UsageSummaryCache:
         self._last_scan_at = now
         self._last_day_total = replace(day_total)
         self._last_week_total = replace(week_total)
+        return self._totals_for_providers(
+            scan_roots,
+            day_start,
+            week_start,
+            included_providers,
+        )
+
+    def _totals_for_providers(
+        self,
+        scan_roots: Sequence[Path],
+        day_start: datetime,
+        week_start: datetime,
+        included_providers: Iterable[str] | None,
+    ) -> tuple[UsageSummary, UsageSummary]:
+        if included_providers is None:
+            return replace(self._last_day_total), replace(self._last_week_total)
+        providers = {
+            str(provider or "").strip().lower()
+            for provider in included_providers
+            if str(provider or "").strip()
+        }
+        day_total = UsageSummary()
+        week_total = UsageSummary()
+        for path, entry in self._entries.items():
+            if entry.day_start != day_start or entry.week_start != week_start:
+                continue
+            if entry.model_provider not in providers:
+                continue
+            if not self._path_under_scan_roots(path, scan_roots):
+                continue
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
         return day_total, week_total
 
     def _path_under_scan_roots(self, path: Path, scan_roots: Sequence[Path]) -> bool:
@@ -3700,6 +3750,12 @@ class UsageSummaryCache:
             return UsageSummary(), UsageSummary()
 
         events = self._parser.usage_events(records)
+        provider_reader = getattr(self._parser, "session_model_provider", None)
+        model_provider = (
+            str(provider_reader(records) or "").strip().lower()
+            if callable(provider_reader)
+            else "unknown"
+        ) or "unknown"
         summary_day = self._parser.summarize_usage_events(events, day_start)
         summary_week = self._parser.summarize_usage_events(events, week_start)
         self._entries[path] = _UsageCacheEntry(
@@ -3707,6 +3763,7 @@ class UsageSummaryCache:
             file_size=stat.st_size,
             day_start=day_start,
             week_start=week_start,
+            model_provider=model_provider,
             summary_day=summary_day,
             summary_week=summary_week,
         )
@@ -4001,6 +4058,8 @@ def _work_item_from_snapshot(
         source=source or snapshot.selection_source,
         workdir=str(snapshot.cwd or "").strip(),
         workdir_name=_compact_work_text(_workdir_leaf(snapshot.cwd), 32),
+        model_provider=snapshot.model_provider,
+        client_kind=snapshot.client_kind,
         session_started_at=snapshot.session_started_at,
         task_started_at=snapshot.task_started_at,
         started_at=started_at,
@@ -4113,6 +4172,37 @@ def _select_runtime_work_overlay_items(
     return visible
 
 
+def _effective_provider_scope(
+    context: "RuntimeContext | object",
+    snapshot: ParsedSession | None = None,
+) -> frozenset[str] | None:
+    """Resolve one provider scope for bubbles, usage, budgets, and adjustments."""
+    if snapshot is not None and snapshot.client_kind == "app":
+        observed_provider = str(snapshot.model_provider or "").strip().lower()
+        if observed_provider and observed_provider != "unknown":
+            setattr(context, "app_provider", observed_provider)
+    app_provider = str(getattr(context, "app_provider", "") or "").strip().lower()
+    config = getattr(context, "user_config", None)
+    resolver = getattr(config, "effective_provider_scope", None)
+    if callable(resolver):
+        return resolver(app_provider)
+    return None
+
+
+def _provider_registry_payload(context: object) -> dict[str, object]:
+    registry = getattr(context, "provider_registry", None)
+    entries = getattr(registry, "entries", {})
+    if not isinstance(entries, Mapping):
+        return {}
+    return {
+        provider: {
+            "profiles": list(getattr(entry, "profile_names", ())),
+            "historicalOnly": bool(getattr(entry, "historical_only", False)),
+        }
+        for provider, entry in entries.items()
+    }
+
+
 def active_work_items_for_snapshot(
     context: "RuntimeContext",
     snapshot: ParsedSession,
@@ -4170,6 +4260,9 @@ def active_work_items_for_snapshot(
         return (session_seconds, task_seconds)
 
     ordered = sorted(items.values(), key=sort_key, reverse=True)
+    provider_scope = _effective_provider_scope(context, snapshot)
+    if provider_scope is not None:
+        ordered = [item for item in ordered if item.model_provider in provider_scope]
     return _select_runtime_work_overlay_items(
         context,
         ordered,
@@ -4248,6 +4341,8 @@ class RuntimeContext:
     active_session_tracker: ActiveSessionTracker | None
     session_resolver: SessionPathResolver
     usage_cache: UsageSummaryCache
+    app_provider: str = ""
+    provider_registry: ProviderRegistry | None = None
     pre_send_estimator: PreSendEstimator | None = None
     runtime_events: RuntimeEventBus = field(default_factory=RuntimeEventBus)
     runtime_errors: RuntimeErrorRegistry = field(default_factory=RuntimeErrorRegistry)
@@ -4671,6 +4766,23 @@ def _apply_user_config_to_runtime_context(
         max(0.0, float(next_config.weekly_adjustment_usd)),
     )
     setattr(context, "budget_thresholds", list(next_config.budget_thresholds))
+    sessions_root = getattr(context, "sessions_root", None)
+    if isinstance(sessions_root, Path):
+        registry = discover_provider_registry(
+            user_config=next_config,
+            sessions_root=sessions_root,
+        )
+        next_config = next_config.migrate_legacy_provider_settings(
+            registry.providers(), app_provider=registry.app_provider
+        )
+        setattr(context, "user_config", next_config)
+        registry = discover_provider_registry(
+            user_config=next_config,
+            sessions_root=sessions_root,
+        )
+        setattr(context, "provider_registry", registry)
+        if not str(getattr(context, "app_provider", "") or "").strip():
+            setattr(context, "app_provider", registry.app_provider)
     if prices_changed:
         estimator = _cost_estimator_from_config(next_config)
         parser = getattr(context, "parser", None)
@@ -4823,8 +4935,16 @@ def _handle_renderer_settings_command(
                 context.settings_store.load(),
                 command.get("settings"),
             )
-            prices = fetch_model_prices(config.pricing_url)
-            config = config.with_price_updates(prices, pricing_url=config.pricing_url)
+            provider = str(command.get("provider") or "").strip().lower()
+            provider_url = (
+                config.provider_settings.get(provider).pricing_url
+                if provider and provider in config.provider_settings
+                else config.pricing_url
+            )
+            prices = fetch_model_prices(provider_url)
+            config = config.with_price_updates(
+                prices, pricing_url=provider_url, provider=provider or None
+            )
             _save_renderer_user_config(context, config)
             return _renderer_settings_status(
                 f"已拉取并保存 {len(prices)} 个模型价格。",
@@ -5026,6 +5146,17 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
     _configure_ui_cost_estimators(estimator)
     parser = JsonlSessionParser(estimate_enabled=True, cost_estimator=estimator)
     sessions_root = _discover_sessions_root(platform, args.sessions_root)
+    provider_registry = discover_provider_registry(
+        user_config=user_config,
+        sessions_root=sessions_root,
+    )
+    user_config = user_config.migrate_legacy_provider_settings(
+        provider_registry.providers(), app_provider=provider_registry.app_provider
+    )
+    provider_registry = discover_provider_registry(
+        user_config=user_config,
+        sessions_root=sessions_root,
+    )
     sqlite_log_path = _discover_path(platform, args.sse_db, DEFAULT_SQLITE_LOG)
     state_db_path = _discover_path(platform, args.state_db, DEFAULT_STATE_DB)
     session_index_path = _discover_path(platform, None, DEFAULT_SESSION_INDEX)
@@ -5092,6 +5223,8 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         active_session_tracker=active_session_tracker,
         session_resolver=session_resolver,
         usage_cache=UsageSummaryCache(parser),
+        app_provider=provider_registry.app_provider,
+        provider_registry=provider_registry,
         pre_send_estimator=pre_send_estimator,
         runtime_errors=RuntimeErrorRegistry(),
     )
@@ -5272,6 +5405,7 @@ def build_snapshot(
         and refresh_current_session_usage
     ):
         refresh_budget_paths = (session_path,)
+    provider_scope = _effective_provider_scope(context, snapshot)
     today_total, week_total = context.usage_cache.summarize(
         context.sessions_root,
         day_start,
@@ -5279,8 +5413,11 @@ def build_snapshot(
         allow_stale=refresh_budget_aggregate is False,
         force_rescan=refresh_budget_aggregate is True,
         refresh_paths=refresh_budget_paths,
+        included_providers=provider_scope,
     )
-    week_adjustment_usd = max(0.0, float(context.user_config.weekly_adjustment_usd))
+    week_adjustment_usd = context.user_config.weekly_adjustment_for_scope(
+        provider_scope
+    )
     snapshot.today_tokens = today_total.tokens
     snapshot.today_cost_usd = today_total.cost_usd
     snapshot.week_tokens = week_total.tokens
@@ -6874,6 +7011,8 @@ def run_renderer_hud_session(
                             runtime_errors=_runtime_errors_payload_for_context(context),
                             work_overlay_selectable_max=_work_overlay_screen_max_items(),
                             desktop_overlay_dependency=_desktop_overlay_dependency_status(),
+                            provider_registry=_provider_registry_payload(context),
+                            app_provider=str(getattr(context, "app_provider", "") or ""),
                         )
                     update_ms = (time.perf_counter() - update_started) * 1000.0
                     refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
@@ -6935,6 +7074,8 @@ def run_renderer_hud_session(
                         runtime_errors=_runtime_errors_payload_for_context(context),
                         work_overlay_selectable_max=_work_overlay_screen_max_items(),
                         desktop_overlay_dependency=_desktop_overlay_dependency_status(),
+                        provider_registry=_provider_registry_payload(context),
+                        app_provider=str(getattr(context, "app_provider", "") or ""),
                     ).to_domain_json(*sorted(inputs.event_refresh_request.domains))
                     if not payload:
                         return True

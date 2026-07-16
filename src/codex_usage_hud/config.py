@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.error import URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -124,6 +124,35 @@ def default_model_prices() -> dict[str, ModelPrice]:
 
 
 @dataclass
+class ProviderSettings:
+    """User-managed pricing and adjustment values for one billing provider."""
+
+    model_prices: dict[str, ModelPrice] = field(default_factory=default_model_prices)
+    pricing_url: str = ""
+    weekly_adjustment_usd: float = 0.0
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "ProviderSettings | None":
+        if not isinstance(value, Mapping):
+            return None
+        prices = normalize_model_prices(value.get("model_prices"))
+        return cls(
+            model_prices=prices or default_model_prices(),
+            pricing_url=_optional_str(value.get("pricing_url")) or "",
+            weekly_adjustment_usd=max(0.0, _optional_float(value.get("weekly_adjustment_usd")) or 0.0),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "model_prices": {
+                name: price.to_dict() for name, price in sorted(self.model_prices.items())
+            },
+            "pricing_url": self.pricing_url,
+            "weekly_adjustment_usd": float(self.weekly_adjustment_usd),
+        }
+
+
+@dataclass
 class UserConfig:
     """All user-editable runtime settings."""
 
@@ -140,6 +169,9 @@ class UserConfig:
         default_factory=lambda: list(DEFAULT_BUDGET_THRESHOLDS)
     )
     weekly_adjustment_usd: float = 0.0
+    provider_settings: dict[str, ProviderSettings] = field(default_factory=dict)
+    provider_scope_mode: str = "all"
+    selected_providers: list[str] = field(default_factory=list)
     support_url: str = DEFAULT_SUPPORT_URL
 
     @classmethod
@@ -161,6 +193,11 @@ class UserConfig:
         )
         if legacy_overlay_enabled is False:
             work_overlay_max_items = 0
+        provider_settings = normalize_provider_settings(value.get("provider_settings"))
+        scope_mode = str(value.get("provider_scope_mode") or "all").strip().lower()
+        if scope_mode not in {"all", "custom"}:
+            scope_mode = "all"
+        selected_providers = normalize_provider_names(value.get("selected_providers"))
         return cls(
             daily_budget_usd=max(
                 0.0,
@@ -196,6 +233,9 @@ class UserConfig:
                 if value.get("weekly_adjustment_usd") is not None
                 else defaults.weekly_adjustment_usd,
             ),
+            provider_settings=provider_settings,
+            provider_scope_mode=scope_mode,
+            selected_providers=selected_providers,
             support_url=_optional_str(value.get("support_url")) or DEFAULT_SUPPORT_URL,
         )
 
@@ -211,6 +251,12 @@ class UserConfig:
             "pricing_url": self.pricing_url,
             "budget_thresholds": list(self.budget_thresholds),
             "weekly_adjustment_usd": float(self.weekly_adjustment_usd),
+            "provider_settings": {
+                provider: settings.to_dict()
+                for provider, settings in sorted(self.provider_settings.items())
+            },
+            "provider_scope_mode": self.provider_scope_mode,
+            "selected_providers": list(self.selected_providers),
             "support_url": self.support_url,
             "model_prices": {
                 name: price.to_dict()
@@ -219,14 +265,113 @@ class UserConfig:
         }
 
     def price_table(self) -> dict[str, dict[str, object]]:
-        return {name: price.to_dict() for name, price in self.model_prices.items()}
+        table = {name: price.to_dict() for name, price in self.model_prices.items()}
+        for provider, settings in self.provider_settings.items():
+            for name, price in settings.model_prices.items():
+                table[f"{provider}/{name}"] = {
+                    **price.to_dict(),
+                    "model": price.model or name,
+                    "provider": provider,
+                }
+        return table
+
+    def provider_price_table(self, provider: str) -> dict[str, dict[str, object]]:
+        """Return one provider's price table, preserving legacy global settings as fallback."""
+        normalized_provider = normalize_provider(provider)
+        settings = self.provider_settings.get(normalized_provider)
+        prices = settings.model_prices if settings is not None else self.model_prices
+        return {
+            name: {**price.to_dict(), "provider": normalized_provider}
+            for name, price in prices.items()
+        }
+
+    def effective_provider_scope(
+        self,
+        app_provider: str = "",
+    ) -> frozenset[str] | None:
+        """Return the selected provider set, or ``None`` for the all-provider mode."""
+        if self.provider_scope_mode != "custom":
+            return None
+        selected = set(normalize_provider_names(self.selected_providers))
+        required_provider = normalize_provider(app_provider)
+        if required_provider and required_provider != "unknown":
+            selected.add(required_provider)
+        return frozenset(selected)
+
+    def weekly_adjustment_for_scope(
+        self,
+        providers: Iterable[str] | None,
+    ) -> float:
+        """Return provider adjustments for the same scope used by usage aggregation."""
+        if not self.provider_settings:
+            return max(0.0, float(self.weekly_adjustment_usd))
+        scope = None if providers is None else set(normalize_provider_names(providers))
+        return round(
+            sum(
+                max(0.0, float(settings.weekly_adjustment_usd))
+                for provider, settings in self.provider_settings.items()
+                if scope is None or provider in scope
+            ),
+            6,
+        )
+
+    def migrate_legacy_provider_settings(
+        self,
+        providers: Iterable[str],
+        *,
+        app_provider: str = "",
+    ) -> "UserConfig":
+        """Materialize legacy global pricing once the available providers are known."""
+        if self.provider_settings:
+            return self
+        targets = [
+            provider
+            for provider in normalize_provider_names(providers)
+            if provider != "unknown"
+        ]
+        if not targets:
+            return self
+        scoped: dict[str, dict[str, ModelPrice]] = {provider: {} for provider in targets}
+        for name, price in self.model_prices.items():
+            explicit_provider = normalize_provider(price.provider)
+            if explicit_provider:
+                if explicit_provider in scoped:
+                    scoped[explicit_provider][name] = replace(price, provider=explicit_provider)
+                continue
+            for provider in targets:
+                scoped[provider][name] = replace(price, provider=provider)
+        required_provider = normalize_provider(app_provider)
+        settings = {
+            provider: ProviderSettings(
+                model_prices=prices or default_model_prices(),
+                pricing_url=self.pricing_url,
+                weekly_adjustment_usd=(
+                    self.weekly_adjustment_usd if provider == required_provider else 0.0
+                ),
+            )
+            for provider, prices in scoped.items()
+        }
+        return replace(self, provider_settings=settings)
 
     def with_price_updates(
         self,
         prices: Mapping[str, ModelPrice],
         *,
         pricing_url: str | None = None,
+        provider: str | None = None,
     ) -> "UserConfig":
+        normalized_provider = normalize_provider(provider)
+        if normalized_provider:
+            settings = self.provider_settings.get(normalized_provider, ProviderSettings())
+            next_prices = dict(settings.model_prices)
+            next_prices.update(prices)
+            next_settings = dict(self.provider_settings)
+            next_settings[normalized_provider] = ProviderSettings(
+                model_prices=next_prices,
+                pricing_url=settings.pricing_url if pricing_url is None else pricing_url,
+                weekly_adjustment_usd=settings.weekly_adjustment_usd,
+            )
+            return replace(self, provider_settings=next_settings)
         next_prices = dict(self.model_prices)
         next_prices.update(prices)
         return replace(
@@ -369,6 +514,24 @@ def parse_thresholds(
 def normalize_provider(value: Any) -> str:
     text = str(value or "").strip().lower()
     return text
+
+
+def normalize_provider_names(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return []
+    return sorted({provider for item in value if (provider := normalize_provider(item))})
+
+
+def normalize_provider_settings(value: Any) -> dict[str, ProviderSettings]:
+    if not isinstance(value, Mapping):
+        return {}
+    settings: dict[str, ProviderSettings] = {}
+    for raw_provider, raw_settings in value.items():
+        provider = normalize_provider(raw_provider)
+        parsed = ProviderSettings.from_dict(raw_settings)
+        if provider and parsed is not None:
+            settings[provider] = parsed
+    return settings
 
 
 def normalize_base_url(value: Any) -> str:
@@ -594,6 +757,7 @@ __all__ = [
     "DEFAULT_WORK_OVERLAY_MAX_ITEMS",
     "HUD_SETTINGS_FILENAME",
     "ModelPrice",
+    "ProviderSettings",
     "RUNTIME_STATE_KEY",
     "USER_CONFIG_KEY",
     "UserConfig",
@@ -608,6 +772,8 @@ __all__ = [
     "local_date_key",
     "normalize_display_mode",
     "normalize_model_prices",
+    "normalize_provider_names",
+    "normalize_provider_settings",
     "normalize_work_overlay_max_items",
     "parse_thresholds",
     "read_json_object",

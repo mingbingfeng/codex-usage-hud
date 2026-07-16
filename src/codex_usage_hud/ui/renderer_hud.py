@@ -129,7 +129,8 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
   const supportImagesStorageKey = "codexUsageHudSupportImages:v1";
-  const settingsModalId = "codex-usage-hud-settings-modal";
+const settingsModalId = "codex-usage-hud-settings-modal";
+const settingsProviderName = "__codexUsageHudSettingsProvider";
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
   const activeSessionTimerName = "__codexUsageHudActiveSessionTimer";
@@ -2956,6 +2957,11 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       pricing_url: "",
       budget_thresholds: [0.5, 0.8, 0.9, 1.0],
       weekly_adjustment_usd: 0,
+      provider_settings: {},
+      provider_scope_mode: "all",
+      selected_providers: [],
+      provider_registry: {},
+      app_provider: "",
       support_url: "https://github.com/mingbingfeng/codex-usage-hud",
       model_prices: {},
     };
@@ -3980,6 +3986,20 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   }
 
   function settingsPanelHtml(settings, bridge, path) {
+    const registry = settings.provider_registry && typeof settings.provider_registry === "object" ? settings.provider_registry : {};
+    const providers = Array.from(new Set([...Object.keys(registry), ...Object.keys(settings.provider_settings || {})])).sort();
+    const appProvider = String(settings.app_provider || "").trim().toLowerCase();
+    const requestedProvider = String(window[settingsProviderName] || "").trim().toLowerCase();
+    const activeProvider = providers.includes(requestedProvider) ? requestedProvider : (appProvider || providers[0] || "");
+    const activeSettings = settings.provider_settings?.[activeProvider] || {};
+    const scopedSettings = { ...settings, model_prices: activeSettings.model_prices || settings.model_prices, pricing_url: activeSettings.pricing_url || settings.pricing_url, weekly_adjustment_usd: activeSettings.weekly_adjustment_usd ?? settings.weekly_adjustment_usd };
+    const selected = settings.provider_scope_mode === "custom" ? new Set(settings.selected_providers || []) : new Set(providers);
+    if (appProvider) selected.add(appProvider);
+    const providerScopeHtml = providers.map((provider) => {
+      const detail = registry[provider] || {};
+      const label = provider === appProvider ? `${provider} · Codex App · 必选` : `${provider}${detail.historicalOnly ? " · 历史通道" : ""}${Array.isArray(detail.profiles) && detail.profiles.length ? ` · ${detail.profiles.join(", ")}` : ""}`;
+      return `<label style="display:block"><input type="checkbox" data-provider-scope="true" value="${escapeHtml(provider)}" ${selected.has(provider) ? "checked" : ""} ${provider === appProvider ? "disabled" : ""}> ${escapeHtml(label)}</label>`;
+    }).join("");
     const overlaySelectableMax = workOverlaySelectableMax();
     const overlayValue = Math.min(
       overlaySelectableMax,
@@ -4024,24 +4044,30 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
           <label>超额提醒阈值</label>
           <input data-setting-key="budget_thresholds" value="${escapeHtml(thresholdText(settings))}">
         </div>
+        <div class="codex-usage-hud-settings-field" style="grid-column:1/-1">
+          <label>统计 Provider 范围（当前单价：${escapeHtml(activeProvider || "默认")})</label>
+          <select data-provider-select="true">${providers.map((provider) => `<option value="${escapeHtml(provider)}" ${provider === activeProvider ? "selected" : ""}>${escapeHtml(provider)}${provider === appProvider ? " · Codex App" : ""}</option>`).join("")}</select>
+          <input type="hidden" data-active-provider value="${escapeHtml(activeProvider)}">
+          <div>${providerScopeHtml || "尚未发现 provider"}</div>
+        </div>
         <div class="codex-usage-hud-settings-field">
           <label>本周补充已使用额度 USD</label>
-          <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(settings.weekly_adjustment_usd)}">
+          <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(scopedSettings.weekly_adjustment_usd)}">
         </div>
         <div class="codex-usage-hud-settings-field" style="grid-column:1/-1">
           <label>计费单价获取地址</label>
           <div class="codex-usage-hud-settings-inline">
-            <input data-setting-key="pricing_url" value="${escapeHtml(settings.pricing_url)}" placeholder="https://example.com/model-prices.json">
+            <input data-setting-key="pricing_url" value="${escapeHtml(scopedSettings.pricing_url)}" placeholder="https://example.com/model-prices.json">
             <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取</button>
           </div>
         </div>
-        <div class="codex-usage-hud-price-table" data-advanced="${hasAdvancedPriceRows(settings) ? "true" : "false"}">
+        <div class="codex-usage-hud-price-table" data-advanced="${hasAdvancedPriceRows(scopedSettings) ? "true" : "false"}">
           <div class="codex-usage-hud-price-title">模型单价（USD / 1M tokens）</div>
           <div class="codex-usage-hud-price-header">
             <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
           </div>
-          <div data-price-rows="true">${priceRowsHtml(settings)}</div>
-          ${detectedPriceModelsHtml(settings)}
+          <div data-price-rows="true">${priceRowsHtml(scopedSettings)}</div>
+          ${detectedPriceModelsHtml(scopedSettings)}
           <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model" style="justify-self:start;margin-top:6px">添加模型</button>
         </div>
         <div class="codex-usage-hud-settings-footnote">
@@ -4317,6 +4343,19 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
       if (provider) modelPrices[key].provider = provider;
       if (baseUrl) modelPrices[key].base_url = baseUrl;
     });
+    const activeProvider = String(modal?.querySelector("[data-active-provider]")?.value || "").trim().toLowerCase();
+    const selectedProviders = Array.from(modal?.querySelectorAll("[data-provider-scope='true']:checked") || [])
+      .map((node) => String(node.value || "").trim().toLowerCase()).filter(Boolean);
+    const knownProviders = Array.from(modal?.querySelectorAll("[data-provider-scope='true']") || []).map((node) => String(node.value || "").trim().toLowerCase()).filter(Boolean);
+    const providerSettings = { ...(settings.provider_settings || {}) };
+    if (activeProvider) {
+      providerSettings[activeProvider] = {
+        ...(providerSettings[activeProvider] || {}),
+        model_prices: modelPrices,
+        pricing_url: String(read("pricing_url") || "").trim(),
+        weekly_adjustment_usd: numberValue("weekly_adjustment_usd", 0),
+      };
+    }
     const displayMode = "renderer";
     return {
       ...settings,
@@ -4333,6 +4372,9 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         workOverlaySelectableMax(),
       ),
       pricing_url: String(read("pricing_url") || "").trim(),
+      provider_settings: providerSettings,
+      provider_scope_mode: selectedProviders.length === knownProviders.length ? "all" : "custom",
+      selected_providers: selectedProviders,
       budget_thresholds: String(read("budget_thresholds") || "")
         .split(",")
         .map((item) => Number(item.trim()))
@@ -4353,8 +4395,9 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 
   function fetchPricesFromModal() {
     const settings = collectSettingsForm();
+    const provider = String(document.getElementById(settingsModalId)?.querySelector("[data-active-provider]")?.value || "").trim().toLowerCase();
     submitSettingsCommand(
-      { action: "fetchPrices", settings },
+      { action: "fetchPrices", settings, provider },
       "价格拉取请求已提交，等待 HUD daemon 拉取并写入..."
     );
   }
@@ -4622,6 +4665,12 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
         top: event.deltaY,
       });
     }, { capture: true, passive: false });
+    root.addEventListener("change", (event) => {
+      const select = event.target?.closest?.("[data-provider-select='true']");
+      if (!select || !root.contains(select)) return;
+      window[settingsProviderName] = String(select.value || "").trim().toLowerCase();
+      renderSettingsModal("settings", "已切换当前 provider 的价格编辑页；未保存的输入不会自动保留。");
+    });
     root.addEventListener("click", (event) => {
       if (event.target?.id === settingsModalId) {
         event.preventDefault();
@@ -8202,6 +8251,8 @@ class RendererHudClient:
         runtime_errors: list[RuntimeErrorEvent | dict[str, object]] | None = None,
         work_overlay_selectable_max: int = 6,
         desktop_overlay_dependency: dict[str, object] | None = None,
+        provider_registry: dict[str, object] | None = None,
+        app_provider: str = "",
     ) -> bool:
         started = time.perf_counter()
         support_images = [] if self._support_images_sent else support_qr_payload()
@@ -8225,6 +8276,8 @@ class RendererHudClient:
             runtime_errors=runtime_errors,
             work_overlay_selectable_max=work_overlay_selectable_max,
             desktop_overlay_dependency=desktop_overlay_dependency,
+            provider_registry=provider_registry,
+            app_provider=app_provider,
         ).to_json()
         update_ok = self.update_payload(payload)
         metrics = dict(self.last_update_metrics)
@@ -8553,6 +8606,8 @@ def payload_from_snapshot(
     runtime_errors: list[RuntimeErrorEvent | dict[str, object]] | None = None,
     work_overlay_selectable_max: int = 6,
     desktop_overlay_dependency: dict[str, object] | None = None,
+    provider_registry: dict[str, object] | None = None,
+    app_provider: str = "",
 ) -> RendererHudPayload:
     new_session = _is_new_session_snapshot(snapshot)
     pending_session = _is_pending_session_snapshot(snapshot)
@@ -8602,6 +8657,9 @@ def payload_from_snapshot(
         pre_send_has_prices = bool(snapshot.estimate_base.has_prices)
         activity_warning = bool(snapshot.reading_activity.active)
         activity_reading_file = snapshot.reading_activity.warning_label()
+    settings_payload = (settings or UserConfig.defaults()).to_dict()
+    settings_payload["provider_registry"] = dict(provider_registry or {})
+    settings_payload["app_provider"] = str(app_provider or "")
     return RendererHudPayload(
         top_line=top_line,
         request_line=request_line,
@@ -8625,7 +8683,7 @@ def payload_from_snapshot(
         request_rows=_request_rows(snapshot),
         request_row_details=_request_row_details(snapshot),
         observed_models=_observed_models(snapshot),
-        settings=(settings or UserConfig.defaults()).to_dict(),
+        settings=settings_payload,
         active_display_mode=str(active_display_mode or "renderer"),
         settings_path=str(settings_path or ""),
         settings_bridge_url=settings_bridge_url,

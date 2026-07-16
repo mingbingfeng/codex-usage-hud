@@ -211,6 +211,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _theme_contrast_ratio,
     _visible_overlay_items,
     _workdir_link_hover_visible_for_item,
+    _workdir_clickable_for_item,
     _workdir_link_pending_for_item,
     _work_overlay_header_text,
     _workdir_display_name,
@@ -360,17 +361,27 @@ class _FileBackedUsageParser:
     def __init__(self) -> None:
         self.loads: list[Path] = []
 
-    def load_records_lenient(self, path: Path) -> list[dict[str, float]]:
+    def load_records_lenient(self, path: Path) -> list[dict[str, object]]:
         self.loads.append(path)
-        tokens, cost = path.read_text(encoding="utf-8").strip().split(",", 1)
-        return [{"tokens": float(tokens), "cost": float(cost)}]
+        parts = path.read_text(encoding="utf-8").strip().split(",")
+        provider, tokens, cost = (
+            (parts[0], parts[1], parts[2])
+            if len(parts) == 3
+            else ("unknown", parts[0], parts[1])
+        )
+        return [
+            {"provider": provider, "tokens": float(tokens), "cost": float(cost)}
+        ]
 
-    def usage_events(self, records: list[dict[str, float]]) -> list[dict[str, float]]:
+    def usage_events(self, records: list[dict[str, object]]) -> list[dict[str, object]]:
         return records
+
+    def session_model_provider(self, records: list[dict[str, object]]) -> str:
+        return str(records[0].get("provider") or "unknown")
 
     def summarize_usage_events(
         self,
-        events: list[dict[str, float]],
+        events: list[dict[str, object]],
         start: datetime,
     ) -> UsageSummary:
         del start
@@ -666,6 +677,43 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(day_total.tokens, 56)
         self.assertEqual(week_total.tokens, 50)
         self.assertEqual(parser.loads, 2)
+
+    def test_usage_summary_cache_filters_cached_provider_contributions_without_rescan(self) -> None:
+        parser = _FileBackedUsageParser()
+        cache = UsageSummaryCache(  # type: ignore[arg-type]
+            parser,
+            min_rescan_seconds=60.0,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            sessions_root.mkdir()
+            custom = sessions_root / "custom.jsonl"
+            muyuan = sessions_root / "muyuan.jsonl"
+            custom.write_text("custom,100,1.0", encoding="utf-8")
+            muyuan.write_text("muyuan,200,2.0", encoding="utf-8")
+            day_start = datetime(2026, 7, 16, 0, 0)
+            week_start = datetime(2026, 7, 13, 0, 0)
+
+            all_day, _ = cache.summarize(sessions_root, day_start, week_start)
+            custom_day, _ = cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                allow_stale=True,
+                included_providers={"custom"},
+            )
+            muyuan_day, _ = cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                allow_stale=True,
+                included_providers={"muyuan"},
+            )
+
+        self.assertEqual((all_day.tokens, all_day.cost_usd), (300, 3.0))
+        self.assertEqual((custom_day.tokens, custom_day.cost_usd), (100, 1.0))
+        self.assertEqual((muyuan_day.tokens, muyuan_day.cost_usd), (200, 2.0))
+        self.assertEqual(len(parser.loads), 2)
 
     def test_renderer_current_session_path_filter_matches_only_current_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1342,6 +1390,71 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(len(items), 2)
         self.assertEqual([item.id for item in items], ["session-worker-b", "session-worker-a"])
 
+    def test_active_work_items_share_custom_provider_scope_with_app_requirement(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def write_session(
+            path: Path,
+            session_id: str,
+            provider: str,
+            originator: str,
+            source: str,
+            offset: int,
+        ) -> None:
+            timestamp = (now + timedelta(seconds=offset)).isoformat()
+            rows = [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": f"E:\\Project\\{session_id}",
+                        "model_provider": provider,
+                        "originator": originator,
+                        "source": source,
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": session_id},
+                },
+            ]
+            path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "app.jsonl"
+            selected_cli = root / "muyuan.jsonl"
+            excluded_cli = root / "unused.jsonl"
+            write_session(current, "app", "custom", "Codex Desktop", "vscode", -3)
+            write_session(selected_cli, "selected-cli", "muyuan", "codex-tui", "cli", -2)
+            write_session(excluded_cli, "excluded-cli", "unused", "codex-tui", "cli", -1)
+            snapshot = parser.parse_file(current)
+            config = UserConfig.defaults()
+            config.provider_scope_mode = "custom"
+            config.selected_providers = ["muyuan"]
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+                user_config=config,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, current)
+
+        self.assertEqual({item.id for item in items}, {"app", "selected-cli"})
+        self.assertEqual(context.app_provider, "custom")
+
     def test_active_work_items_are_empty_when_overlay_disabled(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
@@ -1385,6 +1498,8 @@ class BudgetHelperTests(unittest.TestCase):
             workdir_name="codex-usage-hud",
             source="activity",
             workdir="E:\\Project\\codex-usage-hud",
+            model_provider="muyuan",
+            client_kind="cli",
             task_started_at=datetime(2026, 6, 16, 10, 0, 0).astimezone(),
             current=True,
         )
@@ -1405,6 +1520,8 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["cacheHitText"], "67%")
         self.assertEqual(payload["workdirName"], "codex-usage-hud")
         self.assertEqual(payload["workdir"], "E:\\Project\\codex-usage-hud")
+        self.assertEqual(payload["modelProvider"], "muyuan")
+        self.assertEqual(payload["clientKind"], "cli")
         self.assertTrue(str(payload["taskStartedAt"]).startswith("2026-06-16T10:00:00"))
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
@@ -1774,6 +1891,41 @@ class BudgetHelperTests(unittest.TestCase):
             prepare_window.call_args_list[0].kwargs["timeout_seconds"],
             cli_module.WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS,
         )
+
+    def test_cli_work_overlay_command_never_activates_app_session(self) -> None:
+        session_controller = SimpleNamespace(activate_session=MagicMock())
+
+        result = cli_module._handle_work_overlay_command(
+            {
+                "action": "activateSession",
+                "sessionId": "cli-thread",
+                "targetTitle": "CLI Thread",
+                "clientKind": "cli",
+            },
+            session_controller,
+        )
+
+        self.assertIsNone(result)
+        session_controller.activate_session.assert_not_called()
+
+    def test_cli_workdir_is_plain_text_without_hover_or_click(self) -> None:
+        cli_item = {
+            "clientKind": "cli",
+            "sessionId": "cli-thread",
+            "workdir": r"E:\\Project\\cli",
+            "status": "running",
+        }
+        app_item = {
+            "clientKind": "app",
+            "sessionId": "app-thread",
+            "workdir": r"E:\\Project\\app",
+            "status": "running",
+        }
+
+        self.assertFalse(_workdir_clickable_for_item(cli_item))
+        self.assertFalse(_workdir_link_hover_visible_for_item(cli_item))
+        self.assertTrue(_workdir_clickable_for_item(app_item))
+        self.assertTrue(_workdir_link_hover_visible_for_item(app_item))
 
     def test_work_overlay_command_retries_after_cdp_transport_failure(self) -> None:
         command = {

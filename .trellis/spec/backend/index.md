@@ -20,6 +20,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 | [Renderer Runtime Contracts](./renderer-runtime-contracts.md) | Renderer active-session and work-overlay event contracts | Current |
+| [Provider Registry Contracts](./provider-registry-contracts.md) | Provider pricing, scope, migration, and session attribution contracts | Current |
 
 ---
 

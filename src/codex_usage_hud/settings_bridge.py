@@ -133,10 +133,20 @@ class SettingsBridgeServer:
             def _fetch_prices(self) -> None:
                 body = self._read_json()
                 current = store.load()
-                url = str(body.get("url") or current.pricing_url or "").strip()
+                provider = str(body.get("provider") or "").strip().lower()
+                provider_url = (
+                    current.provider_settings.get(provider).pricing_url
+                    if provider and provider in current.provider_settings
+                    else ""
+                )
+                url = str(body.get("url") or provider_url or current.pricing_url or "").strip()
                 try:
                     prices = fetch_model_prices(url)
-                    config = current.with_price_updates(prices, pricing_url=url)
+                    config = current.with_price_updates(
+                        prices,
+                        pricing_url=url,
+                        provider=provider or None,
+                    )
                     store.save(config)
                 except (OSError, ValueError) as exc:
                     self._send_json(

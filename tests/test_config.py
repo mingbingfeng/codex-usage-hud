@@ -98,6 +98,74 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(payload["base_url"], "https://api.vendor-a.example/v1")
         self.assertEqual(payload["input"], 1.25)
 
+    def test_provider_settings_and_custom_scope_round_trip(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "provider_scope_mode": "custom",
+                "selected_providers": ["Muyuan", "custom", "muyuan"],
+                "provider_settings": {
+                    "muyuan": {
+                        "pricing_url": "https://pricing.example/muyuan.json",
+                        "weekly_adjustment_usd": 2.5,
+                        "model_prices": {
+                            "gpt-5": {"input": 2, "cached_input": 1, "output": 4, "reasoning": 4}
+                        },
+                    }
+                },
+            }
+        )
+
+        self.assertEqual(config.provider_scope_mode, "custom")
+        self.assertEqual(config.selected_providers, ["custom", "muyuan"])
+        self.assertEqual(config.provider_settings["muyuan"].weekly_adjustment_usd, 2.5)
+        self.assertEqual(config.provider_price_table("muyuan")["gpt-5"]["provider"], "muyuan")
+        self.assertEqual(config.to_dict()["provider_settings"]["muyuan"]["pricing_url"], "https://pricing.example/muyuan.json")
+
+    def test_legacy_prices_migrate_per_discovered_provider_without_copying_adjustment(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "pricing_url": "https://pricing.example/all.json",
+                "weekly_adjustment_usd": 3.5,
+                "model_prices": {
+                    "shared": {"input": 1, "cached_input": 1, "output": 2, "reasoning": 2},
+                    "muyuan-only": {"provider": "muyuan", "input": 5, "cached_input": 5, "output": 6, "reasoning": 6},
+                },
+            }
+        ).migrate_legacy_provider_settings(["custom", "muyuan", "unknown"], app_provider="custom")
+
+        self.assertEqual(set(config.provider_settings), {"custom", "muyuan"})
+        self.assertIn("shared", config.provider_settings["custom"].model_prices)
+        self.assertNotIn("muyuan-only", config.provider_settings["custom"].model_prices)
+        self.assertEqual(config.provider_settings["muyuan"].model_prices["muyuan-only"].provider, "muyuan")
+        self.assertEqual(config.provider_settings["custom"].weekly_adjustment_usd, 3.5)
+        self.assertEqual(config.provider_settings["muyuan"].weekly_adjustment_usd, 0.0)
+
+    def test_effective_provider_scope_and_adjustment_share_one_selection(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "provider_scope_mode": "custom",
+                "selected_providers": ["muyuan"],
+                "provider_settings": {
+                    "custom": {"weekly_adjustment_usd": 3.0},
+                    "muyuan": {"weekly_adjustment_usd": 2.0},
+                    "unused": {"weekly_adjustment_usd": 7.0},
+                },
+            }
+        )
+
+        scope = config.effective_provider_scope("custom")
+
+        self.assertEqual(scope, frozenset({"custom", "muyuan"}))
+        self.assertEqual(config.weekly_adjustment_for_scope(scope), 5.0)
+        config.provider_scope_mode = "all"
+        self.assertIsNone(config.effective_provider_scope("custom"))
+        self.assertEqual(config.weekly_adjustment_for_scope(None), 12.0)
+
+    def test_legacy_adjustment_remains_visible_before_provider_migration(self) -> None:
+        config = UserConfig.from_dict({"weekly_adjustment_usd": 4.5})
+
+        self.assertEqual(config.weekly_adjustment_for_scope(frozenset({"custom"})), 4.5)
+
     def test_user_config_normalizes_work_overlay_settings(self) -> None:
         config = UserConfig.from_dict(
             {
