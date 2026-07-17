@@ -23,6 +23,9 @@
   compileall, diff check, and latency harness.
 - [x] Restart the source HUD and run real Codex App alternating/provisional session
   validation, preserving the user's unrelated working-tree changes.
+- [x] Preserve PySide6 work bubbles across a transient atomic state-file read gap;
+  retry through the watcher entry point without restoring an idle poll.
+- [x] Add a real offscreen PySide6 regression for first-read `OSError` recovery.
 
 ## Verification Notes
 
@@ -54,6 +57,21 @@
 - Repository-focused Ruff including concurrent `cli.py`/`test_ui.py` reports 10
   pre-existing/concurrent findings. Ruff passes for the isolated tracker/parser/
   renderer and their focused tests.
+- Runtime diagnostics contained eight `work_overlay_helper.state_read_failed`
+  exits from 2026-07-14 through 2026-07-17. The event-driven watcher had retained
+  a 1.2 second read grace but no bounded retry after periodic polling was removed.
+- The helper now retries a transient read after 80 ms, preserves the rendered
+  bubbles during that window, reattaches the replaced path watcher, and cleans up
+  timers/watch paths on exit. The real offscreen regression forced the first read
+  to raise `OSError` and observed the second read before the grace expired.
+- After the fix, 52 work-overlay tests, the required 382-test renderer gate, the
+  default pytest suite, compileall, and diff check passed. Repository-wide Ruff
+  reports 15 existing findings; the changed helper module and focused test rules pass.
+- Restarted the source HUD as PID 27272 with PySide6 helper PID 31268. The live
+  state carried one current-session card, and Win32 enumeration found the 430x110
+  card plus its 22x22 interactive hotspot visible. Across 36 seconds and two
+  keepalive writes, the helper PID stayed stable and the historical
+  `state_read_failed` count remained 8 with no new record.
 
 ## Validation Commands
 

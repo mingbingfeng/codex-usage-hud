@@ -72,6 +72,7 @@ WORK_OVERLAY_COMPLETED_PENDING_LAUNCH_SECONDS = 0.45
 WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS = 0.85
 WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
 WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS = 1.2
+WORK_OVERLAY_STATE_READ_RETRY_MS = 80
 DEFAULT_WORK_OVERLAY_THEME: dict[str, str] = {
     "surface": "#10161D",
     "panelSurface": "#141B24",
@@ -3195,37 +3196,36 @@ def run_work_overlay_helper_qt(
             self.close()
             app.quit()
 
-        def poll_state(self) -> None:
+        def poll_state(self) -> bool:
             state = read_state()
             if state is None:
-                now = time.time()
+                now = time.monotonic()
                 if owner_pid is not None and not process_exists(owner_pid):
                     self.shutdown()
-                    return
+                    return True
                 if self._state_read_failed_at <= 0.0:
                     self._state_read_failed_at = now
-                    return
                 if (
                     now - self._state_read_failed_at
                 ) < WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS:
-                    return
+                    return False
                 self.emit_runtime_error(
                     code="state_read_failed",
                     message="Desktop work overlay helper could not read state file.",
                     context={"stateFile": str(path)},
                 )
                 self.shutdown()
-                return
+                return True
             self._state_read_failed_at = 0.0
             should_close = bool(state.get("close"))
             updated_at = float(state.get("updatedAt") or 0.0)
             file_stale = updated_at > 0 and (time.time() - updated_at) > stale_seconds
             if owner_pid is not None and not process_exists(owner_pid):
                 self.shutdown()
-                return
+                return True
             if should_close or file_stale:
                 self.shutdown()
-                return
+                return True
             raw_items = state.get("items") or []
             items = [item for item in raw_items if isinstance(item, Mapping)]
             command_path_text = str(state.get("commandPath") or "").strip()
@@ -3250,6 +3250,7 @@ def run_work_overlay_helper_qt(
                 max_items=work_overlay_max_items_for_screen_height(screen_height),
             )
             self.render_items(items)
+            return True
 
         def sync_pointer_state(self) -> None:
             if not self.isVisible():
@@ -5014,6 +5015,8 @@ def run_work_overlay_helper_qt(
     state_watcher = QFileSystemWatcher()
     state_stale_timer = QTimer()
     state_stale_timer.setSingleShot(True)
+    state_read_retry_timer = QTimer()
+    state_read_retry_timer.setSingleShot(True)
 
     def watch_state_path() -> None:
         parent = str(path.parent)
@@ -5039,21 +5042,35 @@ def run_work_overlay_helper_qt(
 
     def refresh_state_from_watcher(*_args: object) -> None:
         watch_state_path()
-        overlay.poll_state()
+        state_read = overlay.poll_state()
         watch_state_path()
+        if not state_read:
+            if not state_read_retry_timer.isActive():
+                state_read_retry_timer.start(WORK_OVERLAY_STATE_READ_RETRY_MS)
+            return
+        state_read_retry_timer.stop()
         schedule_stale_check()
 
     state_watcher.fileChanged.connect(refresh_state_from_watcher)
     state_watcher.directoryChanged.connect(refresh_state_from_watcher)
     state_stale_timer.timeout.connect(refresh_state_from_watcher)
+    state_read_retry_timer.timeout.connect(refresh_state_from_watcher)
     watch_state_path()
 
     pointer_timer = QTimer()
     pointer_timer.timeout.connect(overlay.sync_pointer_state)
     pointer_timer.start(WORK_OVERLAY_POINTER_SYNC_MS)
 
-    overlay.poll_state()
-    schedule_stale_check()
+    refresh_state_from_watcher()
     overlay.sync_pointer_state()
     app.exec()
+    pointer_timer.stop()
+    state_read_retry_timer.stop()
+    state_stale_timer.stop()
+    watched_files = state_watcher.files()
+    if watched_files:
+        state_watcher.removePaths(watched_files)
+    watched_directories = state_watcher.directories()
+    if watched_directories:
+        state_watcher.removePaths(watched_directories)
     return 0

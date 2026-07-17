@@ -459,3 +459,95 @@ hotspot.setWindowOpacity(0.22)
 fill = QColor(255, 255, 255, WORK_OVERLAY_HOTSPOT_HIT_ALPHA)
 hotspot.setWindowOpacity(_interactive_hotspot_opacity(base_opacity, hovered))
 ```
+
+## Scenario: Atomic work-overlay state delivery
+
+### 1. Scope / Trigger
+
+- Trigger: `DesktopWorkOverlay` atomically replaces the JSON state file while the
+  PySide6 helper watches both that file and its parent directory with
+  `QFileSystemWatcher`.
+- Scope: cross-process state reads, bounded retry scheduling, watcher reattachment,
+  helper shutdown, and preservation of the currently rendered bubbles.
+
+### 2. Signatures
+
+- Writer: `write_json_object(path, payload)` writes a sibling temporary file and
+  replaces the state path.
+- Reader: `OverlayWindow.poll_state() -> bool`; `False` means the state was
+  transiently unreadable and the caller must schedule a bounded retry. `True`
+  means the read was handled, including an explicit terminal state.
+- Retry: `WORK_OVERLAY_STATE_READ_RETRY_MS` must remain shorter than
+  `WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS * 1000`.
+
+### 3. Contracts
+
+- Atomic replacement remains mandatory, but it does not guarantee that a Windows
+  file-change callback can read the destination at the exact callback instant.
+- A transient `OSError` or `JSONDecodeError` preserves the last rendered items and
+  schedules one single-shot retry. It must not clear the shell, hide the overlay,
+  or exit the helper.
+- The retry uses the same refresh entry point as file and directory events so the
+  replaced file path is re-added to `QFileSystemWatcher` before and after reading.
+- Retry elapsed time uses `time.monotonic()`. Repeated failures remain bounded by
+  the existing failure grace; they do not create an idle polling loop.
+- The helper shuts down immediately when the owner process is gone, or after a
+  readable state says `close=true` or is genuinely stale. Continuous unreadability
+  past the grace records `work_overlay_helper.state_read_failed` and then shuts down.
+- Helper exit stops the pointer/retry/stale timers and removes watched file and
+  directory paths before returning from the Qt runner.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| First read overlaps atomic replacement | Keep current bubbles and retry after the bounded delay. |
+| Retry reads valid state | Cancel the retry, reattach the file watcher, render, and resume the stale deadline. |
+| Multiple watcher events arrive before retry | Keep one active single-shot retry; do not postpone it indefinitely. |
+| State remains unreadable beyond the grace | Emit `state_read_failed` once and shut down. |
+| Owner PID no longer exists | Shut down without waiting for the read grace. |
+| Readable state has `close=true` or is stale | Shut down normally. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a Windows replace notification arrives during the namespace swap; the old
+  bubbles stay visible, the 80 ms retry reads the complete JSON, and the helper PID
+  does not change.
+- Base: a normal file event reads successfully once and schedules only the next
+  conservative stale check.
+- Bad: record the first failed read and wait for the 15 second writer keepalive;
+  that next callback sees an expired 1.2 second grace, exits the helper, and makes
+  every bubble disappear until the parent restarts it.
+
+### 6. Tests Required
+
+- `tests/test_ui.py`: run the real PySide6 event loop offscreen with the first
+  `Path.read_text()` raising `OSError`; assert a second read and clean exit occur
+  before the failure grace expires.
+- `tests/test_ui.py`: assert the retry is single-shot, connected to the watcher
+  refresh entry point, shorter than the failure grace, and does not restore a
+  recurring `WORK_OVERLAY_POLL_MS` timer.
+- Renderer gate: run `tests/test_renderer_hud.py`, `tests/test_active_session.py`,
+  and `tests/test_ui.py` together.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+state = read_state()
+if state is None:
+    remember_first_failure()
+    return  # No event is guaranteed before the grace expires.
+```
+
+#### Correct
+
+```python
+state_read = overlay.poll_state()
+if not state_read and not state_read_retry_timer.isActive():
+    state_read_retry_timer.start(WORK_OVERLAY_STATE_READ_RETRY_MS)
+```
+
+The one-shot timer closes the event-delivery gap without adding recurring idle CPU
+work or replacing the file watcher as the primary event source.

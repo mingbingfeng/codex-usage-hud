@@ -170,6 +170,8 @@ from codex_usage_hud.ui.tk_hud import (
     _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
+    WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS,
+    WORK_OVERLAY_STATE_READ_RETRY_MS,
     WORK_OVERLAY_TEXT_WRAP_WIDTH,
     WORK_OVERLAY_TOP_OFFSET,
     _completed_badge_palette,
@@ -219,6 +221,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _workdir_link_pending_for_item,
     _work_overlay_header_text,
     _workdir_display_name,
+    run_work_overlay_helper_qt,
 )
 
 
@@ -2307,6 +2310,89 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertIn("QFileSystemWatcher", source)
         self.assertNotIn("poll_timer.start(WORK_OVERLAY_POLL_MS)", source)
+        self.assertIn("state_read = overlay.poll_state()", source)
+        self.assertIn("state_read_retry_timer.setSingleShot(True)", source)
+        self.assertIn(
+            "state_read_retry_timer.timeout.connect(refresh_state_from_watcher)",
+            source,
+        )
+        self.assertIn(
+            "state_read_retry_timer.start(WORK_OVERLAY_STATE_READ_RETRY_MS)",
+            source,
+        )
+
+    def test_work_overlay_state_read_retry_runs_inside_failure_grace(self) -> None:
+        self.assertGreater(WORK_OVERLAY_STATE_READ_RETRY_MS, 0)
+        self.assertLess(
+            WORK_OVERLAY_STATE_READ_RETRY_MS,
+            WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS * 1000,
+        )
+
+    def test_work_overlay_helper_retries_transient_state_read(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                state_path = (
+                    Path(temp_dir) / f"work-overlay-{os.getpid()}-retry.json"
+                )
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "ownerPid": os.getpid(),
+                            "itemLimit": 2,
+                            "items": [],
+                            "updatedAt": time.time(),
+                            "close": True,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                original_read_text = Path.read_text
+                read_attempts = 0
+
+                def flaky_read_text(
+                    target: Path,
+                    *args: object,
+                    **kwargs: object,
+                ) -> str:
+                    nonlocal read_attempts
+                    if target == state_path:
+                        read_attempts += 1
+                        if read_attempts == 1:
+                            raise OSError("transient replace window")
+                    return original_read_text(target, *args, **kwargs)
+
+                started = time.monotonic()
+                with patch.object(Path, "read_text", flaky_read_text):
+                    exit_code = run_work_overlay_helper_qt(
+                        state_path,
+                        process_exists=lambda pid: pid == os.getpid(),
+                        owner_pid_from_path=lambda _path: os.getpid(),
+                        item_limit=2,
+                        stale_seconds=20.0,
+                        overlay_alpha=0.88,
+                        hover_alpha=0.22,
+                        header_title_limit=28,
+                    )
+                elapsed = time.monotonic() - started
+
+            self.assertEqual(exit_code, 0)
+            self.assertGreaterEqual(read_attempts, 2)
+            self.assertLess(
+                elapsed,
+                WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS,
+            )
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
 
     def test_desktop_work_overlay_appends_transition_audit_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
