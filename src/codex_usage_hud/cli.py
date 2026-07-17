@@ -4176,7 +4176,7 @@ def _effective_provider_scope(
     context: "RuntimeContext | object",
     snapshot: ParsedSession | None = None,
 ) -> frozenset[str] | None:
-    """Resolve one provider scope for bubbles, usage, budgets, and adjustments."""
+    """Resolve the provider scope used for usage, budgets, and adjustments."""
     if snapshot is not None and snapshot.client_kind == "app":
         observed_provider = str(snapshot.model_provider or "").strip().lower()
         if observed_provider and observed_provider != "unknown":
@@ -4187,6 +4187,20 @@ def _effective_provider_scope(
     if callable(resolver):
         return resolver(app_provider)
     return None
+
+
+def _effective_notification_provider_scope(
+    context: "RuntimeContext | object",
+    snapshot: ParsedSession | None = None,
+) -> frozenset[str] | None:
+    """Resolve providers that may produce active-work notification bubbles."""
+    included = _effective_provider_scope(context, snapshot)
+    app_provider = str(getattr(context, "app_provider", "") or "").strip().lower()
+    config = getattr(context, "user_config", None)
+    resolver = getattr(config, "effective_notification_provider_scope", None)
+    if callable(resolver):
+        return resolver(app_provider)
+    return included
 
 
 def _provider_registry_payload(context: object) -> dict[str, object]:
@@ -4260,7 +4274,7 @@ def active_work_items_for_snapshot(
         return (session_seconds, task_seconds)
 
     ordered = sorted(items.values(), key=sort_key, reverse=True)
-    provider_scope = _effective_provider_scope(context, snapshot)
+    provider_scope = _effective_notification_provider_scope(context, snapshot)
     if provider_scope is not None:
         ordered = [item for item in ordered if item.model_provider in provider_scope]
     return _select_runtime_work_overlay_items(

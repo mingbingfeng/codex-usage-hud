@@ -19,9 +19,11 @@
 - The registry reads the shared Codex TOML parser, saved HUD settings, and only the most recent 30 days of `session_meta` records.
 - The base TOML `model_provider` is the App fallback. A real `client_kind="app"` session replaces it; `cli` never does.
 - Renderer settings receive `provider_registry` and `app_provider`; custom scope always includes the App provider.
-- Renderer price tabs select the provider being edited. The single checkbox below the active tab controls only that provider's inclusion; the App provider remains checked and disabled.
+- Renderer price tabs select the provider being edited. The two checkboxes below the active tab control whether that provider is included in statistics or only produces notification bubbles. They are mutually exclusive; the App provider remains included in statistics and disabled.
+- `notification_only_providers` stores providers that produce active-work bubbles without contributing to usage, budgets, or weekly adjustments. The effective notification scope is the union of the statistics scope and this list.
 - Tab switches capture the current provider into a modal-local draft. Save merges every provider draft in one command, while close with dirty drafts requires explicit discard confirmation.
 - `provider_scope_mode` is `all` only when every known provider is enabled; otherwise it is `custom` with the enabled provider keys in `selected_providers`.
+- Loading normalizes overlaps in favor of `selected_providers`, because inclusion in statistics already includes notification bubbles.
 - Provider-specific edits update `provider_settings` only. Top-level legacy `model_prices`, `pricing_url`, and `weekly_adjustment_usd` remain unchanged so the last viewed tab cannot rewrite compatibility data.
 - Legacy row-level `provider` / `base_url` values remain hidden round-trip metadata. Provider tabs are the visible pricing scope, so those fields must not reopen redundant advanced columns.
 
@@ -36,6 +38,7 @@
 | Switch tabs with unsaved inputs | Capture the current provider, retain its values, and show a dirty marker on its tab. |
 | Close with dirty provider drafts | Show the discard confirmation; do not silently drop drafts. |
 | Save while a non-App tab is active | Merge all drafts and preserve the top-level legacy fields. |
+| Provider is notification-only | Show its active-work bubble, but exclude its usage and adjustment from aggregates. |
 | Price rows contain provider/base URL metadata | Keep values through save, but render only the five approved price columns. |
 
 ### 5. Good/Base/Bad Cases

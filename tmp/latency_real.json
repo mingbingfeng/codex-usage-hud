@@ -1,0 +1,119 @@
+{
+  "schema": "codex-usage-hud.renderer-latency-baseline.v1",
+  "measured_at": "2026-07-15T10:12:22.589246Z",
+  "project_root": "E:\\Project\\codex-usage-hud",
+  "sessions_root": "C:\\Users\\zjxqm\\.codex\\sessions",
+  "session_file": "C:\\Users\\zjxqm\\.codex\\sessions\\2026\\07\\15\\rollout-2026-07-15T17-11-01-019f650b-32ad-7ff0-9dc2-c6ef6faac12d.jsonl",
+  "used_synthetic_session": false,
+  "session_bytes": 574536,
+  "session_lines": 255,
+  "payload_keys": 39,
+  "operations": [
+    {
+      "name": "current_session_parse_full",
+      "iterations": 5,
+      "min_ms": 3.972,
+      "median_ms": 4.124,
+      "p90_ms": 4.717,
+      "max_ms": 4.717,
+      "mean_ms": 4.256
+    },
+    {
+      "name": "renderer_payload_build",
+      "iterations": 5,
+      "min_ms": 0.847,
+      "median_ms": 0.851,
+      "p90_ms": 0.95,
+      "max_ms": 0.95,
+      "mean_ms": 0.873
+    },
+    {
+      "name": "usage_summary_full_scan",
+      "iterations": 5,
+      "min_ms": 83.934,
+      "median_ms": 84.79,
+      "p90_ms": 87.141,
+      "max_ms": 87.141,
+      "mean_ms": 85.183
+    },
+    {
+      "name": "usage_summary_refresh_current_file",
+      "iterations": 5,
+      "min_ms": 3.09,
+      "median_ms": 3.152,
+      "p90_ms": 3.442,
+      "max_ms": 3.442,
+      "mean_ms": 3.201
+    },
+    {
+      "name": "file_watcher_poll_signature",
+      "iterations": 5,
+      "min_ms": 66.862,
+      "median_ms": 67.994,
+      "p90_ms": 68.712,
+      "max_ms": 68.712,
+      "mean_ms": 67.742
+    },
+    {
+      "name": "append_then_incremental_parse_and_payload",
+      "iterations": 5,
+      "min_ms": 9.34,
+      "median_ms": 110.51,
+      "p90_ms": 120.545,
+      "max_ms": 120.545,
+      "mean_ms": 93.222
+    }
+  ],
+  "regression_budgets_ms": {
+    "current_session_parse_full": 50.0,
+    "renderer_payload_build": 25.0,
+    "usage_summary_full_scan": 250.0,
+    "usage_summary_refresh_current_file": 25.0,
+    "file_watcher_poll_signature": 250.0,
+    "append_then_incremental_parse_and_payload": 250.0
+  },
+  "regression_budget_results": [
+    {
+      "name": "current_session_parse_full",
+      "p90_ms": 4.717,
+      "budget_ms": 50.0,
+      "status": "PASS"
+    },
+    {
+      "name": "renderer_payload_build",
+      "p90_ms": 0.95,
+      "budget_ms": 25.0,
+      "status": "PASS"
+    },
+    {
+      "name": "usage_summary_full_scan",
+      "p90_ms": 87.141,
+      "budget_ms": 250.0,
+      "status": "PASS"
+    },
+    {
+      "name": "usage_summary_refresh_current_file",
+      "p90_ms": 3.442,
+      "budget_ms": 25.0,
+      "status": "PASS"
+    },
+    {
+      "name": "file_watcher_poll_signature",
+      "p90_ms": 68.712,
+      "budget_ms": 250.0,
+      "status": "PASS"
+    },
+    {
+      "name": "append_then_incremental_parse_and_payload",
+      "p90_ms": 120.545,
+      "budget_ms": 250.0,
+      "status": "PASS"
+    }
+  ],
+  "notes": [
+    "This local harness does not measure live CDP transport, renderer DOM paint, or user-visible end-to-end latency.",
+    "current_session_parse_full and usage_summary_refresh_current_file run against temporary copies of the selected session file to avoid concurrent writes from the live Codex session skewing local parser timings.",
+    "append_then_incremental_parse_and_payload writes only to a temporary copy of the selected session file.",
+    "file_watcher_poll_signature represents the polling fallback scan cost, not native watcher delivery latency."
+  ]
+}

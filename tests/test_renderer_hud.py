@@ -515,6 +515,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-action="settings-provider-tab"', script)
         self.assertIn('data-provider-tab="true"', script)
         self.assertIn('data-provider-enabled="true"', script)
+        self.assertIn('data-provider-notification-only="true"', script)
+        self.assertIn("仅气泡通知不统计", script)
         self.assertIn("function captureSettingsProviderForm", script)
         self.assertIn("function switchSettingsProvider", script)
         self.assertIn("settingsDirtyProviders.add(activeProvider)", script)
@@ -525,6 +527,8 @@ class RendererHudPayloadTests(unittest.TestCase):
             'provider_scope_mode: allProvidersSelected ? "all" : "custom"',
             script,
         )
+        self.assertIn("notification_only_providers: notificationOnlyProviders", script)
+        self.assertIn("if (counterpart) counterpart.checked = false", script)
         self.assertIn('pricing_url: String(settings.pricing_url || "").trim()', script)
         self.assertIn("weekly_adjustment_usd: settings.weekly_adjustment_usd", script)
         self.assertIn("model_prices: settings.model_prices", script)

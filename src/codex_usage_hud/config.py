@@ -172,6 +172,7 @@ class UserConfig:
     provider_settings: dict[str, ProviderSettings] = field(default_factory=dict)
     provider_scope_mode: str = "all"
     selected_providers: list[str] = field(default_factory=list)
+    notification_only_providers: list[str] = field(default_factory=list)
     support_url: str = DEFAULT_SUPPORT_URL
 
     @classmethod
@@ -198,6 +199,18 @@ class UserConfig:
         if scope_mode not in {"all", "custom"}:
             scope_mode = "all"
         selected_providers = normalize_provider_names(value.get("selected_providers"))
+        notification_only_providers = normalize_provider_names(
+            value.get("notification_only_providers")
+        )
+        if scope_mode == "all":
+            notification_only_providers = []
+        else:
+            selected_provider_set = set(selected_providers)
+            notification_only_providers = [
+                provider
+                for provider in notification_only_providers
+                if provider not in selected_provider_set
+            ]
         return cls(
             daily_budget_usd=max(
                 0.0,
@@ -236,6 +249,7 @@ class UserConfig:
             provider_settings=provider_settings,
             provider_scope_mode=scope_mode,
             selected_providers=selected_providers,
+            notification_only_providers=notification_only_providers,
             support_url=_optional_str(value.get("support_url")) or DEFAULT_SUPPORT_URL,
         )
 
@@ -257,6 +271,7 @@ class UserConfig:
             },
             "provider_scope_mode": self.provider_scope_mode,
             "selected_providers": list(self.selected_providers),
+            "notification_only_providers": list(self.notification_only_providers),
             "support_url": self.support_url,
             "model_prices": {
                 name: price.to_dict()
@@ -297,6 +312,19 @@ class UserConfig:
         if required_provider and required_provider != "unknown":
             selected.add(required_provider)
         return frozenset(selected)
+
+    def effective_notification_provider_scope(
+        self,
+        app_provider: str = "",
+    ) -> frozenset[str] | None:
+        """Return providers whose active work should produce notification bubbles."""
+        included = self.effective_provider_scope(app_provider)
+        if included is None:
+            return None
+        return frozenset(
+            set(included)
+            | set(normalize_provider_names(self.notification_only_providers))
+        )
 
     def weekly_adjustment_for_scope(
         self,

@@ -1390,7 +1390,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(len(items), 2)
         self.assertEqual([item.id for item in items], ["session-worker-b", "session-worker-a"])
 
-    def test_active_work_items_share_custom_provider_scope_with_app_requirement(self) -> None:
+    def test_active_work_items_include_notification_only_provider(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
 
@@ -1435,14 +1435,17 @@ class BudgetHelperTests(unittest.TestCase):
             root = Path(temp_dir)
             current = root / "app.jsonl"
             selected_cli = root / "muyuan.jsonl"
+            notification_cli = root / "notice.jsonl"
             excluded_cli = root / "unused.jsonl"
             write_session(current, "app", "custom", "Codex Desktop", "vscode", -3)
             write_session(selected_cli, "selected-cli", "muyuan", "codex-tui", "cli", -2)
-            write_session(excluded_cli, "excluded-cli", "unused", "codex-tui", "cli", -1)
+            write_session(notification_cli, "notification-cli", "notice", "codex-tui", "cli", -1)
+            write_session(excluded_cli, "excluded-cli", "unused", "codex-tui", "cli", 0)
             snapshot = parser.parse_file(current)
             config = UserConfig.defaults()
             config.provider_scope_mode = "custom"
             config.selected_providers = ["muyuan"]
+            config.notification_only_providers = ["notice"]
             context = SimpleNamespace(
                 sessions_root=root,
                 parser=parser,
@@ -1452,7 +1455,10 @@ class BudgetHelperTests(unittest.TestCase):
 
             items = active_work_items_for_snapshot(context, snapshot, current)
 
-        self.assertEqual({item.id for item in items}, {"app", "selected-cli"})
+        self.assertEqual(
+            {item.id for item in items},
+            {"app", "selected-cli", "notification-cli"},
+        )
         self.assertEqual(context.app_provider, "custom")
 
     def test_active_work_items_are_empty_when_overlay_disabled(self) -> None:
@@ -9635,7 +9641,14 @@ class DaemonLifecycleTests(unittest.TestCase):
             exit_requested = MagicMock()
 
             status = _handle_renderer_settings_command(
-                {"action": "save", "settings": {"daily_reset_time": "09:30"}},
+                {
+                    "action": "save",
+                    "settings": {
+                        "daily_reset_time": "09:30",
+                        "provider_scope_mode": "custom",
+                        "notification_only_providers": ["notice"],
+                    },
+                },
                 context,
                 restart_requested,
                 exit_requested,
@@ -9645,6 +9658,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(status["kind"], "")
         self.assertEqual(status["restartVisible"], False)
         self.assertEqual(saved.daily_reset_time, "09:30")
+        self.assertEqual(saved.notification_only_providers, ["notice"])
         self.assertEqual(saved.daily_budget_usd, 12.34)
         self.assertEqual(saved.weekly_budget_usd, 56.78)
         self.assertIsNone(context.settings_mtime)

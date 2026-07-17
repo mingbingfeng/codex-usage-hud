@@ -2196,6 +2196,13 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: var(--codex-usage-hud-text, #e8eef7);
         cursor: pointer;
       }
+      #${rootId} .codex-usage-hud-provider-scope-options {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+      }
       #${rootId} .codex-usage-hud-provider-scope input {
         width: 15px;
         height: 15px;
@@ -3131,6 +3138,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       provider_settings: {},
       provider_scope_mode: "all",
       selected_providers: [],
+      notification_only_providers: [],
       provider_registry: {},
       app_provider: "",
       support_url: "https://github.com/mingbingfeng/codex-usage-hud",
@@ -4129,13 +4137,14 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     ]));
   }
 
-  function providerDraftFromSettings(settings, provider, enabled) {
+  function providerDraftFromSettings(settings, provider, enabled, notificationOnly) {
     const source = settings.provider_settings?.[provider] || {};
     const modelPrices = source.model_prices && typeof source.model_prices === "object"
       ? source.model_prices
       : settings.model_prices;
     return {
       enabled: !!enabled,
+      notificationOnly: !!notificationOnly && !enabled,
       settings: {
         ...source,
         model_prices: cloneSettingsPriceTable(modelPrices),
@@ -4152,6 +4161,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const selected = settings.provider_scope_mode === "custom"
       ? new Set((settings.selected_providers || []).map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean))
       : new Set(order);
+    const notificationOnly = new Set(
+      (settings.notification_only_providers || []).map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean)
+    );
     if (appProvider) selected.add(appProvider);
     const requestedProvider = String(window[settingsProviderName] || "").trim().toLowerCase();
     const activeProvider = order.includes(requestedProvider)
@@ -4163,7 +4175,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       order,
       providers: Object.fromEntries(order.map((provider) => [
         provider,
-        providerDraftFromSettings(settings, provider, selected.has(provider) || provider === appProvider),
+        providerDraftFromSettings(
+          settings,
+          provider,
+          selected.has(provider) || provider === appProvider,
+          notificationOnly.has(provider) && !selected.has(provider) && provider !== appProvider,
+        ),
       ])),
     };
     settingsDirtyProviders.clear();
@@ -4238,10 +4255,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return `
       ${head}
       <div class="codex-usage-hud-provider-context">
-        <label class="codex-usage-hud-provider-scope" ${required ? 'title="Codex App Provider 必须纳入统计"' : ""}>
-          <input type="checkbox" data-provider-enabled="true" ${entry.enabled || required ? "checked" : ""} ${required ? "disabled" : ""}>
-          <span>纳入统计</span>
-        </label>
+        <div class="codex-usage-hud-provider-scope-options">
+          <label class="codex-usage-hud-provider-scope" ${required ? 'title="Codex App Provider 必须纳入统计"' : ""}>
+            <input type="checkbox" data-provider-enabled="true" ${entry.enabled || required ? "checked" : ""} ${required ? "disabled" : ""}>
+            <span>纳入统计</span>
+          </label>
+          <label class="codex-usage-hud-provider-scope" ${required ? 'title="Codex App Provider 必须纳入统计"' : ""}>
+            <input type="checkbox" data-provider-notification-only="true" ${entry.notificationOnly && !required ? "checked" : ""} ${required ? "disabled" : ""}>
+            <span>仅气泡通知不统计</span>
+          </label>
+        </div>
         <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
       </div>
       <div class="codex-usage-hud-provider-tools">
@@ -4315,10 +4338,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (baseUrl) modelPrices[key].base_url = baseUrl;
     });
     const enabledNode = editor.querySelector('[data-provider-enabled="true"]');
+    const notificationOnlyNode = editor.querySelector('[data-provider-notification-only="true"]');
     const pricingNode = editor.querySelector('[data-setting-key="pricing_url"]');
     const adjustmentNode = editor.querySelector('[data-setting-key="weekly_adjustment_usd"]');
     const adjustment = Number(adjustmentNode?.value);
     entry.enabled = activeProvider === settingsProviderDraft.appProvider || !!enabledNode?.checked;
+    entry.notificationOnly = !entry.enabled && !!notificationOnlyNode?.checked;
     entry.settings = {
       ...entry.settings,
       model_prices: modelPrices,
@@ -4713,6 +4738,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const selectedProviders = draft.order.filter((provider) => (
       provider === draft.appProvider || !!draft.providers[provider]?.enabled
     ));
+    const notificationOnlyProviders = draft.order.filter((provider) => (
+      provider !== draft.appProvider
+      && !draft.providers[provider]?.enabled
+      && !!draft.providers[provider]?.notificationOnly
+    ));
     const allProvidersSelected = draft.order.every((provider) => selectedProviders.includes(provider));
     const displayMode = "renderer";
     return {
@@ -4733,6 +4763,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       provider_settings: providerSettings,
       provider_scope_mode: allProvidersSelected ? "all" : "custom",
       selected_providers: selectedProviders,
+      notification_only_providers: notificationOnlyProviders,
       budget_thresholds: String(read("budget_thresholds") || "")
         .split(",")
         .map((item) => Number(item.trim()))
@@ -5060,6 +5091,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     root.addEventListener("input", (event) => {
       const editor = event.target?.closest?.('[data-provider-editor="true"]');
       if (!editor || !root.contains(editor)) return;
+      const scopeToggle = event.target?.closest?.(
+        '[data-provider-enabled="true"], [data-provider-notification-only="true"]'
+      );
+      if (scopeToggle?.checked) {
+        const counterpartSelector = scopeToggle.matches('[data-provider-enabled="true"]')
+          ? '[data-provider-notification-only="true"]'
+          : '[data-provider-enabled="true"]';
+        const counterpart = editor.querySelector(counterpartSelector);
+        if (counterpart) counterpart.checked = false;
+      }
       markSettingsProviderDirty();
     });
     root.addEventListener("keydown", (event) => {
