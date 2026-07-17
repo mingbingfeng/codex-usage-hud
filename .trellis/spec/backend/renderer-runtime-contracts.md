@@ -1,5 +1,108 @@
 # Renderer Runtime Contracts
 
+## Scenario: Deterministic renderer session following
+
+### 1. Scope / Trigger
+
+- Trigger: the user selects an existing Codex sidebar row or creates a conversation while the renderer identity, local persistence, snapshot build, and HUD application can complete at different times.
+- Scope: renderer observation, CDP binding delivery, `ActiveSessionTracker` reconciliation, visible-first snapshot delivery, deferred work-overlay aggregation, and failure feedback.
+
+### 2. Signatures
+
+- JavaScript: `postActiveSession(reason, overrideRef)` sends `{sessionId, rendererSessionId, selectionSeq, title, url, reason, newSession, pendingSession, matchedBy, observedAt}`.
+- Python: `ActiveSessionTracker.observe_conversation_ref(..., renderer_session_id="", selection_seq=0, observed_at_ms=0) -> bool`.
+- Snapshot: `ParsedSession.selection_seq`, `selection_observed_at_ms`, `follow_state`, `follow_reason`, and `follow_timing` cross the tracker/parser/UI boundary unchanged. `followTiming` attributes renderer observation, Python receipt/resolution, snapshot start/build, and renderer application.
+- Identity/cache: session payloads carry canonical `sessionId`, exact raw `rendererSessionId`, and `cachedPreview=false`. A renderer-only preview sets `cachedPreview=true` for the current sequence without acknowledging it.
+- Runtime events: `active_session_changed` produces the visible `sessionSwitch` domain; a successful visible update schedules `active_work_refresh_requested`.
+- Critical transport: `_RendererBinding(..., retry_same_target=True)` is used only for the active-session binding.
+
+### 3. Contracts
+
+- Every genuinely different renderer selection receives a monotonically increasing `selectionSeq`. Work from an older non-zero sequence cannot replace the current selection.
+- Renderer reinjection preserves the previous page-realm selection/applied counters. Both startup `currentSession` and lightweight `sessionSwitch` payloads raise the local selection counter to their applied sequence before the next click. A script reload must never restart at sequence 1 while Python already holds a larger sequence.
+- Preserve `rendererSessionId` until the selection is superseded. A provisional `client-new-thread:*` ID is pending identity, not proof of a new conversation.
+- Provisional recovery is allowed only when one exact-title entry in `session_index.jsonl` has the same canonical ID as an exact `state_5.sqlite` thread row and that row points to an existing rollout. Zero candidates remain `awaiting-persistence`; multiple candidates remain `ambiguous-persisted-identity`.
+- A sidebar click updates the existing request line immediately with `reading-session-data`; missing renderer binding reports `renderer-channel-unavailable`. Python replaces that provisional feedback with a more specific follow reason when available.
+- Binding acceptance is not application acknowledgement. The renderer suppresses a duplicate only after `activeSessionAppliedSeqName >= selectionSeq`; an unchanged resend for the current sequence must wake Python so a failed first HUD update can retry.
+- The first active-session refresh forces cached budget reuse and `refresh_active_work_items=False`, even when unrelated session/file events were coalesced into the same tick. Only after the visible `sessionSwitch` succeeds may `active_work_refresh_requested` rebuild recent work, and its result is accepted only for the current sequence.
+- Deferred active-work aggregation has a 1.2 second selection quiet window. Another selection inside that window sends another visible-first payload and resets the deadline; file events may refresh lightweight state but cannot start the multi-file scan before the deadline.
+- `active_work_items_for_snapshot` runs in `_RendererActiveWorkPump`, never on the renderer loop thread. The pump coalesces pending requests and returns sequence-bound results; the loop applies only a result whose sequence still matches both tracker and latest snapshot.
+- Warm `SessionSnapshotCache` hits shallow-clone only fields mutated by runtime enrichment (`request`, warnings, active-work list, timing). Parsed request/tool history remains shared read-only; `copy.deepcopy` is forbidden on the session-switch path because large historical sessions made it cost hundreds of milliseconds.
+- The visible-first build copies budget totals/warnings from the latest snapshot and skips the live app-error DOM probe. `UsageSummaryCache.summarize(...)` and `_visible_app_error(...)` are deferred because provider-filter aggregation and CDP probing were each measured in the hundreds of milliseconds on a real App switch.
+- The visible `sessionSwitch` payload is sent before work-overlay updates or current-session watcher reconfiguration. Both operations are deferred with the non-lightweight refresh because rebuilding Windows watcher workers was measured on the click-to-HUD path.
+- Renderer payload `Runtime.evaluate` reuses the persistent active-session binding websocket with command-ID response routing. If that channel is not ready or disconnects, `_send_update` falls back to the existing ephemeral CDP command and the critical binding recovery contract remains active.
+- Codex handles a sidebar click and its React route transition in the same renderer task. A CDP update sent from the binding callback can therefore remain queued for roughly 150-300 ms even when Python snapshot work and CDP round trips are otherwise fast. The renderer keeps up to 48 exact identity keys for previously confirmed session payloads and applies a cache hit synchronously in the capture-phase click handler before Codex route work begins.
+- Renderer preview lookup uses only `rendererSessionId` or canonical `sessionId`; title, prefix, and newest-session lookup are forbidden. A preview must retain the new `selectionSeq` but must not raise `activeSessionAppliedSeqName`, suppress same-sequence follow-ups, or replace the later Python-authoritative payload.
+- A critical active-session binding may reconnect to the same CDP target after disconnect. Auxiliary bindings retain same-target suppression to avoid idle retry loops.
+- The runtime remains event-driven. Selection-specific timers are bounded; no idle active-session poll is permitted.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Canonical ID and rollout already exist | Parse only the selected session and apply `sessionSwitch` immediately. |
+| Provisional ID has one fully verified persisted candidate | Confirm that canonical session without another click and keep `newSession=false`. |
+| Provisional ID has zero or multiple candidates | Stay pending and show `awaiting-persistence` or `ambiguous-persisted-identity`; never guess. |
+| A later `session-map` event arrives | Invalidate mapping caches and retry the retained current identity immediately. |
+| A/B work completes after selection C | Reject it when its non-zero sequence differs from the tracker sequence. |
+| HUD script is reinjected after sequence N | Preserve/restore N so the next renderer observation is greater than or equal to the Python tracker generation. |
+| First session payload is transported but not applied | Bounded duplicate delivery for the same sequence wakes another visible refresh. |
+| Active-session binding disconnects | Preserve the current selection, show `renderer-channel-unavailable`, and permit same-target recovery. |
+| Visible session update succeeds | Schedule recent-work aggregation as a separate event. |
+| Exact selected ID has a confirmed renderer payload cache entry | Apply the visible preview synchronously, keep the sequence unacknowledged, then replace it with the Python-authoritative payload. |
+| Exact selected ID has no cache entry | Show `reading-session-data` immediately and wait for the normal strict mapping/snapshot/CDP path. |
+| Session-file writes share the selection tick | Send the visible cached-budget/session-only payload first; defer the file-derived aggregates. |
+| Another selection arrives during the work quiet window | Apply the new selection first and move the deferred-work deadline forward. |
+| Background work result belongs to an older sequence | Discard it without changing the selected session or overlay. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: click A -> B -> C; exact cache hits repaint in the capture handler, C remains the final authoritative selection, and later work aggregation cannot repaint A or B.
+- Base: Codex exposes `client-new-thread:*` before persistence; HUD remains explicit pending and converges after the exact local evidence appears.
+- Bad: title-key the renderer cache, mark a cached preview as applied, discard the provisional ID after one miss, accept transport delivery as application ACK, synchronously parse 16 recent files before the visible update, or reconnect every auxiliary binding forever.
+
+### 6. Tests Required
+
+- `tests/test_active_session.py`: initial provisional miss followed by mapping reconciliation, duplicate-title ambiguity, stale sequence rejection, and disconnect state preservation.
+- `tests/test_renderer_hud.py`: raw/canonical identity fields, applied-sequence dedup, immediate click feedback, same-target critical binding retry, and disconnect callback payload.
+- `tests/test_renderer_hud.py`: exact-ID payload cache markers, `cachedPreview` ACK exclusion, and authoritative payloads carrying both identity fields.
+- `tests/test_ui.py`: visible-first scan exclusion, separate work refresh, stale snapshot rejection, unchanged current-sequence retry, and specific runtime diagnostics.
+- Live acceptance: alternate canonical rows at least 50 times, exercise rapid A -> B -> C, and select a persisted provisional row without a second click.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+changed = tracker.observe_conversation_ref(**payload)
+if changed:
+    publish_active_session_changed()
+snapshot = build_snapshot(refresh_active_work_items=True)
+```
+
+This drops an unchanged retry after a failed first HUD application and puts the multi-file work scan on the click path.
+
+#### Correct
+
+```python
+changed = tracker.observe_conversation_ref(**payload)
+if changed or payload.selection_seq == tracker.selection_seq:
+    publish_active_session_changed()
+snapshot = build_snapshot(refresh_active_work_items=False)
+# After visible application succeeds:
+publish("active_work_refresh_requested")
+```
+
+The current sequence remains retryable until renderer application, while recent work is refreshed after the user-visible session fields.
+
+For a renderer cache hit, the correct preview rule is:
+
+```javascript
+const cached = cache.get(rendererSessionId); // exact identity only
+applySessionSwitch({ ...cached, selectionSeq, cachedPreview: true });
+// Do not advance appliedSeq. Python confirmation owns the ACK.
+```
+
 ## Scenario: Active session reconciliation after composer send
 
 ### 1. Scope / Trigger
@@ -10,8 +113,8 @@
 ### 2. Signatures
 
 - JavaScript: `scheduleActiveSessionSendFollowup(reason = "composer-send", expectedSessionId = "")`.
-- JavaScript: `postActiveSession(reason, overrideRef)` sends `{sessionId, title, url, reason, newSession, pendingSession, matchedBy, observedAt}`.
-- Python: `ActiveSessionTracker.observe_conversation_ref(session_id, title, source="renderer", new_session=False, pending_session=False)`.
+- JavaScript: `postActiveSession(reason, overrideRef)` sends canonical and raw identities plus `selectionSeq` and observation timing.
+- Python: `ActiveSessionTracker.observe_conversation_ref(..., renderer_session_id="", selection_seq=0, observed_at_ms=0)`.
 - Runtime events: `active_session_changed` wakes the renderer loop; the subsequent refresh may publish `active_work_refresh_requested`.
 
 ### 3. Contracts
@@ -19,7 +122,7 @@
 - Composer submit, and fallback Enter/click handlers when `composerBadgeEnabled` is false, trigger bounded follow-ups at 32, 120, 320, 800, and 1600 ms.
 - The form `submit` listener is independent of the optional composer token badge.
 - A canonical renderer UUID is the only key allowed to resolve a rollout path. Provisional or unmapped refs remain pending.
-- Signature deduplication prevents unchanged follow-ups from producing repeated binding payloads.
+- Signature deduplication suppresses unchanged follow-ups only after the corresponding `selectionSeq` has been applied by the HUD.
 - All listeners and timers are removed by `removeActiveSessionWatchers()`.
 
 ### 4. Validation & Error Matrix
@@ -30,14 +133,15 @@
 | Badge enabled, composer Enter/click | Existing composer watcher handles it; active-session fallback does not duplicate it. |
 | Composer form submit | Active-session follow-up is sent regardless of badge setting. |
 | Canonical UUID not yet exposed | Keep `renderer-new-session`/pending; never choose a title or newest rollout fallback. |
-| Follow-up unchanged | Signature dedup suppresses duplicate payload. |
+| Follow-up unchanged, sequence not applied | Repeat the bounded binding payload so Python can retry the visible update. |
+| Follow-up unchanged, sequence applied | Signature dedup suppresses the duplicate payload. |
 | Renderer watchers removed | Timers and submit/keydown listeners are detached. |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: first message creates a canonical UUID within the follow-up window; the tracker resolves the exact rollout and the completed work item reaches `status="recent"` without a session click.
 - Base: the page remains blank or exposes only `client-new-thread:*`; HUD stays explicitly pending.
-- Bad: using a global idle poll, title match, or newest JSONL to force a visible session; this can show another conversation's usage.
+- Bad: using a global idle poll, unconstrained title match, or newest JSONL to force a visible session; this can show another conversation's usage.
 
 ### 6. Tests Required
 
@@ -74,7 +178,7 @@ The session contract remains active when the visual badge is disabled, while the
 
 ### 1. Scope / Trigger
 
-- Trigger: renderer reports a canonical conversation UUID before Codex commits the matching `threads` row in `state_5.sqlite`.
+- Trigger: renderer reports a canonical UUID before the matching DB row exists, or retains a provisional row while Codex commits its canonical index/DB records.
 - Scope: `ActiveSessionTracker` exact lookup, renderer file-event wakeup, and the renderer-loop synthetic `active_session_changed` event.
 
 ### 2. Signatures
@@ -85,7 +189,8 @@ The session contract remains active when the visual badge is disabled, while the
 
 ### 3. Contracts
 
-- A missing exact row remains `renderer-pending-map`; no title, newest-file, or recursive-session fallback is permitted.
+- A missing canonical exact row remains `renderer-pending-map`; newest-file, prefix, and recursive-session fallbacks are forbidden.
+- A retained provisional identity may use only the exact-title, unique-index, exact-DB-ID, existing-rollout recovery contract defined above.
 - Any event set containing `session-map` wakes the renderer loop immediately, even when batched with `settings` or another non-critical reason.
 - The loop invalidates the tracker mapping cache before appending its exact-mapping `active_session_changed` event.
 - `sessions-root` and settings-only events retain their debounce to avoid refresh storms.
@@ -95,7 +200,7 @@ The session contract remains active when the visual badge is disabled, while the
 | Condition | Required behavior |
 |---|---|
 | Canonical UUID has no DB row | Render pending and record the normal unmatched diagnostic. |
-| State DB/index changes | Clear negative mapping cache and immediately retry that UUID. |
+| State DB/index changes | Clear negative mapping cache and immediately retry the retained canonical or provisional identity. |
 | `session-map` plus settings in one callback | Wake immediately; preserve both reasons for the single loop pass. |
 | Sessions-root JSONL append only | Retain normal debounce/incremental refresh behavior. |
 
@@ -144,9 +249,9 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 ### 3. Contracts
 
 - `sessionId` / canonical conversation UUID is the primary identity for local state, overlay matching, and session switching.
-- `targetTitle` and `workdir` are display/context fields. They must not replace an unavailable canonical UUID by title-matching or newest-rollout guessing.
+- `targetTitle` and `workdir` are display/context fields. They cannot replace an unavailable canonical UUID except inside the constrained provisional recovery contract above; newest-rollout guessing remains forbidden.
 - Progress text must come from structured `status`, `statusText`, `lastText`, `progress`, and `updatedAt` fields produced by the existing snapshot/parser path, not from a second renderer DOM reader.
-- A renderer active-session event wakes the runtime event bus and refreshes the exact current session/work overlay. Bounded follow-up timers are allowed only for provisional new-session reconciliation.
+- A renderer active-session event wakes the runtime event bus and refreshes the exact current session/work overlay. Bounded follow-up timers are allowed only for selection application acknowledgement and provisional new-session reconciliation.
 - The external pet's `open-in-main-window` / `actionPath` behavior may be used as a reverse-engineering reference, but the local stable jump boundary remains `activateSession(sessionId)` through the existing session-switch controller.
 
 ### 4. Validation & Error Matrix
@@ -154,7 +259,7 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 | Condition | Required behavior |
 |---|---|
 | Canonical session ID available | Refresh exact session and allow `activateSession`. |
-| `client-new-thread:*`, blank, or unmapped ID | Keep explicit pending state; do not title-match. |
+| `client-new-thread:*`, blank, or unmapped ID | Keep explicit pending state unless one candidate passes every constrained provisional-recovery check. |
 | Structured activity/status update | Update preview through the event-driven snapshot path. |
 | CDP target unavailable | Record the renderer/CDP error and keep the bounded fallback; do not copy private pet IPC. |
 | External pet asset or action name changes | Local behavior remains governed by the local contract and tests. |
@@ -248,4 +353,109 @@ client.request("thread/resume", {"threadId": session_id})
 capability = probe_read_only_app_server_observer()
 if not capability.cross_platform_safe:
     keep_existing_snapshot_authority()
+```
+
+## Scenario: Concurrent work-overlay shape transitions
+
+### 1. Scope / Trigger
+
+- Trigger: one event-driven overlay refresh changes more than one visible work item
+  between a card and a completed badge, which is common when notification-only
+  providers are visible alongside the primary provider.
+- Scope: `work_overlay_qt.py` visible-item state, animation scheduling, and
+  top-level interaction hotspots only.
+
+### 2. Signatures
+
+- `_transition_changes(old_items, new_items) -> list[tuple[str, str]]`.
+- `_defer_other_transition_items(old_items, new_items, transition_item_id)`.
+- `_interactive_hotspot_opacity(base_opacity, hovered) -> float`.
+- `WORK_OVERLAY_HOTSPOT_HIT_ALPHA` and
+  `WORK_OVERLAY_HOTSPOT_HOVER_ALPHA` define native hit-test and own-hover
+  visibility independently from the parent bubble opacity.
+
+### 3. Contracts
+
+- Preserve the existing animation path and timing for the first shape change.
+- Keep every later changing item at its currently displayed kind until its own
+  turn; do not mark the entire target list as already displayed.
+- On transition completion, re-render the latest raw payload so the next queued
+  item can transition. Provider is not part of the animation identity; `id` is.
+- The external workdir hover layer is card-only. Completed badges retain their
+  painted arc workdir text and their check/dismiss hotspot; they never create a
+  separate workdir window.
+- The card QLabel remains the only workdir text renderer. Its top-level hotspot
+  stays inside the exact label bounds and may paint only a background or
+  underline; it must not redraw, elide, or widen across adjacent footer content.
+- Transparent top-level hotspots must retain non-zero effective alpha at the
+  configured `0.22` bubble-hover opacity. Their own hover raises only that
+  hotspot to `WORK_OVERLAY_HOTSPOT_HOVER_ALPHA`; the recurring pointer sync may
+  update the stored base opacity but cannot dim a currently hovered hotspot.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| One card-to-badge change | Existing single-transition behavior is unchanged. |
+| Multiple shape changes in one payload | Apply one transition, then apply the next from the deferred display state. |
+| New/removed item only | Rebuild without inventing a shape transition. |
+| Card workdir hover | Keep the full QLabel text and highlight only its exact bounds; do not paint a second string or expand over the status label. |
+| Completed badge workdir | Keep only the painted arc text; never create a rectangular workdir window. |
+| Bubble opacity is `0.22` | `WindowFromPoint` still resolves the workdir/check hotspot rather than the window beneath it. |
+| Completed check hover/click | Raise the hotspot to its own hover opacity, show a clear outline, and invoke the existing annihilation dismissal. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `custom` completes while `muyuan` resumes; both animate in sequence.
+- Good: a low-opacity card keeps one full workdir label, while the completed
+  check hotspot remains natively hit-testable and becomes obvious on hover.
+- Base: only one visible session changes kind; it follows the original path.
+- Bad: assigning the full target list to `previous_visible_items` before the
+  first animation ends, which causes later changes to be redrawn abruptly.
+- Bad: using alpha `1` for a layered hotspot at bubble opacity `0.22`, or
+  redrawing workdir text in the hotspot window; the former can become native
+  click-through and the latter creates duplicate or ellipsized text.
+
+### 6. Tests Required
+
+- `tests/test_ui.py`: assert that simultaneous card-to-completed and
+  completed-to-card changes leave the later item deferred, then detectable on
+  the following pass.
+- `tests/test_ui.py`: assert completed workdirs do not create an external link
+  layer, idle card hotspots keep the QLabel anchor size, and own-hover opacity
+  overrides the low bubble opacity.
+- Windows live source-helper gate: at bubble hover opacity `0.22`, verify
+  `WindowFromPoint` resolves both hotspot HWNDs, then use a real mouse click on
+  the completed check and assert the annihilation window appears and the badge
+  is dismissed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+previous_visible_items = target_items
+start_transition(first_change)
+```
+
+#### Correct
+
+```python
+transition_items = defer_other_transition_items(displayed_items, target_items, first_id)
+start_transition(first_change, displayed_items, transition_items)
+previous_visible_items = transition_items
+```
+
+#### Wrong: layered hotspot becomes click-through
+
+```python
+fill = QColor(255, 255, 255, 1)
+hotspot.setWindowOpacity(0.22)
+```
+
+#### Correct: preserve native hit alpha and own-hover visibility
+
+```python
+fill = QColor(255, 255, 255, WORK_OVERLAY_HOTSPOT_HIT_ALPHA)
+hotspot.setWindowOpacity(_interactive_hotspot_opacity(base_opacity, hovered))
 ```

@@ -7,7 +7,9 @@ from pathlib import Path
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -297,16 +299,21 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('postActiveSession("settled")', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("transientWithoutCanonicalId", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("rendererSessionId", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("activeSessionIdIsProvisional(rendererSessionId)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("activeSessionIdIsProvisional(rawRendererSessionId)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("[data-app-action-sidebar-thread-id]", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("activeSessionRowSelector", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("a[href*='thread']", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("[role='button']", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('postActiveSession("click"', renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn(
-            'scheduleActiveSessionSendFollowup("click", ref.sessionId || "")',
-            renderer_hud.RENDERER_HUD_SCRIPT,
-        )
+        self.assertIn("activeSessionSelectionSeqName", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("activeSessionAppliedSeqName", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("previousActiveSessionSelectionSeq", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("previousActiveSessionAppliedSeq", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function showActiveSessionFollowFeedback", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("会话切换中：正在读取会话数据", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("renderer 事件通道不可用", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("rendererSessionId: rawRendererSessionId", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("selectionSeq", renderer_hud.RENDERER_HUD_SCRIPT)
         binding_send = renderer_hud.RENDERER_HUD_SCRIPT.index(
             "binding(JSON.stringify(payload));"
         )
@@ -319,7 +326,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("reason === \"new-session\"", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("if (!ref.sessionId && !ref.title) return;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn(
-            'scheduleActiveSessionSendFollowup("click", ref.sessionId || "")',
+            "ref.rendererSessionId || ref.rawSessionId || ref.sessionId",
             renderer_hud.RENDERER_HUD_SCRIPT,
         )
         self.assertIn("codex-usage-hud-support-qr-grid", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -580,6 +587,12 @@ class RendererHudPayloadTests(unittest.TestCase):
         snapshot = ParsedSession(
             status="waiting",
             selection_source="renderer-pending-map",
+            renderer_session_id="local:client-new-thread:pending-1",
+            selection_seq=9,
+            selection_observed_at_ms=int(time.time() * 1000) - 125,
+            follow_state="pending",
+            follow_reason="awaiting-exact-mapping",
+            follow_timing={"receivedAt": 123, "resolvedAt": 124},
         )
 
         payload = payload_from_snapshot(snapshot).to_json()
@@ -589,7 +602,22 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(payload["session"], "会话加载中")
         self.assertIn("加载精确会话映射", str(payload["topLine"]))
         self.assertNotIn("本会话 0", str(payload["topLine"]))
-        self.assertEqual(payload["requestLine"], "会话数据等待首个事件")
+        self.assertEqual(
+            payload["requestLine"],
+            "会话切换中：正式 ID 已收到，等待本地映射",
+        )
+        self.assertEqual(payload["selectionSeq"], 9)
+        self.assertEqual(
+            payload["rendererSessionId"], "local:client-new-thread:pending-1"
+        )
+        self.assertFalse(payload["cachedPreview"])
+        self.assertEqual(payload["followState"], "pending")
+        self.assertEqual(payload["followReason"], "awaiting-exact-mapping")
+        self.assertEqual(
+            payload["followTiming"],
+            {"receivedAt": 123, "resolvedAt": 124},
+        )
+        self.assertGreaterEqual(payload["followElapsedMs"], 100)
         self.assertEqual(payload["requestRows"], [])
         self.assertEqual(payload["requestRowDetails"], [])
 
@@ -1039,7 +1067,32 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "24";', script)
+        self.assertIn('const version = "30";', script)
+        self.assertIn("function applyCachedActiveSessionPayload", script)
+        self.assertIn("function cacheActiveSessionPayload", script)
+        self.assertIn("if (payload?.cachedPreview) return;", script)
+        self.assertIn("activeSessionPayloadKeys(ref).map((key) => cache.get(key))", script)
+        self.assertIn("window.__codexUsageHudCachedPreview", script)
+        self.assertIn("restoredActiveSessionSelectionSeq", script)
+        self.assertIn(
+            "previousActiveSessionSelectionSeq,\n    previousActiveSessionAppliedSeq",
+            script,
+        )
+        self.assertIn("function applyActiveSessionSequence", script)
+        current_apply = script.index("function applyCurrentSessionPayload")
+        session_apply = script.index("function applySessionSwitchPayload")
+        self.assertIn(
+            "applyActiveSessionSequence(payload);",
+            script[current_apply:session_apply],
+        )
+        self.assertIn(
+            "applyActiveSessionSequence(payload);",
+            script[session_apply:],
+        )
+        self.assertIn(
+            "appliedSeq > Number(window[activeSessionSelectionSeqName] || 0)",
+            script,
+        )
         self.assertIn(
             "scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);",
             script,
@@ -1930,6 +1983,102 @@ class RendererHudClientTests(unittest.TestCase):
             binding.close()
 
         self.assertEqual(attempts, ["ws://127.0.0.1:9229/devtools/page/1"])
+
+    def test_critical_binding_can_retry_same_target_after_disconnect(self) -> None:
+        attempts: list[str] = []
+        binding = renderer_hud._RendererBinding(
+            "testBinding",
+            lambda _payload: None,
+            timeout_seconds=0.05,
+            retry_same_target=True,
+        )
+
+        def fail_connect(websocket_url: str):
+            attempts.append(websocket_url)
+            raise RuntimeError("closed")
+
+        binding._connect = fail_connect  # type: ignore[method-assign]
+        try:
+            binding.ensure("ws://127.0.0.1:9229/devtools/page/1", "target-1")
+            time.sleep(0.02)
+            binding.ensure("ws://127.0.0.1:9229/devtools/page/1", "target-1")
+            time.sleep(0.02)
+        finally:
+            binding.close()
+
+        self.assertEqual(
+            attempts,
+            [
+                "ws://127.0.0.1:9229/devtools/page/1",
+                "ws://127.0.0.1:9229/devtools/page/1",
+            ],
+        )
+
+    def test_binding_command_channel_routes_response_by_id(self) -> None:
+        binding = renderer_hud._RendererBinding(
+            "testBinding",
+            lambda _payload: None,
+            timeout_seconds=0.05,
+        )
+        binding._sock = object()  # type: ignore[assignment]
+        binding._websocket_url = "ws://127.0.0.1:9229/devtools/page/1"
+        binding._ready_event.set()
+
+        def respond(_sock, command_id, method, params):
+            self.assertEqual(method, "Runtime.evaluate")
+            self.assertEqual(params, {"expression": "1"})
+            ready, response = binding._pending_responses[command_id]
+            response["payload"] = {"id": command_id, "result": {"ok": True}}
+            ready.set()
+
+        binding._send_command = respond  # type: ignore[method-assign]
+
+        result = binding.send_command(
+            binding._websocket_url,
+            "Runtime.evaluate",
+            {"expression": "1"},
+            0.05,
+        )
+
+        self.assertEqual(result["result"], {"ok": True})
+
+    def test_renderer_update_prefers_persistent_active_session_channel(self) -> None:
+        client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+        persistent = MagicMock(
+            return_value={
+                "result": {
+                    "result": {"value": {"ok": True, "applyMs": 1.5}}
+                }
+            }
+        )
+        client._active_session_binding = SimpleNamespace(send_command=persistent)
+
+        with patch("codex_usage_hud.ui.renderer_hud.send_cdp_command") as fallback:
+            self.assertTrue(
+                client._send_update(
+                    "ws://127.0.0.1:9229/devtools/page/1",
+                    {"payloadDomains": {"sessionSwitch": {}}},
+                )
+            )
+
+        fallback.assert_not_called()
+        persistent.assert_called_once()
+        self.assertEqual(
+            client.last_update_metrics["transport"],
+            "active-session-binding",
+        )
+
+    def test_active_session_binding_disconnect_is_reported_to_callback(self) -> None:
+        observed: list[dict[str, object]] = []
+        client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
+        client.set_active_session_callback(observed.append)
+
+        client._handle_active_session_binding_disconnect("binding closed")
+        client.close()
+
+        self.assertTrue(observed[0]["channelUnavailable"])
+        self.assertEqual(observed[0]["reason"], "binding closed")
+        self.assertGreater(int(observed[0]["observedAt"]), 0)
 
     def test_binding_subscription_does_not_block_renderer_payload_path(self) -> None:
         binding = renderer_hud._RendererBinding(

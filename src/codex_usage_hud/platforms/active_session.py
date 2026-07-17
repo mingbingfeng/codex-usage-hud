@@ -73,7 +73,6 @@ def is_new_session_source(source: str) -> bool:
     return text.startswith(
         (
             "renderer-new-session",
-            "renderer-pending-session",
             "cdp-new-session",
             "ui-new-session",
         )
@@ -355,15 +354,72 @@ class ActiveSessionTracker:
         self.latest_response_ms = 0.0
         self.latest_event_source = ""
         self._renderer_session_id = ""
+        self._renderer_raw_session_id = ""
         self._renderer_title = ""
         self._renderer_path: Path | None = None
         self._renderer_new_session = False
         self._renderer_pending_session = False
+        self._selection_seq = 0
+        self._selection_observed_at_ms = 0
+        self._selection_received_at_ms = 0
+        self._selection_resolved_at_ms = 0
+        self._follow_state = "waiting"
+        self._follow_reason = "renderer-waiting"
         self._change_callback: Callable[[], None] | None = None
+
+    @property
+    def selection_seq(self) -> int:
+        with self._lock:
+            return self._selection_seq
+
+    @property
+    def selection_observed_at_ms(self) -> int:
+        with self._lock:
+            return self._selection_observed_at_ms
+
+    @property
+    def selection_received_at_ms(self) -> int:
+        with self._lock:
+            return self._selection_received_at_ms
+
+    @property
+    def selection_resolved_at_ms(self) -> int:
+        with self._lock:
+            return self._selection_resolved_at_ms
+
+    @property
+    def follow_state(self) -> str:
+        with self._lock:
+            return self._follow_state
+
+    @property
+    def follow_reason(self) -> str:
+        with self._lock:
+            return self._follow_reason
+
+    @property
+    def renderer_session_id(self) -> str:
+        """Return the exact raw identity currently exposed by the renderer."""
+        with self._lock:
+            return self._renderer_raw_session_id
 
     def set_change_callback(self, callback: Callable[[], None] | None) -> None:
         """Notify the renderer loop when the background active-session watcher moves."""
         self._change_callback = callback
+
+    def mark_renderer_channel_unavailable(self, reason: str = "") -> bool:
+        """Keep the current selection while exposing a renderer transport failure."""
+        with self._lock:
+            changed = (
+                self._follow_state != "pending"
+                or self._follow_reason != "renderer-channel-unavailable"
+            )
+            self._follow_state = "pending"
+            self._follow_reason = "renderer-channel-unavailable"
+            self.latest_event_source = str(reason or "renderer-binding-disconnected")
+        if changed:
+            self._notify_change()
+        return changed
 
     def _notify_change(self) -> None:
         callback = self._change_callback
@@ -545,32 +601,68 @@ class ActiveSessionTracker:
         detected_at: float | None = None,
         new_session: bool = False,
         pending_session: bool = False,
+        renderer_session_id: str = "",
+        selection_seq: int = 0,
+        observed_at_ms: int = 0,
     ) -> bool:
         """Accept an active conversation ref pushed by the renderer bridge."""
         if not self.enabled:
             return False
         session_id = str(session_id or "").strip()
+        renderer_session_id = str(renderer_session_id or session_id).strip()
         title = str(title or "").strip()
-        provisional_renderer_id = is_provisional_renderer_session_id(session_id)
+        provisional_renderer_id = is_provisional_renderer_session_id(
+            renderer_session_id
+        )
         pending_session = bool(pending_session) or is_provisional_renderer_session_id(
-            session_id
+            renderer_session_id
         )
         new_session = bool(new_session) or (
-            not session_id and _is_new_session_title(title)
+            not renderer_session_id and _is_new_session_title(title)
         )
+        try:
+            incoming_seq = max(0, int(selection_seq or 0))
+        except (TypeError, ValueError):
+            incoming_seq = 0
+        try:
+            incoming_observed_at_ms = max(0, int(observed_at_ms or 0))
+        except (TypeError, ValueError):
+            incoming_observed_at_ms = 0
+        incoming_received_at_ms = int(time.time() * 1000)
+        with self._lock:
+            current_seq = self._selection_seq
+            current_identity = (
+                self._renderer_raw_session_id,
+                self._renderer_title,
+                self._renderer_new_session,
+                self._renderer_pending_session,
+            )
+        if incoming_seq and incoming_seq < current_seq:
+            return False
+        identity = (renderer_session_id, title, new_session, pending_session)
+        if not incoming_seq:
+            incoming_seq = current_seq + 1 if identity != current_identity else current_seq
+        follow_reason = ""
         if provisional_renderer_id and title:
-            # 已落库任务行偶尔仍带临时 ID；唯一标题映射成功时恢复 canonical 会话。
-            resolved_id, resolved_path = self.resolve_provisional_renderer_ref(
-                session_id,
-                title,
+            resolved_id, resolved_path, follow_reason = (
+                self._resolve_provisional_renderer_ref_details(
+                    renderer_session_id,
+                    title,
+                )
             )
             if resolved_id and resolved_path is not None:
                 session_id = resolved_id
                 pending_session = False
-        if new_session or pending_session:
-            session_id = ""
         if new_session:
+            session_id = ""
+            renderer_session_id = ""
             title = ""
+            follow_reason = "new-session"
+        elif pending_session:
+            session_id = ""
+            follow_reason = follow_reason or "awaiting-canonical-id"
+        elif not session_id:
+            session_id = renderer_session_id
         if not session_id and not title and not new_session and not pending_session:
             return False
         detected = detected_at if detected_at is not None else time.monotonic()
@@ -579,6 +671,10 @@ class ActiveSessionTracker:
         # its exact state-db record; title matching and recursive file searches
         # can select a different conversation after a sidebar change.
         path = self.path_from_renderer_thread_id(session_id) if session_id else None
+        if session_id and path is None and not pending_session:
+            follow_reason = "awaiting-exact-mapping"
+        elif path is not None:
+            follow_reason = "confirmed"
         display_title = title
         if session_id and path is not None:
             display_title = (
@@ -590,6 +686,7 @@ class ActiveSessionTracker:
             display_title = self.title_from_session_index_id(session_id)
 
         response_ms = (time.monotonic() - detected) * 1000.0
+        incoming_resolved_at_ms = int(time.time() * 1000)
         source_label = compact_text(display_title or session_id)
         latest_source = (
             f"{source}-new-session"
@@ -614,11 +711,25 @@ class ActiveSessionTracker:
             previous_renderer_path = self._renderer_path
             previous_renderer_new_session = self._renderer_new_session
             previous_renderer_pending_session = self._renderer_pending_session
+            previous_selection_seq = self._selection_seq
+            previous_follow_state = self._follow_state
+            previous_follow_reason = self._follow_reason
             self._renderer_session_id = session_id
+            self._renderer_raw_session_id = renderer_session_id
             self._renderer_title = display_title
             self._renderer_path = path
             self._renderer_new_session = new_session
             self._renderer_pending_session = pending_session
+            self._selection_seq = incoming_seq
+            self._selection_observed_at_ms = incoming_observed_at_ms
+            self._selection_received_at_ms = incoming_received_at_ms
+            self._selection_resolved_at_ms = incoming_resolved_at_ms
+            self._follow_state = (
+                "confirmed"
+                if path is not None
+                else ("new-session" if new_session else "pending")
+            )
+            self._follow_reason = follow_reason
             self.latest_session_id = session_id
             self.latest_title = display_title
             self.latest_path = path
@@ -637,6 +748,9 @@ class ActiveSessionTracker:
             or path != previous_renderer_path
             or new_session != previous_renderer_new_session
             or pending_session != previous_renderer_pending_session
+            or incoming_seq != previous_selection_seq
+            or self._follow_state != previous_follow_state
+            or follow_reason != previous_follow_reason
         )
         if changed:
             _LOGGER.info(
@@ -796,8 +910,20 @@ class ActiveSessionTracker:
         Accept only an exact, unique title from session_index.jsonl whose
         canonical rollout path already exists; otherwise remain pending.
         """
+        resolved_id, path, _reason = self._resolve_provisional_renderer_ref_details(
+            session_id,
+            title,
+        )
+        return resolved_id, path
+
+    def _resolve_provisional_renderer_ref_details(
+        self,
+        session_id: str,
+        title: str,
+    ) -> tuple[str, Path | None, str]:
+        """Resolve a provisional row and retain a stable pending reason."""
         if not is_provisional_renderer_session_id(session_id) or not title:
-            return "", None
+            return "", None, "awaiting-canonical-id"
         candidates: dict[str, Path] = {}
         try:
             with self.session_index_path.open("r", encoding="utf-8") as handle:
@@ -815,11 +941,16 @@ class ActiveSessionTracker:
                     if path is not None:
                         candidates[candidate_id] = path
         except OSError:
-            return "", None
+            return "", None, "awaiting-persistence"
         if len(candidates) != 1:
-            return "", None
+            reason = (
+                "ambiguous-persisted-identity"
+                if len(candidates) > 1
+                else "awaiting-persistence"
+            )
+            return "", None, reason
         candidate_id, path = next(iter(candidates.items()))
-        return candidate_id, path
+        return candidate_id, path, "confirmed"
 
     def path_from_renderer_thread_id(self, thread_id: str) -> Path | None:
         """Resolve a canonical renderer id through its exact state-db row.
@@ -1039,13 +1170,52 @@ class ActiveSessionTracker:
                 self._mapped_title = ""
                 self.latest_source = "renderer-new-session"
                 self.latest_event_source = "renderer"
+                self._follow_state = "new-session"
+                self._follow_reason = "new-session"
                 return True, None
+            if self._renderer_pending_session:
+                raw_session_id = self._renderer_raw_session_id
+                title = self._renderer_title
+                selection_seq = self._selection_seq
+                observed_at_ms = self._selection_observed_at_ms
+            else:
+                raw_session_id = ""
+                title = ""
+                selection_seq = 0
+                observed_at_ms = 0
+        if raw_session_id and is_provisional_renderer_session_id(raw_session_id):
+            resolved_id, resolved_path, reason = (
+                self._resolve_provisional_renderer_ref_details(raw_session_id, title)
+            )
+            if resolved_id and resolved_path is not None:
+                self.observe_conversation_ref(
+                    resolved_id,
+                    title,
+                    source="renderer",
+                    renderer_session_id=raw_session_id,
+                    selection_seq=selection_seq,
+                    observed_at_ms=observed_at_ms,
+                )
+                return True, resolved_path
+            with self._lock:
+                self.latest_session_id = ""
+                self.latest_title = title
+                self.latest_path = None
+                self._mapped_title = ""
+                self.latest_source = "renderer-pending-session"
+                self.latest_event_source = "renderer"
+                self._follow_state = "pending"
+                self._follow_reason = reason
+            return True, None
+        with self._lock:
             if self._renderer_pending_session:
                 self.latest_session_id = ""
                 self.latest_path = None
                 self._mapped_title = ""
                 self.latest_source = "renderer-pending-session"
                 self.latest_event_source = "renderer"
+                self._follow_state = "pending"
+                self._follow_reason = "awaiting-canonical-id"
                 return True, None
             if not self._renderer_session_id and not self._renderer_title:
                 return False, None
@@ -1060,6 +1230,8 @@ class ActiveSessionTracker:
                 self._mapped_title = title
                 self.latest_source = f"renderer:{compact_text(title or session_id)}"
                 self.latest_event_source = "renderer"
+                self._follow_state = "confirmed"
+                self._follow_reason = "confirmed"
             return True, path
         if session_id:
             path = self.path_from_renderer_thread_id(session_id)
@@ -1083,6 +1255,10 @@ class ActiveSessionTracker:
                 else "renderer-pending-map"
             )
             self.latest_event_source = "renderer"
+            self._follow_state = "confirmed" if path is not None else "pending"
+            self._follow_reason = (
+                "confirmed" if path is not None else "awaiting-exact-mapping"
+            )
         return True, path
 
     def _normalize_rollout_path(self, path_text: str) -> Path | None:

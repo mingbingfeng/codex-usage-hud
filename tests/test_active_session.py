@@ -865,6 +865,185 @@ class ActiveSessionTrackerTests(unittest.TestCase):
                 "renderer:Persisted Provisional Thread",
             )
 
+    def test_renderer_provisional_id_reconciles_after_mapping_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            state_db = root / "state_5.sqlite"
+            session_index = root / "session_index.jsonl"
+            platform = FakePlatform()
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+            resolver = SessionPathResolver(
+                platform,
+                sessions_root,
+                active_session_tracker=tracker,
+            )
+
+            tracker.observe_conversation_ref(
+                "",
+                "Persisted Later",
+                renderer_session_id="local:client-new-thread:pending-uuid",
+                pending_session=True,
+                selection_seq=7,
+                observed_at_ms=1234,
+            )
+            self.assertEqual(resolver.resolve(), (None, "renderer-pending-session"))
+            self.assertEqual(tracker.follow_reason, "awaiting-persistence")
+
+            session_path = sessions_root / "rollout-canonical-id.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            _write_thread_mapping(
+                state_db,
+                "canonical-id",
+                session_path,
+                title="Persisted Later",
+            )
+            session_index.write_text(
+                json.dumps(
+                    {"id": "canonical-id", "thread_name": "Persisted Later"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            tracker.invalidate_mapping_cache()
+
+            self.assertEqual(
+                resolver.resolve(),
+                (session_path, "renderer:Persisted Later"),
+            )
+            self.assertEqual(tracker.selection_seq, 7)
+            self.assertEqual(tracker.selection_observed_at_ms, 1234)
+            self.assertEqual(tracker.follow_state, "confirmed")
+            self.assertEqual(tracker.follow_reason, "confirmed")
+            self.assertGreater(tracker.selection_received_at_ms, 0)
+            self.assertGreaterEqual(
+                tracker.selection_resolved_at_ms,
+                tracker.selection_received_at_ms,
+            )
+
+    def test_renderer_provisional_duplicate_title_stays_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            state_db = root / "state_5.sqlite"
+            session_index = root / "session_index.jsonl"
+            paths = [sessions_root / f"rollout-{index}.jsonl" for index in (1, 2)]
+            for path in paths:
+                path.write_text("{}\n", encoding="utf-8")
+            con = sqlite3.connect(state_db)
+            try:
+                con.execute(
+                    "create table threads (id text primary key, rollout_path text, title text)"
+                )
+                con.executemany(
+                    "insert into threads values (?, ?, ?)",
+                    [
+                        ("thread-1", str(paths[0]), "Duplicate Title"),
+                        ("thread-2", str(paths[1]), "Duplicate Title"),
+                    ],
+                )
+                con.commit()
+            finally:
+                con.close()
+            session_index.write_text(
+                "\n".join(
+                    json.dumps({"id": thread_id, "thread_name": "Duplicate Title"})
+                    for thread_id in ("thread-1", "thread-2")
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            platform = FakePlatform()
+            tracker = ActiveSessionTracker(
+                platform=platform,
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=session_index,
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+            resolver = SessionPathResolver(
+                platform,
+                sessions_root,
+                active_session_tracker=tracker,
+            )
+
+            tracker.observe_conversation_ref(
+                "",
+                "Duplicate Title",
+                renderer_session_id="local:client-new-thread:pending-uuid",
+                pending_session=True,
+                selection_seq=3,
+            )
+
+            self.assertEqual(resolver.resolve(), (None, "renderer-pending-session"))
+            self.assertEqual(tracker.follow_reason, "ambiguous-persisted-identity")
+            self.assertEqual(platform.detect_calls, 0)
+
+    def test_renderer_ignores_stale_selection_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            sessions_root.mkdir()
+            session_path = sessions_root / "rollout-newer.jsonl"
+            session_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            _write_thread_mapping(state_db, "newer", session_path, title="Newer")
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            self.assertTrue(
+                tracker.observe_conversation_ref("newer", "Newer", selection_seq=2)
+            )
+            self.assertFalse(
+                tracker.observe_conversation_ref(
+                    "older",
+                    "Older",
+                    selection_seq=1,
+                )
+            )
+            self.assertEqual(tracker.latest_session_id, "newer")
+            self.assertEqual(tracker.selection_seq, 2)
+
+    def test_renderer_channel_disconnect_preserves_selection_and_reports_reason(self) -> None:
+        tracker = ActiveSessionTracker(
+            platform=FakePlatform(),
+            state_db=Path("state_5.sqlite"),
+            sessions_root=Path("sessions"),
+            session_index_path=Path("session_index.jsonl"),
+            poll_ms=250,
+            enabled=True,
+            start_background_watcher=False,
+        )
+        tracker.latest_session_id = "thread-current"
+        tracker.latest_title = "Current"
+
+        self.assertTrue(tracker.mark_renderer_channel_unavailable("binding closed"))
+        self.assertEqual(tracker.latest_session_id, "thread-current")
+        self.assertEqual(tracker.latest_title, "Current")
+        self.assertEqual(tracker.follow_state, "pending")
+        self.assertEqual(tracker.follow_reason, "renderer-channel-unavailable")
+        self.assertEqual(tracker.latest_event_source, "binding closed")
+
     def test_renderer_unmapped_uuid_stays_pending_without_activity_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

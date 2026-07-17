@@ -456,6 +456,12 @@ class ParsedSession:
     task_aborted_at: datetime | None = None
     final_answer_at: datetime | None = None
     selection_source: str = "activity"
+    renderer_session_id: str = ""
+    selection_seq: int = 0
+    selection_observed_at_ms: int = 0
+    follow_state: str = ""
+    follow_reason: str = ""
+    follow_timing: dict[str, int] = field(default_factory=dict)
     today_tokens: int = 0
     today_cost_usd: float = 0.0
     week_tokens: int = 0

@@ -39,7 +39,7 @@ from ..platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from ..support_assets import support_qr_payload
 
 RENDERER_HUD_ENV = "CODEX_USAGE_HUD_RENDERER"
-RENDERER_HUD_VERSION = "19"
+RENDERER_HUD_VERSION = "20"
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 SLOW_RENDERER_UPDATE_LOG_MS = 250.0
@@ -94,7 +94,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "24";
+  const version = "30";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -141,6 +141,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   const activeSessionCanonicalIdName = "__codexUsageHudActiveSessionCanonicalId";
   const activeSessionCanonicalAtName = "__codexUsageHudActiveSessionCanonicalAt";
   const activeSessionSettledTimerName = "__codexUsageHudActiveSessionSettledTimer";
+  const activeSessionSelectionKeyName = "__codexUsageHudActiveSessionSelectionKey";
+  const activeSessionSelectionSeqName = "__codexUsageHudActiveSessionSelectionSeq";
+  const activeSessionAppliedSeqName = "__codexUsageHudActiveSessionAppliedSeq";
+  const activeSessionPayloadCacheName = "__codexUsageHudActiveSessionPayloadCache";
     const activeSessionLastSignatureName = "__codexUsageHudActiveSessionLastSignature";
     const activeSessionBindingName = "codexUsageHudActiveSession";
     const settingsCommandBindingName = "codexUsageHudSettingsCommand";
@@ -167,12 +171,28 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   const settingsDirtyProviders = new Set();
   const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
   const numericAnimations = new WeakMap();
+  const previousActiveSessionSelectionSeq = Number(
+    window[activeSessionSelectionSeqName] || 0
+  );
+  const previousActiveSessionAppliedSeq = Number(
+    window[activeSessionAppliedSeqName] || 0
+  );
 
   try {
     if (typeof window.__codexUsageHudRemove === "function") {
       window.__codexUsageHudRemove({ preserveState: true });
     }
   } catch (_) {}
+  const restoredActiveSessionSelectionSeq = Math.max(
+    previousActiveSessionSelectionSeq,
+    previousActiveSessionAppliedSeq
+  );
+  if (restoredActiveSessionSelectionSeq > 0) {
+    window[activeSessionSelectionSeqName] = restoredActiveSessionSelectionSeq;
+  }
+  if (previousActiveSessionAppliedSeq > 0) {
+    window[activeSessionAppliedSeqName] = previousActiveSessionAppliedSeq;
+  }
 
   const PANEL = {
     top: {
@@ -3646,10 +3666,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const newSession = !!ref.newSession || reason === "new-session";
     const pendingSession = !!ref.pendingSession;
     if (!ref.sessionId && !ref.title && !newSession && !pendingSession) return;
-    const rendererSessionId = normalizeThreadId(
-      ref.sessionId || ref.rendererSessionId || "",
+    const rawRendererSessionId = normalize(
+      ref.rendererSessionId || ref.rawSessionId || ref.sessionId || "",
     );
-    const canonicalSessionId = activeSessionIdIsProvisional(rendererSessionId)
+    const rendererSessionId = normalizeThreadId(rawRendererSessionId);
+    const canonicalSessionId = activeSessionIdIsProvisional(rawRendererSessionId)
       ? ""
       : rendererSessionId;
     const lastCanonicalSessionId = normalizeThreadId(
@@ -3670,17 +3691,38 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }, 320);
       return;
     }
-    const signature = JSON.stringify([rendererSessionId, ref.title, ref.url || location.href, newSession, pendingSession]);
-    if (window[activeSessionLastSignatureName] === signature) return;
+    const selectionKey = JSON.stringify([
+      rawRendererSessionId,
+      ref.title,
+      newSession,
+      pendingSession,
+    ]);
+    if (window[activeSessionSelectionKeyName] !== selectionKey) {
+      window[activeSessionSelectionKeyName] = selectionKey;
+      window[activeSessionSelectionSeqName] = Number(window[activeSessionSelectionSeqName] || 0) + 1;
+    }
+    const selectionSeq = Math.max(1, Number(window[activeSessionSelectionSeqName] || 1));
+    const appliedSeq = Number(window[activeSessionAppliedSeqName] || 0);
+    const signature = JSON.stringify([
+      selectionSeq,
+      rawRendererSessionId,
+      ref.title,
+      ref.url || location.href,
+      newSession,
+      pendingSession,
+    ]);
+    if (window[activeSessionLastSignatureName] === signature && appliedSeq >= selectionSeq) return;
     const payload = {
-      sessionId: rendererSessionId,
+      sessionId: canonicalSessionId,
+      rendererSessionId: rawRendererSessionId,
+      selectionSeq,
       title: ref.title,
       url: ref.url || location.href,
       reason: newSession ? "new-session" : (pendingSession ? "pending-session" : reason),
       newSession,
       pendingSession,
       matchedBy: ref.matchedBy || "",
-      observedAt: Date.now(),
+      observedAt: Number(ref.observedAt || 0) || Date.now(),
     };
     const binding = window[activeSessionBindingName];
     if (typeof binding === "function") {
@@ -3736,6 +3778,72 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     window[activeSessionSettledTimerName] = 0;
   }
 
+  function showActiveSessionFollowFeedback(reason = "reading-session-data") {
+    const root = document.getElementById(rootId);
+    if (!root) return;
+    const message = reason === "renderer-channel-unavailable"
+      ? "会话切换暂停：renderer 事件通道不可用"
+      : "会话切换中：正在读取会话数据";
+    setText(root, "requestLine", message);
+    setText(root, "requestLineExpanded", message);
+  }
+
+  function activeSessionPayloadCache() {
+    const existing = window[activeSessionPayloadCacheName];
+    if (existing instanceof Map) return existing;
+    const cache = new Map();
+    window[activeSessionPayloadCacheName] = cache;
+    return cache;
+  }
+
+  function activeSessionPayloadKeys(value) {
+    const raw = normalize(value?.rendererSessionId || value?.rawSessionId || "");
+    const canonical = normalize(value?.sessionId || "");
+    return [...new Set([raw, canonical].filter(Boolean))];
+  }
+
+  function cacheActiveSessionPayload(payload) {
+    if (
+      !payload
+      || payload.cachedPreview
+      || payload.newSession
+      || payload.pendingSession
+      || payload.requestStatus !== "confirmed"
+    ) return;
+    const keys = activeSessionPayloadKeys(payload);
+    if (!keys.length) return;
+    const cache = activeSessionPayloadCache();
+    const cached = { ...payload, cachedPreview: false };
+    delete cached.payloadDomains;
+    for (const key of keys) cache.set(key, cached);
+    while (cache.size > 48) cache.delete(cache.keys().next().value);
+  }
+
+  function applyCachedActiveSessionPayload(ref, observedAt = 0) {
+    const cache = activeSessionPayloadCache();
+    const cached = activeSessionPayloadKeys(ref).map((key) => cache.get(key)).find(Boolean);
+    if (!cached || typeof window.__codexUsageHudUpdate !== "function") return false;
+    const domain = {
+      ...cached,
+      selectionSeq: Math.max(1, Number(window[activeSessionSelectionSeqName] || 1)),
+      selectionObservedAt: Number(observedAt || 0) || Date.now(),
+      followState: "cached",
+      followReason: "renderer-cached-preview",
+      cachedPreview: true,
+    };
+    window.__codexUsageHudUpdate({
+      ...domain,
+      payloadDomains: { sessionSwitch: domain },
+    });
+    window.__codexUsageHudCachedPreview = {
+      selectionSeq: domain.selectionSeq,
+      observedAt: domain.selectionObservedAt,
+      appliedAt: Date.now(),
+      rendererSessionId: normalize(ref?.rendererSessionId || ref?.rawSessionId || ""),
+    };
+    return true;
+  }
+
   function activeSessionComposerTarget(target) {
     if (!(target instanceof Node)) return false;
     const composer = composerElement();
@@ -3745,10 +3853,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function scheduleActiveSessionSendFollowup(reason = "composer-send", expectedSessionId = "") {
     clearActiveSessionSendFollowup();
-    const expected = normalizeThreadId(expectedSessionId);
+    const expected = normalize(expectedSessionId);
     const report = () => {
       const ref = readActiveSessionRef();
-      if (expected && ref.sessionId !== expected) return;
+      const current = normalize(ref.rendererSessionId || ref.rawSessionId || ref.sessionId || "");
+      if (expected && current !== expected) return;
       postActiveSession(reason, ref);
       refreshActiveSessionObserver();
     };
@@ -3893,6 +4002,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     delete window[activeSessionCanonicalIdName];
     delete window[activeSessionCanonicalAtName];
     delete window[activeSessionSettledTimerName];
+    delete window[activeSessionSelectionKeyName];
+    delete window[activeSessionSelectionSeqName];
+    delete window[activeSessionAppliedSeqName];
   }
 
   function ensureActiveSessionWatchers() {
@@ -3917,6 +4029,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           const ref = activeSessionRefFromRow(row);
           const pendingSession = !!ref.pendingSession;
           const newSession = !pendingSession && !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
+          const observedAt = Date.now();
+          showActiveSessionFollowFeedback(
+            typeof window[activeSessionBindingName] === "function"
+              ? "reading-session-data"
+              : "renderer-channel-unavailable"
+          );
           postActiveSession("click", {
             sessionId: (newSession || pendingSession) ? "" : (ref.sessionId || ""),
             rendererSessionId: ref.rendererSessionId || ref.rawSessionId || "",
@@ -3924,8 +4042,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
             url: activeSessionRowUrl(row),
             newSession,
             pendingSession,
+            observedAt,
           });
-          scheduleActiveSessionSendFollowup("click", ref.sessionId || "");
+          applyCachedActiveSessionPayload({
+            sessionId: ref.sessionId || "",
+            rendererSessionId: ref.rendererSessionId || ref.rawSessionId || "",
+          }, observedAt);
+          scheduleActiveSessionSendFollowup(
+            "click",
+            ref.rendererSessionId || ref.rawSessionId || ref.sessionId || "",
+          );
         }
       };
       document.addEventListener("click", window[activeSessionClickHandlerName], true);
@@ -7657,6 +7783,21 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     });
     renderTopDetails(root, payload || {});
     renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!(payload?.newSession || payload?.pendingSession));
+    applyActiveSessionSequence(payload);
+  }
+
+  function applyActiveSessionSequence(payload) {
+    if (payload?.cachedPreview) return;
+    const appliedSeq = Number(payload?.selectionSeq || 0);
+    if (appliedSeq > Number(window[activeSessionAppliedSeqName] || 0)) {
+      window[activeSessionAppliedSeqName] = appliedSeq;
+    }
+    if (appliedSeq > Number(window[activeSessionSelectionSeqName] || 0)) {
+      // A HUD reinjection can receive an observation from the previous script
+      // realm before installing the new one. Keep the next click monotonic
+      // relative to the Python tracker that already accepted that sequence.
+      window[activeSessionSelectionSeqName] = appliedSeq;
+    }
   }
 
   function applySessionSwitchPayload(root, payload) {
@@ -7672,6 +7813,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
       node.classList.toggle(errorClass, payload?.requestStatus === "error");
     });
+    applyActiveSessionSequence(payload);
   }
 
   function applySettingsPayload(root, payload) {
@@ -7722,6 +7864,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         ? normalizePayloadDomains(previousPayload)
         : {});
     const retainedDomains = { ...previousDomains, ...domains };
+    if ("sessionSwitch" in domains) cacheActiveSessionPayload(domains.sessionSwitch);
+    if ("currentSession" in domains) cacheActiveSessionPayload(domains.currentSession);
     if (
       (!payload?.supportImages || !payload.supportImages.length) &&
       previousPayload.supportImages?.length
@@ -8037,6 +8181,14 @@ class RendererHudPayload:
     warning: bool = False
     new_session: bool = False
     pending_session: bool = False
+    selection_seq: int = 0
+    session_id: str = ""
+    renderer_session_id: str = ""
+    selection_observed_at_ms: int = 0
+    follow_state: str = ""
+    follow_reason: str = ""
+    follow_elapsed_ms: int = 0
+    follow_timing: dict[str, int] = field(default_factory=dict)
     top_details: dict[str, object] = field(default_factory=dict)
     top_progress: dict[str, object] = field(default_factory=dict)
     top_copies: dict[str, str] = field(default_factory=dict)
@@ -8078,6 +8230,15 @@ class RendererHudPayload:
             "warning": self.warning,
             "newSession": bool(self.new_session),
             "pendingSession": bool(self.pending_session),
+            "selectionSeq": int(self.selection_seq),
+            "sessionId": self.session_id,
+            "rendererSessionId": self.renderer_session_id,
+            "cachedPreview": False,
+            "selectionObservedAt": int(self.selection_observed_at_ms),
+            "followState": self.follow_state,
+            "followReason": self.follow_reason,
+            "followElapsedMs": int(self.follow_elapsed_ms),
+            "followTiming": dict(self.follow_timing),
             "topDetails": dict(self.top_details),
             "topProgress": dict(self.top_progress),
             "topCopies": dict(self.top_copies),
@@ -8152,6 +8313,15 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "warning",
         "newSession",
         "pendingSession",
+        "selectionSeq",
+        "sessionId",
+        "rendererSessionId",
+        "cachedPreview",
+        "selectionObservedAt",
+        "followState",
+        "followReason",
+        "followElapsedMs",
+        "followTiming",
     )
     current_session_keys = (
         "topLine",
@@ -8165,6 +8335,14 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "warning",
         "newSession",
         "pendingSession",
+        "selectionSeq",
+        "sessionId",
+        "rendererSessionId",
+        "cachedPreview",
+        "selectionObservedAt",
+        "followState",
+        "followReason",
+        "followElapsedMs",
         "topDetails",
         "topCopies",
         "requestRows",
@@ -8267,12 +8445,15 @@ class _RendererBinding:
         *,
         timeout_seconds: float,
         disconnect_callback: Any = None,
+        retry_same_target: bool = False,
     ) -> None:
         self.binding_name = str(binding_name or "").strip()
         self.callback = callback
         self.timeout_seconds = max(0.05, float(timeout_seconds))
         self.disconnect_callback = disconnect_callback
+        self.retry_same_target = bool(retry_same_target)
         self._lock = threading.Lock()
+        self._send_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._ready_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -8280,6 +8461,10 @@ class _RendererBinding:
         self._websocket_url = ""
         self._target_id = ""
         self._disconnected_target_id = ""
+        self._next_command_id = 100
+        self._pending_responses: dict[
+            int, tuple[threading.Event, dict[str, object]]
+        ] = {}
 
     def ensure(self, websocket_url: str, target_id: str) -> None:
         """Start or restart the binding listener for the current page target.
@@ -8305,6 +8490,7 @@ class _RendererBinding:
                 disconnected_target_id
                 and disconnected_target_id == target_id
                 and websocket_url == self._websocket_url
+                and not self.retry_same_target
             ):
                 # Do not turn an auxiliary binding disconnect into a retry
                 # loop.  A real target transition supplies a new target id and
@@ -8331,6 +8517,48 @@ class _RendererBinding:
             ready_event = self._ready_event
         timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         return bool(ready_event.wait(max(0.0, float(timeout))))
+
+    def send_command(
+        self,
+        websocket_url: str,
+        method: str,
+        params: dict[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        """Send a CDP command over the already-subscribed binding socket."""
+        response_ready = threading.Event()
+        response: dict[str, object] = {}
+        with self._lock:
+            sock = self._sock
+            if (
+                sock is None
+                or websocket_url != self._websocket_url
+                or not self._ready_event.is_set()
+            ):
+                raise RuntimeError("renderer binding command channel is not ready")
+            command_id = self._next_command_id
+            self._next_command_id += 1
+            self._pending_responses[command_id] = (response_ready, response)
+        try:
+            with self._send_lock:
+                self._send_command(sock, command_id, method, params)
+        except Exception:
+            with self._lock:
+                self._pending_responses.pop(command_id, None)
+            raise
+        if not response_ready.wait(max(0.05, float(timeout_seconds))):
+            with self._lock:
+                self._pending_responses.pop(command_id, None)
+            raise TimeoutError("timed out waiting for persistent CDP response")
+        with self._lock:
+            self._pending_responses.pop(command_id, None)
+        error = response.get("error")
+        if error:
+            raise RuntimeError(str(error))
+        payload = response.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError("persistent CDP response was invalid")
+        return payload
 
     def close(self, *, join_timeout: float = 1.0) -> None:
         self._stop_event.set()
@@ -8387,6 +8615,17 @@ class _RendererBinding:
                     if not pending:
                         self._ready_event.set()
                     continue
+                try:
+                    response_id = int(command_id)
+                except (TypeError, ValueError):
+                    response_id = 0
+                with self._lock:
+                    pending_response = self._pending_responses.get(response_id)
+                if pending_response is not None:
+                    response_ready, response = pending_response
+                    response["payload"] = payload
+                    response_ready.set()
+                    continue
                 if payload.get("method") != "Runtime.bindingCalled":
                     continue
                 params = payload.get("params") or {}
@@ -8409,6 +8648,10 @@ class _RendererBinding:
                 stopped = self._stop_event.is_set()
                 if disconnect_reason and not stopped:
                     self._disconnected_target_id = self._target_id
+                pending_responses = list(self._pending_responses.values())
+            for response_ready, response in pending_responses:
+                response["error"] = disconnect_reason or "renderer binding closed"
+                response_ready.set()
             if (
                 disconnect_reason
                 and not stopped
@@ -8523,7 +8766,24 @@ class RendererHudClient:
                 ACTIVE_SESSION_BINDING_NAME,
                 callback,
                 timeout_seconds=self.timeout_seconds,
+                disconnect_callback=self._handle_active_session_binding_disconnect,
             )
+            self._active_session_binding.retry_same_target = True
+
+    def _handle_active_session_binding_disconnect(self, reason: str) -> None:
+        callback = self._active_session_callback
+        if not callable(callback):
+            return
+        try:
+            callback(
+                {
+                    "channelUnavailable": True,
+                    "reason": str(reason or "renderer binding disconnected"),
+                    "observedAt": int(time.time() * 1000),
+                }
+            )
+        except Exception:
+            return
 
     def set_settings_command_callback(self, callback: Any) -> None:
         """Receive renderer settings commands over CDP instead of HTTP fetch."""
@@ -8769,7 +9029,9 @@ class RendererHudClient:
         started = time.perf_counter()
         stage = "target_discovery"
         try:
+            target_started = time.perf_counter()
             target = self._page_target()
+            target_discovery_ms = (time.perf_counter() - target_started) * 1000.0
             websocket_url = str(target.get("webSocketDebuggerUrl") or "")
             target_id = str(target.get("id") or websocket_url)
             if not websocket_url:
@@ -8826,6 +9088,7 @@ class RendererHudClient:
         metrics = dict(self.last_update_metrics)
         metrics.update(
             {
+                "targetDiscoveryMs": target_discovery_ms,
                 "totalMs": (time.perf_counter() - started) * 1000.0,
                 "failureStage": "",
             }
@@ -8949,12 +9212,40 @@ class RendererHudClient:
             "})()"
         )
         started = time.perf_counter()
-        result = send_cdp_command(
-            websocket_url,
-            "Runtime.evaluate",
-            _runtime_expression_params(expression),
-            self.timeout_seconds,
-        )
+        transport = "ephemeral"
+        persistent_ms: float | None = None
+        persistent_fallback_reason = ""
+        fallback_ms: float | None = None
+        send_persistent = getattr(self._active_session_binding, "send_command", None)
+        if callable(send_persistent):
+            persistent_started = time.perf_counter()
+            try:
+                result = send_persistent(
+                    websocket_url,
+                    "Runtime.evaluate",
+                    _runtime_expression_params(expression),
+                    self.timeout_seconds,
+                )
+                persistent_ms = (time.perf_counter() - persistent_started) * 1000.0
+                transport = "active-session-binding"
+            except Exception as exc:
+                persistent_ms = (time.perf_counter() - persistent_started) * 1000.0
+                persistent_fallback_reason = f"{type(exc).__name__}: {exc}"
+                fallback_started = time.perf_counter()
+                result = send_cdp_command(
+                    websocket_url,
+                    "Runtime.evaluate",
+                    _runtime_expression_params(expression),
+                    self.timeout_seconds,
+                )
+                fallback_ms = (time.perf_counter() - fallback_started) * 1000.0
+        else:
+            result = send_cdp_command(
+                websocket_url,
+                "Runtime.evaluate",
+                _runtime_expression_params(expression),
+                self.timeout_seconds,
+            )
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         value = result.get("result", {}).get("result", {}).get("value", False)
         renderer_apply_ms: float | None = None
@@ -8978,6 +9269,10 @@ class RendererHudClient:
             "rendererApplyMs": renderer_apply_ms,
             "payloadBytes": len(payload_json.encode("utf-8")),
             "payloadDomains": payload_domains,
+            "transport": transport,
+            "persistentMs": persistent_ms,
+            "persistentFallbackReason": persistent_fallback_reason,
+            "fallbackMs": fallback_ms,
             "attribution": (
                 "hud_dom"
                 if renderer_apply_ms is not None
@@ -8989,14 +9284,23 @@ class RendererHudClient:
                 )
             ),
         }
-        if elapsed_ms >= SLOW_RENDERER_UPDATE_LOG_MS or (
+        slow_session_switch = (
+            "sessionSwitch" in payload_domains and elapsed_ms >= 150.0
+        )
+        if slow_session_switch or elapsed_ms >= SLOW_RENDERER_UPDATE_LOG_MS or (
             renderer_apply_ms is not None
             and renderer_apply_ms >= SLOW_RENDERER_UPDATE_LOG_MS
         ):
             _LOGGER.info(
-                "renderer_update_timing attribution=%s cdp_ms=%.1f renderer_apply_ms=%s payload_bytes=%s domains=%s ok=%s",
+                "renderer_update_timing attribution=%s transport=%s cdp_ms=%.1f persistent_ms=%s fallback_ms=%s fallback_reason=%s renderer_apply_ms=%s payload_bytes=%s domains=%s ok=%s",
                 self.last_update_metrics["attribution"],
+                transport,
                 elapsed_ms,
+                (
+                    f"{persistent_ms:.1f}" if persistent_ms is not None else "-"
+                ),
+                f"{fallback_ms:.1f}" if fallback_ms is not None else "-",
+                persistent_fallback_reason or "-",
                 (
                     f"{renderer_apply_ms:.1f}"
                     if renderer_apply_ms is not None
@@ -9100,7 +9404,9 @@ def payload_from_snapshot(
         }
     request_line = _request_total_line(snapshot)
     if pending_session:
-        request_line = "会话数据等待首个事件"
+        request_line = _follow_feedback(snapshot)
+    elif snapshot.follow_reason == "renderer-channel-unavailable":
+        request_line = _follow_feedback(snapshot)
     if snapshot.request.error:
         request_line = f"本次 Token 出错 | {_compact(snapshot.request.error, 120)}"
     pre_send_estimate = ""
@@ -9134,6 +9440,14 @@ def payload_from_snapshot(
         refreshed_at=_format_time(snapshot.refreshed_at),
         new_session=new_session,
         pending_session=pending_session,
+        selection_seq=int(snapshot.selection_seq or 0),
+        session_id=str(snapshot.session_id or ""),
+        renderer_session_id=str(snapshot.renderer_session_id or ""),
+        selection_observed_at_ms=int(snapshot.selection_observed_at_ms or 0),
+        follow_state=str(snapshot.follow_state or ""),
+        follow_reason=str(snapshot.follow_reason or ""),
+        follow_elapsed_ms=_follow_elapsed_ms(snapshot),
+        follow_timing=dict(snapshot.follow_timing or {}),
         warning=bool(
             snapshot.error
             or snapshot.request.error
@@ -9189,7 +9503,9 @@ def session_switch_payload_from_snapshot(
         top_line = f"{_status_label(snapshot.status)} | {_compact(snapshot.error, 120)}"
     request_line = _request_total_line(snapshot)
     if _is_pending_session_snapshot(snapshot):
-        request_line = "会话数据等待首个事件"
+        request_line = _follow_feedback(snapshot)
+    elif snapshot.follow_reason == "renderer-channel-unavailable":
+        request_line = _follow_feedback(snapshot)
     if snapshot.request.error:
         request_line = f"本次 Token 出错 | {_compact(snapshot.request.error, 120)}"
     domain = {
@@ -9209,6 +9525,15 @@ def session_switch_payload_from_snapshot(
         ),
         "newSession": bool(_is_new_session_snapshot(snapshot)),
         "pendingSession": bool(_is_pending_session_snapshot(snapshot)),
+        "selectionSeq": int(snapshot.selection_seq or 0),
+        "sessionId": str(snapshot.session_id or ""),
+        "rendererSessionId": str(snapshot.renderer_session_id or ""),
+        "cachedPreview": False,
+        "selectionObservedAt": int(snapshot.selection_observed_at_ms or 0),
+        "followState": str(snapshot.follow_state or ""),
+        "followReason": str(snapshot.follow_reason or ""),
+        "followElapsedMs": _follow_elapsed_ms(snapshot),
+        "followTiming": dict(snapshot.follow_timing or {}),
     }
     payload = dict(domain)
     payload["payloadDomains"] = {"sessionSwitch": dict(domain)}
@@ -9321,6 +9646,25 @@ def _session_label(snapshot: ParsedSession) -> str:
         return title
     session_id = str(snapshot.session_id or "n/a")
     return session_id[-12:] if len(session_id) > 12 else session_id
+
+
+def _follow_elapsed_ms(snapshot: ParsedSession) -> int:
+    observed_at_ms = int(snapshot.selection_observed_at_ms or 0)
+    if observed_at_ms <= 0:
+        return 0
+    return max(0, int(time.time() * 1000) - observed_at_ms)
+
+
+def _follow_feedback(snapshot: ParsedSession) -> str:
+    reason = str(snapshot.follow_reason or "").strip()
+    labels = {
+        "awaiting-canonical-id": "会话切换中：等待 Codex 提供正式会话 ID",
+        "awaiting-persistence": "会话切换中：等待 Codex 写入会话映射",
+        "awaiting-exact-mapping": "会话切换中：正式 ID 已收到，等待本地映射",
+        "ambiguous-persisted-identity": "会话切换暂停：存在同名历史会话，未自动匹配",
+        "renderer-channel-unavailable": "会话切换暂停：renderer 事件通道不可用",
+    }
+    return labels.get(reason, "会话切换中：正在确认当前会话")
 
 
 def _is_new_session_snapshot(snapshot: ParsedSession) -> bool:

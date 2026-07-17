@@ -28,6 +28,8 @@ except Exception:  # pragma: no cover - depends on local runtime
     _QTextOption = None
 
 WORK_OVERLAY_POINTER_SYNC_MS = 60
+WORK_OVERLAY_HOTSPOT_HIT_ALPHA = 8
+WORK_OVERLAY_HOTSPOT_HOVER_ALPHA = 0.96
 WORK_OVERLAY_WIDTH = 430
 WORK_OVERLAY_MARGIN = 16
 WORK_OVERLAY_TOP_OFFSET = 56
@@ -239,6 +241,12 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def _interactive_hotspot_opacity(base_opacity: float, hovered: bool) -> float:
+    if hovered:
+        return WORK_OVERLAY_HOTSPOT_HOVER_ALPHA
+    return _clamp01(base_opacity)
+
+
 def _ease_out_cubic(value: float) -> float:
     value = _clamp01(value)
     return 1.0 - pow(1.0 - value, 3)
@@ -263,7 +271,16 @@ def _detect_transition(
     old_items: Sequence[Mapping[str, object]],
     new_items: Sequence[Mapping[str, object]],
 ) -> str | None:
+    changes = _transition_changes(old_items, new_items)
+    return changes[0][1] if changes else None
+
+
+def _transition_changes(
+    old_items: Sequence[Mapping[str, object]],
+    new_items: Sequence[Mapping[str, object]],
+) -> list[tuple[str, str]]:
     old_by_id = {_item_id(item): item for item in old_items if _item_id(item)}
+    changes: list[tuple[str, str]] = []
     for item in new_items:
         item_id = _item_id(item)
         if not item_id or item_id not in old_by_id:
@@ -271,22 +288,39 @@ def _detect_transition(
         old_kind = _item_kind(old_by_id[item_id])
         new_kind = _item_kind(item)
         if old_kind == "card" and new_kind == "completed":
-            return "card_to_completed"
-        if old_kind == "completed" and new_kind == "card":
-            return "completed_to_card"
-    return None
+            changes.append((item_id, "card_to_completed"))
+        elif old_kind == "completed" and new_kind == "card":
+            changes.append((item_id, "completed_to_card"))
+    return changes
 
 
 def _detect_transition_item_id(
     old_items: Sequence[Mapping[str, object]],
     new_items: Sequence[Mapping[str, object]],
 ) -> str:
+    changes = _transition_changes(old_items, new_items)
+    return changes[0][0] if changes else ""
+
+
+def _defer_other_transition_items(
+    old_items: Sequence[Mapping[str, object]],
+    new_items: Sequence[Mapping[str, object]],
+    transition_item_id: str,
+) -> list[Mapping[str, object]]:
+    """Keep later shape changes at their displayed state until their turn."""
     old_by_id = {_item_id(item): item for item in old_items if _item_id(item)}
+    deferred_ids = {
+        item_id
+        for item_id, _transition_type in _transition_changes(old_items, new_items)
+        if item_id != transition_item_id
+    }
+    deferred_items: list[Mapping[str, object]] = []
     for item in new_items:
         item_id = _item_id(item)
-        if item_id and item_id in old_by_id and _item_kind(old_by_id[item_id]) != _item_kind(item):
-            return item_id
-    return ""
+        deferred_items.append(
+            dict(old_by_id[item_id]) if item_id in deferred_ids else item
+        )
+    return deferred_items
 
 
 def _completed_badge_slot_rects(
@@ -627,6 +661,10 @@ def _workdir_clickable_for_item(item: Mapping[str, object]) -> bool:
 
 def _workdir_link_hover_visible_for_item(item: Mapping[str, object]) -> bool:
     return not _item_is_cli(item) and not _item_is_completed(item)
+
+
+def _workdir_external_link_for_item(item: Mapping[str, object]) -> bool:
+    return _workdir_clickable_for_item(item) and not _item_is_completed(item)
 
 
 def _transition_required_height(
@@ -1659,6 +1697,7 @@ def run_work_overlay_helper_qt(
             self._fg = QColor("#A9B6C6")
             self._hover_fg = QColor("#F3D27A")
             self._hover = False
+            self._base_opacity = 1.0
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setFocusPolicy(focus_policy.NoFocus)
@@ -1679,16 +1718,29 @@ def run_work_overlay_helper_qt(
             self._hover_bg = QColor(hover_background)
             self._fg = QColor(foreground)
             self._hover_fg = QColor(hover_foreground)
-            self.setWindowOpacity(opacity)
+            self.set_overlay_opacity(opacity)
             self.update()
+
+        def set_overlay_opacity(self, opacity: float) -> None:
+            self._base_opacity = _clamp01(opacity)
+            if not self._hover:
+                self.setWindowOpacity(
+                    _interactive_hotspot_opacity(self._base_opacity, False)
+                )
 
         def enterEvent(self, event: object) -> None:
             self._hover = True
+            self.setWindowOpacity(
+                _interactive_hotspot_opacity(self._base_opacity, True)
+            )
             self.update()
             super().enterEvent(event)
 
         def leaveEvent(self, event: object) -> None:
             self._hover = False
+            self.setWindowOpacity(
+                _interactive_hotspot_opacity(self._base_opacity, False)
+            )
             self.update()
             super().leaveEvent(event)
 
@@ -1728,6 +1780,7 @@ def run_work_overlay_helper_qt(
             self._hover = False
             self._pending = False
             self._pending_started_at = 0.0
+            self._base_opacity = 1.0
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setFocusPolicy(focus_policy.NoFocus)
@@ -1744,7 +1797,7 @@ def run_work_overlay_helper_qt(
             self._item = dict(item)
             self._pending = bool(pending)
             self._pending_started_at = float(pending_started_at or 0.0)
-            self.setWindowOpacity(opacity)
+            self.set_overlay_opacity(opacity)
             tooltip = str(
                 item.get("targetTitle") or item.get("title") or item.get("workdir") or ""
             ).strip()
@@ -1753,13 +1806,26 @@ def run_work_overlay_helper_qt(
             self.setToolTip(tooltip)
             self.update()
 
+        def set_overlay_opacity(self, opacity: float) -> None:
+            self._base_opacity = _clamp01(opacity)
+            if not self._hover:
+                self.setWindowOpacity(
+                    _interactive_hotspot_opacity(self._base_opacity, False)
+                )
+
         def enterEvent(self, event: object) -> None:
             self._hover = True
+            self.setWindowOpacity(
+                _interactive_hotspot_opacity(self._base_opacity, True)
+            )
             self.update()
             super().enterEvent(event)
 
         def leaveEvent(self, event: object) -> None:
             self._hover = False
+            self.setWindowOpacity(
+                _interactive_hotspot_opacity(self._base_opacity, False)
+            )
             self.update()
             super().leaveEvent(event)
 
@@ -1777,15 +1843,24 @@ def run_work_overlay_helper_qt(
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setPen(Qt.PenStyle.NoPen)
-            # Keep a near-transparent fill so Windows still treats the hot area
-            # as a hit-testable layered window instead of letting clicks pass through.
-            fill = QColor(255, 255, 255, 1)
+            # Keep the post-opacity alpha non-zero so Windows layered hit-testing
+            # does not drop the hotspot while the parent bubble is at 0.22 opacity.
+            fill = QColor(255, 255, 255, WORK_OVERLAY_HOTSPOT_HIT_ALPHA)
             if self._hover and _workdir_link_hover_visible_for_item(self._item):
-                fill = QColor(156, 203, 255, 18)
+                fill = QColor(156, 203, 255, 48)
             if self._pending:
                 fill = QColor(156, 203, 255, 42)
             painter.setBrush(fill)
             painter.drawRoundedRect(self.rect(), 4, 4)
+            if self._hover and _workdir_link_hover_visible_for_item(self._item):
+                underline = QPen(QColor(231, 242, 255, 235), 1.6)
+                underline.setCapStyle(Qt.PenCapStyle.RoundCap)
+                painter.setPen(underline)
+                underline_y = max(1.0, float(self.height()) - 2.0)
+                painter.drawLine(
+                    QPointF(3.0, underline_y),
+                    QPointF(max(3.0, float(self.width()) - 3.0), underline_y),
+                )
             if not self._pending:
                 return
             elapsed = max(0.0, time.monotonic() - self._pending_started_at)
@@ -2087,6 +2162,7 @@ def run_work_overlay_helper_qt(
             self._circle = bool(circle)
             self._hover = False
             self._hover_color = QColor(hover_color)
+            self._base_opacity = 1.0
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setFocusPolicy(focus_policy.NoFocus)
@@ -2101,19 +2177,32 @@ def run_work_overlay_helper_qt(
             hover_color: str | None = None,
         ) -> None:
             self._item = dict(item)
-            self.setWindowOpacity(opacity)
+            self.set_overlay_opacity(opacity)
             self.setToolTip(tooltip)
             if hover_color is not None:
                 self._hover_color = QColor(hover_color)
             self.update()
 
+        def set_overlay_opacity(self, opacity: float) -> None:
+            self._base_opacity = _clamp01(opacity)
+            if not self._hover:
+                self.setWindowOpacity(
+                    _interactive_hotspot_opacity(self._base_opacity, False)
+                )
+
         def enterEvent(self, event: object) -> None:
             self._hover = True
+            self.setWindowOpacity(
+                _interactive_hotspot_opacity(self._base_opacity, True)
+            )
             self.update()
             super().enterEvent(event)
 
         def leaveEvent(self, event: object) -> None:
             self._hover = False
+            self.setWindowOpacity(
+                _interactive_hotspot_opacity(self._base_opacity, False)
+            )
             self.update()
             super().leaveEvent(event)
 
@@ -2142,15 +2231,19 @@ def run_work_overlay_helper_qt(
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setPen(Qt.PenStyle.NoPen)
-            fill = QColor(255, 255, 255, 1)
+            fill = QColor(255, 255, 255, WORK_OVERLAY_HOTSPOT_HIT_ALPHA)
             if self._hover:
                 fill = QColor(self._hover_color)
-                fill.setAlpha(18)
+                fill.setAlpha(56)
+                outline = QColor(self._hover_color)
+                outline.setAlpha(235)
+                painter.setPen(QPen(outline, 1.8))
             painter.setBrush(fill)
+            target_rect = self.rect().adjusted(1, 1, -1, -1)
             if self._circle:
-                painter.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
+                painter.drawEllipse(target_rect)
             else:
-                painter.drawRoundedRect(self.rect(), 6, 6)
+                painter.drawRoundedRect(target_rect, 6, 6)
 
     class EnergyRingAnnihilationWidget(QWidget):
         """Transient completion-circle disappearance effect."""
@@ -3186,11 +3279,11 @@ def run_work_overlay_helper_qt(
                 return
             self.setWindowOpacity(target)
             for close_window in self._close_windows:
-                close_window.setWindowOpacity(target)
+                close_window.set_overlay_opacity(target)
             for workdir_window in self._workdir_windows:
-                workdir_window.setWindowOpacity(target)
+                workdir_window.set_overlay_opacity(target)
             for check_window in self._completed_check_windows:
-                check_window.setWindowOpacity(target)
+                check_window.set_overlay_opacity(target)
 
         @staticmethod
         def _item_identity(item: Mapping[str, object], index: int) -> str:
@@ -3264,11 +3357,6 @@ def run_work_overlay_helper_qt(
             )
             hover_anchor.move(0, 0)
             hover_anchor.show()
-            workdir_anchor = QWidget(badge)
-            workdir_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-            workdir_anchor.setFixedSize(WORK_OVERLAY_COMPLETED_BADGE_SIZE - 24, 40)
-            workdir_anchor.move(12, 124)
-            workdir_anchor.show()
             check_anchor = QWidget(badge)
             check_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             check_anchor.setFixedSize(68, 56)
@@ -3279,7 +3367,6 @@ def run_work_overlay_helper_qt(
                 "item_id": item_id,
                 "badge": badge,
                 "hover_anchor": hover_anchor,
-                "workdir_anchor": workdir_anchor,
                 "check_anchor": check_anchor,
             }
             self._item_widgets.append(record)
@@ -3303,9 +3390,6 @@ def run_work_overlay_helper_qt(
                 completed_at=self._switch_pending_completed_at if completed else 0.0,
             )
             self._completed_hover_anchors.append(record["hover_anchor"])
-            workdir_text = _workdir_display_name(item)
-            if workdir_text and _workdir_clickable_for_item(item):
-                self._workdir_anchors.append((record["workdir_anchor"], dict(item)))
             self._completed_check_anchors.append((record["check_anchor"], dict(item)))
 
         def _build_item_card(self, item: Mapping[str, object]) -> None:
@@ -3541,7 +3625,7 @@ def run_work_overlay_helper_qt(
                 self._close_anchors.append(
                     (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
                 )
-                if workdir_clickable:
+                if _workdir_external_link_for_item(item):
                     self._workdir_anchors.append((record["workdir_label"], dict(item)))
             switch_overlay = record.get("switch_overlay")
             if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):
@@ -4772,9 +4856,14 @@ def run_work_overlay_helper_qt(
             if transition is not None:
                 item_id = _detect_transition_item_id(self._previous_visible_items, visible_items)
                 if item_id:
-                    self._layout_width = _transition_layout_width(
+                    transition_items = _defer_other_transition_items(
                         self._previous_visible_items,
                         visible_items,
+                        item_id,
+                    )
+                    self._layout_width = _transition_layout_width(
+                        self._previous_visible_items,
+                        transition_items,
                     )
                     self._layout_items = list(self._previous_visible_items)
                     self._sync_overlay_geometry()
@@ -4783,9 +4872,9 @@ def run_work_overlay_helper_qt(
                         transition,
                         item_id,
                         self._previous_visible_items,
-                        visible_items,
+                        transition_items,
                     )
-                    self._previous_visible_items = list(visible_items)
+                    self._previous_visible_items = list(transition_items)
                     return
             self._previous_visible_items = list(visible_items)
             self._last_payload_signature = payload_signature

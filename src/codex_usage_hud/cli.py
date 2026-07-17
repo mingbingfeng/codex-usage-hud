@@ -130,6 +130,7 @@ RENDERER_FILE_WATCHER_FALLBACK_SECONDS = 5.0
 RENDERER_FILE_EVENT_DEBOUNCE_SECONDS = 0.75
 RENDERER_EVENT_IDLE_WAIT_SECONDS = 30.0
 RENDERER_ACTIVE_WORK_RESCAN_SECONDS = 5.0
+RENDERER_ACTIVE_WORK_AFTER_SESSION_DELAY_SECONDS = 1.2
 HUD_LOCK_FILENAME = "codex_usage_hud.pid"
 HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
@@ -143,6 +144,11 @@ DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
 RENDERER_INITIAL_TIMEOUT_SECONDS = 0.75
 RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS = 2.0
 DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 10.0
+# A just-restarted Codex needs a materially longer CDP readiness window than
+# an already-running instance. Keep this bounded so a failed restart still
+# returns control instead of relaunching indefinitely.
+RENDERER_RESTART_CDP_TIMEOUT_SECONDS = 1.5
+RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS = 30.0
 DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
 RENDERER_ACTIVE_SESSION_BOOTSTRAP_WAIT_SECONDS = 0.35
 RENDERER_STARTUP_STEP_MIN_VISIBLE_SECONDS = 0.45
@@ -171,7 +177,8 @@ VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
 WORK_OVERLAY_KEEPALIVE_SECONDS = 15.0
 WORK_OVERLAY_ALPHA = 0.88
-WORK_OVERLAY_HOVER_ALPHA = 0.52
+# Let the work bubble fade far enough on hover to keep content beneath it readable.
+WORK_OVERLAY_HOVER_ALPHA = 0.22
 WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
 WORK_OVERLAY_RESTART_BACKOFF_SECONDS = 60.0
 WORK_OVERLAY_TOP_OFFSET = 56
@@ -1809,6 +1816,7 @@ def launch_codex_app(*, debugger: bool = False) -> bool:
                 parameters=parameters,
                 working_dir=executable.parent,
             ):
+                _remember_requested_renderer_cdp_port(port)
                 _LOGGER.info(
                     "codex_app_launched mode=debugger target=%s port=%s",
                     executable,
@@ -1817,6 +1825,7 @@ def launch_codex_app(*, debugger: bool = False) -> bool:
                 return True
         for target in _codex_app_shell_targets():
             if _shell_execute_open(target, parameters=parameters):
+                _remember_requested_renderer_cdp_port(port)
                 _LOGGER.info(
                     "codex_app_launched mode=debugger target=%s port=%s",
                     target,
@@ -2124,18 +2133,36 @@ def _explicit_renderer_cdp_port_from_env() -> int | None:
 
 
 def _read_persisted_renderer_cdp_port() -> int | None:
+    return _read_persisted_renderer_cdp_state_port("lastSuccessfulPort")
+
+
+def _read_persisted_renderer_cdp_state_port(key: str) -> int | None:
     try:
         data = json.loads(renderer_cdp_state_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     try:
-        port = int(data.get("lastSuccessfulPort"))
+        port = int(data.get(key))
     except (AttributeError, TypeError, ValueError):
         return None
     return port if 0 < port < 65536 else None
 
 
-def _remember_successful_renderer_cdp_port(port: int | None) -> None:
+def _localhost_cdp_port_is_listening(port: int | None) -> bool:
+    try:
+        value = int(port or 0)
+        with socket.create_connection(("127.0.0.1", value), timeout=0.2):
+            return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _remember_renderer_cdp_port(
+    port: int | None,
+    *,
+    requested: bool = False,
+    successful: bool = False,
+) -> None:
     if port is None:
         return
     try:
@@ -2145,15 +2172,29 @@ def _remember_successful_renderer_cdp_port(port: int | None) -> None:
     if value <= 0 or value >= 65536:
         return
     path = renderer_cdp_state_path()
-    payload = {
-        "lastSuccessfulPort": value,
-        "updatedAt": datetime.now().astimezone().isoformat(),
-    }
     try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        payload = dict(existing) if isinstance(existing, Mapping) else {}
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    try:
+        if requested:
+            payload["lastRequestedPort"] = value
+        if successful:
+            payload["lastSuccessfulPort"] = value
+        payload["updatedAt"] = datetime.now().astimezone().isoformat()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
     except OSError:
         return
+
+
+def _remember_requested_renderer_cdp_port(port: int | None) -> None:
+    _remember_renderer_cdp_port(port, requested=True)
+
+
+def _remember_successful_renderer_cdp_port(port: int | None) -> None:
+    _remember_renderer_cdp_port(port, requested=True, successful=True)
 
 
 def _select_initial_renderer_cdp_port() -> int:
@@ -2163,12 +2204,20 @@ def _select_initial_renderer_cdp_port() -> int:
         return explicit
 
     persisted = _read_persisted_renderer_cdp_port()
-    selected = persisted or DEFAULT_CDP_PORT
+    requested = _read_persisted_renderer_cdp_state_port("lastRequestedPort")
+    # A cold-start attach may finish after the HUD process times out. Reuse its
+    # port only when it is now alive; an old failed request must not displace a
+    # known successful endpoint or create another restart loop.
+    selected = (
+        requested
+        if requested is not None and _localhost_cdp_port_is_listening(requested)
+        else persisted or DEFAULT_CDP_PORT
+    )
     os.environ[CDP_PORT_ENV] = str(selected)
     _LOGGER.info(
         "renderer_cdp_port_selected fixed=%s source=%s",
         selected,
-        "persisted" if persisted else "default",
+        "requested" if selected == requested else "persisted" if persisted else "default",
     )
     return selected
 
@@ -2375,6 +2424,59 @@ def _renderer_should_refresh_active_work_items(
         now_monotonic - latest_active_work_refresh_at
         >= RENDERER_ACTIVE_WORK_RESCAN_SECONDS
     )
+
+
+def _renderer_snapshot_selection_is_stale(
+    snapshot: ParsedSession,
+    tracker: object | None,
+) -> bool:
+    snapshot_seq = int(getattr(snapshot, "selection_seq", 0) or 0)
+    current_seq = int(getattr(tracker, "selection_seq", 0) or 0)
+    return bool(snapshot_seq and current_seq and snapshot_seq != current_seq)
+
+
+def _renderer_active_session_observation_should_refresh(
+    *,
+    changed: bool,
+    selection_seq: object,
+    tracker: object | None,
+) -> bool:
+    """Retry the current selection until the renderer applies its sequence."""
+    if changed:
+        return True
+    try:
+        incoming_seq = int(selection_seq or 0)
+        current_seq = int(getattr(tracker, "selection_seq", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(incoming_seq > 0 and incoming_seq == current_seq)
+
+
+def _renderer_should_use_visible_first_active_session(
+    *,
+    active_session_requested: bool,
+    latest_snapshot: ParsedSession | None,
+    has_command: bool,
+    has_settings_command_status: bool,
+    update_phase: str,
+) -> bool:
+    """Keep coalesced filesystem writes off the selected-session click path."""
+    return bool(
+        active_session_requested
+        and latest_snapshot is not None
+        and not has_command
+        and not has_settings_command_status
+        and update_phase != "downloading"
+    )
+
+
+def _renderer_deferred_active_work_refresh_due(
+    *,
+    pending: bool,
+    not_before: float,
+    now_monotonic: float,
+) -> bool:
+    return bool(pending and now_monotonic >= not_before)
 
 
 def _renderer_file_watch_specs(
@@ -4284,6 +4386,88 @@ def active_work_items_for_snapshot(
     )
 
 
+class _RendererActiveWorkPump:
+    """Build recent-work items off the latency-critical renderer loop."""
+
+    def __init__(self, context: "RuntimeContext", wake_event: Event) -> None:
+        self._context = context
+        self._wake_event = wake_event
+        self._lock = threading.Lock()
+        self._closed = False
+        self._pending: tuple[ParsedSession, Path | None, int] | None = None
+        self._latest: tuple[int, list[WorkStatusItem]] | None = None
+        self._worker: threading.Thread | None = None
+
+    def request(self, snapshot: ParsedSession, session_path: Path | None) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            self._pending = (
+                copy.copy(snapshot),
+                session_path,
+                int(snapshot.selection_seq or 0),
+            )
+            if self._worker is not None and self._worker.is_alive():
+                return True
+            self._worker = threading.Thread(
+                target=self._run,
+                name="codex-usage-hud-renderer-active-work",
+                daemon=True,
+            )
+            self._worker.start()
+        return True
+
+    def take_latest(self) -> tuple[int, list[WorkStatusItem]] | None:
+        with self._lock:
+            latest = self._latest
+            self._latest = None
+            return latest
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._pending = None
+            worker = self._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=0.2)
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                if self._closed:
+                    self._worker = None
+                    return
+                request = self._pending
+                self._pending = None
+            if request is None:
+                with self._lock:
+                    self._worker = None
+                return
+            snapshot, session_path, selection_seq = request
+            try:
+                items = active_work_items_for_snapshot(
+                    self._context,
+                    snapshot,
+                    session_path,
+                )
+            except Exception as exc:
+                _LOGGER.info(
+                    "renderer_active_work_refresh_failed error=%s",
+                    f"{type(exc).__name__}: {exc}",
+                )
+                items = []
+            with self._lock:
+                if self._closed:
+                    self._worker = None
+                    return
+                if self._pending is not None:
+                    continue
+                self._latest = (selection_seq, items)
+                self._worker = None
+            self._wake_event.set()
+            return
+
+
 def _visible_app_error_task_key(snapshot: ParsedSession) -> str:
     started_at = snapshot.task_started_at or snapshot.request.started_at
     return json.dumps(
@@ -4450,6 +4634,16 @@ class _SessionSnapshotCacheEntry:
     accessed_at: float
 
 
+def _clone_cached_session_snapshot(snapshot: ParsedSession) -> ParsedSession:
+    """Clone mutable runtime fields while sharing parsed history read-only."""
+    cloned = copy.copy(snapshot)
+    cloned.request = copy.copy(snapshot.request)
+    cloned.budget_warnings = list(snapshot.budget_warnings)
+    cloned.active_work_items = list(snapshot.active_work_items)
+    cloned.follow_timing = dict(snapshot.follow_timing)
+    return cloned
+
+
 class SessionSnapshotCache:
     """Keep cold session parsing off the renderer refresh path.
 
@@ -4512,7 +4706,7 @@ class SessionSnapshotCache:
                 and entry.mtime == stat.st_mtime
             ):
                 entry.accessed_at = time.monotonic()
-                return copy.deepcopy(entry.snapshot)
+                return _clone_cached_session_snapshot(entry.snapshot)
             self._enqueue_locked(key, session_id)
         return self._parser.parse_file_tail_preview(
             key,
@@ -5281,8 +5475,37 @@ def _record_active_session_runtime_error(
     if registry is None:
         return
     source = str(selection_source or "")
+    pending_codes = {
+        "awaiting-canonical-id": "awaiting_canonical_id",
+        "awaiting-persistence": "awaiting_persistence",
+        "awaiting-exact-mapping": "awaiting_exact_mapping",
+        "ambiguous-persisted-identity": "ambiguous_persisted_identity",
+        "renderer-channel-unavailable": "renderer_channel_unavailable",
+    }
+    tracker = getattr(context, "active_session_tracker", None)
+    follow_reason = str(getattr(tracker, "follow_reason", "") or "")
+    if is_pending_session_source(source):
+        code = pending_codes.get(follow_reason, "pending_mapping")
+        registry.record(
+            source="active_session",
+            severity=(
+                "error"
+                if follow_reason
+                in {"ambiguous-persisted-identity", "renderer-channel-unavailable"}
+                else "warning"
+            ),
+            code=code,
+            message="Renderer active session is waiting for exact local reconciliation.",
+            context={
+                "selectionSource": source,
+                "followReason": follow_reason,
+                "selectionSeq": int(getattr(tracker, "selection_seq", 0) or 0),
+                "threadId": str(getattr(tracker, "latest_session_id", "") or ""),
+                "title": str(getattr(tracker, "latest_title", "") or ""),
+            },
+        )
+        return
     if source.startswith("renderer-unmatched"):
-        tracker = getattr(context, "active_session_tracker", None)
         registry.record(
             source="active_session",
             severity="error",
@@ -5299,6 +5522,9 @@ def _record_active_session_runtime_error(
         return
     if source.startswith("renderer:") or is_new_session_source(source):
         registry.resolve(source="active_session", code="unmatched_thread")
+        registry.resolve(source="active_session", code="pending_mapping")
+        for code in pending_codes.values():
+            registry.resolve(source="active_session", code=code)
 
 
 def _record_cdp_update_failure(
@@ -5347,9 +5573,13 @@ def build_snapshot(
     refresh_budget_paths: Iterable[Path] = (),
     refresh_active_work_items: bool = True,
     refresh_current_session_usage: bool = True,
+    reuse_budget_from: ParsedSession | None = None,
+    refresh_visible_app_error: bool = True,
 ) -> ParsedSession:
+    build_started_at_ms = int(time.time() * 1000)
     context.reload_user_config()
     session_path, selection_source = context.session_resolver.resolve()
+    session_resolved_at_ms = int(time.time() * 1000)
     _record_active_session_runtime_error(context, selection_source, session_path)
 
     if session_path is None:
@@ -5398,65 +5628,103 @@ def build_snapshot(
                 sse_tracker=context.sse_tracker,
             )
             context.current_session_tail_state = tail_state
+    session_parsed_at_ms = int(time.time() * 1000)
     snapshot.selection_source = selection_source
-    if context.active_session_tracker is not None and session_path is not None:
-        snapshot.session_title = context.active_session_tracker.title_for_session(
-            session_path,
-            snapshot.session_id,
+    if context.active_session_tracker is not None:
+        tracker = context.active_session_tracker
+        snapshot.renderer_session_id = str(
+            getattr(tracker, "renderer_session_id", "") or ""
         )
+        snapshot.selection_seq = int(getattr(tracker, "selection_seq", 0) or 0)
+        snapshot.selection_observed_at_ms = int(
+            getattr(tracker, "selection_observed_at_ms", 0) or 0
+        )
+        snapshot.follow_state = str(getattr(tracker, "follow_state", "") or "")
+        snapshot.follow_reason = str(getattr(tracker, "follow_reason", "") or "")
+        snapshot.follow_timing = {
+            "observedAt": int(getattr(tracker, "selection_observed_at_ms", 0) or 0),
+            "receivedAt": int(getattr(tracker, "selection_received_at_ms", 0) or 0),
+            "resolvedAt": int(getattr(tracker, "selection_resolved_at_ms", 0) or 0),
+        }
+        if session_path is not None:
+            snapshot.session_title = tracker.title_for_session(
+                session_path,
+                snapshot.session_id,
+            )
+    tracker_enriched_at_ms = int(time.time() * 1000)
     app_error = context.visible_app_error_cache.resolve(
         snapshot,
-        _visible_app_error(context.platform),
+        _visible_app_error(context.platform) if refresh_visible_app_error else "",
     )
     _apply_visible_app_error(snapshot, app_error)
+    app_error_checked_at_ms = int(time.time() * 1000)
 
-    day_start, week_start = current_budget_windows(context.user_config)
-    refresh_budget_paths = tuple(Path(path) for path in refresh_budget_paths)
-    if (
-        refresh_budget_aggregate is False
-        and not refresh_budget_paths
-        and session_path is not None
-        and refresh_current_session_usage
-    ):
-        refresh_budget_paths = (session_path,)
-    provider_scope = _effective_provider_scope(context, snapshot)
-    today_total, week_total = context.usage_cache.summarize(
-        context.sessions_root,
-        day_start,
-        week_start,
-        allow_stale=refresh_budget_aggregate is False,
-        force_rescan=refresh_budget_aggregate is True,
-        refresh_paths=refresh_budget_paths,
-        included_providers=provider_scope,
-    )
-    week_adjustment_usd = context.user_config.weekly_adjustment_for_scope(
-        provider_scope
-    )
-    snapshot.today_tokens = today_total.tokens
-    snapshot.today_cost_usd = today_total.cost_usd
-    snapshot.week_tokens = week_total.tokens
-    snapshot.week_cost_usd = round(week_total.cost_usd + week_adjustment_usd, 6)
-    prior_week_total = usage_before_today_in_week(
-        week_total,
-        today_total,
-        day_start,
-        week_start,
-    )
-    snapshot.week_before_today_tokens = prior_week_total.tokens
-    snapshot.week_before_today_cost_usd = prior_week_total.cost_usd
-    snapshot.week_adjustment_usd = week_adjustment_usd
-    snapshot.daily_limit_usd = context.daily_budget_usd
-    snapshot.weekly_limit_usd = context.weekly_budget_usd
-    snapshot.day_start = day_start
-    snapshot.week_start = week_start
-    snapshot.budget_warnings = budget_warnings(
-        today_total.cost_usd,
-        snapshot.week_cost_usd,
-        context.daily_budget_usd,
-        context.weekly_budget_usd,
-        context.budget_thresholds,
-    )
-    snapshot.budget_error = "" if context.sessions_root.exists() else snapshot.error
+    if reuse_budget_from is not None:
+        for field_name in (
+            "today_tokens",
+            "today_cost_usd",
+            "week_tokens",
+            "week_cost_usd",
+            "week_before_today_tokens",
+            "week_before_today_cost_usd",
+            "week_adjustment_usd",
+            "daily_limit_usd",
+            "weekly_limit_usd",
+            "day_start",
+            "week_start",
+            "budget_error",
+        ):
+            setattr(snapshot, field_name, getattr(reuse_budget_from, field_name))
+        snapshot.budget_warnings = list(reuse_budget_from.budget_warnings)
+    else:
+        day_start, week_start = current_budget_windows(context.user_config)
+        refresh_budget_paths = tuple(Path(path) for path in refresh_budget_paths)
+        if (
+            refresh_budget_aggregate is False
+            and not refresh_budget_paths
+            and session_path is not None
+            and refresh_current_session_usage
+        ):
+            refresh_budget_paths = (session_path,)
+        provider_scope = _effective_provider_scope(context, snapshot)
+        today_total, week_total = context.usage_cache.summarize(
+            context.sessions_root,
+            day_start,
+            week_start,
+            allow_stale=refresh_budget_aggregate is False,
+            force_rescan=refresh_budget_aggregate is True,
+            refresh_paths=refresh_budget_paths,
+            included_providers=provider_scope,
+        )
+        week_adjustment_usd = context.user_config.weekly_adjustment_for_scope(
+            provider_scope
+        )
+        snapshot.today_tokens = today_total.tokens
+        snapshot.today_cost_usd = today_total.cost_usd
+        snapshot.week_tokens = week_total.tokens
+        snapshot.week_cost_usd = round(week_total.cost_usd + week_adjustment_usd, 6)
+        prior_week_total = usage_before_today_in_week(
+            week_total,
+            today_total,
+            day_start,
+            week_start,
+        )
+        snapshot.week_before_today_tokens = prior_week_total.tokens
+        snapshot.week_before_today_cost_usd = prior_week_total.cost_usd
+        snapshot.week_adjustment_usd = week_adjustment_usd
+        snapshot.daily_limit_usd = context.daily_budget_usd
+        snapshot.weekly_limit_usd = context.weekly_budget_usd
+        snapshot.day_start = day_start
+        snapshot.week_start = week_start
+        snapshot.budget_warnings = budget_warnings(
+            today_total.cost_usd,
+            snapshot.week_cost_usd,
+            context.daily_budget_usd,
+            context.weekly_budget_usd,
+            context.budget_thresholds,
+        )
+        snapshot.budget_error = "" if context.sessions_root.exists() else snapshot.error
+    usage_summarized_at_ms = int(time.time() * 1000)
     if refresh_active_work_items:
         snapshot.active_work_items = active_work_items_for_snapshot(
             context,
@@ -5464,6 +5732,16 @@ def build_snapshot(
             session_path,
         )
     _apply_pre_send_and_activity(context, snapshot)
+    snapshot.follow_timing = {
+        **dict(snapshot.follow_timing or {}),
+        "buildStartedAt": build_started_at_ms,
+        "sessionResolvedAt": session_resolved_at_ms,
+        "sessionParsedAt": session_parsed_at_ms,
+        "trackerEnrichedAt": tracker_enriched_at_ms,
+        "appErrorCheckedAt": app_error_checked_at_ms,
+        "usageSummarizedAt": usage_summarized_at_ms,
+        "runtimeEnrichedAt": int(time.time() * 1000),
+    }
     return snapshot
 
 
@@ -5873,10 +6151,13 @@ def run_renderer_hud_session(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
             renderer_cdp_timeout = (
-                DAEMON_RENDERER_CDP_TIMEOUT_SECONDS
-                if daemon_manager is not None
-                and (launched_codex or not codex_was_running)
-                else RENDERER_CDP_TIMEOUT_SECONDS
+                RENDERER_RESTART_CDP_TIMEOUT_SECONDS
+                if launched_codex
+                else (
+                    DAEMON_RENDERER_CDP_TIMEOUT_SECONDS
+                    if daemon_manager is not None and not codex_was_running
+                    else RENDERER_CDP_TIMEOUT_SECONDS
+                )
             )
             client = RendererHudClient(timeout_seconds=renderer_cdp_timeout)
             update_manager = AutoUpdateManager(current_version=__version__)
@@ -5969,6 +6250,14 @@ def run_renderer_hud_session(
 
             def observe_renderer_active_session(payload: dict[str, object]) -> None:
                 tracker = getattr(context, "active_session_tracker", None)
+                if bool(
+                    payload.get("channelUnavailable")
+                    or payload.get("channel_unavailable")
+                ):
+                    marker = getattr(tracker, "mark_renderer_channel_unavailable", None)
+                    if callable(marker):
+                        marker(str(payload.get("reason") or ""))
+                    return
                 observer = getattr(tracker, "observe_conversation_ref", None)
                 if not callable(observer):
                     return
@@ -5979,6 +6268,23 @@ def run_renderer_hud_session(
                     "title": str(payload.get("title") or ""),
                     "source": "renderer",
                 }
+                renderer_session_id = str(
+                    payload.get("rendererSessionId")
+                    or payload.get("renderer_session_id")
+                    or ""
+                )
+                if renderer_session_id:
+                    observer_kwargs["renderer_session_id"] = renderer_session_id
+                selection_seq = payload.get("selectionSeq") or payload.get(
+                    "selection_seq"
+                )
+                if selection_seq:
+                    observer_kwargs["selection_seq"] = selection_seq
+                observed_at_ms = payload.get("observedAt") or payload.get(
+                    "observed_at_ms"
+                )
+                if observed_at_ms:
+                    observer_kwargs["observed_at_ms"] = observed_at_ms
                 if bool(payload.get("newSession") or payload.get("new_session")):
                     observer_kwargs["new_session"] = True
                 if bool(
@@ -5986,7 +6292,11 @@ def run_renderer_hud_session(
                 ):
                     observer_kwargs["pending_session"] = True
                 changed = observer(**observer_kwargs)
-                if changed:
+                if _renderer_active_session_observation_should_refresh(
+                    changed=bool(changed),
+                    selection_seq=selection_seq,
+                    tracker=tracker,
+                ):
                     publish_active_session_changed("renderer_bridge")
 
             def observe_renderer_attachments(payload: dict[str, object]) -> None:
@@ -6166,6 +6476,8 @@ def run_renderer_hud_session(
                 refresh_budget_paths: Iterable[Path] = (),
                 refresh_active_work_items: bool = True,
                 refresh_current_session_usage: bool = True,
+                reuse_budget_from: ParsedSession | None = None,
+                refresh_visible_app_error: bool = True,
             ) -> ParsedSession:
                 try:
                     if refresh_budget_aggregate is None and refresh_active_work_items:
@@ -6179,6 +6491,10 @@ def run_renderer_hud_session(
                         "refresh_budget_aggregate": refresh_budget_aggregate,
                         "refresh_budget_paths": refresh_budget_paths,
                     }
+                    if reuse_budget_from is not None:
+                        snapshot_kwargs["reuse_budget_from"] = reuse_budget_from
+                    if not refresh_visible_app_error:
+                        snapshot_kwargs["refresh_visible_app_error"] = False
                     if not refresh_current_session_usage:
                         snapshot_kwargs["refresh_current_session_usage"] = False
                     if refresh_active_work_items:
@@ -6203,7 +6519,10 @@ def run_renderer_hud_session(
                 wait_for_window = launched_codex or (
                     sys.platform.startswith("win") and not codex_was_running
                 )
-                launch_if_missing = True
+                # The explicit recovery path already launched Codex with the
+                # fresh CDP port. The process/window may take seconds to
+                # appear; launching again here races that same startup.
+                launch_if_missing = not launched_codex
                 if local_loading is not None:
                     local_loading.update(
                         title=(
@@ -6270,9 +6589,13 @@ def run_renderer_hud_session(
                         return RENDERER_HUD_UNAVAILABLE
 
                 initial_timeout = (
-                    DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS
-                    if wait_for_window
-                    else RENDERER_INITIAL_TIMEOUT_SECONDS
+                    RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS
+                    if launched_codex
+                    else (
+                        DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS
+                        if wait_for_window
+                        else RENDERER_INITIAL_TIMEOUT_SECONDS
+                    )
                 )
                 if local_loading is not None:
                     local_loading.update(
@@ -6441,6 +6764,10 @@ def run_renderer_hud_session(
                     context,
                     command_refresh_requested,
                 )
+                active_work_pump = _RendererActiveWorkPump(
+                    context,
+                    command_refresh_requested,
+                )
                 if local_loading is not None:
                     local_loading.close()
                 command_pump.start()
@@ -6513,6 +6840,7 @@ def run_renderer_hud_session(
                     latest_update_state: dict[str, object] | None = None
                     latest_active_work_refresh_at: float = 0.0
                     active_work_refresh_pending: bool = False
+                    active_work_refresh_not_before: float = 0.0
 
                 loop_state = _RendererLoopState()
 
@@ -6680,6 +7008,31 @@ def run_renderer_hud_session(
 
                 def sample_tick_inputs() -> _RendererTickInputs:
                     started_at = time.monotonic()
+                    active_work_result = active_work_pump.take_latest()
+                    if active_work_result is not None:
+                        result_seq, result_items = active_work_result
+                        tracker = getattr(context, "active_session_tracker", None)
+                        current_seq = int(getattr(tracker, "selection_seq", 0) or 0)
+                        latest_seq = int(
+                            getattr(loop_state.latest_snapshot, "selection_seq", 0)
+                            or 0
+                        )
+                        if (
+                            loop_state.latest_snapshot is not None
+                            and result_seq == current_seq
+                            and result_seq == latest_seq
+                        ):
+                            loop_state.latest_snapshot.active_work_items = list(
+                                result_items
+                            )
+                            work_overlay.update(result_items)
+                        else:
+                            _LOGGER.info(
+                                "renderer_active_work_discarded result_seq=%s current_seq=%s latest_seq=%s",
+                                result_seq,
+                                current_seq,
+                                latest_seq,
+                            )
                     update_state_value = update_manager.tick().to_dict()
                     update_state_signature = _json_signature(update_state_value)
                     if loop_state.latest_update_state_signature is None:
@@ -6730,9 +7083,12 @@ def run_renderer_hud_session(
                     if session_map_changed:
                         _invalidate_active_session_mapping_cache(context)
                     pending_command = take_renderer_bridge_command()
-                    if loop_state.active_work_refresh_pending and callable(
-                        runtime_event_publish
-                    ):
+                    active_work_refresh_due = _renderer_deferred_active_work_refresh_due(
+                        pending=loop_state.active_work_refresh_pending,
+                        not_before=loop_state.active_work_refresh_not_before,
+                        now_monotonic=time.monotonic(),
+                    )
+                    if active_work_refresh_due and callable(runtime_event_publish):
                         runtime_event_publish(
                             "active_work_refresh_requested",
                             source="renderer_loop",
@@ -6950,26 +7306,48 @@ def run_renderer_hud_session(
                         latest_snapshot=latest,
                         latest_active_work_refresh_at=loop_state.latest_active_work_refresh_at,
                         now_monotonic=time.monotonic(),
-                        active_work_refresh_pending=loop_state.active_work_refresh_pending,
+                        active_work_refresh_pending=(
+                            loop_state.active_work_refresh_pending
+                            and _renderer_deferred_active_work_refresh_due(
+                                pending=True,
+                                not_before=loop_state.active_work_refresh_not_before,
+                                now_monotonic=time.monotonic(),
+                            )
+                        ),
                         file_change_reasons=inputs.file_change_reasons,
                         file_change_paths=inputs.file_change_paths,
                     )
-                    lightweight_active_session_refresh = bool(
-                        (
+                    lightweight_active_session_refresh = (
+                        _renderer_should_use_visible_first_active_session(
+                            active_session_requested=bool(
                             inputs.active_session_wakeup
                             or inputs.event_refresh_request.active_session
+                            ),
+                            latest_snapshot=latest,
+                            has_command=bool(inputs.command),
+                            has_settings_command_status=bool(
+                                loop_state.settings_command_status
+                            ),
+                            update_phase=str(inputs.update_state.get("phase") or ""),
                         )
-                        and latest is not None
-                        and not loop_state.active_work_refresh_pending
-                        and not inputs.command
-                        and not loop_state.settings_command_status
-                        and not inputs.file_change_reasons
-                        and inputs.update_state.get("phase") != "downloading"
                     )
                     if lightweight_active_session_refresh:
-                        # renderer bridge 与 tracker callback 都表示当前会话已变更；
-                        # 这类事件必须同时刷新气泡，不能只更新 session payload。
-                        refresh_active_work_items = True
+                        # The selected session is latency-critical. Reuse the
+                        # existing budget/work data even when unrelated session
+                        # writes were coalesced into this tick. Rebuild them in a
+                        # separate event after the visible sessionSwitch payload.
+                        refresh_budget_aggregate = False
+                        refresh_budget_paths = ()
+                        refresh_active_work_items = False
+                    elif (
+                        loop_state.active_work_refresh_pending
+                        and not _renderer_deferred_active_work_refresh_due(
+                            pending=True,
+                            not_before=loop_state.active_work_refresh_not_before,
+                            now_monotonic=time.monotonic(),
+                        )
+                    ):
+                        refresh_active_work_items = False
                     hydrated_session_refresh = any(
                         str(getattr(event, "type", "") or "")
                         == "session_snapshot_hydrated"
@@ -6979,27 +7357,57 @@ def run_renderer_hud_session(
                     snapshot_kwargs: dict[str, object] = {
                         "refresh_budget_aggregate": refresh_budget_aggregate,
                         "refresh_budget_paths": refresh_budget_paths,
-                        # 会话切换仍可使用轻量 session payload，但气泡必须在同一
-                        # 个事件周期重建结构化工作状态，避免先展示旧进度再等待二次刷新。
-                        "refresh_active_work_items": refresh_active_work_items,
+                        # 会话切换先发送轻量 session payload；结构化工作状态在
+                        # 随后的独立事件中重建，避免 16 文件扫描阻塞可见切换。
+                        "refresh_active_work_items": bool(
+                            refresh_active_work_items and latest is None
+                        ),
                     }
+                    if lightweight_active_session_refresh:
+                        snapshot_kwargs["reuse_budget_from"] = latest
+                        snapshot_kwargs["refresh_visible_app_error"] = False
                     if lightweight_active_session_refresh or hydrated_session_refresh:
                         snapshot_kwargs["refresh_current_session_usage"] = False
                     snapshot_started = time.perf_counter()
+                    snapshot_started_at_ms = int(time.time() * 1000)
                     fresh = snapshot_or_error(**snapshot_kwargs)
+                    snapshot_built_at_ms = int(time.time() * 1000)
+                    fresh.follow_timing = {
+                        **dict(fresh.follow_timing or {}),
+                        "snapshotStartedAt": snapshot_started_at_ms,
+                        "snapshotBuiltAt": snapshot_built_at_ms,
+                    }
                     snapshot_ms = (time.perf_counter() - snapshot_started) * 1000.0
-                    if not refresh_active_work_items and latest is not None:
+                    tracker = getattr(context, "active_session_tracker", None)
+                    if latest is not None and _renderer_snapshot_selection_is_stale(
+                        fresh,
+                        tracker,
+                    ):
+                        _LOGGER.info(
+                            "renderer_refresh_discarded reason=stale_selection fresh_seq=%s current_seq=%s",
+                            fresh.selection_seq,
+                            int(getattr(tracker, "selection_seq", 0) or 0),
+                        )
+                        return latest
+                    background_active_work_refresh = bool(
+                        refresh_active_work_items and latest is not None
+                    )
+                    if latest is not None:
                         fresh.active_work_items = list(latest.active_work_items)
-                    else:
+                    if background_active_work_refresh:
+                        active_work_pump.request(fresh, fresh.session_path)
                         loop_state.latest_active_work_refresh_at = time.monotonic()
                         loop_state.active_work_refresh_pending = False
+                        loop_state.active_work_refresh_not_before = 0.0
+                    elif refresh_active_work_items:
+                        loop_state.latest_active_work_refresh_at = time.monotonic()
+                        loop_state.active_work_refresh_pending = False
+                        loop_state.active_work_refresh_not_before = 0.0
                     loop_state.latest_snapshot = fresh
                     loop_state.latest_budget_signature = _renderer_budget_signature(context)
-                    work_overlay.configure(
-                        item_limit=_work_overlay_item_limit_for_context(context),
+                    fresh.follow_timing["payloadSendStartedAt"] = int(
+                        time.time() * 1000
                     )
-                    work_overlay.update(fresh.active_work_items)
-                    file_events.update_session_path(fresh.session_path)
                     update_started = time.perf_counter()
                     if lightweight_active_session_refresh:
                         update_payload = getattr(client, "update_payload", None)
@@ -7029,6 +7437,12 @@ def run_renderer_hud_session(
                             app_provider=str(getattr(context, "app_provider", "") or ""),
                         )
                     update_ms = (time.perf_counter() - update_started) * 1000.0
+                    if not lightweight_active_session_refresh:
+                        work_overlay.configure(
+                            item_limit=_work_overlay_item_limit_for_context(context),
+                        )
+                        work_overlay.update(fresh.active_work_items)
+                        file_events.update_session_path(fresh.session_path)
                     refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
                     update_metrics = dict(
                         getattr(client, "last_update_metrics", {}) or {}
@@ -7043,16 +7457,28 @@ def run_renderer_hud_session(
                             )
                         )
                         _LOGGER.info(
-                            "renderer_refresh_timing attribution=%s total_ms=%.1f snapshot_ms=%.1f hud_update_ms=%.1f cdp_ms=%s renderer_apply_ms=%s source=%s",
+                            "renderer_refresh_timing attribution=%s total_ms=%.1f snapshot_ms=%.1f hud_update_ms=%.1f target_ms=%s transport=%s cdp_ms=%s persistent_ms=%s fallback_ms=%s fallback_reason=%s renderer_apply_ms=%s source=%s",
                             attribution,
                             refresh_ms,
                             snapshot_ms,
                             update_ms,
+                            update_metrics.get("targetDiscoveryMs", "-"),
+                            update_metrics.get("transport", "-"),
                             update_metrics.get("cdpMs", "-"),
+                            update_metrics.get("persistentMs", "-"),
+                            update_metrics.get("fallbackMs", "-"),
+                            update_metrics.get("persistentFallbackReason", "-") or "-",
                             update_metrics.get("rendererApplyMs", "-"),
                             fresh.selection_source,
                         )
                     if update_ok:
+                        if lightweight_active_session_refresh:
+                            loop_state.active_work_refresh_pending = True
+                            loop_state.active_work_refresh_not_before = (
+                                time.monotonic()
+                                + RENDERER_ACTIVE_WORK_AFTER_SESSION_DELAY_SECONDS
+                            )
+                            command_refresh_requested.set()
                         loop_state.settings_command_status = {}
                         loop_state.failures = 0
                         _resolve_cdp_update_failure(context)
@@ -7155,6 +7581,15 @@ def run_renderer_hud_session(
                         delay_value = max(
                             delay_value, min(5.0, loop_state.failures * 0.5)
                         )
+                    if loop_state.active_work_refresh_pending:
+                        delay_value = min(
+                            delay_value,
+                            max(
+                                0.05,
+                                loop_state.active_work_refresh_not_before
+                                - time.monotonic(),
+                            ),
+                        )
                     return delay_value
 
                 while True:
@@ -7209,6 +7644,8 @@ def run_renderer_hud_session(
                     runtime_event_unsubscribe()
                 if callable(tracker_change_callback):
                     tracker_change_callback(None)
+                if "active_work_pump" in locals():
+                    active_work_pump.close()
                 client.close()
                 bridge.close()
                 if command_pump is not None:
