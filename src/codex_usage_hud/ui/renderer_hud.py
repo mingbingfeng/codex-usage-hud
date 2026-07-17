@@ -163,6 +163,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   let cachedComposerNode = null;
   let observedHeaderNode = null;
   let observedComposerNode = null;
+  let settingsProviderDraft = null;
+  const settingsDirtyProviders = new Set();
   const numericTokenRe = /\$?\d+(?:,\d{3})*(?:\.\d+)?(?:[kM%])?/g;
   const numericAnimations = new WeakMap();
 
@@ -2097,9 +2099,152 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         min-height: 30px;
         padding-inline: 12px;
       }
+      #${rootId} .codex-usage-hud-settings-visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      #${rootId} .codex-usage-hud-provider-editor {
+        min-width: 0;
+        grid-column: 1 / -1;
+        display: grid;
+        gap: 8px;
+        margin-top: 4px;
+        border-top: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-provider-editor-head {
+        min-width: 0;
+        min-height: 42px;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        padding-top: 5px;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-provider-tabs {
+        min-width: 0;
+        display: flex;
+        gap: 2px;
+        overflow-x: auto;
+        overscroll-behavior-inline: contain;
+        scrollbar-width: thin;
+        scrollbar-color: var(--codex-usage-hud-divider, #273241) transparent;
+      }
+      #${rootId} .codex-usage-hud-provider-tab {
+        position: relative;
+        flex: 0 0 auto;
+        min-width: 88px;
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        background: transparent;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        padding: 5px 10px 4px;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-provider-tab:hover {
+        background: var(--codex-usage-hud-header-surface, #202833);
+        color: var(--codex-usage-hud-text, #e8eef7);
+      }
+      #${rootId} .codex-usage-hud-provider-tab[aria-selected="true"] {
+        border-bottom-color: var(--codex-usage-hud-accent, #f3d27a);
+        color: var(--codex-usage-hud-text, #e8eef7);
+      }
+      #${rootId} .codex-usage-hud-provider-tab-badge {
+        border: 1px solid var(--codex-usage-hud-panel-border, #3a485a);
+        border-radius: 4px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        padding: 1px 4px;
+        font-size: 9px;
+        line-height: 1.4;
+      }
+      #${rootId} .codex-usage-hud-provider-tab[aria-selected="true"] .codex-usage-hud-provider-tab-badge {
+        border-color: color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 48%, transparent);
+        color: var(--codex-usage-hud-accent, #f3d27a);
+      }
+      #${rootId} .codex-usage-hud-provider-dirty-dot {
+        width: 6px;
+        height: 6px;
+        flex: 0 0 6px;
+        border-radius: 50%;
+        background: var(--codex-usage-hud-warning, #ffb86b);
+      }
+      #${rootId} .codex-usage-hud-provider-context {
+        min-width: 0;
+        min-height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #${rootId} .codex-usage-hud-provider-scope {
+        min-width: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--codex-usage-hud-text, #e8eef7);
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-provider-scope input {
+        width: 15px;
+        height: 15px;
+        margin: 0;
+        accent-color: var(--codex-usage-hud-accent, #f3d27a);
+      }
+      #${rootId} .codex-usage-hud-provider-scope input:disabled {
+        opacity: .78;
+        cursor: not-allowed;
+      }
+      #${rootId} .codex-usage-hud-provider-meta {
+        min-width: 0;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        text-align: right;
+        overflow-wrap: anywhere;
+      }
+      #${rootId} .codex-usage-hud-provider-meta[data-tone="required"] {
+        color: var(--codex-usage-hud-success, #8fe3a1);
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-provider-meta[data-tone="historical"] {
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-provider-tools {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 150px;
+        gap: 6px;
+        align-items: end;
+      }
+      #${rootId} .codex-usage-hud-provider-url .codex-usage-hud-settings-inline {
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-provider-empty {
+        color: var(--codex-usage-hud-muted, #8492a6);
+        padding: 8px 0 4px;
+      }
+      #${rootId} .codex-usage-hud-price-unit {
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+        white-space: nowrap;
+      }
       #${rootId} .codex-usage-hud-price-table {
         grid-column: 1 / -1;
         margin-top: 4px;
+        overflow-x: auto;
+        scrollbar-width: thin;
+        scrollbar-color: var(--codex-usage-hud-divider, #273241) transparent;
       }
       #${rootId} .codex-usage-hud-price-row,
       #${rootId} .codex-usage-hud-price-header {
@@ -2107,16 +2252,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         grid-template-columns: minmax(130px, 1.4fr) repeat(4, minmax(72px, 1fr));
         gap: 6px;
         align-items: center;
-      }
-      #${rootId} .codex-usage-hud-price-table[data-advanced="true"] .codex-usage-hud-price-row,
-      #${rootId} .codex-usage-hud-price-table[data-advanced="true"] .codex-usage-hud-price-header {
-        grid-template-columns: minmax(130px, 1.2fr) repeat(4, minmax(68px, 1fr)) minmax(92px, .9fr) minmax(150px, 1.3fr);
+        min-width: 610px;
       }
       #${rootId} .codex-usage-hud-price-advanced {
         display: none;
-      }
-      #${rootId} .codex-usage-hud-price-table[data-advanced="true"] .codex-usage-hud-price-advanced {
-        display: block;
       }
       #${rootId} .codex-usage-hud-price-header {
         color: var(--codex-usage-hud-muted, #8492a6);
@@ -2602,12 +2741,44 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-settings-grid {
           grid-template-columns: minmax(0, 1fr);
         }
+        #${rootId} .codex-usage-hud-provider-editor {
+          grid-column: 1;
+        }
+        #${rootId} .codex-usage-hud-provider-editor-head {
+          grid-template-columns: auto minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-provider-editor-head .codex-usage-hud-price-unit {
+          display: none;
+        }
+        #${rootId} .codex-usage-hud-provider-tools {
+          grid-template-columns: minmax(0, 1fr) 138px;
+        }
+        #${rootId} .codex-usage-hud-provider-url {
+          grid-column: 1 / -1;
+        }
+        #${rootId} .codex-usage-hud-provider-context {
+          align-items: flex-start;
+        }
+        #${rootId} .codex-usage-hud-provider-meta {
+          max-width: 58%;
+        }
         #${rootId} .codex-usage-hud-support-qr-grid {
           grid-template-columns: minmax(0, 1fr);
         }
-        #${rootId} .codex-usage-hud-price-row,
-        #${rootId} .codex-usage-hud-price-header {
-          grid-template-columns: minmax(110px, 1fr) repeat(2, minmax(68px, 1fr));
+      }
+      @media (max-width: 520px) {
+        #${rootId} .codex-usage-hud-provider-tools {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-provider-url {
+          grid-column: 1;
+        }
+        #${rootId} .codex-usage-hud-provider-context {
+          display: grid;
+        }
+        #${rootId} .codex-usage-hud-provider-meta {
+          max-width: none;
+          text-align: left;
         }
       }
     `;
@@ -3017,11 +3188,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return observedPriceModels().filter(
       (model) => !configured.some((pattern) => priceModelPatternMatches(pattern, model))
     );
-  }
-
-  function hasAdvancedPriceRows(settings) {
-    const prices = settings?.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
-    return Object.values(prices).some((price) => !!String(price?.provider || price?.base_url || price?.baseUrl || "").trim());
   }
 
   function settingsBridgeUrl() {
@@ -3917,14 +4083,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const prices = settings.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
     const entries = Object.entries(prices);
     if (!entries.length) entries.push(["gpt-5.5", { input: 5, cached_input: 0.5, output: 30, reasoning: 30 }]);
-    const advanced = hasAdvancedPriceRows(settings);
     return entries.map(([key, price]) => {
       const model = String(price?.model || key || "");
       const provider = String(price?.provider || "");
       const baseUrl = String(price?.base_url || price?.baseUrl || "");
-      const rowAdvanced = advanced || provider || baseUrl;
       return `
-      <div class="codex-usage-hud-price-row" data-price-row="true" data-price-key="${escapeHtml(key)}" data-advanced="${rowAdvanced ? "true" : "false"}">
+      <div class="codex-usage-hud-price-row" data-price-row="true" data-price-key="${escapeHtml(key)}">
         <input data-price-field="model" value="${escapeHtml(model)}" aria-label="模型">
         <input data-price-field="input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.input ?? 0)}" aria-label="输入单价">
         <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cached_input ?? 0)}" aria-label="缓存输入单价">
@@ -3948,12 +4112,263 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     `;
   }
 
-  function renderSettingsModal(tab = "settings", status = "") {
+  function settingsProviderNames(settings) {
+    const registry = settings.provider_registry && typeof settings.provider_registry === "object" ? settings.provider_registry : {};
+    const providerSettings = settings.provider_settings && typeof settings.provider_settings === "object" ? settings.provider_settings : {};
+    const appProvider = String(settings.app_provider || "").trim().toLowerCase();
+    const names = new Set([...Object.keys(registry), ...Object.keys(providerSettings)]);
+    if (appProvider) names.add(appProvider);
+    return Array.from(names).map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean).sort();
+  }
+
+  function cloneSettingsPriceTable(value) {
+    const prices = value && typeof value === "object" ? value : {};
+    return Object.fromEntries(Object.entries(prices).map(([key, price]) => [
+      key,
+      price && typeof price === "object" ? { ...price } : {},
+    ]));
+  }
+
+  function providerDraftFromSettings(settings, provider, enabled) {
+    const source = settings.provider_settings?.[provider] || {};
+    const modelPrices = source.model_prices && typeof source.model_prices === "object"
+      ? source.model_prices
+      : settings.model_prices;
+    return {
+      enabled: !!enabled,
+      settings: {
+        ...source,
+        model_prices: cloneSettingsPriceTable(modelPrices),
+        pricing_url: String(source.pricing_url ?? settings.pricing_url ?? ""),
+        weekly_adjustment_usd: Number(source.weekly_adjustment_usd ?? settings.weekly_adjustment_usd ?? 0),
+      },
+    };
+  }
+
+  function ensureSettingsProviderDraft(settings, reset = false) {
+    if (settingsProviderDraft && !reset) return settingsProviderDraft;
+    const order = settingsProviderNames(settings);
+    const appProvider = String(settings.app_provider || "").trim().toLowerCase();
+    const selected = settings.provider_scope_mode === "custom"
+      ? new Set((settings.selected_providers || []).map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean))
+      : new Set(order);
+    if (appProvider) selected.add(appProvider);
+    const requestedProvider = String(window[settingsProviderName] || "").trim().toLowerCase();
+    const activeProvider = order.includes(requestedProvider)
+      ? requestedProvider
+      : (order.includes(appProvider) ? appProvider : (order[0] || ""));
+    settingsProviderDraft = {
+      activeProvider,
+      appProvider,
+      order,
+      providers: Object.fromEntries(order.map((provider) => [
+        provider,
+        providerDraftFromSettings(settings, provider, selected.has(provider) || provider === appProvider),
+      ])),
+    };
+    settingsDirtyProviders.clear();
+    window[settingsProviderName] = activeProvider;
+    return settingsProviderDraft;
+  }
+
+  function settingsProviderTabBadge(settings, provider) {
+    const detail = settings.provider_registry?.[provider] || {};
+    if (provider === settingsProviderDraft?.appProvider) return "App";
+    if (detail.historicalOnly) return "历史";
+    if (provider === "unknown") return "未知";
+    return "";
+  }
+
+  function settingsProviderMeta(settings, provider) {
+    const detail = settings.provider_registry?.[provider] || {};
+    const profiles = Array.isArray(detail.profiles) ? detail.profiles.map((profile) => String(profile || "").trim()).filter(Boolean) : [];
+    const parts = [];
+    let tone = "";
+    if (provider === settingsProviderDraft?.appProvider) {
+      parts.push("Codex App · 必选");
+      tone = "required";
+    } else if (detail.historicalOnly) {
+      parts.push("历史通道");
+      tone = "historical";
+    } else if (provider === "unknown") {
+      parts.push("未知通道");
+    }
+    if (profiles.length) {
+      parts.push(`${profiles.length > 1 ? "Profiles" : "Profile"}: ${profiles.join(", ")}`);
+    }
+    return { text: parts.join(" · "), tone };
+  }
+
+  function settingsProviderTabsHtml(settings) {
+    const draft = ensureSettingsProviderDraft(settings);
+    return draft.order.map((provider) => {
+      const badge = settingsProviderTabBadge(settings, provider);
+      const dirty = settingsDirtyProviders.has(provider);
+      return `
+        <button type="button" class="codex-usage-hud-provider-tab" role="tab"
+          data-action="settings-provider-tab" data-provider-tab="true" data-provider="${escapeHtml(provider)}"
+          aria-selected="${provider === draft.activeProvider}">
+          <span>${escapeHtml(provider)}</span>
+          ${badge ? `<span class="codex-usage-hud-provider-tab-badge">${escapeHtml(badge)}</span>` : ""}
+          ${dirty ? '<span class="codex-usage-hud-provider-dirty-dot" aria-hidden="true"></span><span class="codex-usage-hud-settings-visually-hidden">有未保存修改</span>' : ""}
+        </button>
+      `;
+    }).join("");
+  }
+
+  function settingsProviderEditorHtml(settings) {
+    const draft = ensureSettingsProviderDraft(settings);
+    const activeProvider = draft.activeProvider;
+    const head = `
+      <div class="codex-usage-hud-provider-editor-head">
+        <div class="codex-usage-hud-price-title">模型单价</div>
+        <div class="codex-usage-hud-provider-tabs" data-provider-tabs="true" role="tablist" aria-label="Provider">
+          ${settingsProviderTabsHtml(settings)}
+        </div>
+        <div class="codex-usage-hud-price-unit">USD / 1M tokens</div>
+      </div>
+    `;
+    const entry = draft.providers[activeProvider];
+    if (!activeProvider || !entry) {
+      return `${head}<div class="codex-usage-hud-provider-empty">尚未发现 Provider</div>`;
+    }
+    const providerSettings = entry.settings;
+    const required = activeProvider === draft.appProvider;
+    const meta = settingsProviderMeta(settings, activeProvider);
+    return `
+      ${head}
+      <div class="codex-usage-hud-provider-context">
+        <label class="codex-usage-hud-provider-scope" ${required ? 'title="Codex App Provider 必须纳入统计"' : ""}>
+          <input type="checkbox" data-provider-enabled="true" ${entry.enabled || required ? "checked" : ""} ${required ? "disabled" : ""}>
+          <span>纳入统计</span>
+        </label>
+        <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
+      </div>
+      <div class="codex-usage-hud-provider-tools">
+        <div class="codex-usage-hud-settings-field codex-usage-hud-provider-url">
+          <label>计费单价获取地址</label>
+          <div class="codex-usage-hud-settings-inline">
+            <input data-setting-key="pricing_url" value="${escapeHtml(providerSettings.pricing_url)}" placeholder="https://example.com/model-prices.json">
+            <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取</button>
+          </div>
+        </div>
+        <div class="codex-usage-hud-settings-field">
+          <label>本周补充额度 USD</label>
+          <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(providerSettings.weekly_adjustment_usd)}">
+        </div>
+      </div>
+      <div class="codex-usage-hud-price-table">
+        <div class="codex-usage-hud-price-header">
+          <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
+        </div>
+        <div data-price-rows="true">${priceRowsHtml(providerSettings)}</div>
+        ${detectedPriceModelsHtml(providerSettings)}
+        <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model" style="justify-self:start;margin-top:6px">添加模型</button>
+      </div>
+    `;
+  }
+
+  function revealSettingsProviderTab(tab) {
+    const tabs = tab?.parentElement;
+    if (!tab || !tabs) return;
+    const left = tab.offsetLeft;
+    const right = left + tab.offsetWidth;
+    if (left < tabs.scrollLeft) {
+      tabs.scrollLeft = left;
+    } else if (right > tabs.scrollLeft + tabs.clientWidth) {
+      tabs.scrollLeft = right - tabs.clientWidth;
+    }
+  }
+
+  function renderSettingsProviderTabs() {
+    const tabs = document.querySelector(`#${settingsModalId} [data-provider-tabs="true"]`);
+    if (!tabs || !settingsProviderDraft) return;
+    tabs.innerHTML = settingsProviderTabsHtml(hudSettingsFromPayload());
+    revealSettingsProviderTab(tabs.querySelector('[aria-selected="true"]'));
+  }
+
+  function captureSettingsProviderForm() {
+    const modal = document.getElementById(settingsModalId);
+    const editor = modal?.querySelector('[data-provider-editor="true"]');
+    const activeProvider = String(editor?.dataset.activeProvider || "").trim().toLowerCase();
+    const entry = settingsProviderDraft?.providers?.[activeProvider];
+    if (!editor || !activeProvider || !entry) return "";
+    const modelPrices = {};
+    editor.querySelectorAll("[data-price-row='true']").forEach((row) => {
+      const model = String(row.querySelector("[data-price-field='model']")?.value || "").trim();
+      if (!model) return;
+      const provider = String(row.querySelector("[data-price-field='provider']")?.value || "").trim().toLowerCase();
+      const baseUrl = String(row.querySelector("[data-price-field='base_url']")?.value || "").trim().replace(/\/+$/, "");
+      const field = (name) => {
+        const value = Number(row.querySelector(`[data-price-field="${name}"]`)?.value);
+        return Number.isFinite(value) && value >= 0 ? value : 0;
+      };
+      const key = provider ? `${provider}/${model}` : (baseUrl ? `${baseUrl}/${model}` : model);
+      modelPrices[key] = {
+        model,
+        input: field("input"),
+        cached_input: field("cached_input"),
+        output: field("output"),
+        reasoning: field("reasoning"),
+      };
+      if (provider) modelPrices[key].provider = provider;
+      if (baseUrl) modelPrices[key].base_url = baseUrl;
+    });
+    const enabledNode = editor.querySelector('[data-provider-enabled="true"]');
+    const pricingNode = editor.querySelector('[data-setting-key="pricing_url"]');
+    const adjustmentNode = editor.querySelector('[data-setting-key="weekly_adjustment_usd"]');
+    const adjustment = Number(adjustmentNode?.value);
+    entry.enabled = activeProvider === settingsProviderDraft.appProvider || !!enabledNode?.checked;
+    entry.settings = {
+      ...entry.settings,
+      model_prices: modelPrices,
+      pricing_url: String(pricingNode?.value || "").trim(),
+      weekly_adjustment_usd: Number.isFinite(adjustment) && adjustment >= 0 ? adjustment : 0,
+    };
+    return activeProvider;
+  }
+
+  function updateSettingsProviderDraftStatus() {
+    const count = settingsDirtyProviders.size;
+    if (count) setSettingsStatus(`${count} 个 Provider 有未保存修改`);
+  }
+
+  function markSettingsProviderDirty() {
+    const activeProvider = captureSettingsProviderForm();
+    if (!activeProvider) return;
+    settingsDirtyProviders.add(activeProvider);
+    renderSettingsProviderTabs();
+    updateSettingsProviderDraftStatus();
+  }
+
+  function renderSettingsProviderEditor({ focusTab = false } = {}) {
+    const editor = document.querySelector(`#${settingsModalId} [data-provider-editor="true"]`);
+    if (!editor || !settingsProviderDraft) return;
+    editor.dataset.activeProvider = settingsProviderDraft.activeProvider;
+    editor.innerHTML = settingsProviderEditorHtml(hudSettingsFromPayload());
+    const activeTab = editor.querySelector('[data-provider-tab="true"][aria-selected="true"]');
+    revealSettingsProviderTab(activeTab);
+    if (focusTab) activeTab?.focus?.();
+    updateSettingsProviderDraftStatus();
+  }
+
+  function switchSettingsProvider(provider, { focusTab = false } = {}) {
+    const nextProvider = String(provider || "").trim().toLowerCase();
+    if (!settingsProviderDraft?.order.includes(nextProvider) || nextProvider === settingsProviderDraft.activeProvider) return;
+    captureSettingsProviderForm();
+    settingsProviderDraft.activeProvider = nextProvider;
+    window[settingsProviderName] = nextProvider;
+    renderSettingsProviderEditor({ focusTab });
+  }
+
+  function renderSettingsModal(tab = "settings", status = "", { resetProviderDraft = false } = {}) {
     const root = document.getElementById(rootId);
     const modal = document.getElementById(settingsModalId);
     if (!root || !modal) return;
+    if (!modal.hidden) captureSettingsProviderForm();
     const settings = hudSettingsFromPayload();
     const activeTab = ["support", "about"].includes(tab) ? tab : "settings";
+    if (activeTab === "settings") ensureSettingsProviderDraft(settings, resetProviderDraft);
     const path = settingsPathLabel();
     const bridge = settingsBridgeUrl();
     const defaultStatus = activeTab === "about"
@@ -3986,20 +4401,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   }
 
   function settingsPanelHtml(settings, bridge, path) {
-    const registry = settings.provider_registry && typeof settings.provider_registry === "object" ? settings.provider_registry : {};
-    const providers = Array.from(new Set([...Object.keys(registry), ...Object.keys(settings.provider_settings || {})])).sort();
-    const appProvider = String(settings.app_provider || "").trim().toLowerCase();
-    const requestedProvider = String(window[settingsProviderName] || "").trim().toLowerCase();
-    const activeProvider = providers.includes(requestedProvider) ? requestedProvider : (appProvider || providers[0] || "");
-    const activeSettings = settings.provider_settings?.[activeProvider] || {};
-    const scopedSettings = { ...settings, model_prices: activeSettings.model_prices || settings.model_prices, pricing_url: activeSettings.pricing_url || settings.pricing_url, weekly_adjustment_usd: activeSettings.weekly_adjustment_usd ?? settings.weekly_adjustment_usd };
-    const selected = settings.provider_scope_mode === "custom" ? new Set(settings.selected_providers || []) : new Set(providers);
-    if (appProvider) selected.add(appProvider);
-    const providerScopeHtml = providers.map((provider) => {
-      const detail = registry[provider] || {};
-      const label = provider === appProvider ? `${provider} · Codex App · 必选` : `${provider}${detail.historicalOnly ? " · 历史通道" : ""}${Array.isArray(detail.profiles) && detail.profiles.length ? ` · ${detail.profiles.join(", ")}` : ""}`;
-      return `<label style="display:block"><input type="checkbox" data-provider-scope="true" value="${escapeHtml(provider)}" ${selected.has(provider) ? "checked" : ""} ${provider === appProvider ? "disabled" : ""}> ${escapeHtml(label)}</label>`;
-    }).join("");
+    ensureSettingsProviderDraft(settings);
     const overlaySelectableMax = workOverlaySelectableMax();
     const overlayValue = Math.min(
       overlaySelectableMax,
@@ -4044,31 +4446,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           <label>超额提醒阈值</label>
           <input data-setting-key="budget_thresholds" value="${escapeHtml(thresholdText(settings))}">
         </div>
-        <div class="codex-usage-hud-settings-field" style="grid-column:1/-1">
-          <label>统计 Provider 范围（当前单价：${escapeHtml(activeProvider || "默认")})</label>
-          <select data-provider-select="true">${providers.map((provider) => `<option value="${escapeHtml(provider)}" ${provider === activeProvider ? "selected" : ""}>${escapeHtml(provider)}${provider === appProvider ? " · Codex App" : ""}</option>`).join("")}</select>
-          <input type="hidden" data-active-provider value="${escapeHtml(activeProvider)}">
-          <div>${providerScopeHtml || "尚未发现 provider"}</div>
-        </div>
-        <div class="codex-usage-hud-settings-field">
-          <label>本周补充已使用额度 USD</label>
-          <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(scopedSettings.weekly_adjustment_usd)}">
-        </div>
-        <div class="codex-usage-hud-settings-field" style="grid-column:1/-1">
-          <label>计费单价获取地址</label>
-          <div class="codex-usage-hud-settings-inline">
-            <input data-setting-key="pricing_url" value="${escapeHtml(scopedSettings.pricing_url)}" placeholder="https://example.com/model-prices.json">
-            <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取</button>
-          </div>
-        </div>
-        <div class="codex-usage-hud-price-table" data-advanced="${hasAdvancedPriceRows(scopedSettings) ? "true" : "false"}">
-          <div class="codex-usage-hud-price-title">模型单价（USD / 1M tokens）</div>
-          <div class="codex-usage-hud-price-header">
-            <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
-          </div>
-          <div data-price-rows="true">${priceRowsHtml(scopedSettings)}</div>
-          ${detectedPriceModelsHtml(scopedSettings)}
-          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model" style="justify-self:start;margin-top:6px">添加模型</button>
+        <div class="codex-usage-hud-provider-editor" data-provider-editor="true" data-active-provider="${escapeHtml(settingsProviderDraft?.activeProvider || "")}">
+          ${settingsProviderEditorHtml(settings)}
         </div>
         <div class="codex-usage-hud-settings-footnote">
           <button type="button" class="codex-usage-hud-settings-action" data-action="settings-exit" data-variant="ghost">退出 HUD</button>
@@ -4322,40 +4701,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (!Number.isFinite(value)) return fallback;
       return Math.min(max, Math.max(min, Math.round(value)));
     };
-    const modelPrices = {};
-    modal?.querySelectorAll("[data-price-row='true']").forEach((row) => {
-      const model = String(row.querySelector("[data-price-field='model']")?.value || "").trim();
-      if (!model) return;
-      const provider = String(row.querySelector("[data-price-field='provider']")?.value || "").trim().toLowerCase();
-      const baseUrl = String(row.querySelector("[data-price-field='base_url']")?.value || "").trim().replace(/\/+$/, "");
-      const field = (name) => {
-        const value = Number(row.querySelector(`[data-price-field="${name}"]`)?.value);
-        return Number.isFinite(value) && value >= 0 ? value : 0;
-      };
-      const key = provider ? `${provider}/${model}` : (baseUrl ? `${baseUrl}/${model}` : model);
-      modelPrices[key] = {
-        model,
-        input: field("input"),
-        cached_input: field("cached_input"),
-        output: field("output"),
-        reasoning: field("reasoning"),
-      };
-      if (provider) modelPrices[key].provider = provider;
-      if (baseUrl) modelPrices[key].base_url = baseUrl;
-    });
-    const activeProvider = String(modal?.querySelector("[data-active-provider]")?.value || "").trim().toLowerCase();
-    const selectedProviders = Array.from(modal?.querySelectorAll("[data-provider-scope='true']:checked") || [])
-      .map((node) => String(node.value || "").trim().toLowerCase()).filter(Boolean);
-    const knownProviders = Array.from(modal?.querySelectorAll("[data-provider-scope='true']") || []).map((node) => String(node.value || "").trim().toLowerCase()).filter(Boolean);
+    captureSettingsProviderForm();
+    const draft = ensureSettingsProviderDraft(settings);
     const providerSettings = { ...(settings.provider_settings || {}) };
-    if (activeProvider) {
-      providerSettings[activeProvider] = {
-        ...(providerSettings[activeProvider] || {}),
-        model_prices: modelPrices,
-        pricing_url: String(read("pricing_url") || "").trim(),
-        weekly_adjustment_usd: numberValue("weekly_adjustment_usd", 0),
+    draft.order.forEach((provider) => {
+      providerSettings[provider] = {
+        ...(providerSettings[provider] || {}),
+        ...(draft.providers[provider]?.settings || {}),
       };
-    }
+    });
+    const selectedProviders = draft.order.filter((provider) => (
+      provider === draft.appProvider || !!draft.providers[provider]?.enabled
+    ));
+    const allProvidersSelected = draft.order.every((provider) => selectedProviders.includes(provider));
     const displayMode = "renderer";
     return {
       ...settings,
@@ -4371,31 +4729,35 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         0,
         workOverlaySelectableMax(),
       ),
-      pricing_url: String(read("pricing_url") || "").trim(),
+      pricing_url: String(settings.pricing_url || "").trim(),
       provider_settings: providerSettings,
-      provider_scope_mode: selectedProviders.length === knownProviders.length ? "all" : "custom",
+      provider_scope_mode: allProvidersSelected ? "all" : "custom",
       selected_providers: selectedProviders,
       budget_thresholds: String(read("budget_thresholds") || "")
         .split(",")
         .map((item) => Number(item.trim()))
         .filter((item) => Number.isFinite(item) && item > 0),
-      weekly_adjustment_usd: numberValue("weekly_adjustment_usd", settings.weekly_adjustment_usd),
+      weekly_adjustment_usd: settings.weekly_adjustment_usd,
       support_url: String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud").trim(),
-      model_prices: modelPrices,
+      model_prices: settings.model_prices,
     };
   }
 
   function saveSettingsFromModal() {
     const settings = collectSettingsForm();
-    submitSettingsCommand(
+    const submitted = submitSettingsCommand(
       { action: "save", settings },
       "保存请求已提交，等待 HUD daemon 写入本地配置..."
     );
+    if (submitted) {
+      settingsDirtyProviders.clear();
+      renderSettingsProviderTabs();
+    }
   }
 
   function fetchPricesFromModal() {
     const settings = collectSettingsForm();
-    const provider = String(document.getElementById(settingsModalId)?.querySelector("[data-active-provider]")?.value || "").trim().toLowerCase();
+    const provider = String(settingsProviderDraft?.activeProvider || "").trim().toLowerCase();
     submitSettingsCommand(
       { action: "fetchPrices", settings, provider },
       "价格拉取请求已提交，等待 HUD daemon 拉取并写入..."
@@ -4548,7 +4910,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const row = document.createElement("div");
     row.className = "codex-usage-hud-price-row";
     row.dataset.priceRow = "true";
-    row.dataset.advanced = "false";
     row.innerHTML = `
       <input data-price-field="model" value="${escapeHtml(initialModel)}" aria-label="模型">
       <input data-price-field="input" type="number" min="0" step="0.000001" value="0" aria-label="输入单价">
@@ -4559,13 +4920,44 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       <input class="codex-usage-hud-price-advanced" data-price-field="base_url" value="" aria-label="Base URL">
     `;
     rows.appendChild(row);
+    markSettingsProviderDirty();
     const target = initialModel ? row.querySelector('[data-price-field="input"]') : row.querySelector("input");
     target?.focus?.();
   }
 
-  function closeSettingsModal() {
+  function openSettingsDiscardConfirm() {
+    const dialog = settingsDialogRoot();
+    if (!dialog) return;
+    closeSettingsConfirm();
+    const layer = document.createElement("div");
+    layer.className = "codex-usage-hud-settings-confirm-layer";
+    layer.dataset.settingsConfirm = "true";
+    layer.innerHTML = `
+      <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="放弃未保存的 Provider 修改">
+        <div class="codex-usage-hud-settings-confirm-kicker">未保存修改</div>
+        <div class="codex-usage-hud-settings-confirm-title">关闭设置并放弃修改？</div>
+        <div class="codex-usage-hud-settings-confirm-body">${settingsDirtyProviders.size} 个 Provider 仍有未保存修改。</div>
+        <div class="codex-usage-hud-settings-confirm-actions">
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-discard-cancel" data-variant="ghost">继续编辑</button>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-discard-confirm" data-primary="true">放弃修改</button>
+        </div>
+      </div>
+    `;
+    dialog.appendChild(layer);
+  }
+
+  function closeSettingsModal({ force = false } = {}) {
     const modal = document.getElementById(settingsModalId);
-    if (modal) modal.hidden = true;
+    if (!modal) return;
+    captureSettingsProviderForm();
+    if (!force && settingsDirtyProviders.size) {
+      openSettingsDiscardConfirm();
+      return;
+    }
+    closeSettingsConfirm();
+    modal.hidden = true;
+    settingsProviderDraft = null;
+    settingsDirtyProviders.clear();
   }
 
   function ensureRoot() {
@@ -4665,11 +5057,22 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         top: event.deltaY,
       });
     }, { capture: true, passive: false });
-    root.addEventListener("change", (event) => {
-      const select = event.target?.closest?.("[data-provider-select='true']");
-      if (!select || !root.contains(select)) return;
-      window[settingsProviderName] = String(select.value || "").trim().toLowerCase();
-      renderSettingsModal("settings", "已切换当前 provider 的价格编辑页；未保存的输入不会自动保留。");
+    root.addEventListener("input", (event) => {
+      const editor = event.target?.closest?.('[data-provider-editor="true"]');
+      if (!editor || !root.contains(editor)) return;
+      markSettingsProviderDirty();
+    });
+    root.addEventListener("keydown", (event) => {
+      const tab = event.target?.closest?.('[data-provider-tab="true"]');
+      if (!tab || !root.contains(tab) || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      const providers = settingsProviderDraft?.order || [];
+      if (!providers.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const currentIndex = Math.max(0, providers.indexOf(settingsProviderDraft.activeProvider));
+      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const nextIndex = (currentIndex + offset + providers.length) % providers.length;
+      switchSettingsProvider(providers[nextIndex], { focusTab: true });
     });
     root.addEventListener("click", (event) => {
       if (event.target?.id === settingsModalId) {
@@ -4720,7 +5123,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (action.dataset.action === "settings-open") {
         event.preventDefault();
         event.stopPropagation();
-        renderSettingsModal("settings");
+        renderSettingsModal("settings", "", { resetProviderDraft: true });
         return;
       }
       if (action.dataset.action === "settings-close") {
@@ -4733,6 +5136,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.preventDefault();
         event.stopPropagation();
         renderSettingsModal(action.dataset.tab || "settings");
+        return;
+      }
+      if (action.dataset.action === "settings-provider-tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        switchSettingsProvider(action.dataset.provider || "");
         return;
       }
       if (action.dataset.action === "settings-add-model") {
@@ -4764,6 +5173,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.stopPropagation();
         closeSettingsConfirm();
         setSettingsStatus("已取消退出。");
+        return;
+      }
+      if (action.dataset.action === "settings-discard-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        updateSettingsProviderDraftStatus();
+        return;
+      }
+      if (action.dataset.action === "settings-discard-confirm") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsModal({ force: true });
         return;
       }
       if (action.dataset.action === "settings-exit-confirm") {

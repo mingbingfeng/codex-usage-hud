@@ -509,6 +509,35 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
 
+    def test_provider_settings_use_tabs_with_modal_drafts(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('data-action="settings-provider-tab"', script)
+        self.assertIn('data-provider-tab="true"', script)
+        self.assertIn('data-provider-enabled="true"', script)
+        self.assertIn("function captureSettingsProviderForm", script)
+        self.assertIn("function switchSettingsProvider", script)
+        self.assertIn("settingsDirtyProviders.add(activeProvider)", script)
+        self.assertIn("${count} 个 Provider 有未保存修改", script)
+        self.assertIn('data-action="settings-discard-confirm"', script)
+        self.assertIn('["ArrowLeft", "ArrowRight"]', script)
+        self.assertIn(
+            'provider_scope_mode: allProvidersSelected ? "all" : "custom"',
+            script,
+        )
+        self.assertIn('pricing_url: String(settings.pricing_url || "").trim()', script)
+        self.assertIn("weekly_adjustment_usd: settings.weekly_adjustment_usd", script)
+        self.assertIn("model_prices: settings.model_prices", script)
+        self.assertIn(
+            'renderSettingsModal("settings", "", { resetProviderDraft: true })',
+            script,
+        )
+        self.assertNotIn('data-provider-select="true"', script)
+        self.assertNotIn('data-provider-scope="true"', script)
+        self.assertNotIn("data-advanced=", script)
+        self.assertNotIn("price-table[data-advanced", script)
+        self.assertNotIn("未保存的输入不会自动保留", script)
+
     def test_payload_from_renderer_new_session_clears_session_and_round_stats(self) -> None:
         snapshot = ParsedSession(
             status="waiting",
