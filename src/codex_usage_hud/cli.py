@@ -850,6 +850,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "workdir": item.workdir,
         "modelProvider": item.model_provider,
         "clientKind": item.client_kind,
+        "sessionStartedAt": _iso_or_empty(item.session_started_at),
         "taskStartedAt": _iso_or_empty(item.task_started_at),
         "startedAt": _iso_or_empty(item.started_at),
         "updatedAt": _iso_or_empty(item.updated_at),
@@ -4233,6 +4234,118 @@ def _work_overlay_seen_task_keys(context: object) -> set[str]:
     return seen
 
 
+def _work_overlay_visible_item_cache(context: object) -> dict[str, WorkStatusItem]:
+    cache = getattr(context, "_work_overlay_visible_item_cache", None)
+    if isinstance(cache, dict):
+        return cache
+    cache = {}
+    try:
+        setattr(context, "_work_overlay_visible_item_cache", cache)
+    except Exception:
+        pass
+    return cache
+
+
+def _work_overlay_published_item_cache(context: object) -> dict[str, WorkStatusItem]:
+    cache = getattr(context, "_work_overlay_published_item_cache", None)
+    if isinstance(cache, dict):
+        return cache
+    cache = {}
+    try:
+        setattr(context, "_work_overlay_published_item_cache", cache)
+    except Exception:
+        pass
+    return cache
+
+
+def _work_overlay_terminal_item_tasks(context: object) -> dict[str, str]:
+    terminal = getattr(context, "_work_overlay_terminal_item_tasks", None)
+    if isinstance(terminal, dict):
+        return terminal
+    terminal = {}
+    try:
+        setattr(context, "_work_overlay_terminal_item_tasks", terminal)
+    except Exception:
+        pass
+    return terminal
+
+
+def _work_overlay_item_sort_key(item: WorkStatusItem) -> tuple[float, float]:
+    session_timestamp = item.session_started_at or item.started_at or item.updated_at
+    task_timestamp = item.started_at or item.updated_at or item.session_started_at
+    session_seconds = session_timestamp.timestamp() if session_timestamp is not None else 0.0
+    task_seconds = task_timestamp.timestamp() if task_timestamp is not None else 0.0
+    return session_seconds, task_seconds
+
+
+def _stabilize_published_work_overlay_items(
+    context: object,
+    items: Sequence[WorkStatusItem],
+) -> list[WorkStatusItem]:
+    item_limit = _work_overlay_item_limit_for_context(context)
+    cache = _work_overlay_published_item_cache(context)
+    terminal = _work_overlay_terminal_item_tasks(context)
+    if item_limit <= 0:
+        cache.clear()
+        return []
+
+    now = datetime.now().astimezone()
+    merged = {str(item.id): item for item in items if str(item.id or "").strip()}
+    for item_id, item in list(merged.items()):
+        cached_item = cache.get(item_id)
+        if cached_item is not None and cached_item.session_started_at is not None:
+            stable_session_start = cached_item.session_started_at
+            if item.session_started_at is not None:
+                stable_session_start = min(
+                    stable_session_start,
+                    item.session_started_at,
+                )
+            if item.session_started_at != stable_session_start:
+                item = replace(item, session_started_at=stable_session_start)
+                merged[item_id] = item
+        terminal_task = terminal.get(item_id)
+        item_task = _iso_or_empty(item.task_started_at or item.started_at)
+        if terminal_task and terminal_task == item_task:
+            merged.pop(item_id, None)
+        elif terminal_task:
+            terminal.pop(item_id, None)
+
+    provider_scope = _effective_notification_provider_scope(context, None)
+    for item_id, cached_item in list(cache.items()):
+        if item_id in merged:
+            continue
+        cached_task = _iso_or_empty(cached_item.task_started_at or cached_item.started_at)
+        if terminal.get(item_id) == cached_task:
+            continue
+        if provider_scope is not None and cached_item.model_provider not in provider_scope:
+            continue
+        updated_at = (
+            cached_item.updated_at
+            or cached_item.started_at
+            or cached_item.task_started_at
+            or cached_item.session_started_at
+        )
+        if cached_item.status != "recent" and (
+            updated_at is None
+            or _datetime_age_seconds(updated_at, now) > ACTIVE_WORK_STALE_SECONDS
+        ):
+            continue
+        merged[item_id] = replace(cached_item, current=False)
+
+    stable = sorted(merged.values(), key=_work_overlay_item_sort_key, reverse=True)[
+        :item_limit
+    ]
+    cache.clear()
+    cache.update(
+        {
+            str(item.id): replace(item, current=False)
+            for item in stable
+            if str(item.id or "").strip()
+        }
+    )
+    return stable
+
+
 def _select_runtime_work_overlay_items(
     context: object,
     items: Sequence[WorkStatusItem],
@@ -4327,9 +4440,13 @@ def active_work_items_for_snapshot(
     """Build primary-screen work bubble items from recently active Codex sessions."""
     item_limit = _work_overlay_item_limit_for_context(context)
     if item_limit <= 0:
+        _work_overlay_visible_item_cache(context).clear()
         return []
     now = datetime.now().astimezone()
     items: dict[str, WorkStatusItem] = {}
+    visible_item_cache = _work_overlay_visible_item_cache(context)
+    terminal_item_tasks = _work_overlay_terminal_item_tasks(context)
+    terminal_item_ids: dict[str, str] = {}
     current_key = _session_path_key(session_path)
     current_item = _work_item_from_snapshot(
         snapshot,
@@ -4340,6 +4457,10 @@ def active_work_items_for_snapshot(
     )
     if current_item is not None:
         items[str(current_item.id)] = current_item
+    elif snapshot.task_aborted_at is not None and snapshot.session_id:
+        terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
+            snapshot.task_started_at
+        )
 
     for path in _recent_session_files(
         context.sessions_root,
@@ -4367,23 +4488,64 @@ def active_work_items_for_snapshot(
         )
         if item is not None:
             items[str(item.id)] = item
+        elif parsed.task_aborted_at is not None and parsed.session_id:
+            terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
+                parsed.task_started_at
+            )
 
-    def sort_key(item: WorkStatusItem) -> tuple[int, float]:
-        session_timestamp = item.session_started_at or item.started_at or item.updated_at
-        task_timestamp = item.started_at or item.updated_at or item.session_started_at
-        session_seconds = session_timestamp.timestamp() if session_timestamp is not None else 0.0
-        task_seconds = task_timestamp.timestamp() if task_timestamp is not None else 0.0
-        return (session_seconds, task_seconds)
+    terminal_item_tasks.update(terminal_item_ids)
+    for item_id in terminal_item_ids:
+        visible_item_cache.pop(item_id, None)
+    for item_id, cached_item in list(visible_item_cache.items()):
+        if item_id in items:
+            continue
+        updated_at = (
+            cached_item.updated_at
+            or cached_item.started_at
+            or cached_item.task_started_at
+            or cached_item.session_started_at
+        )
+        if cached_item.status != "recent" and (
+            updated_at is None
+            or _datetime_age_seconds(updated_at, now) > ACTIVE_WORK_STALE_SECONDS
+        ):
+            visible_item_cache.pop(item_id, None)
+            continue
+        items[item_id] = replace(cached_item, current=False)
 
-    ordered = sorted(items.values(), key=sort_key, reverse=True)
+    ordered = sorted(items.values(), key=_work_overlay_item_sort_key, reverse=True)
     provider_scope = _effective_notification_provider_scope(context, snapshot)
     if provider_scope is not None:
         ordered = [item for item in ordered if item.model_provider in provider_scope]
-    return _select_runtime_work_overlay_items(
+    selected = _select_runtime_work_overlay_items(
         context,
         ordered,
         item_limit=item_limit,
     )
+    selected_ids = {str(item.id) for item in selected if str(item.id or "").strip()}
+    retained_ids = {
+        item_id
+        for item_id, cached_item in visible_item_cache.items()
+        if item_id in items
+        and item_id not in terminal_item_ids
+        and _work_overlay_runtime_task_key(items[item_id])
+        == _work_overlay_runtime_task_key(cached_item)
+    }
+    visible_ids = selected_ids | retained_ids
+    selected = [
+        item
+        for item in ordered
+        if str(item.id or "").strip() in visible_ids
+    ][:item_limit]
+    visible_item_cache.clear()
+    visible_item_cache.update(
+        {
+            str(item.id): replace(item, current=False)
+            for item in selected
+            if str(item.id or "").strip()
+        }
+    )
+    return selected
 
 
 class _RendererActiveWorkPump:
@@ -4698,6 +4860,8 @@ class SessionSnapshotCache:
                 session_id=session_id or None,
                 max_bytes=self._preview_bytes,
             )
+        preserve_previous_cost = False
+        previous_cost: float | None = None
         with self._lock:
             entry = self._entries.get(key)
             if (
@@ -4707,12 +4871,20 @@ class SessionSnapshotCache:
             ):
                 entry.accessed_at = time.monotonic()
                 return _clone_cached_session_snapshot(entry.snapshot)
+            if entry is not None and int(stat.st_size) > entry.file_size:
+                current_file_id = self._parser._file_id(key, stat)
+                if entry.state.file_id == current_file_id:
+                    preserve_previous_cost = True
+                    previous_cost = entry.snapshot.confirmed.cumulative_cost_usd
             self._enqueue_locked(key, session_id)
-        return self._parser.parse_file_tail_preview(
+        preview = self._parser.parse_file_tail_preview(
             key,
             session_id=session_id or None,
             max_bytes=self._preview_bytes,
         )
+        if preserve_previous_cost:
+            preview.confirmed.cumulative_cost_usd = previous_cost
+        return preview
 
     def _enqueue_locked(self, path: Path, session_id: str) -> None:
         if path in self._queued or self._closed.is_set():
@@ -7022,10 +7194,14 @@ def run_renderer_hud_session(
                             and result_seq == current_seq
                             and result_seq == latest_seq
                         ):
-                            loop_state.latest_snapshot.active_work_items = list(
-                                result_items
+                            stable_items = _stabilize_published_work_overlay_items(
+                                context,
+                                result_items,
                             )
-                            work_overlay.update(result_items)
+                            loop_state.latest_snapshot.active_work_items = list(
+                                stable_items
+                            )
+                            work_overlay.update(stable_items)
                         else:
                             _LOGGER.info(
                                 "renderer_active_work_discarded result_seq=%s current_seq=%s latest_seq=%s",
@@ -7438,10 +7614,15 @@ def run_renderer_hud_session(
                         )
                     update_ms = (time.perf_counter() - update_started) * 1000.0
                     if not lightweight_active_session_refresh:
+                        stable_items = _stabilize_published_work_overlay_items(
+                            context,
+                            fresh.active_work_items,
+                        )
+                        fresh.active_work_items = list(stable_items)
                         work_overlay.configure(
                             item_limit=_work_overlay_item_limit_for_context(context),
                         )
-                        work_overlay.update(fresh.active_work_items)
+                        work_overlay.update(stable_items)
                         file_events.update_session_path(fresh.session_path)
                     refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
                     update_metrics = dict(

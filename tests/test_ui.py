@@ -16,6 +16,7 @@ from tkinter import ttk
 import unittest
 
 import pytest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -216,6 +217,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _theme_contrast_ratio,
     _visible_overlay_items,
     _workdir_link_hover_visible_for_item,
+    _workdir_link_opacity_for_item,
     _workdir_external_link_for_item,
     _workdir_clickable_for_item,
     _workdir_link_pending_for_item,
@@ -1104,6 +1106,93 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(complete.status, "parsed")
         self.assertEqual(complete.session_id, "thread-1")
 
+    def test_session_cache_preview_preserves_complete_cost_during_append(self) -> None:
+        estimator = cli_module.CostEstimator(
+            cli_module.UsageCalculator(
+                {
+                    "gpt-5": {
+                        "input": 1,
+                        "cached_input": 1,
+                        "output": 1,
+                        "reasoning": 1,
+                    }
+                }
+            )
+        )
+        parser = JsonlSessionParser(cost_estimator=estimator)
+
+        def row(timestamp: str, record_type: str, payload: dict[str, object]) -> dict[str, object]:
+            return {"timestamp": timestamp, "type": record_type, "payload": payload}
+
+        def token_count(timestamp: str, last_input: int, total_input: int) -> dict[str, object]:
+            return row(
+                timestamp,
+                "event_msg",
+                {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": last_input,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 0,
+                            "reasoning_output_tokens": 0,
+                            "total_tokens": last_input,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": total_input,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 0,
+                            "reasoning_output_tokens": 0,
+                            "total_tokens": total_input,
+                        },
+                    },
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.jsonl"
+            initial = [
+                row("2026-07-17T00:00:00Z", "session_meta", {"id": "thread-1"}),
+                row("2026-07-17T00:00:01Z", "turn_context", {"model": "gpt-5"}),
+                token_count("2026-07-17T00:00:02Z", 1_000_000, 1_000_000),
+            ]
+            path.write_text(
+                "".join(json.dumps(item) + "\n" for item in initial),
+                encoding="utf-8",
+            )
+            events = RuntimeEventBus()
+            hydrated = threading.Event()
+            events.subscribe(
+                lambda event: hydrated.set()
+                if event.type == "session_snapshot_hydrated"
+                else None
+            )
+            cache = SessionSnapshotCache(parser, event_bus=events, preview_bytes=1024)
+            try:
+                cache.snapshot_for(path, session_id="thread-1")
+                self.assertTrue(hydrated.wait(1.0))
+                complete = cache.snapshot_for(path, session_id="thread-1")
+                self.assertEqual(complete.confirmed.cumulative_cost_usd, 1.0)
+
+                appended = [
+                    row(
+                        "2026-07-17T00:00:03Z",
+                        "event_msg",
+                        {"type": "notice", "text": "x" * 4096},
+                    ),
+                    row("2026-07-17T00:00:04Z", "turn_context", {"model": "gpt-5"}),
+                    token_count("2026-07-17T00:00:05Z", 2_000_000, 3_000_000),
+                ]
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write("".join(json.dumps(item) + "\n" for item in appended))
+                preview = cache.snapshot_for(path, session_id="thread-1")
+            finally:
+                cache.close()
+
+        self.assertEqual(preview.status, "loading")
+        self.assertEqual(preview.confirmed.cumulative_total, 3_000_000)
+        self.assertEqual(preview.confirmed.cumulative_cost_usd, 1.0)
+
     def test_cached_session_clone_shares_history_but_isolates_runtime_fields(self) -> None:
         history = [SimpleNamespace(status="confirmed")]
         source = ParsedSession(
@@ -1459,9 +1548,38 @@ class BudgetHelperTests(unittest.TestCase):
             )
 
             items = active_work_items_for_snapshot(context, snapshot, current)
+            with patch(
+                "codex_usage_hud.cli._recent_session_files",
+                return_value=[current],
+            ), patch(
+                "codex_usage_hud.cli._select_runtime_work_overlay_items",
+                side_effect=lambda _context, candidates, **_kwargs: [
+                    item for item in candidates if item.id == "session-current"
+                ],
+            ):
+                retained_items = active_work_items_for_snapshot(context, snapshot, current)
+
+            aborted_row = {
+                "timestamp": now.isoformat(),
+                "type": "event_msg",
+                "payload": {"type": "turn_aborted", "reason": "interrupted"},
+            }
+            worker.write_text(
+                worker.read_text(encoding="utf-8")
+                + "\n"
+                + json.dumps(aborted_row, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+            after_abort_items = active_work_items_for_snapshot(context, snapshot, current)
 
         self.assertGreaterEqual(len(items), 2)
         self.assertEqual([item.id for item in items[:2]], ["session-worker", "session-current"])
+        self.assertEqual(
+            [item.id for item in retained_items[:2]],
+            ["session-worker", "session-current"],
+        )
+        self.assertNotIn("session-worker", [item.id for item in after_abort_items])
         self.assertTrue(any(item.current for item in items))
         self.assertIn("Background thread work", " ".join(item.detail for item in items))
         self.assertEqual(items[0].workdir, "E:\\Project\\session-worker")
@@ -1509,6 +1627,61 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(len(items), 2)
         self.assertEqual([item.id for item in items], ["session-worker-b", "session-worker-a"])
+
+    def test_published_work_overlay_stabilizes_stale_snapshot_until_terminal(self) -> None:
+        now = datetime.now().astimezone()
+        older = WorkStatusItem(
+            id="session-older",
+            title="Older session",
+            status="running",
+            status_label="运行中",
+            detail="older",
+            model_provider="custom",
+            session_started_at=now - timedelta(minutes=10),
+            task_started_at=now - timedelta(minutes=9),
+            updated_at=now,
+        )
+        newer = WorkStatusItem(
+            id="session-newer",
+            title="Newer session",
+            status="running",
+            status_label="运行中",
+            detail="newer",
+            model_provider="custom",
+            session_started_at=now - timedelta(minutes=2),
+            task_started_at=now - timedelta(minutes=1),
+            updated_at=now,
+        )
+        context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            app_provider="custom",
+        )
+
+        initial = cli_module._stabilize_published_work_overlay_items(
+            context,
+            [older, newer],
+        )
+        retained = cli_module._stabilize_published_work_overlay_items(
+            context,
+            [older],
+        )
+        preview_newer = replace(newer, session_started_at=now)
+        refreshed = cli_module._stabilize_published_work_overlay_items(
+            context,
+            [older, preview_newer],
+        )
+        context._work_overlay_terminal_item_tasks[newer.id] = (
+            newer.task_started_at.isoformat()
+        )
+        after_terminal = cli_module._stabilize_published_work_overlay_items(
+            context,
+            [older],
+        )
+
+        self.assertEqual([item.id for item in initial], [newer.id, older.id])
+        self.assertEqual([item.id for item in retained], [newer.id, older.id])
+        self.assertEqual(refreshed[0].session_started_at, newer.session_started_at)
+        self.assertEqual([item.id for item in after_terminal], [older.id])
 
     def test_active_work_items_include_notification_only_provider(self) -> None:
         parser = JsonlSessionParser()
@@ -1626,6 +1799,7 @@ class BudgetHelperTests(unittest.TestCase):
             workdir="E:\\Project\\codex-usage-hud",
             model_provider="muyuan",
             client_kind="cli",
+            session_started_at=datetime(2026, 6, 16, 9, 55, 0).astimezone(),
             task_started_at=datetime(2026, 6, 16, 10, 0, 0).astimezone(),
             current=True,
         )
@@ -1648,6 +1822,9 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["workdir"], "E:\\Project\\codex-usage-hud")
         self.assertEqual(payload["modelProvider"], "muyuan")
         self.assertEqual(payload["clientKind"], "cli")
+        self.assertTrue(
+            str(payload["sessionStartedAt"]).startswith("2026-06-16T09:55:00")
+        )
         self.assertTrue(str(payload["taskStartedAt"]).startswith("2026-06-16T10:00:00"))
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
@@ -1761,16 +1938,27 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(_interactive_hotspot_opacity(0.22, False), 0.22)
         self.assertEqual(_interactive_hotspot_opacity(0.22, True), 0.96)
 
-    def test_completed_workdir_never_creates_an_external_link_layer(self) -> None:
+    def test_completed_app_workdir_creates_an_invisible_click_hotspot(self) -> None:
         completed_item = {
             "status": "recent",
             "workdir": r"E:\\Work\\zjxc.moon",
             "sessionId": "thread-1",
+            "clientKind": "app",
         }
         active_item = {**completed_item, "status": "running"}
+        cli_item = {**completed_item, "clientKind": "cli"}
 
-        self.assertFalse(_workdir_external_link_for_item(completed_item))
+        self.assertTrue(_workdir_external_link_for_item(completed_item))
         self.assertTrue(_workdir_external_link_for_item(active_item))
+        self.assertFalse(_workdir_external_link_for_item(cli_item))
+        self.assertEqual(
+            _workdir_link_opacity_for_item(completed_item, 0.22, True),
+            0.22,
+        )
+        self.assertEqual(
+            _workdir_link_opacity_for_item(active_item, 0.22, True),
+            0.96,
+        )
 
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()
@@ -2318,6 +2506,21 @@ class BudgetHelperTests(unittest.TestCase):
         )
         self.assertIn(
             "state_read_retry_timer.start(WORK_OVERLAY_STATE_READ_RETRY_MS)",
+            source,
+        )
+
+    def test_work_overlay_helper_collects_completed_workdir_click_hotspot(self) -> None:
+        source = (
+            PROJECT_ROOT
+            / "src"
+            / "codex_usage_hud"
+            / "ui"
+            / "work_overlay_qt.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"workdir_anchor": workdir_anchor', source)
+        self.assertIn(
+            'self._workdir_anchors.append((record["workdir_anchor"], dict(item)))',
             source,
         )
 
@@ -3584,7 +3787,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].elapsed_text, "已处理 1m00s")
         self.assertEqual(items[0].cache_hit_text, "25%")
 
-    def test_completed_overlay_items_order_oldest_to_newest_before_active_items(self) -> None:
+    def test_overlay_items_keep_completed_first_and_active_sessions_newest_first(self) -> None:
         completed_latest = {
             "id": "session-completed-latest",
             "status": "recent",
@@ -3599,18 +3802,31 @@ class BudgetHelperTests(unittest.TestCase):
             "lastText": "更早完成",
             "updatedAt": "2026-06-17T10:01:00+08:00",
         }
-        active = {
-            "id": "session-active",
+        active_oldest = {
+            "id": "session-active-oldest",
             "status": "running",
             "statusText": "运行中",
             "lastText": "进行中",
+            "sessionStartedAt": "2026-06-17T10:02:00+08:00",
+        }
+        active_latest = {
+            **active_oldest,
+            "id": "session-active-latest",
+            "sessionStartedAt": "2026-06-17T10:07:00+08:00",
         }
 
-        ordered = _ordered_overlay_items([completed_latest, active, completed_oldest])
+        ordered = _ordered_overlay_items(
+            [active_oldest, completed_latest, active_latest, completed_oldest]
+        )
 
         self.assertEqual(
             [item["id"] for item in ordered],
-            ["session-completed-oldest", "session-completed-latest", "session-active"],
+            [
+                "session-completed-oldest",
+                "session-completed-latest",
+                "session-active-latest",
+                "session-active-oldest",
+            ],
         )
 
     def test_completed_badge_hover_ignores_bounding_box_corner(self) -> None:

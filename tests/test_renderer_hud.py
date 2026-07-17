@@ -158,6 +158,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         top_line = str(payload["topLine"])
         self.assertNotIn("Live Renderer Thread", str(payload["topLine"]))
         self.assertTrue(top_line.startswith("本会话 14k/"))
+        self.assertIn("本会话 14k/$0.123/", top_line)
+        self.assertNotIn("$0.136", top_line)
         self.assertIn("/~61% | 今日", top_line)
         self.assertIn("今日 50k/$0.500", top_line)
         self.assertIn("本周 200k/$1.50", top_line)

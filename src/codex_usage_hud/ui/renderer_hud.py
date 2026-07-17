@@ -9965,9 +9965,6 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
             _total_estimated,
         ) = _display_tokens(snapshot)
         total_tokens += int(request_total_tokens or 0)
-        request_cost, _request_cost_estimated = _request_cost(snapshot)
-        if request_cost is not None:
-            total_cost = float(total_cost or 0.0) + float(request_cost)
     return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
 
 

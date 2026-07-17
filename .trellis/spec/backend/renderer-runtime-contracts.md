@@ -15,6 +15,7 @@
 - Identity/cache: session payloads carry canonical `sessionId`, exact raw `rendererSessionId`, and `cachedPreview=false`. A renderer-only preview sets `cachedPreview=true` for the current sequence without acknowledging it.
 - Runtime events: `active_session_changed` produces the visible `sessionSwitch` domain; a successful visible update schedules `active_work_refresh_requested`.
 - Critical transport: `_RendererBinding(..., retry_same_target=True)` is used only for the active-session binding.
+- Cost preview: `JsonlSessionParser.parse_file_tail_preview(...)` may expose cumulative token counters, while `SessionSnapshotCache.snapshot_for(...)` owns stabilization of the last complete `cumulative_cost_usd` during an append-triggered hydrate.
 
 ### 3. Contracts
 
@@ -33,6 +34,8 @@
 - Renderer payload `Runtime.evaluate` reuses the persistent active-session binding websocket with command-ID response routing. If that channel is not ready or disconnects, `_send_update` falls back to the existing ephemeral CDP command and the critical binding recovery contract remains active.
 - Codex handles a sidebar click and its React route transition in the same renderer task. A CDP update sent from the binding callback can therefore remain queued for roughly 150-300 ms even when Python snapshot work and CDP round trips are otherwise fast. The renderer keeps up to 48 exact identity keys for previously confirmed session payloads and applies a cache hit synchronously in the capture-phase click handler before Codex route work begins.
 - Renderer preview lookup uses only `rendererSessionId` or canonical `sessionId`; title, prefix, and newest-session lookup are forbidden. A preview must retain the new `selectionSeq` but must not raise `activeSessionAppliedSeqName`, suppress same-sequence follow-ups, or replace the later Python-authoritative payload.
+- A bounded tail must clear its tail-window `cumulative_cost_usd`; those records cannot prove the whole-session cost. For append-only growth of the same file identity, `SessionSnapshotCache` keeps the prior complete cost until incremental hydration publishes the replacement.
+- The top `本会话` amount is the confirmed session cumulative cost. Live request tokens may be included while a request runs, but `_request_cost(snapshot)` must not be added to that amount.
 - A critical active-session binding may reconnect to the same CDP target after disconnect. Auxiliary bindings retain same-target suppression to avoid idle retry loops.
 - The runtime remains event-driven. Selection-specific timers are bounded; no idle active-session poll is permitted.
 
@@ -49,6 +52,9 @@
 | First session payload is transported but not applied | Bounded duplicate delivery for the same sequence wakes another visible refresh. |
 | Active-session binding disconnects | Preserve the current selection, show `renderer-channel-unavailable`, and permit same-target recovery. |
 | Visible session update succeeds | Schedule recent-work aggregation as a separate event. |
+| Append-only file growth has a complete cached snapshot | Keep the cached complete session cost until incremental hydration publishes the new complete cost. |
+| Cold bounded tail excludes earlier token events | Treat its tail-window cost as unknown; never label it as the cumulative session cost. |
+| Request is still running | Live token estimates may appear in `本会话`, but its amount excludes the running round estimate. |
 | Exact selected ID has a confirmed renderer payload cache entry | Apply the visible preview synchronously, keep the sequence unacknowledged, then replace it with the Python-authoritative payload. |
 | Exact selected ID has no cache entry | Show `reading-session-data` immediately and wait for the normal strict mapping/snapshot/CDP path. |
 | Session-file writes share the selection tick | Send the visible cached-budget/session-only payload first; defer the file-derived aggregates. |
@@ -58,8 +64,11 @@
 ### 5. Good/Base/Bad Cases
 
 - Good: click A -> B -> C; exact cache hits repaint in the capture handler, C remains the final authoritative selection, and later work aggregation cannot repaint A or B.
+- Good: a complete session costs `$1`, an appended round costs `$2`, and the visible sequence is `$1` while hydrating then `$3` when complete, never `$2`.
 - Base: Codex exposes `client-new-thread:*` before persistence; HUD remains explicit pending and converges after the exact local evidence appears.
+- Base: a cold partial tail has no prior complete cost; it remains explicitly loading and does not publish the sum of tail-window rounds as a session total.
 - Bad: title-key the renderer cache, mark a cached preview as applied, discard the provisional ID after one miss, accept transport delivery as application ACK, synchronously parse 16 recent files before the visible update, or reconnect every auxiliary binding forever.
+- Bad: add `_request_cost(snapshot)` to the top `本会话` amount or retain the partial parser's tail-only `cumulative_cost_usd`; both make the amount jump between round and session totals.
 
 ### 6. Tests Required
 
@@ -67,6 +76,9 @@
 - `tests/test_renderer_hud.py`: raw/canonical identity fields, applied-sequence dedup, immediate click feedback, same-target critical binding retry, and disconnect callback payload.
 - `tests/test_renderer_hud.py`: exact-ID payload cache markers, `cachedPreview` ACK exclusion, and authoritative payloads carrying both identity fields.
 - `tests/test_ui.py`: visible-first scan exclusion, separate work refresh, stale snapshot rejection, unchanged current-sequence retry, and specific runtime diagnostics.
+- `tests/test_parser.py`: a bounded partial tail clears its non-authoritative cumulative cost.
+- `tests/test_ui.py`: an append preview preserves the last complete cost until hydration.
+- `tests/test_renderer_hud.py`: a running request cannot add its round estimate to the top session amount.
 - Live acceptance: alternate canonical rows at least 50 times, exercise rapid A -> B -> C, and select a persisted provisional row without a second click.
 
 ### 7. Wrong vs Correct
@@ -94,6 +106,18 @@ publish("active_work_refresh_requested")
 ```
 
 The current sequence remains retryable until renderer application, while recent work is refreshed after the user-visible session fields.
+
+For append-triggered cost previews, the correct rule is:
+
+```python
+# Wrong: this is only the sum of token events inside the bounded tail.
+preview.confirmed.cumulative_cost_usd = tail_window_cost
+top_session_cost += running_request_cost
+
+# Correct: keep the last complete value until incremental hydration replaces it.
+preview.confirmed.cumulative_cost_usd = cached.confirmed.cumulative_cost_usd
+top_session_cost = confirmed_session_cost
+```
 
 For a renderer cache hit, the correct preview rule is:
 
@@ -381,9 +405,16 @@ if not capability.cross_platform_safe:
   turn; do not mark the entire target list as already displayed.
 - On transition completion, re-render the latest raw payload so the next queued
   item can transition. Provider is not part of the animation identity; `id` is.
-- The external workdir hover layer is card-only. Completed badges retain their
-  painted arc workdir text and their check/dismiss hotspot; they never create a
-  separate workdir window.
+- Already visible work items survive a transient candidate-scan omission until
+  an explicit terminal state, the activity stale deadline, or normal
+  provider/item-limit selection removes them.
+- Active cards are ordered by `sessionStartedAt` descending, with task/update
+  timestamps used only as fallbacks, so a newer session stays above an older
+  session across payload refreshes.
+- The visible workdir hover layer is card-only. Completed badges retain their
+  painted arc workdir text and use a visually inert native hotspot over that arc
+  to activate the corresponding App session; the hotspot must not draw a
+  rectangular workdir layer or overlap the check/dismiss hotspot.
 - The card QLabel remains the only workdir text renderer. Its top-level hotspot
   stays inside the exact label bounds and may paint only a background or
   underline; it must not redraw, elide, or widen across adjacent footer content.
@@ -400,7 +431,7 @@ if not capability.cross_platform_safe:
 | Multiple shape changes in one payload | Apply one transition, then apply the next from the deferred display state. |
 | New/removed item only | Rebuild without inventing a shape transition. |
 | Card workdir hover | Keep the full QLabel text and highlight only its exact bounds; do not paint a second string or expand over the status label. |
-| Completed badge workdir | Keep only the painted arc text; never create a rectangular workdir window. |
+| Completed badge workdir | Keep only the painted arc text; its invisible native hotspot activates the App session without drawing a rectangular layer. |
 | Bubble opacity is `0.22` | `WindowFromPoint` still resolves the workdir/check hotspot rather than the window beneath it. |
 | Completed check hover/click | Raise the hotspot to its own hover opacity, show a clear outline, and invoke the existing annihilation dismissal. |
 

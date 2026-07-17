@@ -665,7 +665,18 @@ def _workdir_link_hover_visible_for_item(item: Mapping[str, object]) -> bool:
 
 
 def _workdir_external_link_for_item(item: Mapping[str, object]) -> bool:
-    return _workdir_clickable_for_item(item) and not _item_is_completed(item)
+    return _workdir_clickable_for_item(item)
+
+
+def _workdir_link_opacity_for_item(
+    item: Mapping[str, object],
+    base_opacity: float,
+    hovered: bool,
+) -> float:
+    return _interactive_hotspot_opacity(
+        base_opacity,
+        hovered and _workdir_link_hover_visible_for_item(item),
+    )
 
 
 def _transition_required_height(
@@ -880,6 +891,16 @@ def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mappin
             "taskStartedAt",
             "startedAt",
         )
+    )
+    active.sort(
+        key=lambda item: _overlay_item_timestamp_seconds(
+            item,
+            "sessionStartedAt",
+            "taskStartedAt",
+            "startedAt",
+            "updatedAt",
+        ),
+        reverse=True,
     )
     return completed + active
 
@@ -1811,13 +1832,21 @@ def run_work_overlay_helper_qt(
             self._base_opacity = _clamp01(opacity)
             if not self._hover:
                 self.setWindowOpacity(
-                    _interactive_hotspot_opacity(self._base_opacity, False)
+                    _workdir_link_opacity_for_item(
+                        self._item,
+                        self._base_opacity,
+                        False,
+                    )
                 )
 
         def enterEvent(self, event: object) -> None:
             self._hover = True
             self.setWindowOpacity(
-                _interactive_hotspot_opacity(self._base_opacity, True)
+                _workdir_link_opacity_for_item(
+                    self._item,
+                    self._base_opacity,
+                    True,
+                )
             )
             self.update()
             super().enterEvent(event)
@@ -1825,7 +1854,11 @@ def run_work_overlay_helper_qt(
         def leaveEvent(self, event: object) -> None:
             self._hover = False
             self.setWindowOpacity(
-                _interactive_hotspot_opacity(self._base_opacity, False)
+                _workdir_link_opacity_for_item(
+                    self._item,
+                    self._base_opacity,
+                    False,
+                )
             )
             self.update()
             super().leaveEvent(event)
@@ -3358,6 +3391,11 @@ def run_work_overlay_helper_qt(
             )
             hover_anchor.move(0, 0)
             hover_anchor.show()
+            workdir_anchor = QWidget(badge)
+            workdir_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            workdir_anchor.setFixedSize(WORK_OVERLAY_COMPLETED_BADGE_SIZE - 24, 40)
+            workdir_anchor.move(12, 124)
+            workdir_anchor.show()
             check_anchor = QWidget(badge)
             check_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             check_anchor.setFixedSize(68, 56)
@@ -3368,6 +3406,7 @@ def run_work_overlay_helper_qt(
                 "item_id": item_id,
                 "badge": badge,
                 "hover_anchor": hover_anchor,
+                "workdir_anchor": workdir_anchor,
                 "check_anchor": check_anchor,
             }
             self._item_widgets.append(record)
@@ -3391,6 +3430,9 @@ def run_work_overlay_helper_qt(
                 completed_at=self._switch_pending_completed_at if completed else 0.0,
             )
             self._completed_hover_anchors.append(record["hover_anchor"])
+            workdir_text = _workdir_display_name(item)
+            if workdir_text and _workdir_external_link_for_item(item):
+                self._workdir_anchors.append((record["workdir_anchor"], dict(item)))
             self._completed_check_anchors.append((record["check_anchor"], dict(item)))
 
         def _build_item_card(self, item: Mapping[str, object]) -> None:

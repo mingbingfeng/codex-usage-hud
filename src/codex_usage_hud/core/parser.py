@@ -673,6 +673,10 @@ class JsonlSessionParser:
 
         snapshot.last_file_mtime = stat.st_mtime
         preview = self.parse_records(records, path, session_id, snapshot=snapshot)
+        if start:
+            # A bounded tail can price only the rounds inside its byte window,
+            # not the whole cumulative token total reported by Codex.
+            preview.confirmed.cumulative_cost_usd = None
         if preview.status == "parsed":
             preview.status = "loading"
         return preview
