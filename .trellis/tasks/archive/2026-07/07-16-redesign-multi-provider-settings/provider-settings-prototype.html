@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multi-provider settings prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #171717;
+      --surface: #101214;
+      --surface-raised: #171a1d;
+      --field: #1b1e21;
+      --line: #303438;
+      --line-soft: #24272a;
+      --text: #f1f1ee;
+      --muted: #a6a7a2;
+      --faint: #747771;
+      --accent: #f0c75e;
+      --accent-ink: #17130a;
+      --success: #73c991;
+      --warning: #e6a45d;
+      --danger: #e07a74;
+      --radius: 6px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { min-height: 100%; }
+
+    body {
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--page);
+      color: var(--text);
+      font: 12px "Microsoft YaHei UI", system-ui, sans-serif;
+      letter-spacing: 0;
+    }
+
+    button, input, select { font: inherit; letter-spacing: 0; }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--accent) 82%, white);
+      outline-offset: 1px;
+    }
+
+    .dialog {
+      width: min(760px, calc(100vw - 32px));
+      max-height: min(760px, calc(100vh - 32px));
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      overflow: hidden;
+      border: 1px solid #3c4044;
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: 0 22px 64px rgb(0 0 0 / 48%);
+    }
+
+    .head,
+    .actions {
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 12px;
+      background: var(--surface-raised);
+    }
+
+    .title { font-size: 13px; font-weight: 700; }
+
+    .icon-button,
+    .button {
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #24272a;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .icon-button {
+      width: 30px;
+      padding: 0;
+      display: inline-grid;
+      place-items: center;
+      font-size: 17px;
+    }
+
+    .button { padding: 4px 10px; }
+    .button:hover, .icon-button:hover { border-color: #555a5f; background: #2b2f32; }
+
+    .button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: var(--accent-ink);
+      font-weight: 700;
+    }
+
+    .button.ghost { background: transparent; }
+
+    .top-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 7px 12px;
+      border-top: 1px solid var(--line-soft);
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .top-tab {
+      min-height: 28px;
+      border: 0;
+      border-radius: 5px;
+      padding: 4px 9px;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .top-tab.active { background: #272a2d; color: var(--accent); }
+
+    .body { min-height: 0; overflow: auto; padding: 12px; }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px 10px;
+    }
+
+    .field { min-width: 0; display: grid; gap: 4px; }
+    .field label, .eyebrow { color: var(--muted); font-size: 10px; font-weight: 700; }
+
+    .field input,
+    .field select,
+    .price-table input {
+      width: 100%;
+      min-width: 0;
+      min-height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 5px 7px;
+      background: var(--field);
+      color: var(--text);
+    }
+
+    .field input:focus,
+    .field select:focus,
+    .price-table input:focus { border-color: var(--accent); }
+
+    .split-field { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+    .dependency {
+      min-height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 5px 7px;
+      background: var(--field);
+    }
+
+    .dependency strong { color: var(--success); }
+
+    .provider-editor {
+      grid-column: 1 / -1;
+      min-width: 0;
+      margin-top: 4px;
+      border-top: 1px solid var(--line);
+    }
+
+    .provider-title-row {
+      min-height: 42px;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding-top: 5px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .provider-title { font-size: 12px; font-weight: 700; }
+    .unit { color: var(--faint); font-size: 10px; }
+
+    .provider-tabs-wrap {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .provider-tabs {
+      display: flex;
+      gap: 2px;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      overscroll-behavior-inline: contain;
+    }
+
+    .provider-tab {
+      position: relative;
+      flex: 0 0 auto;
+      min-width: 94px;
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      padding: 5px 10px 4px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    .provider-tab:hover { background: #1a1d20; color: var(--text); }
+    .provider-tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--text); }
+
+    .tab-badge {
+      border: 1px solid #4b4f53;
+      border-radius: 4px;
+      padding: 1px 4px;
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.4;
+    }
+
+    .provider-tab[aria-selected="true"] .tab-badge { border-color: #77682f; color: var(--accent); }
+
+    .dirty-dot {
+      width: 6px;
+      height: 6px;
+      flex: 0 0 6px;
+      border-radius: 50%;
+      background: var(--warning);
+    }
+
+    .provider-panel { display: grid; gap: 8px; padding-top: 8px; }
+
+    .provider-context {
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .scope-check {
+      min-width: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .scope-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+    .scope-check input:disabled { opacity: .78; }
+    .provider-meta { min-width: 0; color: var(--muted); overflow-wrap: anywhere; text-align: right; }
+    .provider-meta .required { color: var(--success); font-weight: 700; }
+    .provider-meta .historical { color: var(--warning); font-weight: 700; }
+
+    .provider-tools {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 150px;
+      gap: 6px;
+      align-items: end;
+    }
+
+    .url-field { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+    .url-field .eyebrow { grid-column: 1 / -1; }
+    .compact-field { display: grid; gap: 4px; }
+
+    .table-scroll { min-width: 0; overflow-x: auto; padding-bottom: 2px; }
+
+    .price-table { min-width: 660px; display: grid; gap: 5px; }
+    .price-head, .price-row {
+      display: grid;
+      grid-template-columns: minmax(150px, 1.5fr) repeat(4, minmax(82px, 1fr));
+      gap: 6px;
+      align-items: center;
+    }
+
+    .price-head { color: var(--muted); font-size: 10px; font-weight: 700; }
+    .price-row[data-placeholder="true"] input { color: var(--faint); }
+
+    .price-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .add-model { display: inline-flex; align-items: center; gap: 6px; }
+
+    .config-note { color: var(--faint); overflow-wrap: anywhere; }
+    .status { min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+    .status.dirty { color: var(--warning); }
+    .action-group { flex: 0 0 auto; display: flex; gap: 6px; }
+
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 700px) {
+      body { place-items: start center; padding: 8px; }
+      .dialog { width: min(100%, 560px); max-height: calc(100vh - 16px); }
+      .settings-grid { grid-template-columns: minmax(0, 1fr); }
+      .provider-editor { grid-column: 1; }
+      .provider-tools { grid-template-columns: minmax(0, 1fr) 138px; }
+      .url-field { grid-column: 1 / -1; }
+      .provider-title-row { grid-template-columns: auto minmax(0, 1fr); }
+      .provider-title-row .unit { display: none; }
+      .provider-context { align-items: flex-start; }
+      .provider-meta { max-width: 56%; }
+      .actions { align-items: flex-start; }
+      .status { font-size: 10px; }
+    }
+
+    @media (max-width: 430px) {
+      .head, .actions { padding-inline: 9px; }
+      .body, .top-tabs { padding-inline: 9px; }
+      .provider-tools { grid-template-columns: minmax(0, 1fr); }
+      .url-field, .compact-field { grid-column: 1; }
+      .provider-context { display: grid; }
+      .provider-meta { max-width: none; text-align: left; }
+      .config-note { display: none; }
+      .action-group .button.ghost { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="dialog" aria-label="codex-usage-hud 设置设计稿">
+    <header class="head">
+      <div class="title">codex-usage-hud v1.0.5</div>
+      <button class="icon-button" type="button" title="关闭" aria-label="关闭">&times;</button>
+    </header>
+
+    <nav class="top-tabs" aria-label="设置分类">
+      <button class="top-tab active" type="button">设置</button>
+      <button class="top-tab" type="button">请作者喝咖啡</button>
+      <button class="top-tab" type="button">版本更新</button>
+    </nav>
+
+    <section class="body">
+      <div class="settings-grid">
+        <div class="field">
+          <label for="daily-budget">日额度 USD</label>
+          <input id="daily-budget" type="number" value="25.00">
+        </div>
+        <div class="field">
+          <label for="weekly-budget">周额度 USD</label>
+          <input id="weekly-budget" type="number" value="120.00">
+        </div>
+        <div class="field">
+          <label for="daily-reset">日额度重置时间</label>
+          <input id="daily-reset" type="time" value="00:00">
+        </div>
+        <div class="field">
+          <label>周额度重置</label>
+          <div class="split-field">
+            <select aria-label="周额度重置星期"><option>周一</option></select>
+            <input type="time" value="00:00" aria-label="周额度重置时间">
+          </div>
+        </div>
+        <div class="field">
+          <label for="bubble-count">会话进度气泡数量</label>
+          <select id="bubble-count"><option>4</option></select>
+        </div>
+        <div class="field">
+          <label>气泡运行环境</label>
+          <div class="dependency"><span>桌面叠加层</span><strong>已就绪</strong></div>
+        </div>
+        <div class="field">
+          <label for="thresholds">超额提醒阈值</label>
+          <input id="thresholds" value="50, 80, 100">
+        </div>
+
+        <section class="provider-editor" aria-labelledby="price-title">
+          <div class="provider-title-row">
+            <div id="price-title" class="provider-title">模型单价</div>
+            <div class="provider-tabs-wrap">
+              <div id="provider-tabs" class="provider-tabs" role="tablist" aria-label="Provider"></div>
+            </div>
+            <div class="unit">USD / 1M tokens</div>
+          </div>
+
+          <div id="provider-panel" class="provider-panel" role="tabpanel">
+            <div class="provider-context">
+              <label class="scope-check">
+                <input id="provider-enabled" type="checkbox">
+                <span>纳入统计</span>
+              </label>
+              <div id="provider-meta" class="provider-meta"></div>
+            </div>
+
+            <div class="provider-tools">
+              <div class="compact-field url-field">
+                <label class="eyebrow" for="pricing-url">计费单价获取地址</label>
+                <span class="visually-hidden">价格地址和拉取按钮</span>
+                <input id="pricing-url" value="" placeholder="https://example.com/model-prices.json">
+                <button id="fetch-prices" class="button" type="button">拉取</button>
+              </div>
+              <div class="compact-field">
+                <label class="eyebrow" for="weekly-adjustment">本周补充额度 USD</label>
+                <input id="weekly-adjustment" type="number" min="0" step="0.01" value="0">
+              </div>
+            </div>
+
+            <div class="table-scroll">
+              <div class="price-table">
+                <div class="price-head" aria-hidden="true">
+                  <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div>
+                </div>
+                <div id="price-rows"></div>
+              </div>
+            </div>
+
+            <div class="price-actions">
+              <button id="add-model" class="button ghost add-model" type="button"><span aria-hidden="true">+</span><span>添加模型</span></button>
+              <span id="draft-summary" class="unit"></span>
+            </div>
+          </div>
+        </section>
+
+        <div class="config-note">配置文件：C:\Users\demo\AppData\Local\codex-usage-hud\hud_settings.json</div>
+      </div>
+    </section>
+
+    <footer class="actions">
+      <div id="status" class="status">设置将保存到本地配置文件</div>
+      <div class="action-group">
+        <button class="button ghost" type="button">导出 JSON</button>
+        <button id="save" class="button primary" type="button">保存</button>
+      </div>
+    </footer>
+  </main>
+
+  <script>
+    const providers = {
+      custom: {
+        badge: "App",
+        enabled: true,
+        required: true,
+        meta: "Codex App · 必选 · Profile: default",
+        url: "https://prices.example.com/custom.json",
+        adjustment: 0,
+        prices: [
+          { model: "gpt-5.5", input: 5, cached: 0.5, output: 30, reasoning: 30 },
+          { model: "gpt-5.4-mini", input: 1.1, cached: 0.11, output: 4.4, reasoning: 4.4 }
+        ]
+      },
+      muyuan: {
+        badge: "CLI",
+        enabled: true,
+        required: false,
+        meta: "Profile: muyuan",
+        url: "https://prices.example.com/muyuan.json",
+        adjustment: 2.5,
+        prices: [
+          { model: "gpt-5.5", input: 2.8, cached: 0.28, output: 16, reasoning: 16 },
+          { model: "gpt-5.4-mini", input: 0.7, cached: 0.07, output: 2.8, reasoning: 2.8 }
+        ]
+      },
+      "legacy-proxy": {
+        badge: "历史",
+        enabled: false,
+        required: false,
+        historical: true,
+        meta: "历史通道 · 最近使用 18 天前",
+        url: "",
+        adjustment: 0,
+        prices: [
+          { model: "gpt-5.4-mini", input: 1, cached: 0.1, output: 4, reasoning: 4 }
+        ]
+      }
+    };
+
+    let activeProvider = "custom";
+    const dirtyProviders = new Set();
+    const tabList = document.getElementById("provider-tabs");
+    const enabledInput = document.getElementById("provider-enabled");
+    const meta = document.getElementById("provider-meta");
+    const urlInput = document.getElementById("pricing-url");
+    const adjustmentInput = document.getElementById("weekly-adjustment");
+    const rows = document.getElementById("price-rows");
+    const status = document.getElementById("status");
+    const draftSummary = document.getElementById("draft-summary");
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>'"]/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
+      })[char]);
+    }
+
+    function renderTabs() {
+      tabList.innerHTML = Object.entries(providers).map(([name, provider]) => `
+        <button class="provider-tab" type="button" role="tab"
+          aria-selected="${name === activeProvider}" data-provider="${escapeHtml(name)}">
+          <span>${escapeHtml(name)}</span>
+          ${provider.badge ? `<span class="tab-badge">${escapeHtml(provider.badge)}</span>` : ""}
+          ${dirtyProviders.has(name) ? '<span class="dirty-dot" aria-label="有未保存修改"></span>' : ""}
+        </button>
+      `).join("");
+    }
+
+    function rowHtml(price, index) {
+      const value = (field) => escapeHtml(price[field] ?? 0);
+      return `
+        <div class="price-row" data-row="${index}">
+          <input data-field="model" value="${escapeHtml(price.model)}" aria-label="模型">
+          <input data-field="input" type="number" min="0" step="0.000001" value="${value("input")}" aria-label="输入单价">
+          <input data-field="cached" type="number" min="0" step="0.000001" value="${value("cached")}" aria-label="缓存单价">
+          <input data-field="output" type="number" min="0" step="0.000001" value="${value("output")}" aria-label="输出单价">
+          <input data-field="reasoning" type="number" min="0" step="0.000001" value="${value("reasoning")}" aria-label="推理单价">
+        </div>
+      `;
+    }
+
+    function renderProvider() {
+      const provider = providers[activeProvider];
+      enabledInput.checked = provider.enabled;
+      enabledInput.disabled = provider.required;
+      enabledInput.closest("label").title = provider.required ? "Codex App Provider 必须纳入统计" : "";
+      meta.innerHTML = provider.required
+        ? `<span class="required">${escapeHtml(provider.meta)}</span>`
+        : provider.historical
+          ? `<span class="historical">${escapeHtml(provider.meta)}</span>`
+          : escapeHtml(provider.meta);
+      urlInput.value = provider.url;
+      adjustmentInput.value = provider.adjustment;
+      rows.innerHTML = provider.prices.map(rowHtml).join("");
+      renderTabs();
+      tabList.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      updateStatus();
+    }
+
+    function collectCurrent() {
+      const provider = providers[activeProvider];
+      provider.enabled = provider.required ? true : enabledInput.checked;
+      provider.url = urlInput.value;
+      provider.adjustment = Number(adjustmentInput.value) || 0;
+      provider.prices = Array.from(rows.querySelectorAll(".price-row")).map((row) => {
+        const read = (field) => row.querySelector(`[data-field="${field}"]`)?.value || "";
+        return {
+          model: read("model"),
+          input: Number(read("input")) || 0,
+          cached: Number(read("cached")) || 0,
+          output: Number(read("output")) || 0,
+          reasoning: Number(read("reasoning")) || 0
+        };
+      });
+    }
+
+    function markDirty() {
+      collectCurrent();
+      dirtyProviders.add(activeProvider);
+      renderTabs();
+      updateStatus();
+    }
+
+    function updateStatus(message = "") {
+      const count = dirtyProviders.size;
+      status.textContent = message || (count ? `${count} 个 Provider 有未保存修改` : "设置将保存到本地配置文件");
+      status.classList.toggle("dirty", count > 0);
+      draftSummary.textContent = count ? "切换 tab 不会丢失修改" : "";
+    }
+
+    tabList.addEventListener("click", (event) => {
+      const tab = event.target.closest("[data-provider]");
+      if (!tab || tab.dataset.provider === activeProvider) return;
+      collectCurrent();
+      activeProvider = tab.dataset.provider;
+      renderProvider();
+    });
+
+    tabList.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      const names = Object.keys(providers);
+      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const index = (names.indexOf(activeProvider) + offset + names.length) % names.length;
+      collectCurrent();
+      activeProvider = names[index];
+      renderProvider();
+      tabList.querySelector('[aria-selected="true"]')?.focus();
+    });
+
+    document.getElementById("provider-panel").addEventListener("input", markDirty);
+    document.getElementById("provider-panel").addEventListener("change", markDirty);
+
+    document.getElementById("fetch-prices").addEventListener("click", () => {
+      markDirty();
+      updateStatus(`已暂存 ${activeProvider} 的拉取结果`);
+    });
+
+    document.getElementById("add-model").addEventListener("click", () => {
+      collectCurrent();
+      providers[activeProvider].prices.push({ model: "new-model", input: 0, cached: 0, output: 0, reasoning: 0 });
+      dirtyProviders.add(activeProvider);
+      renderProvider();
+      rows.querySelector(".price-row:last-child input")?.focus();
+    });
+
+    document.getElementById("save").addEventListener("click", () => {
+      collectCurrent();
+      dirtyProviders.clear();
+      renderTabs();
+      updateStatus("全部 Provider 设置已保存（设计稿演示）");
+      status.classList.remove("dirty");
+    });
+
+    renderProvider();
+  </script>
+</body>
+</html>
