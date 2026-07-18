@@ -168,6 +168,7 @@ RENDERER_CDP_DISCOVERY_TIMEOUT_SECONDS = 0.25
 CRASH_DIAGNOSTIC_FILENAME = "crash.log"
 CRASH_DIAGNOSTICS_ENV = "CODEX_USAGE_HUD_CRASH_DIAGNOSTICS"
 RUNTIME_DEBUG_ENV = "CODEX_USAGE_HUD_DEBUG"
+FORCE_DESKTOP_OVERLAY_MISSING_ENV = "CODEX_USAGE_HUD_FORCE_DESKTOP_OVERLAY_MISSING"
 CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
 CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
 CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
@@ -207,6 +208,7 @@ _LOGGER = logging.getLogger("codex_usage_hud.cli")
 _cli_daemon_logging_attached = False
 _CRASH_DIAGNOSTIC_FILE: Any | None = None
 _DESKTOP_OVERLAY_INSTALL_PROCESS: subprocess.Popen[Any] | None = None
+_FORCE_DESKTOP_OVERLAY_MISSING = False
 
 
 def _work_overlay_helper_qt() -> Any:
@@ -223,7 +225,28 @@ def _work_overlay_max_items_for_screen_height(screen_height: int) -> int:
     return max(1, available_height // WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT)
 
 
-def _pyside6_runtime_available() -> bool:
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _force_desktop_overlay_missing() -> bool:
+    return bool(_FORCE_DESKTOP_OVERLAY_MISSING)
+
+
+def _set_force_desktop_overlay_missing(enabled: bool) -> None:
+    global _FORCE_DESKTOP_OVERLAY_MISSING
+    _FORCE_DESKTOP_OVERLAY_MISSING = bool(enabled)
+
+
+def _init_force_desktop_overlay_missing_from_env() -> None:
+    _set_force_desktop_overlay_missing(
+        _env_flag_enabled(FORCE_DESKTOP_OVERLAY_MISSING_ENV)
+    )
+
+
+def _pyside6_runtime_available(*, honor_force: bool = True) -> bool:
+    if honor_force and _force_desktop_overlay_missing():
+        return False
     try:
         importlib.invalidate_caches()
         return importlib.util.find_spec(DESKTOP_OVERLAY_PACKAGE) is not None
@@ -248,6 +271,9 @@ def _desktop_overlay_install_running() -> bool:
     if process.poll() is None:
         return True
     _DESKTOP_OVERLAY_INSTALL_PROCESS = None
+    # Install finished: if the package is now present, stop simulating missing.
+    if _pyside6_runtime_available(honor_force=False):
+        _set_force_desktop_overlay_missing(False)
     return False
 
 
@@ -256,8 +282,10 @@ def _desktop_overlay_can_install() -> bool:
 
 
 def _desktop_overlay_dependency_status() -> dict[str, object]:
-    installed = _pyside6_runtime_available()
-    version = _pyside6_version() if installed else ""
+    real_installed = _pyside6_runtime_available(honor_force=False)
+    # Forced-missing simulation reports not installed until install/enable clears it.
+    installed = real_installed and not _force_desktop_overlay_missing()
+    version = _pyside6_version() if real_installed else ""
     can_install = _desktop_overlay_can_install()
     installing = _desktop_overlay_install_running()
     requires_restart = bool(getattr(sys, "frozen", False)) and not installed
@@ -265,12 +293,14 @@ def _desktop_overlay_dependency_status() -> dict[str, object]:
     return {
         "package": DESKTOP_OVERLAY_PACKAGE,
         "installed": installed,
-        "version": version,
+        "version": version if installed else "",
         "canInstall": can_install,
         "installing": installing,
         "requiresRestart": requires_restart,
         "canEnableNow": not requires_restart,
         "installCommand": install_command,
+        "forcedMissing": _force_desktop_overlay_missing(),
+        "realInstalled": real_installed,
     }
 
 
@@ -280,6 +310,11 @@ def _start_desktop_overlay_install() -> bool:
         return True
     if not _desktop_overlay_can_install():
         return False
+    # Simulated missing + real package present: clear force immediately so the next
+    # status poll shows installed without a redundant pip install.
+    if _force_desktop_overlay_missing() and _pyside6_runtime_available(honor_force=False):
+        _set_force_desktop_overlay_missing(False)
+        return True
     try:
         _DESKTOP_OVERLAY_INSTALL_PROCESS = subprocess.Popen(
             [sys.executable, "-m", "pip", "install", DESKTOP_OVERLAY_PIP_SPEC],
@@ -6032,7 +6067,7 @@ def _handle_renderer_settings_command(
                 )
             if bool(status.get("installing")):
                 return _renderer_settings_status(
-                    "气泡组件正在安装；完成后点击“已安装，启用气泡”。",
+                    "气泡组件正在安装；完成后点击“启用气泡”。",
                 )
             if not bool(status.get("canInstall")):
                 return _renderer_settings_status(
@@ -6040,19 +6075,35 @@ def _handle_renderer_settings_command(
                     kind="error",
                     restart_visible=bool(status.get("requiresRestart")),
                 )
-            if _start_desktop_overlay_install():
+            # Simulated missing with real package: clear force and surface detected install.
+            if bool(status.get("forcedMissing")) and bool(status.get("realInstalled")):
+                _set_force_desktop_overlay_missing(False)
+                version = _pyside6_version()
                 return _renderer_settings_status(
-                    "已开始安装气泡组件；完成后点击“已安装，启用气泡”。",
+                    f"已检测到本机已安装气泡组件{f'（PySide6 {version}）' if version else ''}；可直接启用会话进度气泡。",
+                )
+            if _start_desktop_overlay_install():
+                refreshed = _desktop_overlay_dependency_status()
+                if bool(refreshed.get("installed")):
+                    version = str(refreshed.get("version") or "").strip()
+                    return _renderer_settings_status(
+                        f"已检测到本机已安装气泡组件{f'（PySide6 {version}）' if version else ''}；可直接启用会话进度气泡。",
+                    )
+                return _renderer_settings_status(
+                    "已开始安装气泡组件；完成后点击“启用气泡”。",
                 )
             return _renderer_settings_status(
                 "无法启动 PySide6 安装；请在终端运行 pip install PySide6>=6.8。",
                 kind="error",
             )
         if action == "enableDesktopOverlay":
+            # Clear simulation first so enable can re-detect a real install.
+            if _force_desktop_overlay_missing() and _pyside6_runtime_available(honor_force=False):
+                _set_force_desktop_overlay_missing(False)
             status = _desktop_overlay_dependency_status()
             if not bool(status.get("installed")):
                 return _renderer_settings_status(
-                    "还没检测到气泡组件；安装完成后再点一次“已安装，启用气泡”。",
+                    "还没检测到气泡组件；安装完成后再点一次“启用气泡”。",
                     kind="error",
                     restart_visible=bool(status.get("requiresRestart")),
                 )
@@ -8702,6 +8753,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _enable_crash_diagnostics()
     parser = build_parser()
     args = parser.parse_args(argv)
+    _init_force_desktop_overlay_missing_from_env()
     if getattr(args, "loading_feedback_helper", False):
         return run_loading_feedback_helper(args.loading_feedback_state_file)
     if getattr(args, "work_overlay_helper", False):

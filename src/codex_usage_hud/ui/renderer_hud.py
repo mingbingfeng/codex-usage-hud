@@ -2042,6 +2042,21 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 10px;
       }
+      #${rootId} .codex-usage-hud-settings-compact-row {
+        grid-column: 1 / -1;
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(112px, 0.9fr) minmax(88px, 0.72fr) minmax(0, 1.45fr);
+        gap: 8px;
+        align-items: end;
+      }
+      #${rootId} .codex-usage-hud-settings-compact-row > .codex-usage-hud-settings-field {
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-settings-compact-row [data-setting-key="work_overlay_max_items"],
+      #${rootId} .codex-usage-hud-settings-compact-row [data-setting-key="budget_thresholds"] {
+        max-width: 100%;
+      }
       #${rootId} .codex-usage-hud-settings-field,
       #${rootId} .codex-usage-hud-price-table {
         min-width: 0;
@@ -2076,38 +2091,45 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-overlay-dependency {
         min-height: 30px;
         box-sizing: border-box;
-        display: grid;
-        gap: 5px;
-        padding: 7px 8px;
+        display: flex;
+        flex-wrap: nowrap;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 8px;
         border: 1px solid var(--codex-usage-hud-divider, #273241);
         border-radius: 5px;
         background: var(--codex-usage-hud-panel-surface, #141b24);
-      }
-      #${rootId} .codex-usage-hud-overlay-dependency-head {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        justify-content: space-between;
-        gap: 6px;
+        overflow: hidden;
       }
       #${rootId} .codex-usage-hud-overlay-dependency-state {
         color: var(--codex-usage-hud-text, #e8eef7);
         font-size: 11px;
         font-weight: 700;
+        white-space: nowrap;
+        flex: 0 0 auto;
+      }
+      #${rootId} .codex-usage-hud-overlay-dependency-version,
+      #${rootId} .codex-usage-hud-overlay-dependency-note {
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 11px;
+        line-height: 1.2;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+        flex: 1 1 auto;
       }
       #${rootId} .codex-usage-hud-overlay-dependency-version {
         color: var(--codex-usage-hud-success, #8fe3a1);
         font: 700 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
-      }
-      #${rootId} .codex-usage-hud-overlay-dependency-note {
-        color: var(--codex-usage-hud-muted, #8492a6);
-        font-size: 11px;
-        line-height: 1.35;
+        flex: 0 1 auto;
       }
       #${rootId} .codex-usage-hud-overlay-dependency-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
+        display: inline-flex;
+        flex-wrap: nowrap;
+        gap: 8px;
+        flex: 0 0 auto;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-settings-inline {
         display: grid;
@@ -2206,7 +2228,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
+        gap: 10px;
+        flex-wrap: nowrap;
       }
       #${rootId} .codex-usage-hud-provider-scope {
         min-width: 0;
@@ -2215,13 +2238,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         gap: 7px;
         color: var(--codex-usage-hud-text, #e8eef7);
         cursor: pointer;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-provider-scope-options {
         min-width: 0;
         display: inline-flex;
         align-items: center;
-        flex-wrap: wrap;
-        gap: 8px 16px;
+        flex-wrap: nowrap;
+        gap: 8px 14px;
+        flex: 1 1 auto;
       }
       #${rootId} .codex-usage-hud-provider-scope input {
         width: 15px;
@@ -2247,15 +2272,52 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: var(--codex-usage-hud-warning, #ffb86b);
         font-weight: 700;
       }
-      #${rootId} .codex-usage-hud-provider-tools {
+      #${rootId} .codex-usage-hud-provider-context-adjustment {
+        min-width: 140px;
+        width: 160px;
+        flex: 0 0 160px;
+      }
+      #${rootId} .codex-usage-hud-provider-context-adjustment input {
+        min-width: 0;
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 5px;
+        background: var(--codex-usage-hud-panel-surface, #141b24);
+        color: var(--codex-usage-hud-text, #e8eef7);
+        min-height: 28px;
+        padding: 4px 7px;
+        outline: none;
+      }
+      #${rootId} .codex-usage-hud-provider-context-adjustment input:focus {
+        border-color: var(--codex-usage-hud-accent, #f3d27a);
+      }
+      #${rootId} .codex-usage-hud-price-actions {
         min-width: 0;
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 150px;
-        gap: 6px;
-        align-items: end;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        margin-top: 6px;
       }
-      #${rootId} .codex-usage-hud-provider-url .codex-usage-hud-settings-inline {
+      #${rootId} .codex-usage-hud-price-actions > .codex-usage-hud-settings-action {
+        justify-self: start;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-price-actions input[data-setting-key="pricing_url"] {
         min-width: 0;
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 5px;
+        background: var(--codex-usage-hud-panel-surface, #141b24);
+        color: var(--codex-usage-hud-text, #e8eef7);
+        min-height: 30px;
+        padding: 5px 7px;
+        outline: none;
+      }
+      #${rootId} .codex-usage-hud-price-actions input[data-setting-key="pricing_url"]:focus {
+        border-color: var(--codex-usage-hud-accent, #f3d27a);
       }
       #${rootId} .codex-usage-hud-provider-empty {
         color: var(--codex-usage-hud-muted, #8492a6);
@@ -2768,6 +2830,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-settings-grid {
           grid-template-columns: minmax(0, 1fr);
         }
+        #${rootId} .codex-usage-hud-settings-compact-row {
+          grid-template-columns: minmax(0, 1fr);
+        }
         #${rootId} .codex-usage-hud-provider-editor {
           grid-column: 1;
         }
@@ -2777,14 +2842,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-provider-editor-head .codex-usage-hud-price-unit {
           display: none;
         }
-        #${rootId} .codex-usage-hud-provider-tools {
-          grid-template-columns: minmax(0, 1fr) 138px;
-        }
-        #${rootId} .codex-usage-hud-provider-url {
-          grid-column: 1 / -1;
+        #${rootId} .codex-usage-hud-price-actions {
+          grid-template-columns: auto minmax(0, 1fr) auto;
         }
         #${rootId} .codex-usage-hud-provider-context {
-          align-items: flex-start;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        #${rootId} .codex-usage-hud-provider-scope-options {
+          flex-wrap: wrap;
         }
         #${rootId} .codex-usage-hud-provider-meta {
           max-width: 58%;
@@ -2794,14 +2860,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         }
       }
       @media (max-width: 520px) {
-        #${rootId} .codex-usage-hud-provider-tools {
+        #${rootId} .codex-usage-hud-price-actions {
           grid-template-columns: minmax(0, 1fr);
-        }
-        #${rootId} .codex-usage-hud-provider-url {
-          grid-column: 1;
         }
         #${rootId} .codex-usage-hud-provider-context {
           display: grid;
+        }
+        #${rootId} .codex-usage-hud-provider-context-adjustment {
+          width: 100%;
+          flex: 1 1 auto;
         }
         #${rootId} .codex-usage-hud-provider-meta {
           max-width: none;
@@ -4134,15 +4201,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const requiresRestart = !!dependency.requiresRestart;
     const canInstall = !!dependency.canInstall;
     const version = String(dependency.version || "").trim();
-    const installCommand = String(dependency.installCommand || "python -m pip install \"PySide6>=6.8\"");
     if (installed) {
       return `
-        <div class="codex-usage-hud-overlay-dependency" data-installed="true">
-          <div class="codex-usage-hud-overlay-dependency-head">
-            <span class="codex-usage-hud-overlay-dependency-state">已安装</span>
-            <span class="codex-usage-hud-overlay-dependency-version">${escapeHtml(version ? `PySide6 ${version}` : "PySide6 可用")}</span>
-          </div>
-          <div class="codex-usage-hud-overlay-dependency-note">保存后显示方形进度气泡；会话完成后收起为圆形总结。</div>
+        <div class="codex-usage-hud-overlay-dependency" data-installed="true" title="保存后显示方形进度气泡；会话完成后收起为圆形总结。">
+          <span class="codex-usage-hud-overlay-dependency-state">已安装</span>
+          <span class="codex-usage-hud-overlay-dependency-version">${escapeHtml(version ? `PySide6 ${version}` : "PySide6 可用")}</span>
         </div>
       `;
     }
@@ -4151,22 +4214,24 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-install-desktop-overlay">立即安装</button>');
     }
     if (!requiresRestart) {
-      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-enable-desktop-overlay">已安装，启用气泡</button>');
+      actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-enable-desktop-overlay">启用气泡</button>');
     } else {
       actions.push('<button type="button" class="codex-usage-hud-settings-link" data-action="settings-restart">立即重启</button>');
     }
+    const stateText = installing ? "正在安装" : (requiresRestart ? "需要重启" : "未安装");
+    const noteText = installing
+      ? "后台安装中"
+      : (requiresRestart ? "重启后生效" : "需 PySide6");
     return `
-      <div class="codex-usage-hud-overlay-dependency" data-installed="false">
-        <div class="codex-usage-hud-overlay-dependency-head">
-          <span class="codex-usage-hud-overlay-dependency-state">${installing ? "正在安装" : (requiresRestart ? "需要重启" : "需要安装环境")}</span>
-        </div>
-        <div class="codex-usage-hud-overlay-dependency-note">${
-          installing
-            ? "气泡组件正在后台安装；完成后点击“已安装，启用气泡”。"
-            : (requiresRestart
-              ? "安装完成后重启 HUD，才能显示会话进度气泡。"
-              : `会话进度气泡需要 PySide6 桌面组件。命令：${escapeHtml(installCommand)}`)
-        }</div>
+      <div class="codex-usage-hud-overlay-dependency" data-installed="false" title="${escapeHtml(
+        installing
+          ? "气泡组件正在后台安装；完成后可启用。"
+          : (requiresRestart
+            ? "安装完成后重启 HUD，才能显示会话进度气泡。"
+            : "会话进度气泡需要 PySide6 桌面组件。")
+      )}">
+        <span class="codex-usage-hud-overlay-dependency-state">${stateText}</span>
+        <span class="codex-usage-hud-overlay-dependency-note">${escapeHtml(noteText)}</span>
         <div class="codex-usage-hud-overlay-dependency-actions">${actions.join("")}</div>
       </div>
     `;
@@ -4378,6 +4443,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const providerSettings = entry.settings;
     const required = activeProvider === draft.appProvider;
     const meta = settingsProviderMeta(settings, activeProvider);
+    const weeklyAdjustment = Number(providerSettings.weekly_adjustment_usd);
+    const weeklyAdjustmentValue = Number.isFinite(weeklyAdjustment) && weeklyAdjustment > 0
+      ? String(weeklyAdjustment)
+      : "";
+    const pricingUrlPlaceholder = "计费单价获取地址 · https://example.com/model-prices.json";
     return `
       ${head}
       <div class="codex-usage-hud-provider-context">
@@ -4390,21 +4460,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
             <input type="checkbox" data-provider-notification-only="true" ${entry.notificationOnly && !required ? "checked" : ""} ${required ? "disabled" : ""}>
             <span>仅气泡通知不统计</span>
           </label>
-        </div>
-        <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
-      </div>
-      <div class="codex-usage-hud-provider-tools">
-        <div class="codex-usage-hud-settings-field codex-usage-hud-provider-url">
-          <label>计费单价获取地址</label>
-          <div class="codex-usage-hud-settings-inline">
-            <input data-setting-key="pricing_url" value="${escapeHtml(providerSettings.pricing_url)}" placeholder="https://example.com/model-prices.json">
-            <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取</button>
+          <div class="codex-usage-hud-provider-context-adjustment">
+            <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(weeklyAdjustmentValue)}" placeholder="本周补充额度 USD" aria-label="本周补充额度 USD" title="本周补充额度 USD">
           </div>
         </div>
-        <div class="codex-usage-hud-settings-field">
-          <label>本周补充额度 USD</label>
-          <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(providerSettings.weekly_adjustment_usd)}">
-        </div>
+        <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
       </div>
       <div class="codex-usage-hud-price-table">
         <div class="codex-usage-hud-price-header">
@@ -4412,7 +4472,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         </div>
         <div data-price-rows="true">${priceRowsHtml(providerSettings)}</div>
         ${detectedPriceModelsHtml(providerSettings)}
-        <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model" style="justify-self:start;margin-top:6px">添加模型</button>
+        <div class="codex-usage-hud-price-actions">
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model">添加模型</button>
+          <input data-setting-key="pricing_url" value="${escapeHtml(providerSettings.pricing_url)}" placeholder="${escapeHtml(pricingUrlPlaceholder)}" aria-label="计费单价获取地址" title="${escapeHtml(pricingUrlPlaceholder)}">
+          <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取</button>
+        </div>
       </div>
     `;
   }
@@ -4585,17 +4649,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
             <input data-setting-key="weekly_reset_time" type="time" value="${escapeHtml(settings.weekly_reset_time)}">
           </div>
         </div>
-        <div class="codex-usage-hud-settings-field">
-          <label>会话进度气泡数量（0 为关闭）</label>
-          <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
-        </div>
-        <div class="codex-usage-hud-settings-field">
-          <label>气泡运行环境</label>
-          <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
-        </div>
-        <div class="codex-usage-hud-settings-field">
-          <label>超额提醒阈值</label>
-          <input data-setting-key="budget_thresholds" value="${escapeHtml(thresholdText(settings))}">
+        <div class="codex-usage-hud-settings-compact-row">
+          <div class="codex-usage-hud-settings-field">
+            <label>超额提醒阈值</label>
+            <input data-setting-key="budget_thresholds" value="${escapeHtml(thresholdText(settings))}" placeholder="50,80,100">
+          </div>
+          <div class="codex-usage-hud-settings-field">
+            <label>会话进度气泡数量（0 为关闭）</label>
+            <select data-setting-key="work_overlay_max_items">${overlayOptions}</select>
+          </div>
+          <div class="codex-usage-hud-settings-field">
+            <label>气泡运行环境</label>
+            <div data-desktop-overlay-dependency="true">${desktopOverlayDependencyHtml()}</div>
+          </div>
         </div>
         <div class="codex-usage-hud-provider-editor" data-provider-editor="true" data-active-provider="${escapeHtml(settingsProviderDraft?.activeProvider || "")}">
           ${settingsProviderEditorHtml(settings)}

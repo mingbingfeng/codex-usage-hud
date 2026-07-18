@@ -7369,6 +7369,70 @@ class TokenHudWindow:
         self._bind_manual_priority_tree(self._settings_actions_frame)
         self._bind_settings_scroll_tree(self._settings_body_frame)
 
+    def _install_settings_entry_placeholder(
+        self,
+        entry: tk.Entry,
+        placeholder: str,
+        *,
+        keep_value: bool = False,
+    ) -> None:
+        """Show placeholder text inside a Tk Entry when it is empty."""
+        muted = _theme_secondary_text(HUD_BG)
+        normal = _theme_primary_text(HUD_BG)
+
+        def _is_placeholder() -> bool:
+            return bool(getattr(entry, "_codex_usage_hud_placeholder_active", False))
+
+        def _show_placeholder() -> None:
+            entry.delete(0, "end")
+            entry.insert(0, placeholder)
+            try:
+                entry.configure(fg=muted)
+            except tk.TclError:
+                pass
+            entry._codex_usage_hud_placeholder_active = True  # type: ignore[attr-defined]
+
+        def _hide_placeholder() -> None:
+            if _is_placeholder():
+                entry.delete(0, "end")
+            try:
+                entry.configure(fg=normal)
+            except tk.TclError:
+                pass
+            entry._codex_usage_hud_placeholder_active = False  # type: ignore[attr-defined]
+
+        def _on_focus_in(_event: object = None) -> None:
+            if _is_placeholder():
+                _hide_placeholder()
+
+        def _on_focus_out(_event: object = None) -> None:
+            if not entry.get().strip():
+                _show_placeholder()
+
+        def _value_for_save() -> str:
+            return "" if _is_placeholder() else entry.get()
+
+        entry._codex_usage_hud_placeholder_value = _value_for_save  # type: ignore[attr-defined]
+        entry.bind("<FocusIn>", _on_focus_in, add="+")
+        entry.bind("<FocusOut>", _on_focus_out, add="+")
+        if keep_value:
+            entry._codex_usage_hud_placeholder_active = False  # type: ignore[attr-defined]
+            try:
+                entry.configure(fg=normal)
+            except tk.TclError:
+                pass
+        else:
+            _show_placeholder()
+
+    def _settings_entry_value(self, key: str) -> str:
+        entry = self._settings_entries.get(key)
+        if entry is None:
+            return ""
+        getter = getattr(entry, "_codex_usage_hud_placeholder_value", None)
+        if callable(getter):
+            return str(getter())
+        return str(entry.get())
+
     def _settings_field(
         self,
         parent: tk.Misc,
@@ -7487,11 +7551,33 @@ class TokenHudWindow:
         mode.bind("<<ComboboxSelected>>", self._on_display_mode_selected, add="+")
         self._settings_entries["display_mode"] = mode
 
-        bubble_frame = tk.Frame(grid, bg=HUD_BG)
-        bubble_frame.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        bubble_threshold_frame = tk.Frame(grid, bg=HUD_BG)
+        bubble_threshold_frame.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        bubble_threshold_frame.columnconfigure(0, weight=0, minsize=120)
+        bubble_threshold_frame.columnconfigure(1, weight=0, minsize=96)
+        threshold_frame = tk.Frame(bubble_threshold_frame, bg=HUD_BG)
+        threshold_frame.grid(row=0, column=0, sticky="nw", padx=(0, 6))
+        tk.Label(
+            threshold_frame,
+            text="超额提醒阈值",
+            anchor="w",
+            bg=HUD_BG,
+            fg=_theme_secondary_text(HUD_BG),
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill="x")
+        threshold_entry = tk.Entry(
+            threshold_frame,
+            width=14,
+            **_settings_entry_kwargs(HUD_BG),
+        )
+        threshold_entry.insert(0, ",".join(str(item) for item in settings.budget_thresholds))
+        threshold_entry.pack(fill="x", ipady=4)
+        self._settings_entries["budget_thresholds"] = threshold_entry
+        bubble_frame = tk.Frame(bubble_threshold_frame, bg=HUD_BG)
+        bubble_frame.grid(row=0, column=1, sticky="nw")
         tk.Label(
             bubble_frame,
-            text="会话气泡最大显示数（0 表示不启用）",
+            text="会话气泡数（0 关闭）",
             anchor="w",
             bg=HUD_BG,
             fg=_theme_secondary_text(HUD_BG),
@@ -7502,63 +7588,33 @@ class TokenHudWindow:
             values=self._work_overlay_setting_values(),
             state="readonly",
             style="CodexUsageHud.TCombobox",
+            width=8,
         )
         bubble_limit.set(self._work_overlay_setting_text(settings.work_overlay_max_items))
         self._configure_settings_combobox(bubble_limit)
         bubble_limit.pack(fill="x")
         self._settings_entries["work_overlay_max_items"] = bubble_limit
 
-        self._settings_field(
-            grid,
-            3,
-            0,
-            "budget_thresholds",
-            "超额提醒阈值",
-            ",".join(str(item) for item in settings.budget_thresholds),
-        )
-        self._settings_field(
-            grid,
-            3,
-            1,
-            "weekly_adjustment_usd",
-            "本周补充已使用额度 USD",
-            settings.weekly_adjustment_usd,
-        )
-        pricing_frame = tk.Frame(grid, bg=HUD_BG)
-        pricing_frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
-        tk.Label(
-            pricing_frame,
-            text="计费单价获取地址",
-            anchor="w",
-            bg=HUD_BG,
-            fg=_theme_secondary_text(HUD_BG),
-            font=("Microsoft YaHei UI", 8, "bold"),
-        ).pack(fill="x")
-        pricing_controls = tk.Frame(pricing_frame, bg=HUD_BG)
-        pricing_controls.pack(fill="x")
-        pricing_entry = tk.Entry(
-            pricing_controls,
+        weekly_frame = tk.Frame(grid, bg=HUD_BG)
+        weekly_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        weekly_entry = tk.Entry(
+            weekly_frame,
             **_settings_entry_kwargs(HUD_BG),
         )
-        pricing_entry.insert(0, str(settings.pricing_url))
-        pricing_entry.pack(side="left", fill="x", expand=True, ipady=4)
-        self._settings_entries["pricing_url"] = pricing_entry
-        tk.Button(
-            pricing_controls,
-            text="拉取",
-            command=lambda: self._settings_fetch_prices(
-                self._settings_entries,
-                self._settings_price_rows,
-                prices_body,
-            ),
-            **_settings_secondary_button_kwargs(HUD_BG),
-            padx=10,
-            pady=4,
-            cursor="hand2",
-        ).pack(side="left", padx=(8, 0))
+        weekly_value = str(settings.weekly_adjustment_usd)
+        keep_weekly = weekly_value not in {"", "0", "0.0"}
+        if keep_weekly:
+            weekly_entry.insert(0, weekly_value)
+        weekly_entry.pack(fill="x", ipady=4, expand=True, pady=(18, 0))
+        self._settings_entries["weekly_adjustment_usd"] = weekly_entry
+        self._install_settings_entry_placeholder(
+            weekly_entry,
+            "本周补充已使用额度 USD",
+            keep_value=keep_weekly,
+        )
 
         price_table = tk.Frame(grid, bg=HUD_BG)
-        price_table.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=5, pady=(8, 0))
+        price_table.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=5, pady=(8, 0))
         tk.Label(
             price_table,
             text="模型单价（USD / 1M tokens）",
@@ -7583,18 +7639,47 @@ class TokenHudWindow:
         prices_body.pack(fill="x")
         self._settings_prices_body = prices_body
         self._replace_price_rows(prices_body, self._settings_price_rows, settings.model_prices)
+        price_actions = tk.Frame(price_table, bg=HUD_BG)
+        price_actions.pack(fill="x", pady=(6, 0))
         tk.Button(
-            price_table,
+            price_actions,
             text="添加模型",
             command=lambda: self._add_price_row(prices_body, self._settings_price_rows),
             **_settings_secondary_button_kwargs(HUD_BG),
             padx=9,
             pady=3,
             cursor="hand2",
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(side="left")
+        pricing_entry = tk.Entry(
+            price_actions,
+            **_settings_entry_kwargs(HUD_BG),
+        )
+        pricing_value = str(settings.pricing_url or "")
+        if pricing_value:
+            pricing_entry.insert(0, pricing_value)
+        pricing_entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(8, 0))
+        self._settings_entries["pricing_url"] = pricing_entry
+        self._install_settings_entry_placeholder(
+            pricing_entry,
+            "计费单价获取地址 · https://example.com/model-prices.json",
+            keep_value=bool(pricing_value),
+        )
+        tk.Button(
+            price_actions,
+            text="拉取",
+            command=lambda: self._settings_fetch_prices(
+                self._settings_entries,
+                self._settings_price_rows,
+                prices_body,
+            ),
+            **_settings_secondary_button_kwargs(HUD_BG),
+            padx=10,
+            pady=4,
+            cursor="hand2",
+        ).pack(side="left", padx=(8, 0))
 
         footer = tk.Frame(grid, bg=HUD_BG)
-        footer.grid(row=6, column=0, columnspan=2, sticky="ew", padx=5, pady=(10, 0))
+        footer.grid(row=5, column=0, columnspan=2, sticky="ew", padx=5, pady=(10, 0))
         tk.Button(
             footer,
             text="退出 HUD",
@@ -8231,8 +8316,8 @@ class TokenHudWindow:
             "display_mode": self._selected_display_mode(entries),
             "work_overlay_max_items": entries["work_overlay_max_items"].get(),
             "budget_thresholds": parse_config_thresholds(entries["budget_thresholds"].get()),
-            "weekly_adjustment_usd": entries["weekly_adjustment_usd"].get(),
-            "pricing_url": entries["pricing_url"].get(),
+            "weekly_adjustment_usd": self._settings_entry_value("weekly_adjustment_usd") or "0",
+            "pricing_url": self._settings_entry_value("pricing_url"),
             "support_url": self.user_settings.support_url,
             "model_prices": price_payload,
         }
@@ -8268,7 +8353,7 @@ class TokenHudWindow:
         price_rows: list[dict[str, tk.Entry]],
         prices_parent: tk.Misc,
     ) -> None:
-        url = entries["pricing_url"].get().strip()
+        url = self._settings_entry_value("pricing_url").strip()
         try:
             fetched = fetch_model_prices(url)
             config = self._config_from_settings_dialog(entries, price_rows).with_price_updates(
