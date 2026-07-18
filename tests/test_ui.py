@@ -55,6 +55,7 @@ from codex_usage_hud.cli import (
     _build_session_switch_controller,
     _enable_crash_diagnostics,
     active_work_items_for_snapshot,
+    is_subagent_session,
     _prepare_codex_window_for_renderer,
     _prepare_codex_window_for_tk,
     _renderer_refresh_delay_seconds,
@@ -1498,6 +1499,113 @@ class BudgetHelperTests(unittest.TestCase):
         )
 
         self.assertTrue(_active_session_switch_pending(context, snapshot))
+
+
+    def test_active_work_items_filter_completed_subagent_sessions(self) -> None:
+        """Parent user session stays running; completed subagents must not bubble."""
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def write_jsonl(path: Path, rows: list[dict]) -> None:
+            path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+        def base_rows(
+            session_id: str,
+            *,
+            thread_source: str = "user",
+            parent_thread_id: str = "",
+            agent_nickname: str = "",
+            completed: bool = False,
+            offset: int = 0,
+        ) -> list[dict]:
+            ts = (now + timedelta(seconds=offset)).isoformat()
+            meta = {
+                "id": session_id,
+                "cwd": "E:/Project/demo",
+                "originator": "codex-tui",
+                "source": "cli",
+                "thread_source": thread_source,
+                "model_provider": "muyuan",
+            }
+            if parent_thread_id:
+                meta["parent_thread_id"] = parent_thread_id
+            if agent_nickname:
+                meta["agent_nickname"] = agent_nickname
+            rows = [
+                {"timestamp": ts, "type": "session_meta", "payload": meta},
+                {"timestamp": ts, "type": "event_msg", "payload": {"type": "task_started"}},
+                {
+                    "timestamp": ts,
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": f"work {session_id}"},
+                },
+            ]
+            if completed:
+                rows.append(
+                    {
+                        "timestamp": (now + timedelta(seconds=offset + 1)).isoformat(),
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete"},
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "timestamp": (now + timedelta(seconds=offset + 1)).isoformat(),
+                        "type": "event_msg",
+                        "payload": {"type": "agent_message", "message": "still working"},
+                    }
+                )
+            return rows
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            parent = root / "parent.jsonl"
+            child_a = root / "child-a.jsonl"
+            child_b = root / "child-b.jsonl"
+            write_jsonl(
+                parent,
+                base_rows("session-parent", thread_source="user", completed=False, offset=-3),
+            )
+            write_jsonl(
+                child_a,
+                base_rows(
+                    "session-rawls",
+                    thread_source="subagent",
+                    parent_thread_id="session-parent",
+                    agent_nickname="Rawls",
+                    completed=True,
+                    offset=-2,
+                ),
+            )
+            write_jsonl(
+                child_b,
+                base_rows(
+                    "session-singer",
+                    thread_source="subagent",
+                    parent_thread_id="session-parent",
+                    agent_nickname="Singer",
+                    completed=True,
+                    offset=-1,
+                ),
+            )
+            snapshot = parser.parse_file(parent)
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+            items = active_work_items_for_snapshot(context, snapshot, parent)
+            self.assertEqual([item.id for item in items], ["session-parent"])
+            self.assertNotEqual(items[0].status, "recent")
+            self.assertFalse(any(item.is_subagent for item in items))
+            self.assertTrue(is_subagent_session(parser.parse_file(child_a)))
+            # retained cache must not resurrect filtered subagents
+            retained = active_work_items_for_snapshot(context, snapshot, parent)
+            self.assertEqual([item.id for item in retained], ["session-parent"])
 
     def test_active_work_items_follow_session_creation_order_desc(self) -> None:
         parser = JsonlSessionParser()
@@ -14051,7 +14159,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 user_config=store.load(),
                 daily_budget_usd=100.0,
                 weekly_budget_usd=400.0,
-                budget_thresholds=list(fake_context.user_config.budget_thresholds) if False else [0.5, 0.8, 0.9, 1.0],
+                budget_thresholds=[0.5, 0.8, 0.9, 1.0],
                 session_resolver=SimpleNamespace(
                     resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
                 ),
@@ -15794,9 +15902,18 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         fake_client.update.side_effect = update_side_effect
 
+        startup_plan = cli_module.RendererStartupPlan(
+            scenario=cli_module.RENDERER_STARTUP_ATTACH,
+            port=9222,
+            port_source="test",
+        )
         with (
             patch.object(sys, "platform", "win32"),
             patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli._renderer_startup_plan",
+                return_value=startup_plan,
+            ),
             patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
             patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
             patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay) as overlay_class,

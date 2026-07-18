@@ -4657,6 +4657,18 @@ def _elapsed_compact(
     return f"{hours}h{minutes:02d}m"
 
 
+def is_subagent_session(snapshot: ParsedSession | object) -> bool:
+    """True when a parsed session is a Codex multi-agent subagent thread."""
+    flag = getattr(snapshot, "is_subagent", False)
+    if flag:
+        return True
+    thread_source = str(getattr(snapshot, "thread_source", "") or "").strip().lower()
+    if thread_source == "subagent":
+        return True
+    parent_thread_id = str(getattr(snapshot, "parent_thread_id", "") or "").strip()
+    return bool(parent_thread_id)
+
+
 def _work_status_from_snapshot(
     snapshot: ParsedSession,
     *,
@@ -4721,6 +4733,7 @@ def _work_item_from_snapshot(
     display_title = (
         title.strip()
         or snapshot.session_title.strip()
+        or str(getattr(snapshot, "agent_nickname", "") or "").strip()
         or str(snapshot.session_id or "").strip()
         or "Codex 工作"
     )
@@ -4775,6 +4788,9 @@ def _work_item_from_snapshot(
         workdir_name=_compact_work_text(_workdir_leaf(snapshot.cwd), 32),
         model_provider=snapshot.model_provider,
         client_kind=snapshot.client_kind,
+        is_subagent=is_subagent_session(snapshot),
+        agent_nickname=str(getattr(snapshot, "agent_nickname", "") or "").strip(),
+        parent_thread_id=str(getattr(snapshot, "parent_thread_id", "") or "").strip(),
         session_started_at=snapshot.session_started_at,
         task_started_at=snapshot.task_started_at,
         started_at=started_at,
@@ -4923,8 +4939,13 @@ def _stabilize_published_work_overlay_items(
             terminal.pop(item_id, None)
 
     provider_scope = _effective_notification_provider_scope(context, None)
+    for item_id, item in list(merged.items()):
+        if bool(getattr(item, "is_subagent", False)) and not item.current:
+            merged.pop(item_id, None)
     for item_id, cached_item in list(cache.items()):
         if item_id in merged:
+            continue
+        if bool(getattr(cached_item, "is_subagent", False)):
             continue
         cached_task = _iso_or_empty(cached_item.task_started_at or cached_item.started_at)
         if terminal.get(item_id) == cached_task:
@@ -5060,19 +5081,22 @@ def active_work_items_for_snapshot(
     terminal_item_tasks = _work_overlay_terminal_item_tasks(context)
     terminal_item_ids: dict[str, str] = {}
     current_key = _session_path_key(session_path)
-    current_item = _work_item_from_snapshot(
-        snapshot,
-        current=True,
-        title=snapshot.session_title,
-        source=snapshot.selection_source,
-        now=now,
-    )
-    if current_item is not None:
-        items[str(current_item.id)] = current_item
-    elif snapshot.task_aborted_at is not None and snapshot.session_id:
-        terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
-            snapshot.task_started_at
+    # Codex multi-agent v2 writes one jsonl per subagent. Desktop bubbles track the
+    # user-visible parent thread only; completed/running children must not surface.
+    if not is_subagent_session(snapshot):
+        current_item = _work_item_from_snapshot(
+            snapshot,
+            current=True,
+            title=snapshot.session_title,
+            source=snapshot.selection_source,
+            now=now,
         )
+        if current_item is not None:
+            items[str(current_item.id)] = current_item
+        elif snapshot.task_aborted_at is not None and snapshot.session_id:
+            terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
+                snapshot.task_started_at
+            )
 
     for path in _recent_session_files(
         context.sessions_root,
@@ -5084,6 +5108,8 @@ def active_work_items_for_snapshot(
         try:
             parsed = context.parser.parse_file(path)
         except Exception:
+            continue
+        if is_subagent_session(parsed):
             continue
         title = ""
         if context.active_session_tracker is not None:
@@ -5110,6 +5136,9 @@ def active_work_items_for_snapshot(
         visible_item_cache.pop(item_id, None)
     for item_id, cached_item in list(visible_item_cache.items()):
         if item_id in items:
+            continue
+        if bool(getattr(cached_item, "is_subagent", False)):
+            visible_item_cache.pop(item_id, None)
             continue
         updated_at = (
             cached_item.updated_at

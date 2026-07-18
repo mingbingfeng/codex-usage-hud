@@ -361,6 +361,9 @@ class WorkStatusItem:
     workdir: str = ""
     model_provider: str = "unknown"
     client_kind: str = "unknown"
+    is_subagent: bool = False
+    agent_nickname: str = ""
+    parent_thread_id: str = ""
     session_started_at: datetime | None = None
     task_started_at: datetime | None = None
     started_at: datetime | None = None
@@ -435,6 +438,10 @@ class ParsedSession:
     model_provider: str = "unknown"
     originator: str = ""
     client_kind: str = "unknown"
+    thread_source: str = ""
+    parent_thread_id: str = ""
+    agent_nickname: str = ""
+    is_subagent: bool = False
     status: str = "starting"
     error: str = ""
     refreshed_at: datetime = field(default_factory=lambda: datetime.now().astimezone())
@@ -551,6 +558,26 @@ def classify_session_client(originator: object, source: object) -> str:
         if source_text == "vscode":
             return "app"
     return "unknown"
+
+
+def extract_session_thread_identity(payload: Mapping[str, Any] | None) -> tuple[str, str, str, bool]:
+    """Return thread_source, parent_thread_id, agent_nickname, is_subagent from session_meta."""
+    if not isinstance(payload, Mapping):
+        return "", "", "", False
+    thread_source = str(payload.get("thread_source") or "").strip()
+    parent_thread_id = str(payload.get("parent_thread_id") or "").strip()
+    agent_nickname = str(payload.get("agent_nickname") or "").strip()
+    source = payload.get("source")
+    if not parent_thread_id and isinstance(source, Mapping):
+        subagent = source.get("subagent")
+        if isinstance(subagent, Mapping):
+            spawn = subagent.get("thread_spawn")
+            if isinstance(spawn, Mapping):
+                parent_thread_id = str(spawn.get("parent_thread_id") or "").strip()
+                if not agent_nickname:
+                    agent_nickname = str(spawn.get("agent_nickname") or "").strip()
+    is_subagent = thread_source.lower() == "subagent" or bool(parent_thread_id)
+    return thread_source, parent_thread_id, agent_nickname, is_subagent
 
 
 class JsonlSessionParser:
@@ -769,6 +796,12 @@ class JsonlSessionParser:
         parsed.model_provider = self.session_model_provider(records)
         parsed.originator = self.session_originator(records)
         parsed.client_kind = classify_session_client(parsed.originator, self.session_source(records))
+        (
+            parsed.thread_source,
+            parsed.parent_thread_id,
+            parsed.agent_nickname,
+            parsed.is_subagent,
+        ) = extract_session_thread_identity(self.session_meta_payload(records))
         parsed.last_event_time = records[-1].get("_dt")
         parsed.activity = self.latest_activity(records)
         parsed.last_output = self.latest_output(records)

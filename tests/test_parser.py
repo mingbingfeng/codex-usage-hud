@@ -24,6 +24,7 @@ from codex_usage_hud.core.parser import (
     RequestTokens,
     SseRequestStateMachine,
     extract_log_field,
+    extract_session_thread_identity,
     parse_timestamp,
 )
 from codex_usage_hud.core.calculator import UsageCalculator
@@ -1002,3 +1003,80 @@ class SseRequestStateMachineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiAgentSessionMetaTests(unittest.TestCase):
+    def test_extract_session_thread_identity_for_subagent_meta(self) -> None:
+        payload = {
+            "id": "child-1",
+            "thread_source": "subagent",
+            "parent_thread_id": "parent-1",
+            "agent_nickname": "Rawls",
+            "source": {
+                "subagent": {
+                    "thread_spawn": {
+                        "parent_thread_id": "parent-1",
+                        "agent_nickname": "Rawls",
+                    }
+                }
+            },
+        }
+        thread_source, parent_id, nickname, is_sub = extract_session_thread_identity(payload)
+        self.assertEqual(thread_source, "subagent")
+        self.assertEqual(parent_id, "parent-1")
+        self.assertEqual(nickname, "Rawls")
+        self.assertTrue(is_sub)
+
+    def test_extract_session_thread_identity_for_user_meta(self) -> None:
+        payload = {
+            "id": "parent-1",
+            "thread_source": "user",
+            "source": "cli",
+        }
+        thread_source, parent_id, nickname, is_sub = extract_session_thread_identity(payload)
+        self.assertEqual(thread_source, "user")
+        self.assertEqual(parent_id, "")
+        self.assertEqual(nickname, "")
+        self.assertFalse(is_sub)
+
+    def test_parser_marks_subagent_from_first_session_meta(self) -> None:
+        rows = [
+            record(
+                "2026-07-18T01:00:00Z",
+                "session_meta",
+                {
+                    "id": "child-1",
+                    "thread_source": "subagent",
+                    "parent_thread_id": "parent-1",
+                    "agent_nickname": "Singer",
+                    "cwd": "E:/Project/demo",
+                    "originator": "codex-tui",
+                    "source": "cli",
+                },
+            ),
+            record(
+                "2026-07-18T01:00:01Z",
+                "session_meta",
+                {
+                    "id": "parent-1",
+                    "thread_source": "user",
+                    "cwd": "E:/Project/demo",
+                    "originator": "codex-tui",
+                    "source": "cli",
+                },
+            ),
+            record("2026-07-18T01:00:02Z", "event_msg", {"type": "task_started"}),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "child.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            parsed = JsonlSessionParser().parse_file(path)
+        self.assertEqual(parsed.session_id, "child-1")
+        self.assertEqual(parsed.thread_source, "subagent")
+        self.assertEqual(parsed.parent_thread_id, "parent-1")
+        self.assertEqual(parsed.agent_nickname, "Singer")
+        self.assertTrue(parsed.is_subagent)
+
