@@ -114,6 +114,43 @@ def _compact_workdir_text(value: object, limit: int) -> str:
     return "..." + text[-max(0, limit - 3) :]
 
 
+def _normalized_system_action(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    action_id = str(value.get("id") or "").strip()
+    action = str(value.get("action") or "").strip()
+    title = str(value.get("title") or "").strip()
+    label = str(value.get("label") or "").strip()
+    if not action_id or not action or not title or not label:
+        return None
+    return {
+        "id": action_id,
+        "action": action,
+        "title": title,
+        "message": str(value.get("message") or "").strip(),
+        "label": label,
+        "persistent": bool(value.get("persistent")),
+    }
+
+
+def _system_action_overlay_item(action: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "id": str(action.get("id") or ""),
+        "title": str(action.get("title") or ""),
+        "status": "warning",
+        "statusLabel": str(action.get("label") or ""),
+        "statusText": str(action.get("label") or ""),
+        "lastText": str(action.get("message") or ""),
+        "elapsedText": "",
+        "systemAction": True,
+        "action": str(action.get("action") or ""),
+    }
+
+
+def _item_is_system_action(item: Mapping[str, object]) -> bool:
+    return bool(item.get("systemAction")) and bool(str(item.get("action") or "").strip())
+
+
 def _workdir_parts(value: object) -> list[str]:
     text = str(value or "").strip().rstrip("\\/")
     if not text:
@@ -2930,11 +2967,16 @@ def run_work_overlay_helper_qt(
             self._close_windows: list[CloseButtonWindow] = []
             self._workdir_windows: list[WorkdirLinkWindow] = []
             self._completed_check_windows: list[ClickHotspotWindow] = []
+            self._system_action_windows: list[ClickHotspotWindow] = []
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
             self._workdir_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._completed_check_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
+            self._system_action_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._card_hover_anchors: list[QWidget] = []
             self._completed_hover_anchors: list[QWidget] = []
+            self._system_action: dict[str, object] | None = None
+            self._ready_system_action_ids: set[str] = set()
+            self._requested_system_action_ids: set[str] = set()
             self._item_widgets: list[dict[str, Any]] = []
             self.circles: list[dict[str, Any]] = []
             self.rects: list[dict[str, Any]] = []
@@ -3155,13 +3197,48 @@ def run_work_overlay_helper_qt(
                 "requestedAt": time.time(),
                 "current": bool(item.get("current")),
             }
+            if not self._append_command(payload):
+                return
+            self._set_switch_pending(item)
+
+        def trigger_system_action(self, item: Mapping[str, object]) -> None:
+            if not _item_is_system_action(item):
+                return
+            action_id = str(item.get("id") or "").strip()
+            if not action_id or action_id in self._requested_system_action_ids:
+                return
+            payload = {
+                "action": str(item.get("action") or "").strip(),
+                "actionId": action_id,
+                "requestedAt": time.time(),
+            }
+            if not payload["action"] or not self._append_command(payload):
+                return
+            self._requested_system_action_ids.add(action_id)
+            for window in self._system_action_windows:
+                window.hide()
+
+        def _append_command(self, payload: Mapping[str, object]) -> bool:
             try:
                 self._command_path.parent.mkdir(parents=True, exist_ok=True)
                 with self._command_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    handle.write(json.dumps(dict(payload), ensure_ascii=False) + "\n")
             except OSError:
+                return False
+            return True
+
+        def emit_system_action_ready(self, action: Mapping[str, object]) -> None:
+            action_id = str(action.get("id") or "").strip()
+            if not action_id or action_id in self._ready_system_action_ids:
                 return
-            self._set_switch_pending(item)
+            if self._append_command(
+                {
+                    "action": "systemActionReady",
+                    "actionId": action_id,
+                    "reportedAt": time.time(),
+                }
+            ):
+                self._ready_system_action_ids.add(action_id)
 
         def emit_runtime_error(
             self,
@@ -3198,13 +3275,7 @@ def run_work_overlay_helper_qt(
                 return
             self._last_runtime_error_signature = signature
             self._last_runtime_error_at = now
-            command_path = self._command_path or _work_overlay_command_path(path)
-            try:
-                command_path.parent.mkdir(parents=True, exist_ok=True)
-                with command_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            except OSError:
-                return
+            self._append_command(payload)
 
         def hide_overlay(self) -> None:
             self.hide()
@@ -3214,6 +3285,8 @@ def run_work_overlay_helper_qt(
                 workdir_window.hide()
             for check_window in self._completed_check_windows:
                 check_window.hide()
+            for action_window in self._system_action_windows:
+                action_window.hide()
 
         def shutdown(self) -> None:
             self.hide_overlay()
@@ -3226,6 +3299,9 @@ def run_work_overlay_helper_qt(
             for check_window in self._completed_check_windows:
                 check_window.close()
             self._completed_check_windows.clear()
+            for action_window in self._system_action_windows:
+                action_window.close()
+            self._system_action_windows.clear()
             self.close()
             app.quit()
 
@@ -3251,12 +3327,13 @@ def run_work_overlay_helper_qt(
                 return True
             self._state_read_failed_at = 0.0
             should_close = bool(state.get("close"))
+            system_action = _normalized_system_action(state.get("systemAction"))
             updated_at = float(state.get("updatedAt") or 0.0)
             file_stale = updated_at > 0 and (time.time() - updated_at) > stale_seconds
             if owner_pid is not None and not process_exists(owner_pid):
                 self.shutdown()
                 return True
-            if should_close or file_stale:
+            if should_close or (file_stale and not bool(system_action and system_action.get("persistent"))):
                 self.shutdown()
                 return True
             raw_items = state.get("items") or []
@@ -3282,7 +3359,9 @@ def run_work_overlay_helper_qt(
                 item_limit,
                 max_items=work_overlay_max_items_for_screen_height(screen_height),
             )
-            self.render_items(items)
+            self.render_items(items, system_action=system_action or {})
+            if system_action is not None:
+                self.emit_system_action_ready(system_action)
             return True
 
         def sync_pointer_state(self) -> None:
@@ -3318,6 +3397,8 @@ def run_work_overlay_helper_qt(
                 workdir_window.set_overlay_opacity(target)
             for check_window in self._completed_check_windows:
                 check_window.set_overlay_opacity(target)
+            for action_window in self._system_action_windows:
+                action_window.set_overlay_opacity(target)
 
         @staticmethod
         def _item_identity(item: Mapping[str, object], index: int) -> str:
@@ -3344,6 +3425,7 @@ def run_work_overlay_helper_qt(
             self._close_anchors.clear()
             self._workdir_anchors.clear()
             self._completed_check_anchors.clear()
+            self._system_action_anchors.clear()
             self._card_hover_anchors.clear()
             self._completed_hover_anchors.clear()
             self._item_widgets.clear()
@@ -3548,12 +3630,17 @@ def run_work_overlay_helper_qt(
         ) -> None:
             record["item"] = dict(item)
             status = str(item.get("status") or "")
+            system_action = _item_is_system_action(item)
             accent, pill_bg, card_bg, border_color = _color_for(
                 status,
                 self._theme_tokens,
             )
             theme = self._theme_tokens
-            elapsed_text = str(item.get("elapsedText") or "").strip() or "已处理 --"
+            elapsed_text = (
+                ""
+                if system_action
+                else str(item.get("elapsedText") or "").strip() or "已处理 --"
+            )
             header_text = _work_overlay_header_text(
                 str(item.get("startedAt") or ""),
                 elapsed_text,
@@ -3665,10 +3752,13 @@ def run_work_overlay_helper_qt(
 
             if collect_anchors:
                 self._card_hover_anchors.append(card)
-                self._close_anchors.append(
-                    (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
-                )
-                if _workdir_external_link_for_item(item):
+                if system_action:
+                    self._system_action_anchors.append((status_label, dict(item)))
+                else:
+                    self._close_anchors.append(
+                        (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
+                    )
+                if not system_action and _workdir_external_link_for_item(item):
                     self._workdir_anchors.append((record["workdir_label"], dict(item)))
             switch_overlay = record.get("switch_overlay")
             if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):
@@ -4022,6 +4112,7 @@ def run_work_overlay_helper_qt(
                 *self._close_windows,
                 *self._workdir_windows,
                 *self._completed_check_windows,
+                *self._system_action_windows,
             ]:
                 window.hide()
 
@@ -4848,7 +4939,14 @@ def run_work_overlay_helper_qt(
             self.raise_()
             QTimer.singleShot(0, self.reposition_interactive_windows)
 
-        def render_items(self, items: Sequence[Mapping[str, object]]) -> None:
+        def render_items(
+            self,
+            items: Sequence[Mapping[str, object]],
+            *,
+            system_action: Mapping[str, object] | None = None,
+        ) -> None:
+            if system_action is not None:
+                self._system_action = _normalized_system_action(system_action)
             if self._transition_in_progress:
                 self._raw_items = list(items)
                 return
@@ -4859,6 +4957,15 @@ def run_work_overlay_helper_qt(
                 self._dismissed_instances,
                 item_limit=self._item_limit,
             )
+            if self._system_action is not None:
+                visible_items = [
+                    _system_action_overlay_item(self._system_action),
+                    *[
+                        item
+                        for item in visible_items
+                        if not _item_is_system_action(item)
+                    ],
+                ]
             self._sync_switch_pending(visible_items)
             if not visible_items:
                 if self.isVisible():
@@ -4934,6 +5041,7 @@ def run_work_overlay_helper_qt(
             self._close_anchors.clear()
             self._workdir_anchors.clear()
             self._completed_check_anchors.clear()
+            self._system_action_anchors.clear()
             self._card_hover_anchors.clear()
             self._completed_hover_anchors.clear()
             if rebuild:
@@ -5052,6 +5160,44 @@ def run_work_overlay_helper_qt(
                 )
                 check_window.show()
                 check_window.raise_()
+
+            action_color = _color_for("warning", self._theme_tokens)[0]
+            while len(self._system_action_windows) < len(self._system_action_anchors):
+                self._system_action_windows.append(
+                    ClickHotspotWindow(
+                        self.trigger_system_action,
+                        circle=False,
+                        hover_color=action_color,
+                    )
+                )
+            while len(self._system_action_windows) > len(self._system_action_anchors):
+                orphan = self._system_action_windows.pop()
+                orphan.close()
+
+            for index, action_window in enumerate(self._system_action_windows):
+                anchor, item = self._system_action_anchors[index]
+                action_id = str(item.get("id") or "").strip()
+                if (
+                    not anchor.isVisible()
+                    or action_id in self._requested_system_action_ids
+                ):
+                    action_window.hide()
+                    continue
+                anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
+                action_window.configure(
+                    item,
+                    opacity=current_opacity,
+                    tooltip=str(item.get("statusText") or "重启 Codex"),
+                    hover_color=action_color,
+                )
+                action_window.setGeometry(
+                    anchor_top_left.x(),
+                    anchor_top_left.y(),
+                    max(1, anchor.width()),
+                    max(1, anchor.height()),
+                )
+                action_window.show()
+                action_window.raise_()
 
     overlay = OverlayWindow()
     state_watcher = QFileSystemWatcher()

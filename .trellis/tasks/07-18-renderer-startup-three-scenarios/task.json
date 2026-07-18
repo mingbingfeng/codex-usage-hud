@@ -1,0 +1,31 @@
+{
+  "id": "renderer-startup-three-scenarios",
+  "name": "renderer-startup-three-scenarios",
+  "title": "明确 Renderer HUD 三场景启动契约",
+  "description": "Define and implement the renderer HUD startup contract for absent, non-CDP, and existing-CDP Codex App states.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "renderer startup classification, CDP port discovery, and PySide6 restart action",
+  "package": null,
+  "priority": "P2",
+  "creator": "fbm",
+  "assignee": "fbm",
+  "createdAt": "2026-07-18",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "src/codex_usage_hud/cli.py",
+    "src/codex_usage_hud/ui/work_overlay_qt.py",
+    "tests/test_ui.py",
+    ".trellis/spec/backend/renderer-runtime-contracts.md"
+  ],
+  "notes": "",
+  "meta": {}
+}

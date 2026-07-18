@@ -2462,8 +2462,143 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(path_arg, overlay._state_path)
             self.assertEqual(payload_arg["commandPath"], str(overlay._command_path))
             self.assertEqual(payload_arg["items"], [{"id": "thread-1"}])
+            self.assertEqual(payload_arg["systemAction"], {})
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
+
+    def test_desktop_work_overlay_restart_action_bypasses_zero_item_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=0)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            fake_process = SimpleNamespace(
+                poll=MagicMock(return_value=None),
+                wait=MagicMock(),
+            )
+
+            def start_helper() -> None:
+                overlay._process = fake_process
+
+            with (
+                patch.object(overlay, "_runtime_available", return_value=True),
+                patch.object(overlay, "_theme_payload", return_value={}),
+                patch.object(overlay, "_start", side_effect=start_helper),
+                patch.object(
+                    overlay,
+                    "_wait_for_system_action_command",
+                    return_value={"action": cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY},
+                ),
+                patch("codex_usage_hud.cli.write_json_object") as write_json,
+            ):
+                offered = overlay.offer_codex_restart(
+                    title="需要重启 Codex",
+                    message="保存当前工作后继续。",
+                )
+
+        self.assertTrue(offered)
+        self.assertFalse(overlay.enabled)
+        payload = write_json.call_args.args[1]
+        self.assertEqual(payload["itemLimit"], 0)
+        self.assertEqual(payload["items"], [])
+        self.assertEqual(
+            payload["systemAction"]["action"],
+            cli_module.WORK_OVERLAY_RESTART_ACTION,
+        )
+        self.assertTrue(payload["systemAction"]["persistent"])
+
+    def test_desktop_work_overlay_waits_for_one_restart_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=0)
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay._system_action = {
+                "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+            }
+            block_forever = threading.Event()
+            overlay._process = SimpleNamespace(wait=block_forever.wait)
+            overlay._command_path.write_text(
+                json.dumps(
+                    {
+                        "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                        "actionId": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            requested = overlay.wait_for_codex_restart_request()
+
+        self.assertTrue(requested)
+        self.assertEqual(overlay.take_commands(), [])
+
+    def test_desktop_work_overlay_preserves_fast_restart_during_ready_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=0)
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay._system_action = {
+                "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+            }
+            block_forever = threading.Event()
+            overlay._process = SimpleNamespace(wait=block_forever.wait)
+            overlay._command_path.write_text(
+                "\n".join(
+                    json.dumps(command)
+                    for command in (
+                        {
+                            "action": cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY,
+                            "actionId": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                        },
+                        {
+                            "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                            "actionId": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                        },
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            ready = overlay._wait_for_system_action_command(
+                {cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY},
+                timeout_seconds=0.1,
+            )
+            requested = overlay.wait_for_codex_restart_request()
+
+        self.assertEqual(
+            ready["action"],
+            cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY,
+        )
+        self.assertTrue(requested)
+
+    def test_desktop_work_overlay_ignores_restart_for_another_action_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=0)
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            overlay._system_action = {
+                "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+            }
+            overlay._process = SimpleNamespace(wait=lambda: None)
+            overlay._command_path.write_text(
+                json.dumps(
+                    {
+                        "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                        "actionId": "stale-action",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            requested = overlay.wait_for_codex_restart_request()
+
+        self.assertFalse(requested)
 
     def test_desktop_work_overlay_skips_unchanged_state_until_keepalive(self) -> None:
         item = WorkStatusItem(
@@ -2590,6 +2725,106 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertLess(
                 elapsed,
                 WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS,
+            )
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
+    def test_work_overlay_restart_action_survives_stale_state_and_clicks_once(self) -> None:
+        try:
+            from PySide6.QtCore import QPoint, QTimer, Qt
+            from PySide6.QtTest import QTest
+            from PySide6.QtWidgets import QApplication
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                state_path = root / f"work-overlay-{os.getpid()}-restart.json"
+                command_path = root / "restart-commands.jsonl"
+                state = {
+                    "ownerPid": os.getpid(),
+                    "itemLimit": 0,
+                    "commandPath": str(command_path),
+                    "items": [],
+                    "systemAction": {
+                        "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                        "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                        "title": "需要重启 Codex",
+                        "message": "保存当前工作后继续。",
+                        "label": "重启 Codex",
+                        "persistent": True,
+                    },
+                    "updatedAt": time.time() - 60.0,
+                    "close": False,
+                }
+                state_path.write_text(
+                    json.dumps(state, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                app = QApplication.instance() or QApplication(["overlay-restart-test"])
+                observed_hotspots: list[object] = []
+
+                def click_restart() -> None:
+                    hotspots = [
+                        widget
+                        for widget in app.topLevelWidgets()
+                        if type(widget).__name__ == "ClickHotspotWindow"
+                        and widget.isVisible()
+                        and widget.toolTip() == "重启 Codex"
+                    ]
+                    observed_hotspots.extend(hotspots)
+                    if hotspots:
+                        center = QPoint(
+                            max(1, hotspots[0].width() // 2),
+                            max(1, hotspots[0].height() // 2),
+                        )
+                        QTest.mouseClick(hotspots[0], Qt.MouseButton.LeftButton, pos=center)
+                        QTest.mouseClick(hotspots[0], Qt.MouseButton.LeftButton, pos=center)
+                    state["close"] = True
+                    state["updatedAt"] = time.time()
+                    state_path.write_text(
+                        json.dumps(state, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                QTimer.singleShot(250, click_restart)
+                QTimer.singleShot(2000, app.quit)
+                exit_code = run_work_overlay_helper_qt(
+                    state_path,
+                    process_exists=lambda pid: pid == os.getpid(),
+                    owner_pid_from_path=lambda _path: os.getpid(),
+                    item_limit=0,
+                    stale_seconds=0.1,
+                    overlay_alpha=0.88,
+                    hover_alpha=0.22,
+                    header_title_limit=28,
+                )
+                commands = [
+                    json.loads(line)
+                    for line in command_path.read_text(encoding="utf-8").splitlines()
+                ]
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(observed_hotspots)
+            self.assertEqual(
+                sum(
+                    command.get("action") == cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY
+                    for command in commands
+                ),
+                1,
+            )
+            self.assertEqual(
+                sum(
+                    command.get("action") == cli_module.WORK_OVERLAY_RESTART_ACTION
+                    for command in commands
+                ),
+                1,
             )
         finally:
             if previous_platform is None:
@@ -2958,6 +3193,56 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertTrue(feedback.take_codex_restart_request())
             self.assertFalse(feedback._restart_request_path.exists())
             self.assertFalse(feedback.take_codex_restart_request())
+
+    def test_loading_feedback_restart_wait_uses_file_change_watcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            feedback = cli_module.HudLoadingFeedback(
+                "还差一步：重启 Codex",
+                "准备好后点击按钮继续。",
+                enabled=True,
+            )
+            feedback._state_path = root / "loading-123-1.json"
+            feedback._restart_request_path = cli_module._loading_feedback_restart_path(
+                feedback._state_path
+            )
+            helper_exit = threading.Event()
+            feedback._process = SimpleNamespace(wait=helper_exit.wait)
+            created: list[object] = []
+
+            class FakeWatcher:
+                def __init__(self, callback, **kwargs):
+                    self.callback = callback
+                    self.kwargs = kwargs
+                    self.specs = []
+                    self.closed = False
+                    created.append(self)
+
+                def update(self, specs):
+                    self.specs = list(specs)
+                    feedback._restart_request_path.write_text(
+                        '{"action":"restart_codex"}',
+                        encoding="utf-8",
+                    )
+                    self.callback(
+                        {"loading-feedback-restart"},
+                        {feedback._restart_request_path},
+                    )
+
+                def close(self):
+                    self.closed = True
+
+            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
+                requested = feedback.wait_for_codex_restart_request()
+
+        self.assertTrue(requested)
+        watcher = created[0]
+        self.assertEqual(
+            watcher.kwargs["fallback_poll_seconds"],
+            cli_module.WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS,
+        )
+        self.assertEqual(watcher.specs[0].path, feedback._restart_request_path)
+        self.assertTrue(watcher.closed)
 
     def test_loading_feedback_uses_renderer_bubble_top_right_geometry(self) -> None:
         self.assertEqual(
@@ -3547,6 +3832,159 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].status_text, "已完成")
         self.assertTrue(items[0].pending_accounting)
         self.assertTrue(work_item_to_overlay_dict(items[0])["pendingAccounting"])
+
+    def test_work_overlay_user_steer_reopens_final_answer_without_task_started(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def row(offset: int, row_type: str, payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "timestamp": (now + timedelta(seconds=offset)).isoformat(),
+                "type": row_type,
+                "payload": payload,
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-current.jsonl"
+            running_rows = [
+                row(-20, "session_meta", {"id": "session-current"}),
+                row(-19, "event_msg", {"type": "task_started"}),
+                row(-18, "event_msg", {"type": "user_message", "message": "initial task"}),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in running_rows),
+                encoding="utf-8",
+            )
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+            running_snapshot = parser.parse_file(path)
+            running_items = active_work_items_for_snapshot(
+                context,
+                running_snapshot,
+                path,
+            )
+
+            completed_rows = [
+                *running_rows,
+                row(
+                    -10,
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "first final answer",
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in completed_rows),
+                encoding="utf-8",
+            )
+            completed_snapshot = parser.parse_file(path)
+            completed_items = active_work_items_for_snapshot(
+                context,
+                completed_snapshot,
+                path,
+            )
+
+            steered_rows = [
+                *completed_rows,
+                row(-1, "event_msg", {"type": "user_message", "message": "keep going"}),
+                row(0, "event_msg", {"type": "agent_reasoning", "text": "continuing"}),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in steered_rows),
+                encoding="utf-8",
+            )
+            steered_snapshot = parser.parse_file(path)
+            steered_items = active_work_items_for_snapshot(
+                context,
+                steered_snapshot,
+                path,
+            )
+
+        self.assertIn(running_items[0].status, {"running", "active"})
+        self.assertEqual(completed_items[0].status, "recent")
+        self.assertIsNone(steered_snapshot.final_answer_at)
+        self.assertIsNone(steered_snapshot.task_completed_at)
+        self.assertIn(steered_items[0].status, {"running", "active"})
+        self.assertNotEqual(steered_items[0].status_text, "已完成")
+
+    def test_work_overlay_compaction_handoff_keeps_running_card(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def row(
+            offset: int,
+            row_type: str,
+            payload: object,
+        ) -> dict[str, object]:
+            return {
+                "timestamp": (now + timedelta(seconds=offset)).isoformat(),
+                "type": row_type,
+                "payload": payload,
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-current.jsonl"
+            rows = [
+                row(-20, "session_meta", {"id": "session-current"}),
+                row(-19, "event_msg", {"type": "task_started"}),
+                row(
+                    -18,
+                    "event_msg",
+                    {"type": "user_message", "message": "long-running task"},
+                ),
+                row(
+                    -12,
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {"type": "output_text", "text": "compaction handoff"}
+                        ],
+                    },
+                ),
+                row(-11, "compacted", "handoff summary"),
+                row(-10, "event_msg", {"type": "context_compacted"}),
+                row(
+                    -2,
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "content": [
+                            {"type": "output_text", "text": "still working"}
+                        ],
+                    },
+                ),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                encoding="utf-8",
+            )
+            snapshot = parser.parse_file(path)
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, path)
+
+        self.assertIsNone(snapshot.final_answer_at)
+        self.assertIsNone(snapshot.task_completed_at)
+        self.assertEqual(len(items), 1)
+        self.assertIn(items[0].status, {"running", "active"})
+        self.assertNotEqual(items[0].status_text, "已完成")
 
     def test_current_completed_task_hides_without_prior_running_overlay(self) -> None:
         parser = JsonlSessionParser()
@@ -10945,7 +11383,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_bridge.close.assert_called_once()
         fake_context.close.assert_called_once()
 
-    def test_renderer_initial_connect_timeout_uses_restart_card_not_modal(self) -> None:
+    def test_renderer_initial_connect_error_on_live_cdp_does_not_offer_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             fake_context = SimpleNamespace(
@@ -10961,27 +11399,30 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
-            restart_card = MagicMock()
-            restart_card.start.return_value = restart_card
-            restart_card.offer_codex_restart.return_value = False
+            startup_plan = cli_module.RendererStartupPlan(
+                scenario=cli_module.RENDERER_STARTUP_ATTACH,
+                port=9229,
+                port_source="desktop-process",
+            )
 
             with (
+                patch(
+                    "codex_usage_hud.cli._renderer_startup_plan",
+                    return_value=startup_plan,
+                ),
                 patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
                 patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
                 patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
                 patch(
                     "codex_usage_hud.cli._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
-                ),
+                ) as prepare_window,
                 patch("codex_usage_hud.cli.wait_for_renderer", return_value=False),
                 patch(
-                    "codex_usage_hud.cli._assign_fresh_renderer_cdp_port",
-                    side_effect=RuntimeError("no available CDP port"),
+                    "codex_usage_hud.cli._validate_renderer_cdp_candidate",
+                    return_value=(True, ""),
                 ),
-                patch(
-                    "codex_usage_hud.cli._create_loading_feedback",
-                    return_value=restart_card,
-                ) as create_loading,
+                patch("codex_usage_hud.cli._create_loading_feedback") as create_loading,
                 patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
@@ -10990,8 +11431,11 @@ class DaemonLifecycleTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
-        create_loading.assert_called_once()
-        restart_card.offer_codex_restart.assert_called_once()
+        create_loading.assert_not_called()
+        prepare_window.assert_called_once_with(
+            timeout_seconds=cli_module.RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            launch_if_missing=False,
+        )
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
         fake_context.close.assert_called_once()
@@ -11112,7 +11556,253 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(port, 9444)
         self.assertEqual(env_port, "9444")
 
-    def test_renderer_initial_connect_waits_for_start_card_restart_request(self) -> None:
+    def test_remote_debugging_ports_parse_both_chromium_flag_forms(self) -> None:
+        ports = cli_module._remote_debugging_ports_from_command_line(
+            '"C:\\Codex\\ChatGPT.exe" --remote-debugging-port=59629 '
+            "--remote-debugging-port 60123 --remote-debugging-port=70000"
+        )
+
+        self.assertEqual(ports, (59629, 60123))
+
+    def test_windows_process_query_rejects_npm_codex_cli(self) -> None:
+        rows = [
+            {
+                "ProcessId": 11,
+                "Name": "codex.exe",
+                "ExecutablePath": "C:\\Users\\test\\AppData\\Roaming\\npm\\codex.exe",
+                "CommandLine": "codex.exe --remote-debugging-port=59999",
+            },
+            {
+                "ProcessId": 22,
+                "Name": "ChatGPT.exe",
+                "ExecutablePath": (
+                    "C:\\Program Files\\WindowsApps\\OpenAI.Codex_1.0_x64__id"
+                    "\\app\\ChatGPT.exe"
+                ),
+                "CommandLine": "ChatGPT.exe --remote-debugging-port=59629",
+            },
+        ]
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(rows),
+            stderr="",
+        )
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("codex_usage_hud.cli.subprocess.run", return_value=completed),
+        ):
+            processes = cli_module._windows_running_codex_desktop_processes()
+
+        self.assertEqual([item.pid for item in processes], [22])
+        self.assertEqual(
+            cli_module._remote_debugging_ports_from_command_line(
+                processes[0].command_line
+            ),
+            (59629,),
+        )
+
+    def test_macos_process_query_requires_codex_app_executable(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "11 /usr/local/bin/codex --remote-debugging-port=59999\n"
+                "22 /Applications/Codex.app/Contents/MacOS/Codex "
+                "--remote-debugging-port 59629\n"
+            ),
+            stderr="",
+        )
+
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch("codex_usage_hud.cli.subprocess.run", return_value=completed),
+        ):
+            processes = cli_module._macos_running_codex_desktop_processes()
+
+        self.assertEqual([item.pid for item in processes], [22])
+        self.assertEqual(
+            cli_module._remote_debugging_ports_from_command_line(
+                processes[0].command_line
+            ),
+            (59629,),
+        )
+
+    def test_macos_process_query_accepts_unquoted_app_path_with_spaces(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "22 /Applications/OpenAI Codex.app/Contents/MacOS/Codex "
+                "--remote-debugging-port=59629\n"
+            ),
+            stderr="",
+        )
+
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch.dict(
+                os.environ,
+                {cli_module.CODEX_APP_PATH_ENV: "/Applications/OpenAI Codex.app"},
+                clear=False,
+            ),
+            patch("codex_usage_hud.cli.subprocess.run", return_value=completed),
+        ):
+            processes = cli_module._macos_running_codex_desktop_processes()
+
+        self.assertEqual([item.pid for item in processes], [22])
+        self.assertEqual(
+            processes[0].executable_path,
+            "/Applications/OpenAI Codex.app/Contents/MacOS/Codex",
+        )
+
+    def test_macos_debug_launch_remembers_requested_port(self) -> None:
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch.dict(
+                os.environ,
+                {
+                    cli_module.CODEX_APP_PATH_ENV: "/Applications/OpenAI Codex.app",
+                    cli_module.CDP_PORT_ENV: "59629",
+                },
+                clear=False,
+            ),
+            patch("codex_usage_hud.cli.subprocess.Popen") as popen,
+            patch(
+                "codex_usage_hud.cli._remember_requested_renderer_cdp_port"
+            ) as remember_port,
+        ):
+            launched = cli_module.launch_codex_app(debugger=True)
+
+        self.assertTrue(launched)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:2], ["open", "/Applications/OpenAI Codex.app"])
+        self.assertIn("--remote-debugging-port=59629", command)
+        remember_port.assert_called_once_with(59629)
+
+    def test_existing_renderer_port_requires_verified_codex_target(self) -> None:
+        process = cli_module._CodexDesktopProcess(
+            pid=22,
+            name="ChatGPT.exe",
+            executable_path="C:\\Codex\\ChatGPT.exe",
+            command_line="ChatGPT.exe --remote-debugging-port=59629",
+        )
+        target = {
+            "type": "page",
+            "title": "Codex",
+            "url": "app://-/index.html",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:59629/devtools/page/1",
+        }
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch("codex_usage_hud.cli._running_codex_desktop_processes", return_value=[process]),
+            patch("codex_usage_hud.cli.hud_runtime_dir", return_value=Path(temp_dir)),
+            patch("codex_usage_hud.cli._localhost_cdp_port_is_listening", return_value=True),
+            patch(
+                "codex_usage_hud.cli.cdp_version_info",
+                return_value={"Protocol-Version": "1.3"},
+            ) as version_info,
+            patch("codex_usage_hud.cli.list_targets", return_value=[target]),
+            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+        ):
+            candidate = cli_module._find_existing_renderer_cdp_candidate()
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.port, 59629)
+        self.assertEqual(candidate.source, "desktop-process")
+        version_info.assert_called_once_with(
+            59629,
+            cli_module.RENDERER_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+        diagnostic.assert_called_once_with(
+            "renderer_cdp_process_port_discovered",
+            platform=sys.platform,
+            pid=22,
+            port=59629,
+        )
+
+    def test_existing_renderer_port_rejects_invalid_version_endpoint(self) -> None:
+        candidate = cli_module._RendererCdpPortCandidate(
+            port=59629,
+            source="desktop-process",
+            pid=22,
+        )
+        with (
+            patch(
+                "codex_usage_hud.cli._localhost_cdp_port_is_listening",
+                return_value=True,
+            ),
+            patch(
+                "codex_usage_hud.cli.cdp_version_info",
+                side_effect=RuntimeError("CDP version response has no protocol identity"),
+            ),
+            patch("codex_usage_hud.cli.list_targets") as list_cdp_targets,
+        ):
+            valid, reason = cli_module._validate_renderer_cdp_candidate(candidate)
+
+        self.assertFalse(valid)
+        self.assertIn("protocol identity", reason)
+        list_cdp_targets.assert_not_called()
+
+    def test_renderer_startup_plan_covers_three_scenarios_and_recovery(self) -> None:
+        candidate = cli_module._RendererCdpPortCandidate(
+            port=59629,
+            source="desktop-process",
+            pid=22,
+        )
+        with (
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
+            patch("codex_usage_hud.cli._select_launch_renderer_cdp_port", return_value=60100),
+        ):
+            launch = cli_module._renderer_startup_plan()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
+            patch("codex_usage_hud.cli._find_existing_renderer_cdp_candidate", return_value=candidate),
+        ):
+            attach = cli_module._renderer_startup_plan()
+            attached_port = os.environ.get(cli_module.CDP_PORT_ENV)
+        with (
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
+            patch("codex_usage_hud.cli._find_existing_renderer_cdp_candidate", return_value=None),
+        ):
+            restart = cli_module._renderer_startup_plan()
+        with (
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=60200),
+        ):
+            recovery = cli_module._renderer_startup_plan(launched_codex=True)
+
+        self.assertEqual(launch.scenario, cli_module.RENDERER_STARTUP_LAUNCH)
+        self.assertEqual(launch.port, 60100)
+        self.assertEqual(attach.scenario, cli_module.RENDERER_STARTUP_ATTACH)
+        self.assertEqual(attach.port, 59629)
+        self.assertEqual(attached_port, "59629")
+        self.assertEqual(
+            restart.scenario,
+            cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+        )
+        self.assertEqual(
+            recovery.scenario,
+            cli_module.RENDERER_STARTUP_ATTACH_LAUNCHED,
+        )
+        self.assertEqual(recovery.port, 60200)
+
+    def test_launch_port_selection_uses_fresh_port_when_preferred_is_occupied(self) -> None:
+        with (
+            patch.dict(os.environ, {cli_module.CDP_PORT_ENV: "9444"}, clear=True),
+            patch("codex_usage_hud.cli._localhost_cdp_port_available", return_value=False),
+            patch("codex_usage_hud.cli._allocate_fresh_renderer_cdp_port", return_value=9555),
+        ):
+            port = cli_module._select_launch_renderer_cdp_port()
+            env_port = os.environ.get(cli_module.CDP_PORT_ENV)
+
+        self.assertEqual(port, 9555)
+        self.assertEqual(env_port, "9555")
+
+    def test_renderer_attach_target_loss_waits_for_pyside_restart_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             settings_path = temp_root / "hud_settings.json"
@@ -11143,17 +11833,20 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
             fake_work_overlay = MagicMock()
-            restart_card = MagicMock()
-            restart_card.start.return_value = restart_card
-            restart_card.offer_codex_restart.return_value = True
-            restart_card.wait_for_codex_restart_request.return_value = True
-
-            def assign_fresh_port() -> int:
-                os.environ[cli_module.CDP_PORT_ENV] = "9444"
-                return 9444
+            fake_work_overlay.offer_codex_restart.return_value = True
+            fake_work_overlay.wait_for_codex_restart_request.return_value = True
+            startup_plan = cli_module.RendererStartupPlan(
+                scenario=cli_module.RENDERER_STARTUP_ATTACH,
+                port=9229,
+                port_source="desktop-process",
+            )
 
             with (
                 patch.dict(os.environ, {cli_module.CDP_PORT_ENV: "9229"}),
+                patch(
+                    "codex_usage_hud.cli._renderer_startup_plan",
+                    return_value=startup_plan,
+                ),
                 patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
                 patch(
                     "codex_usage_hud.cli.RendererHudClient",
@@ -11170,16 +11863,13 @@ class DaemonLifecycleTests(unittest.TestCase):
                 ),
                 patch(
                     "codex_usage_hud.cli.wait_for_renderer",
-                    side_effect=[False, True],
+                    return_value=False,
                 ) as wait_renderer,
                 patch(
-                    "codex_usage_hud.cli._assign_fresh_renderer_cdp_port",
-                    side_effect=assign_fresh_port,
-                ) as assign_port,
-                patch(
-                    "codex_usage_hud.cli._create_loading_feedback",
-                    return_value=restart_card,
-                ) as create_loading,
+                    "codex_usage_hud.cli._validate_renderer_cdp_candidate",
+                    return_value=(False, "not-listening"),
+                ),
+                patch("codex_usage_hud.cli._select_launch_renderer_cdp_port") as select_launch_port,
                 patch("codex_usage_hud.cli._restart_codex_for_renderer") as restart_codex,
                 patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
             ):
@@ -11191,16 +11881,131 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, HUD_SWITCH_TO_RENDERER_RESTART_CODEX)
         self.assertEqual(client_class.call_count, 1)
         self.assertEqual(wait_renderer.call_count, 1)
-        assign_port.assert_called_once_with()
-        create_loading.assert_called_once()
-        restart_card.offer_codex_restart.assert_called_once()
-        restart_card.wait_for_codex_restart_request.assert_called_once_with()
-        restart_card.close.assert_called_once_with()
+        select_launch_port.assert_not_called()
+        fake_work_overlay.offer_codex_restart.assert_called_once()
+        fake_work_overlay.wait_for_codex_restart_request.assert_called_once_with()
         restart_codex.assert_not_called()
         failed_client.close.assert_called()
         active_tracker.close.assert_not_called()
         fake_bridge.close.assert_called_once()
         fake_context.close.assert_called_once()
+
+    def test_renderer_running_without_cdp_waits_before_client_construction(self) -> None:
+        fake_context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            close=MagicMock(),
+        )
+        fake_work_overlay = MagicMock()
+        fake_work_overlay.offer_codex_restart.return_value = True
+        fake_work_overlay.wait_for_codex_restart_request.return_value = True
+        loading = MagicMock()
+        startup_plan = cli_module.RendererStartupPlan(
+            scenario=cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+            reason="running-codex-has-no-verified-cdp-target",
+        )
+
+        with (
+            patch(
+                "codex_usage_hud.cli._renderer_startup_plan",
+                return_value=startup_plan,
+            ),
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli.DesktopWorkOverlay",
+                return_value=fake_work_overlay,
+            ),
+            patch("codex_usage_hud.cli.RendererHudClient") as client_class,
+            patch("codex_usage_hud.cli.SettingsBridgeServer") as bridge_class,
+        ):
+            exit_code = run_renderer_hud_session(
+                SimpleNamespace(),
+                lock_already_held=True,
+                loading_feedback=loading,
+            )
+
+        self.assertEqual(exit_code, HUD_SWITCH_TO_RENDERER_RESTART_CODEX)
+        client_class.assert_not_called()
+        bridge_class.assert_not_called()
+        fake_work_overlay.offer_codex_restart.assert_called_once()
+        fake_work_overlay.wait_for_codex_restart_request.assert_called_once_with()
+        loading.close.assert_called_once_with()
+        fake_work_overlay.close.assert_called_once_with()
+        fake_context.close.assert_called_once_with()
+
+    def test_renderer_restart_action_falls_back_when_pyside_is_unavailable(self) -> None:
+        fake_context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            close=MagicMock(),
+        )
+        fake_work_overlay = MagicMock()
+        fake_work_overlay.offer_codex_restart.return_value = False
+        fake_work_overlay.system_action_unavailable_reason = "PySide6 is not installed"
+        loading = MagicMock()
+        loading.offer_codex_restart.return_value = True
+        loading.wait_for_codex_restart_request.return_value = True
+        startup_plan = cli_module.RendererStartupPlan(
+            scenario=cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+            reason="running-codex-has-no-verified-cdp-target",
+        )
+
+        with (
+            patch(
+                "codex_usage_hud.cli._renderer_startup_plan",
+                return_value=startup_plan,
+            ),
+            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch(
+                "codex_usage_hud.cli.DesktopWorkOverlay",
+                return_value=fake_work_overlay,
+            ),
+            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+            patch("codex_usage_hud.cli.RendererHudClient") as client_class,
+        ):
+            exit_code = run_renderer_hud_session(
+                SimpleNamespace(),
+                lock_already_held=True,
+                loading_feedback=loading,
+            )
+
+        self.assertEqual(exit_code, HUD_SWITCH_TO_RENDERER_RESTART_CODEX)
+        client_class.assert_not_called()
+        loading.offer_codex_restart.assert_called_once()
+        loading.wait_for_codex_restart_request.assert_called_once_with()
+        loading.close.assert_called_once_with()
+        diagnostic.assert_any_call(
+            "renderer_restart_overlay_fallback",
+            reason="PySide6 is not installed",
+        )
+
+    def test_renderer_restart_selects_fresh_port_only_after_stop(self) -> None:
+        call_order: list[str] = []
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch(
+                "codex_usage_hud.cli._stop_codex_processes",
+                side_effect=lambda: call_order.append("stop") or True,
+            ),
+            patch(
+                "codex_usage_hud.cli._select_launch_renderer_cdp_port",
+                side_effect=lambda **_kwargs: call_order.append("select") or 59629,
+            ) as select_port,
+            patch(
+                "codex_usage_hud.cli.launch_codex_app",
+                side_effect=lambda **_kwargs: call_order.append("launch") or True,
+            ),
+            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+        ):
+            restarted = cli_module._restart_codex_for_renderer()
+
+        self.assertTrue(restarted)
+        self.assertEqual(call_order, ["stop", "select", "launch"])
+        select_port.assert_called_once_with(require_fresh=True)
+        diagnostic.assert_called_once_with(
+            "renderer_restart_requested_by_user",
+            action_id=cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+            port=59629,
+        )
 
     def test_run_hud_session_restarts_codex_and_retries_renderer(self) -> None:
         args = SimpleNamespace(renderer_hud=True)
@@ -11240,14 +12045,61 @@ class DaemonLifecycleTests(unittest.TestCase):
                 ),
             ),
             patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
-            patch("codex_usage_hud.cli._select_initial_renderer_cdp_port"),
-            patch("codex_usage_hud.cli.launch_codex_app", return_value=True),
+            patch(
+                "codex_usage_hud.cli._select_launch_renderer_cdp_port",
+                return_value=59629,
+            ) as select_port,
+            patch(
+                "codex_usage_hud.cli.launch_codex_app",
+                return_value=True,
+            ) as launch_app,
             patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as run_renderer,
         ):
             self.assertEqual(run_daemon(args), 0)
 
+        select_port.assert_called_once_with()
+        launch_app.assert_called_once_with(debugger=True)
         run_renderer.assert_called_once()
         self.assertTrue(run_renderer.call_args.kwargs["launched_codex"])
+
+    def test_daemon_missing_codex_returns_when_single_launch_fails(self) -> None:
+        manager = SimpleNamespace(
+            wait_for_codex=MagicMock(),
+            poll_seconds=0.1,
+        )
+        loading = MagicMock()
+        loading.start.return_value = loading
+        args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
+
+        with (
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
+            patch("codex_usage_hud.cli.HudInstanceLock"),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=cli_module.DaemonStartupDecision(
+                    DAEMON_STARTUP_RENDERER,
+                    launch_codex=True,
+                ),
+            ),
+            patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
+            patch(
+                "codex_usage_hud.cli._select_launch_renderer_cdp_port",
+                return_value=59629,
+            ),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=False) as launch_app,
+            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        launch_app.assert_called_once_with(debugger=True)
+        manager.wait_for_codex.assert_not_called()
+        loading.close.assert_called_once_with()
+        diagnostic.assert_called_once_with(
+            "renderer_cdp_launch_failed",
+            port=59629,
+            source="daemon-startup",
+        )
 
     def test_daemon_shows_progress_immediately_for_existing_codex(self) -> None:
         manager = SimpleNamespace(
@@ -14750,7 +15602,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn("--remote-debugging-port=9333", command)
         self.assertIn("--remote-allow-origins=http://127.0.0.1:9333", command)
 
-    def test_run_renderer_hud_session_prepares_window_before_connect_in_manual_mode(self) -> None:
+    def test_run_renderer_hud_session_launches_once_before_window_prepare(self) -> None:
         fake_context = SimpleNamespace(
             settings_store=SimpleNamespace(path=Path("hud_settings.json")),
             user_config=UserConfig.defaults(),
@@ -14768,12 +15620,21 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         fake_bridge = MagicMock()
         fake_bridge.start.return_value = "http://127.0.0.1:8765"
+        startup_plan = cli_module.RendererStartupPlan(
+            scenario=cli_module.RENDERER_STARTUP_LAUNCH,
+            port=9333,
+            port_source="launch",
+        )
 
         with (
+            patch(
+                "codex_usage_hud.cli._renderer_startup_plan",
+                return_value=startup_plan,
+            ),
             patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
             patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
             patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
+            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch_app,
             patch(
                 "codex_usage_hud.cli._prepare_codex_window_for_renderer",
                 return_value=(True, "visible", "", 123),
@@ -14793,8 +15654,9 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 130)
         prepare_window.assert_called_once_with(
             timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
-            launch_if_missing=True,
+            launch_if_missing=False,
         )
+        launch_app.assert_called_once_with(debugger=True)
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
         fake_context.close.assert_called_once()
@@ -14980,7 +15842,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         prepare_window.assert_called_once_with(
             timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
-            launch_if_missing=True,
+            launch_if_missing=False,
         )
         prepare_overlay_window.assert_not_called()
         refocus_overlay_window.assert_called_once()

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -69,6 +70,7 @@ from .daemon import (
     WindowsProcessListener,
     configure_daemon_logging,
     hide_console_window,
+    is_codex_client_process,
 )
 from .platforms import (
     ActiveSessionTracker,
@@ -86,7 +88,10 @@ from .platforms.base import BasePlatform
 from .platforms.cdp_probe import (
     CDP_PORT_ENV,
     DEFAULT_CDP_PORT,
+    cdp_version_info,
     cdp_port_from_env,
+    list_targets,
+    pick_page_target,
 )
 from .platforms.codex_theme import CodexThemeProbe
 from .platforms.file_watcher import FileChangeWatcher, FileWatchSpec
@@ -159,6 +164,7 @@ RENDERER_UPDATE_FAILURE_LIMIT = 6
 AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT = 3
 RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
 RENDERER_CDP_STATE_FILENAME = "renderer_cdp_state.json"
+RENDERER_CDP_DISCOVERY_TIMEOUT_SECONDS = 0.25
 CRASH_DIAGNOSTIC_FILENAME = "crash.log"
 CRASH_DIAGNOSTICS_ENV = "CODEX_USAGE_HUD_CRASH_DIAGNOSTICS"
 RUNTIME_DEBUG_ENV = "CODEX_USAGE_HUD_DEBUG"
@@ -168,6 +174,13 @@ CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
 DAEMON_STARTUP_WAIT = "wait"
 DAEMON_STARTUP_RENDERER = "renderer"
 DAEMON_STARTUP_CANCEL = "cancel"
+RENDERER_STARTUP_LAUNCH = "launch"
+RENDERER_STARTUP_ATTACH = "attach"
+RENDERER_STARTUP_RESTART_REQUIRED = "restart-required"
+RENDERER_STARTUP_ATTACH_LAUNCHED = "attach-launched"
+_REMOTE_DEBUGGING_PORT_PATTERN = re.compile(
+    r"(?:^|\s)--remote-debugging-port(?:=|\s+)(\d{1,5})(?=\s|$)"
+)
 LOADING_FEEDBACK_STALE_SECONDS = 20.0
 ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
@@ -184,6 +197,10 @@ WORK_OVERLAY_RESTART_BACKOFF_SECONDS = 60.0
 WORK_OVERLAY_TOP_OFFSET = 56
 WORK_OVERLAY_MARGIN = 16
 WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT = 160
+WORK_OVERLAY_RESTART_ACTION = "restartCodex"
+WORK_OVERLAY_SYSTEM_ACTION_READY = "systemActionReady"
+WORK_OVERLAY_RESTART_ACTION_ID = "restart-codex-for-renderer"
+WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS = 2.0
 DESKTOP_OVERLAY_PACKAGE = "PySide6"
 DESKTOP_OVERLAY_PIP_SPEC = "PySide6>=6.8"
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
@@ -288,6 +305,31 @@ class DaemonStartupDecision:
     launch_codex: bool = False
 
 
+@dataclass(frozen=True)
+class RendererStartupPlan:
+    """One evidence-backed action for the renderer startup state machine."""
+
+    scenario: str
+    port: int | None = None
+    port_source: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _CodexDesktopProcess:
+    pid: int
+    name: str
+    executable_path: str
+    command_line: str
+
+
+@dataclass(frozen=True)
+class _RendererCdpPortCandidate:
+    port: int
+    source: str
+    pid: int | None = None
+
+
 class HudLoadingFeedback:
     """Small topmost startup/loading card for renderer launch and recovery."""
 
@@ -375,11 +417,48 @@ class HudLoadingFeedback:
         """Wait without automatic restart while the user finishes current work."""
         if not self.enabled or self._closed:
             return False
-        while not self._closed:
-            if self.take_codex_restart_request():
-                return True
-            time.sleep(0.2)
-        return False
+        process = self._process
+        path = self._restart_request_path
+        if process is None or path is None:
+            return False
+        wake = Event()
+        requested = False
+        requested_lock = threading.Lock()
+
+        def consume_request() -> None:
+            nonlocal requested
+            if not self.take_codex_restart_request():
+                return
+            with requested_lock:
+                requested = True
+            wake.set()
+
+        watcher = FileChangeWatcher(
+            lambda _reasons, _paths: consume_request(),
+            fallback_poll_seconds=WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS,
+        )
+        try:
+            watcher.update([FileWatchSpec.file(path, "loading-feedback-restart")])
+            consume_request()
+
+            def wait_for_helper_exit() -> None:
+                try:
+                    process.wait()
+                except Exception:
+                    pass
+                wake.set()
+
+            threading.Thread(
+                target=wait_for_helper_exit,
+                name="codex-hud-loading-action-exit",
+                daemon=True,
+            ).start()
+            wake.wait()
+            consume_request()
+        finally:
+            watcher.close()
+        with requested_lock:
+            return requested
 
     def close(self) -> None:
         if not self.enabled or self._closed:
@@ -909,6 +988,7 @@ class DesktopWorkOverlay:
         self._command_path = _work_overlay_command_path(self._state_path)
         self._transition_audit_path = _work_overlay_transition_audit_path()
         self._command_offset = 0
+        self._deferred_commands: deque[dict[str, object]] = deque()
         self._process: subprocess.Popen[str] | None = None
         self._closed = False
         self._available: bool | None = None
@@ -918,6 +998,8 @@ class DesktopWorkOverlay:
         self._last_helper_exit_code: int | None = None
         self._last_payload_items: list[dict[str, object]] | None = None
         self._last_theme_payload: dict[str, object] = {}
+        self._system_action: dict[str, object] | None = None
+        self._system_action_unavailable_reason = ""
         self._last_state_signature: str | None = None
         self._last_state_write_at = 0.0
         # A HUD launch cannot have an in-progress task.  The first snapshot can
@@ -946,14 +1028,16 @@ class DesktopWorkOverlay:
         if item_limit is not None:
             self.item_limit = normalize_work_overlay_max_items(item_limit)
         self.enabled = next_enabled and self.item_limit > 0
-        if not self.enabled and not self._closed:
+        if not self.enabled and self._system_action is None and not self._closed:
             self._stop_runtime(permanent=False)
 
     def update(self, items: Sequence[WorkStatusItem]) -> None:
         if self._closed:
             return
-        if not self.enabled:
+        if not self.enabled and self._system_action is None:
             self._stop_runtime(permanent=False)
+            return
+        if not self.enabled:
             return
         if not self._runtime_available():
             self._stop_runtime(permanent=False)
@@ -991,6 +1075,144 @@ class DesktopWorkOverlay:
         self._last_theme_payload = dict(theme_payload)
         if self._process is None and time.monotonic() >= self._restart_blocked_until:
             self._start()
+
+    def offer_codex_restart(self, *, title: str, message: str) -> bool:
+        """Show a persistent system action independently of session-bubble settings."""
+        if self._closed:
+            return False
+        self._system_action_unavailable_reason = ""
+        self._system_action = {
+            "id": WORK_OVERLAY_RESTART_ACTION_ID,
+            "action": WORK_OVERLAY_RESTART_ACTION,
+            "title": str(title or "需要重启 Codex"),
+            "message": str(message or ""),
+            "label": "重启 Codex",
+            "persistent": True,
+        }
+        if not self._runtime_available():
+            self._system_action_unavailable_reason = self._unavailable_reason
+            self._report_unavailable_once(self._unavailable_reason)
+            self._system_action = None
+            return False
+        payload_items = list(self._last_payload_items or [])
+        theme_payload = self._theme_payload()
+        self._write_state(payload_items, theme=theme_payload, close=False)
+        self._last_payload_items = [dict(item) for item in payload_items]
+        self._last_theme_payload = dict(theme_payload)
+        process = self._process
+        if process is not None and process.poll() is not None:
+            self._last_helper_exit_code = int(process.returncode or 0)
+            self._process = None
+        if self._process is None:
+            self._start()
+        if self._process is None:
+            self._system_action_unavailable_reason = (
+                self._unavailable_reason or "unable to start PySide6 desktop overlay helper"
+            )
+            self._system_action = None
+            return False
+        ready = self._wait_for_system_action_command(
+            {WORK_OVERLAY_SYSTEM_ACTION_READY},
+            timeout_seconds=WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS,
+        )
+        if ready is None:
+            if not self._system_action_unavailable_reason:
+                self._system_action_unavailable_reason = (
+                    "PySide6 desktop overlay helper did not acknowledge the restart action"
+                )
+            self._stop_runtime(permanent=False)
+            return False
+        return True
+
+    def wait_for_codex_restart_request(self) -> bool:
+        """Wait on file/process events until the system action is clicked or fails."""
+        if self._closed or self._system_action is None:
+            return False
+        command = self._wait_for_system_action_command(
+            {WORK_OVERLAY_RESTART_ACTION},
+            timeout_seconds=None,
+        )
+        if command is None:
+            if not self._system_action_unavailable_reason:
+                self._system_action_unavailable_reason = (
+                    "PySide6 desktop overlay helper exited before restart was requested"
+                )
+            return False
+        return True
+
+    @property
+    def system_action_unavailable_reason(self) -> str:
+        return self._system_action_unavailable_reason
+
+    def _wait_for_system_action_command(
+        self,
+        accepted_actions: set[str],
+        *,
+        timeout_seconds: float | None,
+    ) -> dict[str, object] | None:
+        process = self._process
+        if process is None:
+            return None
+        wake = Event()
+        matched: list[dict[str, object]] = []
+        result_lock = threading.Lock()
+        drain_lock = threading.Lock()
+        expected_action_id = str(
+            (self._system_action or {}).get("id") or ""
+        ).strip()
+
+        def drain_commands() -> None:
+            with drain_lock:
+                commands = list(self._deferred_commands)
+                self._deferred_commands.clear()
+                commands.extend(self.take_commands())
+                for command in commands:
+                    action = str(command.get("action") or "").strip()
+                    if action == "runtimeError":
+                        self._system_action_unavailable_reason = str(
+                            command.get("message") or "PySide6 desktop overlay helper error"
+                        )
+                        wake.set()
+                        continue
+                    if action not in accepted_actions:
+                        self._deferred_commands.append(dict(command))
+                        continue
+                    action_id = str(command.get("actionId") or "").strip()
+                    if expected_action_id and action_id != expected_action_id:
+                        continue
+                    with result_lock:
+                        if not matched:
+                            matched.append(dict(command))
+                    wake.set()
+
+        watcher = FileChangeWatcher(
+            lambda _reasons, _paths: drain_commands(),
+            fallback_poll_seconds=WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS,
+        )
+        try:
+            watcher.update(
+                [FileWatchSpec.file(self._command_path, "work-overlay-system-action")]
+            )
+            drain_commands()
+
+            def wait_for_helper_exit() -> None:
+                try:
+                    process.wait()
+                except Exception:
+                    pass
+                wake.set()
+
+            threading.Thread(
+                target=wait_for_helper_exit,
+                name="codex-hud-overlay-action-exit",
+                daemon=True,
+            ).start()
+            wake.wait(timeout_seconds)
+            drain_commands()
+        finally:
+            watcher.close()
+        with result_lock:
+            return dict(matched[0]) if matched else None
 
     def keep_alive(self) -> None:
         """Refresh the helper state file while renderer snapshots are unchanged."""
@@ -1155,8 +1377,10 @@ class DesktopWorkOverlay:
         except OSError:
             pass
         self._command_offset = 0
+        self._deferred_commands.clear()
         self._last_payload_items = None
         self._last_theme_payload = {}
+        self._system_action = None
         self._last_state_signature = None
         self._last_state_write_at = 0.0
         self._switch_completed_command = None
@@ -1302,6 +1526,9 @@ class DesktopWorkOverlay:
                     "itemLimit": int(self.item_limit),
                     "commandPath": str(self._command_path),
                     "items": payload_items,
+                    "systemAction": (
+                        dict(self._system_action or {}) if not close else {}
+                    ),
                     "theme": dict(theme or {}),
                     "updatedAt": time.time(),
                     "close": bool(close),
@@ -1325,6 +1552,9 @@ class DesktopWorkOverlay:
                 "itemLimit": int(self.item_limit),
                 "commandPath": str(self._command_path),
                 "items": list(items),
+                "systemAction": (
+                    dict(self._system_action or {}) if not close else {}
+                ),
                 "theme": dict(theme or {}),
                 "close": bool(close),
             },
@@ -1337,6 +1567,51 @@ class DesktopWorkOverlay:
         if snapshot.source not in {"cdp", "persisted"}:
             return {}
         return snapshot.hud_tokens.to_dict()
+
+
+def _wait_for_renderer_restart_request(
+    args: argparse.Namespace,
+    work_overlay: DesktopWorkOverlay,
+    loading_feedback: HudLoadingFeedback | None,
+) -> bool:
+    title = "需要重启 Codex"
+    message = "当前 Codex 未开启 HUD 所需的 CDP。保存好当前工作后，点击重启继续。"
+    if work_overlay.offer_codex_restart(title=title, message=message):
+        if loading_feedback is not None:
+            loading_feedback.close()
+            loading_feedback = None
+        if work_overlay.wait_for_codex_restart_request():
+            _LOGGER.info("renderer_restart_requested_by_user surface=work-overlay")
+            return True
+        fallback_reason = work_overlay.system_action_unavailable_reason
+    else:
+        fallback_reason = work_overlay.system_action_unavailable_reason
+
+    fallback_reason = str(
+        fallback_reason or "PySide6 desktop restart action unavailable"
+    )
+    _append_renderer_diagnostic(
+        "renderer_restart_overlay_fallback",
+        reason=fallback_reason,
+    )
+    work_overlay.close()
+    card = loading_feedback
+    if card is None:
+        card = _create_loading_feedback(
+            args,
+            title=title,
+            message="",
+        ).start()
+    offered = card.offer_codex_restart(title=title, message=message)
+    if not offered:
+        card.close()
+        return False
+    if not card.wait_for_codex_restart_request():
+        card.close()
+        return False
+    card.close()
+    _LOGGER.info("renderer_restart_requested_by_user surface=loading-card")
+    return True
 
 
 class _WorkOverlayCommandPump:
@@ -1766,6 +2041,8 @@ def _launch_macos_codex_app(*, debugger: bool = False) -> bool:
         "debugger" if debugger else "normal",
         target,
     )
+    if debugger:
+        _remember_requested_renderer_cdp_port(cdp_port_from_env())
     return True
 
 
@@ -1924,11 +2201,24 @@ def _stop_codex_processes(*, timeout_seconds: float = 8.0) -> bool:
 
 
 def _restart_codex_for_renderer() -> bool:
-    _select_initial_renderer_cdp_port()
     if sys.platform.startswith("win") and not _stop_codex_processes():
         return False
     if sys.platform == "darwin" and not _stop_macos_codex_app():
         return False
+    try:
+        port = _select_launch_renderer_cdp_port(require_fresh=True)
+    except (OSError, RuntimeError) as exc:
+        _append_renderer_diagnostic(
+            "renderer_cdp_launch_failed",
+            reason=str(exc),
+            source="restart",
+        )
+        return False
+    _append_renderer_diagnostic(
+        "renderer_restart_requested_by_user",
+        action_id=WORK_OVERLAY_RESTART_ACTION_ID,
+        port=port,
+    )
     return launch_codex_app(debugger=True)
 
 
@@ -2122,6 +2412,257 @@ def _renderer_initial_failure_should_recover_cdp_port(last_error: str) -> bool:
     )
 
 
+def _valid_renderer_cdp_port(value: object) -> int | None:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _remote_debugging_ports_from_command_line(command_line: object) -> tuple[int, ...]:
+    """Extract bounded Chromium remote-debugging ports from one command line."""
+    text = str(command_line or "")
+    ports: list[int] = []
+    for match in _REMOTE_DEBUGGING_PORT_PATTERN.finditer(text):
+        port = _valid_renderer_cdp_port(match.group(1))
+        if port is not None and port not in ports:
+            ports.append(port)
+    return tuple(ports)
+
+
+def _windows_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
+    if not sys.platform.startswith("win"):
+        return []
+    script = (
+        "$items = @(Get-CimInstance Win32_Process "
+        "-Filter \"Name='ChatGPT.exe' OR Name='Codex.exe'\" | "
+        "Select-Object ProcessId,Name,ExecutablePath,CommandLine); "
+        "ConvertTo-Json -InputObject $items -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _LOGGER.info("renderer_cdp_process_query_failed platform=windows error=%s", exc)
+        return []
+    if result.returncode != 0 or not result.stdout.strip():
+        _LOGGER.info(
+            "renderer_cdp_process_query_failed platform=windows code=%s",
+            result.returncode,
+        )
+        return []
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        _LOGGER.info(
+            "renderer_cdp_process_query_failed platform=windows error=%s", exc
+        )
+        return []
+    rows = payload if isinstance(payload, list) else [payload]
+    processes: list[_CodexDesktopProcess] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        name = str(row.get("Name") or "").strip()
+        executable_path = str(row.get("ExecutablePath") or "").strip()
+        if not is_codex_client_process(name, executable_path):
+            continue
+        try:
+            pid = int(row.get("ProcessId") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0:
+            continue
+        processes.append(
+            _CodexDesktopProcess(
+                pid=pid,
+                name=name,
+                executable_path=executable_path,
+                command_line=str(row.get("CommandLine") or ""),
+            )
+        )
+    return processes
+
+
+def _is_macos_codex_desktop_command(executable: str, command_line: str) -> bool:
+    normalized_executable = str(executable or "").replace("\\", "/").casefold()
+    normalized_command = str(command_line or "").replace("\\", "/").casefold()
+    if "/codex.app/contents/macos/" in normalized_executable:
+        return True
+    configured = os.environ.get(CODEX_APP_PATH_ENV, "").strip()
+    if configured:
+        configured_path = configured.replace("\\", "/").rstrip("/").casefold()
+        if configured_path and configured_path in normalized_command:
+            return "/contents/macos/" in normalized_executable
+    return False
+
+
+def _macos_executable_from_command_line(command_line: object) -> str:
+    """Recover a macOS app executable even when ``ps`` leaves spaces unquoted."""
+    text = str(command_line or "").strip()
+    if not text:
+        return ""
+    try:
+        args = shlex.split(text, posix=True)
+    except ValueError:
+        args = []
+    executable = args[0] if args else ""
+    if "/contents/macos/" in executable.replace("\\", "/").casefold():
+        return executable
+    match = re.match(
+        r"^(.+?\.app/Contents/MacOS/[^\s]+)(?:\s|$)",
+        text.replace("\\", "/"),
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip('"\'') if match is not None else executable
+
+
+def _macos_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
+    if sys.platform != "darwin":
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _LOGGER.info("renderer_cdp_process_query_failed platform=macos error=%s", exc)
+        return []
+    if result.returncode != 0:
+        _LOGGER.info(
+            "renderer_cdp_process_query_failed platform=macos code=%s",
+            result.returncode,
+        )
+        return []
+    processes: list[_CodexDesktopProcess] = []
+    for line in result.stdout.splitlines():
+        row = line.strip()
+        if not row:
+            continue
+        pid_text, separator, command_line = row.partition(" ")
+        if not separator:
+            continue
+        try:
+            pid = int(pid_text)
+        except (ValueError, TypeError):
+            continue
+        executable = _macos_executable_from_command_line(command_line)
+        if pid <= 0 or not _is_macos_codex_desktop_command(executable, command_line):
+            continue
+        processes.append(
+            _CodexDesktopProcess(
+                pid=pid,
+                name=Path(executable).name,
+                executable_path=executable,
+                command_line=command_line,
+            )
+        )
+    return processes
+
+
+def _running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
+    if sys.platform.startswith("win"):
+        return _windows_running_codex_desktop_processes()
+    if sys.platform == "darwin":
+        return _macos_running_codex_desktop_processes()
+    return []
+
+
+def _append_renderer_cdp_candidate(
+    candidates: list[_RendererCdpPortCandidate],
+    port: object,
+    source: str,
+    *,
+    pid: int | None = None,
+) -> None:
+    value = _valid_renderer_cdp_port(port)
+    if value is None or any(item.port == value for item in candidates):
+        return
+    candidates.append(
+        _RendererCdpPortCandidate(port=value, source=str(source or ""), pid=pid)
+    )
+
+
+def _renderer_cdp_port_candidates() -> list[_RendererCdpPortCandidate]:
+    candidates: list[_RendererCdpPortCandidate] = []
+    for process in _running_codex_desktop_processes():
+        for port in _remote_debugging_ports_from_command_line(process.command_line):
+            _append_renderer_cdp_candidate(
+                candidates,
+                port,
+                "desktop-process",
+                pid=process.pid,
+            )
+    _append_renderer_cdp_candidate(
+        candidates,
+        _explicit_renderer_cdp_port_from_env(),
+        "environment",
+    )
+    _append_renderer_cdp_candidate(
+        candidates,
+        _read_persisted_renderer_cdp_state_port("lastRequestedPort"),
+        "requested",
+    )
+    _append_renderer_cdp_candidate(
+        candidates,
+        _read_persisted_renderer_cdp_port(),
+        "successful",
+    )
+    _append_renderer_cdp_candidate(candidates, DEFAULT_CDP_PORT, "default")
+    return candidates
+
+
+def _validate_renderer_cdp_candidate(
+    candidate: _RendererCdpPortCandidate,
+) -> tuple[bool, str]:
+    if not _localhost_cdp_port_is_listening(candidate.port):
+        return False, "not-listening"
+    try:
+        cdp_version_info(
+            candidate.port,
+            RENDERER_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+        targets = list_targets(
+            candidate.port,
+            RENDERER_CDP_DISCOVERY_TIMEOUT_SECONDS,
+        )
+        pick_page_target(targets)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, ""
+
+
+def _find_existing_renderer_cdp_candidate() -> _RendererCdpPortCandidate | None:
+    for candidate in _renderer_cdp_port_candidates():
+        valid, reason = _validate_renderer_cdp_candidate(candidate)
+        if valid:
+            if candidate.source == "desktop-process":
+                _append_renderer_diagnostic(
+                    "renderer_cdp_process_port_discovered",
+                    platform=sys.platform,
+                    pid=candidate.pid,
+                    port=candidate.port,
+                )
+            return candidate
+        _append_renderer_diagnostic(
+            "renderer_cdp_candidate_rejected",
+            port=candidate.port,
+            source=candidate.source,
+            reason=reason,
+        )
+    return None
+
+
 def _explicit_renderer_cdp_port_from_env() -> int | None:
     raw = os.environ.get(CDP_PORT_ENV, "").strip()
     if not raw:
@@ -2140,7 +2681,7 @@ def _read_persisted_renderer_cdp_port() -> int | None:
 def _read_persisted_renderer_cdp_state_port(key: str) -> int | None:
     try:
         data = json.loads(renderer_cdp_state_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, RuntimeError, json.JSONDecodeError):
         return None
     try:
         port = int(data.get(key))
@@ -2172,7 +2713,10 @@ def _remember_renderer_cdp_port(
         return
     if value <= 0 or value >= 65536:
         return
-    path = renderer_cdp_state_path()
+    try:
+        path = renderer_cdp_state_path()
+    except (OSError, RuntimeError):
+        return
     try:
         existing = json.loads(path.read_text(encoding="utf-8"))
         payload = dict(existing) if isinstance(existing, Mapping) else {}
@@ -2199,7 +2743,7 @@ def _remember_successful_renderer_cdp_port(port: int | None) -> None:
 
 
 def _select_initial_renderer_cdp_port() -> int:
-    """Select exactly one configured port; mismatches require user restart."""
+    """Select the configured launch preference without probing the runtime."""
     explicit = _explicit_renderer_cdp_port_from_env()
     if explicit is not None:
         return explicit
@@ -2221,6 +2765,72 @@ def _select_initial_renderer_cdp_port() -> int:
         "requested" if selected == requested else "persisted" if persisted else "default",
     )
     return selected
+
+
+def _select_launch_renderer_cdp_port(*, require_fresh: bool = False) -> int:
+    """Select a port that Codex can bind immediately for a single CDP launch."""
+    preferred: list[int] = []
+    for candidate in (
+        _explicit_renderer_cdp_port_from_env(),
+        _read_persisted_renderer_cdp_state_port("lastRequestedPort"),
+        _read_persisted_renderer_cdp_port(),
+        DEFAULT_CDP_PORT,
+    ):
+        value = _valid_renderer_cdp_port(candidate)
+        if value is not None and value not in preferred:
+            preferred.append(value)
+    if not require_fresh:
+        for port in preferred:
+            if _localhost_cdp_port_available(port):
+                os.environ[CDP_PORT_ENV] = str(port)
+                _LOGGER.info(
+                    "renderer_cdp_launch_port_selected port=%s source=preferred",
+                    port,
+                )
+                return port
+    port = _allocate_fresh_renderer_cdp_port()
+    os.environ[CDP_PORT_ENV] = str(port)
+    _LOGGER.info("renderer_cdp_launch_port_selected port=%s source=fresh", port)
+    return port
+
+
+def _renderer_startup_plan(*, launched_codex: bool = False) -> RendererStartupPlan:
+    if launched_codex:
+        port = _select_initial_renderer_cdp_port()
+        plan = RendererStartupPlan(
+            scenario=RENDERER_STARTUP_ATTACH_LAUNCHED,
+            port=port,
+            port_source="requested-launch",
+        )
+    elif _codex_processes_running():
+        existing = _find_existing_renderer_cdp_candidate()
+        if existing is None:
+            plan = RendererStartupPlan(
+                scenario=RENDERER_STARTUP_RESTART_REQUIRED,
+                reason="running-codex-has-no-verified-cdp-target",
+            )
+        else:
+            os.environ[CDP_PORT_ENV] = str(existing.port)
+            plan = RendererStartupPlan(
+                scenario=RENDERER_STARTUP_ATTACH,
+                port=existing.port,
+                port_source=existing.source,
+            )
+    else:
+        port = _select_launch_renderer_cdp_port()
+        plan = RendererStartupPlan(
+            scenario=RENDERER_STARTUP_LAUNCH,
+            port=port,
+            port_source="launch",
+        )
+    _append_renderer_diagnostic(
+        "renderer_startup_classified",
+        scenario=plan.scenario,
+        port=plan.port,
+        source=plan.port_source,
+        reason=plan.reason,
+    )
+    return plan
 
 
 def _refresh_renderer_cdp_dependents(context: object) -> None:
@@ -2747,13 +3357,15 @@ def _wait_for_visible_codex_window(
 
 
 def _codex_processes_running() -> bool:
-    if not sys.platform.startswith("win"):
-        return False
-    try:
-        listener = WindowsProcessListener(exclude_pid=os.getpid())
-        return bool(listener.snapshot().found)
-    except ProcessListenerError:
-        return False
+    if sys.platform.startswith("win"):
+        try:
+            listener = WindowsProcessListener(exclude_pid=os.getpid())
+            return bool(listener.snapshot().found)
+        except ProcessListenerError:
+            return False
+    if sys.platform == "darwin":
+        return bool(_macos_running_codex_desktop_processes())
+    return False
 
 
 def _codex_processes_exited() -> bool:
@@ -2859,7 +3471,7 @@ def _prepare_codex_window_for_renderer(
                 launched = False
                 action = "await_restart_confirmation"
             else:
-                _select_initial_renderer_cdp_port()
+                _select_launch_renderer_cdp_port()
                 launched = launch_codex_app(debugger=True)
                 action = "launch_debugger"
             _LOGGER.info(
@@ -6315,13 +6927,64 @@ def run_renderer_hud_session(
     lock_context = nullcontext() if lock_already_held else HudInstanceLock()
     try:
         with lock_context:
-            _select_initial_renderer_cdp_port()
             local_loading = loading_feedback
-            codex_was_running = _codex_processes_running()
+            try:
+                startup_plan = _renderer_startup_plan(launched_codex=launched_codex)
+            except (OSError, RuntimeError) as exc:
+                if local_loading is not None:
+                    local_loading.close()
+                _append_renderer_diagnostic(
+                    "renderer_cdp_launch_failed",
+                    reason=str(exc),
+                    source="startup-classification",
+                )
+                return RENDERER_HUD_UNAVAILABLE
+            codex_was_running = startup_plan.scenario in {
+                RENDERER_STARTUP_ATTACH,
+                RENDERER_STARTUP_RESTART_REQUIRED,
+            }
+            if startup_plan.scenario == RENDERER_STARTUP_LAUNCH:
+                if local_loading is not None:
+                    local_loading.update(
+                        title="正在启动 Renderer HUD",
+                        message="正在以调试/CDP 模式启动 Codex App...",
+                    )
+                if not launch_codex_app(debugger=True):
+                    if local_loading is not None:
+                        local_loading.close()
+                    _append_renderer_diagnostic(
+                        "renderer_cdp_launch_failed",
+                        port=startup_plan.port,
+                        source=startup_plan.port_source,
+                    )
+                    return RENDERER_HUD_UNAVAILABLE
+                launched_codex = True
             context = build_runtime_context(args)
             display_mode = normalize_display_mode(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
+            work_overlay = DesktopWorkOverlay(
+                item_limit=_work_overlay_item_limit_for_context(context),
+            )
+            if startup_plan.scenario == RENDERER_STARTUP_RESTART_REQUIRED:
+                try:
+                    requested = _wait_for_renderer_restart_request(
+                        args,
+                        work_overlay,
+                        local_loading,
+                    )
+                    return (
+                        HUD_SWITCH_TO_RENDERER_RESTART_CODEX
+                        if requested
+                        else RENDERER_HUD_UNAVAILABLE
+                    )
+                except KeyboardInterrupt:
+                    if local_loading is not None:
+                        local_loading.close()
+                    return 130
+                finally:
+                    work_overlay.close()
+                    context.close()
             renderer_cdp_timeout = (
                 RENDERER_RESTART_CDP_TIMEOUT_SECONDS
                 if launched_codex
@@ -6335,9 +6998,6 @@ def run_renderer_hud_session(
             update_manager = AutoUpdateManager(current_version=__version__)
             restart_requested = Event()
             exit_requested = Event()
-            work_overlay = DesktopWorkOverlay(
-                item_limit=_work_overlay_item_limit_for_context(context),
-            )
             command_refresh_requested = Event()
             active_session_refresh_requested = Event()
             command_pump: _WorkOverlayCommandPump | None = None
@@ -6691,10 +7351,10 @@ def run_renderer_hud_session(
                 wait_for_window = launched_codex or (
                     sys.platform.startswith("win") and not codex_was_running
                 )
-                # The explicit recovery path already launched Codex with the
-                # fresh CDP port. The process/window may take seconds to
-                # appear; launching again here races that same startup.
-                launch_if_missing = not launched_codex
+                # Startup classification is the only owner of a CDP launch.
+                # Window preparation may activate/focus the selected process,
+                # but it must never race the classified launch with another.
+                launch_if_missing = False
                 if local_loading is not None:
                     local_loading.update(
                         title=(
@@ -6831,74 +7491,45 @@ def run_renderer_hud_session(
                     )
                 if not renderer_attached:
                     original_error = client.last_error
-                    restart_can_help = (
-                        _renderer_initial_failure_should_recover_cdp_port(
-                            original_error
-                        )
-                        or _renderer_initial_failure_can_be_fixed_by_restart(
-                            original_error
+                    restart_can_help = bool(
+                        startup_plan.scenario == RENDERER_STARTUP_ATTACH
+                        and (
+                            _renderer_initial_failure_should_recover_cdp_port(
+                                original_error
+                            )
+                            or _renderer_initial_failure_can_be_fixed_by_restart(
+                                original_error
+                            )
                         )
                     )
                     if restart_can_help:
-                        fresh_port = 0
-                        if _renderer_initial_failure_should_recover_cdp_port(
-                            original_error
-                        ):
-                            try:
-                                fresh_port = _assign_fresh_renderer_cdp_port()
-                            except Exception as exc:
-                                _LOGGER.info(
-                                    "renderer_cdp_port_reassign_failed error=%s", exc
+                        current_port = _valid_renderer_cdp_port(
+                            getattr(client, "port", startup_plan.port)
+                        )
+                        if current_port is not None:
+                            target_still_valid, _reason = _validate_renderer_cdp_candidate(
+                                _RendererCdpPortCandidate(
+                                    port=current_port,
+                                    source=startup_plan.port_source or "startup-plan",
                                 )
+                            )
+                            restart_can_help = not target_still_valid
+                    if restart_can_help:
                         _append_renderer_diagnostic(
                             "initial_connect_restart_waiting_for_user",
                             status=client.last_status,
                             error=original_error,
                             old_port=getattr(client, "port", None),
-                            new_port=fresh_port or None,
                             display_mode=display_mode,
                             daemon_mode=daemon_manager is not None,
                         )
-                        if local_loading is None:
-                            local_loading = _create_loading_feedback(
-                                args,
-                                title="需要重启 Codex",
-                                message="",
-                            ).start()
-                        offer_restart = getattr(
+                        if _wait_for_renderer_restart_request(
+                            args,
+                            work_overlay,
                             local_loading,
-                            "offer_codex_restart",
-                            None,
-                        )
-                        wait_for_restart = getattr(
-                            local_loading,
-                            "wait_for_codex_restart_request",
-                            None,
-                        )
-                        restart_offered = bool(
-                            callable(offer_restart)
-                            and offer_restart(
-                                title="需要重启 Codex",
-                                message=(
-                                    "当前 Codex 未使用 HUD 所需的 CDP 端口。"
-                                    "保存好当前工作后，点击下方按钮继续。"
-                                ),
-                            )
-                        )
-                        if restart_offered and callable(wait_for_restart):
-                            _LOGGER.info(
-                                "renderer_cdp_port_restart_waiting_for_user port=%s",
-                                fresh_port or getattr(client, "port", None),
-                            )
-                            if bool(wait_for_restart()):
-                                local_loading.close()
-                                _LOGGER.info(
-                                    "renderer_cdp_port_restart_requested_by_user"
-                                )
-                                return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
-                        _LOGGER.info(
-                            "renderer_cdp_port_restart_card_unavailable"
-                        )
+                        ):
+                            return HUD_SWITCH_TO_RENDERER_RESTART_CODEX
+                        _LOGGER.info("renderer_cdp_port_restart_card_unavailable")
                     if local_loading is not None:
                         local_loading.close()
                     _LOGGER.info(
@@ -7951,8 +8582,24 @@ def run_daemon(args: argparse.Namespace) -> int:
                     title="正在启动 Renderer HUD",
                     message="正在以调试模式启动 Codex App...",
                 ).start()
-                _select_initial_renderer_cdp_port()
-                launch_codex_app(debugger=True)
+                try:
+                    launch_port = _select_launch_renderer_cdp_port()
+                except (OSError, RuntimeError) as exc:
+                    startup_loading.close()
+                    _append_renderer_diagnostic(
+                        "renderer_cdp_launch_failed",
+                        reason=str(exc),
+                        source="daemon-startup",
+                    )
+                    return RENDERER_HUD_UNAVAILABLE
+                if not launch_codex_app(debugger=True):
+                    startup_loading.close()
+                    _append_renderer_diagnostic(
+                        "renderer_cdp_launch_failed",
+                        port=launch_port,
+                        source="daemon-startup",
+                    )
+                    return RENDERER_HUD_UNAVAILABLE
                 # The daemon has just initiated the fixed-port launch.  Pass
                 # that fact through to the renderer session so it waits for
                 # this one startup instead of treating the process as an old

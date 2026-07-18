@@ -1046,21 +1046,38 @@ class CodexCdpSessionController:
 
 
 def list_targets(port: int, timeout_seconds: float) -> list[dict[str, Any]]:
+    data = _read_http_json(port, timeout_seconds, endpoint="/json")
+    return data if isinstance(data, list) else []
+
+
+def cdp_version_info(port: int, timeout_seconds: float) -> dict[str, Any]:
+    """Return the bounded local CDP version response for endpoint validation."""
+    data = _read_http_json(port, timeout_seconds, endpoint="/json/version")
+    if not isinstance(data, dict):
+        raise RuntimeError("Invalid CDP version response")
+    if not any(
+        str(data.get(key) or "").strip()
+        for key in ("Browser", "Protocol-Version", "webSocketDebuggerUrl")
+    ):
+        raise RuntimeError("CDP version response has no protocol identity")
+    return data
+
+
+def _read_http_json(port: int, timeout_seconds: float, *, endpoint: str) -> Any:
     opener = build_opener(ProxyHandler({}))
     errors: list[Exception] = []
     for host in ("127.0.0.1", "[::1]"):
-        url = f"http://{host}:{port}/json"
+        url = f"http://{host}:{port}{endpoint}"
         try:
             request = Request(url, headers={"Accept": "application/json"})
             with opener.open(request, timeout=timeout_seconds) as response:
                 payload = response.read(512 * 1024).decode("utf-8", "replace")
-            data = json.loads(payload)
-            return data if isinstance(data, list) else []
+            return json.loads(payload)
         except Exception as exc:
             errors.append(exc)
     if errors:
         raise errors[-1]
-    return []
+    raise RuntimeError("No local CDP host was available")
 
 
 def pick_page_target(targets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1247,6 +1264,15 @@ def snapshot_from_evaluate_result(result: dict[str, Any]) -> CdpDomSnapshot | No
     if not isinstance(value, dict):
         return None
     dpr = _positive_float(value.get("devicePixelRatio")) or 1.0
+    app_error = str(value.get("appError") or "").strip()
+    normalized_app_error = " ".join(app_error.lower().split())
+    permission_advisory_markers = (
+        "full access is on",
+        "chatgpt will be able to run commands, use the internet",
+        "this comes with risks like data loss and prompt injection",
+    )
+    if any(marker in normalized_app_error for marker in permission_advisory_markers):
+        app_error = ""
     return CdpDomSnapshot(
         session_id=str(value.get("sessionId") or "").strip(),
         title=str(value.get("title") or "").strip(),
@@ -1255,7 +1281,7 @@ def snapshot_from_evaluate_result(result: dict[str, Any]) -> CdpDomSnapshot | No
         title_rect=_rect_from_value(value.get("titleRect")),
         top_slot_rect=_rect_from_value(value.get("topSlotRect")),
         composer_rect=_rect_from_value(value.get("composerRect")),
-        app_error=str(value.get("appError") or "").strip(),
+        app_error=app_error,
     )
 
 
@@ -1418,6 +1444,7 @@ __all__ = [
     "CodexCdpProbe",
     "DOM_PROBE_SCRIPT",
     "DEFAULT_CDP_PORT",
+    "cdp_version_info",
     "install_new_document_script",
     "pick_page_target",
     "remove_new_document_script",

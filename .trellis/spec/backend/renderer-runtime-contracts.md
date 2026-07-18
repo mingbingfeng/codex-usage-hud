@@ -127,6 +127,53 @@ applySessionSwitch({ ...cached, selectionSeq, cachedPreview: true });
 // Do not advance appliedSeq. Python confirmation owns the ACK.
 ```
 
+## Scenario: Visible App error classification
+
+### 1. Scope / Trigger
+
+- Trigger: CDP DOM probing finds visible alert-, toast-, notification-, or error-styled content and may project it into the current request and work overlay.
+
+### 2. Signatures
+
+- CDP payload: `appError: string` in `CdpDomSnapshot`.
+- Normalization boundary: `snapshot_from_evaluate_result(...) -> CdpDomSnapshot | None`.
+
+### 3. Contracts
+
+- Visual severity is candidate evidence, not proof of a failed request. A red `role="alert"` surface may be an informational permission advisory.
+- The Codex `Full access is on` advisory, including its bounded/truncated risk copy, normalizes to `app_error=""` before `build_snapshot()` can set `request.status="error"`.
+- Confirmed request failures such as retry-limit, rate-limit, network, and server errors retain their existing `appError` text.
+
+### 4. Validation & Error Matrix
+
+| Visible content | Required result |
+|---|---|
+| `Full access is on` permission advisory | Empty `app_error`; no request or work-overlay error transition. |
+| Advisory truncated after `ChatGPT will be able to run commands, use the internet` | Empty `app_error`. |
+| `429 Too Many Requests` or `exceeded retry limit` | Preserve the error text. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: Codex cold start renders the full-access warning; session bubbles and the bottom HUD keep the JSONL-derived request state.
+- Base: no visible error candidate produces an empty `appError`.
+- Bad: treat every red alert/error icon as a request failure and copy permission guidance into `request.error`.
+
+### 6. Tests Required
+
+- `tests/test_cdp_probe.py`: feed the complete full-access advisory through `snapshot_from_evaluate_result()` and assert `snapshot.app_error == ""`.
+- Keep a positive assertion that a real `429`/retry-limit message remains unchanged.
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: DOM styling alone becomes runtime request state.
+snapshot.request.error = value["appError"]
+
+# Correct: normalize known non-error advisories at the CDP payload boundary.
+snapshot = snapshot_from_evaluate_result(result)
+assert snapshot.app_error == ""
+```
+
 ## Scenario: Active session reconciliation after composer send
 
 ### 1. Scope / Trigger
@@ -139,6 +186,7 @@ applySessionSwitch({ ...cached, selectionSeq, cachedPreview: true });
 - JavaScript: `scheduleActiveSessionSendFollowup(reason = "composer-send", expectedSessionId = "")`.
 - JavaScript: `postActiveSession(reason, overrideRef)` sends canonical and raw identities plus `selectionSeq` and observation timing.
 - Python: `ActiveSessionTracker.observe_conversation_ref(..., renderer_session_id="", selection_seq=0, observed_at_ms=0)`.
+- Parser: `JsonlSessionParser.latest_task_segment_start(records, task_started_index) -> int` scopes terminal markers to the latest non-empty `user_message`, top-level `compacted`, or `event_msg.context_compacted` continuation boundary in the task.
 - Runtime events: `active_session_changed` wakes the renderer loop; the subsequent refresh may publish `active_work_refresh_requested`.
 
 ### 3. Contracts
@@ -147,6 +195,9 @@ applySessionSwitch({ ...cached, selectionSeq, cachedPreview: true });
 - The form `submit` listener is independent of the optional composer token badge.
 - A canonical renderer UUID is the only key allowed to resolve a rollout path. Provisional or unmapped refs remain pending.
 - Signature deduplication suppresses unchanged follow-ups only after the corresponding `selectionSeq` has been applied by the HUD.
+- A steered `user_message` may continue the current task without another `task_started`. In JSONL record order, it invalidates earlier `final_answer`, `task_complete`, and `turn_aborted` markers until a new terminal marker appears after that message.
+- A context-compaction handoff may emit a synthetic `final_answer` and then resume the same task without another user message. `compacted` and `context_compacted` invalidate terminal markers before the handoff but preserve the task start, prompt, ordinal, and usage history.
+- Work-overlay completion must use the latest continuation segment, not the latest task-start segment alone; otherwise an active card can revert to `status="recent"` while a steered or compacted continuation is still running.
 - All listeners and timers are removed by `removeActiveSessionWatchers()`.
 
 ### 4. Validation & Error Matrix
@@ -159,19 +210,28 @@ applySessionSwitch({ ...cached, selectionSeq, cachedPreview: true });
 | Canonical UUID not yet exposed | Keep `renderer-new-session`/pending; never choose a title or newest rollout fallback. |
 | Follow-up unchanged, sequence not applied | Repeat the bounded binding payload so Python can retry the visible update. |
 | Follow-up unchanged, sequence applied | Signature dedup suppresses the duplicate payload. |
+| Non-empty user message follows a terminal marker without a new task start | Clear parsed task completion, abort, and final-answer state; keep or restore the work item as a card. |
+| `compacted` / `context_compacted` follows a synthetic handoff final | Clear terminal markers before the compaction boundary; resumed CLI activity remains a card. |
+| A real final answer/task completion follows the compaction boundary | Accept only that later terminal and transition the card to `status="recent"`. |
+| A new final answer or task completion follows that user message | Accept the later marker and transition the card to `status="recent"`. |
 | Renderer watchers removed | Timers and submit/keydown listeners are detached. |
 
 ### 5. Good/Base/Bad Cases
 
 - Good: first message creates a canonical UUID within the follow-up window; the tracker resolves the exact rollout and the completed work item reaches `status="recent"` without a session click.
+- Good: a user steers immediately after a final answer; the existing circle returns to a card and stays non-terminal until the continuation finishes.
+- Good: context compaction writes a handoff summary, the next model continues with commentary/tools, and the same CLI item remains a square until its later real final.
 - Base: the page remains blank or exposes only `client-new-thread:*`; HUD stays explicitly pending.
 - Bad: using a global idle poll, unconstrained title match, or newest JSONL to force a visible session; this can show another conversation's usage.
+- Bad: treating any terminal marker after the latest `task_started` as current after a later user message; steered input does not reliably emit another `task_started`.
+- Bad: treating the `final_answer` immediately before `compacted` as task completion; it is transport for the next context, not a user-visible terminal.
 
 ### 6. Tests Required
 
 - `tests/test_renderer_hud.py`: assert the fallback composer handler, badge-disabled guard, bounded delays, submit/keydown cleanup, and existing composer watcher reuse markers.
 - `tests/test_active_session.py`: preserve provisional/unmapped pending behavior and exact UUID mapping behavior.
-- `tests/test_ui.py`: preserve renderer event wakeups, file watcher mapping invalidation, and completed overlay payload behavior.
+- `tests/test_parser.py`: assert a user steer or context-compaction boundary invalidates prior completion/final-answer markers and later markers restore them.
+- `tests/test_ui.py`: preserve renderer event wakeups, file watcher mapping invalidation, completed overlay payload behavior, and `recent -> active` recovery after steered input or context compaction without a new task start.
 - Live acceptance: send in a new Codex App conversation and verify canonical ref, rollout path, `status="recent"`, and card-to-circle transition without clicking another session.
 
 ### 7. Wrong vs Correct
@@ -197,6 +257,21 @@ if (!composerBadgeEnabled) {
 ```
 
 The session contract remains active when the visual badge is disabled, while the existing badge-enabled watcher is reused without duplicate keydown/click handlers.
+
+For terminal work state, the correct record-boundary rule is:
+
+```python
+# Wrong: this can reuse a final answer from before a steered user message.
+start_index = task_started_index + 1
+final_answer_at = latest_final_answer(records[start_index:])
+
+# Correct: terminal markers must belong to the latest user-message segment.
+start_index = latest_task_segment_start(records, task_started_index)
+final_answer_at = latest_final_answer(records[start_index:])
+```
+
+The same helper must return the first record after the latest compaction marker;
+checking only user messages leaves a handoff summary visible as a false completion.
 
 ## Scenario: Exact renderer mapping becomes available
 
@@ -582,3 +657,131 @@ if not state_read and not state_read_retry_timer.isActive():
 
 The one-shot timer closes the event-delivery gap without adding recurring idle CPU
 work or replacing the file watcher as the primary event source.
+
+## Scenario: Three-scenario renderer startup
+
+### 1. Scope / Trigger
+
+- Trigger: HUD startup must distinguish an absent Codex Desktop process, a running
+  Desktop process without a usable debugger endpoint, and a running Desktop process
+  that already exposes a usable CDP renderer target.
+- Scope: renderer startup classification, bounded process command-line discovery,
+  CDP endpoint validation, one-shot launch/restart ownership, and the persistent
+  PySide6 restart action plus its lightweight fallback.
+
+### 2. Signatures
+
+- Startup value: `RendererStartupPlan(scenario, port=None, port_source="", reason="")`.
+  Valid scenarios are `launch`, `attach`, `restart-required`, and the recovery-only
+  `attach-launched` state.
+- Process evidence: `_CodexDesktopProcess(pid, name, executable_path, command_line)`;
+  remote debugging accepts both `--remote-debugging-port=<port>` and
+  `--remote-debugging-port <port>`.
+- Endpoint evidence: `cdp_version_info(port, timeout_seconds) -> dict` followed by
+  `list_targets(port, timeout_seconds)` and `pick_page_target(targets)`.
+- Overlay state: top-level `systemAction` is separate from `items` and carries
+  `id`, `action`, `title`, `message`, `label`, and `persistent`.
+- Overlay commands are append-only JSONL: `systemActionReady` and `restartCodex`
+  both carry the matching `actionId`; a restart request also carries `requestedAt`.
+
+### 3. Contracts
+
+- No Desktop process -> select a currently bindable launch port, launch Codex once
+  with CDP flags, and attach to that launch without another launch attempt from
+  window preparation.
+- A running Desktop process is attachable only when its bounded candidate port has
+  a valid `/json/version` protocol identity and `pick_page_target()` selects a main
+  Codex page. A TCP listener, persisted port, or command-line flag alone is not
+  sufficient.
+- Windows command-line discovery must filter rows through
+  `is_codex_client_process()` so npm/standalone `codex.exe` is never Desktop
+  evidence. macOS discovery must retain an executable inside
+  `*.app/Contents/MacOS/`, including an unquoted app path containing spaces.
+- A running Desktop process without a verified target enters `restart-required`.
+  It must not be stopped until the user clicks the persistent action.
+- `systemAction` bypasses the ordinary item limit, stale timestamp, and dismiss
+  behavior while its owner PID is alive. `work_overlay_max_items=0` suppresses
+  session bubbles only.
+- Parent waits are awakened by `FileChangeWatcher` and helper process exit. The
+  5-second watcher fallback is degraded reconciliation, not a 200 ms primary poll.
+- On click, stop the verified Desktop family first, then allocate a fresh bindable
+  port, record `renderer_restart_requested_by_user`, launch once, and re-enter with
+  `launched_codex=True` so the next plan is `attach-launched`.
+- Missing/unready PySide6 records `renderer_restart_overlay_fallback` and transfers
+  the same indefinite action to `HudLoadingFeedback`; failure of optional state
+  persistence must never turn a successful app launch into a launch failure.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| No verified Desktop process | `launch`; choose a bindable port and call the debugger launcher once. |
+| Desktop command line exposes a live valid Codex CDP port | `attach` to that exact port; do not show restart UI. |
+| Candidate listens but `/json/version` is invalid | Reject it and continue through the bounded candidate list. |
+| Version is valid but no main Codex page target exists | Reject it; a running Desktop falls into `restart-required`. |
+| Persisted/configured launch port is occupied | Allocate one fresh localhost port before the one launch. |
+| PySide6 helper never reports ready or exits | Record the fallback reason and show the lightweight persistent action. |
+| Command action ID does not match the active system action | Ignore that system-action command; preserve unrelated overlay commands. |
+| User leaves the restart action untouched | Keep it visible and leave Codex running indefinitely. |
+| User clicks restart repeatedly | Append and consume one matching restart request only. |
+| Launch-port persistence cannot resolve or write its path | Continue the successful launch without persistence. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: Codex already runs with CDP on a non-default port; process evidence finds the
+  port, both HTTP checks pass, and one HUD invocation attaches without a restart.
+- Good: ordinary bubbles are disabled, but the PySide6 restart card remains visible
+  past the normal stale deadline and one click produces one stop/select/launch chain.
+- Base: process command-line discovery fails or all candidates are rejected; keep the
+  current app alive and request explicit restart rather than guessing a port.
+- Base: PySide6 is absent in the official package; the lightweight card owns the
+  action and waits on its request file event.
+- Bad: scan a port range, trust a listening or persisted port without CDP identity,
+  treat npm `codex.exe` as Desktop, poll the command file every 200 ms, or let
+  `_prepare_codex_window_for_renderer()` launch after classification.
+
+### 6. Tests Required
+
+- `tests/test_ui.py`: process identity, both flag forms, macOS paths with spaces,
+  candidate version/target rejection, occupied launch ports, all startup plans,
+  no second window-preparation launch, and stop -> select -> launch ordering.
+- `tests/test_ui.py`: `item_limit=0`, owner/stale persistence, helper-ready and
+  fast-click backlog, action-ID matching, helper-exit fallback, and event-driven
+  lightweight-card waiting.
+- `tests/test_ui.py`: run the real PySide6 helper offscreen and assert a visible
+  native restart hotspot, one ready command, one restart command, and clean exit.
+- `tests/test_cdp_probe.py`: assert `/json/version` is requested locally with the
+  bounded timeout and returns protocol identity.
+- Full renderer gate: `python -m pytest tests/test_renderer_hud.py
+  tests/test_active_session.py tests/test_ui.py -q`, then `python -m pytest`.
+- Windows live acceptance order is Scenario 3 first, then user-clicked Scenario 2
+  restart into Scenario 1; never stop the active app merely to prepare the test.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+port = persisted_port_or_default()
+client = RendererHudClient(port=port)
+if not client.attach():
+    stop_codex()
+    launch_codex_with_cdp(port)
+```
+
+This trusts stale state, constructs a client for the wrong endpoint, and stops the
+user's app without an explicit action.
+
+#### Correct
+
+```python
+plan = _renderer_startup_plan(launched_codex=launched_codex)
+if plan.scenario == RENDERER_STARTUP_RESTART_REQUIRED:
+    return wait_for_explicit_restart_action()
+if plan.scenario == RENDERER_STARTUP_LAUNCH:
+    launch_codex_app(debugger=True)  # Exactly once for the selected bindable port.
+return attach_renderer_without_window_prepare_launch(plan.port)
+```
+
+Classification owns launch/restart policy; CDP validation owns attach identity, and
+the overlay command owns user consent.

@@ -973,7 +973,7 @@ class JsonlSessionParser:
         records: Sequence[Mapping[str, Any]],
         task_started_index: int | None,
     ) -> datetime | None:
-        start_index = 0 if task_started_index is None else task_started_index + 1
+        start_index = self.latest_task_segment_start(records, task_started_index)
         for record in reversed(records[start_index:]):
             payload = record.get("payload") or {}
             if (
@@ -989,7 +989,7 @@ class JsonlSessionParser:
         records: Sequence[Mapping[str, Any]],
         task_started_index: int | None,
     ) -> datetime | None:
-        start_index = 0 if task_started_index is None else task_started_index + 1
+        start_index = self.latest_task_segment_start(records, task_started_index)
         for record in reversed(records[start_index:]):
             payload = record.get("payload") or {}
             if (
@@ -1005,7 +1005,7 @@ class JsonlSessionParser:
         records: Sequence[Mapping[str, Any]],
         task_started_index: int | None,
     ) -> datetime | None:
-        start_index = 0 if task_started_index is None else task_started_index + 1
+        start_index = self.latest_task_segment_start(records, task_started_index)
         for record in reversed(records[start_index:]):
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
@@ -1027,6 +1027,31 @@ class JsonlSessionParser:
                 if compact_text(message_text(payload), 8):
                     return record.get("_dt")
         return None
+
+    def latest_task_segment_start(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+    ) -> int:
+        """Return the current continuation segment within the latest task."""
+        task_start = 0 if task_started_index is None else task_started_index + 1
+        for index in range(len(records) - 1, task_start - 1, -1):
+            record = records[index]
+            payload = record.get("payload") or {}
+            if record.get("type") == "compacted":
+                return index + 1
+            if (
+                record.get("type") == "event_msg"
+                and isinstance(payload, Mapping)
+            ):
+                payload_type = payload.get("type")
+                if payload_type == "context_compacted":
+                    return index + 1
+                if payload_type == "user_message" and compact_text(
+                    payload.get("message"), 8
+                ):
+                    return index + 1
+        return task_start
 
     def latest_model(self, records: Sequence[Mapping[str, Any]]) -> str:
         for record in reversed(records):

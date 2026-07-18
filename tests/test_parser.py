@@ -462,6 +462,149 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(snapshot.task_index, 2)
         self.assertEqual(snapshot.task_count, 2)
 
+    def test_user_steer_invalidates_prior_completion_without_new_task_start(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:01Z",
+                "event_msg",
+                {
+                    "type": "agent_message",
+                    "message": "first answer",
+                    "phase": "final_answer",
+                },
+            ),
+            record("2026-05-28T00:00:02Z", "event_msg", {"type": "task_complete"}),
+            record(
+                "2026-05-28T00:00:03Z",
+                "event_msg",
+                {"type": "user_message", "message": "continue with one more change"},
+            ),
+            record(
+                "2026-05-28T00:00:04Z",
+                "event_msg",
+                {"type": "agent_reasoning", "text": "continuing"},
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        snapshot = parser.parse_records(records)
+
+        self.assertIsNone(snapshot.task_completed_at)
+        self.assertIsNone(snapshot.task_aborted_at)
+        self.assertIsNone(snapshot.final_answer_at)
+        self.assertEqual(snapshot.task_prompt, "continue with one more change")
+
+        records.extend(
+            [
+                record(
+                    "2026-05-28T00:00:05Z",
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "second answer",
+                        "phase": "final_answer",
+                    },
+                ),
+                record("2026-05-28T00:00:06Z", "event_msg", {"type": "task_complete"}),
+            ]
+        )
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        completed = parser.parse_records(records)
+
+        self.assertEqual(
+            completed.final_answer_at,
+            parse_timestamp("2026-05-28T00:00:05Z"),
+        )
+        self.assertEqual(
+            completed.task_completed_at,
+            parse_timestamp("2026-05-28T00:00:06Z"),
+        )
+
+    def test_compaction_handoff_invalidates_pre_compaction_terminal_markers(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record("2026-05-28T00:00:00Z", "event_msg", {"type": "task_started"}),
+            record(
+                "2026-05-28T00:00:01Z",
+                "event_msg",
+                {"type": "user_message", "message": "continue across compaction"},
+            ),
+            record(
+                "2026-05-28T00:00:02Z",
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "handoff summary"}],
+                },
+            ),
+            record("2026-05-28T00:00:03Z", "event_msg", {"type": "task_complete"}),
+            record("2026-05-28T00:00:04Z", "compacted", {"summary": "handoff"}),
+            record(
+                "2026-05-28T00:00:05Z",
+                "event_msg",
+                {"type": "context_compacted"},
+            ),
+            record(
+                "2026-05-28T00:00:06Z",
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "work resumed"}],
+                },
+            ),
+        ]
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        resumed = parser.parse_records(records)
+
+        self.assertEqual(resumed.request.status, "running")
+        self.assertIsNone(resumed.task_completed_at)
+        self.assertIsNone(resumed.task_aborted_at)
+        self.assertIsNone(resumed.final_answer_at)
+        self.assertEqual(resumed.task_prompt, "continue across compaction")
+
+        records.extend(
+            [
+                record(
+                    "2026-05-28T00:00:07Z",
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "actual final answer",
+                        "phase": "final_answer",
+                    },
+                ),
+                record("2026-05-28T00:00:08Z", "event_msg", {"type": "task_complete"}),
+            ]
+        )
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        completed = parser.parse_records(records)
+
+        self.assertEqual(
+            completed.final_answer_at,
+            parse_timestamp("2026-05-28T00:00:07Z"),
+        )
+        self.assertEqual(
+            completed.task_completed_at,
+            parse_timestamp("2026-05-28T00:00:08Z"),
+        )
+
     def test_token_rounds_capture_activity_summary_for_heavy_rounds(self) -> None:
         parser = JsonlSessionParser()
         records = [

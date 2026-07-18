@@ -26,6 +26,33 @@ from codex_usage_hud.platforms import cdp_probe
 
 
 class CdpProbeTests(unittest.TestCase):
+    def test_cdp_version_info_requires_protocol_identity(self) -> None:
+        opened_urls: list[str] = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                return b'{"Browser":"Chrome/136","Protocol-Version":"1.3"}'
+
+        class FakeOpener:
+            def open(self, request, *, timeout: float):
+                self.timeout = timeout
+                opened_urls.append(request.full_url)
+                return FakeResponse()
+
+        opener = FakeOpener()
+        with patch.object(cdp_probe, "build_opener", return_value=opener):
+            version = cdp_probe.cdp_version_info(59629, 0.25)
+
+        self.assertEqual(version["Protocol-Version"], "1.3")
+        self.assertEqual(opened_urls, ["http://127.0.0.1:59629/json/version"])
+        self.assertEqual(opener.timeout, 0.25)
+
     def test_pick_page_target_prefers_codex_page(self) -> None:
         targets = [
             {
@@ -148,6 +175,30 @@ class CdpProbeTests(unittest.TestCase):
         self.assertEqual(snapshot.header_rect, CdpRect(10.0, 20.0, 910.0, 64.0))
         self.assertEqual(snapshot.top_slot_rect, CdpRect(320.0, 20.0, 720.0, 64.0))
         self.assertEqual(snapshot.composer_rect, CdpRect(260.0, 700.0, 1000.0, 760.0))
+
+    def test_snapshot_ignores_full_access_permission_advisory_as_app_error(self) -> None:
+        result = {
+            "result": {
+                "result": {
+                    "value": {
+                        "sessionId": "thread-123",
+                        "devicePixelRatio": 1,
+                        "appError": (
+                            "Full access is on ChatGPT will be able to run commands, "
+                            "use the internet, and create, modify, upload, or delete files "
+                            "anywhere on this computer without your permission. This comes "
+                            "with risks like data loss and prompt injection."
+                        ),
+                    }
+                }
+            }
+        }
+
+        snapshot = snapshot_from_evaluate_result(result)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.app_error, "")
 
     def test_dom_probe_scores_conversation_header_before_global_menu(self) -> None:
         self.assertIn("header.app-header-tint", DOM_PROBE_SCRIPT)
