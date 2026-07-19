@@ -10718,6 +10718,19 @@ class TkSnapshotPumpTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_renderer_storage_command_is_immediately_acked_to_worker(self) -> None:
+        worker = SimpleNamespace(enqueue=MagicMock(return_value={"status": "accepted", "requestId": "storage-1"}))
+        context = SimpleNamespace(file_manager_worker=worker)
+        status = _handle_renderer_settings_command(
+            {"action": "scan", "requestId": "storage-1"},
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+        self.assertEqual(status["fileManagementRequestId"], "storage-1")
+        self.assertIn("排队", status["message"])
+        worker.enqueue.assert_called_once_with({"action": "scan", "requestId": "storage-1"})
+
     def test_renderer_settings_command_merges_partial_save_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = UserConfigStore(Path(temp_dir) / "hud_settings.json")

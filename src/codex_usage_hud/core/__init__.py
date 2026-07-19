@@ -10,6 +10,15 @@ from .pre_send_estimator import (
 )
 from .runtime_events import RuntimeEvent, RuntimeEventBus
 from .runtime_errors import RuntimeErrorEvent, RuntimeErrorRegistry
+from .codex_file_manager import (
+    CodexFileManager,
+    CodexFileManagerWorker,
+    CodexRoots,
+    FileManagementError,
+    Inventory,
+    InventoryItem,
+    resolve_codex_roots,
+)
 from .parser import (
     Activity,
     ConfirmedTokens,
@@ -36,9 +45,15 @@ __all__ = [
     "AttachmentEstimate",
     "BaseEstimate",
     "CodexActivityMonitor",
+    "CodexFileManager",
+    "CodexFileManagerWorker",
+    "CodexRoots",
     "ConfirmedTokens",
     "CostEstimator",
     "EstimateTokens",
+    "FileManagementError",
+    "Inventory",
+    "InventoryItem",
     "JsonlSessionParser",
     "JsonlTailState",
     "MODEL_PRICES",
@@ -63,5 +78,6 @@ __all__ = [
     "extract_log_field",
     "message_text",
     "parse_timestamp",
+    "resolve_codex_roots",
     "short_session_id",
 ]

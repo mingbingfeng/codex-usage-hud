@@ -163,6 +163,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   const modelPickerSelectionName = "__codexUsageHudModelPickerSelection";
   let topSlotCache = null;
   let pendingSyncPanels = null;
+  let settingsActiveTab = "settings";
+  let storageFilter = "all";
+  let storagePreviewHidden = false;
   let cachedHeaderNode = null;
   let cachedComposerNode = null;
   let observedHeaderNode = null;
@@ -2363,6 +2366,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         min-width: 0;
         color: var(--codex-usage-hud-request-muted, #a9bcd2);
         font-size: 11px;
+        overflow-wrap: anywhere;
       }
       #${rootId} .codex-usage-hud-settings-footnote {
         grid-column: 1 / -1;
@@ -2378,6 +2382,210 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-settings-status[data-kind="error"] {
         color: var(--codex-usage-hud-warning, #ffb86b);
+      }
+      #${rootId} .codex-usage-hud-storage {
+        display: grid;
+        gap: 12px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-storage-pathbar,
+      #${rootId} .codex-usage-hud-storage-summary,
+      #${rootId} .codex-usage-hud-storage-preview-head,
+      #${rootId} .codex-usage-hud-storage-preview-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-storage-path,
+      #${rootId} .codex-usage-hud-storage-item-path {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font: 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-storage-muted {
+        color: var(--codex-usage-hud-muted, #8492a6);
+      }
+      #${rootId} .codex-usage-hud-storage-status,
+      #${rootId} .codex-usage-hud-storage-policy {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        flex: 0 0 auto;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 4px;
+        padding: 3px 6px;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-storage-status[data-state="running"],
+      #${rootId} .codex-usage-hud-storage-status[data-state="queued_exit"] {
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        border-color: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 55%, transparent);
+      }
+      #${rootId} .codex-usage-hud-storage-status[data-state="completed"],
+      #${rootId} .codex-usage-hud-storage-policy[data-policy="candidate"] {
+        color: var(--codex-usage-hud-success, #8fe3a1);
+        border-color: color-mix(in srgb, var(--codex-usage-hud-success, #8fe3a1) 55%, transparent);
+      }
+      #${rootId} .codex-usage-hud-storage-policy[data-policy="managed"] {
+        color: var(--codex-usage-hud-info, #9ccbff);
+        border-color: color-mix(in srgb, var(--codex-usage-hud-info, #9ccbff) 55%, transparent);
+      }
+      #${rootId} .codex-usage-hud-storage-policy[data-policy="blocked"],
+      #${rootId} .codex-usage-hud-storage-policy[data-policy="unknown"] {
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        border-color: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 55%, transparent);
+      }
+      #${rootId} .codex-usage-hud-storage-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) repeat(2, minmax(90px, .7fr));
+        align-items: stretch;
+        gap: 8px;
+        padding: 10px 0;
+        border-top: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-storage-summary-value,
+      #${rootId} .codex-usage-hud-storage-summary-label {
+        margin: 0;
+      }
+      #${rootId} .codex-usage-hud-storage-summary-value {
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-storage-summary-main .codex-usage-hud-storage-summary-value {
+        color: var(--codex-usage-hud-accent, #f3d27a);
+      }
+      #${rootId} .codex-usage-hud-storage-summary-label {
+        margin-top: 3px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-storage-filters {
+        display: flex;
+        gap: 6px;
+        overflow-x: auto;
+        padding-bottom: 2px;
+        scrollbar-width: thin;
+      }
+      #${rootId} .codex-usage-hud-storage-filter {
+        flex: 0 0 auto;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        padding: 5px 8px;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-storage-filter[data-active="true"] {
+        background: var(--codex-usage-hud-header-surface, #202833);
+        color: var(--codex-usage-hud-accent, #f3d27a);
+      }
+      #${rootId} .codex-usage-hud-storage-categories,
+      #${rootId} .codex-usage-hud-storage-items {
+        display: grid;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-storage-category,
+      #${rootId} .codex-usage-hud-storage-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        padding: 8px 0;
+        border-top: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-storage-item {
+        grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+      }
+      #${rootId} .codex-usage-hud-storage-category-main,
+      #${rootId} .codex-usage-hud-storage-item-main {
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-storage-category-title {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-storage-marker {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 7px;
+        border-radius: 50%;
+        background: var(--codex-usage-hud-warning, #ffb86b);
+      }
+      #${rootId} .codex-usage-hud-storage-marker[data-policy="candidate"] { background: var(--codex-usage-hud-success, #8fe3a1); }
+      #${rootId} .codex-usage-hud-storage-marker[data-policy="managed"] { background: var(--codex-usage-hud-info, #9ccbff); }
+      #${rootId} .codex-usage-hud-storage-marker[data-policy="blocked"] { background: var(--codex-usage-hud-error, #ff6b6b); }
+      #${rootId} .codex-usage-hud-storage-meta {
+        margin-top: 3px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+        overflow-wrap: anywhere;
+      }
+      #${rootId} .codex-usage-hud-storage-size {
+        color: var(--codex-usage-hud-text, #e8eef7);
+        white-space: nowrap;
+        font: 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-storage-item input[type="checkbox"] {
+        width: 15px;
+        height: 15px;
+        accent-color: var(--codex-usage-hud-accent, #f3d27a);
+      }
+      #${rootId} .codex-usage-hud-storage-item-action {
+        min-height: 26px;
+        border: 0;
+        border-radius: 4px;
+        background: var(--codex-usage-hud-panel-border, #2e3846);
+        color: var(--codex-usage-hud-text, #e8eef7);
+        padding: 4px 7px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-storage-item-action:disabled { opacity: .55; cursor: not-allowed; }
+      #${rootId} .codex-usage-hud-storage-item-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 5px;
+        grid-column: 4;
+      }
+      #${rootId} .codex-usage-hud-storage-preview {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 45%, transparent);
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 7%, var(--codex-usage-hud-panel-surface, #141b24));
+      }
+      #${rootId} .codex-usage-hud-storage-preview-list {
+        display: grid;
+        gap: 5px;
+        max-height: 150px;
+        overflow: auto;
+      }
+      #${rootId} .codex-usage-hud-storage-preview-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+        padding-top: 5px;
+        border-top: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 72%, transparent);
+      }
+      #${rootId} .codex-usage-hud-storage-note {
+        margin: 0;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        line-height: 1.5;
+      }
+      #${rootId} .codex-usage-hud-storage-empty {
+        padding: 14px 0;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        text-align: center;
       }
       #${rootId} .codex-usage-hud-settings-confirm-layer {
         position: absolute;
@@ -2858,8 +3066,27 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-support-qr-grid {
           grid-template-columns: minmax(0, 1fr);
         }
+        #${rootId} .codex-usage-hud-storage-summary {
+          grid-template-columns: 1fr 1fr;
+        }
+        #${rootId} .codex-usage-hud-storage-summary-main {
+          grid-column: 1 / -1;
+        }
       }
       @media (max-width: 520px) {
+        #${rootId} .codex-usage-hud-settings-actions {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        #${rootId} .codex-usage-hud-settings-actions > div:last-child {
+          display: flex;
+          width: 100%;
+          gap: 6px;
+        }
+        #${rootId} .codex-usage-hud-settings-actions > div:last-child .codex-usage-hud-settings-action {
+          min-width: 0;
+          flex: 1 1 0;
+        }
         #${rootId} .codex-usage-hud-price-actions {
           grid-template-columns: minmax(0, 1fr);
         }
@@ -2873,6 +3100,43 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-provider-meta {
           max-width: none;
           text-align: left;
+        }
+        #${rootId} .codex-usage-hud-storage-pathbar,
+        #${rootId} .codex-usage-hud-storage-preview-head,
+        #${rootId} .codex-usage-hud-storage-preview-foot {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        #${rootId} .codex-usage-hud-storage-category {
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
+        #${rootId} .codex-usage-hud-storage-category .codex-usage-hud-storage-policy {
+          grid-column: 1;
+          justify-self: start;
+          margin-left: 14px;
+        }
+        #${rootId} .codex-usage-hud-storage-category .codex-usage-hud-storage-size {
+          grid-column: 2;
+          grid-row: 1 / span 2;
+        }
+        #${rootId} .codex-usage-hud-storage-item {
+          grid-template-columns: auto minmax(0, 1fr) auto;
+        }
+        #${rootId} .codex-usage-hud-storage-item .codex-usage-hud-storage-policy {
+          grid-column: 2;
+          justify-self: start;
+        }
+        #${rootId} .codex-usage-hud-storage-item .codex-usage-hud-storage-size {
+          grid-column: 3;
+          grid-row: 1 / span 2;
+        }
+        #${rootId} .codex-usage-hud-storage-item-action {
+          grid-column: 2;
+          justify-self: start;
+        }
+        #${rootId} .codex-usage-hud-storage-item-actions {
+          grid-column: 2;
+          justify-self: start;
         }
       }
     `;
@@ -4587,19 +4851,112 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     renderSettingsProviderEditor({ focusTab });
   }
 
+  function fileManagementFromPayload() {
+    const value = currentPayload()?.fileManagement;
+    return value && typeof value === "object" ? value : {
+      rootLabel: "CODEX_HOME", generatedAt: "", revision: "",
+      totals: { bytes: 0, files: 0, items: 0 }, categories: [], items: [],
+      operation: { state: "idle", progress: 0, error: "" },
+    };
+  }
+
+  function storageFormatBytes(value) {
+    let bytes = Math.max(0, Number(value) || 0);
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let index = 0;
+    while (bytes >= 1024 && index < units.length - 1) { bytes /= 1024; index += 1; }
+    return `${bytes >= 10 || index === 0 ? bytes.toFixed(0) : bytes.toFixed(1)} ${units[index]}`;
+  }
+
+  function storagePolicyLabel(policy) {
+    return ({ candidate: "可候选", managed: "官方动作", blocked: "禁止直接删", unknown: "未知保护" })[policy] || "保护";
+  }
+
+  function storageOperationLabel(operation) {
+    return ({ idle: "尚未生成清理计划", running: "正在处理存储操作", accepted: "存储操作已排队", cancelling: "正在取消存储操作", preview: "清理预览已生成", queued_exit: "已加入退出后队列", completed: "存储操作已完成", partial: "存储操作部分完成", cancelled: "存储操作已取消", failed: "存储操作失败" })[String(operation?.state || "idle")] || "存储状态待更新";
+  }
+
+  function storagePanelHtml(data) {
+    const totals = data?.totals && typeof data.totals === "object" ? data.totals : {};
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const allItems = Array.isArray(data?.items) ? data.items : [];
+    const items = storageFilter === "all" ? allItems : allItems.filter((item) => String(item?.policy || "unknown") === storageFilter);
+    const categories = Array.isArray(data?.categories) ? data.categories : [];
+    const previewItems = Array.isArray(operation?.items) ? operation.items : [];
+    const managedAction = String(operation?.managedAction || "");
+    const operationState = String(operation?.state || "idle");
+    const visibleItems = items.slice(0, 160);
+    const policyCounts = { candidate: 0, managed: 0, blocked: 0, unknown: 0 };
+    allItems.forEach((item) => { const policy = String(item?.policy || "unknown"); if (policy in policyCounts) policyCounts[policy] += 1; });
+    const categoryHtml = categories
+      .filter((category) => storageFilter === "all" || String(category?.policy || "unknown") === storageFilter)
+      .map((category) => {
+        const policy = String(category?.policy || "unknown");
+        return `<div class="codex-usage-hud-storage-category" data-policy="${escapeHtml(policy)}"><div class="codex-usage-hud-storage-category-main"><div class="codex-usage-hud-storage-category-title"><span class="codex-usage-hud-storage-marker" data-policy="${escapeHtml(policy)}"></span>${escapeHtml(category?.category || "未知")}</div><div class="codex-usage-hud-storage-meta">${escapeHtml(category?.reason || "受保护")}</div></div><span class="codex-usage-hud-storage-policy" data-policy="${escapeHtml(policy)}">${escapeHtml(storagePolicyLabel(policy))}</span><span class="codex-usage-hud-storage-size">${storageFormatBytes(category?.size)}</span></div>`;
+      }).join("");
+    const itemHtml = visibleItems.map((item) => {
+      const policy = String(item?.policy || "unknown");
+      const id = String(item?.id || "");
+      const actions = Array.isArray(item?.allowedActions) ? item.allowedActions : [];
+      const selector = policy === "candidate" ? `<input type="checkbox" data-storage-item-id="${escapeHtml(id)}" aria-label="选择 ${escapeHtml(item?.relativePath || "候选项")}">` : "<span aria-hidden=\"true\"></span>";
+      const managedButtons = policy === "managed" && actions.length ? `<span class="codex-usage-hud-storage-item-actions">${actions.map((managedAction) => `<button type="button" class="codex-usage-hud-storage-item-action" data-action="storage-managed-preview" data-storage-managed-action="${escapeHtml(managedAction)}" data-storage-item-id="${escapeHtml(id)}">${escapeHtml(managedAction === "logout" ? "官方退出" : managedAction === "remove_plugin" ? "官方移除" : managedAction === "archive_session" ? "官方归档" : "官方删除")}</button>`).join("")}</span>` : `<button type="button" class="codex-usage-hud-storage-item-action" disabled>${escapeHtml(storagePolicyLabel(policy))}</button>`;
+      return `<div class="codex-usage-hud-storage-item" data-policy="${escapeHtml(policy)}">${selector}<div class="codex-usage-hud-storage-item-main"><div class="codex-usage-hud-storage-item-path" title="${escapeHtml(item?.relativePath || "")}">${escapeHtml(item?.relativePath || "未知路径")}</div><div class="codex-usage-hud-storage-meta">${escapeHtml(item?.reason || "")}</div></div><span class="codex-usage-hud-storage-policy" data-policy="${escapeHtml(policy)}">${escapeHtml(storagePolicyLabel(policy))}</span><span class="codex-usage-hud-storage-size">${storageFormatBytes(item?.size)}</span>${managedButtons}</div>`;
+    }).join("");
+    const previewHtml = operationState === "preview" && !storagePreviewHidden ? `<section class="codex-usage-hud-storage-preview" aria-live="polite"><div class="codex-usage-hud-storage-preview-head"><div><strong>清理预览</strong><div class="codex-usage-hud-storage-muted">${previewItems.length} 个项，预计释放 ${storageFormatBytes(operation?.bytes)}</div></div><span class="codex-usage-hud-storage-status" data-state="completed">Dry run</span></div><div class="codex-usage-hud-storage-preview-list">${previewItems.map((item) => `<div class="codex-usage-hud-storage-preview-row"><span class="codex-usage-hud-storage-item-path">${escapeHtml(item?.relativePath || "")}</span><span class="codex-usage-hud-storage-muted">${storageFormatBytes(item?.size)}</span></div>`).join("")}</div><p class="codex-usage-hud-storage-note">Codex 运行期间不会直接修改原始文件；执行前会再次检查 revision、锁定状态和路径指纹。</p><div class="codex-usage-hud-storage-preview-foot"><button type="button" class="codex-usage-hud-settings-link" data-action="storage-clear-preview">取消预览</button><button type="button" class="codex-usage-hud-settings-action" data-action="storage-confirm-preview" data-primary="true">${escapeHtml(managedAction ? "确认官方动作" : "加入退出后队列")}</button></div></section>` : "";
+    const operationNote = operation?.error ? `：${operation.error}` : operationState === "queued_exit" ? "；Codex 完全退出后才会执行" : "";
+    return `<div class="codex-usage-hud-storage"><div class="codex-usage-hud-storage-pathbar"><div class="codex-usage-hud-storage-path">${escapeHtml(data?.rootLabel || "CODEX_HOME")}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(operationState)}">${escapeHtml(storageOperationLabel(operation) + operationNote)}</span></div><div class="codex-usage-hud-storage-summary"><div class="codex-usage-hud-storage-summary-main"><p class="codex-usage-hud-storage-summary-value">${storageFormatBytes(totals?.bytes)}</p><p class="codex-usage-hud-storage-summary-label">已发现的 Codex 数据</p></div><div><p class="codex-usage-hud-storage-summary-value">${Number(totals?.files || 0).toLocaleString()}</p><p class="codex-usage-hud-storage-summary-label">文件</p></div><div><p class="codex-usage-hud-storage-summary-value">${Number(totals?.items || 0).toLocaleString()}</p><p class="codex-usage-hud-storage-summary-label">管理项</p></div></div><div class="codex-usage-hud-storage-filters" role="tablist" aria-label="文件风险筛选">${[["all", "总览"], ["candidate", "可候选"], ["managed", "官方动作"], ["blocked", "受保护"], ["unknown", "未知"]].map(([key, label]) => `<button type="button" class="codex-usage-hud-storage-filter" data-action="storage-filter" data-storage-filter="${key}" data-active="${storageFilter === key}">${label} ${key === "all" ? "" : `(${policyCounts[key]})`}</button>`).join("")}</div><div class="codex-usage-hud-storage-categories" aria-live="polite">${categoryHtml || '<div class="codex-usage-hud-storage-empty">尚未扫描，点击“重新扫描”查看本地元数据。</div>'}</div><div class="codex-usage-hud-storage-items">${itemHtml || '<div class="codex-usage-hud-storage-empty">当前筛选没有可展示的管理项。</div>'}</div>${visibleItems.length < items.length ? `<div class="codex-usage-hud-storage-muted">仅显示前 ${visibleItems.length} 项；扫描不会自动重复。</div>` : ""}${previewHtml}<p class="codex-usage-hud-storage-note">只显示相对路径和元数据；未知项、凭据、配置、SQLite、会话原始文件、活动插件运行时和 reparse point 不提供直接删除。</p></div>`;
+  }
+
+  function storageSelectedItemIds() {
+    return Array.from(document.querySelectorAll(`#${settingsModalId} [data-storage-item-id]`))
+      .filter((node) => node instanceof HTMLInputElement && node.checked)
+      .map((node) => String(node.dataset.storageItemId || "")).filter(Boolean);
+  }
+
+  function storagePreviewSelected(managedAction = "", managedItemId = "") {
+    const data = fileManagementFromPayload();
+    const itemIds = managedItemId ? [managedItemId] : storageSelectedItemIds();
+    const revision = String(data?.revision || "");
+    if (!revision || !itemIds.length) {
+      setSettingsStatus("请先扫描并选择一个可候选项。", "error");
+      return;
+    }
+    storagePreviewHidden = false;
+    submitSettingsCommand({ action: "preview", itemIds, inventoryRevision: revision, managedAction }, managedAction ? "官方动作预览已提交..." : "清理预览请求已提交...", { preserveOverlay: true });
+  }
+
+  function openStorageExecuteConfirm() {
+    const dialog = settingsDialogRoot();
+    const data = fileManagementFromPayload();
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    if (!dialog || String(operation?.state || "") !== "preview") return;
+    closeSettingsConfirm();
+    const managedAction = String(operation?.managedAction || "");
+    const count = Array.isArray(operation?.items) ? operation.items.length : 0;
+    const layer = document.createElement("div");
+    layer.className = "codex-usage-hud-settings-confirm-layer";
+    layer.dataset.settingsConfirm = "true";
+    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认存储操作"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">${escapeHtml(managedAction ? "执行官方 Codex 动作？" : "加入退出后清理队列？")}</div><div class="codex-usage-hud-settings-confirm-body">已预览 ${count} 个项。${managedAction ? "将只调用官方命令，不会直接删除会话或插件文件。" : "Codex 仍在运行时不会修改原始文件；退出后会再次检查。"}</div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="storage-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="storage-confirm-execute" data-primary="true">确认</button></div></div>`;
+    dialog.appendChild(layer);
+    layer.querySelector('[data-action="storage-confirm-cancel"]')?.focus?.();
+  }
+
   function renderSettingsModal(tab = "settings", status = "", { resetProviderDraft = false } = {}) {
     const root = document.getElementById(rootId);
     const modal = document.getElementById(settingsModalId);
     if (!root || !modal) return;
     if (!modal.hidden) captureSettingsProviderForm();
     const settings = hudSettingsFromPayload();
-    const activeTab = ["support", "about"].includes(tab) ? tab : "settings";
+    const activeTab = ["storage", "support", "about"].includes(tab) ? tab : "settings";
+    settingsActiveTab = activeTab;
     if (activeTab === "settings") ensureSettingsProviderDraft(settings, resetProviderDraft);
     const path = settingsPathLabel();
     const bridge = settingsBridgeUrl();
     const defaultStatus = activeTab === "about"
       ? "可检查 GitHub Release 并启动 Windows 安装器。"
-      : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件");
+      : activeTab === "storage"
+        ? "扫描只在用户点击时发生；默认只读。"
+        : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件");
     modal.innerHTML = `
       <div class="codex-usage-hud-settings-dialog" role="dialog" aria-modal="true" aria-label="codex-usage-hud 设置">
         <div class="codex-usage-hud-settings-head">
@@ -4608,16 +4965,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         </div>
         <div class="codex-usage-hud-settings-tabs" role="tablist">
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="settings" data-active="${activeTab === "settings"}">设置</button>
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="storage" data-active="${activeTab === "storage"}">存储</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="support" data-active="${activeTab === "support"}">请作者喝咖啡</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="about" data-active="${activeTab === "about"}">版本更新</button>
         </div>
         <div class="codex-usage-hud-settings-body">
-          ${activeTab === "support" ? supportPanelHtml(settings, path) : activeTab === "about" ? aboutPanelHtml(path) : settingsPanelHtml(settings, bridge, path)}
+          ${activeTab === "support" ? supportPanelHtml(settings, path) : activeTab === "about" ? aboutPanelHtml(path) : activeTab === "storage" ? storagePanelHtml(fileManagementFromPayload()) : settingsPanelHtml(settings, bridge, path)}
         </div>
         <div class="codex-usage-hud-settings-actions">
           <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || defaultStatus)}</div>
           <div>
-            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "storage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="storage-scan">重新扫描</button> <button type="button" class="codex-usage-hud-settings-action" data-action="storage-preview" data-primary="true">生成预览</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
           </div>
         </div>
       </div>
@@ -5307,6 +5665,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       markSettingsProviderDirty();
     });
     root.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        const modal = document.getElementById(settingsModalId);
+        if (modal && !modal.hidden) {
+          const confirm = modal.querySelector('[data-settings-confirm="true"]');
+          event.preventDefault();
+          event.stopPropagation();
+          if (confirm) closeSettingsConfirm();
+          else closeSettingsModal();
+          return;
+        }
+      }
       const tab = event.target?.closest?.('[data-provider-tab="true"]');
       if (!tab || !root.contains(tab) || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
       const providers = settingsProviderDraft?.order || [];
@@ -5380,6 +5749,63 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.preventDefault();
         event.stopPropagation();
         renderSettingsModal(action.dataset.tab || "settings");
+        return;
+      }
+      if (action.dataset.action === "storage-filter") {
+        event.preventDefault();
+        event.stopPropagation();
+        storageFilter = String(action.dataset.storageFilter || "all");
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "storage-scan") {
+        event.preventDefault();
+        event.stopPropagation();
+        storagePreviewHidden = true;
+        submitSettingsCommand({ action: "scan" }, "正在准备新的存储扫描...", { preserveOverlay: true });
+        return;
+      }
+      if (action.dataset.action === "storage-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        storagePreviewSelected();
+        return;
+      }
+      if (action.dataset.action === "storage-managed-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        storagePreviewSelected(action.dataset.storageManagedAction || "", action.dataset.storageItemId || "");
+        return;
+      }
+      if (action.dataset.action === "storage-clear-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        storagePreviewHidden = true;
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "storage-confirm-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        openStorageExecuteConfirm();
+        return;
+      }
+      if (action.dataset.action === "storage-confirm-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        return;
+      }
+      if (action.dataset.action === "storage-confirm-execute") {
+        event.preventDefault();
+        event.stopPropagation();
+        const data = fileManagementFromPayload();
+        const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+        const managedAction = String(operation?.managedAction || "");
+        const itemIds = Array.isArray(operation?.itemIds) ? operation.itemIds : [];
+        const commandAction = managedAction || "execute";
+        closeSettingsConfirm();
+        submitSettingsCommand({ action: commandAction, itemIds, inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""), confirmationToken: String(operation?.confirmationToken || "") }, commandAction === "execute" ? "清理已加入退出后队列..." : "官方动作已提交...", { preserveOverlay: true });
         return;
       }
       if (action.dataset.action === "settings-provider-tab") {
@@ -7787,7 +8213,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const provided = payload?.payloadDomains && typeof payload.payloadDomains === "object"
       ? payload.payloadDomains
       : {};
-    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "diagnostics"];
+    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "diagnostics", "fileManagement"];
     const domains = {};
     if (Object.keys(provided).length > 0) {
       for (const name of allDomains) {
@@ -7896,6 +8322,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     // domain explicit lets renderer updates skip unrelated DOM work.
   }
 
+  function applyFileManagementPayload(_root, payload) {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "storage") return;
+    if (String(payload?.fileManagement?.operation?.state || "") === "preview") storagePreviewHidden = false;
+    else storagePreviewHidden = true;
+    const scrollTop = modal.querySelector(".codex-usage-hud-settings-body")?.scrollTop || 0;
+    renderSettingsModal("storage");
+    const body = modal.querySelector(".codex-usage-hud-settings-body");
+    if (body) body.scrollTop = scrollTop;
+  }
+
   function applyPayloadDomains(root, payload, domains) {
     if ("currentSession" in domains) {
       applyCurrentSessionPayload(root, { ...(payload || {}), ...(domains.currentSession || {}) });
@@ -7914,6 +8351,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
     if ("diagnostics" in domains) {
       renderRuntimeErrors(root, { ...(payload || {}), ...(domains.diagnostics || {}) });
+    }
+    if ("fileManagement" in domains) {
+      applyFileManagementPayload(root, { ...(payload || {}), ...(domains.fileManagement || {}) });
     }
   }
 
@@ -8269,6 +8709,7 @@ class RendererHudPayload:
     settings_path: str = ""
     settings_bridge_url: str = ""
     settings_command_status: dict[str, object] = field(default_factory=dict)
+    file_management: dict[str, object] = field(default_factory=dict)
     work_overlay_selectable_max: int = 6
     desktop_overlay_dependency: dict[str, object] = field(default_factory=dict)
     support_images: list[dict[str, str]] = field(default_factory=list)
@@ -8319,6 +8760,7 @@ class RendererHudPayload:
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
             "settingsCommandStatus": dict(self.settings_command_status),
+            "fileManagement": dict(self.file_management),
             "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
             "desktopOverlayDependency": dict(self.desktop_overlay_dependency),
             "supportImages": [dict(item) for item in self.support_images],
@@ -8440,11 +8882,12 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
     )
     overlay_keys = ("workOverlaySelectableMax", "desktopOverlayDependency")
     diagnostics_keys = ("debug", "runtimeErrors")
+    file_management = payload.get("fileManagement")
 
     def pick(keys: tuple[str, ...]) -> dict[str, object]:
         return {key: payload[key] for key in keys if key in payload}
 
-    return {
+    domains = {
         "currentSession": pick(current_session_keys),
         "sessionSwitch": pick(session_switch_keys),
         "budget": pick(budget_keys),
@@ -8452,6 +8895,9 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "overlay": pick(overlay_keys),
         "diagnostics": pick(diagnostics_keys),
     }
+    if isinstance(file_management, dict) and file_management:
+        domains["fileManagement"] = {"fileManagement": dict(file_management)}
+    return domains
 
 
 class _RendererTargetDiscovery:
@@ -9045,6 +9491,7 @@ class RendererHudClient:
         desktop_overlay_dependency: dict[str, object] | None = None,
         provider_registry: dict[str, object] | None = None,
         app_provider: str = "",
+        file_management: dict[str, object] | None = None,
     ) -> bool:
         started = time.perf_counter()
         support_images = [] if self._support_images_sent else support_qr_payload()
@@ -9070,6 +9517,7 @@ class RendererHudClient:
             desktop_overlay_dependency=desktop_overlay_dependency,
             provider_registry=provider_registry,
             app_provider=app_provider,
+            file_management=file_management,
         ).to_json()
         update_ok = self.update_payload(payload)
         metrics = dict(self.last_update_metrics)
@@ -9444,6 +9892,7 @@ def payload_from_snapshot(
     desktop_overlay_dependency: dict[str, object] | None = None,
     provider_registry: dict[str, object] | None = None,
     app_provider: str = "",
+    file_management: dict[str, object] | None = None,
 ) -> RendererHudPayload:
     new_session = _is_new_session_snapshot(snapshot)
     pending_session = _is_pending_session_snapshot(snapshot)
@@ -9534,6 +9983,7 @@ def payload_from_snapshot(
         settings_path=str(settings_path or ""),
         settings_bridge_url=settings_bridge_url,
         settings_command_status=settings_command_status or {},
+        file_management=file_management or {},
         work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),
         desktop_overlay_dependency=desktop_overlay_dependency or {},
         support_images=support_images or [],

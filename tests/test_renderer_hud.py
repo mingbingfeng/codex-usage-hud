@@ -792,6 +792,34 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("requestRows", partial)
         self.assertNotIn("requestRowDetails", partial)
 
+    def test_renderer_payload_can_emit_independent_file_management_domain(self) -> None:
+        file_management = {
+            "rootLabel": "CODEX_HOME",
+            "revision": "1-opaque",
+            "totals": {"bytes": 42, "files": 1, "items": 1},
+            "categories": [{"category": "expired_temp", "policy": "candidate", "size": 42}],
+            "items": [{
+                "id": "opaque-item",
+                "relativePath": ".tmp/staging-old",
+                "policy": "candidate",
+                "category": "expired_temp",
+                "size": 42,
+                "mtime": 1.0,
+                "source": "inferred",
+                "risk": "success",
+                "reason": "expired",
+            }],
+            "operation": {"state": "idle", "progress": 0},
+        }
+        payload = payload_from_snapshot(
+            ParsedSession(status="parsed"), file_management=file_management
+        )
+        partial = payload.to_domain_json("fileManagement")
+        self.assertEqual(set(partial["payloadDomains"]), {"fileManagement"})
+        self.assertEqual(partial["fileManagement"]["revision"], "1-opaque")
+        self.assertNotIn("topLine", partial)
+        self.assertNotIn("relative/absolute", str(partial))
+
     def test_update_payload_reports_failed_update_without_reinstall_retry(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
         install_force_flags = []

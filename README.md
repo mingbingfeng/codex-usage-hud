@@ -109,11 +109,15 @@ codex-hud --update
 
 ## 数据位置
 
-- Codex 会话日志：`~/.codex/sessions/`
-- Codex SSE / 状态数据库：`~/.codex/logs_2.sqlite`、`~/.codex/state_5.sqlite`
+- Codex 共享数据根目录：`CODEX_HOME`（未设置时为 `~/.codex`）
+- Codex 会话日志：`$CODEX_HOME/sessions/`
+- Codex SSE / 状态数据库：`$CODEX_HOME/logs_2.sqlite`、`$CODEX_HOME/state_5.sqlite`
+- 可选 SQLite 根目录：`CODEX_SQLITE_HOME` 或 config.toml 的 `sqlite_home`
 - HUD 配置：`%LOCALAPPDATA%\codex-usage-hud\hud_settings.json`
 - HUD daemon 日志：`%LOCALAPPDATA%\codex-usage-hud\daemon.log`
 - 默认安装目录：`%LOCALAPPDATA%\Programs\codex-usage-hud`
+
+设置里的“存储”页默认只显示本地元数据，并且只在用户点击“重新扫描”时工作。候选清理必须先生成 dry-run 预览、再二次确认；Codex 运行期间只会排队，不会自动结束任务。第一版只把过期且未被配置引用的临时 staging/clone 项列为 raw 清理候选，SQLite/WAL/SHM、JSONL 会话、插件运行时、凭据、配置、未知项和 reparse point 始终受保护。会话、插件和登录状态只能通过对应的官方 `codex archive/delete/plugin remove/logout` 动作管理。
 
 ## Codex 主题同步
 
@@ -137,7 +141,7 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 
 ### 会上传我的提示词或日志吗？
 
-不会。项目只读取本机日志和数据库，不做遥测、不上传 prompt/response，也不要求云端账号。提交 issue 前请阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
+不会。项目只读取本机日志和数据库，不做遥测、不上传 prompt/response，也不要求云端账号。显式启用“存储”页的本地清理属于受保护的例外：它只接受 inventory 发出的 opaque item id，执行前会重验 revision、路径和锁定状态，且不会 raw 删除 JSONL/SQLite。提交 issue 前请阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
 
 ## 开发
 

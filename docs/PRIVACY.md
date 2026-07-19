@@ -1,11 +1,11 @@
 # Privacy Policy for codex-usage-hud
 
-`codex-usage-hud` 的首要原则是 `local-first privacy`。这个项目的职责，是在你的机器上读取本地可访问的 Codex 使用记录，并在本地完成解析、统计与显示。
+`codex-usage-hud` 的首要原则是 `local-first privacy`。这个项目的职责，是在你的机器上读取本地可访问的 Codex 使用记录，并在本地完成解析、统计与显示。默认仍是只读分析器；“存储”页的写操作必须由用户显式启用并完成 dry-run 与二次确认。
 
 ## 核心承诺
 
 - 只在本地运行。
-- 只读本地日志与本地数据库。
+- 只读本地日志与本地数据库；显式启用的本地文件管理写操作是单独列出的例外。
 - 绝对不联网。
 - 绝对不上传任何内容。
 - 绝对不把 prompt、response、token 统计、路径信息或元数据发送给作者、维护者或任何第三方。
@@ -27,7 +27,13 @@
 - 计算本地 HUD 所需指标
 - 在本地终端显示结果
 
-本项目不应主动修改这些原始数据源，也不应把它们复制到远端位置。
+本项目不应主动修改这些原始数据源，也不应把它们复制到远端位置。存储管理器不会 raw 修改原始 JSONL、SQLite、WAL/SHM、凭据、配置或未知项；会话、插件和登录状态只通过用户确认的官方 Codex 动作处理。
+
+## 显式本地文件管理例外
+
+设置里的“存储”页只有在用户点击扫描、预览和确认后才会访问对应的本地元数据。renderer payload 只包含中性的根标签、相对路径、分类、大小、mtime、风险和操作状态，不包含 prompt、response、token、凭据或文件内容。
+
+raw 清理第一版仅允许过期且未被配置引用的临时 staging/clone 项，并在执行前按 inventory revision、canonical path、lstat 指纹和锁定状态重新验证。Codex、app-server 或插件同步运行时，操作只会排队到退出后；HUD 不会自动杀进程。SQLite 主库与 `-wal`/`-shm` 是不可拆分的受保护组。未知文件、symlink/junction/reparse point、`auth.json`、`config.toml`、`secrets`、会话 transcript 和活动插件 cache 默认禁止 raw 删除。
 
 ## 我们绝不会做的事
 

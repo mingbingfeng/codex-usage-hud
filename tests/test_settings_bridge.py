@@ -203,6 +203,30 @@ class SettingsBridgeServerTests(unittest.TestCase):
         self.assertTrue(command_received.is_set())
         self.assertEqual(received, [{"action": "exit", "id": "cmd-1"}])
 
+    def test_command_endpoint_accepts_storage_command_without_scanning_http_thread(self) -> None:
+        received: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            bridge = SettingsBridgeServer(
+                store,
+                port=0,
+                command_callback=lambda command: received.append(command),
+            )
+            try:
+                url = bridge.start()
+                request = Request(
+                    f"{url}/command",
+                    data=json.dumps({"action": "scan", "requestId": "storage-1"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                bridge.close()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(received, [{"action": "scan", "requestId": "storage-1"}])
+
     def test_active_session_endpoint_invokes_callback(self) -> None:
         received: list[dict[str, object]] = []
         session_received = threading.Event()

@@ -62,6 +62,11 @@ from .core import (
 )
 from .core.runtime_events import RuntimeEvent, RuntimeEventBus
 from .core.runtime_errors import RuntimeErrorRegistry
+from .core.codex_file_manager import (
+    CodexFileManager,
+    CodexFileManagerWorker,
+    FileManagementError,
+)
 from .daemon import (
     CodexDaemonManager,
     DEFAULT_DAEMON_POLL_MS,
@@ -5399,6 +5404,10 @@ class RuntimeContext:
     )
     current_session_tail_state: JsonlTailState | None = None
     session_snapshot_cache: "SessionSnapshotCache | None" = None
+    renderer_mode: bool = True
+    file_manager: CodexFileManager | None = None
+    file_manager_worker: CodexFileManagerWorker | None = None
+    file_management_payload: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.runtime_errors.event_bus is None:
@@ -5410,14 +5419,61 @@ class RuntimeContext:
                 event_bus=self.runtime_events,
                 sse_tracker=self.sse_tracker,
             )
+        if self.renderer_mode and self.file_manager is None:
+            self.file_manager = CodexFileManager(
+                env=os.environ,
+                platform_candidates=(
+                    self.sessions_root.parent,
+                    self.sqlite_log_path.parent
+                    if self.sqlite_log_path
+                    else self.sessions_root.parent,
+                ),
+            )
+        if self.renderer_mode and self.file_manager is not None:
+            self.file_management_payload = self.file_manager.snapshot()
+            if self.file_manager_worker is None:
+                self.file_manager_worker = CodexFileManagerWorker(
+                    self.file_manager,
+                    on_update=self._on_file_manager_update,
+                )
 
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
         _stop_active_session_tracker(self)
+        if self.file_manager_worker is not None:
+            try:
+                operation = self.file_manager.snapshot().get("operation", {}) if self.file_manager else {}
+                if (
+                    isinstance(operation, Mapping)
+                    and operation.get("state") == "queued_exit"
+                    and self.file_manager is not None
+                    and not self.file_manager.process_gate()
+                ):
+                    self.file_manager_worker.enqueue(
+                        {"action": "execute_pending", "requestId": "codex-exit"}
+                    )
+            except Exception:
+                pass
+            self.file_manager_worker.close()
+            self.file_manager_worker = None
         if self.session_snapshot_cache is not None:
             self.session_snapshot_cache.close()
         if self.pre_send_estimator is not None:
             self.pre_send_estimator.close()
+
+    def _on_file_manager_update(self, payload: dict[str, object]) -> None:
+        self.file_management_payload = dict(payload)
+        operation = payload.get("operation")
+        operation_payload = dict(operation) if isinstance(operation, Mapping) else {}
+        self.runtime_events.publish(
+            "file_management_changed",
+            source="codex_file_manager",
+            context={
+                "revision": str(payload.get("revision") or ""),
+                "action": str(operation_payload.get("action") or ""),
+                "state": str(operation_payload.get("state") or ""),
+            },
+        )
 
     def reload_user_config(self) -> None:
         """Reload user config and reset cost caches when pricing changes."""
@@ -5896,6 +5952,8 @@ def _partial_domains_for_settings_command(
     current_config: UserConfig,
 ) -> set[str] | None:
     action = str(command.get("action") or "").strip()
+    if action in FILE_MANAGEMENT_COMMANDS:
+        return {"settings", "fileManagement"}
     if action == "save":
         changed_keys = _changed_user_config_keys(previous_config, current_config)
         return _partial_domains_for_changed_user_config(changed_keys)
@@ -5970,6 +6028,55 @@ def _renderer_settings_status(
     return payload
 
 
+FILE_MANAGEMENT_COMMANDS = {
+    "scan",
+    "preview",
+    "execute",
+    "cancel",
+    "archive_session",
+    "delete_session",
+    "remove_plugin",
+    "logout",
+}
+
+
+def _handle_renderer_file_management_command(
+    command: Mapping[str, Any],
+    context: RuntimeContext,
+) -> dict[str, object]:
+    action = str(command.get("action") or "").strip()
+    worker = getattr(context, "file_manager_worker", None)
+    if action not in FILE_MANAGEMENT_COMMANDS:
+        return _renderer_settings_status(
+            f"无法处理未知存储命令：{action or 'empty'}",
+            kind="error",
+        )
+    if worker is None:
+        return _renderer_settings_status(
+            "当前 HUD 不是 Renderer 存储管理模式。",
+            kind="error",
+        )
+    try:
+        accepted = worker.enqueue(command)
+    except FileManagementError as exc:
+        return _renderer_settings_status(str(exc), kind="error")
+    request_id = str(accepted.get("requestId") or command.get("id") or "")
+    labels = {
+        "scan": "存储扫描已排队；不会读取文件内容。",
+        "preview": "清理预览已排队；执行前会再次校验。",
+        "execute": "清理请求已排队；Codex 运行期间不会直接修改文件。",
+        "cancel": "已请求取消当前存储操作。",
+        "archive_session": "会话归档请求已排队，将调用官方 Codex 动作。",
+        "delete_session": "会话删除请求已排队，将调用官方 Codex 动作。",
+        "remove_plugin": "插件移除请求已排队，将调用官方 Codex 动作。",
+        "logout": "退出登录请求已排队，将调用官方 Codex 动作。",
+    }
+    status = _renderer_settings_status(labels.get(action, "存储命令已排队。"))
+    status["fileManagementRequestId"] = request_id
+    status["fileManagementAction"] = action
+    return status
+
+
 def _handle_renderer_settings_command(
     command: Mapping[str, Any],
     context: RuntimeContext,
@@ -5980,6 +6087,8 @@ def _handle_renderer_settings_command(
 ) -> dict[str, object]:
     action = str(command.get("action") or "").strip()
     try:
+        if action in FILE_MANAGEMENT_COMMANDS:
+            return _handle_renderer_file_management_command(command, context)
         if action == "save":
             config = _config_from_settings_payload(
                 context.settings_store.load(),
@@ -6311,6 +6420,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         provider_registry=provider_registry,
         pre_send_estimator=pre_send_estimator,
         runtime_errors=RuntimeErrorRegistry(),
+        renderer_mode=renderer_active_session_bridge,
     )
 
 
@@ -7124,6 +7234,7 @@ def run_renderer_hud_session(
                         "renderer_layout_changed",
                         "renderer_theme_changed",
                         "session_snapshot_hydrated",
+                        "file_management_changed",
                     }:
                         command_refresh_requested.set()
                     elif event_type == "active_session_changed":
@@ -7796,6 +7907,11 @@ def run_renderer_hud_session(
                     if action in {"installDesktopOverlay", "enableDesktopOverlay"}:
                         request.request_domains("settings", "overlay", force_fast=True)
                         return
+                    if action in FILE_MANAGEMENT_COMMANDS:
+                        request.request_domains(
+                            "settings", "fileManagement", force_fast=True
+                        )
+                        return
                     if action == "dismissWarningsToday":
                         request.request_domains(
                             "currentSession",
@@ -7867,6 +7983,13 @@ def run_renderer_hud_session(
                         request.theme_payload = dict(theme)
                         request.request_domains("settings", force_fast=True)
 
+                def handle_file_management_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_domains("fileManagement", force_fast=True)
+
                 def handle_active_work_refresh_requested(
                     event: object,
                     request: _RendererEventRefreshRequest,
@@ -7887,6 +8010,7 @@ def run_renderer_hud_session(
                     "settings_command_received": handle_settings_command_received,
                     "update_state_changed": handle_update_state_changed,
                     "renderer_theme_changed": handle_renderer_theme_changed,
+                    "file_management_changed": handle_file_management_changed,
                 }
 
                 def refresh_request_for_events(
@@ -8334,6 +8458,9 @@ def run_renderer_hud_session(
                             desktop_overlay_dependency=_desktop_overlay_dependency_status(),
                             provider_registry=_provider_registry_payload(context),
                             app_provider=str(getattr(context, "app_provider", "") or ""),
+                            file_management=dict(
+                                getattr(context, "file_management_payload", {}) or {}
+                            ),
                         )
                     update_ms = (time.perf_counter() - update_started) * 1000.0
                     if not lightweight_active_session_refresh:
@@ -8420,6 +8547,9 @@ def run_renderer_hud_session(
                         desktop_overlay_dependency=_desktop_overlay_dependency_status(),
                         provider_registry=_provider_registry_payload(context),
                         app_provider=str(getattr(context, "app_provider", "") or ""),
+                        file_management=dict(
+                            getattr(context, "file_management_payload", {}) or {}
+                        ),
                     ).to_domain_json(*sorted(inputs.event_refresh_request.domains))
                     if not payload:
                         return True
