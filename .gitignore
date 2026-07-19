@@ -45,6 +45,7 @@ Thumbs.db
 .codebase-memory/
 
 # Local debug and mockup artifacts
+/tmp/
 /.tmp-*.png
 /[0-9].png
 /docs/mockups/
