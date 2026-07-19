@@ -61,6 +61,7 @@ class UserConfigStoreTests(unittest.TestCase):
                         "pricing": {
                             "input": 1.25,
                             "cached": 0.125,
+                            "cache_creation": 1.5625,
                             "completion": 7.5,
                             "reasoning": 8.0,
                         },
@@ -71,6 +72,7 @@ class UserConfigStoreTests(unittest.TestCase):
 
         self.assertEqual(prices["custom-model"].input, 1.25)
         self.assertEqual(prices["custom-model"].cached_input, 0.125)
+        self.assertEqual(prices["custom-model"].cache_write, 1.5625)
         self.assertEqual(prices["custom-model"].output, 7.5)
         self.assertEqual(prices["custom-model"].reasoning, 8.0)
 

@@ -10,28 +10,52 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 MODEL_PRICES: dict[str, dict[str, float]] = {
+    "gpt-5.6-sol": {
+        "input": 5.00,
+        "cached_input": 0.50,
+        "cache_write": 6.25,
+        "output": 30.00,
+        "reasoning": 30.00,
+    },
+    "gpt-5.6-terra": {
+        "input": 2.50,
+        "cached_input": 0.25,
+        "cache_write": 3.125,
+        "output": 15.00,
+        "reasoning": 15.00,
+    },
+    "gpt-5.6-luna": {
+        "input": 1.00,
+        "cached_input": 0.10,
+        "cache_write": 1.25,
+        "output": 6.00,
+        "reasoning": 6.00,
+    },
     "gpt-5.5": {
         "input": 5.00,
         "cached_input": 0.50,
+        "cache_write": 0.00,
         "output": 30.00,
         "reasoning": 30.00,
     },
     "gpt-5.4": {
         "input": 2.50,
         "cached_input": 0.25,
+        "cache_write": 0.00,
         "output": 15.00,
         "reasoning": 15.00,
     },
     "gpt-5.4-mini": {
         "input": 0.75,
         "cached_input": 0.075,
+        "cache_write": 0.00,
         "output": 4.50,
         "reasoning": 4.50,
     },
 }
 
 
-PRICE_FIELDS = ("input", "cached_input", "output", "reasoning")
+REQUIRED_PRICE_FIELDS = ("input", "cached_input", "output")
 
 
 @dataclass(frozen=True)
@@ -89,8 +113,13 @@ def _model_matches(pattern: str, model_name: str) -> tuple[bool, int]:
 
 def _price_profile_from_mapping(key: str, value: Mapping[str, Any]) -> _PriceProfile:
     prices = {
-        field: float(value[field])
-        for field in PRICE_FIELDS
+        "input": float(value["input"]),
+        "cached_input": float(value["cached_input"]),
+        "cache_write": float(value.get("cache_write", 0.0)),
+        "output": float(value["output"]),
+        # Kept in the profile for settings compatibility. Codex output_tokens
+        # already includes reasoning_output_tokens, so it is not billed twice.
+        "reasoning": float(value.get("reasoning", value["output"])),
     }
     model_pattern = str(
         value.get("model")
@@ -135,7 +164,7 @@ class UsageCalculator:
         self._price_profiles = [
             _price_profile_from_mapping(name, prices)
             for name, prices in self._model_prices.items()
-            if all(field in prices for field in PRICE_FIELDS)
+            if all(field in prices for field in REQUIRED_PRICE_FIELDS)
         ]
 
     def normalize_model_name(self, model_name: str) -> str:
@@ -198,6 +227,7 @@ class UsageCalculator:
         output_tokens: int,
         reasoning_tokens: int = 0,
         *,
+        cache_write_tokens: int = 0,
         provider: str = "",
         base_url: str = "",
     ) -> float:
@@ -213,14 +243,18 @@ class UsageCalculator:
 
         total_input_tokens = max(0, int(input_tokens or 0))
         cached_tokens = max(0, min(int(cached_input_tokens or 0), total_input_tokens))
-        uncached_tokens = total_input_tokens - cached_tokens
+        cache_write_count = max(
+            0,
+            min(int(cache_write_tokens or 0), total_input_tokens - cached_tokens),
+        )
+        uncached_tokens = total_input_tokens - cached_tokens - cache_write_count
         output_count = max(0, int(output_tokens or 0))
-        reasoning_count = max(0, int(reasoning_tokens or 0))
+        del reasoning_tokens
 
         total_cost = (
             (uncached_tokens * prices["input"])
             + (cached_tokens * prices["cached_input"])
+            + (cache_write_count * prices["cache_write"])
             + (output_count * prices["output"])
-            + (reasoning_count * prices["reasoning"])
         ) / 1_000_000.0
         return round(total_cost, 6)

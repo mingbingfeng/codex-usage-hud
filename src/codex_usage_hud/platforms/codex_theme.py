@@ -102,12 +102,12 @@ THEME_PROBE_SCRIPT = r"""
     classList,
     colorScheme,
     cssTheme: {
-      accent: colorValue("--vscode-focusBorder", "--vscode-button-background", "--vscode-textLink-foreground"),
-      surface: colorValue("--vscode-editor-background", "--vscode-sideBar-background", "--vscode-panel-background", "--vscode-activityBar-background"),
-      ink: colorValue("--vscode-editor-foreground", "--vscode-foreground", "--vscode-sideBarTitle-foreground"),
-      diffAdded: colorValue("--vscode-gitDecoration-addedResourceForeground", "--vscode-terminal-ansiGreen"),
-      diffRemoved: colorValue("--vscode-gitDecoration-deletedResourceForeground", "--vscode-terminal-ansiRed"),
-      skill: colorValue("--vscode-terminal-ansiMagenta", "--vscode-textLink-foreground", "--vscode-terminal-ansiBlue"),
+      accent: colorValue("--codex-base-accent", "--color-text-accent", "--vscode-focusBorder", "--vscode-button-background", "--vscode-textLink-foreground"),
+      surface: colorValue("--codex-base-surface", "--color-background-surface", "--vscode-editor-background", "--vscode-sideBar-background", "--vscode-panel-background", "--vscode-activityBar-background"),
+      ink: colorValue("--codex-base-ink", "--color-text-foreground", "--vscode-editor-foreground", "--vscode-foreground", "--vscode-sideBarTitle-foreground"),
+      diffAdded: colorValue("--color-decoration-added", "--vscode-gitDecoration-addedResourceForeground", "--vscode-terminal-ansiGreen"),
+      diffRemoved: colorValue("--color-decoration-deleted", "--vscode-gitDecoration-deletedResourceForeground", "--vscode-terminal-ansiRed"),
+      skill: colorValue("--color-accent-purple", "--vscode-terminal-ansiMagenta", "--vscode-textLink-foreground", "--vscode-terminal-ansiBlue"),
     },
   };
 })()

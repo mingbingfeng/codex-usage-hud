@@ -33,6 +33,20 @@ The probe also reads the current CSS variables from the live document so the
 HUD can follow the theme that is actually rendered, not just the last saved
 setting.
 
+Live renderer updates are event-driven. Codex applies appearance changes to
+the document root by changing its `electron-light` / `electron-dark` class and
+rewriting the inline `--codex-base-*` / `--color-*` theme variables. The HUD
+uses a targeted `MutationObserver` for those root attributes, plus a
+`matchMedia("(prefers-color-scheme: dark)")` listener for system-mode changes,
+and pushes the resulting snapshot through a CDP runtime binding. There is no
+recurring theme poll while the page is unchanged. The same renderer path is
+used on Windows and macOS.
+
+The `appearance*` local-storage keys remain a compatibility source for Codex
+versions that expose them. They are not the primary live signal because a
+same-document storage write does not emit a `storage` event and current Codex
+versions may keep those keys elsewhere.
+
 Renderer HUD is the primary sync path because renderer mode already requires
 CDP. When CDP is unavailable, the probe now falls back to the persisted Codex
 desktop settings in `CODEX_HOME/config.toml` and reads the saved:

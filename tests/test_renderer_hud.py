@@ -246,6 +246,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-price-advanced", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="provider"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="base_url"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-price-field="cache_write"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("缓存写入", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn('data-price-field="reasoning"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("unknownPriceModels", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-add-detected-model", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-exit"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -1237,12 +1240,67 @@ class RendererHudPayloadTests(unittest.TestCase):
 
     def test_renderer_script_listens_for_live_theme_changes(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
+        theme_section = script.split("function rendererThemeSnapshot()", 1)[1].split(
+            "function normalizeThreadId(value)",
+            1,
+        )[0]
 
         self.assertIn('const themeBindingName = "codexUsageHudTheme";', script)
         self.assertIn("new MutationObserver", script)
         self.assertIn('attributeFilter: ["class", "style", "data-theme", "data-color-scheme"]', script)
         self.assertIn("matchMedia?.(\"(prefers-color-scheme: dark)\")", script)
         self.assertIn("window.__codexUsageHudReportTheme", script)
+        self.assertNotIn("setInterval(", theme_section)
+
+    def test_renderer_theme_observer_is_owned_by_theme_lifecycle(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+        layout_section = script.split("function refreshLayoutObservers()", 1)[1].split(
+            "function stopBootstrapObserver()",
+            1,
+        )[0]
+        stale_section = script.split("function scheduleStaleGuard(payload)", 1)[1].split(
+            "function normalizePayloadDomains(payload)",
+            1,
+        )[0]
+        remove_section = script.split("window.__codexUsageHudRemove = () =>", 1)[1].split(
+            "window[scheduleName] =",
+            1,
+        )[0]
+
+        self.assertNotIn("themeObserverName", layout_section)
+        self.assertNotIn("themeMediaQueryName", layout_section)
+        self.assertNotIn("themeStorageHandlerName", layout_section)
+        self.assertNotIn("themeTimerName", stale_section)
+        self.assertIn("stopRendererThemeObserver();", remove_section)
+        self.assertIn("clearTimeout(window[themeTimerName] || 0);", script)
+
+    def test_renderer_theme_snapshot_prefers_current_codex_chrome_tokens(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn(
+            'accent: colorValue("--codex-base-accent", "--color-text-accent", "--vscode-focusBorder"',
+            script,
+        )
+        self.assertIn(
+            'surface: colorValue("--codex-base-surface", "--color-background-surface", "--vscode-editor-background"',
+            script,
+        )
+        self.assertIn(
+            'ink: colorValue("--codex-base-ink", "--color-text-foreground", "--vscode-editor-foreground"',
+            script,
+        )
+        self.assertIn(
+            'diffAdded: colorValue("--color-decoration-added", "--vscode-gitDecoration-addedResourceForeground"',
+            script,
+        )
+        self.assertIn(
+            'diffRemoved: colorValue("--color-decoration-deleted", "--vscode-gitDecoration-deletedResourceForeground"',
+            script,
+        )
+        self.assertIn(
+            'skill: colorValue("--color-accent-purple", "--vscode-terminal-ansiMagenta"',
+            script,
+        )
 
     def test_renderer_theme_binding_converts_probe_payload(self) -> None:
         captured: list[dict[str, object]] = []

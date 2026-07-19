@@ -374,6 +374,20 @@ class JsonlSessionParserTests(unittest.TestCase):
             token_count("2026-05-28T00:00:01Z", 100, 0, 0, 0, 100, 155),
             token_count("2026-05-28T00:00:02Z", 200, 100, 10, 2, 210, 365),
         ]
+        records[2]["payload"]["info"]["total_token_usage"] = {
+            "input_tokens": 150,
+            "cached_input_tokens": 0,
+            "output_tokens": 5,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 155,
+        }
+        records[3]["payload"]["info"]["total_token_usage"] = {
+            "input_tokens": 350,
+            "cached_input_tokens": 100,
+            "output_tokens": 15,
+            "reasoning_output_tokens": 2,
+            "total_tokens": 365,
+        }
         for index, item in enumerate(records, 1):
             item["_line"] = index
             item["_dt"] = parse_timestamp(item["timestamp"])
@@ -390,7 +404,49 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(summary.cached_tokens, 100)
         self.assertEqual(summary.output_tokens, 10)
         self.assertEqual(summary.reasoning_tokens, 2)
-        self.assertEqual(summary.cost_usd, 0.00141)
+        self.assertEqual(summary.cost_usd, 0.00135)
+
+    def test_usage_events_skip_subagent_replayed_parent_history(self) -> None:
+        parser = JsonlSessionParser()
+        records = [
+            record(
+                "2026-07-18T13:00:00Z",
+                "session_meta",
+                {
+                    "id": "child-thread",
+                    "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}},
+                },
+            ),
+            record("2026-07-18T13:00:01Z", "turn_context", {"model": "gpt-5.6-sol"}),
+            token_count("2026-07-18T13:00:02Z", 100, 80, 10, 4, 110, 110),
+            record(
+                "2026-07-18T13:00:03Z",
+                "inter_agent_communication_metadata",
+                {},
+            ),
+            token_count("2026-07-18T13:00:04Z", 40, 32, 5, 2, 45, 155),
+        ]
+        records[4]["payload"]["info"]["total_token_usage"] = {
+            "input_tokens": 140,
+            "cached_input_tokens": 112,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 15,
+            "reasoning_output_tokens": 6,
+            "total_tokens": 155,
+        }
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        events = parser.usage_events(records)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].input_tokens, 40)
+        self.assertEqual(events[0].cached_tokens, 32)
+        self.assertEqual(events[0].output_tokens, 5)
+        self.assertEqual(events[0].reasoning_tokens, 2)
+        self.assertEqual(events[0].total_tokens, 45)
+        self.assertEqual(events[0].cost_usd, 0.000206)
 
     def test_token_rounds_since_latest_task_only_include_current_task(self) -> None:
         parser = JsonlSessionParser()

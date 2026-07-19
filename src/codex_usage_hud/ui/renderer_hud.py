@@ -3365,12 +3365,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       classList,
       colorScheme,
       cssTheme: {
-        accent: colorValue("--vscode-focusBorder", "--vscode-button-background", "--vscode-textLink-foreground"),
-        surface: colorValue("--vscode-editor-background", "--vscode-sideBar-background", "--vscode-panel-background", "--vscode-activityBar-background"),
-        ink: colorValue("--vscode-editor-foreground", "--vscode-foreground", "--vscode-sideBarTitle-foreground"),
-        diffAdded: colorValue("--vscode-gitDecoration-addedResourceForeground", "--vscode-terminal-ansiGreen"),
-        diffRemoved: colorValue("--vscode-gitDecoration-deletedResourceForeground", "--vscode-terminal-ansiRed"),
-        skill: colorValue("--vscode-terminal-ansiMagenta", "--vscode-textLink-foreground", "--vscode-terminal-ansiBlue"),
+        accent: colorValue("--codex-base-accent", "--color-text-accent", "--vscode-focusBorder", "--vscode-button-background", "--vscode-textLink-foreground"),
+        surface: colorValue("--codex-base-surface", "--color-background-surface", "--vscode-editor-background", "--vscode-sideBar-background", "--vscode-panel-background", "--vscode-activityBar-background"),
+        ink: colorValue("--codex-base-ink", "--color-text-foreground", "--vscode-editor-foreground", "--vscode-foreground", "--vscode-sideBarTitle-foreground"),
+        diffAdded: colorValue("--color-decoration-added", "--vscode-gitDecoration-addedResourceForeground", "--vscode-terminal-ansiGreen"),
+        diffRemoved: colorValue("--color-decoration-deleted", "--vscode-gitDecoration-deletedResourceForeground", "--vscode-terminal-ansiRed"),
+        skill: colorValue("--color-accent-purple", "--vscode-terminal-ansiMagenta", "--vscode-textLink-foreground", "--vscode-terminal-ansiBlue"),
       },
     };
   }
@@ -3397,17 +3397,28 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }, 0);
   }
 
+  function stopRendererThemeObserver() {
+    window[themeObserverName]?.disconnect?.();
+    const mediaQuery = window[themeMediaQueryName];
+    const mediaQueryHandler = window[themeMediaQueryHandlerName];
+    if (mediaQuery && mediaQueryHandler) {
+      if (typeof mediaQuery.removeEventListener === "function") mediaQuery.removeEventListener("change", mediaQueryHandler);
+      else mediaQuery.removeListener?.(mediaQueryHandler);
+    }
+    const storageHandler = window[themeStorageHandlerName];
+    if (storageHandler) window.removeEventListener("storage", storageHandler);
+    clearTimeout(window[themeTimerName] || 0);
+    delete window[themeObserverName];
+    delete window[themeMediaQueryName];
+    delete window[themeMediaQueryHandlerName];
+    delete window[themeStorageHandlerName];
+    delete window[themeTimerName];
+  }
+
   function startRendererThemeObserver() {
     const root = document.documentElement;
     if (!root) return false;
-    window[themeObserverName]?.disconnect?.();
-    const previousMediaQuery = window[themeMediaQueryName];
-    const previousMediaQueryHandler = window[themeMediaQueryHandlerName];
-    if (previousMediaQuery && previousMediaQueryHandler) {
-      if (typeof previousMediaQuery.removeEventListener === "function") previousMediaQuery.removeEventListener("change", previousMediaQueryHandler);
-      else previousMediaQuery.removeListener?.(previousMediaQueryHandler);
-    }
-    if (window[themeStorageHandlerName]) window.removeEventListener("storage", window[themeStorageHandlerName]);
+    stopRendererThemeObserver();
     window[themeObserverName] = new MutationObserver(() => {
       scheduleRendererThemeReport("dom-theme-change");
     });
@@ -4281,7 +4292,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function priceRowsHtml(settings) {
     const prices = settings.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
     const entries = Object.entries(prices);
-    if (!entries.length) entries.push(["gpt-5.5", { input: 5, cached_input: 0.5, output: 30, reasoning: 30 }]);
+    if (!entries.length) entries.push(["gpt-5.6-sol", { input: 5, output: 30, cached_input: 0.5, cache_write: 6.25 }]);
     return entries.map(([key, price]) => {
       const model = String(price?.model || key || "");
       const provider = String(price?.provider || "");
@@ -4290,9 +4301,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       <div class="codex-usage-hud-price-row" data-price-row="true" data-price-key="${escapeHtml(key)}">
         <input data-price-field="model" value="${escapeHtml(model)}" aria-label="模型">
         <input data-price-field="input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.input ?? 0)}" aria-label="输入单价">
-        <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cached_input ?? 0)}" aria-label="缓存输入单价">
         <input data-price-field="output" type="number" min="0" step="0.000001" value="${escapeHtml(price?.output ?? 0)}" aria-label="输出单价">
-        <input data-price-field="reasoning" type="number" min="0" step="0.000001" value="${escapeHtml(price?.reasoning ?? 0)}" aria-label="推理单价">
+        <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cached_input ?? 0)}" aria-label="缓存读取单价">
+        <input data-price-field="cache_write" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cache_write ?? 0)}" aria-label="缓存写入单价">
         <input class="codex-usage-hud-price-advanced" data-price-field="provider" value="${escapeHtml(provider)}" aria-label="渠道">
         <input class="codex-usage-hud-price-advanced" data-price-field="base_url" value="${escapeHtml(baseUrl)}" aria-label="Base URL">
       </div>
@@ -4468,7 +4479,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       </div>
       <div class="codex-usage-hud-price-table">
         <div class="codex-usage-hud-price-header">
-          <div>模型</div><div>输入</div><div>缓存</div><div>输出</div><div>推理</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
+          <div>模型</div><div>输入</div><div>输出</div><div>缓存读取</div><div>缓存写入</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
         </div>
         <div data-price-rows="true">${priceRowsHtml(providerSettings)}</div>
         ${detectedPriceModelsHtml(providerSettings)}
@@ -4520,9 +4531,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       modelPrices[key] = {
         model,
         input: field("input"),
-        cached_input: field("cached_input"),
         output: field("output"),
-        reasoning: field("reasoning"),
+        cached_input: field("cached_input"),
+        cache_write: field("cache_write"),
       };
       if (provider) modelPrices[key].provider = provider;
       if (baseUrl) modelPrices[key].base_url = baseUrl;
@@ -5136,9 +5147,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     row.innerHTML = `
       <input data-price-field="model" value="${escapeHtml(initialModel)}" aria-label="模型">
       <input data-price-field="input" type="number" min="0" step="0.000001" value="0" aria-label="输入单价">
-      <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="0" aria-label="缓存输入单价">
       <input data-price-field="output" type="number" min="0" step="0.000001" value="0" aria-label="输出单价">
-      <input data-price-field="reasoning" type="number" min="0" step="0.000001" value="0" aria-label="推理单价">
+      <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="0" aria-label="缓存读取单价">
+      <input data-price-field="cache_write" type="number" min="0" step="0.000001" value="0" aria-label="缓存写入单价">
       <input class="codex-usage-hud-price-advanced" data-price-field="provider" value="" aria-label="渠道">
       <input class="codex-usage-hud-price-advanced" data-price-field="base_url" value="" aria-label="Base URL">
     `;
@@ -6846,14 +6857,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     observedComposerNode = composerNode;
     window[mutationObserverName]?.disconnect?.();
     window[resizeObserverName]?.disconnect?.();
-    window[themeObserverName]?.disconnect?.();
-    const themeMediaQuery = window[themeMediaQueryName];
-    const themeMediaQueryHandler = window[themeMediaQueryHandlerName];
-    if (themeMediaQuery && themeMediaQueryHandler) {
-      if (typeof themeMediaQuery.removeEventListener === "function") themeMediaQuery.removeEventListener("change", themeMediaQueryHandler);
-      else themeMediaQuery.removeListener?.(themeMediaQueryHandler);
-    }
-    if (window[themeStorageHandlerName]) window.removeEventListener("storage", window[themeStorageHandlerName]);
     window[mutationObserverName] = new MutationObserver(handleLayoutMutations);
     const mutationOptions = {
       childList: true,
@@ -7776,7 +7779,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function scheduleStaleGuard(payload) {
     clearTimeout(window[staleTimerName] || 0);
-    clearTimeout(window[themeTimerName] || 0);
     if (!payloadNeedsStaleGuard(payload)) return;
     window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250);
   }
@@ -8007,6 +8009,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     window.removeEventListener("scroll", window[scrollHandlerName], true);
     window[mutationObserverName]?.disconnect?.();
     window[resizeObserverName]?.disconnect?.();
+    stopRendererThemeObserver();
     try {
       removeActiveSessionWatchers();
     } catch (_) {}
@@ -10188,6 +10191,7 @@ def _request_cost(snapshot: ParsedSession) -> tuple[float | None, bool]:
         return request.cost_usd, False
     input_tokens = request.input_tokens
     cached_tokens = request.cached_tokens
+    cache_write_tokens = request.cache_write_tokens
     output_tokens = request.output_tokens or 0
     if input_tokens is None or request.estimated:
         input_tokens = max(
@@ -10197,12 +10201,17 @@ def _request_cost(snapshot: ParsedSession) -> tuple[float | None, bool]:
             + snapshot.estimate.tool_tokens,
         )
         cached_tokens = min(snapshot.confirmed.last_cached, int(input_tokens or 0))
+        cache_write_tokens = min(
+            snapshot.confirmed.last_cache_write,
+            max(0, int(input_tokens or 0) - int(cached_tokens or 0)),
+        )
     cost = _COST_ESTIMATOR.calculate(
         request.model,
         input_tokens,
         cached_tokens,
         output_tokens,
         request.reasoning_tokens or 0,
+        cache_write_tokens=cache_write_tokens or 0,
     )
     return cost, True
 
@@ -10228,6 +10237,18 @@ def _round_from_snapshot(snapshot: ParsedSession) -> RequestRound:
             snapshot.request.cached_tokens
             if snapshot.request.cached_tokens is not None
             else min(snapshot.confirmed.last_cached, int(input_tokens or 0))
+        ),
+        cache_write_tokens=(
+            snapshot.request.cache_write_tokens
+            if snapshot.request.cache_write_tokens is not None
+            else min(
+                snapshot.confirmed.last_cache_write,
+                max(
+                    0,
+                    int(input_tokens or 0)
+                    - int(snapshot.request.cached_tokens or snapshot.confirmed.last_cached or 0),
+                ),
+            )
         ),
         output_tokens=output_tokens,
         reasoning_tokens=reasoning_tokens,
@@ -10267,6 +10288,7 @@ def _task_total(snapshot: ParsedSession) -> tuple[int, int, int, int, int, float
                 item.cached_tokens or 0,
                 item.output_tokens or 0,
                 item.reasoning_tokens or 0,
+                cache_write_tokens=item.cache_write_tokens or 0,
             )
             item_estimated = True
         if item_cost is not None:
@@ -10293,6 +10315,7 @@ def _session_cost(snapshot: ParsedSession) -> float | None:
         snapshot.confirmed.cumulative_cached,
         snapshot.confirmed.cumulative_output,
         snapshot.confirmed.cumulative_reasoning,
+        cache_write_tokens=snapshot.confirmed.cumulative_cache_write,
     )
 
 
@@ -10430,6 +10453,7 @@ def _round_entry_parts(
             item.cached_tokens or 0,
             item.output_tokens or 0,
             item.reasoning_tokens or 0,
+            cache_write_tokens=item.cache_write_tokens or 0,
         )
     time_text = _round_time_text(item, now=now)
     index_text = str(item.index)
@@ -10493,6 +10517,7 @@ def _round_entry_widths(
                 item.cached_tokens or 0,
                 item.output_tokens or 0,
                 item.reasoning_tokens or 0,
+                cache_write_tokens=item.cache_write_tokens or 0,
             )
         money_width = max(money_width, len(_format_fixed_money(cost, estimated)))
         total_width = max(total_width, len(_fixed_token_total(item.total_tokens)))
@@ -10656,15 +10681,16 @@ def _component_cost(
     *,
     input_tokens: int = 0,
     cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
     output_tokens: int = 0,
-    reasoning_tokens: int = 0,
 ) -> float | None:
     return _COST_ESTIMATOR.calculate(
         snapshot.request.model,
         input_tokens,
         cached_tokens,
         output_tokens,
-        reasoning_tokens,
+        0,
+        cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -10672,14 +10698,29 @@ def _top_session_composition(snapshot: ParsedSession) -> str:
     confirmed = snapshot.confirmed
     input_tokens = int(confirmed.cumulative_input or 0)
     cached_tokens = max(0, min(int(confirmed.cumulative_cached or 0), input_tokens))
-    uncached_tokens = max(0, input_tokens - cached_tokens)
+    cache_write_tokens = max(
+        0,
+        min(
+            int(confirmed.cumulative_cache_write or 0),
+            input_tokens - cached_tokens,
+        ),
+    )
+    uncached_tokens = max(0, input_tokens - cached_tokens - cache_write_tokens)
     output_tokens = int(confirmed.cumulative_output or 0)
-    reasoning_tokens = int(confirmed.cumulative_reasoning or 0)
     components = [
         (
             "↑↻",
             cached_tokens,
             _component_cost(snapshot, input_tokens=cached_tokens, cached_tokens=cached_tokens),
+        ),
+        (
+            "↑+",
+            cache_write_tokens,
+            _component_cost(
+                snapshot,
+                input_tokens=cache_write_tokens,
+                cache_write_tokens=cache_write_tokens,
+            ),
         ),
         (
             "↑",
@@ -10690,11 +10731,6 @@ def _top_session_composition(snapshot: ParsedSession) -> str:
             "↓",
             output_tokens,
             _component_cost(snapshot, output_tokens=output_tokens),
-        ),
-        (
-            "◇",
-            reasoning_tokens,
-            _component_cost(snapshot, reasoning_tokens=reasoning_tokens),
         ),
     ]
     components = [item for item in components if item[1] > 0]
@@ -10728,6 +10764,7 @@ def _round_cost_value(item: RequestRound, fallback_model: str) -> tuple[float | 
             item.cached_tokens or 0,
             item.output_tokens or 0,
             item.reasoning_tokens or 0,
+            cache_write_tokens=item.cache_write_tokens or 0,
         )
         estimated = True
     return cost, estimated

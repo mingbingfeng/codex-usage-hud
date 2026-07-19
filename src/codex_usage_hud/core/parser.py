@@ -233,11 +233,13 @@ class ConfirmedTokens:
     last_total: int = 0
     last_input: int = 0
     last_cached: int = 0
+    last_cache_write: int = 0
     last_output: int = 0
     last_reasoning: int = 0
     cumulative_total: int = 0
     cumulative_input: int = 0
     cumulative_cached: int = 0
+    cumulative_cache_write: int = 0
     cumulative_output: int = 0
     cumulative_reasoning: int = 0
     cumulative_cost_usd: float | None = None
@@ -267,6 +269,7 @@ class RequestTokens:
     model: str = ""
     input_tokens: int | None = None
     cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
     output_tokens: int | None = 0
     reasoning_tokens: int | None = None
     total_tokens: int | None = 0
@@ -293,6 +296,7 @@ class RequestRound:
     reasoning_tokens: int | None
     total_tokens: int | None
     estimated: bool
+    cache_write_tokens: int | None = 0
     cost_usd: float | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -313,6 +317,8 @@ class UsageEvent:
     total_tokens: int
     cost_usd: float | None = None
     model_provider: str = "unknown"
+    cache_write_tokens: int = 0
+    line: int = 0
 
 
 @dataclass
@@ -322,6 +328,7 @@ class UsageSummary:
     tokens: int = 0
     input_tokens: int = 0
     cached_tokens: int = 0
+    cache_write_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
     cost_usd: float = 0.0
@@ -521,6 +528,7 @@ class CostEstimator:
         output_tokens: int | None,
         reasoning_tokens: int | None = 0,
         *,
+        cache_write_tokens: int | None = 0,
         provider: str = "",
         base_url: str = "",
     ) -> float | None:
@@ -533,6 +541,7 @@ class CostEstimator:
                 cached_input_tokens=cached_tokens or 0,
                 output_tokens=output_tokens,
                 reasoning_tokens=reasoning_tokens or 0,
+                cache_write_tokens=cache_write_tokens or 0,
                 provider=provider,
                 base_url=base_url,
             )
@@ -1097,112 +1106,72 @@ class JsonlSessionParser:
                 return str(payload.get("model") or "")
         return ""
 
-    def apply_confirmed_tokens(
-        self, snapshot: ParsedSession, records: Sequence[Mapping[str, Any]]
-    ) -> int:
-        """Apply confirmed token_count events and return the last event index."""
-        last_token_index = -1
-        current_model = ""
-        session_cost = 0.0
-        has_session_cost = False
-        last_cumulative_seen: int | None = None
-        seen_usage_keys: set[tuple[Any, ...]] = set()
-
-        for index, record in enumerate(records):
+    @staticmethod
+    def _history_replay_boundary(
+        records: Sequence[Mapping[str, Any]],
+    ) -> int | None:
+        """Return the first live-thread record after a forked history snapshot."""
+        carries_history_snapshot = False
+        for record in records:
+            if record.get("type") != "session_meta":
+                continue
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
-                continue
-            if record.get("type") == "turn_context":
-                current_model = str(payload.get("model") or current_model)
-                continue
-            if record.get("type") != "event_msg" or payload.get("type") != "token_count":
-                continue
-
-            info = payload.get("info") or {}
-            if not isinstance(info, Mapping):
-                continue
-            last_usage = info.get("last_token_usage") or {}
-            cumulative = info.get("total_token_usage") or {}
-            if not isinstance(last_usage, Mapping) or not isinstance(cumulative, Mapping):
-                continue
-
-            last_input = _as_int(last_usage.get("input_tokens"))
-            last_cached = _as_int(last_usage.get("cached_input_tokens"))
-            last_output = _as_int(last_usage.get("output_tokens"))
-            last_reasoning = _as_int(last_usage.get("reasoning_output_tokens"))
-            last_total = _as_int(
-                last_usage.get("total_tokens"), last_input + last_output
+                break
+            thread_id = str(
+                payload.get("id")
+                or payload.get("thread_id")
+                or payload.get("threadId")
+                or payload.get("session_id")
+                or payload.get("sessionId")
+                or ""
             )
-            cumulative_total = _as_int(cumulative.get("total_tokens"))
-            if not (last_input or last_output or last_reasoning):
-                continue
-            if cumulative_total:
-                if (
-                    last_cumulative_seen is not None
-                    and cumulative_total <= last_cumulative_seen
-                ):
-                    continue
-                last_cumulative_seen = cumulative_total
-            else:
-                usage_key = (
-                    current_model,
-                    last_input,
-                    last_cached,
-                    last_output,
-                    last_reasoning,
-                    last_total,
-                )
-                if usage_key in seen_usage_keys:
-                    continue
-                seen_usage_keys.add(usage_key)
-
-            last_cost = self.cost_estimator.calculate(
-                current_model,
-                last_input,
-                last_cached,
-                last_output,
-                last_reasoning,
-                provider=snapshot.model_provider,
+            session_id = str(
+                payload.get("session_id") or payload.get("sessionId") or ""
             )
-            if last_cost is not None:
-                session_cost += last_cost
-                has_session_cost = True
+            source = payload.get("source")
+            carries_history_snapshot = bool(payload.get("forked_from_id")) or (
+                isinstance(source, Mapping) and "subagent" in source
+            ) or bool(session_id and thread_id and session_id != thread_id)
+            break
+        if not carries_history_snapshot:
+            return None
 
-            last_token_index = index
-            snapshot.token_events += 1
-            snapshot.confirmed = ConfirmedTokens(
-                last_total=last_total,
-                last_input=last_input,
-                last_cached=last_cached,
-                last_output=last_output,
-                last_reasoning=last_reasoning,
-                cumulative_total=cumulative_total,
-                cumulative_input=_as_int(cumulative.get("input_tokens")),
-                cumulative_cached=_as_int(cumulative.get("cached_input_tokens")),
-                cumulative_output=_as_int(cumulative.get("output_tokens")),
-                cumulative_reasoning=_as_int(
-                    cumulative.get("reasoning_output_tokens")
-                ),
-                cumulative_cost_usd=session_cost if has_session_cost else None,
-                timestamp=record.get("_dt"),
-                line=_as_int(record.get("_line")),
-            )
-        return last_token_index
+        for index, record in enumerate(records):
+            record_type = str(record.get("type") or "")
+            payload = record.get("payload") or {}
+            if record_type.startswith("inter_agent_communication"):
+                return index
+            if (
+                record_type == "event_msg"
+                and isinstance(payload, Mapping)
+                and payload.get("type") == "thread_settings_applied"
+            ):
+                return index
+        return None
 
-    def usage_events(self, records: Sequence[Mapping[str, Any]]) -> list[UsageEvent]:
-        """Return deduplicated confirmed token usage events across a session."""
-        events: list[UsageEvent] = []
+    def _usage_event_records(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> list[tuple[int, UsageEvent]]:
+        """Return per-request deltas, excluding replayed parent-thread history."""
+        events: list[tuple[int, UsageEvent]] = []
         current_model = ""
         model_provider = self.session_model_provider(records)
-        last_cumulative_seen: int | None = None
-        seen_usage_keys: set[tuple[Any, ...]] = set()
+        replay_boundary = self._history_replay_boundary(records)
+        previous_total: tuple[int, int, int, int, int] | None = None
 
         for index, record in enumerate(records):
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
                 continue
             if record.get("type") == "turn_context":
-                current_model = str(payload.get("model") or current_model)
+                info = payload.get("info") or {}
+                current_model = str(
+                    payload.get("model")
+                    or (info.get("model") if isinstance(info, Mapping) else "")
+                    or current_model
+                )
                 continue
             if record.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
@@ -1210,64 +1179,120 @@ class JsonlSessionParser:
             info = payload.get("info") or {}
             if not isinstance(info, Mapping):
                 continue
-            usage = info.get("last_token_usage") or {}
-            cumulative = info.get("total_token_usage") or {}
-            if not isinstance(usage, Mapping) or not isinstance(cumulative, Mapping):
-                continue
-
-            input_tokens = _as_int(usage.get("input_tokens"))
-            cached_tokens = _as_int(usage.get("cached_input_tokens"))
-            output_tokens = _as_int(usage.get("output_tokens"))
-            reasoning_tokens = _as_int(usage.get("reasoning_output_tokens"))
-            total_tokens = _as_int(
-                usage.get("total_tokens"), input_tokens + output_tokens
+            current_model = str(
+                info.get("model")
+                or info.get("model_name")
+                or payload.get("model")
+                or current_model
             )
-            cumulative_total = _as_int(cumulative.get("total_tokens"))
-            if not (input_tokens or output_tokens or reasoning_tokens):
+            cumulative = info.get("total_token_usage")
+            usage = cumulative if isinstance(cumulative, Mapping) else info.get("last_token_usage")
+            if not isinstance(usage, Mapping):
                 continue
 
-            if cumulative_total:
-                if (
-                    last_cumulative_seen is not None
-                    and cumulative_total <= last_cumulative_seen
-                ):
-                    continue
-                last_cumulative_seen = cumulative_total
+            current = (
+                _as_int(usage.get("input_tokens")),
+                _as_int(
+                    usage.get("cached_input_tokens"),
+                    _as_int(usage.get("cache_read_input_tokens")),
+                ),
+                _as_int(
+                    usage.get("cache_write_input_tokens"),
+                    _as_int(usage.get("cache_creation_input_tokens")),
+                ),
+                _as_int(usage.get("output_tokens")),
+                _as_int(usage.get("reasoning_output_tokens")),
+            )
+            if isinstance(cumulative, Mapping):
+                if previous_total is None:
+                    delta = current
+                else:
+                    delta = tuple(
+                        max(0, current[position] - previous_total[position])
+                        for position in range(len(current))
+                    )
+                previous_total = current
             else:
-                usage_key = (
-                    current_model,
-                    input_tokens,
-                    cached_tokens,
-                    output_tokens,
-                    reasoning_tokens,
-                    total_tokens,
-                    record.get("_dt"),
-                )
-                if usage_key in seen_usage_keys:
-                    continue
-                seen_usage_keys.add(usage_key)
+                delta = current
+
+            input_tokens, cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens = delta
+            cached_tokens = min(cached_tokens, input_tokens)
+            cache_write_tokens = min(
+                cache_write_tokens,
+                max(0, input_tokens - cached_tokens),
+            )
+            if not (input_tokens or output_tokens):
+                continue
+            if replay_boundary is not None and index < replay_boundary:
+                continue
 
             events.append(
-                UsageEvent(
-                    timestamp=record.get("_dt"),
-                    model=current_model,
-                    input_tokens=input_tokens,
-                    cached_tokens=cached_tokens,
-                    output_tokens=output_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                    total_tokens=total_tokens,
-                    cost_usd=self.cost_estimator.calculate(
-                        current_model,
-                        input_tokens,
-                        cached_tokens,
-                        output_tokens,
-                        reasoning_tokens,
-                        provider=model_provider,
+                (
+                    index,
+                    UsageEvent(
+                        timestamp=record.get("_dt"),
+                        model=current_model,
+                        input_tokens=input_tokens,
+                        cached_tokens=cached_tokens,
+                        output_tokens=output_tokens,
+                        reasoning_tokens=min(reasoning_tokens, output_tokens),
+                        total_tokens=input_tokens + output_tokens,
+                        cost_usd=self.cost_estimator.calculate(
+                            current_model,
+                            input_tokens,
+                            cached_tokens,
+                            output_tokens,
+                            reasoning_tokens,
+                            cache_write_tokens=cache_write_tokens,
+                            provider=model_provider,
+                        ),
+                        model_provider=model_provider,
+                        cache_write_tokens=cache_write_tokens,
+                        line=_as_int(record.get("_line")),
                     ),
-                    model_provider=model_provider,
                 )
             )
         return events
+
+    def apply_confirmed_tokens(
+        self, snapshot: ParsedSession, records: Sequence[Mapping[str, Any]]
+    ) -> int:
+        """Apply confirmed per-request deltas and return the last event index."""
+        indexed_events = self._usage_event_records(records)
+        if not indexed_events:
+            return -1
+
+        session_cost = sum(
+            float(event.cost_usd or 0.0) for _index, event in indexed_events
+        )
+        has_session_cost = any(
+            event.cost_usd is not None for _index, event in indexed_events
+        )
+        last_token_index, last = indexed_events[-1]
+        events = [event for _index, event in indexed_events]
+        snapshot.token_events = len(events)
+        snapshot.confirmed = ConfirmedTokens(
+            last_total=last.total_tokens,
+            last_input=last.input_tokens,
+            last_cached=last.cached_tokens,
+            last_cache_write=last.cache_write_tokens,
+            last_output=last.output_tokens,
+            last_reasoning=last.reasoning_tokens,
+            cumulative_total=sum(event.total_tokens for event in events),
+            cumulative_input=sum(event.input_tokens for event in events),
+            cumulative_cached=sum(event.cached_tokens for event in events),
+            cumulative_cache_write=sum(event.cache_write_tokens for event in events),
+            cumulative_output=sum(event.output_tokens for event in events),
+            cumulative_reasoning=sum(event.reasoning_tokens for event in events),
+            cumulative_cost_usd=round(session_cost, 6) if has_session_cost else None,
+            timestamp=last.timestamp,
+            line=last.line,
+        )
+        return last_token_index
+
+    def usage_events(self, records: Sequence[Mapping[str, Any]]) -> list[UsageEvent]:
+        """Return confirmed per-request deltas across a session."""
+        return [event for _index, event in self._usage_event_records(records)]
 
     def summarize_usage_events(
         self,
@@ -1285,6 +1310,7 @@ class JsonlSessionParser:
             summary.tokens += event.total_tokens
             summary.input_tokens += event.input_tokens
             summary.cached_tokens += event.cached_tokens
+            summary.cache_write_tokens += event.cache_write_tokens
             summary.output_tokens += event.output_tokens
             summary.reasoning_tokens += event.reasoning_tokens
             summary.cost_usd += float(event.cost_usd or 0.0)
@@ -1465,6 +1491,7 @@ class JsonlSessionParser:
 
             input_tokens = _as_int(usage.get("input_tokens"))
             cached_tokens = _as_int(usage.get("cached_input_tokens"))
+            cache_write_tokens = _as_int(usage.get("cache_write_input_tokens"))
             output_tokens = _as_int(usage.get("output_tokens"))
             reasoning_tokens = _as_int(usage.get("reasoning_output_tokens"))
             total_tokens = _as_int(
@@ -1510,6 +1537,7 @@ class JsonlSessionParser:
                     model=current_model,
                     input_tokens=input_tokens,
                     cached_tokens=cached_tokens,
+                    cache_write_tokens=cache_write_tokens,
                     output_tokens=output_tokens,
                     reasoning_tokens=reasoning_tokens,
                     total_tokens=total_tokens,
@@ -1520,6 +1548,7 @@ class JsonlSessionParser:
                         cached_tokens,
                         output_tokens,
                         reasoning_tokens,
+                        cache_write_tokens=cache_write_tokens,
                         provider=model_provider,
                     ),
                     started_at=round_started_at,
@@ -1832,6 +1861,7 @@ class JsonlSessionParser:
             confirmed.last_cached,
             confirmed.last_output,
             confirmed.last_reasoning,
+            cache_write_tokens=confirmed.last_cache_write,
             provider=snapshot.model_provider,
         )
         return RequestTokens(
@@ -1839,6 +1869,7 @@ class JsonlSessionParser:
             model=latest_model,
             input_tokens=confirmed.last_input or None,
             cached_tokens=confirmed.last_cached or None,
+            cache_write_tokens=confirmed.last_cache_write or None,
             output_tokens=confirmed.last_output,
             reasoning_tokens=confirmed.last_reasoning,
             total_tokens=confirmed.last_total,
@@ -1888,6 +1919,7 @@ class JsonlSessionParser:
         model = request.model or fallback_model
         input_tokens = request.input_tokens
         cached_tokens = request.cached_tokens
+        cache_write_tokens = request.cache_write_tokens
         output_tokens = request.output_tokens
         total_tokens = request.total_tokens
         cost_usd = request.cost_usd
@@ -1911,6 +1943,15 @@ class JsonlSessionParser:
                     if input_tokens is not None
                     else None
                 )
+            if cache_write_tokens is None:
+                cache_write_tokens = (
+                    min(
+                        int(snapshot.confirmed.last_cache_write or 0),
+                        max(0, int(input_tokens) - int(cached_tokens or 0)),
+                    )
+                    if input_tokens is not None
+                    else None
+                )
             if cost_usd is None:
                 cost_usd = self.cost_estimator.calculate(
                     model,
@@ -1918,6 +1959,7 @@ class JsonlSessionParser:
                     cached_tokens,
                     output_tokens or 0,
                     request.reasoning_tokens or 0,
+                    cache_write_tokens=cache_write_tokens or 0,
                     provider=snapshot.model_provider,
                 )
             if snapshot.activity.detail:
@@ -1937,6 +1979,7 @@ class JsonlSessionParser:
             model=model,
             input_tokens=input_tokens,
             cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
             output_tokens=output_tokens,
             reasoning_tokens=request.reasoning_tokens,
             total_tokens=total_tokens,
@@ -2215,12 +2258,14 @@ class SseRequestStateMachine:
             input_tokens = self.extract_int(body, "input_token_count")
             output_tokens = self.extract_int(body, "output_token_count")
             cached_tokens = self.extract_int(body, "cached_token_count")
+            cache_write_tokens = self.extract_int(body, "cache_write_token_count")
             reasoning_tokens = self.extract_int(body, "reasoning_token_count")
             timestamp = self.extract_timestamp(body)
             usage_key = (
                 model,
                 input_tokens,
                 cached_tokens,
+                cache_write_tokens,
                 output_tokens,
                 reasoning_tokens,
                 timestamp,
@@ -2235,6 +2280,7 @@ class SseRequestStateMachine:
                     model=model,
                     input_tokens=input_tokens,
                     cached_tokens=cached_tokens,
+                    cache_write_tokens=cache_write_tokens,
                     output_tokens=output_tokens,
                     reasoning_tokens=reasoning_tokens,
                     total_tokens=(
@@ -2249,6 +2295,7 @@ class SseRequestStateMachine:
                         cached_tokens,
                         output_tokens,
                         reasoning_tokens,
+                        cache_write_tokens=cache_write_tokens or 0,
                     ),
                     completed_at=timestamp,
                 )
@@ -2267,6 +2314,7 @@ class SseRequestStateMachine:
             model=request.model,
             input_tokens=request.input_tokens,
             cached_tokens=request.cached_tokens,
+            cache_write_tokens=request.cache_write_tokens,
             output_tokens=request.output_tokens,
             reasoning_tokens=request.reasoning_tokens,
             total_tokens=request.total_tokens,
@@ -2311,6 +2359,7 @@ class SseRequestStateMachine:
         input_tokens = self.extract_int(body, "input_token_count")
         output_tokens = self.extract_int(body, "output_token_count")
         cached_tokens = self.extract_int(body, "cached_token_count")
+        cache_write_tokens = self.extract_int(body, "cache_write_token_count")
         reasoning_tokens = self.extract_int(body, "reasoning_token_count")
         if input_tokens is None or output_tokens is None:
             return None
@@ -2319,6 +2368,7 @@ class SseRequestStateMachine:
             model=model,
             input_tokens=input_tokens,
             cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens or 0,
             total_tokens=input_tokens + output_tokens,
@@ -2348,6 +2398,7 @@ class SseRequestStateMachine:
             model=str(response.get("model") or ""),
             input_tokens=input_tokens,
             cached_tokens=_as_int(details.get("cached_tokens")),
+            cache_write_tokens=_as_int(details.get("cache_write_tokens")),
             output_tokens=output_tokens,
             reasoning_tokens=_as_int(output_details.get("reasoning_tokens")),
             total_tokens=total_tokens,
@@ -2363,6 +2414,7 @@ class SseRequestStateMachine:
             request.cached_tokens,
             request.output_tokens,
             request.reasoning_tokens or 0,
+            cache_write_tokens=request.cache_write_tokens or 0,
         )
 
     def parse_sse_event(self, body: str) -> dict[str, Any] | None:

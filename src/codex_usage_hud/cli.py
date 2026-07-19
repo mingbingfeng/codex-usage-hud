@@ -4127,6 +4127,7 @@ def _request_round_from_snapshot(snapshot: ParsedSession) -> RequestRound | None
         model=request.model,
         input_tokens=request.input_tokens,
         cached_tokens=request.cached_tokens,
+        cache_write_tokens=request.cache_write_tokens,
         output_tokens=request.output_tokens,
         reasoning_tokens=request.reasoning_tokens,
         total_tokens=total_tokens,
@@ -4207,6 +4208,7 @@ def _merge_usage(target: UsageSummary, addition: UsageSummary) -> None:
     target.tokens += addition.tokens
     target.input_tokens += addition.input_tokens
     target.cached_tokens += addition.cached_tokens
+    target.cache_write_tokens += addition.cache_write_tokens
     target.output_tokens += addition.output_tokens
     target.reasoning_tokens += addition.reasoning_tokens
     target.cost_usd = round(target.cost_usd + addition.cost_usd, 6)
@@ -4221,6 +4223,12 @@ def _replace_usage(
         tokens=max(0, total.tokens - old.tokens + new.tokens),
         input_tokens=max(0, total.input_tokens - old.input_tokens + new.input_tokens),
         cached_tokens=max(0, total.cached_tokens - old.cached_tokens + new.cached_tokens),
+        cache_write_tokens=max(
+            0,
+            total.cache_write_tokens
+            - old.cache_write_tokens
+            + new.cache_write_tokens,
+        ),
         output_tokens=max(0, total.output_tokens - old.output_tokens + new.output_tokens),
         reasoning_tokens=max(
             0,
@@ -4243,6 +4251,10 @@ def usage_before_today_in_week(
         tokens=max(0, week_total.tokens - today_total.tokens),
         input_tokens=max(0, week_total.input_tokens - today_total.input_tokens),
         cached_tokens=max(0, week_total.cached_tokens - today_total.cached_tokens),
+        cache_write_tokens=max(
+            0,
+            week_total.cache_write_tokens - today_total.cache_write_tokens,
+        ),
         output_tokens=max(0, week_total.output_tokens - today_total.output_tokens),
         reasoning_tokens=max(0, week_total.reasoning_tokens - today_total.reasoning_tokens),
         cost_usd=round(max(0.0, week_total.cost_usd - today_total.cost_usd), 6),

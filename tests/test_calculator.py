@@ -51,6 +51,29 @@ class UsageCalculatorTests(unittest.TestCase):
         )
         self.assertEqual(cost, 0.0)
 
+    def test_gpt_5_6_sol_uses_cc_switch_four_bucket_pricing(self) -> None:
+        cost = self.calculator.calculate_cost_usd(
+            model_name="gpt-5.6-sol",
+            input_tokens=1_000_000,
+            cached_input_tokens=600_000,
+            cache_write_tokens=100_000,
+            output_tokens=200_000,
+            reasoning_tokens=50_000,
+        )
+
+        self.assertEqual(cost, 8.425)
+
+    def test_reasoning_is_not_billed_twice_when_included_in_output(self) -> None:
+        cost = self.calculator.calculate_cost_usd(
+            model_name="gpt-5.6-sol",
+            input_tokens=0,
+            cached_input_tokens=0,
+            output_tokens=1_000_000,
+            reasoning_tokens=400_000,
+        )
+
+        self.assertEqual(cost, 30.0)
+
     def test_model_prefix_matching_uses_base_price_table(self) -> None:
         fallback_cost = self.calculator.calculate_cost_usd(
             model_name="gpt-5.5-fallback",

@@ -45,6 +45,15 @@ _PRICE_ALIASES = {
         "cached_input_price",
         "cached_input_per_million",
     ),
+    "cache_write": (
+        "cache_write",
+        "cache_creation",
+        "cacheWrite",
+        "cache_write_price",
+        "cache_creation_price",
+        "cache_write_per_million",
+        "cache_creation_per_million",
+    ),
     "output": ("output", "completion", "output_price", "output_per_million"),
     "reasoning": (
         "reasoning",
@@ -63,12 +72,17 @@ class ModelPrice:
     cached_input: float
     output: float
     reasoning: float
+    cache_write: float = 0.0
     model: str = ""
     provider: str = ""
     base_url: str = ""
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any]) -> "ModelPrice | None":
+    def from_mapping(
+        cls,
+        value: Mapping[str, Any],
+        model_hint: str = "",
+    ) -> "ModelPrice | None":
         prices: dict[str, float] = {}
         for canonical, aliases in _PRICE_ALIASES.items():
             raw = _first_present(value, aliases)
@@ -79,15 +93,19 @@ class ModelPrice:
             return None
         cached_input = prices.get("cached_input", prices["input"])
         reasoning = prices.get("reasoning", prices["output"])
+        model = _optional_str(
+            value.get("model") or value.get("model_pattern") or value.get("pattern")
+        ) or str(model_hint or "").strip()
+        builtin_name = model.lower().rsplit("/", 1)[-1]
+        builtin = MODEL_PRICES.get(builtin_name, {})
+        cache_write = prices.get("cache_write", float(builtin.get("cache_write", 0.0)))
         return cls(
             input=prices["input"],
             cached_input=cached_input,
             output=prices["output"],
             reasoning=reasoning,
-            model=_optional_str(
-                value.get("model") or value.get("model_pattern") or value.get("pattern")
-            )
-            or "",
+            cache_write=cache_write,
+            model=model,
             provider=normalize_provider(value.get("provider")),
             base_url=normalize_base_url(
                 value.get("base_url") or value.get("baseUrl") or value.get("api_base")
@@ -98,6 +116,7 @@ class ModelPrice:
         payload: dict[str, object] = {
             "input": float(self.input),
             "cached_input": float(self.cached_input),
+            "cache_write": float(self.cache_write),
             "output": float(self.output),
             "reasoning": float(self.reasoning),
         }
@@ -113,7 +132,7 @@ class ModelPrice:
 def default_model_prices() -> dict[str, ModelPrice]:
     """Return the built-in model price table as config dataclasses."""
     return {
-        name: ModelPrice.from_mapping(values) or ModelPrice(
+        name: ModelPrice.from_mapping(values, name) or ModelPrice(
             input=0.0,
             cached_input=0.0,
             output=0.0,
@@ -135,9 +154,10 @@ class ProviderSettings:
     def from_dict(cls, value: Any) -> "ProviderSettings | None":
         if not isinstance(value, Mapping):
             return None
-        prices = normalize_model_prices(value.get("model_prices"))
+        prices = default_model_prices()
+        prices.update(normalize_model_prices(value.get("model_prices")))
         return cls(
-            model_prices=prices or default_model_prices(),
+            model_prices=prices,
             pricing_url=_optional_str(value.get("pricing_url")) or "",
             weekly_adjustment_usd=max(0.0, _optional_float(value.get("weekly_adjustment_usd")) or 0.0),
         )
@@ -184,9 +204,8 @@ class UserConfig:
         if not isinstance(value, Mapping):
             return cls.defaults()
         defaults = cls.defaults()
-        prices = normalize_model_prices(value.get("model_prices"))
-        if not prices:
-            prices = defaults.model_prices
+        prices = dict(defaults.model_prices)
+        prices.update(normalize_model_prices(value.get("model_prices")))
         legacy_overlay_enabled = _optional_bool(value.get("work_overlay_enabled"))
         work_overlay_max_items = normalize_work_overlay_max_items(
             value.get("work_overlay_max_items"),
@@ -589,7 +608,7 @@ def normalize_model_prices(value: Any) -> dict[str, ModelPrice]:
         model = str(name or "").strip()
         if not model or not isinstance(raw_price, Mapping):
             continue
-        price = ModelPrice.from_mapping(raw_price)
+        price = ModelPrice.from_mapping(raw_price, model)
         if price is not None:
             prices[model] = price
     return prices
@@ -711,18 +730,22 @@ def _extract_price_collection(value: Any) -> dict[str, ModelPrice]:
         for name, raw in value.items():
             if not isinstance(raw, Mapping):
                 continue
-            price = ModelPrice.from_mapping(raw.get("pricing") or raw.get("prices") or raw)
             model = str(raw.get("id") or raw.get("model") or raw.get("name") or name).strip()
+            price = ModelPrice.from_mapping(
+                raw.get("pricing") or raw.get("prices") or raw,
+                model,
+            )
             if model and price is not None:
                 prices[model] = price
     elif isinstance(value, list):
         for item in value:
             if not isinstance(item, Mapping):
                 continue
-            price = ModelPrice.from_mapping(
-                item.get("pricing") or item.get("prices") or item
-            )
             model = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+            price = ModelPrice.from_mapping(
+                item.get("pricing") or item.get("prices") or item,
+                model,
+            )
             if model and price is not None:
                 prices[model] = price
     return prices

@@ -193,6 +193,34 @@ class CodexThemeSnapshotTests(unittest.TestCase):
 
 
 class CodexThemeProbeTests(unittest.TestCase):
+    def test_runtime_probe_prefers_current_codex_chrome_tokens(self) -> None:
+        script = codex_theme.THEME_PROBE_SCRIPT
+
+        self.assertIn(
+            'accent: colorValue("--codex-base-accent", "--color-text-accent", "--vscode-focusBorder"',
+            script,
+        )
+        self.assertIn(
+            'surface: colorValue("--codex-base-surface", "--color-background-surface", "--vscode-editor-background"',
+            script,
+        )
+        self.assertIn(
+            'ink: colorValue("--codex-base-ink", "--color-text-foreground", "--vscode-editor-foreground"',
+            script,
+        )
+        self.assertIn(
+            'diffAdded: colorValue("--color-decoration-added", "--vscode-gitDecoration-addedResourceForeground"',
+            script,
+        )
+        self.assertIn(
+            'diffRemoved: colorValue("--color-decoration-deleted", "--vscode-gitDecoration-deletedResourceForeground"',
+            script,
+        )
+        self.assertIn(
+            'skill: colorValue("--color-accent-purple", "--vscode-terminal-ansiMagenta"',
+            script,
+        )
+
     def test_probe_reads_persisted_theme_from_desktop_config(self) -> None:
         config_text = """
 [desktop]
