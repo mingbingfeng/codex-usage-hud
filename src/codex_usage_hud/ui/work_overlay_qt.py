@@ -232,6 +232,8 @@ def _multiline_elided_text(
 
 
 def _item_is_completed(item: Mapping[str, object]) -> bool:
+    if _item_is_background_usage(item):
+        return False
     return str(item.get("status") or "") == "recent"
 
 
@@ -368,6 +370,35 @@ def _defer_other_transition_items(
             dict(old_by_id[item_id]) if item_id in deferred_ids else item
         )
     return deferred_items
+
+
+def _matched_overlay_item_records(
+    records: Sequence[dict[str, Any]],
+    items: Sequence[Mapping[str, object]],
+) -> list[tuple[dict[str, Any], Mapping[str, object]]]:
+    """Match grouped widget records to payload items by shape and stable ID."""
+    unused_records = list(records)
+    matched: list[tuple[dict[str, Any], Mapping[str, object]]] = []
+    for item in items:
+        item_id = _item_id(item)
+        kind = _item_kind(item)
+        record = next(
+            (
+                candidate
+                for candidate in unused_records
+                if str(candidate.get("kind") or "") == kind
+                and (
+                    not item_id
+                    or str(candidate.get("item_id") or "") == item_id
+                )
+            ),
+            None,
+        )
+        if record is None:
+            continue
+        unused_records.remove(record)
+        matched.append((record, item))
+    return matched
 
 
 def _completed_badge_slot_rects(
@@ -925,6 +956,7 @@ def _overlay_item_timestamp_seconds(
 
 
 def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    current_active: list[Mapping[str, object]] = []
     background_usage: list[Mapping[str, object]] = []
     completed: list[Mapping[str, object]] = []
     active: list[Mapping[str, object]] = []
@@ -933,6 +965,8 @@ def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mappin
             background_usage.append(item)
         elif _item_is_completed(item):
             completed.append(item)
+        elif bool(item.get("current")):
+            current_active.append(item)
         else:
             active.append(item)
     background_usage.sort(
@@ -947,17 +981,18 @@ def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mappin
             "startedAt",
         )
     )
-    active.sort(
-        key=lambda item: _overlay_item_timestamp_seconds(
-            item,
-            "sessionStartedAt",
-            "taskStartedAt",
-            "startedAt",
-            "updatedAt",
-        ),
-        reverse=True,
-    )
-    return background_usage + completed + active
+    for group in (current_active, active):
+        group.sort(
+            key=lambda item: _overlay_item_timestamp_seconds(
+                item,
+                "sessionStartedAt",
+                "taskStartedAt",
+                "startedAt",
+                "updatedAt",
+            ),
+            reverse=True,
+        )
+    return current_active + background_usage + completed + active
 
 
 def _completed_badge_row_width(count: int) -> int:
@@ -4013,27 +4048,13 @@ def run_work_overlay_helper_qt(
             self,
             visible_items: Sequence[Mapping[str, object]],
         ) -> None:
-            unused_records = list(self._item_widgets)
             self.circles = []
             self.rects = []
-            for item in visible_items:
-                item_id = _item_id(item)
+            for record, item in _matched_overlay_item_records(
+                self._item_widgets,
+                visible_items,
+            ):
                 kind = self._item_widget_kind(item)
-                record = next(
-                    (
-                        candidate
-                        for candidate in unused_records
-                        if str(candidate.get("kind") or "") == kind
-                        and (
-                            not item_id
-                            or str(candidate.get("item_id") or "") == item_id
-                        )
-                    ),
-                    None,
-                )
-                if record is None:
-                    continue
-                unused_records.remove(record)
                 if kind == "completed":
                     self.circles.append(record)
                 else:
@@ -5139,6 +5160,12 @@ def run_work_overlay_helper_qt(
                 ensure_ascii=False,
             )
             rebuild = structure_signature != self._last_structure_signature
+            record_items = _matched_overlay_item_records(
+                self._item_widgets,
+                visible_items,
+            )
+            if not rebuild and len(record_items) != len(visible_items):
+                rebuild = True
             self._close_anchors.clear()
             self._workdir_anchors.clear()
             self._completed_check_anchors.clear()
@@ -5159,7 +5186,7 @@ def run_work_overlay_helper_qt(
                 for item in active_items:
                     self._build_item_widget(item)
             else:
-                for record, item in zip(self._item_widgets, visible_items):
+                for record, item in record_items:
                     self._update_item_widget(record, item)
             self._sync_overlay_geometry()
             self._sync_item_widget_geometries(visible_items)

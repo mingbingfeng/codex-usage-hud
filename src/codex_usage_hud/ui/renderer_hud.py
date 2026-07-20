@@ -94,7 +94,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "31";
+  const version = "32";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -168,6 +168,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   let storagePreviewHidden = false;
   let backgroundUsageFetchSeq = 0;
   let backgroundUsageDetailSeq = 0;
+  const backgroundUsageRequestTimeoutMs = 5000;
+  let backgroundUsageQueryTimeoutId = 0;
+  let backgroundUsageDetailTimeoutId = 0;
+  const backgroundUsageBodyScrollTops = new Map();
+  const backgroundUsageHistoryScrollTops = new Map();
+  const backgroundUsageDetailScrollTops = new Map();
   const backgroundUsageState = {
     range: "today",
     feature: "",
@@ -5442,7 +5448,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   }
 
   function backgroundUsageDetailHtml(detail) {
-    if (backgroundUsageState.detailLoading) {
+    if (backgroundUsageState.detailLoading && !detail) {
       return '<div class="codex-usage-hud-background-empty">正在读取请求明细...</div>';
     }
     if (!detail || typeof detail !== "object") {
@@ -5515,7 +5521,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       : "--";
     const costNote = summary.costComplete === false ? "部分模型缺少价格" : "HUD 估算";
     return `
-      <div class="codex-usage-hud-background" data-background-usage-root="true" aria-busy="${backgroundUsageState.loading}">
+      <div class="codex-usage-hud-background" data-background-usage-root="true"
+        data-background-usage-filter-key="${escapeHtml(backgroundUsageFilterKey())}"
+        aria-busy="${backgroundUsageState.loading}">
         <div class="codex-usage-hud-background-metrics">
           <div><span>筛选费用</span><strong>${escapeHtml(backgroundUsageFormatCost(summary.estimatedCostUsd))}</strong><small>${escapeHtml(costNote)}</small></div>
           <div><span>Tokens</span><strong>${escapeHtml(humanizeTokens(summary.totalTokens || 0))}</strong><small>本机日志值</small></div>
@@ -5543,7 +5551,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
               ${events.map(backgroundUsageEventHtml).join("") || `<div class="codex-usage-hud-background-empty">${backgroundUsageState.loading ? "正在读取后台用量..." : "当前筛选没有后台任务。"}</div>`}
             </div>
           </section>
-          <section class="codex-usage-hud-background-detail">
+          <section class="codex-usage-hud-background-detail"
+            data-background-usage-detail-event-id="${escapeHtml(backgroundUsageState.selectedEventId)}"
+            data-background-usage-detail-loaded="${!!backgroundUsageState.detail}">
             ${backgroundUsageDetailHtml(backgroundUsageState.detail)}
           </section>
         </div>
@@ -5551,11 +5561,126 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     `;
   }
 
+  function backgroundUsageFilterKey() {
+    return JSON.stringify([
+      backgroundUsageState.range,
+      backgroundUsageState.feature,
+      backgroundUsageState.model,
+    ]);
+  }
+
+  function captureBackgroundUsageScrollPositions() {
+    const modal = document.getElementById(settingsModalId);
+    const body = modal?.querySelector?.(".codex-usage-hud-settings-body");
+    const panel = body?.querySelector?.('[data-background-usage-root="true"]');
+    if (!body || !panel) return;
+    const filterKey = String(panel.dataset.backgroundUsageFilterKey || "");
+    const history = panel.querySelector(".codex-usage-hud-background-history");
+    const detail = panel.querySelector(".codex-usage-hud-background-detail");
+    const detailEventId = String(
+      detail?.dataset?.backgroundUsageDetailEventId || "",
+    );
+    if (filterKey) {
+      backgroundUsageBodyScrollTops.set(filterKey, Number(body.scrollTop || 0));
+      backgroundUsageHistoryScrollTops.set(
+        filterKey,
+        Number(history?.scrollTop || 0),
+      );
+    }
+    if (
+      detailEventId
+      && detail?.dataset?.backgroundUsageDetailLoaded === "true"
+    ) {
+      backgroundUsageDetailScrollTops.set(
+        detailEventId,
+        Number(detail?.scrollTop || 0),
+      );
+    }
+  }
+
+  function restoreBackgroundUsageScrollPositions() {
+    const modal = document.getElementById(settingsModalId);
+    const body = modal?.querySelector?.(".codex-usage-hud-settings-body");
+    const panel = body?.querySelector?.('[data-background-usage-root="true"]');
+    if (!body || !panel) return;
+    const filterKey = String(panel.dataset.backgroundUsageFilterKey || "");
+    const history = panel.querySelector(".codex-usage-hud-background-history");
+    const detail = panel.querySelector(".codex-usage-hud-background-detail");
+    const detailEventId = String(
+      detail?.dataset?.backgroundUsageDetailEventId || "",
+    );
+    const apply = () => {
+      body.scrollTop = Number(backgroundUsageBodyScrollTops.get(filterKey) || 0);
+      if (history) {
+        history.scrollTop = Number(
+          backgroundUsageHistoryScrollTops.get(filterKey) || 0,
+        );
+      }
+      if (detail) {
+        detail.scrollTop = Number(
+          backgroundUsageDetailScrollTops.get(detailEventId) || 0,
+        );
+      }
+    };
+    apply();
+    requestAnimationFrame(apply);
+  }
+
+  function clearBackgroundUsageRequestTimeout(kind) {
+    if (kind === "query") {
+      clearTimeout(backgroundUsageQueryTimeoutId);
+      backgroundUsageQueryTimeoutId = 0;
+      return;
+    }
+    clearTimeout(backgroundUsageDetailTimeoutId);
+    backgroundUsageDetailTimeoutId = 0;
+  }
+
+  function scheduleBackgroundUsageRequestTimeout(kind, requestId, eventId = "") {
+    clearBackgroundUsageRequestTimeout(kind);
+    const onTimeout = () => {
+      if (kind === "query") {
+        if (requestId !== backgroundUsageState.queryRequestId) return;
+        backgroundUsageQueryTimeoutId = 0;
+        backgroundUsageState.loading = false;
+        backgroundUsageState.error = "后台用量读取超时，请重试。";
+      } else {
+        if (
+          requestId !== backgroundUsageState.detailRequestId
+          || eventId !== backgroundUsageState.selectedEventId
+        ) return;
+        backgroundUsageDetailTimeoutId = 0;
+        backgroundUsageState.detailLoading = false;
+        backgroundUsageState.error = "请求明细读取超时，请重试。";
+      }
+      syncBackgroundUsagePanel();
+    };
+    const timeoutId = setTimeout(onTimeout, backgroundUsageRequestTimeoutMs);
+    if (kind === "query") backgroundUsageQueryTimeoutId = timeoutId;
+    else backgroundUsageDetailTimeoutId = timeoutId;
+  }
+
+  async function fetchBackgroundUsageWithTimeout(url) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      backgroundUsageRequestTimeoutMs,
+    );
+    try {
+      return await fetch(url, { cache: "no-store", signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   function syncBackgroundUsagePanel() {
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden || settingsActiveTab !== "backgroundUsage") return;
     const body = modal.querySelector(".codex-usage-hud-settings-body");
-    if (body) body.innerHTML = backgroundUsagePanelHtml();
+    if (!body) return;
+    captureBackgroundUsageScrollPositions();
+    body.innerHTML = backgroundUsagePanelHtml();
+    restoreBackgroundUsageScrollPositions();
   }
 
   async function loadBackgroundUsageDetail(eventId) {
@@ -5565,6 +5690,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const requestSeq = ++backgroundUsageDetailSeq;
     backgroundUsageState.detailLoading = true;
     backgroundUsageState.promptExpanded = false;
+    clearBackgroundUsageRequestTimeout("detail");
+    backgroundUsageState.detailRequestId = "";
     syncBackgroundUsagePanel();
     const bindingRequestId = submitBackgroundUsageCommand(
       "backgroundUsageDetail",
@@ -5572,6 +5699,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     );
     if (bindingRequestId) {
       backgroundUsageState.detailRequestId = bindingRequestId;
+      scheduleBackgroundUsageRequestTimeout("detail", bindingRequestId, normalized);
       return;
     }
     if (!url) {
@@ -5582,7 +5710,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
     url.searchParams.set("eventId", normalized);
     try {
-      const response = await fetch(url.toString(), { cache: "no-store" });
+      const response = await fetchBackgroundUsageWithTimeout(url.toString());
       const payload = await response.json();
       if (!response.ok || payload?.status !== "ok") {
         throw new Error(payload?.message || `HTTP ${response.status}`);
@@ -5592,8 +5720,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       backgroundUsageState.error = "";
     } catch (error) {
       if (requestSeq !== backgroundUsageDetailSeq) return;
-      backgroundUsageState.detail = null;
-      backgroundUsageState.error = `请求明细读取失败：${error?.message || error}`;
+      backgroundUsageState.error = error?.name === "AbortError"
+        ? "请求明细读取超时，请重试。"
+        : `请求明细读取失败：${error?.message || error}`;
     } finally {
       if (requestSeq === backgroundUsageDetailSeq) {
         backgroundUsageState.detailLoading = false;
@@ -5618,6 +5747,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const requestSeq = ++backgroundUsageFetchSeq;
     backgroundUsageState.loading = true;
     backgroundUsageState.error = "";
+    clearBackgroundUsageRequestTimeout("query");
+    backgroundUsageState.queryRequestId = "";
     syncBackgroundUsagePanel();
     const bindingRequestId = submitBackgroundUsageCommand(
       "backgroundUsageQuery",
@@ -5632,6 +5763,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     );
     if (bindingRequestId) {
       backgroundUsageState.queryRequestId = bindingRequestId;
+      scheduleBackgroundUsageRequestTimeout("query", bindingRequestId);
       return;
     }
     if (!url) {
@@ -5645,7 +5777,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (backgroundUsageState.model) url.searchParams.set("model", backgroundUsageState.model);
     if (requestedEventId) url.searchParams.set("eventId", requestedEventId);
     try {
-      const response = await fetch(url.toString(), { cache: "no-store" });
+      const response = await fetchBackgroundUsageWithTimeout(url.toString());
       const payload = await response.json();
       if (!response.ok || payload?.status !== "ok") {
         throw new Error(payload?.message || `HTTP ${response.status}`);
@@ -5664,7 +5796,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
     } catch (error) {
       if (requestSeq !== backgroundUsageFetchSeq) return;
-      backgroundUsageState.error = `后台用量读取失败：${error?.message || error}`;
+      backgroundUsageState.error = error?.name === "AbortError"
+        ? "后台用量读取超时，请重试。"
+        : `后台用量读取失败：${error?.message || error}`;
       backgroundUsageState.data = null;
       backgroundUsageState.detail = null;
       syncBackgroundUsagePanel();
@@ -5680,7 +5814,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const root = document.getElementById(rootId);
     const modal = document.getElementById(settingsModalId);
     if (!root || !modal) return;
-    if (!modal.hidden) captureSettingsProviderForm();
+    if (!modal.hidden) {
+      captureSettingsProviderForm();
+      if (settingsActiveTab === "backgroundUsage") {
+        captureBackgroundUsageScrollPositions();
+      }
+    }
     const settings = hudSettingsFromPayload();
     const activeTab = ["storage", "backgroundUsage", "support", "about"].includes(tab) ? tab : "settings";
     settingsActiveTab = activeTab;
@@ -5721,6 +5860,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     modal.hidden = false;
     updateAboutActionButtons(currentUpdateState());
     if (activeTab === "backgroundUsage") {
+      restoreBackgroundUsageScrollPositions();
       const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
       if (!backgroundUsageState.data || backgroundUsageState.loadedRevision !== revision) {
         void loadBackgroundUsage({ force: true });
@@ -6293,6 +6433,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       return;
     }
     closeSettingsConfirm();
+    if (settingsActiveTab === "backgroundUsage") {
+      captureBackgroundUsageScrollPositions();
+      clearBackgroundUsageRequestTimeout("query");
+      clearBackgroundUsageRequestTimeout("detail");
+    }
     modal.hidden = true;
     settingsProviderDraft = null;
     settingsDirtyProviders.clear();
@@ -9112,12 +9257,24 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     // domain explicit lets renderer updates skip unrelated DOM work.
   }
 
+  function backgroundUsageSelectedDetail(responsePayload, eventId) {
+    const detail = responsePayload?.selectedDetail;
+    if (!detail || typeof detail !== "object") return null;
+    const detailEventId = String(detail.eventId || "").trim();
+    return detailEventId && detailEventId === eventId ? detail : null;
+  }
+
   function applyBackgroundUsagePayload(_root, payload) {
     const response = payload?.settingsCommandStatus?.backgroundUsageResponse;
+    const openEventId = String(
+      payload?.settingsCommandStatus?.backgroundUsageOpenEventId || ""
+    ).trim();
     if (response && typeof response === "object") {
       const kind = String(response.kind || "");
       const requestId = String(response.requestId || "");
-      if (kind === "query" && requestId === backgroundUsageState.queryRequestId) {
+      if (kind === "query") {
+        if (requestId !== backgroundUsageState.queryRequestId) return;
+        clearBackgroundUsageRequestTimeout("query");
         backgroundUsageState.loading = false;
         backgroundUsageState.data = response.payload || null;
         backgroundUsageState.loadedRevision = Math.max(
@@ -9127,7 +9284,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         backgroundUsageState.selectedEventId = String(
           response?.payload?.selectedEventId || backgroundUsageState.selectedEventId || "",
         );
-        backgroundUsageState.detail = null;
+        backgroundUsageState.detail = backgroundUsageSelectedDetail(
+          response.payload,
+          backgroundUsageState.selectedEventId,
+        );
         backgroundUsageState.error = String(response.error || "");
         syncBackgroundUsagePanel();
         if (backgroundUsageState.selectedEventId) {
@@ -9135,30 +9295,65 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         }
         return;
       }
-      if (
-        kind === "detail"
-        && requestId === backgroundUsageState.detailRequestId
-        && String(response.eventId || "") === backgroundUsageState.selectedEventId
-      ) {
+      if (kind === "detail") {
+        if (requestId !== backgroundUsageState.detailRequestId) return;
+        if (String(response.eventId || "") !== backgroundUsageState.selectedEventId) return;
+        clearBackgroundUsageRequestTimeout("detail");
         backgroundUsageState.detailLoading = false;
         backgroundUsageState.detail = response.payload || null;
         backgroundUsageState.error = String(response.error || "");
         syncBackgroundUsagePanel();
         return;
       }
+      if (kind === "open") {
+        clearBackgroundUsageRequestTimeout("query");
+        clearBackgroundUsageRequestTimeout("detail");
+        backgroundUsageFetchSeq += 1;
+        backgroundUsageDetailSeq += 1;
+        backgroundUsageState.queryRequestId = "";
+        backgroundUsageState.detailRequestId = "";
+        backgroundUsageState.range = "today";
+        backgroundUsageState.feature = "";
+        backgroundUsageState.model = "";
+        backgroundUsageState.loading = false;
+        backgroundUsageState.detailLoading = false;
+        backgroundUsageState.data = response.payload || null;
+        backgroundUsageState.loadedRevision = Math.max(
+          0,
+          Number(response?.payload?.revision ?? payload?.backgroundUsageRevision ?? 0),
+        );
+        backgroundUsageState.selectedEventId = String(
+          response?.payload?.selectedEventId
+          || response.eventId
+          || openEventId
+          || "",
+        );
+        backgroundUsageState.detail = backgroundUsageSelectedDetail(
+          response.payload,
+          backgroundUsageState.selectedEventId,
+        );
+        backgroundUsageState.promptExpanded = false;
+        backgroundUsageState.error = String(response.error || "");
+        const hasPreview = !!backgroundUsageState.detail;
+        renderSettingsModal("backgroundUsage");
+        if (hasPreview && backgroundUsageState.selectedEventId) {
+          void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
+        }
+        return;
+      }
     }
-    const openEventId = String(
-      payload?.settingsCommandStatus?.backgroundUsageOpenEventId || ""
-    ).trim();
     if (openEventId) {
+      clearBackgroundUsageRequestTimeout("query");
+      clearBackgroundUsageRequestTimeout("detail");
       backgroundUsageState.range = "today";
       backgroundUsageState.feature = "";
       backgroundUsageState.model = "";
       backgroundUsageState.selectedEventId = openEventId;
+      backgroundUsageState.data = null;
       backgroundUsageState.detail = null;
+      backgroundUsageState.loadedRevision = -1;
       backgroundUsageState.promptExpanded = false;
       renderSettingsModal("backgroundUsage");
-      void loadBackgroundUsage({ eventId: openEventId, force: true });
       return;
     }
     const modal = document.getElementById(settingsModalId);
@@ -9312,6 +9507,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     clearInterval(window[runningTimerName] || 0);
     clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
+    clearBackgroundUsageRequestTimeout("query");
+    clearBackgroundUsageRequestTimeout("detail");
     for (const timer of (window[settleTimerName] || [])) clearTimeout(timer);
     for (const timer of (window[modelPickerPatchTimersName] || [])) clearTimeout(timer);
     cancelAnimationFrame(window[modelPickerPatchRafName] || 0);

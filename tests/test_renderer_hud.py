@@ -805,6 +805,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("backgroundUsageResponse", script)
         self.assertIn("queryRequestId", script)
         self.assertIn("detailRequestId", script)
+        self.assertIn("scheduleBackgroundUsageRequestTimeout", script)
+        self.assertIn("clearBackgroundUsageRequestTimeout", script)
+        self.assertIn("captureBackgroundUsageScrollPositions", script)
+        self.assertIn("restoreBackgroundUsageScrollPositions", script)
+        self.assertIn("backgroundUsageHistoryScrollTops", script)
+        self.assertIn("backgroundUsageDetailScrollTops", script)
+        self.assertIn("backgroundUsageDetailLoaded", script)
 
         jump_start = script.index("function applyBackgroundUsagePayload")
         jump_end = script.index("function applyFileManagementPayload", jump_start)
@@ -812,6 +819,14 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("backgroundUsageOpenEventId", jump_contract)
         self.assertIn('renderSettingsModal("backgroundUsage")', jump_contract)
         self.assertIn(
+            'kind === "open"',
+            jump_contract,
+        )
+        self.assertIn(
+            "if (requestId !== backgroundUsageState.queryRequestId) return;",
+            jump_contract,
+        )
+        self.assertNotIn(
             "loadBackgroundUsage({ eventId: openEventId, force: true })",
             jump_contract,
         )
@@ -1170,7 +1185,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "31";', script)
+        self.assertIn('const version = "32";', script)
         self.assertIn("function applyCachedActiveSessionPayload", script)
         self.assertIn("function cacheActiveSessionPayload", script)
         self.assertIn("if (payload?.cachedPreview) return;", script)

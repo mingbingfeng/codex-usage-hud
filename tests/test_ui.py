@@ -198,7 +198,9 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _find_item_position,
     _interactive_hotspot_opacity,
     _item_is_background_usage,
+    _item_is_completed,
     _item_dismiss_key,
+    _matched_overlay_item_records,
     _mark_item_dismissed,
     _multiline_elided_text,
     _overlay_payload_signature,
@@ -2210,6 +2212,17 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(_workdir_external_link_for_item(item))
         self.assertTrue(_workdir_link_hover_visible_for_item(item))
 
+    def test_background_usage_never_enters_completed_layout_or_transition(self) -> None:
+        active = {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "kind": "background_usage",
+            "status": "background_usage",
+        }
+        incorrectly_completed = {**active, "status": "recent"}
+
+        self.assertFalse(_item_is_completed(incorrectly_completed))
+        self.assertIsNone(_detect_transition([active], [incorrectly_completed]))
+
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()
         snapshot = ParsedSession(
@@ -2387,21 +2400,31 @@ class BudgetHelperTests(unittest.TestCase):
         callback = MagicMock(return_value=True)
         runtime_events = RuntimeEventBus(clock=lambda: 123.0)
 
-        handled = cli_module._handle_work_overlay_commands(
-            overlay,
-            session_controller,
-            runtime_events=runtime_events,
-            background_command_callback=callback,
-        )
+        with patch(
+            "codex_usage_hud.cli._refocus_codex_window_after_work_overlay_switch",
+            return_value=(True, "visible", "", 123),
+        ) as refocus:
+            handled = cli_module._handle_work_overlay_commands(
+                overlay,
+                session_controller,
+                runtime_events=runtime_events,
+                background_command_callback=callback,
+            )
 
         self.assertEqual(handled, 2)
         self.assertEqual(callback.call_count, 2)
+        refocus.assert_called_once_with()
         session_controller.activate_session.assert_not_called()
         events = runtime_events.drain()
         self.assertEqual(
             [event.context["action"] for event in events],
             ["dismissBackgroundUsage", "openBackgroundUsage"],
         )
+        self.assertNotIn("windowRefocused", events[0].context)
+        self.assertTrue(events[1].context["backgroundCommandQueued"])
+        self.assertTrue(events[1].context["windowRefocused"])
+        self.assertEqual(events[1].context["windowStatus"], "visible")
+        self.assertEqual(events[1].context["windowHwnd"], 123)
 
     def test_work_overlay_helper_runtime_error_writes_normal_mode_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4706,7 +4729,7 @@ class BudgetHelperTests(unittest.TestCase):
             ],
         )
 
-    def test_background_usage_notifications_take_visible_slots_first(self) -> None:
+    def test_current_task_keeps_first_slot_ahead_of_background_usage(self) -> None:
         background_usage = {
             "id": "10000000-0000-4000-8000-000000000003",
             "kind": "background_usage",
@@ -4721,13 +4744,53 @@ class BudgetHelperTests(unittest.TestCase):
         active = {
             "id": "session-active",
             "status": "running",
+            "current": True,
             "sessionStartedAt": "2026-07-20T10:02:00+08:00",
         }
 
         ordered = _ordered_overlay_items([active, completed, background_usage])
         visible = _visible_overlay_items(ordered, {}, item_limit=1)
 
-        self.assertEqual([item["id"] for item in visible], [background_usage["id"]])
+        self.assertEqual([item["id"] for item in visible], [active["id"]])
+
+    def test_current_task_survives_live_like_six_item_limit(self) -> None:
+        background_usage = [
+            {
+                "id": f"background-{index}",
+                "kind": "background_usage",
+                "status": "background_usage",
+                "updatedAt": f"2026-07-20T10:0{index}:00+08:00",
+            }
+            for index in range(2)
+        ]
+        completed = [
+            {
+                "id": f"completed-{index}",
+                "status": "recent",
+                "updatedAt": f"2026-07-20T09:0{index}:00+08:00",
+            }
+            for index in range(4)
+        ]
+        current = {
+            "id": "current-session",
+            "status": "running",
+            "current": True,
+            "sessionStartedAt": "2026-07-20T08:00:00+08:00",
+        }
+        other_active = {
+            "id": "other-session",
+            "status": "running",
+            "sessionStartedAt": "2026-07-20T11:00:00+08:00",
+        }
+
+        ordered = _ordered_overlay_items(
+            [*background_usage, *completed, current, other_active]
+        )
+        visible = _visible_overlay_items(ordered, {}, item_limit=6)
+
+        self.assertEqual(ordered[0]["id"], current["id"])
+        self.assertIn(current["id"], [item["id"] for item in visible])
+        self.assertNotIn(other_active["id"], [item["id"] for item in visible])
 
     def test_completed_badge_hover_ignores_bounding_box_corner(self) -> None:
         self.assertFalse(
@@ -5336,6 +5399,41 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         self.assertEqual(
             _detect_transition(first_items, new_items),
             "completed_to_card",
+        )
+
+    def test_mixed_shape_widget_updates_match_payloads_by_item_id(self) -> None:
+        backgrounds = [
+            {
+                "id": f"background-{index}",
+                "kind": "background_usage",
+                "status": "background_usage",
+            }
+            for index in range(3)
+        ]
+        completed = [
+            {"id": f"session-{index}", "kind": "session", "status": "recent"}
+            for index in range(2)
+        ]
+        visible_items = [*backgrounds, *completed]
+        records = [
+            *[
+                {"kind": "completed", "item_id": item["id"]}
+                for item in completed
+            ],
+            *[
+                {"kind": "card", "item_id": item["id"]}
+                for item in backgrounds
+            ],
+        ]
+
+        matches = _matched_overlay_item_records(records, visible_items)
+
+        self.assertEqual(
+            [
+                (record["item_id"], item["id"])
+                for record, item in matches
+            ],
+            [(item["id"], item["id"]) for item in visible_items],
         )
 
     def test_no_transition_when_kinds_unchanged(self) -> None:
@@ -11120,10 +11218,25 @@ class DaemonLifecycleTests(unittest.TestCase):
             model="gpt-5.6-terra",
             event_id="event-1",
         )
-        runtime.detail.assert_called_once_with("event-1")
         self.assertEqual(
-            query_status["backgroundUsageResponse"],
-            {"kind": "query", "requestId": "query-1", "payload": query_payload},
+            runtime.detail.call_args_list,
+            [unittest.mock.call("event-1"), unittest.mock.call("event-1")],
+        )
+        query_response = query_status["backgroundUsageResponse"]
+        self.assertEqual(query_response["kind"], "query")
+        self.assertEqual(query_response["requestId"], "query-1")
+        self.assertEqual(
+            query_response["payload"]["selectedDetail"],
+            {"eventId": "event-1", "hasPrompt": True},
+        )
+        self.assertNotIn("prompt", query_response["payload"]["selectedDetail"])
+        self.assertEqual(
+            {
+                key: value
+                for key, value in query_response["payload"].items()
+                if key != "selectedDetail"
+            },
+            query_payload,
         )
         self.assertEqual(
             detail_status["backgroundUsageResponse"],
@@ -11135,6 +11248,57 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "error": "",
             },
         )
+
+    def test_renderer_background_usage_open_returns_today_preview_without_prompt(
+        self,
+    ) -> None:
+        event_id = "10000000-0000-4000-8000-000000000003"
+        runtime = SimpleNamespace(
+            query=MagicMock(
+                return_value={
+                    "revision": 7,
+                    "events": [{"eventId": event_id}],
+                    "selectedEventId": event_id,
+                }
+            ),
+            detail=MagicMock(
+                return_value={
+                    "eventId": event_id,
+                    "prompt": "must not enter the open payload",
+                    "requests": [{"model": "gpt-5.6-terra"}],
+                }
+            ),
+        )
+        context = SimpleNamespace(background_usage_runtime=runtime)
+
+        status = _handle_renderer_settings_command(
+            {"id": "open-1", "action": "openBackgroundUsage", "eventId": event_id},
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        runtime.query.assert_called_once_with(
+            range_key="today",
+            feature="",
+            model="",
+            event_id=event_id,
+        )
+        runtime.detail.assert_called_once_with(event_id)
+        self.assertEqual(status["backgroundUsageOpenEventId"], event_id)
+        response = status["backgroundUsageResponse"]
+        self.assertEqual(response["kind"], "open")
+        self.assertEqual(response["eventId"], event_id)
+        self.assertEqual(response["payload"]["selectedEventId"], event_id)
+        self.assertEqual(
+            response["payload"]["selectedDetail"],
+            {
+                "eventId": event_id,
+                "requests": [{"model": "gpt-5.6-terra"}],
+                "hasPrompt": True,
+            },
+        )
+        self.assertNotIn("prompt", response["payload"]["selectedDetail"])
 
     def test_renderer_storage_command_is_immediately_acked_to_worker(self) -> None:
         worker = SimpleNamespace(enqueue=MagicMock(return_value={"status": "accepted", "requestId": "storage-1"}))

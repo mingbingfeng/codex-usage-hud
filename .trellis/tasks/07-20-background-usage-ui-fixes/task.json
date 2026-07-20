@@ -1,0 +1,32 @@
+{
+  "id": "background-usage-ui-fixes",
+  "name": "background-usage-ui-fixes",
+  "title": "Fix background usage HUD interactions",
+  "description": "Fix background-usage foregrounding, square-only state and slot priority, eliminate the renderer query loop, and preserve settings scroll positions.",
+  "status": "in_progress",
+  "dev_type": "bugfix",
+  "scope": "background usage helper and renderer settings interactions",
+  "package": null,
+  "priority": "P2",
+  "creator": "fbm",
+  "assignee": "fbm",
+  "createdAt": "2026-07-20",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "src/codex_usage_hud/cli.py",
+    "src/codex_usage_hud/ui/renderer_hud.py",
+    "src/codex_usage_hud/ui/work_overlay_qt.py",
+    "tests/test_renderer_hud.py",
+    "tests/test_ui.py"
+  ],
+  "notes": "",
+  "meta": {}
+}

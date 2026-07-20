@@ -3807,9 +3807,47 @@ def _handle_work_overlay_commands(
             continue
         action = str(command.get("action") or "").strip()
         if action in {"dismissBackgroundUsage", "openBackgroundUsage"}:
+            callback_handled = background_command_callback is not None
+            callback_ok = False
             if background_command_callback is not None:
-                background_command_callback(dict(command))
-            _publish_work_overlay_command_event(runtime_events, command, None)
+                callback_ok = bool(background_command_callback(dict(command)))
+            activation_meta: dict[str, object] = {
+                "handled": callback_handled,
+                "ok": callback_ok,
+            }
+            if action == "openBackgroundUsage":
+                activation_meta["backgroundCommandQueued"] = callback_ok
+                if callback_ok and prepare_window:
+                    try:
+                        window_ready, window_status, window_reason, window_hwnd = (
+                            _refocus_codex_window_after_work_overlay_switch()
+                        )
+                    except Exception as exc:
+                        window_ready = False
+                        window_status = "refocus-error"
+                        window_reason = str(exc)
+                        window_hwnd = 0
+                    activation_meta.update(
+                        {
+                            "windowRefocused": window_ready,
+                            "windowStatus": window_status,
+                            "windowReason": window_reason,
+                            "windowHwnd": window_hwnd,
+                        }
+                    )
+                    _LOGGER.info(
+                        "work_overlay_background_usage_refocus ok=%s status=%s hwnd=%s reason=%s",
+                        window_ready,
+                        window_status,
+                        window_hwnd,
+                        window_reason or "-",
+                    )
+            _publish_work_overlay_command_event(
+                runtime_events,
+                command,
+                None,
+                activation_context=activation_meta,
+            )
             handled += 1
             continue
         activation_meta: dict[str, object] = {}
@@ -6209,6 +6247,47 @@ def _renderer_settings_status(
     return payload
 
 
+def _background_usage_query_payload_with_preview(
+    runtime: object,
+    *,
+    range_key: str,
+    feature: str,
+    model: str,
+    event_id: str,
+) -> dict[str, object]:
+    query = getattr(runtime, "query", None)
+    if not callable(query):
+        raise RuntimeError("后台用量当前不可用。")
+    raw_payload = query(
+        range_key=range_key,
+        feature=feature,
+        model=model,
+        event_id=event_id,
+    )
+    if not isinstance(raw_payload, Mapping):
+        raise RuntimeError("后台用量查询返回了无效数据。")
+    payload = dict(raw_payload)
+    selected_event_id = str(payload.get("selectedEventId") or "").strip()
+    selected_detail: dict[str, object] | None = None
+    detail = getattr(runtime, "detail", None)
+    if selected_event_id and callable(detail):
+        try:
+            raw_detail = detail(selected_event_id)
+        except Exception as exc:
+            _LOGGER.debug(
+                "background_usage_preview_failed event_id=%s error=%s",
+                selected_event_id,
+                exc,
+            )
+        else:
+            if isinstance(raw_detail, Mapping):
+                selected_detail = dict(raw_detail)
+                prompt = str(selected_detail.pop("prompt", "") or "")
+                selected_detail["hasPrompt"] = bool(prompt)
+    payload["selectedDetail"] = selected_detail
+    return payload
+
+
 FILE_MANAGEMENT_COMMANDS = {
     "scan",
     "preview",
@@ -6272,15 +6351,10 @@ def _handle_renderer_settings_command(
             return _handle_renderer_file_management_command(command, context)
         if action == "backgroundUsageQuery":
             runtime = getattr(context, "background_usage_runtime", None)
-            query = getattr(runtime, "query", None)
-            if not callable(query):
-                return _renderer_settings_status(
-                    "后台用量当前不可用。",
-                    kind="error",
-                )
             raw_filters = command.get("filters")
             filters = raw_filters if isinstance(raw_filters, Mapping) else {}
-            payload = query(
+            payload = _background_usage_query_payload_with_preview(
+                runtime,
                 range_key=str(filters.get("range") or "today"),
                 feature=str(filters.get("feature") or ""),
                 model=str(filters.get("model") or ""),
@@ -6314,8 +6388,22 @@ def _handle_renderer_settings_command(
             return status
         if action == "openBackgroundUsage":
             event_id = str(command.get("eventId") or "").strip()
+            runtime = getattr(context, "background_usage_runtime", None)
+            payload = _background_usage_query_payload_with_preview(
+                runtime,
+                range_key="today",
+                feature="",
+                model="",
+                event_id=event_id,
+            )
             status = _renderer_settings_status("")
             status["backgroundUsageOpenEventId"] = event_id
+            status["backgroundUsageResponse"] = {
+                "kind": "open",
+                "requestId": str(command.get("id") or ""),
+                "eventId": event_id,
+                "payload": payload,
+            }
             return status
         if action == "save":
             config = _config_from_settings_payload(
@@ -8929,8 +9017,13 @@ def run_renderer_hud_session(
                     if update_payload(payload):
                         if (
                             "backgroundUsage" in inputs.event_refresh_request.domains
-                            and loop_state.settings_command_status.get(
-                                "backgroundUsageOpenEventId"
+                            and (
+                                loop_state.settings_command_status.get(
+                                    "backgroundUsageOpenEventId"
+                                )
+                                or loop_state.settings_command_status.get(
+                                    "backgroundUsageResponse"
+                                )
                             )
                         ):
                             loop_state.settings_command_status = {}

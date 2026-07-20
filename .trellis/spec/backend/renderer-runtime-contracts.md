@@ -479,6 +479,8 @@ if not capability.cross_platform_safe:
 
 - `_transition_changes(old_items, new_items) -> list[tuple[str, str]]`.
 - `_defer_other_transition_items(old_items, new_items, transition_item_id)`.
+- `_matched_overlay_item_records(records, items)` pairs grouped widget records
+  with visible payload items by widget kind and stable item ID.
 - `_interactive_hotspot_opacity(base_opacity, hovered) -> float`.
 - `WORK_OVERLAY_HOTSPOT_HIT_ALPHA` and
   `WORK_OVERLAY_HOTSPOT_HOVER_ALPHA` define native hit-test and own-hover
@@ -491,6 +493,12 @@ if not capability.cross_platform_safe:
   turn; do not mark the entire target list as already displayed.
 - On transition completion, re-render the latest raw payload so the next queued
   item can transition. Provider is not part of the animation identity; `id` is.
+- Completed widgets are built before card widgets, so `_item_widgets` is grouped
+  by shape and is not guaranteed to have the same order as `visible_items`.
+  Steady-state payload refreshes and geometry record arrays must match by
+  `(widget kind, item id)`; positional `zip(records, visible_items)` is forbidden.
+- If every visible item cannot be matched to one existing record, rebuild the
+  widget structure instead of applying a partial update to stale records.
 - Already visible work items survive a transient candidate-scan omission until
   an explicit terminal state, the activity stale deadline, or normal
   provider/item-limit selection removes them.
@@ -516,6 +524,8 @@ if not capability.cross_platform_safe:
 | One card-to-badge change | Existing single-transition behavior is unchanged. |
 | Multiple shape changes in one payload | Apply one transition, then apply the next from the deferred display state. |
 | New/removed item only | Rebuild without inventing a shape transition. |
+| Background cards and completed sessions share one unchanged payload structure | Each background item stays in its card record and each completed session stays in its badge record across content-only refreshes. |
+| A visible item has no matching kind/ID record | Rebuild the structure; never reuse another item's widget by list position. |
 | Card workdir hover | Keep the full QLabel text and highlight only its exact bounds; do not paint a second string or expand over the status label. |
 | Completed badge workdir | Keep only the painted arc text; its invisible native hotspot activates the App session without drawing a rectangular layer. |
 | Bubble opacity is `0.22` | `WindowFromPoint` still resolves the workdir/check hotspot rather than the window beneath it. |
@@ -524,11 +534,17 @@ if not capability.cross_platform_safe:
 ### 5. Good/Base/Bad Cases
 
 - Good: `custom` completes while `muyuan` resumes; both animate in sequence.
+- Good: three background cards followed by two completed sessions may build
+  records as `completed, completed, card, card, card`; subsequent refreshes
+  still update all five records by their own IDs.
 - Good: a low-opacity card keeps one full workdir label, while the completed
   check hotspot remains natively hit-testable and becomes obvious on hover.
 - Base: only one visible session changes kind; it follows the original path.
 - Bad: assigning the full target list to `previous_visible_items` before the
   first animation ends, which causes later changes to be redrawn abruptly.
+- Bad: zipping the grouped widget-record list with logical visible-item order;
+  completed badges then display background titles while completed sessions are
+  painted into square cards.
 - Bad: using alpha `1` for a layered hotspot at bubble opacity `0.22`, or
   redrawing workdir text in the hotspot window; the former can become native
   click-through and the latter creates duplicate or ellipsized text.
@@ -538,6 +554,8 @@ if not capability.cross_platform_safe:
 - `tests/test_ui.py`: assert that simultaneous card-to-completed and
   completed-to-card changes leave the later item deferred, then detectable on
   the following pass.
+- `tests/test_ui.py`: assert a live-like mixed list of background cards and
+  completed sessions matches every grouped widget record to the same item ID.
 - `tests/test_ui.py`: assert completed workdirs do not create an external link
   layer, idle card hotspots keep the QLabel anchor size, and own-hover opacity
   overrides the low bubble opacity.
@@ -561,6 +579,20 @@ start_transition(first_change)
 transition_items = defer_other_transition_items(displayed_items, target_items, first_id)
 start_transition(first_change, displayed_items, transition_items)
 previous_visible_items = transition_items
+```
+
+#### Wrong: update grouped widgets by logical list position
+
+```python
+for record, item in zip(item_widgets, visible_items):
+    update_item_widget(record, item)
+```
+
+#### Correct: preserve item identity across shape grouping
+
+```python
+for record, item in matched_overlay_item_records(item_widgets, visible_items):
+    update_item_widget(record, item)
 ```
 
 #### Wrong: layered hotspot becomes click-through
@@ -808,22 +840,39 @@ the overlay command owns user consent.
 ### 2. Signatures
 
 - Renderer commands use the existing `codexUsageHudSettingsCommand` CDP binding:
-  `backgroundUsageQuery { id, filters }` and
+  `openBackgroundUsage { eventId }`, `backgroundUsageQuery { id, filters }`, and
   `backgroundUsageDetail { id, eventId }`.
 - Python returns one-shot
   `settingsCommandStatus.backgroundUsageResponse` with `kind`, `requestId`,
-  optional `eventId`, `payload`, and optional `error`.
+  optional `eventId`, `payload`, and optional `error`. `open` and `query`
+  payloads may include `selectedDetail { eventId, hasPrompt, ... }`; they must
+  never include `selectedDetail.prompt`.
 
 ### 3. Contracts
 
 - Codex Desktop's page CSP does not include `http://127.0.0.1:*` in
   `connect-src`; injected product UI must not rely on renderer `fetch()` to a
   localhost bridge.
-- Query responses contain summaries and filters but no Prompt. Only a detail
-  response for the selected `eventId` may contain Prompt.
+- A bubble jump performs exactly one `openBackgroundUsage` query. Its first
+  response contains the requested day's list, the selected event, and a
+  Prompt-free detail preview. A normal tab open performs exactly one query and
+  selects the most recent matching event when no explicit `eventId` is given.
+- Query/open responses contain summaries, request attribution, and a selected
+  detail preview but no Prompt. `hasPrompt` may advertise availability; only a
+  detail response for the selected `eventId` may contain Prompt.
 - Renderer state tracks separate query/detail request IDs and ignores stale or
-  mismatched responses. Python clears the response status after a successful
-  domain update.
+  mismatched responses. Ignoring a stale response is terminal and must not
+  schedule a replacement query.
+- Query/detail loading timers are request-scoped and bounded to five seconds.
+  A timeout clears the matching loading state, shows a retryable error, and
+  cannot mutate a newer request.
+- Python clears a one-shot open/query/detail response only after the
+  `backgroundUsage` domain update is acknowledged. A failed renderer update
+  retains the response for retry.
+- Before replacing background-usage markup, capture settings-body scroll by
+  filter key, history scroll by filter key, and detail scroll by `eventId`.
+  Restore synchronously and on the next animation frame. A loading placeholder
+  is not a loaded detail and must never overwrite the saved detail offset.
 - Localhost HTTP endpoints may remain for diagnostics and standalone fixtures.
   Product code must not call `Page.setBypassCSP` or otherwise weaken Codex CSP.
 
@@ -836,25 +885,37 @@ the overlay command owns user consent.
 | Runtime or event is unavailable | Return a typed error response; keep the renderer and existing selection usable. |
 | A late response ID does not match current state | Ignore it without changing loading, selection, or detail. |
 | List/query response contains Prompt | Fail the contract and remove Prompt from the summary projection. |
+| A query or detail exceeds five seconds | End only that request's loading state and show a retryable timeout error. |
+| Renderer delivery fails | Keep the one-shot response so the next domain update can retry it. |
+| Selection/detail repaint replaces the scroll containers | Restore history for the current filter and detail for the selected event. |
+| A new filter or never-viewed event is selected | Start its corresponding scroll position at zero. |
 
 ### 5. Good/Base/Bad Cases
 
-- Good: a bubble jump sends a query, highlights the matching event, then sends one
-  detail request whose response alone contains Prompt.
+- Good: a bubble jump returns the list and matching Prompt-free preview in one
+  `open` response, paints them immediately, then sends one detail request whose
+  response alone may contain Prompt.
+- Good: selecting an event at history offset 260 and detail offset 170 preserves
+  those offsets across detail hydration and Prompt repaint; revisiting the event
+  restores 170.
 - Base: the visual fixture has no binding and reads its mock localhost endpoint.
 - Bad: disable CSP globally, fetch localhost from the real Codex document, include
-  Prompt in normal HUD payloads, or apply a response without matching its ID.
+  Prompt in normal HUD payloads, apply a response without matching its ID, start a
+  new query after rejecting a stale response, or save a loading placeholder's
+  zero scroll offset over a loaded event's offset.
 
 ### 6. Tests Required
 
 - `tests/test_ui.py`: assert query/detail commands call the background runtime with
-  normalized filters and return typed responses with matching request IDs.
+  normalized filters, return typed responses with matching request IDs, and strip
+  Prompt from open/query previews.
 - `tests/test_renderer_hud.py`: assert both binding commands, response handling,
-  stale-response IDs, lazy detail loading, and the HTTP fixture fallback remain in
-  the script contract.
+  stale-response terminal returns, bounded timers, scroll capture/restore, lazy
+  detail loading, and the HTTP fixture fallback remain in the script contract.
 - Live renderer acceptance: use the helper JSONL command path, then inspect the
   real DOM through CDP for the active `backgroundUsage` tab, selected `eventId`,
-  populated request detail, and no error text.
+  populated request detail, no error text, one initial query, and stable history
+  and detail scroll offsets.
 
 ### 7. Wrong vs Correct
 
@@ -870,13 +931,19 @@ valid CORS headers.
 #### Correct
 
 ```javascript
-const requestId = nextRequestId();
-window.codexUsageHudSettingsCommand(JSON.stringify({
-  id: requestId,
-  action: "backgroundUsageDetail",
-  eventId,
-}));
+const requestId = submitBackgroundUsageCommand("backgroundUsageQuery", { filters });
+scheduleBackgroundUsageRequestTimeout("query", requestId);
+
+// A late response is consumed by doing nothing; it never starts another query.
+if (response.requestId !== backgroundUsageState.queryRequestId) return;
+clearBackgroundUsageRequestTimeout("query");
+backgroundUsageState.data = response.payload;
+backgroundUsageState.detail = backgroundUsageSelectedDetail(
+  response.payload,
+  response.payload.selectedEventId,
+);
 ```
 
-The renderer applies the later typed payload only when its `requestId` and
-`eventId` still match the current selection.
+The renderer paints the first list/preview response only when its `requestId`
+matches. A later detail payload additionally requires the same selected
+`eventId`; scroll capture runs before either repaint.
