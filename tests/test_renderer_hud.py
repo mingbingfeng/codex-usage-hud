@@ -702,6 +702,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         payload = payload_from_snapshot(
             snapshot,
             settings_bridge_url="http://127.0.0.1:8765",
+            background_usage_bridge_url=(
+                "http://127.0.0.1:8765/background-usage?access_token=test"
+            ),
+            background_usage_revision=7,
             settings_command_status={"lastCommand": "saved"},
             theme={"variant": "dark"},
             update_state={"visible": True, "phase": "ready"},
@@ -731,6 +735,7 @@ class RendererHudPayloadTests(unittest.TestCase):
                 "settings",
                 "overlay",
                 "diagnostics",
+                "backgroundUsage",
             },
         )
         self.assertEqual(domains["currentSession"]["topLine"], payload["topLine"])
@@ -742,10 +747,73 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(domains["settings"]["updateState"]["phase"], "ready")
         self.assertEqual(domains["overlay"]["workOverlaySelectableMax"], 3)
         self.assertEqual(domains["overlay"]["desktopOverlayDependency"], {"available": True})
+        self.assertEqual(domains["backgroundUsage"]["backgroundUsageRevision"], 7)
+        self.assertIn(
+            "access_token=test",
+            domains["backgroundUsage"]["backgroundUsageBridgeUrl"],
+        )
+        self.assertEqual(
+            domains["backgroundUsage"]["settingsCommandStatus"],
+            {"lastCommand": "saved"},
+        )
+        self.assertNotIn(
+            "prompt",
+            repr(domains["backgroundUsage"]).casefold(),
+        )
         self.assertTrue(domains["diagnostics"]["debug"])
         self.assertEqual(
             domains["diagnostics"]["runtimeErrors"][0]["code"],
             "renderer.anchor_missing",
+        )
+
+    def test_renderer_background_usage_tab_contract(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('data-tab="backgroundUsage"', script)
+        self.assertIn('>后台用量</button>', script)
+        self.assertIn('data-background-usage-filter="feature"', script)
+        self.assertIn('data-background-usage-filter="model"', script)
+        self.assertIn('data-action="background-usage-range"', script)
+        self.assertIn("HUD 估算", script)
+        self.assertIn("本机日志值", script)
+        self.assertIn(
+            "backgroundUsageFormatCost(summary.estimatedCostUsd)",
+            script,
+        )
+        self.assertNotIn(
+            "backgroundUsageFormatCost(summary.estimatedCostUsd || 0)",
+            script,
+        )
+        self.assertIn(
+            '.codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] '
+            ".codex-usage-hud-settings-body {\n          overflow: auto;",
+            script,
+        )
+
+        detail_start = script.index("async function loadBackgroundUsageDetail(eventId)")
+        list_start = script.index("async function loadBackgroundUsage(", detail_start)
+        self.assertIn(
+            'backgroundUsageEndpoint("/detail")',
+            script[detail_start:list_start],
+        )
+        self.assertNotIn(
+            'backgroundUsageEndpoint("/detail")',
+            script[list_start:],
+        )
+        self.assertIn('"backgroundUsageQuery"', script)
+        self.assertIn('"backgroundUsageDetail"', script)
+        self.assertIn("backgroundUsageResponse", script)
+        self.assertIn("queryRequestId", script)
+        self.assertIn("detailRequestId", script)
+
+        jump_start = script.index("function applyBackgroundUsagePayload")
+        jump_end = script.index("function applyFileManagementPayload", jump_start)
+        jump_contract = script[jump_start:jump_end]
+        self.assertIn("backgroundUsageOpenEventId", jump_contract)
+        self.assertIn('renderSettingsModal("backgroundUsage")', jump_contract)
+        self.assertIn(
+            "loadBackgroundUsage({ eventId: openEventId, force: true })",
+            jump_contract,
         )
 
     def test_renderer_payload_can_emit_domain_only_update(self) -> None:
@@ -1102,7 +1170,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "30";', script)
+        self.assertIn('const version = "31";', script)
         self.assertIn("function applyCachedActiveSessionPayload", script)
         self.assertIn("function cacheActiveSessionPayload", script)
         self.assertIn("if (payload?.cachedPreview) return;", script)

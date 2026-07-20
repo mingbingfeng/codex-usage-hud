@@ -219,6 +219,29 @@ class UsageCalculator:
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
 
+    def price_snapshot(
+        self,
+        model_name: str,
+        *,
+        provider: str = "",
+        base_url: str = "",
+    ) -> dict[str, object] | None:
+        """Return the exact local price profile selected for an estimate."""
+        profile = self._resolve_price_profile(
+            model_name,
+            provider=provider,
+            base_url=base_url,
+        )
+        if profile is None:
+            return None
+        return {
+            "key": profile.key,
+            "model": profile.model_pattern,
+            "provider": profile.provider or _normalize_provider(provider),
+            "baseUrl": profile.base_url or _normalize_base_url(base_url),
+            "prices": dict(profile.prices),
+        }
+
     def calculate_cost_usd(
         self,
         model_name: str,

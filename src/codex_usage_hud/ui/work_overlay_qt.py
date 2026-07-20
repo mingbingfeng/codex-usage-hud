@@ -163,7 +163,16 @@ def _workdir_leaf(value: object) -> str:
     return parts[-1] if parts else ""
 
 
+def _item_is_background_usage(item: Mapping[str, object]) -> bool:
+    return (
+        str(item.get("kind") or "").strip() == "background_usage"
+        or str(item.get("status") or "").strip() == "background_usage"
+    )
+
+
 def _workdir_display_name(item: Mapping[str, object]) -> str:
+    if _item_is_background_usage(item):
+        return str(item.get("workdirName") or "查看后台用量记录").strip()
     return _workdir_leaf(item.get("workdir")) or _workdir_leaf(item.get("workdirName"))
 
 
@@ -691,6 +700,8 @@ def _item_is_cli(item: Mapping[str, object]) -> bool:
 def _workdir_clickable_for_item(item: Mapping[str, object]) -> bool:
     if _item_is_cli(item):
         return False
+    if _item_is_background_usage(item):
+        return bool(str(item.get("eventId") or item.get("id") or "").strip())
     workdir = str(item.get("workdir") or "").strip()
     session_id = str(item.get("sessionId") or item.get("id") or "").strip()
     target_title = str(item.get("targetTitle") or item.get("title") or "").strip()
@@ -914,13 +925,20 @@ def _overlay_item_timestamp_seconds(
 
 
 def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    background_usage: list[Mapping[str, object]] = []
     completed: list[Mapping[str, object]] = []
     active: list[Mapping[str, object]] = []
     for item in items:
-        if _item_is_completed(item):
+        if _item_is_background_usage(item):
+            background_usage.append(item)
+        elif _item_is_completed(item):
             completed.append(item)
         else:
             active.append(item)
+    background_usage.sort(
+        key=lambda item: _overlay_item_timestamp_seconds(item, "updatedAt"),
+        reverse=True,
+    )
     completed.sort(
         key=lambda item: _overlay_item_timestamp_seconds(
             item,
@@ -939,7 +957,7 @@ def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mappin
         ),
         reverse=True,
     )
-    return completed + active
+    return background_usage + completed + active
 
 
 def _completed_badge_row_width(count: int) -> int:
@@ -1288,6 +1306,14 @@ def _color_for(
             _theme_mix(theme["surface"], accent, 0.10, fallback=base_card),
             _theme_mix(base_card, accent, 0.12, fallback=base_card),
             _theme_mix(base_border, accent, 0.45, fallback=base_border),
+        )
+    if status == "background_usage":
+        accent = theme["warning"]
+        return (
+            accent,
+            _theme_mix(theme["surface"], accent, 0.12, fallback=base_card),
+            _theme_mix(base_card, accent, 0.15, fallback=base_card),
+            _theme_mix(base_border, accent, 0.58, fallback=base_border),
         )
     if status == "tool":
         accent = theme["info"]
@@ -1777,6 +1803,11 @@ def run_work_overlay_helper_qt(
             self._hover_bg = QColor(hover_background)
             self._fg = QColor(foreground)
             self._hover_fg = QColor(hover_foreground)
+            self.setToolTip(
+                "确认并关闭后台用量提醒"
+                if _item_is_background_usage(item)
+                else "关闭气泡"
+            )
             self.set_overlay_opacity(opacity)
             self.update()
 
@@ -1821,7 +1852,11 @@ def run_work_overlay_helper_qt(
             painter.drawRoundedRect(self.rect(), 6, 6)
             painter.setPen(self._hover_fg if self._hover else self._fg)
             painter.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold))
-            painter.drawText(self.rect(), alignment.AlignCenter, "×")
+            painter.drawText(
+                self.rect(),
+                alignment.AlignCenter,
+                "✓" if _item_is_background_usage(self._item) else "×",
+            )
 
     class WorkdirLinkWindow(QWidget):
         def __init__(
@@ -1860,6 +1895,8 @@ def run_work_overlay_helper_qt(
             tooltip = str(
                 item.get("targetTitle") or item.get("title") or item.get("workdir") or ""
             ).strip()
+            if _item_is_background_usage(item):
+                tooltip = "查看后台用量记录"
             if self._pending:
                 tooltip = (tooltip + "\n" if tooltip else "") + "正在前往会话..."
             self.setToolTip(tooltip)
@@ -3022,6 +3059,21 @@ def run_work_overlay_helper_qt(
 
         def dismiss_item(self, item: Mapping[str, object]) -> None:
             item_id = str(item.get("id") or "")
+            if _item_is_background_usage(item):
+                event_id = str(item.get("eventId") or item_id).strip()
+                if not event_id or not self._append_command(
+                    {
+                        "action": "dismissBackgroundUsage",
+                        "eventId": event_id,
+                        "requestedAt": time.time(),
+                    }
+                ):
+                    return
+                _mark_item_dismissed(self._dismissed_instances, item)
+                self._last_payload_signature = ""
+                self._last_structure_signature = ""
+                self.render_items(self._raw_items)
+                return
             if (
                 item_id
                 and _item_is_completed(item)
@@ -3181,6 +3233,18 @@ def run_work_overlay_helper_qt(
                             switch_overlay.raise_()
 
         def switch_item(self, item: Mapping[str, object]) -> None:
+            if _item_is_background_usage(item):
+                event_id = str(item.get("eventId") or item.get("id") or "").strip()
+                if not event_id:
+                    return
+                self._append_command(
+                    {
+                        "action": "openBackgroundUsage",
+                        "eventId": event_id,
+                        "requestedAt": time.time(),
+                    }
+                )
+                return
             if _item_is_cli(item):
                 return
             session_id = str(item.get("sessionId") or item.get("id") or "").strip()
@@ -3631,6 +3695,7 @@ def run_work_overlay_helper_qt(
             record["item"] = dict(item)
             status = str(item.get("status") or "")
             system_action = _item_is_system_action(item)
+            background_usage = _item_is_background_usage(item)
             accent, pill_bg, card_bg, border_color = _color_for(
                 status,
                 self._theme_tokens,
@@ -3638,14 +3703,18 @@ def run_work_overlay_helper_qt(
             theme = self._theme_tokens
             elapsed_text = (
                 ""
-                if system_action
+                if system_action or background_usage
                 else str(item.get("elapsedText") or "").strip() or "已处理 --"
             )
-            header_text = _work_overlay_header_text(
-                str(item.get("startedAt") or ""),
-                elapsed_text,
-                str(item.get("title") or "Codex 工作"),
-                title_limit=header_title_limit,
+            header_text = (
+                str(item.get("statusLabel") or "Codex App 后台任务使用了额度")
+                if background_usage
+                else _work_overlay_header_text(
+                    str(item.get("startedAt") or ""),
+                    elapsed_text,
+                    str(item.get("title") or "Codex 工作"),
+                    title_limit=header_title_limit,
+                )
             )
 
             card = record["card"]
@@ -3661,7 +3730,7 @@ def run_work_overlay_helper_qt(
             header.setText(header_text)
             header.setStyleSheet(
                 "QLabel {"
-                f"color: {accent if status == 'recent' else _theme_mix(theme['text'], theme['muted'], 0.36, fallback=theme['text'])};"
+                f"color: {accent if status in {'recent', 'background_usage'} else _theme_mix(theme['text'], theme['muted'], 0.36, fallback=theme['text'])};"
                 "border: none;"
                 "background: transparent;"
                 "}"
@@ -3692,7 +3761,18 @@ def run_work_overlay_helper_qt(
                 round_badge.setFixedWidth(18)
                 round_badge.setVisible(False)
 
-            body_text = str(item.get("lastText") or item.get("detail") or "").strip()
+            if background_usage:
+                feature_text = str(item.get("title") or "未知后台任务").strip()
+                model_text = str(item.get("modelName") or "").strip()
+                progress_text = str(item.get("progress") or item.get("detail") or "").strip()
+                secondary = " · ".join(
+                    part for part in (model_text, progress_text) if part
+                )
+                body_text = "\n".join(
+                    part for part in (feature_text, secondary) if part
+                )
+            else:
+                body_text = str(item.get("lastText") or item.get("detail") or "").strip()
             detail = record["detail"]
             detail_text = _multiline_elided_text(
                 body_text,
@@ -3713,20 +3793,41 @@ def run_work_overlay_helper_qt(
             workdir_text = _workdir_display_name(item)
             full_workdir = str(item.get("workdir") or "").strip()
             workdir_clickable = _workdir_clickable_for_item(item)
-            status_text = str(item.get("statusText") or item.get("statusLabel") or "").strip()
+            status_text = (
+                " · ".join(
+                    part
+                    for part in (
+                        (
+                            f"{str(item.get('tokensText') or '').strip()} tokens"
+                            if str(item.get("tokensText") or "").strip()
+                            else ""
+                        ),
+                        str(item.get("costText") or "").strip(),
+                    )
+                    if part
+                )
+                if background_usage
+                else str(item.get("statusText") or item.get("statusLabel") or "").strip()
+            )
             footer_container = record["footer_container"]
             footer_container.setVisible(bool(status_text or workdir_text))
 
             status_label = record["status_label"]
             if status_text:
-                status_text_color = accent if status in {"recent", "error"} else theme["muted"]
+                status_text_color = (
+                    accent
+                    if status in {"recent", "error", "background_usage"}
+                    else theme["muted"]
+                )
                 footer_status_text = _compact_work_text(
                     status_text,
                     48 if workdir_text else 80,
                 )
                 status_label.setText(footer_status_text)
                 status_label.setBaseColor(status_text_color)
-                status_label.setShimmerEnabled(status != "recent")
+                status_label.setShimmerEnabled(
+                    status not in {"recent", "background_usage"}
+                )
                 status_label.setVisible(True)
             else:
                 status_label.setText("")

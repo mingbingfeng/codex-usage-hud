@@ -796,3 +796,87 @@ return attach_renderer_without_window_prepare_launch(plan.port)
 
 Classification owns launch/restart policy; CDP validation owns attach identity, and
 the overlay command owns user consent.
+
+## Scenario: Renderer-to-Python local detail RPC under Codex CSP
+
+### 1. Scope / Trigger
+
+- Trigger: an injected renderer surface needs local HUD data that is too large or
+  sensitive for the ordinary snapshot, such as an on-demand Prompt or request
+  timeline.
+
+### 2. Signatures
+
+- Renderer commands use the existing `codexUsageHudSettingsCommand` CDP binding:
+  `backgroundUsageQuery { id, filters }` and
+  `backgroundUsageDetail { id, eventId }`.
+- Python returns one-shot
+  `settingsCommandStatus.backgroundUsageResponse` with `kind`, `requestId`,
+  optional `eventId`, `payload`, and optional `error`.
+
+### 3. Contracts
+
+- Codex Desktop's page CSP does not include `http://127.0.0.1:*` in
+  `connect-src`; injected product UI must not rely on renderer `fetch()` to a
+  localhost bridge.
+- Query responses contain summaries and filters but no Prompt. Only a detail
+  response for the selected `eventId` may contain Prompt.
+- Renderer state tracks separate query/detail request IDs and ignores stale or
+  mismatched responses. Python clears the response status after a successful
+  domain update.
+- Localhost HTTP endpoints may remain for diagnostics and standalone fixtures.
+  Product code must not call `Page.setBypassCSP` or otherwise weaken Codex CSP.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| CDP settings binding is available | Send typed RPC; do not attempt localhost fetch. |
+| Binding is absent in a standalone fixture | The localhost HTTP fallback may be used. |
+| Runtime or event is unavailable | Return a typed error response; keep the renderer and existing selection usable. |
+| A late response ID does not match current state | Ignore it without changing loading, selection, or detail. |
+| List/query response contains Prompt | Fail the contract and remove Prompt from the summary projection. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a bubble jump sends a query, highlights the matching event, then sends one
+  detail request whose response alone contains Prompt.
+- Base: the visual fixture has no binding and reads its mock localhost endpoint.
+- Bad: disable CSP globally, fetch localhost from the real Codex document, include
+  Prompt in normal HUD payloads, or apply a response without matching its ID.
+
+### 6. Tests Required
+
+- `tests/test_ui.py`: assert query/detail commands call the background runtime with
+  normalized filters and return typed responses with matching request IDs.
+- `tests/test_renderer_hud.py`: assert both binding commands, response handling,
+  stale-response IDs, lazy detail loading, and the HTTP fixture fallback remain in
+  the script contract.
+- Live renderer acceptance: use the helper JSONL command path, then inspect the
+  real DOM through CDP for the active `backgroundUsage` tab, selected `eventId`,
+  populated request detail, and no error text.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```javascript
+await fetch("http://127.0.0.1:57322/background-usage");
+```
+
+The Codex document blocks this at `connect-src`, even when the HTTP server has
+valid CORS headers.
+
+#### Correct
+
+```javascript
+const requestId = nextRequestId();
+window.codexUsageHudSettingsCommand(JSON.stringify({
+  id: requestId,
+  action: "backgroundUsageDetail",
+  eventId,
+}));
+```
+
+The renderer applies the later typed payload only when its `requestId` and
+`eventId` still match the current selection.

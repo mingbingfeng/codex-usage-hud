@@ -94,7 +94,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "30";
+  const version = "31";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -166,6 +166,23 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   let settingsActiveTab = "settings";
   let storageFilter = "all";
   let storagePreviewHidden = false;
+  let backgroundUsageFetchSeq = 0;
+  let backgroundUsageDetailSeq = 0;
+  const backgroundUsageState = {
+    range: "today",
+    feature: "",
+    model: "",
+    selectedEventId: "",
+    data: null,
+    detail: null,
+    loading: false,
+    detailLoading: false,
+    error: "",
+    loadedRevision: -1,
+    promptExpanded: false,
+    queryRequestId: "",
+    detailRequestId: "",
+  };
   let cachedHeaderNode = null;
   let cachedComposerNode = null;
   let observedHeaderNode = null;
@@ -2040,6 +2057,329 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         scrollbar-width: thin;
         scrollbar-color: var(--codex-usage-hud-divider, #273241) var(--codex-usage-hud-surface, #10161d);
       }
+      #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] {
+        width: min(1060px, calc(100vw - 32px));
+        height: min(760px, calc(100vh - 32px));
+      }
+      #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] .codex-usage-hud-settings-body {
+        overflow: hidden;
+        padding: 0;
+      }
+      #${rootId} .codex-usage-hud-background {
+        min-height: 0;
+        height: 100%;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        color: var(--codex-usage-hud-text, #e8eef7);
+      }
+      #${rootId} .codex-usage-hud-background-metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        padding: 12px;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-background-metrics > div {
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+        padding: 9px 10px;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 6px;
+        background: var(--codex-usage-hud-request-panel-surface, #121a23);
+      }
+      #${rootId} .codex-usage-hud-background-metrics span,
+      #${rootId} .codex-usage-hud-background-metrics small {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-background-metrics strong {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        font-size: 17px;
+        line-height: 1.25;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-background-metrics > div:nth-child(2) strong {
+        color: var(--codex-usage-hud-info, #9ccbff);
+      }
+      #${rootId} .codex-usage-hud-background-metrics > div:nth-child(3) strong {
+        color: var(--codex-usage-hud-text, #e8eef7);
+      }
+      #${rootId} .codex-usage-hud-background-metrics > div:nth-child(4) strong {
+        color: var(--codex-usage-hud-success, #8fe3a1);
+        font-size: 13px;
+      }
+      #${rootId} .codex-usage-hud-background-toolbar {
+        display: grid;
+        grid-template-columns: auto minmax(140px, 1fr) minmax(140px, 1fr);
+        gap: 8px;
+        align-items: center;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-background-range {
+        display: inline-flex;
+        min-width: 0;
+        padding-right: 8px;
+        border-right: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-background-range button,
+      #${rootId} .codex-usage-hud-background-toolbar select {
+        min-height: 30px;
+        box-sizing: border-box;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        background: var(--codex-usage-hud-panel-surface, #141b24);
+        color: var(--codex-usage-hud-muted, #a9bcd2);
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-background-range button {
+        padding: 4px 10px;
+        border-right: 0;
+      }
+      #${rootId} .codex-usage-hud-background-range button:first-child {
+        border-radius: 5px 0 0 5px;
+      }
+      #${rootId} .codex-usage-hud-background-range button:last-child {
+        border-right: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 0 5px 5px 0;
+      }
+      #${rootId} .codex-usage-hud-background-range button[data-active="true"] {
+        border-color: var(--codex-usage-hud-warning, #ffb86b);
+        background: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 14%, var(--codex-usage-hud-panel-surface, #141b24));
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-background-toolbar select {
+        min-width: 0;
+        width: 100%;
+        border-radius: 5px;
+        padding: 4px 8px;
+      }
+      #${rootId} .codex-usage-hud-background-master-detail {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-background-history,
+      #${rootId} .codex-usage-hud-background-detail {
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+        padding: 12px;
+        scrollbar-width: thin;
+      }
+      #${rootId} .codex-usage-hud-background-history {
+        border-right: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-background-section-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-height: 24px;
+        color: var(--codex-usage-hud-text, #e8eef7);
+        font-size: 11px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-background-section-title > span:last-child {
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-weight: 600;
+      }
+      #${rootId} .codex-usage-hud-background-event-list {
+        display: grid;
+        gap: 7px;
+        margin-top: 7px;
+      }
+      #${rootId} .codex-usage-hud-background-event {
+        min-width: 0;
+        width: 100%;
+        display: grid;
+        gap: 5px;
+        padding: 9px 10px;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-background-event:hover,
+      #${rootId} .codex-usage-hud-background-event[data-selected="true"] {
+        border-color: var(--codex-usage-hud-warning, #ffb86b);
+        background: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 8%, var(--codex-usage-hud-panel-surface, #141b24));
+      }
+      #${rootId} .codex-usage-hud-background-event-head,
+      #${rootId} .codex-usage-hud-background-event-totals {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 7px;
+      }
+      #${rootId} .codex-usage-hud-background-event-title {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--codex-usage-hud-text, #e8eef7);
+        font-weight: 700;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-background-event-meta {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-background-event-totals {
+        justify-content: flex-start;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-background-event-totals strong {
+        color: var(--codex-usage-hud-text, #e8eef7);
+      }
+      #${rootId} .codex-usage-hud-background-event-totals span:last-child {
+        margin-left: auto;
+        color: var(--codex-usage-hud-warning, #ffb86b);
+      }
+      #${rootId} .codex-usage-hud-background-status {
+        flex: 0 0 auto;
+        padding: 2px 7px;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 4px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 9px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-background-status[data-tone="pending"] {
+        border-color: var(--codex-usage-hud-warning, #ffb86b);
+        color: var(--codex-usage-hud-warning, #ffb86b);
+      }
+      #${rootId} .codex-usage-hud-background-status[data-tone="confirmed"] {
+        border-color: var(--codex-usage-hud-success, #8fe3a1);
+        color: var(--codex-usage-hud-success, #8fe3a1);
+      }
+      #${rootId} .codex-usage-hud-background-detail-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-background-detail-head h3 {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.35;
+        letter-spacing: 0;
+      }
+      #${rootId} .codex-usage-hud-background-detail-sub {
+        color: var(--codex-usage-hud-info, #9ccbff);
+        font: 10px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-background-detail-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px 12px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-background-detail-grid > div {
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+      }
+      #${rootId} .codex-usage-hud-background-detail-grid span {
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 9px;
+      }
+      #${rootId} .codex-usage-hud-background-detail-grid strong {
+        min-width: 0;
+        overflow: hidden;
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-background-detail-grid .codex-usage-hud-background-detail-wide {
+        grid-column: span 2;
+      }
+      #${rootId} .codex-usage-hud-background-requests,
+      #${rootId} .codex-usage-hud-background-prompt {
+        padding-top: 10px;
+      }
+      #${rootId} .codex-usage-hud-background-request-list {
+        display: grid;
+        gap: 4px;
+        margin-top: 6px;
+      }
+      #${rootId} .codex-usage-hud-background-request {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: 74px minmax(100px, 1.2fr) minmax(96px, 1fr) 58px 82px 28px;
+        gap: 7px;
+        align-items: center;
+        min-height: 28px;
+        padding: 0 8px;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 4px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 9px;
+      }
+      #${rootId} .codex-usage-hud-background-request > * {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-background-request strong,
+      #${rootId} .codex-usage-hud-background-request-endpoint {
+        color: var(--codex-usage-hud-text, #e8eef7);
+      }
+      #${rootId} .codex-usage-hud-background-request > span:nth-child(5) {
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        text-align: right;
+      }
+      #${rootId} .codex-usage-hud-background-request-index {
+        text-align: right;
+      }
+      #${rootId} .codex-usage-hud-background-prompt pre {
+        max-height: 150px;
+        box-sizing: border-box;
+        margin: 6px 0 0;
+        overflow: auto;
+        padding: 9px 10px;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 5px;
+        background: var(--codex-usage-hud-request-panel-surface, #121a23);
+        color: var(--codex-usage-hud-request-text, #d8e2ef);
+        font: 9px/1.55 Consolas, "Cascadia Mono", ui-monospace, monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      #${rootId} .codex-usage-hud-background-prompt pre[data-expanded="true"] {
+        max-height: 320px;
+      }
+      #${rootId} .codex-usage-hud-background-empty,
+      #${rootId} .codex-usage-hud-background-error {
+        padding: 16px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        text-align: center;
+      }
+      #${rootId} .codex-usage-hud-background-error {
+        padding: 7px 12px;
+        background: color-mix(in srgb, var(--codex-usage-hud-error, #ff7b86) 8%, transparent);
+        color: var(--codex-usage-hud-error, #ff7b86);
+        text-align: left;
+      }
       #${rootId} .codex-usage-hud-settings-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3072,8 +3412,55 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-storage-summary-main {
           grid-column: 1 / -1;
         }
+        #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] {
+          height: calc(100vh - 24px);
+        }
+        #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] .codex-usage-hud-settings-body {
+          overflow: auto;
+        }
+        #${rootId} .codex-usage-hud-background {
+          display: block;
+          height: auto;
+          min-height: 100%;
+        }
+        #${rootId} .codex-usage-hud-background-metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-background-toolbar {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-background-range {
+          grid-column: 1 / -1;
+          border-right: 0;
+          padding-right: 0;
+        }
+        #${rootId} .codex-usage-hud-background-master-detail {
+          display: block;
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-background-history,
+        #${rootId} .codex-usage-hud-background-detail {
+          overflow: visible;
+        }
+        #${rootId} .codex-usage-hud-background-history {
+          border-right: 0;
+          border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+        }
+        #${rootId} .codex-usage-hud-background-request {
+          grid-template-columns: 70px minmax(92px, 1fr) 56px 78px;
+        }
+        #${rootId} .codex-usage-hud-background-request > span:nth-child(3),
+        #${rootId} .codex-usage-hud-background-request-index {
+          display: none;
+        }
       }
       @media (max-width: 520px) {
+        #${rootId} .codex-usage-hud-settings-tabs {
+          overflow-x: auto;
+        }
+        #${rootId} .codex-usage-hud-settings-tab {
+          flex: 0 0 auto;
+        }
         #${rootId} .codex-usage-hud-settings-actions {
           align-items: flex-start;
           flex-wrap: wrap;
@@ -3137,6 +3524,29 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-storage-item-actions {
           grid-column: 2;
           justify-self: start;
+        }
+        #${rootId} .codex-usage-hud-background-toolbar {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-background-range {
+          grid-column: 1;
+        }
+        #${rootId} .codex-usage-hud-background-range button {
+          min-width: 0;
+          flex: 1 1 0;
+          padding-inline: 6px;
+        }
+        #${rootId} .codex-usage-hud-background-detail-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-background-detail-grid .codex-usage-hud-background-detail-wide {
+          grid-column: 1 / -1;
+        }
+        #${rootId} .codex-usage-hud-background-request {
+          grid-template-columns: minmax(92px, 1fr) 52px 74px;
+        }
+        #${rootId} .codex-usage-hud-background-request > span:first-child {
+          display: none;
         }
       }
     `;
@@ -3551,6 +3961,43 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function settingsBridgeUrl() {
     return String(currentPayload()?.settingsBridgeUrl || "").replace(/\/+$/, "");
+  }
+
+  function backgroundUsageBridgeUrl() {
+    return String(currentPayload()?.backgroundUsageBridgeUrl || "").trim();
+  }
+
+  function backgroundUsageEndpoint(suffix = "") {
+    const bridge = backgroundUsageBridgeUrl();
+    if (!bridge) return null;
+    try {
+      const url = new URL(bridge, window.location.href);
+      url.pathname = url.pathname.replace(
+        /\/background-usage\/?$/,
+        `/background-usage${suffix}`,
+      );
+      return url;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function submitBackgroundUsageCommand(action, payload = {}) {
+    const binding = window[settingsCommandBindingName];
+    if (typeof binding !== "function") return "";
+    const requestId = `background-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      binding(JSON.stringify({
+        id: requestId,
+        createdAt: Date.now(),
+        action,
+        ...payload,
+      }));
+      return requestId;
+    } catch (error) {
+      backgroundUsageState.error = `后台用量命令提交失败：${error?.message || error}`;
+      return "";
+    }
   }
 
   function readThemeStorage(key) {
@@ -4941,13 +5388,301 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     layer.querySelector('[data-action="storage-confirm-cancel"]')?.focus?.();
   }
 
+  function backgroundUsageFormatCost(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+      return "估算不可用";
+    }
+    const amount = Number(value);
+    const digits = amount >= 10 ? 2 : amount >= 1 ? 3 : 6;
+    return `估算 $${amount.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "")}`;
+  }
+
+  function backgroundUsageTime(value, { compact = false } = {}) {
+    const parsed = new Date(String(value || ""));
+    if (Number.isNaN(parsed.getTime())) return "--";
+    return parsed.toLocaleString([], compact
+      ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }
+      : { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function backgroundUsageStatusMeta(status) {
+    const key = String(status || "history");
+    if (key === "confirmed") return { label: "已确认", tone: "confirmed" };
+    if (key === "pending") return { label: "未确认", tone: "pending" };
+    return { label: "历史", tone: "history" };
+  }
+
+  function backgroundUsageRedactedPrompt(value) {
+    return String(value || "")
+      .replace(/([A-Za-z]:\\Users\\)[^\\/\r\n]+/gi, "$1[user]")
+      .replace(/(\/Users\/)[^\/\r\n]+/g, "$1[user]")
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]");
+  }
+
+  function backgroundUsageEventHtml(event) {
+    const selected = String(event?.eventId || "") === backgroundUsageState.selectedEventId;
+    const status = backgroundUsageStatusMeta(event?.status);
+    const models = Array.isArray(event?.models) ? event.models.filter(Boolean) : [];
+    const modelText = models.join(" + ") || "未知模型";
+    return `
+      <button type="button" class="codex-usage-hud-background-event"
+        data-action="background-usage-select" data-event-id="${escapeHtml(event?.eventId || "")}" data-selected="${selected}">
+        <span class="codex-usage-hud-background-event-head">
+          <span class="codex-usage-hud-background-event-title">${escapeHtml(event?.featureLabel || "未知后台任务")}</span>
+          <span class="codex-usage-hud-background-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+        </span>
+        <span class="codex-usage-hud-background-event-meta">${escapeHtml(backgroundUsageTime(event?.lastSeenAt, { compact: true }))} · ${escapeHtml(modelText)}</span>
+        <span class="codex-usage-hud-background-event-totals">
+          <strong>${escapeHtml(humanizeTokens(event?.totalTokens || 0))} tokens</strong>
+          <span>${Number(event?.requestCount || 0).toLocaleString()} 次请求</span>
+          <span>${escapeHtml(backgroundUsageFormatCost(event?.estimatedCostUsd))}</span>
+        </span>
+      </button>
+    `;
+  }
+
+  function backgroundUsageDetailHtml(detail) {
+    if (backgroundUsageState.detailLoading) {
+      return '<div class="codex-usage-hud-background-empty">正在读取请求明细...</div>';
+    }
+    if (!detail || typeof detail !== "object") {
+      return '<div class="codex-usage-hud-background-empty">选择一项后台任务查看请求明细。</div>';
+    }
+    const status = backgroundUsageStatusMeta(detail.status);
+    const models = Array.isArray(detail.models) ? detail.models.filter(Boolean) : [];
+    const requests = Array.isArray(detail.requests) ? detail.requests : [];
+    const rawPrompt = String(detail.prompt || "");
+    const redactedPrompt = backgroundUsageRedactedPrompt(rawPrompt);
+    const promptText = backgroundUsageState.promptExpanded
+      ? rawPrompt
+      : `${redactedPrompt.slice(0, 520)}${redactedPrompt.length > 520 ? "\n…" : ""}`;
+    const requestRows = requests.map((request, index) => `
+      <div class="codex-usage-hud-background-request">
+        <span>${escapeHtml(backgroundUsageTime(request?.occurredAt, { compact: true }))}</span>
+        <span class="codex-usage-hud-background-request-endpoint">POST ${escapeHtml(request?.endpoint || "/responses")}</span>
+        <span title="${escapeHtml(request?.model || "")}">${escapeHtml(request?.model || "未知模型")}</span>
+        <strong>${escapeHtml(humanizeTokens(request?.totalTokens || 0))}</strong>
+        <span>${escapeHtml(backgroundUsageFormatCost(request?.estimatedCostUsd))}</span>
+        <span class="codex-usage-hud-background-request-index">#${index + 1}</span>
+      </div>
+    `).join("");
+    const processText = String(detail.processUuid || "");
+    const threadText = String(detail.threadId || detail.eventId || "");
+    return `
+      <div class="codex-usage-hud-background-detail-head">
+        <div>
+          <h3>${escapeHtml(detail.featureLabel || "未知后台任务")}</h3>
+          <span class="codex-usage-hud-background-detail-sub">Codex App 非会话用量 · 本机已归因</span>
+        </div>
+        <span class="codex-usage-hud-background-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+      </div>
+      <div class="codex-usage-hud-background-detail-grid">
+        <div><span>模型</span><strong>${escapeHtml(models.join(" + ") || "未知")}</strong></div>
+        <div><span>请求</span><strong>${Number(detail.requestCount || 0).toLocaleString()} 次</strong></div>
+        <div title="${escapeHtml(threadText)}"><span>线程</span><strong>${escapeHtml(threadText ? `…${threadText.slice(-12)}` : "--")}</strong></div>
+        <div title="${escapeHtml(processText)}"><span>进程</span><strong>${escapeHtml(processText.split(":").slice(0, 2).join(":") || "--")}</strong></div>
+        <div class="codex-usage-hud-background-detail-wide"><span>时段</span><strong>${escapeHtml(backgroundUsageTime(detail.firstSeenAt))} - ${escapeHtml(backgroundUsageTime(detail.lastSeenAt))}</strong></div>
+        <div class="codex-usage-hud-background-detail-wide" title="${escapeHtml(detail.cwd || "")}"><span>工作目录</span><strong>${escapeHtml(detail.cwd || "--")}</strong></div>
+      </div>
+      <section class="codex-usage-hud-background-requests">
+        <div class="codex-usage-hud-background-section-title">请求明细 <span>${requests.length}</span></div>
+        <div class="codex-usage-hud-background-request-list">${requestRows || '<div class="codex-usage-hud-background-empty">没有可用请求明细。</div>'}</div>
+      </section>
+      ${rawPrompt ? `
+        <section class="codex-usage-hud-background-prompt">
+          <div class="codex-usage-hud-background-section-title">
+            <span>请求内容</span>
+            <button type="button" class="codex-usage-hud-settings-link" data-action="background-usage-toggle-prompt">${backgroundUsageState.promptExpanded ? "收起原文" : "展开原文"}</button>
+          </div>
+          <pre data-expanded="${backgroundUsageState.promptExpanded}">${escapeHtml(promptText)}</pre>
+        </section>
+      ` : ""}
+    `;
+  }
+
+  function backgroundUsagePanelHtml() {
+    const data = backgroundUsageState.data;
+    const summary = data?.summary && typeof data.summary === "object" ? data.summary : {};
+    const events = Array.isArray(data?.events) ? data.events : [];
+    const filters = data?.filters && typeof data.filters === "object" ? data.filters : {};
+    const featureOptions = Array.isArray(filters.features) ? filters.features : [];
+    const modelOptions = Array.isArray(filters.models) ? filters.models : [];
+    if (!backgroundUsageBridgeUrl()) {
+      return '<div class="codex-usage-hud-background" data-background-usage-root="true"><div class="codex-usage-hud-background-empty">后台用量审计当前不可用。</div></div>';
+    }
+    const modelSummary = Array.isArray(summary.models) && summary.models.length
+      ? summary.models.join(" + ")
+      : "--";
+    const costNote = summary.costComplete === false ? "部分模型缺少价格" : "HUD 估算";
+    return `
+      <div class="codex-usage-hud-background" data-background-usage-root="true" aria-busy="${backgroundUsageState.loading}">
+        <div class="codex-usage-hud-background-metrics">
+          <div><span>筛选费用</span><strong>${escapeHtml(backgroundUsageFormatCost(summary.estimatedCostUsd))}</strong><small>${escapeHtml(costNote)}</small></div>
+          <div><span>Tokens</span><strong>${escapeHtml(humanizeTokens(summary.totalTokens || 0))}</strong><small>本机日志值</small></div>
+          <div><span>后台任务</span><strong>${Number(summary.eventCount || 0).toLocaleString()}</strong><small>${Number(summary.requestCount || 0).toLocaleString()} 次请求</small></div>
+          <div title="${escapeHtml(modelSummary)}"><span>使用模型</span><strong>${escapeHtml(modelSummary)}</strong><small>${Array.isArray(summary.models) ? summary.models.length : 0} 个模型</small></div>
+        </div>
+        <div class="codex-usage-hud-background-toolbar">
+          <div class="codex-usage-hud-background-range" role="group" aria-label="日期范围">
+            ${[["today", "今天"], ["7d", "近 7 天"], ["30d", "近 30 天"]].map(([key, label]) => `<button type="button" data-action="background-usage-range" data-background-range="${key}" data-active="${backgroundUsageState.range === key}">${label}</button>`).join("")}
+          </div>
+          <select data-background-usage-filter="feature" aria-label="功能筛选">
+            <option value="">全部功能</option>
+            ${featureOptions.map((item) => `<option value="${escapeHtml(item?.key || "")}" ${backgroundUsageState.feature === String(item?.key || "") ? "selected" : ""}>${escapeHtml(item?.label || item?.key || "")}</option>`).join("")}
+          </select>
+          <select data-background-usage-filter="model" aria-label="模型筛选">
+            <option value="">全部模型</option>
+            ${modelOptions.map((model) => `<option value="${escapeHtml(model)}" ${backgroundUsageState.model === String(model) ? "selected" : ""}>${escapeHtml(model)}</option>`).join("")}
+          </select>
+        </div>
+        ${backgroundUsageState.error ? `<div class="codex-usage-hud-background-error">${escapeHtml(backgroundUsageState.error)}</div>` : ""}
+        <div class="codex-usage-hud-background-master-detail">
+          <section class="codex-usage-hud-background-history">
+            <div class="codex-usage-hud-background-section-title"><span>后台任务历史</span><span>${events.length} 项</span></div>
+            <div class="codex-usage-hud-background-event-list">
+              ${events.map(backgroundUsageEventHtml).join("") || `<div class="codex-usage-hud-background-empty">${backgroundUsageState.loading ? "正在读取后台用量..." : "当前筛选没有后台任务。"}</div>`}
+            </div>
+          </section>
+          <section class="codex-usage-hud-background-detail">
+            ${backgroundUsageDetailHtml(backgroundUsageState.detail)}
+          </section>
+        </div>
+      </div>
+    `;
+  }
+
+  function syncBackgroundUsagePanel() {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "backgroundUsage") return;
+    const body = modal.querySelector(".codex-usage-hud-settings-body");
+    if (body) body.innerHTML = backgroundUsagePanelHtml();
+  }
+
+  async function loadBackgroundUsageDetail(eventId) {
+    const normalized = String(eventId || "").trim();
+    const url = backgroundUsageEndpoint("/detail");
+    if (!normalized) return;
+    const requestSeq = ++backgroundUsageDetailSeq;
+    backgroundUsageState.detailLoading = true;
+    backgroundUsageState.promptExpanded = false;
+    syncBackgroundUsagePanel();
+    const bindingRequestId = submitBackgroundUsageCommand(
+      "backgroundUsageDetail",
+      { eventId: normalized },
+    );
+    if (bindingRequestId) {
+      backgroundUsageState.detailRequestId = bindingRequestId;
+      return;
+    }
+    if (!url) {
+      backgroundUsageState.detailLoading = false;
+      backgroundUsageState.error ||= "后台用量桥接未连接";
+      syncBackgroundUsagePanel();
+      return;
+    }
+    url.searchParams.set("eventId", normalized);
+    try {
+      const response = await fetch(url.toString(), { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || payload?.status !== "ok") {
+        throw new Error(payload?.message || `HTTP ${response.status}`);
+      }
+      if (requestSeq !== backgroundUsageDetailSeq || backgroundUsageState.selectedEventId !== normalized) return;
+      backgroundUsageState.detail = payload.backgroundUsageDetail || null;
+      backgroundUsageState.error = "";
+    } catch (error) {
+      if (requestSeq !== backgroundUsageDetailSeq) return;
+      backgroundUsageState.detail = null;
+      backgroundUsageState.error = `请求明细读取失败：${error?.message || error}`;
+    } finally {
+      if (requestSeq === backgroundUsageDetailSeq) {
+        backgroundUsageState.detailLoading = false;
+        syncBackgroundUsagePanel();
+      }
+    }
+  }
+
+  async function loadBackgroundUsage({ eventId = "", force = false } = {}) {
+    const url = backgroundUsageEndpoint();
+    const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
+    const requestedEventId = String(eventId || backgroundUsageState.selectedEventId || "").trim();
+    if (!force && backgroundUsageState.data && backgroundUsageState.loadedRevision === revision) {
+      if (requestedEventId && requestedEventId !== backgroundUsageState.selectedEventId) {
+        backgroundUsageState.selectedEventId = requestedEventId;
+        backgroundUsageState.detail = null;
+        syncBackgroundUsagePanel();
+        await loadBackgroundUsageDetail(requestedEventId);
+      }
+      return;
+    }
+    const requestSeq = ++backgroundUsageFetchSeq;
+    backgroundUsageState.loading = true;
+    backgroundUsageState.error = "";
+    syncBackgroundUsagePanel();
+    const bindingRequestId = submitBackgroundUsageCommand(
+      "backgroundUsageQuery",
+      {
+        filters: {
+          range: backgroundUsageState.range,
+          feature: backgroundUsageState.feature,
+          model: backgroundUsageState.model,
+          eventId: requestedEventId,
+        },
+      },
+    );
+    if (bindingRequestId) {
+      backgroundUsageState.queryRequestId = bindingRequestId;
+      return;
+    }
+    if (!url) {
+      backgroundUsageState.loading = false;
+      backgroundUsageState.error ||= "后台用量桥接未连接";
+      syncBackgroundUsagePanel();
+      return;
+    }
+    url.searchParams.set("range", backgroundUsageState.range);
+    if (backgroundUsageState.feature) url.searchParams.set("feature", backgroundUsageState.feature);
+    if (backgroundUsageState.model) url.searchParams.set("model", backgroundUsageState.model);
+    if (requestedEventId) url.searchParams.set("eventId", requestedEventId);
+    try {
+      const response = await fetch(url.toString(), { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || payload?.status !== "ok") {
+        throw new Error(payload?.message || `HTTP ${response.status}`);
+      }
+      if (requestSeq !== backgroundUsageFetchSeq) return;
+      backgroundUsageState.data = payload.backgroundUsage || null;
+      backgroundUsageState.loadedRevision = revision;
+      backgroundUsageState.selectedEventId = String(
+        payload?.backgroundUsage?.selectedEventId || requestedEventId || ""
+      );
+      backgroundUsageState.detail = null;
+      backgroundUsageState.error = "";
+      syncBackgroundUsagePanel();
+      if (backgroundUsageState.selectedEventId) {
+        await loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
+      }
+    } catch (error) {
+      if (requestSeq !== backgroundUsageFetchSeq) return;
+      backgroundUsageState.error = `后台用量读取失败：${error?.message || error}`;
+      backgroundUsageState.data = null;
+      backgroundUsageState.detail = null;
+      syncBackgroundUsagePanel();
+    } finally {
+      if (requestSeq === backgroundUsageFetchSeq) {
+        backgroundUsageState.loading = false;
+        syncBackgroundUsagePanel();
+      }
+    }
+  }
+
   function renderSettingsModal(tab = "settings", status = "", { resetProviderDraft = false } = {}) {
     const root = document.getElementById(rootId);
     const modal = document.getElementById(settingsModalId);
     if (!root || !modal) return;
     if (!modal.hidden) captureSettingsProviderForm();
     const settings = hudSettingsFromPayload();
-    const activeTab = ["storage", "support", "about"].includes(tab) ? tab : "settings";
+    const activeTab = ["storage", "backgroundUsage", "support", "about"].includes(tab) ? tab : "settings";
     settingsActiveTab = activeTab;
     if (activeTab === "settings") ensureSettingsProviderDraft(settings, resetProviderDraft);
     const path = settingsPathLabel();
@@ -4956,9 +5691,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       ? "可检查 GitHub Release 并启动 Windows 安装器。"
       : activeTab === "storage"
         ? "扫描只在用户点击时发生；默认只读。"
+        : activeTab === "backgroundUsage"
+          ? "Tokens 来自本机日志；费用均为 HUD 估算。"
         : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件");
     modal.innerHTML = `
-      <div class="codex-usage-hud-settings-dialog" role="dialog" aria-modal="true" aria-label="codex-usage-hud 设置">
+      <div class="codex-usage-hud-settings-dialog" data-active-tab="${escapeHtml(activeTab)}" role="dialog" aria-modal="true" aria-label="codex-usage-hud 设置">
         <div class="codex-usage-hud-settings-head">
           <div class="codex-usage-hud-settings-title">codex-usage-hud v${escapeHtml(appVersion())}</div>
           <button type="button" class="codex-usage-hud-settings-close" data-action="settings-close" aria-label="关闭">×</button>
@@ -4966,22 +5703,31 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         <div class="codex-usage-hud-settings-tabs" role="tablist">
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="settings" data-active="${activeTab === "settings"}">设置</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="storage" data-active="${activeTab === "storage"}">存储</button>
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="backgroundUsage" data-active="${activeTab === "backgroundUsage"}">后台用量</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="support" data-active="${activeTab === "support"}">请作者喝咖啡</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="about" data-active="${activeTab === "about"}">版本更新</button>
         </div>
         <div class="codex-usage-hud-settings-body">
-          ${activeTab === "support" ? supportPanelHtml(settings, path) : activeTab === "about" ? aboutPanelHtml(path) : activeTab === "storage" ? storagePanelHtml(fileManagementFromPayload()) : settingsPanelHtml(settings, bridge, path)}
+          ${activeTab === "support" ? supportPanelHtml(settings, path) : activeTab === "about" ? aboutPanelHtml(path) : activeTab === "storage" ? storagePanelHtml(fileManagementFromPayload()) : activeTab === "backgroundUsage" ? backgroundUsagePanelHtml() : settingsPanelHtml(settings, bridge, path)}
         </div>
         <div class="codex-usage-hud-settings-actions">
           <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || defaultStatus)}</div>
           <div>
-            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "storage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="storage-scan">重新扫描</button> <button type="button" class="codex-usage-hud-settings-action" data-action="storage-preview" data-primary="true">生成预览</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "storage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="storage-scan">重新扫描</button> <button type="button" class="codex-usage-hud-settings-action" data-action="storage-preview" data-primary="true">生成预览</button>' : activeTab === "backgroundUsage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="background-usage-refresh">刷新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
           </div>
         </div>
       </div>
     `;
     modal.hidden = false;
     updateAboutActionButtons(currentUpdateState());
+    if (activeTab === "backgroundUsage") {
+      const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
+      if (!backgroundUsageState.data || backgroundUsageState.loadedRevision !== revision) {
+        void loadBackgroundUsage({ force: true });
+      } else if (backgroundUsageState.selectedEventId && !backgroundUsageState.detail) {
+        void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
+      }
+    }
   }
 
   function settingsPanelHtml(settings, bridge, path) {
@@ -5664,6 +6410,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       markSettingsProviderDirty();
     });
+    root.addEventListener("change", (event) => {
+      const filter = event.target?.closest?.("[data-background-usage-filter]");
+      if (!filter || !root.contains(filter)) return;
+      const key = String(filter.dataset.backgroundUsageFilter || "");
+      if (key === "feature") backgroundUsageState.feature = String(filter.value || "");
+      if (key === "model") backgroundUsageState.model = String(filter.value || "");
+      backgroundUsageState.selectedEventId = "";
+      backgroundUsageState.detail = null;
+      void loadBackgroundUsage({ force: true });
+    });
     root.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         const modal = document.getElementById(settingsModalId);
@@ -5749,6 +6505,40 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.preventDefault();
         event.stopPropagation();
         renderSettingsModal(action.dataset.tab || "settings");
+        return;
+      }
+      if (action.dataset.action === "background-usage-range") {
+        event.preventDefault();
+        event.stopPropagation();
+        backgroundUsageState.range = String(action.dataset.backgroundRange || "today");
+        backgroundUsageState.selectedEventId = "";
+        backgroundUsageState.detail = null;
+        void loadBackgroundUsage({ force: true });
+        return;
+      }
+      if (action.dataset.action === "background-usage-select") {
+        event.preventDefault();
+        event.stopPropagation();
+        const eventId = String(action.dataset.eventId || "").trim();
+        if (!eventId) return;
+        backgroundUsageState.selectedEventId = eventId;
+        backgroundUsageState.detail = null;
+        backgroundUsageState.promptExpanded = false;
+        syncBackgroundUsagePanel();
+        void loadBackgroundUsageDetail(eventId);
+        return;
+      }
+      if (action.dataset.action === "background-usage-toggle-prompt") {
+        event.preventDefault();
+        event.stopPropagation();
+        backgroundUsageState.promptExpanded = !backgroundUsageState.promptExpanded;
+        syncBackgroundUsagePanel();
+        return;
+      }
+      if (action.dataset.action === "background-usage-refresh") {
+        event.preventDefault();
+        event.stopPropagation();
+        void loadBackgroundUsage({ force: true });
         return;
       }
       if (action.dataset.action === "storage-filter") {
@@ -8213,7 +9003,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const provided = payload?.payloadDomains && typeof payload.payloadDomains === "object"
       ? payload.payloadDomains
       : {};
-    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "diagnostics", "fileManagement"];
+    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "backgroundUsage", "diagnostics", "fileManagement"];
     const domains = {};
     if (Object.keys(provided).length > 0) {
       for (const name of allDomains) {
@@ -8322,6 +9112,63 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     // domain explicit lets renderer updates skip unrelated DOM work.
   }
 
+  function applyBackgroundUsagePayload(_root, payload) {
+    const response = payload?.settingsCommandStatus?.backgroundUsageResponse;
+    if (response && typeof response === "object") {
+      const kind = String(response.kind || "");
+      const requestId = String(response.requestId || "");
+      if (kind === "query" && requestId === backgroundUsageState.queryRequestId) {
+        backgroundUsageState.loading = false;
+        backgroundUsageState.data = response.payload || null;
+        backgroundUsageState.loadedRevision = Math.max(
+          0,
+          Number(response?.payload?.revision ?? payload?.backgroundUsageRevision ?? 0),
+        );
+        backgroundUsageState.selectedEventId = String(
+          response?.payload?.selectedEventId || backgroundUsageState.selectedEventId || "",
+        );
+        backgroundUsageState.detail = null;
+        backgroundUsageState.error = String(response.error || "");
+        syncBackgroundUsagePanel();
+        if (backgroundUsageState.selectedEventId) {
+          void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
+        }
+        return;
+      }
+      if (
+        kind === "detail"
+        && requestId === backgroundUsageState.detailRequestId
+        && String(response.eventId || "") === backgroundUsageState.selectedEventId
+      ) {
+        backgroundUsageState.detailLoading = false;
+        backgroundUsageState.detail = response.payload || null;
+        backgroundUsageState.error = String(response.error || "");
+        syncBackgroundUsagePanel();
+        return;
+      }
+    }
+    const openEventId = String(
+      payload?.settingsCommandStatus?.backgroundUsageOpenEventId || ""
+    ).trim();
+    if (openEventId) {
+      backgroundUsageState.range = "today";
+      backgroundUsageState.feature = "";
+      backgroundUsageState.model = "";
+      backgroundUsageState.selectedEventId = openEventId;
+      backgroundUsageState.detail = null;
+      backgroundUsageState.promptExpanded = false;
+      renderSettingsModal("backgroundUsage");
+      void loadBackgroundUsage({ eventId: openEventId, force: true });
+      return;
+    }
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "backgroundUsage") return;
+    const revision = Math.max(0, Number(payload?.backgroundUsageRevision || 0));
+    if (!backgroundUsageState.data || backgroundUsageState.loadedRevision !== revision) {
+      void loadBackgroundUsage({ force: true });
+    }
+  }
+
   function applyFileManagementPayload(_root, payload) {
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden || settingsActiveTab !== "storage") return;
@@ -8348,6 +9195,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
     if ("overlay" in domains) {
       applyOverlayPayload(root, { ...(payload || {}), ...(domains.overlay || {}) });
+    }
+    if ("backgroundUsage" in domains) {
+      applyBackgroundUsagePayload(root, { ...(payload || {}), ...(domains.backgroundUsage || {}) });
     }
     if ("diagnostics" in domains) {
       renderRuntimeErrors(root, { ...(payload || {}), ...(domains.diagnostics || {}) });
@@ -8708,6 +9558,8 @@ class RendererHudPayload:
     active_display_mode: str = "renderer"
     settings_path: str = ""
     settings_bridge_url: str = ""
+    background_usage_bridge_url: str = ""
+    background_usage_revision: int = 0
     settings_command_status: dict[str, object] = field(default_factory=dict)
     file_management: dict[str, object] = field(default_factory=dict)
     work_overlay_selectable_max: int = 6
@@ -8759,6 +9611,8 @@ class RendererHudPayload:
             "activeDisplayMode": self.active_display_mode,
             "settingsPath": self.settings_path,
             "settingsBridgeUrl": self.settings_bridge_url,
+            "backgroundUsageBridgeUrl": self.background_usage_bridge_url,
+            "backgroundUsageRevision": int(self.background_usage_revision),
             "settingsCommandStatus": dict(self.settings_command_status),
             "fileManagement": dict(self.file_management),
             "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
@@ -8881,6 +9735,11 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "appVersion",
     )
     overlay_keys = ("workOverlaySelectableMax", "desktopOverlayDependency")
+    background_usage_keys = (
+        "backgroundUsageBridgeUrl",
+        "backgroundUsageRevision",
+        "settingsCommandStatus",
+    )
     diagnostics_keys = ("debug", "runtimeErrors")
     file_management = payload.get("fileManagement")
 
@@ -8893,6 +9752,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "budget": pick(budget_keys),
         "settings": pick(settings_keys),
         "overlay": pick(overlay_keys),
+        "backgroundUsage": pick(background_usage_keys),
         "diagnostics": pick(diagnostics_keys),
     }
     if isinstance(file_management, dict) and file_management:
@@ -9483,6 +10343,8 @@ class RendererHudClient:
         active_display_mode: str = "renderer",
         settings_path: Path | str | None = None,
         settings_bridge_url: str = "",
+        background_usage_bridge_url: str = "",
+        background_usage_revision: int = 0,
         settings_command_status: dict[str, object] | None = None,
         update_state: dict[str, object] | None = None,
         debug: bool = False,
@@ -9507,6 +10369,8 @@ class RendererHudClient:
             active_display_mode=active_display_mode,
             settings_path=settings_path,
             settings_bridge_url=settings_bridge_url,
+            background_usage_bridge_url=background_usage_bridge_url,
+            background_usage_revision=background_usage_revision,
             settings_command_status=settings_command_status,
             support_images=support_images,
             theme=_renderer_theme_payload(theme_snapshot),
@@ -9882,6 +10746,8 @@ def payload_from_snapshot(
     active_display_mode: str = "renderer",
     settings_path: Path | str | None = None,
     settings_bridge_url: str = "",
+    background_usage_bridge_url: str = "",
+    background_usage_revision: int = 0,
     settings_command_status: dict[str, object] | None = None,
     support_images: list[dict[str, str]] | None = None,
     theme: dict[str, object] | None = None,
@@ -9982,6 +10848,8 @@ def payload_from_snapshot(
         active_display_mode=str(active_display_mode or "renderer"),
         settings_path=str(settings_path or ""),
         settings_bridge_url=settings_bridge_url,
+        background_usage_bridge_url=background_usage_bridge_url,
+        background_usage_revision=max(0, int(background_usage_revision or 0)),
         settings_command_status=settings_command_status or {},
         file_management=file_management or {},
         work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),

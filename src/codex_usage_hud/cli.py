@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
@@ -28,6 +28,10 @@ from threading import Event
 from typing import Any, Mapping
 
 from . import __version__
+from .background_usage_runtime import (
+    BACKGROUND_USAGE_DATABASE_FILENAME,
+    BackgroundUsageRuntime,
+)
 from .config import (
     DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED,
     DEFAULT_BUDGET_THRESHOLDS,
@@ -61,6 +65,7 @@ from .core import (
     detect_reading_activity,
 )
 from .core.runtime_events import RuntimeEvent, RuntimeEventBus
+from .core.background_usage import BACKGROUND_USAGE_KIND
 from .core.runtime_errors import RuntimeErrorRegistry
 from .core.codex_file_manager import (
     CodexFileManager,
@@ -948,6 +953,8 @@ def _overlay_payload_transition_name(
 
 def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
     return {
+        "kind": item.kind,
+        "eventId": item.event_id,
         "id": item.id,
         "title": item.title,
         "sessionId": item.session_id,
@@ -976,6 +983,92 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "current": item.current,
         "pendingAccounting": item.pending_accounting,
     }
+
+
+def background_usage_to_work_item(
+    summary: Mapping[str, object],
+) -> WorkStatusItem | None:
+    """Project one typed audit summary into the existing desktop helper payload."""
+    event_id = str(summary.get("eventId") or "").strip()
+    if not event_id:
+        return None
+    models_value = summary.get("models")
+    models = (
+        [str(value).strip() for value in models_value if str(value).strip()]
+        if isinstance(models_value, Sequence) and not isinstance(models_value, str)
+        else []
+    )
+    model_name = " + ".join(models[:2])
+    if len(models) > 2:
+        model_name = f"{model_name} +{len(models) - 2}"
+    request_count = max(0, int(summary.get("requestCount") or 0))
+    total_tokens = max(0, int(summary.get("totalTokens") or 0))
+    cost_value = summary.get("estimatedCostUsd")
+    try:
+        estimated_cost = float(cost_value) if cost_value is not None else None
+    except (TypeError, ValueError):
+        estimated_cost = None
+    updated_at: datetime | None = None
+    updated_text = str(summary.get("lastSeenAt") or "").strip()
+    if updated_text:
+        try:
+            updated_at = datetime.fromisoformat(updated_text.replace("Z", "+00:00"))
+        except ValueError:
+            updated_at = None
+    feature_label = str(summary.get("featureLabel") or "未知后台任务").strip()
+    endpoint = str(summary.get("endpoint") or "/responses").strip()
+    return WorkStatusItem(
+        id=event_id,
+        event_id=event_id,
+        kind=BACKGROUND_USAGE_KIND,
+        title=feature_label,
+        status=BACKGROUND_USAGE_KIND,
+        status_label="Codex App 后台任务使用了额度",
+        detail=f"{request_count} 次 API 请求",
+        model_name=model_name,
+        status_text=f"{request_count} 次请求",
+        last_text=endpoint,
+        progress=f"{request_count} 次 API 请求",
+        tokens_text=_format_tokens(total_tokens),
+        cost_text=(
+            f"估算 {_format_cost_compact(estimated_cost)}"
+            if estimated_cost is not None
+            else "估算不可用"
+        ),
+        workdir_name="查看后台用量记录",
+        source=BACKGROUND_USAGE_KIND,
+        workdir=str(summary.get("cwd") or "").strip(),
+        model_provider=str(summary.get("provider") or "unknown").strip() or "unknown",
+        client_kind="app",
+        updated_at=updated_at,
+    )
+
+
+def _background_usage_work_items(context: object) -> list[WorkStatusItem]:
+    runtime = getattr(context, "background_usage_runtime", None)
+    pending_today = getattr(runtime, "pending_today", None)
+    if not callable(pending_today):
+        return []
+    try:
+        summaries = pending_today()
+    except Exception as exc:
+        _LOGGER.debug("background_usage_overlay_query_failed error=%s", exc)
+        return []
+    items: list[WorkStatusItem] = []
+    for summary in summaries:
+        if not isinstance(summary, Mapping):
+            continue
+        item = background_usage_to_work_item(summary)
+        if item is not None:
+            items.append(item)
+    return items
+
+
+def _work_overlay_items_with_background_usage(
+    context: object,
+    session_items: Sequence[WorkStatusItem],
+) -> list[WorkStatusItem]:
+    return [*session_items, *_background_usage_work_items(context)]
 
 
 def _normalized_overlay_match_text(value: object) -> str:
@@ -1085,7 +1178,11 @@ class DesktopWorkOverlay:
             return
         if self._suppress_initial_items:
             self._suppress_initial_items = False
-            payload_items: list[dict[str, object]] = []
+            payload_items = [
+                work_item_to_overlay_dict(item)
+                for item in items
+                if item.kind == BACKGROUND_USAGE_KIND
+            ]
         else:
             payload_items = [work_item_to_overlay_dict(item) for item in items]
         payload_items = self._apply_switch_completed_override(payload_items)
@@ -1666,6 +1763,7 @@ class _WorkOverlayCommandPump:
         command_event: Event | None = None,
         runtime_events: RuntimeEventBus | None = None,
         runtime_errors: RuntimeErrorRegistry | None = None,
+        background_command_callback: Callable[[dict[str, object]], bool] | None = None,
     ) -> None:
         self._work_overlay = work_overlay
         self._session_controller = session_controller
@@ -1673,6 +1771,7 @@ class _WorkOverlayCommandPump:
         self._command_event = command_event
         self._runtime_events = runtime_events
         self._runtime_errors = runtime_errors
+        self._background_command_callback = background_command_callback
         self._stop_event = Event()
         self._lock = threading.Lock()
         self._watcher: FileChangeWatcher | None = None
@@ -1736,6 +1835,7 @@ class _WorkOverlayCommandPump:
             prepare_window=True,
             runtime_events=self._runtime_events,
             runtime_errors=self._runtime_errors,
+            background_command_callback=self._background_command_callback,
         )
         if handled and self._command_event is not None:
             self._command_event.set()
@@ -3691,6 +3791,7 @@ def _handle_work_overlay_commands(
     prepare_window: bool = True,
     runtime_events: RuntimeEventBus | None = None,
     runtime_errors: RuntimeErrorRegistry | None = None,
+    background_command_callback: Callable[[dict[str, object]], bool] | None = None,
 ) -> int:
     take_commands = getattr(work_overlay, "take_commands", None)
     if not callable(take_commands):
@@ -3702,6 +3803,13 @@ def _handle_work_overlay_commands(
             runtime_events,
             runtime_errors,
         ):
+            handled += 1
+            continue
+        action = str(command.get("action") or "").strip()
+        if action in {"dismissBackgroundUsage", "openBackgroundUsage"}:
+            if background_command_callback is not None:
+                background_command_callback(dict(command))
+            _publish_work_overlay_command_event(runtime_events, command, None)
             handled += 1
             continue
         activation_meta: dict[str, object] = {}
@@ -5464,6 +5572,7 @@ class RuntimeContext:
     file_manager: CodexFileManager | None = None
     file_manager_worker: CodexFileManagerWorker | None = None
     file_management_payload: dict[str, object] = field(default_factory=dict)
+    background_usage_runtime: BackgroundUsageRuntime | None = None
 
     def __post_init__(self) -> None:
         if self.runtime_errors.event_bus is None:
@@ -5496,6 +5605,9 @@ class RuntimeContext:
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
         _stop_active_session_tracker(self)
+        if self.background_usage_runtime is not None:
+            self.background_usage_runtime.close()
+            self.background_usage_runtime = None
         if self.file_manager_worker is not None:
             try:
                 operation = self.file_manager.snapshot().get("operation", {}) if self.file_manager else {}
@@ -5974,6 +6086,13 @@ def _apply_user_config_to_runtime_context(
         if parser is not None:
             setattr(context, "usage_cache", UsageSummaryCache(parser))
         _configure_ui_cost_estimators(estimator)
+    background_usage_runtime = getattr(context, "background_usage_runtime", None)
+    reconfigure_background_usage = getattr(background_usage_runtime, "reconfigure", None)
+    if callable(reconfigure_background_usage):
+        reconfigure_background_usage(
+            provider=str(getattr(context, "app_provider", "") or ""),
+            price_table=next_config.price_table(),
+        )
 
 
 def _partial_domains_for_changed_user_config(
@@ -6017,6 +6136,12 @@ def _partial_domains_for_settings_command(
         return {"settings"}
     if action == "fetchPrices":
         return {"currentSession", "settings"}
+    if action in {
+        "openBackgroundUsage",
+        "backgroundUsageQuery",
+        "backgroundUsageDetail",
+    }:
+        return {"backgroundUsage"}
     return None
 
 
@@ -6145,6 +6270,53 @@ def _handle_renderer_settings_command(
     try:
         if action in FILE_MANAGEMENT_COMMANDS:
             return _handle_renderer_file_management_command(command, context)
+        if action == "backgroundUsageQuery":
+            runtime = getattr(context, "background_usage_runtime", None)
+            query = getattr(runtime, "query", None)
+            if not callable(query):
+                return _renderer_settings_status(
+                    "后台用量当前不可用。",
+                    kind="error",
+                )
+            raw_filters = command.get("filters")
+            filters = raw_filters if isinstance(raw_filters, Mapping) else {}
+            payload = query(
+                range_key=str(filters.get("range") or "today"),
+                feature=str(filters.get("feature") or ""),
+                model=str(filters.get("model") or ""),
+                event_id=str(filters.get("eventId") or ""),
+            )
+            status = _renderer_settings_status("")
+            status["backgroundUsageResponse"] = {
+                "kind": "query",
+                "requestId": str(command.get("id") or ""),
+                "payload": payload,
+            }
+            return status
+        if action == "backgroundUsageDetail":
+            runtime = getattr(context, "background_usage_runtime", None)
+            detail = getattr(runtime, "detail", None)
+            if not callable(detail):
+                return _renderer_settings_status(
+                    "后台用量当前不可用。",
+                    kind="error",
+                )
+            event_id = str(command.get("eventId") or "").strip()
+            payload = detail(event_id) if event_id else None
+            status = _renderer_settings_status("")
+            status["backgroundUsageResponse"] = {
+                "kind": "detail",
+                "requestId": str(command.get("id") or ""),
+                "eventId": event_id,
+                "payload": payload,
+                "error": "" if payload is not None else "后台用量事件不存在。",
+            }
+            return status
+        if action == "openBackgroundUsage":
+            event_id = str(command.get("eventId") or "").strip()
+            status = _renderer_settings_status("")
+            status["backgroundUsageOpenEventId"] = event_id
+            return status
         if action == "save":
             config = _config_from_settings_payload(
                 context.settings_store.load(),
@@ -6453,7 +6625,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
             project_roots=[str(sessions_root.parent)],
         )
         pre_send_estimator.start()
-    return RuntimeContext(
+    context = RuntimeContext(
         platform=platform,
         sessions_root=sessions_root,
         session_file=Path(args.session_file).expanduser() if args.session_file else None,
@@ -6478,6 +6650,28 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         runtime_errors=RuntimeErrorRegistry(),
         renderer_mode=renderer_active_session_bridge,
     )
+    if renderer_active_session_bridge and sqlite_log_path.is_file():
+        try:
+            context.background_usage_runtime = BackgroundUsageRuntime(
+                logs_path=sqlite_log_path,
+                state_path=state_db_path,
+                database_path=(
+                    hud_runtime_dir() / BACKGROUND_USAGE_DATABASE_FILENAME
+                ),
+                provider=provider_registry.app_provider,
+                price_table=user_config.price_table(),
+                event_bus=context.runtime_events,
+                runtime_errors=context.runtime_errors,
+            ).start()
+        except Exception as exc:
+            context.runtime_errors.record(
+                source="background_usage",
+                code="startup_failed",
+                message="Background usage audit could not start; the renderer HUD remains available.",
+                severity="warning",
+                context={"errorType": type(exc).__name__},
+            )
+    return context
 
 
 def _visible_app_error(platform: BasePlatform) -> str:
@@ -7291,6 +7485,7 @@ def run_renderer_hud_session(
                         "renderer_theme_changed",
                         "session_snapshot_hydrated",
                         "file_management_changed",
+                        "background_usage_changed",
                     }:
                         command_refresh_requested.set()
                     elif event_type == "active_session_changed":
@@ -7338,6 +7533,24 @@ def run_renderer_hud_session(
                 with bridge_command_lock:
                     bridge_commands.append(dict(command))
                 publish_settings_command_received(dict(command))
+
+            def handle_background_usage_overlay_command(
+                command: dict[str, object],
+            ) -> bool:
+                runtime = getattr(context, "background_usage_runtime", None)
+                action = str(command.get("action") or "").strip()
+                event_id = str(command.get("eventId") or "").strip()
+                if runtime is None or not event_id:
+                    return False
+                if action == "dismissBackgroundUsage":
+                    confirm = getattr(runtime, "confirm", None)
+                    return bool(callable(confirm) and confirm(event_id))
+                if action == "openBackgroundUsage":
+                    enqueue_renderer_command(
+                        {"action": "openBackgroundUsage", "eventId": event_id}
+                    )
+                    return True
+                return False
 
             def observe_renderer_active_session(payload: dict[str, object]) -> None:
                 tracker = getattr(context, "active_session_tracker", None)
@@ -7455,14 +7668,39 @@ def run_renderer_hud_session(
                         return None
                     return bridge_commands.popleft()
 
+            background_usage_runtime = getattr(
+                context,
+                "background_usage_runtime",
+                None,
+            )
             bridge = SettingsBridgeServer(
                 context.settings_store,
                 restart_callback=restart_requested.set,
                 command_callback=enqueue_renderer_command,
                 active_session_callback=observe_renderer_active_session,
                 attachments_callback=observe_renderer_attachments,
+                background_usage_query_callback=(
+                    lambda filters: background_usage_runtime.query(**filters)
+                    if background_usage_runtime is not None
+                    else None
+                ),
+                background_usage_detail_callback=(
+                    background_usage_runtime.detail
+                    if background_usage_runtime is not None
+                    else None
+                ),
+                background_usage_confirm_callback=(
+                    background_usage_runtime.confirm
+                    if background_usage_runtime is not None
+                    else None
+                ),
             )
             bridge_url = bridge.start()
+            background_usage_bridge_url = (
+                bridge.background_usage_url
+                if background_usage_runtime is not None
+                else ""
+            )
 
             def renderer_startup_payload(
                 *,
@@ -7821,6 +8059,9 @@ def run_renderer_hud_session(
                     command_event=command_refresh_requested,
                     runtime_events=getattr(context, "runtime_events", None),
                     runtime_errors=getattr(context, "runtime_errors", None),
+                    background_command_callback=(
+                        handle_background_usage_overlay_command
+                    ),
                 )
                 file_events = _RendererFileEventSource(
                     context,
@@ -7842,6 +8083,7 @@ def run_renderer_hud_session(
                     force_fast: bool = False
                     active_session: bool = False
                     diagnostics: bool = False
+                    background_usage: bool = False
                     domains: set[str] = field(default_factory=set)
                     theme_payload: dict[str, object] | None = None
 
@@ -7857,6 +8099,10 @@ def run_renderer_hud_session(
                         self.diagnostics = True
                         self.force_fast = True
                         self.domains.add("diagnostics")
+
+                    def request_background_usage(self) -> None:
+                        self.background_usage = True
+                        self.force_fast = True
 
                     def request_domains(
                         self,
@@ -7981,8 +8227,27 @@ def run_renderer_hud_session(
                     event: object,
                     request: _RendererEventRefreshRequest,
                 ) -> None:
-                    del event
+                    context_value = getattr(event, "context", None)
+                    action = (
+                        str(context_value.get("action") or "").strip()
+                        if isinstance(context_value, Mapping)
+                        else ""
+                    )
+                    if action in {
+                        "dismissBackgroundUsage",
+                        "openBackgroundUsage",
+                    }:
+                        request.request_background_usage()
+                        return
                     request.request_snapshot(force_fast=True)
+
+                def handle_background_usage_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_background_usage()
+                    request.request_domains("backgroundUsage", force_fast=True)
 
                 def handle_runtime_error(
                     event: object,
@@ -8067,6 +8332,7 @@ def run_renderer_hud_session(
                     "update_state_changed": handle_update_state_changed,
                     "renderer_theme_changed": handle_renderer_theme_changed,
                     "file_management_changed": handle_file_management_changed,
+                    "background_usage_changed": handle_background_usage_changed,
                 }
 
                 def refresh_request_for_events(
@@ -8104,7 +8370,12 @@ def run_renderer_hud_session(
                             loop_state.latest_snapshot.active_work_items = list(
                                 stable_items
                             )
-                            work_overlay.update(stable_items)
+                            work_overlay.update(
+                                _work_overlay_items_with_background_usage(
+                                    context,
+                                    stable_items,
+                                )
+                            )
                         else:
                             _LOGGER.info(
                                 "renderer_active_work_discarded result_seq=%s current_seq=%s latest_seq=%s",
@@ -8301,6 +8572,26 @@ def run_renderer_hud_session(
                             *sorted(partial_domains),
                             force_fast=True,
                         )
+
+                def apply_background_usage_change(
+                    inputs: _RendererTickInputs,
+                ) -> None:
+                    if not inputs.event_refresh_request.background_usage:
+                        return
+                    session_items = (
+                        list(loop_state.latest_snapshot.active_work_items)
+                        if loop_state.latest_snapshot is not None
+                        else []
+                    )
+                    work_overlay.configure(
+                        item_limit=_work_overlay_item_limit_for_context(context),
+                    )
+                    work_overlay.update(
+                        _work_overlay_items_with_background_usage(
+                            context,
+                            session_items,
+                        )
+                    )
 
                 def apply_partial_settings_file_change(
                     inputs: _RendererTickInputs,
@@ -8512,6 +8803,12 @@ def run_renderer_hud_session(
                             active_display_mode="renderer",
                             settings_path=context.settings_store.path,
                             settings_bridge_url=bridge_url,
+                            background_usage_bridge_url=background_usage_bridge_url,
+                            background_usage_revision=(
+                                background_usage_runtime.store.revision()
+                                if background_usage_runtime is not None
+                                else 0
+                            ),
                             settings_command_status=loop_state.settings_command_status,
                             update_state=inputs.update_state,
                             debug=_runtime_debug_enabled(),
@@ -8534,7 +8831,12 @@ def run_renderer_hud_session(
                         work_overlay.configure(
                             item_limit=_work_overlay_item_limit_for_context(context),
                         )
-                        work_overlay.update(stable_items)
+                        work_overlay.update(
+                            _work_overlay_items_with_background_usage(
+                                context,
+                                stable_items,
+                            )
+                        )
                         file_events.update_session_path(fresh.session_path)
                     refresh_ms = (time.perf_counter() - refresh_started) * 1000.0
                     update_metrics = dict(
@@ -8600,6 +8902,12 @@ def run_renderer_hud_session(
                         active_display_mode="renderer",
                         settings_path=context.settings_store.path,
                         settings_bridge_url=bridge_url,
+                        background_usage_bridge_url=background_usage_bridge_url,
+                        background_usage_revision=(
+                            background_usage_runtime.store.revision()
+                            if background_usage_runtime is not None
+                            else 0
+                        ),
                         settings_command_status=loop_state.settings_command_status,
                         theme=inputs.event_refresh_request.theme_payload,
                         update_state=inputs.update_state,
@@ -8619,6 +8927,13 @@ def run_renderer_hud_session(
                     if not callable(update_payload):
                         return False
                     if update_payload(payload):
+                        if (
+                            "backgroundUsage" in inputs.event_refresh_request.domains
+                            and loop_state.settings_command_status.get(
+                                "backgroundUsageOpenEventId"
+                            )
+                        ):
+                            loop_state.settings_command_status = {}
                         loop_state.failures = 0
                         _resolve_cdp_update_failure(context)
                         return True
@@ -8705,6 +9020,7 @@ def run_renderer_hud_session(
                             return RENDERER_HUD_UNAVAILABLE
                     tick = sample_tick_inputs()
                     apply_settings_command(tick)
+                    apply_background_usage_change(tick)
                     apply_partial_settings_file_change(tick)
                     if exit_requested.is_set():
                         _LOGGER.info("renderer_hud_exit_requested")

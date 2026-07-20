@@ -377,6 +377,8 @@ class WorkStatusItem:
     updated_at: datetime | None = None
     current: bool = False
     pending_accounting: bool = False
+    kind: str = "session"
+    event_id: str = ""
 
 
 @dataclass

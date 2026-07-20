@@ -9,7 +9,8 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,81 @@ def _available_port() -> int:
 
 
 class SettingsBridgeServerTests(unittest.TestCase):
+    def test_background_usage_endpoints_require_token_and_lazy_load_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            event_id = "10000000-0000-4000-8000-000000000003"
+            query_callback = MagicMock(
+                return_value={
+                    "summary": {"eventCount": 1},
+                    "events": [{"eventId": event_id, "featureLabel": "Memory consolidation"}],
+                }
+            )
+            detail_callback = MagicMock(
+                return_value={
+                    "eventId": event_id,
+                    "prompt": "sensitive local prompt",
+                    "requests": [],
+                }
+            )
+            confirm_callback = MagicMock(return_value=True)
+            bridge = SettingsBridgeServer(
+                store,
+                port=0,
+                background_usage_query_callback=query_callback,
+                background_usage_detail_callback=detail_callback,
+                background_usage_confirm_callback=confirm_callback,
+            )
+            try:
+                bridge.start()
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(f"{bridge.url}/background-usage", timeout=2)
+                self.assertEqual(denied.exception.code, 403)
+
+                with urlopen(
+                    f"{bridge.background_usage_url}&range=7d&feature=memory_consolidation",
+                    timeout=2,
+                ) as response:
+                    list_payload = json.loads(response.read().decode("utf-8"))
+                detail_url = bridge.background_usage_url.replace(
+                    "/background-usage?",
+                    "/background-usage/detail?",
+                )
+                with urlopen(f"{detail_url}&eventId={event_id}", timeout=2) as response:
+                    detail_payload = json.loads(response.read().decode("utf-8"))
+                confirm_url = bridge.background_usage_url.replace(
+                    "/background-usage?",
+                    "/background-usage/confirm?",
+                )
+                request = Request(
+                    confirm_url,
+                    data=json.dumps({"eventId": event_id}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    confirm_payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                bridge.close()
+
+        self.assertEqual(list_payload["status"], "ok")
+        self.assertNotIn("prompt", json.dumps(list_payload).casefold())
+        query_callback.assert_called_once_with(
+            {
+                "range_key": "7d",
+                "feature": "memory_consolidation",
+                "model": "",
+                "event_id": "",
+            }
+        )
+        self.assertEqual(
+            detail_payload["backgroundUsageDetail"]["prompt"],
+            "sensitive local prompt",
+        )
+        detail_callback.assert_called_once_with(event_id)
+        self.assertTrue(confirm_payload["changed"])
+        confirm_callback.assert_called_once_with(event_id)
+
     def test_fetch_prices_updates_only_requested_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = UserConfigStore(Path(temp_dir) / "hud_settings.json")

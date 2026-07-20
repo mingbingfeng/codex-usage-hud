@@ -52,6 +52,7 @@ from codex_usage_hud.cli import (
     _TkWorkOverlayCommandPump,
     _active_session_switch_pending,
     _apply_visible_app_error,
+    background_usage_to_work_item,
     _build_session_switch_controller,
     _enable_crash_diagnostics,
     active_work_items_for_snapshot,
@@ -196,6 +197,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _find_item_rect,
     _find_item_position,
     _interactive_hotspot_opacity,
+    _item_is_background_usage,
     _item_dismiss_key,
     _mark_item_dismissed,
     _multiline_elided_text,
@@ -2034,6 +2036,33 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(payload["current"])
         self.assertIn("tokens", str(payload["progress"]))
 
+    def test_background_usage_payload_has_independent_kind_and_event_id(self) -> None:
+        event_id = "10000000-0000-4000-8000-000000000003"
+        item = background_usage_to_work_item(
+            {
+                "eventId": event_id,
+                "featureLabel": "Memory consolidation",
+                "models": ["gpt-5.6-terra"],
+                "requestCount": 9,
+                "totalTokens": 533_361,
+                "estimatedCostUsd": 0.548041,
+                "lastSeenAt": "2026-07-20T09:10:10+08:00",
+                "cwd": r"C:\Users\tester\.codex\memories",
+                "provider": "custom",
+                "endpoint": "/responses",
+            }
+        )
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        payload = work_item_to_overlay_dict(item)
+        self.assertEqual(payload["kind"], "background_usage")
+        self.assertEqual(payload["eventId"], event_id)
+        self.assertEqual(payload["status"], "background_usage")
+        self.assertEqual(payload["modelName"], "gpt-5.6-terra")
+        self.assertEqual(payload["workdirName"], "查看后台用量记录")
+        self.assertIn("估算", payload["costText"])
+
     def test_work_overlay_top_offset_uses_screen_geometry_top(self) -> None:
         self.assertEqual(_overlay_window_top_y(0), WORK_OVERLAY_TOP_OFFSET)
         self.assertEqual(_overlay_window_top_y(48), 48 + WORK_OVERLAY_TOP_OFFSET)
@@ -2164,6 +2193,22 @@ class BudgetHelperTests(unittest.TestCase):
             _workdir_link_opacity_for_item(active_item, 0.22, True),
             0.96,
         )
+
+    def test_background_usage_reuses_workdir_hotspot_as_history_link(self) -> None:
+        item = {
+            "kind": "background_usage",
+            "status": "background_usage",
+            "eventId": "10000000-0000-4000-8000-000000000003",
+            "workdir": r"C:\Users\tester\.codex\memories",
+            "workdirName": "查看后台用量记录",
+            "clientKind": "app",
+        }
+
+        self.assertTrue(_item_is_background_usage(item))
+        self.assertEqual(_workdir_display_name(item), "查看后台用量记录")
+        self.assertTrue(_workdir_clickable_for_item(item))
+        self.assertTrue(_workdir_external_link_for_item(item))
+        self.assertTrue(_workdir_link_hover_visible_for_item(item))
 
     def test_running_work_overlay_item_uses_model_name_and_current_round(self) -> None:
         now = datetime.now().astimezone()
@@ -2326,6 +2371,36 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(
             payload[0]["code"],
             "work_overlay_helper.state_read_failed",
+        )
+
+    def test_background_usage_commands_bypass_session_switching(self) -> None:
+        event_id = "10000000-0000-4000-8000-000000000003"
+        overlay = SimpleNamespace(
+            take_commands=MagicMock(
+                return_value=[
+                    {"action": "dismissBackgroundUsage", "eventId": event_id},
+                    {"action": "openBackgroundUsage", "eventId": event_id},
+                ]
+            )
+        )
+        session_controller = MagicMock()
+        callback = MagicMock(return_value=True)
+        runtime_events = RuntimeEventBus(clock=lambda: 123.0)
+
+        handled = cli_module._handle_work_overlay_commands(
+            overlay,
+            session_controller,
+            runtime_events=runtime_events,
+            background_command_callback=callback,
+        )
+
+        self.assertEqual(handled, 2)
+        self.assertEqual(callback.call_count, 2)
+        session_controller.activate_session.assert_not_called()
+        events = runtime_events.drain()
+        self.assertEqual(
+            [event.context["action"] for event in events],
+            ["dismissBackgroundUsage", "openBackgroundUsage"],
         )
 
     def test_work_overlay_helper_runtime_error_writes_normal_mode_diagnostic(self) -> None:
@@ -3037,6 +3112,130 @@ class BudgetHelperTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_work_overlay_background_item_emits_open_and_confirm_commands(self) -> None:
+        try:
+            from PySide6.QtCore import QPoint, QTimer, Qt
+            from PySide6.QtTest import QTest
+            from PySide6.QtWidgets import QApplication
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        previous_platform = os.environ.get("QT_QPA_PLATFORM")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                event_id = "10000000-0000-4000-8000-000000000003"
+                state_path = root / f"work-overlay-{os.getpid()}-background.json"
+                command_path = root / "background-commands.jsonl"
+                state = {
+                    "ownerPid": os.getpid(),
+                    "itemLimit": 2,
+                    "commandPath": str(command_path),
+                    "items": [
+                        {
+                            "kind": "background_usage",
+                            "eventId": event_id,
+                            "id": event_id,
+                            "title": "Memory consolidation",
+                            "status": "background_usage",
+                            "statusLabel": "Codex App 后台任务使用了额度",
+                            "modelName": "gpt-5.6-terra",
+                            "progress": "9 次 API 请求",
+                            "tokensText": "533.4k",
+                            "costText": "估算 $0.548",
+                            "workdir": r"C:\Users\tester\.codex\memories",
+                            "workdirName": "查看后台用量记录",
+                            "clientKind": "app",
+                            "updatedAt": datetime.now().astimezone().isoformat(),
+                        }
+                    ],
+                    "updatedAt": time.time(),
+                    "close": False,
+                }
+                state_path.write_text(
+                    json.dumps(state, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                app = QApplication.instance() or QApplication(["overlay-background-test"])
+                observed: dict[str, object] = {}
+
+                def click_background_actions() -> None:
+                    link = next(
+                        (
+                            widget
+                            for widget in app.topLevelWidgets()
+                            if type(widget).__name__ == "WorkdirLinkWindow"
+                            and widget.isVisible()
+                            and widget.toolTip() == "查看后台用量记录"
+                        ),
+                        None,
+                    )
+                    confirm = next(
+                        (
+                            widget
+                            for widget in app.topLevelWidgets()
+                            if type(widget).__name__ == "CloseButtonWindow"
+                            and widget.isVisible()
+                            and widget.toolTip() == "确认并关闭后台用量提醒"
+                        ),
+                        None,
+                    )
+                    observed["link"] = link
+                    observed["confirm"] = confirm
+                    if link is not None:
+                        QTest.mouseClick(
+                            link,
+                            Qt.MouseButton.LeftButton,
+                            pos=QPoint(max(1, link.width() // 2), max(1, link.height() // 2)),
+                        )
+                    if confirm is not None:
+                        QTest.mouseClick(
+                            confirm,
+                            Qt.MouseButton.LeftButton,
+                            pos=QPoint(
+                                max(1, confirm.width() // 2),
+                                max(1, confirm.height() // 2),
+                            ),
+                        )
+                    state["close"] = True
+                    state["updatedAt"] = time.time()
+                    state_path.write_text(
+                        json.dumps(state, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+                QTimer.singleShot(250, click_background_actions)
+                QTimer.singleShot(2000, app.quit)
+                exit_code = run_work_overlay_helper_qt(
+                    state_path,
+                    process_exists=lambda pid: pid == os.getpid(),
+                    owner_pid_from_path=lambda _path: os.getpid(),
+                    item_limit=2,
+                    stale_seconds=20.0,
+                    overlay_alpha=0.88,
+                    hover_alpha=0.22,
+                    header_title_limit=28,
+                )
+                commands = [
+                    json.loads(line)
+                    for line in command_path.read_text(encoding="utf-8").splitlines()
+                ]
+
+            self.assertEqual(exit_code, 0)
+            self.assertIsNotNone(observed.get("link"))
+            self.assertIsNotNone(observed.get("confirm"))
+            self.assertEqual(
+                [command.get("action") for command in commands],
+                ["openBackgroundUsage", "dismissBackgroundUsage"],
+            )
+            self.assertTrue(all(command.get("eventId") == event_id for command in commands))
+        finally:
+            if previous_platform is None:
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = previous_platform
+
     def test_desktop_work_overlay_appends_transition_audit_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3245,6 +3444,41 @@ class BudgetHelperTests(unittest.TestCase):
 
         write_json.assert_called_once()
         self.assertEqual(write_json.call_args.args[1]["items"][0]["id"], "thread-startup")
+
+    def test_desktop_work_overlay_keeps_today_background_item_on_first_snapshot(
+        self,
+    ) -> None:
+        session_item = WorkStatusItem(
+            id="thread-startup",
+            title="Historical task",
+            session_id="thread-startup",
+            status="running",
+            status_label="运行中",
+            detail="Persisted session state",
+        )
+        background_item = WorkStatusItem(
+            id="10000000-0000-4000-8000-000000000003",
+            event_id="10000000-0000-4000-8000-000000000003",
+            kind="background_usage",
+            title="Memory consolidation",
+            status="background_usage",
+            status_label="Codex App 后台任务使用了额度",
+            detail="9 次 API 请求",
+        )
+        overlay = DesktopWorkOverlay(item_limit=2)
+
+        with (
+            patch.object(overlay, "_runtime_available", return_value=True),
+            patch.object(overlay, "_theme_payload", return_value={}),
+            patch.object(overlay, "_start"),
+            patch("codex_usage_hud.cli.write_json_object") as write_json,
+        ):
+            overlay.update([session_item, background_item])
+
+        write_json.assert_called_once()
+        items = write_json.call_args.args[1]["items"]
+        self.assertEqual([item["kind"] for item in items], ["background_usage"])
+        self.assertEqual(items[0]["eventId"], background_item.event_id)
 
     def test_desktop_work_overlay_keep_alive_refreshes_cached_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4471,6 +4705,29 @@ class BudgetHelperTests(unittest.TestCase):
                 "session-active-oldest",
             ],
         )
+
+    def test_background_usage_notifications_take_visible_slots_first(self) -> None:
+        background_usage = {
+            "id": "10000000-0000-4000-8000-000000000003",
+            "kind": "background_usage",
+            "status": "background_usage",
+            "updatedAt": "2026-07-20T10:00:00+08:00",
+        }
+        completed = {
+            "id": "session-completed",
+            "status": "recent",
+            "updatedAt": "2026-07-20T10:01:00+08:00",
+        }
+        active = {
+            "id": "session-active",
+            "status": "running",
+            "sessionStartedAt": "2026-07-20T10:02:00+08:00",
+        }
+
+        ordered = _ordered_overlay_items([active, completed, background_usage])
+        visible = _visible_overlay_items(ordered, {}, item_limit=1)
+
+        self.assertEqual([item["id"] for item in visible], [background_usage["id"]])
 
     def test_completed_badge_hover_ignores_bounding_box_corner(self) -> None:
         self.assertFalse(
@@ -10815,6 +11072,70 @@ class TkSnapshotPumpTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_renderer_background_usage_commands_return_typed_responses(self) -> None:
+        query_payload = {
+            "revision": 4,
+            "events": [{"eventId": "event-1"}],
+            "selectedEventId": "event-1",
+        }
+        detail_payload = {
+            "eventId": "event-1",
+            "prompt": "loaded only for detail",
+        }
+        runtime = SimpleNamespace(
+            query=MagicMock(return_value=query_payload),
+            detail=MagicMock(return_value=detail_payload),
+        )
+        context = SimpleNamespace(background_usage_runtime=runtime)
+
+        query_status = _handle_renderer_settings_command(
+            {
+                "id": "query-1",
+                "action": "backgroundUsageQuery",
+                "filters": {
+                    "range": "7d",
+                    "feature": "memory_consolidation",
+                    "model": "gpt-5.6-terra",
+                    "eventId": "event-1",
+                },
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+        detail_status = _handle_renderer_settings_command(
+            {
+                "id": "detail-1",
+                "action": "backgroundUsageDetail",
+                "eventId": "event-1",
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        runtime.query.assert_called_once_with(
+            range_key="7d",
+            feature="memory_consolidation",
+            model="gpt-5.6-terra",
+            event_id="event-1",
+        )
+        runtime.detail.assert_called_once_with("event-1")
+        self.assertEqual(
+            query_status["backgroundUsageResponse"],
+            {"kind": "query", "requestId": "query-1", "payload": query_payload},
+        )
+        self.assertEqual(
+            detail_status["backgroundUsageResponse"],
+            {
+                "kind": "detail",
+                "requestId": "detail-1",
+                "eventId": "event-1",
+                "payload": detail_payload,
+                "error": "",
+            },
+        )
+
     def test_renderer_storage_command_is_immediately_acked_to_worker(self) -> None:
         worker = SimpleNamespace(enqueue=MagicMock(return_value={"status": "accepted", "requestId": "storage-1"}))
         context = SimpleNamespace(file_manager_worker=worker)

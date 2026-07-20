@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import secrets
 from threading import Thread
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .config import UserConfig, UserConfigStore, fetch_model_prices
 
@@ -25,6 +26,13 @@ class SettingsBridgeServer:
         command_callback: Callable[[dict[str, Any]], None] | None = None,
         active_session_callback: Callable[[dict[str, Any]], None] | None = None,
         attachments_callback: Callable[[dict[str, Any]], None] | None = None,
+        background_usage_query_callback: (
+            Callable[[dict[str, str]], dict[str, object]] | None
+        ) = None,
+        background_usage_detail_callback: (
+            Callable[[str], dict[str, object] | None] | None
+        ) = None,
+        background_usage_confirm_callback: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
         self.host = host
@@ -33,6 +41,10 @@ class SettingsBridgeServer:
         self.command_callback = command_callback
         self.active_session_callback = active_session_callback
         self.attachments_callback = attachments_callback
+        self.background_usage_query_callback = background_usage_query_callback
+        self.background_usage_detail_callback = background_usage_detail_callback
+        self.background_usage_confirm_callback = background_usage_confirm_callback
+        self.background_usage_access_token = secrets.token_urlsafe(24)
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
         self.url = ""
@@ -57,6 +69,15 @@ class SettingsBridgeServer:
         self._thread.start()
         return self.url
 
+    @property
+    def background_usage_url(self) -> str:
+        if not self.url:
+            return ""
+        return (
+            f"{self.url}/background-usage?access_token="
+            f"{quote(self.background_usage_access_token, safe='')}"
+        )
+
     def close(self) -> None:
         server = self._server
         self._server = None
@@ -73,6 +94,10 @@ class SettingsBridgeServer:
         command_callback = self.command_callback
         active_session_callback = self.active_session_callback
         attachments_callback = self.attachments_callback
+        background_usage_query_callback = self.background_usage_query_callback
+        background_usage_detail_callback = self.background_usage_detail_callback
+        background_usage_confirm_callback = self.background_usage_confirm_callback
+        background_usage_access_token = self.background_usage_access_token
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "codex-usage-hud-settings"
@@ -85,10 +110,19 @@ class SettingsBridgeServer:
                 self._send_json({"ok": True})
 
             def do_GET(self) -> None:
-                if urlparse(self.path).path != "/settings":
+                parsed = urlparse(self.path)
+                if parsed.path == "/settings":
+                    self._send_config(store.load(), "ok", "settings loaded")
+                    return
+                if parsed.path == "/background-usage":
+                    self._background_usage_query(parsed)
+                    return
+                if parsed.path == "/background-usage/detail":
+                    self._background_usage_detail(parsed)
+                    return
+                if parsed.path != "/settings":
                     self._send_json({"status": "failed", "message": "not found"}, 404)
                     return
-                self._send_config(store.load(), "ok", "settings loaded")
 
             def do_POST(self) -> None:
                 path = urlparse(self.path).path
@@ -110,7 +144,110 @@ class SettingsBridgeServer:
                 if path == "/composer-attachments":
                     self._receive_attachments()
                     return
+                if path == "/background-usage/confirm":
+                    self._background_usage_confirm(urlparse(self.path))
+                    return
                 self._send_json({"status": "failed", "message": "not found"}, 404)
+
+            def _background_usage_authorized(self, parsed: Any) -> bool:
+                supplied = str(
+                    parse_qs(str(parsed.query or "")).get("access_token", [""])[0]
+                )
+                if secrets.compare_digest(supplied, background_usage_access_token):
+                    return True
+                self._send_json(
+                    {"status": "failed", "message": "background usage access denied"},
+                    403,
+                )
+                return False
+
+            def _background_usage_query(self, parsed: Any) -> None:
+                if not self._background_usage_authorized(parsed):
+                    return
+                if background_usage_query_callback is None:
+                    self._send_json(
+                        {"status": "failed", "message": "background usage is unavailable"},
+                        503,
+                    )
+                    return
+                query = parse_qs(str(parsed.query or ""))
+                filters = {
+                    "range_key": str(query.get("range", ["today"])[0]),
+                    "feature": str(query.get("feature", [""])[0]),
+                    "model": str(query.get("model", [""])[0]),
+                    "event_id": str(query.get("eventId", [""])[0]),
+                }
+                try:
+                    payload = background_usage_query_callback(filters)
+                except Exception as exc:
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": f"background usage query failed: {exc}",
+                        },
+                        500,
+                    )
+                    return
+                self._send_json({"status": "ok", "backgroundUsage": payload})
+
+            def _background_usage_detail(self, parsed: Any) -> None:
+                if not self._background_usage_authorized(parsed):
+                    return
+                if background_usage_detail_callback is None:
+                    self._send_json(
+                        {"status": "failed", "message": "background usage is unavailable"},
+                        503,
+                    )
+                    return
+                query = parse_qs(str(parsed.query or ""))
+                event_id = str(query.get("eventId", [""])[0]).strip()
+                try:
+                    payload = background_usage_detail_callback(event_id)
+                except Exception as exc:
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": f"background usage detail failed: {exc}",
+                        },
+                        500,
+                    )
+                    return
+                if payload is None:
+                    self._send_json(
+                        {"status": "failed", "message": "background usage event not found"},
+                        404,
+                    )
+                    return
+                self._send_json({"status": "ok", "backgroundUsageDetail": payload})
+
+            def _background_usage_confirm(self, parsed: Any) -> None:
+                if not self._background_usage_authorized(parsed):
+                    return
+                if background_usage_confirm_callback is None:
+                    self._send_json(
+                        {"status": "failed", "message": "background usage is unavailable"},
+                        503,
+                    )
+                    return
+                event_id = str(self._read_json().get("eventId") or "").strip()
+                try:
+                    changed = bool(background_usage_confirm_callback(event_id))
+                except Exception as exc:
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": f"background usage confirmation failed: {exc}",
+                        },
+                        500,
+                    )
+                    return
+                self._send_json(
+                    {
+                        "status": "ok",
+                        "message": "background usage confirmed" if changed else "unchanged",
+                        "changed": changed,
+                    }
+                )
 
             def _save_settings(self) -> None:
                 body = self._read_json()
@@ -298,7 +435,10 @@ class SettingsBridgeServer:
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header(
+                    "Access-Control-Allow-Headers",
+                    "Content-Type,X-Codex-Usage-Hud-Token",
+                )
                 self.send_header("Access-Control-Allow-Private-Network", "true")
                 self.end_headers()
                 self.wfile.write(data)
