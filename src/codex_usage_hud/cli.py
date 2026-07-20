@@ -4958,6 +4958,55 @@ def _work_overlay_item_sort_key(item: WorkStatusItem) -> tuple[float, float]:
     return session_seconds, task_seconds
 
 
+def _work_overlay_item_updated_seconds(item: WorkStatusItem) -> float:
+    updated_at = (
+        item.updated_at
+        or item.started_at
+        or item.task_started_at
+        or item.session_started_at
+    )
+    return updated_at.timestamp() if updated_at is not None else 0.0
+
+
+def _refresh_visible_current_work_item(
+    context: object,
+    items: Sequence[WorkStatusItem],
+    snapshot: ParsedSession,
+) -> list[WorkStatusItem]:
+    """Apply current-session state without waiting for the recent-work scan."""
+    if is_subagent_session(snapshot):
+        return list(items)
+    session_id = str(snapshot.session_id or "").strip()
+    if not session_id:
+        return list(items)
+    existing_index = next(
+        (
+            index
+            for index, item in enumerate(items)
+            if str(item.session_id or item.id).strip() == session_id
+        ),
+        None,
+    )
+    if existing_index is None:
+        return list(items)
+    refreshed = _work_item_from_snapshot(
+        snapshot,
+        current=True,
+        title=snapshot.session_title,
+        source=snapshot.selection_source,
+    )
+    if refreshed is None:
+        if snapshot.task_aborted_at is None:
+            return list(items)
+        task_key = _iso_or_empty(snapshot.task_started_at or snapshot.request.started_at)
+        if task_key:
+            _work_overlay_terminal_item_tasks(context)[session_id] = task_key
+        return [item for index, item in enumerate(items) if index != existing_index]
+    updated = list(items)
+    updated[existing_index] = refreshed
+    return updated
+
+
 def _stabilize_published_work_overlay_items(
     context: object,
     items: Sequence[WorkStatusItem],
@@ -4973,6 +5022,13 @@ def _stabilize_published_work_overlay_items(
     merged = {str(item.id): item for item in items if str(item.id or "").strip()}
     for item_id, item in list(merged.items()):
         cached_item = cache.get(item_id)
+        if (
+            cached_item is not None
+            and _work_overlay_item_updated_seconds(item)
+            < _work_overlay_item_updated_seconds(cached_item)
+        ):
+            item = replace(cached_item, current=item.current)
+            merged[item_id] = item
         if cached_item is not None and cached_item.session_started_at is not None:
             stable_session_start = cached_item.session_started_at
             if item.session_started_at is not None:
@@ -8417,6 +8473,12 @@ def run_renderer_hud_session(
                     )
                     if latest is not None:
                         fresh.active_work_items = list(latest.active_work_items)
+                        if not lightweight_active_session_refresh:
+                            fresh.active_work_items = _refresh_visible_current_work_item(
+                                context,
+                                fresh.active_work_items,
+                                fresh,
+                            )
                     if background_active_work_refresh:
                         active_work_pump.request(fresh, fresh.session_path)
                         loop_state.latest_active_work_refresh_at = time.monotonic()

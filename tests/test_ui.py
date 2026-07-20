@@ -1791,6 +1791,103 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(refreshed[0].session_started_at, newer.session_started_at)
         self.assertEqual([item.id for item in after_terminal], [older.id])
 
+    def test_current_completion_refresh_does_not_wait_for_recent_work_scan(self) -> None:
+        now = datetime.now().astimezone()
+        started_at = now - timedelta(minutes=2)
+        stale = WorkStatusItem(
+            id="session-current",
+            session_id="session-current",
+            title="Current session",
+            status="active",
+            status_label="处理中",
+            detail="working",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=started_at,
+            task_started_at=started_at,
+            started_at=started_at,
+            updated_at=now - timedelta(seconds=10),
+            current=True,
+        )
+        completed = ParsedSession(
+            session_id="session-current",
+            session_title="Current session",
+            model_provider="custom",
+            client_kind="app",
+            session_started_at=started_at,
+            task_started_at=started_at,
+            task_completed_at=now,
+            selection_source="renderer:Current session",
+        )
+        completed.request.started_at = started_at
+        completed.request.updated_at = now
+        context = SimpleNamespace(user_config=UserConfig.defaults(), app_provider="custom")
+
+        refreshed = cli_module._refresh_visible_current_work_item(
+            context,
+            [stale],
+            completed,
+        )
+
+        self.assertEqual(len(refreshed), 1)
+        self.assertEqual(refreshed[0].status, "recent")
+        self.assertEqual(refreshed[0].status_label, "刚完成")
+        self.assertTrue(refreshed[0].current)
+        self.assertEqual(refreshed[0].updated_at, now)
+
+    def test_published_work_overlay_rejects_older_running_result_after_completion(self) -> None:
+        now = datetime.now().astimezone()
+        started_at = now - timedelta(minutes=2)
+        completed = WorkStatusItem(
+            id="session-current",
+            session_id="session-current",
+            title="Current session",
+            status="recent",
+            status_label="刚完成",
+            detail="done",
+            model_provider="custom",
+            session_started_at=started_at,
+            task_started_at=started_at,
+            started_at=started_at,
+            updated_at=now,
+            current=True,
+        )
+        stale_running = replace(
+            completed,
+            status="active",
+            status_label="处理中",
+            detail="working",
+            updated_at=now - timedelta(seconds=10),
+        )
+        context = SimpleNamespace(
+            user_config=UserConfig.defaults(),
+            app_provider="custom",
+        )
+
+        cli_module._stabilize_published_work_overlay_items(context, [completed])
+        stabilized = cli_module._stabilize_published_work_overlay_items(
+            context,
+            [stale_running],
+        )
+        resumed_at = now + timedelta(seconds=1)
+        resumed = cli_module._stabilize_published_work_overlay_items(
+            context,
+            [
+                replace(
+                    stale_running,
+                    task_started_at=resumed_at,
+                    started_at=resumed_at,
+                    updated_at=resumed_at,
+                )
+            ],
+        )
+
+        self.assertEqual(len(stabilized), 1)
+        self.assertEqual(stabilized[0].status, "recent")
+        self.assertEqual(stabilized[0].updated_at, now)
+        self.assertEqual(resumed[0].status, "active")
+        self.assertEqual(resumed[0].updated_at, resumed_at)
+
     def test_active_work_items_include_notification_only_provider(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()
@@ -15277,6 +15374,135 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, 130)
         self.assertEqual(build_snapshot.call_count, 2)
         self.assertEqual(fake_client.update.call_count, 2)
+
+    def test_renderer_loop_applies_current_completion_on_session_file_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}", encoding="utf-8")
+            runtime_events = RuntimeEventBus()
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(close=MagicMock())
+            fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+            now = datetime.now().astimezone()
+            started_at = now - timedelta(minutes=2)
+            active_item = WorkStatusItem(
+                id="session-current",
+                session_id="session-current",
+                title="Live Thread",
+                status="active",
+                status_label="处理中",
+                detail="working",
+                model_provider="custom",
+                client_kind="app",
+                session_started_at=started_at,
+                task_started_at=started_at,
+                started_at=started_at,
+                updated_at=now - timedelta(seconds=10),
+                current=True,
+            )
+            active = ParsedSession(
+                status="parsed",
+                session_path=session_file,
+                session_id="session-current",
+                session_title="Live Thread",
+                model_provider="custom",
+                client_kind="app",
+                session_started_at=started_at,
+                task_started_at=started_at,
+                selection_source="renderer:Live Thread",
+                active_work_items=[active_item],
+            )
+            active.request.status = "running"
+            active.request.started_at = started_at
+            active.request.updated_at = active_item.updated_at
+            completed = replace(active, task_completed_at=now, active_work_items=[])
+            completed.request = replace(active.request)
+            completed.request.status = "confirmed"
+            completed.request.updated_at = now
+            delay_calls = 0
+
+            def delay_then_session_event(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls > 1:
+                    raise KeyboardInterrupt
+                runtime_events.publish(
+                    "session_file_changed",
+                    source="file_watcher",
+                    session=str(session_file),
+                    context={"reasons": ["session"]},
+                )
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch(
+                    "codex_usage_hud.cli.build_snapshot",
+                    side_effect=[active, completed],
+                ) as build_snapshot,
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_session_event,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(build_snapshot.call_count, 2)
+        published = [call.args[0] for call in fake_work_overlay.update.call_args_list]
+        self.assertEqual(published[0][0].status, "active")
+        self.assertEqual(published[1][0].status, "recent")
 
     def test_renderer_loop_handles_layout_event_without_snapshot_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

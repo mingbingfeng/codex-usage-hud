@@ -14,6 +14,7 @@
 - Snapshot: `ParsedSession.selection_seq`, `selection_observed_at_ms`, `follow_state`, `follow_reason`, and `follow_timing` cross the tracker/parser/UI boundary unchanged. `followTiming` attributes renderer observation, Python receipt/resolution, snapshot start/build, and renderer application.
 - Identity/cache: session payloads carry canonical `sessionId`, exact raw `rendererSessionId`, and `cachedPreview=false`. A renderer-only preview sets `cachedPreview=true` for the current sequence without acknowledging it.
 - Runtime events: `active_session_changed` produces the visible `sessionSwitch` domain; a successful visible update schedules `active_work_refresh_requested`.
+- Work overlay: `_refresh_visible_current_work_item(context, items, snapshot) -> list[WorkStatusItem]` projects a refreshed current-session snapshot onto an already-visible bubble before recent-work aggregation completes.
 - Critical transport: `_RendererBinding(..., retry_same_target=True)` is used only for the active-session binding.
 - Cost preview: `JsonlSessionParser.parse_file_tail_preview(...)` may expose cumulative token counters, while `SessionSnapshotCache.snapshot_for(...)` owns stabilization of the last complete `cumulative_cost_usd` during an append-triggered hydrate.
 
@@ -28,6 +29,8 @@
 - The first active-session refresh forces cached budget reuse and `refresh_active_work_items=False`, even when unrelated session/file events were coalesced into the same tick. Only after the visible `sessionSwitch` succeeds may `active_work_refresh_requested` rebuild recent work, and its result is accepted only for the current sequence.
 - Deferred active-work aggregation has a 1.2 second selection quiet window. Another selection inside that window sends another visible-first payload and resets the deadline; file events may refresh lightweight state but cannot start the multi-file scan before the deadline.
 - `active_work_items_for_snapshot` runs in `_RendererActiveWorkPump`, never on the renderer loop thread. The pump coalesces pending requests and returns sequence-bound results; the loop applies only a result whose sequence still matches both tracker and latest snapshot.
+- A full current-session refresh must replace the matching already-visible work item from the fresh snapshot before requesting `_RendererActiveWorkPump`. A `task_complete` file event therefore publishes `recent` without waiting for the multi-file scan; this fast path must not create a previously hidden completed bubble.
+- The final work-overlay publication cache rejects an item whose effective `updated_at` predates the cached item for the same ID. This prevents an older pump result from reverting `recent` to active, while a newer user steer remains allowed to restore the active card.
 - Warm `SessionSnapshotCache` hits shallow-clone only fields mutated by runtime enrichment (`request`, warnings, active-work list, timing). Parsed request/tool history remains shared read-only; `copy.deepcopy` is forbidden on the session-switch path because large historical sessions made it cost hundreds of milliseconds.
 - The visible-first build copies budget totals/warnings from the latest snapshot and skips the live app-error DOM probe. `UsageSummaryCache.summarize(...)` and `_visible_app_error(...)` are deferred because provider-filter aggregation and CDP probing were each measured in the hundreds of milliseconds on a real App switch.
 - The visible `sessionSwitch` payload is sent before work-overlay updates or current-session watcher reconfiguration. Both operations are deferred with the non-lightweight refresh because rebuilding Windows watcher workers was measured on the click-to-HUD path.
@@ -52,6 +55,9 @@
 | First session payload is transported but not applied | Bounded duplicate delivery for the same sequence wakes another visible refresh. |
 | Active-session binding disconnects | Preserve the current selection, show `renderer-channel-unavailable`, and permit same-target recovery. |
 | Visible session update succeeds | Schedule recent-work aggregation as a separate event. |
+| Current visible session appends `task_complete` | Publish its existing bubble as `recent` from the refreshed snapshot before recent-work aggregation returns. |
+| Older active-work result arrives after current completion | Keep the newer completed item; do not regress to a square active card. |
+| A newer user steer follows completion | Accept the newer timestamp/task identity and restore the active card. |
 | Append-only file growth has a complete cached snapshot | Keep the cached complete session cost until incremental hydration publishes the new complete cost. |
 | Cold bounded tail excludes earlier token events | Treat its tail-window cost as unknown; never label it as the cumulative session cost. |
 | Request is still running | Live token estimates may appear in `本会话`, but its amount excludes the running round estimate. |
@@ -64,11 +70,13 @@
 ### 5. Good/Base/Bad Cases
 
 - Good: click A -> B -> C; exact cache hits repaint in the capture handler, C remains the final authoritative selection, and later work aggregation cannot repaint A or B.
+- Good: a visible active bubble receives `task_complete`; the session-file event turns it into `recent` immediately, and a late older pump result cannot turn it square again.
 - Good: a complete session costs `$1`, an appended round costs `$2`, and the visible sequence is `$1` while hydrating then `$3` when complete, never `$2`.
 - Base: Codex exposes `client-new-thread:*` before persistence; HUD remains explicit pending and converges after the exact local evidence appears.
 - Base: a cold partial tail has no prior complete cost; it remains explicitly loading and does not publish the sum of tail-window rounds as a session total.
 - Bad: title-key the renderer cache, mark a cached preview as applied, discard the provisional ID after one miss, accept transport delivery as application ACK, synchronously parse 16 recent files before the visible update, or reconnect every auxiliary binding forever.
 - Bad: add `_request_cost(snapshot)` to the top `本会话` amount or retain the partial parser's tail-only `cumulative_cost_usd`; both make the amount jump between round and session totals.
+- Bad: leave the current visible bubble unchanged until `_RendererActiveWorkPump` finishes, or blindly let an older pump result overwrite a newer completed item.
 
 ### 6. Tests Required
 
@@ -76,6 +84,7 @@
 - `tests/test_renderer_hud.py`: raw/canonical identity fields, applied-sequence dedup, immediate click feedback, same-target critical binding retry, and disconnect callback payload.
 - `tests/test_renderer_hud.py`: exact-ID payload cache markers, `cachedPreview` ACK exclusion, and authoritative payloads carrying both identity fields.
 - `tests/test_ui.py`: visible-first scan exclusion, separate work refresh, stale snapshot rejection, unchanged current-sequence retry, and specific runtime diagnostics.
+- `tests/test_ui.py`: a `session_file_changed` renderer-loop refresh publishes the current visible item as `recent` before any pump result; an older active result is rejected and a newer resumed task is accepted.
 - `tests/test_parser.py`: a bounded partial tail clears its non-authoritative cumulative cost.
 - `tests/test_ui.py`: an append preview preserves the last complete cost until hydration.
 - `tests/test_renderer_hud.py`: a running request cannot add its round estimate to the top session amount.
@@ -106,6 +115,8 @@ publish("active_work_refresh_requested")
 ```
 
 The current sequence remains retryable until renderer application, while recent work is refreshed after the user-visible session fields.
+
+For non-selection session-file events, refresh the already-visible current item from the fresh snapshot before starting background aggregation. Treat the pump as discovery/reconciliation, not as the completion-state authority for that item.
 
 For append-triggered cost previews, the correct rule is:
 
