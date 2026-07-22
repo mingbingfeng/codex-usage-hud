@@ -3742,7 +3742,7 @@ def run_work_overlay_helper_qt(
                 else str(item.get("elapsedText") or "").strip() or "已处理 --"
             )
             header_text = (
-                str(item.get("statusLabel") or "Codex App 后台任务使用了额度")
+                str(item.get("statusLabel") or "Codex App 后台任务：未知后台任务")
                 if background_usage
                 else _work_overlay_header_text(
                     str(item.get("startedAt") or ""),

@@ -620,8 +620,8 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
     node.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window }));
     node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
     node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-    node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
     if (typeof node.click === "function") node.click();
+    else node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   };
   const visibleSearchInput = () => Array.from(document.querySelectorAll("input[cmdk-input], input[placeholder*='搜索'], input[role='combobox'], textarea"))
     .find((node) => visible(node) && !node.closest(hudRootSelector)) || null;
@@ -725,46 +725,105 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
   const targetSessionId = normalizeThreadId(targetRawSessionId);
   const targetTitle = normalize(target?.title || "");
   const targetWorkdir = normalize(target?.workdir || "");
-  const current = activeRef();
-  if (
-    (targetSessionId && current.sessionId === targetSessionId)
-    || (!targetSessionId && targetTitle && titleMatches(current.title, targetTitle))
-  ) {
-    return Promise.resolve({
-      ok: true,
-      status: "already-active",
-      requestedSessionId: targetSessionId,
-      requestedTitle: targetTitle,
-      activeSessionId: current.sessionId || "",
-      activeTitle: current.title || "",
-      matchedBy: targetSessionId ? "active-session-id" : "active-title",
-      availableCount: queryRows().length,
-    });
-  }
-  let rows = queryRows();
-  let sidebarRevealRequested = false;
-  if (!rows.length) {
-    const toggles = Array.from(document.querySelectorAll("button, [role='button'], a"))
-      .filter((node) => visible(node) && !node.closest(hudRootSelector))
-      .map((node) => ({ node, label: labelForNode(node), rect: node.getBoundingClientRect() }))
-      .filter((item) => /sidebar|history|conversation|conversations|chat history|对话|会话|历史/i.test(item.label))
-      .sort((left, right) => (left.rect.left - right.rect.left) || (left.rect.top - right.rect.top));
-    const toggle = toggles[0]?.node;
-    if (toggle) {
-      clickPrimaryNode(toggle);
-      sidebarRevealRequested = true;
-      rows = queryRows();
-    }
-  }
-  {
+  const rowMatch = (rows) => {
     const refs = rows.map((row) => ({ row, ref: refFromRow(row) }));
-    const match = refs.find((item) => targetSessionId && item.ref.sessionId === targetSessionId)
-      || refs.find((item) => targetRawSessionId && item.ref.rawSessionId === targetRawSessionId)
-      || refs.find((item) => targetRawSessionId && item.ref.rawSessionId.endsWith(`:${targetSessionId}`))
-      || refs.find((item) => targetSessionId && rowHref(item.row).includes(targetSessionId))
-      || refs.find((item) => targetTitle && item.ref.title === targetTitle)
+    if (targetSessionId) {
+      return refs.find((item) => item.ref.sessionId === targetSessionId)
+        || refs.find((item) => targetRawSessionId && item.ref.rawSessionId === targetRawSessionId)
+        || refs.find((item) => item.ref.rawSessionId.endsWith(`:${targetSessionId}`))
+        || refs.find((item) => rowHref(item.row).includes(targetSessionId))
+        || null;
+    }
+    return refs.find((item) => targetTitle && item.ref.title === targetTitle)
       || refs.find((item) => targetTitle && titleMatches(item.ref.title, targetTitle))
       || null;
+  };
+  const targetProjectRows = () => {
+    const projectLabel = projectLabelFromWorkdir(targetWorkdir).toLowerCase();
+    if (!projectLabel) return [];
+    return Array.from(document.querySelectorAll("[data-app-action-sidebar-project-row]"))
+      .filter((row) => (
+        !row.closest(hudRootSelector)
+        && normalize(row.getAttribute("data-app-action-sidebar-project-label") || row.getAttribute("aria-label") || row.textContent).toLowerCase() === projectLabel
+      ));
+  };
+  const revealTargetProjects = async () => {
+    const projectLabel = projectLabelFromWorkdir(targetWorkdir);
+    if (!projectLabel) return [];
+    let projects = targetProjectRows();
+    if (!projects.length) {
+      const projectsToggle = Array.from(document.querySelectorAll("[data-app-action-sidebar-section-toggle]"))
+        .find((node) => visible(node) && /^(projects?|项目)$/i.test(normalize(node.textContent)));
+      if (projectsToggle?.getAttribute("aria-expanded") === "false") {
+        clickPrimaryNode(projectsToggle);
+        await sleep(100);
+        projects = targetProjectRows();
+      }
+    }
+    for (const project of projects) {
+      project.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      if (
+        project.getAttribute("aria-expanded") === "false"
+        || project.getAttribute("data-app-action-sidebar-project-collapsed") === "true"
+      ) {
+        clickPrimaryNode(project);
+        await sleep(120);
+      }
+    }
+    return targetProjectRows()
+      .map((row) => row.closest("[data-sidebar-project-kind]"))
+      .filter(Boolean);
+  };
+  const nextProjectExpander = (scopes) => {
+    for (const scope of scopes) {
+      const showMore = Array.from(scope.querySelectorAll("button, [role='button']"))
+        .find((node) => (
+          visible(node)
+          && !node.closest(hudRootSelector)
+          && /^(show more|load more|展开显示|显示更多|展开更多)$/i.test(normalize(node.textContent || node.getAttribute("aria-label")))
+        ));
+      if (showMore) return showMore;
+      const collapsedGroup = Array.from(
+        scope.querySelectorAll("[data-app-action-sidebar-section-toggle][aria-expanded='false']")
+      ).find((node) => visible(node) && !node.closest(hudRootSelector));
+      if (collapsedGroup) return collapsedGroup;
+    }
+    return null;
+  };
+  const activeMatchesTarget = (active) => (
+    (targetSessionId && active.sessionId === targetSessionId)
+    || (!targetSessionId && targetTitle && titleMatches(active.title, targetTitle))
+  );
+  const activateTarget = async () => {
+    const current = activeRef();
+    if (activeMatchesTarget(current)) {
+      return {
+        ok: true,
+        status: "already-active",
+        requestedSessionId: targetSessionId,
+        requestedTitle: targetTitle,
+        activeSessionId: current.sessionId || "",
+        activeTitle: current.title || "",
+        matchedBy: targetSessionId ? "active-session-id" : "active-title",
+        availableCount: queryRows().length,
+      };
+    }
+    let rows = queryRows();
+    let sidebarRevealRequested = false;
+    let match = rowMatch(rows);
+    if (!match && !rows.length) {
+      sidebarRevealRequested = await revealSidebar();
+    }
+    for (let attempt = 0; !match && attempt < 12; attempt += 1) {
+      const scopes = await revealTargetProjects();
+      rows = queryRows();
+      match = rowMatch(rows);
+      if (match) break;
+      const expander = nextProjectExpander(scopes);
+      if (!expander) break;
+      clickPrimaryNode(expander);
+      await sleep(120);
+    }
     if (!match) {
       return {
         ok: false,
@@ -796,10 +855,14 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       || row.querySelector("button, [role='button']")
       || row;
     clickPrimaryNode(primary);
-    const active = activeRef();
+    let active = activeRef();
+    for (let attempt = 0; !activeMatchesTarget(active) && attempt < 25; attempt += 1) {
+      await sleep(80);
+      active = activeRef();
+    }
     return {
-      ok: true,
-      status: "switch-requested",
+      ok: activeMatchesTarget(active),
+      status: activeMatchesTarget(active) ? "switched" : "switch-timeout",
       requestedSessionId: targetSessionId,
       requestedTitle: targetTitle,
       activeSessionId: active.sessionId || "",
@@ -807,7 +870,8 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
       matchedBy,
       availableCount: rows.length,
     };
-  }
+  };
+  return activateTarget();
 })()
 """
 

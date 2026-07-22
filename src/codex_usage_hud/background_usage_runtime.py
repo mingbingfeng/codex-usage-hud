@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
 import logging
 from pathlib import Path
 import threading
@@ -54,6 +55,9 @@ class BackgroundUsageRuntime:
             now=self._clock,
         )
         self._scanner_lock = threading.Lock()
+        self._notification_lock = threading.Lock()
+        self._notification_index: dict[str, dict[str, object]] = {}
+        self._refresh_notification_index()
         self._wake = threading.Event()
         self._closed = threading.Event()
         self._idle = threading.Event()
@@ -107,6 +111,7 @@ class BackgroundUsageRuntime:
     def confirm(self, event_id: object) -> bool:
         changed = self.store.confirm(event_id)
         if changed:
+            self._refresh_notification_index()
             self._publish_changed(reason="confirmed", event_id=str(event_id or ""))
         return changed
 
@@ -124,6 +129,18 @@ class BackgroundUsageRuntime:
 
     def pending_today(self) -> list[dict[str, object]]:
         return self.store.pending_today()
+
+    def notification_for_session(self, session_id: object) -> dict[str, object]:
+        """Return the unread background notification for one canonical session."""
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            return {}
+        with self._notification_lock:
+            notification = self._notification_index.get(normalized)
+            return dict(notification) if notification is not None else {}
+
+    def range_for_event(self, event_id: object) -> str:
+        return self.store.range_for_event(event_id, now=self._local_now())
 
     def wait_until_idle(self, timeout: float = 2.0) -> bool:
         return self._idle.wait(max(0.0, float(timeout)))
@@ -176,6 +193,7 @@ class BackgroundUsageRuntime:
                 pending_deadline = result.pending_deadline
                 self._sync_diagnostics(result.diagnostics)
                 if result.content_changed:
+                    self._refresh_notification_index()
                     self._publish_changed(reason="scan")
             except Exception as exc:
                 pending_deadline = None
@@ -187,6 +205,17 @@ class BackgroundUsageRuntime:
                 _LOGGER.exception("background_usage_scan_failed")
             finally:
                 self._idle.set()
+
+    def _local_now(self) -> datetime:
+        return datetime.fromtimestamp(float(self._clock())).astimezone()
+
+    def _refresh_notification_index(self) -> None:
+        index = self.store.notification_index(now=self._local_now())
+        with self._notification_lock:
+            self._notification_index = {
+                str(session_id): dict(notification)
+                for session_id, notification in index.items()
+            }
 
     def _publish_changed(self, *, reason: str, event_id: str = "") -> None:
         publish = getattr(self.event_bus, "publish", None)

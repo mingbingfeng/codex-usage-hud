@@ -34,6 +34,8 @@ CHILD_ID = "10000000-0000-4000-8000-000000000002"
 BACKGROUND_ID = "10000000-0000-4000-8000-000000000003"
 UNKNOWN_ID = "10000000-0000-4000-8000-000000000004"
 GRACE_ID = "10000000-0000-4000-8000-000000000005"
+RELATED_SESSION_ID = "20000000-0000-4000-8000-000000000001"
+AMBIGUOUS_SESSION_ID = "20000000-0000-4000-8000-000000000002"
 APP_PROCESS = "pid:1234:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 WORKER_PROCESS = "pid:2345:aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff"
 
@@ -128,6 +130,52 @@ def _create_state(path: Path) -> None:
         )
 
 
+def _create_state_with_sessions(
+    path: Path,
+    sessions: list[tuple[str, str, int]],
+    *,
+    spawn_edges: tuple[tuple[str, str], ...] = (),
+) -> None:
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(
+            """
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                source TEXT,
+                first_user_message TEXT,
+                created_at INTEGER
+            );
+            CREATE TABLE thread_spawn_edges (
+                parent_thread_id TEXT,
+                child_thread_id TEXT,
+                status TEXT
+            );
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO threads(id, source, first_user_message, created_at)
+            VALUES(?, 'vscode', ?, ?)
+            """,
+            sessions,
+        )
+        connection.executemany(
+            """
+            INSERT INTO thread_spawn_edges(parent_thread_id, child_thread_id, status)
+            VALUES(?, ?, 'completed')
+            """,
+            spawn_edges,
+        )
+
+
+def _title_description_prompt(source_prompt: str) -> str:
+    return (
+        "You will be presented with a user prompt, and your job is to provide "
+        "a short title for a task. Fill the structured description field.\n"
+        f"User prompt:\n{source_prompt}"
+    )
+
+
 def _prices() -> dict[str, dict[str, object]]:
     return {
         "custom/gpt-test": {
@@ -150,6 +198,10 @@ class BackgroundUsageDecoderTests(unittest.TestCase):
         self.assertEqual(
             classify_background_feature(prompt).key,
             "memory_consolidation",
+        )
+        self.assertEqual(
+            classify_background_feature(prompt).label,
+            "记忆整理",
         )
 
         model, cwd, endpoint = decode_request_context(
@@ -177,6 +229,257 @@ class BackgroundUsageDecoderTests(unittest.TestCase):
 
 
 class BackgroundUsageScannerTests(unittest.TestCase):
+    def test_exact_title_prompt_association_uses_session_badge_and_unread_range(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            logs_path = root / "logs_2.sqlite"
+            state_path = root / "state_5.sqlite"
+            base_ts = 1_900_000_000
+            source_prompt = "Optimize the usage overview without changing other HUDs."
+            _create_logs(
+                logs_path,
+                [
+                    (
+                        1,
+                        base_ts,
+                        "codex_core::session::handlers",
+                        "codex_core::session::handlers",
+                        _submission_body(
+                            BACKGROUND_ID,
+                            _title_description_prompt(source_prompt),
+                        ),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        2,
+                        base_ts + 1,
+                        "codex_core::session::turn",
+                        "codex_core::session::turn",
+                        _turn_body(BACKGROUND_ID, "gpt-test", 30, 20),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                ],
+            )
+            _create_state_with_sessions(
+                state_path,
+                [(RELATED_SESSION_ID, source_prompt, base_ts - 10)],
+            )
+            store = BackgroundUsageStore(root / "audit.sqlite3")
+            scanner = BackgroundUsageScanner(
+                logs_path=logs_path,
+                state_path=state_path,
+                store=store,
+                provider="custom",
+                price_table=_prices(),
+                grace_seconds=0,
+                now=lambda: float(base_ts + 30),
+            )
+
+            scanner.scan()
+
+            now = datetime.fromtimestamp(base_ts + 30).astimezone()
+            self.assertEqual(store.pending_today(now=now), [])
+            self.assertEqual(
+                store.notification_index(now=now),
+                {
+                    RELATED_SESSION_ID: {
+                        "count": 1,
+                        "eventId": BACKGROUND_ID,
+                        "range": "today",
+                    }
+                },
+            )
+            payload = store.query(range_key="all", now=now)
+            self.assertTrue(payload["events"][0]["unread"])
+            later = datetime.fromtimestamp(base_ts + (8 * 86400)).astimezone()
+            self.assertEqual(store.range_for_event(BACKGROUND_ID, now=later), "30d")
+
+            with closing(sqlite3.connect(store.path)) as connection:
+                row = connection.execute(
+                    "SELECT related_session_id, association_kind "
+                    "FROM background_events WHERE event_id=?",
+                    (BACKGROUND_ID,),
+                ).fetchone()
+            self.assertEqual(
+                row,
+                (RELATED_SESSION_ID, "exact_first_user_message"),
+            )
+            self.assertTrue(store.confirm(BACKGROUND_ID, now=now))
+            self.assertEqual(store.notification_index(now=now), {})
+
+    def test_ambiguous_title_prompt_stays_as_unrelated_overlay_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            logs_path = root / "logs_2.sqlite"
+            state_path = root / "state_5.sqlite"
+            base_ts = 1_900_000_000
+            source_prompt = "The same first message was used twice."
+            _create_logs(
+                logs_path,
+                [
+                    (
+                        1,
+                        base_ts,
+                        "codex_core::session::handlers",
+                        "codex_core::session::handlers",
+                        _submission_body(
+                            BACKGROUND_ID,
+                            _title_description_prompt(source_prompt),
+                        ),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        2,
+                        base_ts + 1,
+                        "codex_core::session::turn",
+                        "codex_core::session::turn",
+                        _turn_body(BACKGROUND_ID, "gpt-test", 30, 20),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                ],
+            )
+            _create_state_with_sessions(
+                state_path,
+                [
+                    (RELATED_SESSION_ID, source_prompt, base_ts - 10),
+                    (AMBIGUOUS_SESSION_ID, source_prompt, base_ts - 5),
+                ],
+            )
+            store = BackgroundUsageStore(root / "audit.sqlite3")
+            scanner = BackgroundUsageScanner(
+                logs_path=logs_path,
+                state_path=state_path,
+                store=store,
+                provider="custom",
+                price_table=_prices(),
+                grace_seconds=0,
+                now=lambda: float(base_ts + 30),
+            )
+
+            scanner.scan()
+
+            now = datetime.fromtimestamp(base_ts + 30).astimezone()
+            self.assertEqual(store.notification_index(now=now), {})
+            self.assertEqual(
+                [item["eventId"] for item in store.pending_today(now=now)],
+                [BACKGROUND_ID],
+            )
+
+    def test_exact_prompt_matching_a_spawn_child_stays_as_overlay_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            logs_path = root / "logs_2.sqlite"
+            state_path = root / "state_5.sqlite"
+            base_ts = 1_900_000_000
+            source_prompt = "A child agent received this exact prompt."
+            _create_logs(
+                logs_path,
+                [
+                    (
+                        1,
+                        base_ts,
+                        "codex_core::session::handlers",
+                        "codex_core::session::handlers",
+                        _submission_body(
+                            BACKGROUND_ID,
+                            _title_description_prompt(source_prompt),
+                        ),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        2,
+                        base_ts + 1,
+                        "codex_core::session::turn",
+                        "codex_core::session::turn",
+                        _turn_body(BACKGROUND_ID, "gpt-test", 30, 20),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                ],
+            )
+            _create_state_with_sessions(
+                state_path,
+                [
+                    (RELATED_SESSION_ID, "Parent prompt", base_ts - 20),
+                    (CHILD_ID, source_prompt, base_ts - 10),
+                ],
+                spawn_edges=((RELATED_SESSION_ID, CHILD_ID),),
+            )
+            store = BackgroundUsageStore(root / "audit.sqlite3")
+            scanner = BackgroundUsageScanner(
+                logs_path=logs_path,
+                state_path=state_path,
+                store=store,
+                provider="custom",
+                price_table=_prices(),
+                grace_seconds=0,
+                now=lambda: float(base_ts + 30),
+            )
+
+            scanner.scan()
+
+            now = datetime.fromtimestamp(base_ts + 30).astimezone()
+            self.assertEqual(store.notification_index(now=now), {})
+            self.assertEqual(
+                [item["eventId"] for item in store.pending_today(now=now)],
+                [BACKGROUND_ID],
+            )
+
+    def test_v1_store_migrates_session_association_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "audit.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                    INSERT INTO metadata(key, value) VALUES('schema_version', '1');
+                    INSERT INTO metadata(key, value) VALUES('revision', '0');
+                    CREATE TABLE background_events (
+                        event_id TEXT PRIMARY KEY,
+                        thread_id TEXT NOT NULL UNIQUE,
+                        process_uuid TEXT NOT NULL DEFAULT '',
+                        feature_key TEXT NOT NULL DEFAULT 'unknown',
+                        feature_label TEXT NOT NULL DEFAULT '',
+                        prompt TEXT NOT NULL DEFAULT '',
+                        cwd TEXT NOT NULL DEFAULT '',
+                        endpoint TEXT NOT NULL DEFAULT '',
+                        provider TEXT NOT NULL DEFAULT '',
+                        first_seen_at INTEGER NOT NULL,
+                        last_seen_at INTEGER NOT NULL,
+                        confirmed_at INTEGER,
+                        classification_state TEXT NOT NULL DEFAULT 'pending',
+                        app_attribution TEXT NOT NULL DEFAULT '',
+                        request_count INTEGER NOT NULL DEFAULT 0,
+                        total_tokens INTEGER NOT NULL DEFAULT 0,
+                        estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                        cost_available INTEGER NOT NULL DEFAULT 0
+                    );
+                    """
+                )
+
+            BackgroundUsageStore(path)
+
+            with closing(sqlite3.connect(path)) as connection:
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(background_events)"
+                    )
+                }
+                version = connection.execute(
+                    "SELECT value FROM metadata WHERE key='schema_version'"
+                ).fetchone()[0]
+            self.assertIn("related_session_id", columns)
+            self.assertIn("association_kind", columns)
+            self.assertEqual(version, "2")
+
     def test_scan_excludes_sessions_aggregates_requests_and_persists_confirmation(
         self,
     ) -> None:
@@ -308,6 +611,11 @@ class BackgroundUsageScannerTests(unittest.TestCase):
             self.assertNotIn(VISIBLE_ID, by_id)
             self.assertNotIn(CHILD_ID, by_id)
             self.assertEqual(by_id[BACKGROUND_ID]["requestCount"], 2)
+            self.assertEqual(by_id[BACKGROUND_ID]["featureLabel"], "任务标题与描述")
+            self.assertIn(
+                {"key": "title_description", "label": "任务标题与描述"},
+                payload["filters"]["features"],
+            )
             self.assertEqual(by_id[BACKGROUND_ID]["totalTokens"], 220)
             self.assertEqual(
                 by_id[BACKGROUND_ID]["featureKey"],
@@ -319,6 +627,29 @@ class BackgroundUsageScannerTests(unittest.TestCase):
                 "visible_app_thread",
             )
             self.assertNotIn("prompt", json.dumps(payload).casefold())
+
+            with closing(sqlite3.connect(audit_path)) as connection:
+                connection.execute(
+                    "UPDATE background_events SET feature_key=?, feature_label=? "
+                    "WHERE event_id=?",
+                    (
+                        "title_description",
+                        "Title and description generation",
+                        UNKNOWN_ID,
+                    ),
+                )
+            deduplicated = store.query(
+                range_key="all",
+                now=datetime.fromtimestamp(base_ts + 30).astimezone(),
+            )
+            self.assertEqual(
+                [
+                    item
+                    for item in deduplicated["filters"]["features"]
+                    if item["key"] == "title_description"
+                ],
+                [{"key": "title_description", "label": "任务标题与描述"}],
+            )
 
             detail = store.detail(BACKGROUND_ID)
             self.assertIsNotNone(detail)
@@ -621,6 +952,74 @@ class _FakeWatcher:
 
 
 class BackgroundUsageRuntimeTests(unittest.TestCase):
+    def test_runtime_refreshes_session_notification_cache_after_confirm(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            logs_path = root / "logs_2.sqlite"
+            state_path = root / "state_5.sqlite"
+            base_ts = 1_900_000_000
+            source_prompt = "Show associated background work in the current HUD."
+            _create_logs(
+                logs_path,
+                [
+                    (
+                        1,
+                        base_ts,
+                        "codex_core::session::handlers",
+                        "codex_core::session::handlers",
+                        _submission_body(
+                            BACKGROUND_ID,
+                            _title_description_prompt(source_prompt),
+                        ),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        2,
+                        base_ts + 1,
+                        "codex_core::session::turn",
+                        "codex_core::session::turn",
+                        _turn_body(BACKGROUND_ID, "gpt-test", 30, 20),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                ],
+            )
+            _create_state_with_sessions(
+                state_path,
+                [(RELATED_SESSION_ID, source_prompt, base_ts - 10)],
+            )
+            events = RuntimeEventBus()
+            runtime = BackgroundUsageRuntime(
+                logs_path=logs_path,
+                state_path=state_path,
+                database_path=root / "audit.sqlite3",
+                provider="custom",
+                price_table=_prices(),
+                event_bus=events,
+                watcher_factory=_FakeWatcher,  # type: ignore[arg-type]
+                clock=lambda: float(base_ts + 30),
+            )
+            try:
+                runtime.start()
+                self.assertTrue(runtime.wait_until_idle())
+                self.assertEqual(
+                    runtime.notification_for_session(RELATED_SESSION_ID),
+                    {
+                        "count": 1,
+                        "eventId": BACKGROUND_ID,
+                        "range": "today",
+                    },
+                )
+                self.assertEqual(runtime.pending_today(), [])
+                self.assertTrue(runtime.confirm(BACKGROUND_ID))
+                self.assertEqual(
+                    runtime.notification_for_session(RELATED_SESSION_ID),
+                    {},
+                )
+            finally:
+                runtime.close()
+
     def test_runtime_is_event_driven_and_closes_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

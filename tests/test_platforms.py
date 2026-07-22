@@ -183,6 +183,32 @@ class SessionSwitchControllerTests(unittest.TestCase):
         self.assertEqual(len(first.requests), 1)
         self.assertEqual(len(second.requests), 0)
 
+    def test_controller_can_restrict_activation_to_cdp_backend(self) -> None:
+        keyboard = self._Backend(
+            "windows-search",
+            SessionSwitchResult(
+                ok=True,
+                status="switched",
+                backend="windows-search",
+            ),
+        )
+        cdp = self._Backend(
+            "cdp",
+            SessionSwitchResult(ok=False, status="thread-not-found", backend="cdp"),
+        )
+
+        controller = SessionSwitchController([cdp, keyboard])
+        result = controller.activate_session(
+            session_id="thread-1",
+            title="Target Thread",
+            backend_names=("cdp",),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.backend, "cdp")
+        self.assertEqual(len(cdp.requests), 1)
+        self.assertEqual(len(keyboard.requests), 0)
+
 
 class WindowsActiveTitleTests(unittest.TestCase):
     def test_windows_platform_initializes_native_active_title_probes_by_default(self) -> None:

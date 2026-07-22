@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
@@ -17,10 +18,13 @@ from codex_usage_hud.updater import (
     AutoUpdateManager,
     UpdateInfo,
     UpdateAsset,
+    UpdateVerificationError,
+    download_update_asset,
     format_update_info,
     installer_asset_name,
     is_newer_version,
     select_windows_installer_asset,
+    verify_update_asset,
     version_key,
 )
 
@@ -54,6 +58,7 @@ class UpdateAssetSelectionTests(unittest.TestCase):
                     "name": "codex-usage-hud-v1.0.0-windows-x64-setup.exe",
                     "browser_download_url": "https://example.test/setup.exe",
                     "size": 123,
+                    "digest": "sha256:" + "a" * 64,
                 },
             ],
             latest_version="v1.0.0",
@@ -62,6 +67,21 @@ class UpdateAssetSelectionTests(unittest.TestCase):
         self.assertIsNotNone(asset)
         self.assertEqual(asset.name, "codex-usage-hud-v1.0.0-windows-x64-setup.exe")
         self.assertEqual(asset.size, 123)
+        self.assertEqual(asset.sha256, "a" * 64)
+
+    def test_verify_update_asset_rejects_an_unexpected_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = Path(temp_dir) / "installer.exe"
+            installer.write_bytes(b"trusted payload")
+            asset = UpdateAsset(
+                name=installer.name,
+                url="https://example.test/installer.exe",
+                size=installer.stat().st_size,
+                sha256="0" * 64,
+            )
+
+            with self.assertRaises(UpdateVerificationError):
+                verify_update_asset(installer, asset)
 
     def test_format_update_info_mentions_installer_when_available(self) -> None:
         asset = select_windows_installer_asset(
@@ -150,7 +170,8 @@ class AutoUpdateManagerTests(unittest.TestCase):
     def test_auto_update_manager_can_pause_resume_and_finish_download(self) -> None:
         requests: list[dict[str, str]] = []
         launched: list[Path] = []
-        payload = b"1234567890"
+        payload = bytes(range(256)) * 4
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
 
         def fake_check(**_kwargs: object) -> UpdateInfo:
             return UpdateInfo(
@@ -160,7 +181,8 @@ class AutoUpdateManagerTests(unittest.TestCase):
                 asset=UpdateAsset(
                     name="codex-usage-hud-v1.0.1-windows-x64-setup.exe",
                     url="https://example.test/setup.exe",
-                    size=10,
+                    size=len(payload),
+                    sha256=payload_sha256,
                 ),
                 release_url="https://example.test/release",
             )
@@ -171,7 +193,7 @@ class AutoUpdateManagerTests(unittest.TestCase):
             if len(requests) == 1:
                 return _FakeResponse(
                     [bytes([value]) for value in payload],
-                    headers={"Content-Length": "10"},
+                    headers={"Content-Length": str(len(payload))},
                     delay_seconds=0.02,
                 )
             range_header = str(requests[-1].get("range") or "")
@@ -220,7 +242,7 @@ class AutoUpdateManagerTests(unittest.TestCase):
                 self._wait_for_phase(manager, "ready")
                 ready = manager.status()
                 self.assertEqual(ready.asset_name, "codex-usage-hud-v1.0.1-windows-x64-setup.exe")
-                self.assertEqual(ready.downloaded_bytes, 10)
+                self.assertEqual(ready.downloaded_bytes, len(payload))
                 self.assertEqual(Path(ready.installer_path).read_bytes(), payload)
                 resumed_offset = int(str(requests[1].get("range") or "bytes=0-").split("=", 1)[1].split("-", 1)[0])
                 self.assertGreaterEqual(resumed_offset, paused_bytes)
@@ -245,6 +267,7 @@ class AutoUpdateManagerTests(unittest.TestCase):
                     name="codex-usage-hud-v1.0.1-windows-x64-setup.exe",
                     url="https://example.test/setup.exe",
                     size=10,
+                    sha256=hashlib.sha256(b"1234567890").hexdigest(),
                 ),
                 release_url="https://example.test/release",
             )
@@ -287,6 +310,7 @@ class AutoUpdateManagerTests(unittest.TestCase):
                     name="codex-usage-hud-v1.0.1-windows-x64-setup.exe",
                     url="https://example.test/setup.exe",
                     size=len(payload),
+                    sha256=hashlib.sha256(payload).hexdigest(),
                 ),
                 release_url="https://example.test/release",
             )
@@ -327,6 +351,84 @@ class AutoUpdateManagerTests(unittest.TestCase):
                 self.assertEqual(Path(ready.installer_path).read_bytes(), payload)
             finally:
                 manager.close()
+
+    def test_auto_update_manager_falls_back_when_official_download_fails(self) -> None:
+        payload = b"mirror verified installer"
+        requests: list[str] = []
+
+        def fake_check(**_kwargs: object) -> UpdateInfo:
+            return UpdateInfo(
+                current_version="1.0.0",
+                latest_version="v1.0.1",
+                available=True,
+                asset=UpdateAsset(
+                    name="codex-usage-hud-v1.0.1-windows-x64-setup.exe",
+                    url="https://github.example/releases/setup.exe",
+                    size=len(payload),
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                ),
+            )
+
+        def fake_open(request, timeout: float):
+            del timeout
+            requests.append(request.full_url)
+            if len(requests) == 1:
+                raise OSError("official route unavailable")
+            return _FakeResponse([payload], headers={"Content-Length": str(len(payload))})
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = AutoUpdateManager(
+                current_version="1.0.0",
+                check_interval_seconds=3600,
+                retry_interval_seconds=60,
+                download_dir=Path(tmp_dir),
+                check_func=fake_check,
+                download_opener=fake_open,
+            )
+            try:
+                manager.request_check(auto_download=True)
+                self._wait_for_phase(manager, "ready")
+                state = manager.status()
+                self.assertTrue(state.verified)
+                self.assertEqual(Path(state.installer_path).read_bytes(), payload)
+                self.assertEqual(requests[0], "https://github.example/releases/setup.exe")
+                self.assertIn("ghproxy.net", requests[1])
+            finally:
+                manager.close()
+
+    def test_download_update_asset_falls_back_to_a_mirror_and_publishes_only_verified_file(self) -> None:
+        payload = b"verified installer"
+        requests: list[str] = []
+        asset = UpdateAsset(
+            name="codex-usage-hud-v1.0.1-windows-x64-setup.exe",
+            url="https://github.example/releases/setup.exe",
+            size=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
+        info = UpdateInfo(
+            current_version="1.0.0",
+            latest_version="v1.0.1",
+            available=True,
+            asset=asset,
+        )
+
+        def fake_open(request, timeout: float):
+            del timeout
+            requests.append(request.full_url)
+            if len(requests) == 1:
+                raise OSError("official route unavailable")
+            return _FakeResponse([payload], headers={"Content-Length": str(len(payload))})
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = download_update_asset(
+                info,
+                destination_dir=Path(temp_dir),
+                opener=fake_open,
+            )
+            self.assertEqual(installer.read_bytes(), payload)
+            self.assertFalse(installer.with_name(f"{installer.name}.part").exists())
+            self.assertEqual(requests[0], asset.url)
+            self.assertIn("ghproxy.net", requests[1])
 
 
 if __name__ == "__main__":

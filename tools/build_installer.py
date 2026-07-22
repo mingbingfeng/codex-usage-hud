@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -40,6 +41,22 @@ def setup_base_filename(version: str) -> str:
     if not tag.startswith("v"):
         tag = f"v{tag}"
     return f"codex-usage-hud-{tag}-windows-x64-setup"
+
+
+def installer_checksum_path(installer: Path) -> Path:
+    """Return the release sidecar path for an installer SHA-256 checksum."""
+    return installer.with_name(f"{installer.name}.sha256")
+
+
+def write_installer_checksum(installer: Path) -> Path:
+    """Write a portable SHA-256 sidecar for release upload and verification."""
+    digest = hashlib.sha256()
+    with installer.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    checksum = installer_checksum_path(installer)
+    checksum.write_text(f"{digest.hexdigest()}  {installer.name}\n", encoding="ascii")
+    return checksum
 
 
 def find_iscc(explicit: Path | None = None) -> Path:
@@ -151,7 +168,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not output.is_file():
         print(f"[ERROR] Expected installer is missing: {output}", file=sys.stderr)
         return 1
+    checksum = write_installer_checksum(output)
     print(f"[build] Created {output}")
+    print(f"[build] Created {checksum}")
     return 0
 
 

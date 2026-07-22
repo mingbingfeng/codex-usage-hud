@@ -408,6 +408,7 @@ class SessionSwitchController:
         session_id: str = "",
         title: str = "",
         workdir: str = "",
+        backend_names: Sequence[str] | None = None,
     ) -> SessionSwitchResult:
         request = SessionSwitchRequest(
             session_id=_normalize_text(session_id),
@@ -420,11 +421,23 @@ class SessionSwitchController:
             requested_session_id=request.session_id,
             requested_title=request.title,
         )
+        allowed_backends = (
+            {str(name or "").strip().casefold() for name in backend_names}
+            if backend_names is not None
+            else None
+        )
         for backend in self._backends:
+            backend_name = str(
+                getattr(backend, "name", "") or type(backend).__name__
+            )
+            if (
+                allowed_backends is not None
+                and backend_name.casefold() not in allowed_backends
+            ):
+                continue
             try:
                 result = backend.activate(request)
             except Exception as exc:
-                backend_name = str(getattr(backend, "name", "") or type(backend).__name__)
                 _LOGGER.exception(
                     "session_switch_backend_failed backend=%s requested_session=%s requested_title=%s",
                     backend_name,

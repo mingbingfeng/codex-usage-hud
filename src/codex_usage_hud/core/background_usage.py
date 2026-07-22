@@ -21,6 +21,20 @@ DEFAULT_IMPORT_DAYS = 30
 DEFAULT_GRACE_SECONDS = 8.0
 UNKNOWN_FEATURE_KEY = "unknown"
 UNKNOWN_FEATURE_LABEL = "未知后台任务"
+BACKGROUND_USAGE_SCHEMA_VERSION = 2
+TITLE_DESCRIPTION_FEATURE_KEY = "title_description"
+TITLE_DESCRIPTION_USER_PROMPT_MARKER = "User prompt:"
+RELATED_SESSION_MAX_LAG_SECONDS = 300
+RELATED_SESSION_CLOCK_SKEW_SECONDS = 5
+
+BACKGROUND_FEATURE_LABELS = {
+    "memory_consolidation": "记忆整理",
+    "context_suggestions": "上下文建议",
+    "suggestion_safety": "建议安全检查",
+    "title_description": "任务标题与描述",
+    "description_refresh": "刷新任务描述",
+    UNKNOWN_FEATURE_KEY: UNKNOWN_FEATURE_LABEL,
+}
 
 _PROMPT_MARKER = 'Text { text: '
 _MODEL_RE = re.compile(r"\bmodel=([^\s}:]+)")
@@ -63,29 +77,37 @@ class BackgroundScanResult:
     diagnostics: tuple[str, ...] = ()
 
 
+def background_feature_label(key: object, fallback: object = "") -> str:
+    """Return the stable Chinese label for a stored feature key."""
+    normalized = str(key or "").strip()
+    if normalized in BACKGROUND_FEATURE_LABELS:
+        return BACKGROUND_FEATURE_LABELS[normalized]
+    return str(fallback or normalized or UNKNOWN_FEATURE_LABEL).strip() or UNKNOWN_FEATURE_LABEL
+
+
 def classify_background_feature(prompt: str) -> BackgroundFeature:
     """Classify one internal prompt without exposing prompt parsing to the UI."""
     value = str(prompt or "")
     lowered = value.casefold()
     if "memory writing agent: phase 2" in lowered and "consolidation" in lowered:
-        return BackgroundFeature("memory_consolidation", "Memory consolidation")
+        return BackgroundFeature("memory_consolidation", background_feature_label("memory_consolidation"))
     if "generate 0 to 3 hyperpersonalized suggestions" in lowered:
-        return BackgroundFeature("context_suggestions", "Context-aware suggestions")
+        return BackgroundFeature("context_suggestions", background_feature_label("context_suggestions"))
     if (
         "safety and compliance standards for codex ambient suggestions" in lowered
         and "ambient suggestion candidates" in lowered
     ):
-        return BackgroundFeature("suggestion_safety", "Suggestion safety review")
+        return BackgroundFeature("suggestion_safety", background_feature_label("suggestion_safety"))
     if (
         "provide a short title for a task" in lowered
         and "structured description field" in lowered
     ):
-        return BackgroundFeature("title_description", "Title and description generation")
+        return BackgroundFeature("title_description", background_feature_label("title_description"))
     if (
         "fork of an existing codex thread" in lowered
         and "structured description field" in lowered
     ):
-        return BackgroundFeature("description_refresh", "Description refresh")
+        return BackgroundFeature("description_refresh", background_feature_label("description_refresh"))
     return BackgroundFeature(UNKNOWN_FEATURE_KEY, UNKNOWN_FEATURE_LABEL, "")
 
 
@@ -101,6 +123,14 @@ def decode_submission_prompt(body: object) -> str:
     except (json.JSONDecodeError, TypeError, ValueError):
         return ""
     return value if isinstance(value, str) else ""
+
+
+def title_description_source_prompt(prompt: object) -> str:
+    """Return the exact user prompt embedded in a title-generation request."""
+    _prefix, marker, value = str(prompt or "").rpartition(
+        TITLE_DESCRIPTION_USER_PROMPT_MARKER
+    )
+    return value.strip() if marker else ""
 
 
 def decode_request_evidence(
@@ -194,6 +224,34 @@ def _range_start_timestamp(range_key: str, now: datetime | None = None) -> int:
     return int((today - timedelta(days=days - 1)).timestamp())
 
 
+def _range_key_for_timestamp(value: object, now: datetime | None = None) -> str:
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return "today"
+    for key in ("today", "7d", "30d"):
+        if timestamp >= _range_start_timestamp(key, now):
+            return key
+    return "all"
+
+
+def _epoch_seconds(value: object) -> int:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError):
+        text = str(value or "").strip()
+        if not text:
+            return 0
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+        return int(parsed.timestamp())
+    if timestamp > 10_000_000_000:
+        timestamp /= 1000.0
+    return max(0, int(timestamp))
+
+
 class BackgroundUsageStore:
     """HUD-owned SQLite history queried by the overlay and settings bridge."""
 
@@ -246,7 +304,9 @@ class BackgroundUsageStore:
                     request_count INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
                     estimated_cost_usd REAL NOT NULL DEFAULT 0,
-                    cost_available INTEGER NOT NULL DEFAULT 0
+                    cost_available INTEGER NOT NULL DEFAULT 0,
+                    related_session_id TEXT NOT NULL DEFAULT '',
+                    association_kind TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS background_requests (
                     request_id TEXT PRIMARY KEY,
@@ -272,9 +332,33 @@ class BackgroundUsageStore:
                     ON background_requests(event_id, source_log_id);
                 CREATE INDEX IF NOT EXISTS idx_background_requests_model
                     ON background_requests(model, occurred_at DESC);
-                INSERT OR IGNORE INTO metadata(key, value) VALUES('schema_version', '1');
+                INSERT OR IGNORE INTO metadata(key, value) VALUES('schema_version', '2');
                 INSERT OR IGNORE INTO metadata(key, value) VALUES('revision', '0');
                 """
+            )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(background_events)")
+            }
+            if "related_session_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE background_events "
+                    "ADD COLUMN related_session_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "association_kind" not in columns:
+                connection.execute(
+                    "ALTER TABLE background_events "
+                    "ADD COLUMN association_kind TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_background_events_related_session
+                    ON background_events(related_session_id, confirmed_at, last_seen_at DESC)
+                """
+            )
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='schema_version'",
+                (str(BACKGROUND_USAGE_SCHEMA_VERSION),),
             )
 
     def revision(self) -> int:
@@ -338,6 +422,7 @@ class BackgroundUsageStore:
                 FROM background_events e
                 WHERE e.classification_state='background'
                   AND e.confirmed_at IS NULL
+                  AND e.related_session_id=''
                   AND e.last_seen_at>=?
                   AND e.request_count>0
                 ORDER BY e.last_seen_at DESC
@@ -346,6 +431,88 @@ class BackgroundUsageStore:
                 (today_start, max(1, min(int(limit), 100))),
             ).fetchall()
         return [self._event_summary(row, today_start=today_start) for row in rows]
+
+    def notification_index(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """Return unread related-event summaries keyed by canonical session ID."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, related_session_id, last_seen_at
+                FROM background_events
+                WHERE classification_state='background'
+                  AND confirmed_at IS NULL
+                  AND related_session_id<>''
+                  AND request_count>0
+                ORDER BY last_seen_at DESC, event_id
+                """
+            ).fetchall()
+        index: dict[str, dict[str, object]] = {}
+        for row in rows:
+            session_id = str(row["related_session_id"] or "").strip()
+            event_id = valid_background_event_id(row["event_id"])
+            if not session_id or not event_id:
+                continue
+            timestamp = int(row["last_seen_at"] or 0)
+            summary = index.setdefault(
+                session_id,
+                {
+                    "count": 0,
+                    "eventId": event_id,
+                    "oldestSeenAt": timestamp,
+                },
+            )
+            summary["count"] = int(summary["count"] or 0) + 1
+            summary["oldestSeenAt"] = min(
+                int(summary["oldestSeenAt"] or timestamp), timestamp
+            )
+        for summary in index.values():
+            summary["range"] = _range_key_for_timestamp(
+                summary.pop("oldestSeenAt", 0), now
+            )
+        return index
+
+    def range_for_event(
+        self,
+        event_id: object,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """Return the smallest available range covering the selected reminder."""
+        normalized = valid_background_event_id(event_id)
+        if not normalized:
+            return "today"
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT related_session_id, last_seen_at
+                FROM background_events
+                WHERE event_id=? AND classification_state='background'
+                """,
+                (normalized,),
+            ).fetchone()
+            if row is None:
+                return "today"
+            timestamp = int(row["last_seen_at"] or 0)
+            related_session_id = str(row["related_session_id"] or "").strip()
+            if related_session_id:
+                oldest = connection.execute(
+                    """
+                    SELECT MIN(last_seen_at)
+                    FROM background_events
+                    WHERE classification_state='background'
+                      AND confirmed_at IS NULL
+                      AND request_count>0
+                      AND related_session_id=?
+                    """,
+                    (related_session_id,),
+                ).fetchone()
+                if oldest is not None and oldest[0] is not None:
+                    timestamp = int(oldest[0])
+        return _range_key_for_timestamp(timestamp, now)
 
     def query(
         self,
@@ -437,6 +604,10 @@ class BackgroundUsageStore:
         estimated_cost: float | None = float(aggregate["estimated_cost"] or 0.0)
         if event_count > 0 and unavailable_costs >= event_count:
             estimated_cost = None
+        feature_options = {
+            str(row[0]): background_feature_label(row[0], row[1])
+            for row in feature_rows
+        }
         return {
             "revision": self.revision(),
             "range": str(range_key or "today"),
@@ -453,10 +624,16 @@ class BackgroundUsageStore:
             "events": events,
             "selectedEventId": selected,
             "filters": {
-                "features": [
-                    {"key": str(row[0]), "label": str(row[1])}
-                    for row in feature_rows
-                ],
+                "features": sorted(
+                    [
+                        {
+                            "key": key,
+                            "label": label,
+                        }
+                        for key, label in feature_options.items()
+                    ],
+                    key=lambda item: str(item["label"]).casefold(),
+                ),
                 "models": [str(row[0]) for row in model_rows],
             },
         }
@@ -517,13 +694,16 @@ class BackgroundUsageStore:
             "threadId": str(row["thread_id"]),
             "processUuid": str(row["process_uuid"] or ""),
             "featureKey": str(row["feature_key"] or UNKNOWN_FEATURE_KEY),
-            "featureLabel": str(row["feature_label"] or UNKNOWN_FEATURE_LABEL),
+            "featureLabel": background_feature_label(
+                row["feature_key"], row["feature_label"]
+            ),
             "cwd": str(row["cwd"] or ""),
             "endpoint": str(row["endpoint"] or ""),
             "provider": str(row["provider"] or ""),
             "firstSeenAt": _timestamp_iso(row["first_seen_at"]),
             "lastSeenAt": _timestamp_iso(row["last_seen_at"]),
             "confirmedAt": _timestamp_iso(confirmed_at),
+            "unread": confirmed_at is None,
             "status": status,
             "appAttribution": str(row["app_attribution"] or ""),
             "requestCount": int(row["request_count"] or 0),
@@ -618,7 +798,12 @@ class BackgroundUsageScanner:
         if not self.state_path.is_file():
             return BackgroundScanResult(diagnostics=("state_database_missing",))
         try:
-            visible, child_threads, app_visible = self._state_evidence()
+            (
+                visible,
+                child_threads,
+                app_visible,
+                related_session_candidates,
+            ) = self._state_evidence()
         except (OSError, sqlite3.Error):
             return BackgroundScanResult(diagnostics=("state_database_unavailable",))
         now_ts = int(float(self._clock()))
@@ -742,6 +927,7 @@ class BackgroundUsageScanner:
                     target,
                     visible=visible,
                     child_threads=child_threads,
+                    related_session_candidates=related_session_candidates,
                     now_ts=now_ts,
                 )
                 target.execute(
@@ -769,9 +955,16 @@ class BackgroundUsageScanner:
             diagnostics=tuple(diagnostics),
         )
 
-    def _state_evidence(self) -> tuple[dict[str, str], set[str], set[str]]:
+    def _state_evidence(
+        self,
+    ) -> tuple[
+        dict[str, str],
+        set[str],
+        set[str],
+        dict[str, list[tuple[str, int]]],
+    ]:
         if not self.state_path.is_file():
-            return {}, set(), set()
+            return {}, set(), set(), {}
         with closing(_read_only_connection(self.state_path)) as connection:
             columns = {
                 str(row[1]) for row in connection.execute("PRAGMA table_info(threads)")
@@ -800,12 +993,60 @@ class BackgroundUsageScanner:
                 if "thread_spawn_edges" in tables
                 else set()
             )
+            related_session_candidates: dict[str, list[tuple[str, int]]] = {}
+            if "first_user_message" in columns:
+                created_column = (
+                    "created_at"
+                    if "created_at" in columns
+                    else "created_at_ms"
+                    if "created_at_ms" in columns
+                    else ""
+                )
+                created_select = created_column or "0"
+                for row in connection.execute(
+                    f"SELECT id, first_user_message, {created_select} FROM threads"
+                ):
+                    session_id = str(row[0] or "").strip()
+                    first_user_message = str(row[1] or "").strip()
+                    created_at = _epoch_seconds(row[2])
+                    if (
+                        not _UUID_RE.fullmatch(session_id)
+                        or not first_user_message
+                        or created_at <= 0
+                        or session_id in child_threads
+                    ):
+                        continue
+                    related_session_candidates.setdefault(
+                        first_user_message, []
+                    ).append((session_id, created_at))
         app_visible = {
             thread_id
             for thread_id, source in visible.items()
             if str(source or "").strip().lower() == "vscode"
         }
-        return visible, child_threads, app_visible
+        return visible, child_threads, app_visible, related_session_candidates
+
+    @staticmethod
+    def _related_session_id(
+        *,
+        feature_key: str,
+        prompt: str,
+        first_seen_at: int,
+        candidates: Mapping[str, list[tuple[str, int]]],
+    ) -> str:
+        if feature_key != TITLE_DESCRIPTION_FEATURE_KEY:
+            return ""
+        source_prompt = title_description_source_prompt(prompt)
+        if not source_prompt:
+            return ""
+        matches = {
+            session_id
+            for session_id, created_at in candidates.get(source_prompt, [])
+            if first_seen_at - RELATED_SESSION_MAX_LAG_SECONDS
+            <= created_at
+            <= first_seen_at + RELATED_SESSION_CLOCK_SKEW_SECONDS
+        }
+        return next(iter(matches)) if len(matches) == 1 else ""
 
     def _upsert_event(
         self,
@@ -1044,13 +1285,15 @@ class BackgroundUsageScanner:
         *,
         visible: Mapping[str, str],
         child_threads: set[str],
+        related_session_candidates: Mapping[str, list[tuple[str, int]]],
         now_ts: int,
     ) -> bool:
         changed = False
         rows = connection.execute(
             """
-            SELECT event_id, thread_id, process_uuid, feature_key, first_seen_at,
-                   request_count, classification_state, app_attribution
+            SELECT event_id, thread_id, process_uuid, feature_key, prompt,
+                   first_seen_at, request_count, classification_state,
+                   app_attribution, related_session_id, association_kind
             FROM background_events
             """
         ).fetchall()
@@ -1089,18 +1332,36 @@ class BackgroundUsageScanner:
                     next_state = "pending"
                 else:
                     next_state = "background"
-            if (next_state, next_attribution) == (
+            next_related_session_id = self._related_session_id(
+                feature_key=str(row["feature_key"] or UNKNOWN_FEATURE_KEY),
+                prompt=str(row["prompt"] or ""),
+                first_seen_at=int(row["first_seen_at"] or 0),
+                candidates=related_session_candidates,
+            )
+            next_association_kind = (
+                "exact_first_user_message" if next_related_session_id else ""
+            )
+            if (next_state, next_attribution, next_related_session_id, next_association_kind) == (
                 current_state,
                 current_attribution,
+                str(row["related_session_id"] or ""),
+                str(row["association_kind"] or ""),
             ):
                 continue
             connection.execute(
                 """
                 UPDATE background_events
-                SET classification_state=?, app_attribution=?
+                SET classification_state=?, app_attribution=?,
+                    related_session_id=?, association_kind=?
                 WHERE event_id=?
                 """,
-                (next_state, next_attribution, str(row["event_id"])),
+                (
+                    next_state,
+                    next_attribution,
+                    next_related_session_id,
+                    next_association_kind,
+                    str(row["event_id"]),
+                ),
             )
             changed = True
         return changed
@@ -1133,5 +1394,6 @@ __all__ = [
     "decode_request_context",
     "decode_request_evidence",
     "decode_submission_prompt",
+    "title_description_source_prompt",
     "valid_background_event_id",
 ]

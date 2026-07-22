@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,8 +27,19 @@ DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 DEFAULT_AUTO_UPDATE_RETRY_SECONDS = 15 * 60
 DEFAULT_UPDATE_CHUNK_BYTES = 256 * 1024
+# GitHub remains the source of release metadata and file digests. These only
+# provide alternate transport for the exact, already-verified release asset.
+DEFAULT_UPDATE_MIRROR_URL_TEMPLATES = (
+    "https://ghproxy.net/{url}",
+    "https://gh-proxy.com/{url}",
+)
 INSTALLER_SUFFIX = "-windows-x64-setup.exe"
 _VERSION_RE = re.compile(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+
+
+class UpdateVerificationError(ValueError):
+    """A downloaded update does not match trusted release metadata."""
 
 
 @dataclass(frozen=True)
@@ -37,9 +49,15 @@ class UpdateAsset:
     name: str
     url: str
     size: int = 0
+    sha256: str = ""
 
     def to_dict(self) -> dict[str, object]:
-        return {"name": self.name, "url": self.url, "size": self.size}
+        return {
+            "name": self.name,
+            "url": self.url,
+            "size": self.size,
+            "sha256": self.sha256,
+        }
 
 
 @dataclass(frozen=True)
@@ -51,6 +69,7 @@ class UpdateInfo:
     release_url: str = RELEASES_URL
     available: bool = False
     asset: UpdateAsset | None = None
+    platform_supported: bool = True
     error: str = ""
 
     @property
@@ -68,6 +87,7 @@ class UpdateInfo:
             "releaseUrl": self.release_url,
             "available": self.available,
             "asset": self.asset.to_dict() if self.asset else None,
+            "platformSupported": self.platform_supported,
             "error": self.error,
         }
 
@@ -85,6 +105,8 @@ class AutoUpdateState:
     downloaded_bytes: int = 0
     progress: float = 0.0
     installer_path: str = ""
+    download_source: str = ""
+    verified: bool = False
     visible: bool = False
     icon: str = ""
     message: str = ""
@@ -130,6 +152,8 @@ class AutoUpdateState:
             "progress": self.progress,
             "progressText": self.progress_text,
             "installerPath": self.installer_path,
+            "downloadSource": self.download_source,
+            "verified": self.verified,
             "visible": self.visible,
             "icon": self.icon,
             "message": self.message,
@@ -203,13 +227,23 @@ def select_windows_installer_asset(
             continue
         normalized = name.lower()
         if expected_name and normalized == expected_name:
-            return UpdateAsset(name=name, url=url, size=_asset_size(item))
+            return UpdateAsset(
+                name=name,
+                url=url,
+                size=_asset_size(item),
+                sha256=_asset_sha256(item),
+            )
         if (
             normalized.endswith(".exe")
             and "setup" in normalized
             and ("windows" in normalized or "win" in normalized)
         ):
-            fallback = fallback or UpdateAsset(name=name, url=url, size=_asset_size(item))
+            fallback = fallback or UpdateAsset(
+                name=name,
+                url=url,
+                size=_asset_size(item),
+                sha256=_asset_sha256(item),
+            )
     return fallback
 
 
@@ -218,6 +252,71 @@ def _asset_size(item: Mapping[str, Any]) -> int:
         return max(0, int(item.get("size") or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _asset_sha256(item: Mapping[str, Any]) -> str:
+    """Read GitHub's ``sha256:<hex>`` release-asset digest when available."""
+    digest = str(item.get("digest") or "").strip()
+    algorithm, separator, value = digest.partition(":")
+    if separator and algorithm.lower() == "sha256" and _SHA256_RE.fullmatch(value):
+        return value.lower()
+    return ""
+
+
+def update_download_urls(
+    asset: UpdateAsset,
+    *,
+    mirror_url_templates: tuple[str, ...] = DEFAULT_UPDATE_MIRROR_URL_TEMPLATES,
+) -> tuple[str, ...]:
+    """Return official then HTTPS mirror URLs for one immutable release asset."""
+    urls = [asset.url]
+    for template in mirror_url_templates:
+        candidate = str(template or "").strip()
+        if not candidate.startswith("https://") or "{url}" not in candidate:
+            continue
+        candidate = candidate.replace("{url}", asset.url)
+        if candidate not in urls:
+            urls.append(candidate)
+    return tuple(urls)
+
+
+def verify_update_asset(path: Path, asset: UpdateAsset) -> None:
+    """Raise when an installer cannot be proven to match GitHub metadata."""
+    installer = Path(path)
+    if not installer.is_file():
+        raise UpdateVerificationError(f"installer is missing: {installer}")
+    if asset.size > 0 and installer.stat().st_size != asset.size:
+        raise UpdateVerificationError("installer size does not match the release asset")
+    if not asset.sha256:
+        raise UpdateVerificationError("release asset does not provide a SHA-256 digest")
+    digest = hashlib.sha256()
+    with installer.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest().lower() != asset.sha256.lower():
+        raise UpdateVerificationError("installer SHA-256 does not match the release asset")
+
+
+def _partial_download_path(target: Path) -> Path:
+    return target.with_name(f"{target.name}.part")
+
+
+def _remove_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def _existing_file_bytes(path: Path, expected_size: int) -> int:
+    try:
+        size = max(0, int(path.stat().st_size))
+    except OSError:
+        return 0
+    if expected_size > 0 and size > expected_size:
+        _remove_file(path)
+        return 0
+    return size
 
 
 def _format_byte_amount(value: int) -> str:
@@ -234,6 +333,7 @@ def check_for_update(
     current_version: str,
     repository: str = DEFAULT_REPOSITORY,
     timeout_seconds: float = DEFAULT_UPDATE_TIMEOUT_SECONDS,
+    platform_name: str | None = None,
 ) -> UpdateInfo:
     """Check GitHub Releases and return update metadata."""
     try:
@@ -249,10 +349,23 @@ def check_for_update(
             payload.get("assets"),
             latest_version=latest_version,
         )
-        available = bool(
+        supported = (platform_name or sys.platform).startswith("win")
+        candidate_available = bool(
             latest_version
             and is_newer_version(latest_version, current_version)
             and asset is not None
+        )
+        if candidate_available and asset is not None and not asset.sha256:
+            return UpdateInfo(
+                current_version=current_version,
+                latest_version=latest_version,
+                release_url=release_url or RELEASES_URL,
+                asset=asset,
+                error="latest installer does not provide a GitHub SHA-256 digest",
+            )
+        available = bool(
+            candidate_available
+            and supported
         )
         return UpdateInfo(
             current_version=current_version,
@@ -260,6 +373,7 @@ def check_for_update(
             release_url=release_url or RELEASES_URL,
             available=available,
             asset=asset,
+            platform_supported=supported,
         )
     except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
         return UpdateInfo(current_version=current_version, error=str(exc))
@@ -269,6 +383,11 @@ def format_update_info(info: UpdateInfo) -> str:
     """Return a concise human-readable update status."""
     if info.error:
         return f"Update check failed: {info.error}"
+    if not info.platform_supported:
+        return (
+            "A newer Windows installer may be available, but automatic "
+            "installer updates are currently only supported on Windows."
+        )
     if info.available:
         return (
             f"Update available: {info.current_version} -> {info.latest_version}\n"
@@ -340,22 +459,70 @@ def download_update_asset(
     *,
     destination_dir: Path | None = None,
     timeout_seconds: float = DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECONDS,
+    opener: Callable[..., Any] | None = None,
 ) -> Path:
-    """Download the selected update installer and return the local path."""
+    """Download, verify, and atomically publish the selected installer."""
     if not info.asset:
         raise ValueError("update info does not include an installer asset")
+    asset = info.asset
+    if not asset.sha256:
+        raise UpdateVerificationError("release asset does not provide a SHA-256 digest")
     target_dir = destination_dir or default_update_download_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / info.asset.name
-    request = Request(info.asset.url, headers={"User-Agent": UPDATE_USER_AGENT})
-    with urlopen(request, timeout=max(1.0, float(timeout_seconds))) as response:
-        with target.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-    return target
+    target = target_dir / asset.name
+    partial = _partial_download_path(target)
+    try:
+        verify_update_asset(target, asset)
+        return target
+    except UpdateVerificationError:
+        _remove_file(target)
+    try:
+        verify_update_asset(partial, asset)
+        partial.replace(target)
+        return target
+    except UpdateVerificationError:
+        if _existing_file_bytes(partial, asset.size) >= asset.size > 0:
+            _remove_file(partial)
+
+    open_request = opener or urlopen
+    errors: list[str] = []
+    for source_url in update_download_urls(asset):
+        try:
+            offset = _existing_file_bytes(partial, asset.size)
+            headers = {"User-Agent": UPDATE_USER_AGENT}
+            if offset > 0:
+                headers["Range"] = f"bytes={offset}-"
+            request = Request(source_url, headers=headers)
+            with open_request(
+                request,
+                timeout=max(1.0, float(timeout_seconds)),
+            ) as response:
+                append = offset > 0 and _response_status_code(response) == 206
+                if not append:
+                    offset = 0
+                total_bytes = _download_response_total_bytes(
+                    response,
+                    offset=offset,
+                    fallback_size=asset.size,
+                )
+                downloaded = offset
+                with partial.open("ab" if append else "wb") as handle:
+                    while chunk := response.read(1024 * 1024):
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+            expected_size = asset.size or total_bytes
+            if expected_size > 0 and downloaded != expected_size:
+                raise IOError("download ended before the installer was fully written")
+            verify_update_asset(partial, asset)
+            partial.replace(target)
+            return target
+        except UpdateVerificationError as exc:
+            _remove_file(partial)
+            errors.append(f"{source_url}: {exc}")
+        except Exception as exc:
+            errors.append(f"{source_url}: {exc}")
+    details = "; ".join(errors) or "no usable download source"
+    raise IOError(f"all update download sources failed: {details}")
 
 
 def launch_installer(path: Path) -> None:
@@ -668,9 +835,24 @@ class AutoUpdateManager:
                 error="missing installer asset",
             )
             return
+        if not info.asset.sha256:
+            self._status = AutoUpdateState(
+                phase="error",
+                current_version=self.current_version,
+                latest_version=info.latest_version,
+                release_url=info.release_url,
+                asset_name=info.asset.name,
+                asset_size=info.asset.size,
+                visible=True,
+                icon="download",
+                message="安装包缺少 GitHub SHA-256 校验信息，已拒绝下载。",
+                error="release asset does not provide a SHA-256 digest",
+            )
+            return
         target = self.download_dir / info.asset.name
-        downloaded = self._existing_file_bytes(target, info.asset.size)
-        if info.asset.size > 0 and downloaded >= info.asset.size:
+        partial = _partial_download_path(target)
+        try:
+            verify_update_asset(target, info.asset)
             self._status = AutoUpdateState(
                 phase="ready",
                 current_version=self.current_version,
@@ -678,14 +860,26 @@ class AutoUpdateManager:
                 release_url=info.release_url,
                 asset_name=info.asset.name,
                 asset_size=info.asset.size,
-                downloaded_bytes=info.asset.size,
+                downloaded_bytes=self._existing_file_bytes(target, info.asset.size),
                 progress=1.0,
                 installer_path=str(target),
+                verified=True,
                 visible=True,
                 icon="install",
-                message="更新安装包已下载完成。",
+                message="更新安装包已完成 SHA-256 校验。",
             )
             return
+        except UpdateVerificationError:
+            _remove_file(target)
+        try:
+            verify_update_asset(partial, info.asset)
+            partial.replace(target)
+            self._start_download_locked(info)
+            return
+        except UpdateVerificationError:
+            if _existing_file_bytes(partial, info.asset.size) >= info.asset.size > 0:
+                _remove_file(partial)
+        downloaded = self._existing_file_bytes(partial, info.asset.size)
         if self._download_thread is not None and self._download_thread.is_alive():
             return
         progress = (
@@ -721,84 +915,101 @@ class AutoUpdateManager:
 
     def _download_worker(self, info: UpdateInfo, target: Path) -> None:
         assert info.asset is not None
+        asset = info.asset
+        partial = _partial_download_path(target)
+        errors: list[str] = []
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            offset = self._existing_file_bytes(target, info.asset.size)
-            headers = {"User-Agent": UPDATE_USER_AGENT}
-            if offset > 0:
-                headers["Range"] = f"bytes={offset}-"
-            request = Request(info.asset.url, headers=headers)
-            with self._download_opener(
-                request,
-                timeout=max(1.0, float(self.download_timeout_seconds)),
-            ) as response:
-                status_code = _response_status_code(response)
-                append = offset > 0 and status_code == 206
-                if not append and offset > 0:
-                    offset = 0
-                total_bytes = _download_response_total_bytes(
-                    response,
-                    offset=offset,
-                    fallback_size=info.asset.size,
-                )
-                downloaded = offset
-                mode = "ab" if append else "wb"
-                with target.open(mode) as handle:
-                    while True:
-                        if self._stop_event.is_set():
-                            return
-                        if self._pause_event.is_set():
-                            with self._lock:
-                                self._download_thread = None
-                                self._status = AutoUpdateState(
-                                    phase="paused",
-                                    current_version=self.current_version,
-                                    latest_version=info.latest_version,
-                                    release_url=info.release_url,
-                                    asset_name=info.asset.name,
-                                    asset_size=total_bytes or info.asset.size,
-                                    downloaded_bytes=downloaded,
-                                    progress=(
-                                        min(1.0, downloaded / max(1, total_bytes))
-                                        if total_bytes > 0
-                                        else 0.0
-                                    ),
-                                    installer_path=str(target),
-                                    visible=True,
-                                    icon="download",
-                                    message="已暂停更新下载。",
-                                )
-                            return
-                        chunk = response.read(DEFAULT_UPDATE_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        handle.write(chunk)
-                        downloaded += len(chunk)
-                        with self._lock:
-                            self._status = AutoUpdateState(
-                                phase="downloading",
-                                current_version=self.current_version,
-                                latest_version=info.latest_version,
-                                release_url=info.release_url,
-                                asset_name=info.asset.name,
-                                asset_size=total_bytes or info.asset.size,
-                                downloaded_bytes=downloaded,
-                                progress=(
-                                    min(1.0, downloaded / max(1, total_bytes))
-                                    if total_bytes > 0
-                                    else 0.0
-                                ),
-                                installer_path=str(target),
-                                visible=True,
-                                icon="download",
-                                message=(
-                                    "正在下载安装更新，完成后会自动启动安装器。"
-                                    if self._launch_after_download
-                                    else "正在后台下载更新安装包。"
-                                ),
-                            )
-                if total_bytes > 0 and downloaded < total_bytes:
-                    raise IOError("download ended before the installer was fully written")
+            for source_url in update_download_urls(asset):
+                try:
+                    offset = self._existing_file_bytes(partial, asset.size)
+                    headers = {"User-Agent": UPDATE_USER_AGENT}
+                    if offset > 0:
+                        headers["Range"] = f"bytes={offset}-"
+                    request = Request(source_url, headers=headers)
+                    with self._download_opener(
+                        request,
+                        timeout=max(1.0, float(self.download_timeout_seconds)),
+                    ) as response:
+                        append = offset > 0 and _response_status_code(response) == 206
+                        if not append:
+                            offset = 0
+                        total_bytes = _download_response_total_bytes(
+                            response,
+                            offset=offset,
+                            fallback_size=asset.size,
+                        )
+                        downloaded = offset
+                        with partial.open("ab" if append else "wb") as handle:
+                            while True:
+                                if self._stop_event.is_set():
+                                    return
+                                if self._pause_event.is_set():
+                                    with self._lock:
+                                        self._download_thread = None
+                                        self._status = AutoUpdateState(
+                                            phase="paused",
+                                            current_version=self.current_version,
+                                            latest_version=info.latest_version,
+                                            release_url=info.release_url,
+                                            asset_name=asset.name,
+                                            asset_size=total_bytes or asset.size,
+                                            downloaded_bytes=downloaded,
+                                            progress=(
+                                                min(1.0, downloaded / max(1, total_bytes))
+                                                if total_bytes > 0
+                                                else 0.0
+                                            ),
+                                            installer_path=str(target),
+                                            download_source=source_url,
+                                            visible=True,
+                                            icon="download",
+                                            message="已暂停更新下载。",
+                                        )
+                                    return
+                                chunk = response.read(DEFAULT_UPDATE_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                handle.write(chunk)
+                                downloaded += len(chunk)
+                                with self._lock:
+                                    self._status = AutoUpdateState(
+                                        phase="downloading",
+                                        current_version=self.current_version,
+                                        latest_version=info.latest_version,
+                                        release_url=info.release_url,
+                                        asset_name=asset.name,
+                                        asset_size=total_bytes or asset.size,
+                                        downloaded_bytes=downloaded,
+                                        progress=(
+                                            min(1.0, downloaded / max(1, total_bytes))
+                                            if total_bytes > 0
+                                            else 0.0
+                                        ),
+                                        installer_path=str(target),
+                                        download_source=source_url,
+                                        visible=True,
+                                        icon="download",
+                                        message=(
+                                            "正在下载安装更新，完成后会自动启动安装器。"
+                                            if self._launch_after_download
+                                            else "正在后台下载更新安装包。"
+                                        ),
+                                    )
+                    expected_size = asset.size or total_bytes
+                    if expected_size > 0 and downloaded != expected_size:
+                        raise IOError("download ended before the installer was fully written")
+                    verify_update_asset(partial, asset)
+                    partial.replace(target)
+                    break
+                except UpdateVerificationError as exc:
+                    _remove_file(partial)
+                    errors.append(f"{source_url}: {exc}")
+                except Exception as exc:
+                    errors.append(f"{source_url}: {exc}")
+            else:
+                details = "; ".join(errors) or "no usable download source"
+                raise IOError(f"all update download sources failed: {details}")
         except Exception as exc:
             with self._lock:
                 self._download_thread = None
@@ -807,9 +1018,9 @@ class AutoUpdateManager:
                     current_version=self.current_version,
                     latest_version=info.latest_version,
                     release_url=info.release_url,
-                    asset_name=info.asset.name,
-                    asset_size=info.asset.size,
-                    downloaded_bytes=self._existing_file_bytes(target, info.asset.size),
+                    asset_name=asset.name,
+                    asset_size=asset.size,
+                    downloaded_bytes=self._existing_file_bytes(partial, asset.size),
                     progress=0.0,
                     installer_path=str(target),
                     visible=True,
@@ -819,21 +1030,22 @@ class AutoUpdateManager:
                 )
                 return
         with self._lock:
-            final_size = max(self._existing_file_bytes(target, info.asset.size), info.asset.size)
+            final_size = self._existing_file_bytes(target, asset.size)
             self._download_thread = None
             self._status = AutoUpdateState(
                 phase="ready",
                 current_version=self.current_version,
                 latest_version=info.latest_version,
                 release_url=info.release_url,
-                asset_name=info.asset.name,
+                asset_name=asset.name,
                 asset_size=final_size,
                 downloaded_bytes=final_size,
                 progress=1.0,
                 installer_path=str(target),
+                verified=True,
                 visible=True,
                 icon="install",
-                message="更新安装包已下载完成。",
+                message="更新安装包已完成 SHA-256 校验。",
             )
             auto_launch = self._launch_after_download
             self._launch_after_download = False
@@ -860,17 +1072,7 @@ class AutoUpdateManager:
 
     @staticmethod
     def _existing_file_bytes(path: Path, expected_size: int) -> int:
-        try:
-            size = max(0, int(path.stat().st_size))
-        except OSError:
-            return 0
-        if expected_size > 0 and size > expected_size:
-            try:
-                path.unlink()
-            except OSError:
-                return 0
-            return 0
-        return size
+        return _existing_file_bytes(path, expected_size)
 
 
 def install_latest_update(
@@ -902,11 +1104,13 @@ __all__ = [
     "DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS",
     "DEFAULT_AUTO_UPDATE_RETRY_SECONDS",
     "DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECONDS",
+    "DEFAULT_UPDATE_MIRROR_URL_TEMPLATES",
     "INSTALLER_SUFFIX",
     "LATEST_RELEASE_API_URL",
     "RELEASES_URL",
     "UpdateAsset",
     "UpdateInfo",
+    "UpdateVerificationError",
     "check_for_update",
     "default_update_download_dir",
     "download_update_asset",
@@ -919,5 +1123,7 @@ __all__ = [
     "latest_release_api_url",
     "normalize_tag",
     "select_windows_installer_asset",
+    "update_download_urls",
+    "verify_update_asset",
     "version_key",
 ]

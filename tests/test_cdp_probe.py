@@ -281,7 +281,12 @@ class CdpProbeTests(unittest.TestCase):
         self.assertIn('"thread-123"', script)
         self.assertIn('"Selected Thread"', script)
         self.assertNotIn("return (async () =>", script)
-        self.assertIn('status: "switch-requested"', script)
+        self.assertIn("[data-app-action-sidebar-project-row]", script)
+        self.assertIn("data-app-action-sidebar-project-collapsed", script)
+        self.assertIn("展开显示", script)
+        self.assertIn("attempt < 12", script)
+        self.assertIn('status: activeMatchesTarget(active) ? "switched"', script)
+        self.assertIn("return activateTarget();", script)
         self.assertIn('status: sidebarRevealRequested', script)
 
     def test_dom_probe_prefers_sidebar_selected_state_before_location_match(self) -> None:

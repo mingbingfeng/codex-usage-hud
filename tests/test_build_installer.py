@@ -44,6 +44,20 @@ class InstallerBuildHelperTests(unittest.TestCase):
         self.assertTrue(any(item.startswith("/DSourceExe=") for item in command))
         self.assertTrue(command[-1].endswith("CodexUsageHud.iss"))
 
+    def test_write_installer_checksum_uses_release_filename_and_sha256(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = Path(temp_dir) / "codex-usage-hud-v1.0.0-windows-x64-setup.exe"
+            installer.write_bytes(b"installer-payload")
+
+            checksum = build_installer.write_installer_checksum(installer)
+
+            self.assertEqual(checksum.name, f"{installer.name}.sha256")
+            self.assertEqual(
+                checksum.read_text(encoding="ascii"),
+                "fbc5fd97006521785cd1aa58917a4e2999e66d835748400dcb47e1df5e5a8226  "
+                f"{installer.name}\n",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
