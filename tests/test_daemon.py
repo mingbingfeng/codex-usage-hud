@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -14,8 +16,10 @@ if str(SRC_ROOT) not in sys.path:
 from codex_usage_hud.daemon import (
     CodexDaemonManager,
     DaemonState,
+    MacOSProcessListener,
     ProcessListenerError,
     ProcessSnapshot,
+    current_process_listener,
     is_codex_client_process,
 )
 
@@ -101,6 +105,40 @@ class DaemonProcessMatchingTests(unittest.TestCase):
                 "codex.exe",
                 r"C:\Users\person\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe",
             )
+        )
+
+    def test_macos_listener_keeps_only_codex_app_processes(self) -> None:
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "11 /usr/local/bin/codex --remote-debugging-port=59999\n"
+                "22 /Applications/Codex.app/Contents/MacOS/Codex\n"
+                "33 /Applications/OpenAI Codex.app/Contents/MacOS/Codex "
+                "--remote-debugging-port=59629\n"
+            ),
+            stderr="",
+        )
+
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch("codex_usage_hud.daemon.subprocess.run", return_value=completed),
+        ):
+            snapshot = MacOSProcessListener(exclude_pid=999).snapshot()
+
+        self.assertTrue(snapshot.found)
+        self.assertEqual(snapshot.pids, (22, 33))
+        self.assertEqual(snapshot.names, ("Codex", "Codex"))
+
+    def test_current_listener_selects_macos_snapshot_fallback(self) -> None:
+        with (
+            patch.object(sys, "platform", "darwin"),
+            patch("codex_usage_hud.daemon._logger.info") as log_info,
+        ):
+            listener = current_process_listener()
+
+        self.assertIsInstance(listener, MacOSProcessListener)
+        log_info.assert_called_once_with(
+            "daemon_process_listener_selected platform=macos mode=ps-snapshot-fallback"
         )
 
 

@@ -576,6 +576,44 @@ class SafeCleanupInventoryTests(unittest.TestCase):
 
             self.assertTrue(candidate.exists())
 
+    def test_scan_emits_phased_progress_without_confirmation_token(self) -> None:
+        events: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hud = root / "hud"
+            hud.mkdir()
+            (hud / "crash.log").write_text("x" * 32, encoding="utf-8")
+            manager = SafeCleanupManager(
+                platform="win32",
+                home=root,
+                env={},
+                hud_runtime_root=hud,
+                cache_definitions=(),
+                sqlite_targets=(),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: (),
+            )
+            manager.progress_publisher = events.append
+            snapshot = manager.scan(request_id="scan-progress-1")
+        self.assertTrue(events, "expected progressive scan events")
+        first = events[0]
+        op = first["operation"]
+        self.assertEqual(op["state"], "scanning")
+        self.assertIn(op["phase"], {"hud", "codex", "processes", "caches", "backups", "sqlite"})
+        self.assertLess(int(op["progress"]), 100)
+        self.assertTrue(str(first.get("revision") or "").startswith("scanning:"))
+        self.assertNotIn("confirmationToken", op)
+        final_op = snapshot["operation"]
+        self.assertEqual(final_op["state"], "completed")
+        self.assertEqual(int(final_op["progress"]), 100)
+        self.assertFalse(str(snapshot.get("revision") or "").startswith("scanning:"))
+        # progressive events must never issue a confirmation token
+        for event in events:
+            self.assertNotIn("confirmationToken", event.get("operation") or {})
+
+
+
 
 class SafeCleanupConfirmationTests(unittest.TestCase):
     def make_manager(

@@ -174,6 +174,7 @@ CLEANUP_MAINTENANCE_REQUESTED = 11
 RENDERER_HUD_UNAVAILABLE = 20
 HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
+HUD_AUTO_RESTART_CODEX = 33
 RENDERER_CDP_TIMEOUT_SECONDS = 0.35
 BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS = (0.15, 0.35, 0.75)
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
@@ -210,6 +211,8 @@ RENDERER_STARTUP_LAUNCH = "launch"
 RENDERER_STARTUP_ATTACH = "attach"
 RENDERER_STARTUP_RESTART_REQUIRED = "restart-required"
 RENDERER_STARTUP_ATTACH_LAUNCHED = "attach-launched"
+RENDERER_STARTUP_ATTACH_OBSERVED = "attach-observed"
+RENDERER_STARTUP_RELAUNCH_OBSERVED = "relaunch-observed"
 _REMOTE_DEBUGGING_PORT_PATTERN = re.compile(
     r"(?:^|\s)--remote-debugging-port(?:=|\s+)(\d{1,5})(?=\s|$)"
 )
@@ -3232,7 +3235,55 @@ def _select_launch_renderer_cdp_port(*, require_fresh: bool = False) -> int:
     return port
 
 
-def _renderer_startup_plan(*, launched_codex: bool = False) -> RendererStartupPlan:
+def _observed_renderer_startup_plan() -> RendererStartupPlan:
+    """Classify a Desktop family observed after the daemon saw full absence."""
+    try:
+        processes = _audited_running_codex_desktop_processes()
+    except RuntimeError as exc:
+        return RendererStartupPlan(
+            scenario=RENDERER_STARTUP_RESTART_REQUIRED,
+            reason=f"observed-codex-process-audit-failed: {exc}",
+        )
+    if not processes:
+        return RendererStartupPlan(
+            scenario=RENDERER_STARTUP_RESTART_REQUIRED,
+            reason="observed-codex-process-not-found",
+        )
+
+    declared_ports = sorted(
+        {
+            port
+            for process in processes
+            for port in _remote_debugging_ports_from_command_line(
+                process.command_line
+            )
+        }
+    )
+    if len(declared_ports) > 1:
+        return RendererStartupPlan(
+            scenario=RENDERER_STARTUP_RESTART_REQUIRED,
+            reason="observed-codex-has-conflicting-cdp-ports",
+        )
+    if not declared_ports:
+        return RendererStartupPlan(
+            scenario=RENDERER_STARTUP_RELAUNCH_OBSERVED,
+            reason="observed-codex-has-no-declared-cdp-port",
+        )
+
+    port = declared_ports[0]
+    os.environ[CDP_PORT_ENV] = str(port)
+    return RendererStartupPlan(
+        scenario=RENDERER_STARTUP_ATTACH_OBSERVED,
+        port=port,
+        port_source="observed-desktop-process",
+    )
+
+
+def _renderer_startup_plan(
+    *,
+    launched_codex: bool = False,
+    observed_codex_launch: bool = False,
+) -> RendererStartupPlan:
     if launched_codex:
         port = _select_initial_renderer_cdp_port()
         plan = RendererStartupPlan(
@@ -3240,6 +3291,8 @@ def _renderer_startup_plan(*, launched_codex: bool = False) -> RendererStartupPl
             port=port,
             port_source="requested-launch",
         )
+    elif observed_codex_launch:
+        plan = _observed_renderer_startup_plan()
     elif _codex_processes_running():
         existing = _find_existing_renderer_cdp_candidate()
         if existing is None:
@@ -5788,12 +5841,34 @@ class _SafeCleanupWorker:
             request_id = str(command.get("requestId") or "")
             try:
                 if action == "safeCleanupScan":
-                    snapshot = self.manager.scan(request_id=request_id)
+                    previous_publisher = getattr(
+                        self.manager, "progress_publisher", None
+                    )
+                    self.manager.progress_publisher = self._publish
+                    try:
+                        snapshot = self.manager.scan(request_id=request_id)
+                    finally:
+                        self.manager.progress_publisher = previous_publisher
                     default_ids = _cleanup_string_list(
                         snapshot.get("defaultSelectedIds")
                     )
                     revision = str(snapshot.get("revision") or "")
-                    if default_ids and revision:
+                    if (
+                        default_ids
+                        and revision
+                        and not str(revision).startswith("scanning:")
+                    ):
+                        self.manager.mark_operation(
+                            request_id=request_id,
+                            action="scan",
+                            state="scanning",
+                            progress=99,
+                            phase="preview",
+                            phaseLabel="Default safe preview",
+                            phaseIndex=6,
+                            phaseCount=6,
+                        )
+                        self._publish(self.manager.snapshot())
                         snapshot = self.manager.preview(
                             default_ids,
                             revision,
@@ -5908,7 +5983,14 @@ class _SessionCleanupWorker:
             request_id = str(command.get("requestId") or "")
             try:
                 if action == "sessionCleanupScan":
-                    snapshot = self.manager.scan(request_id=request_id)
+                    previous_publisher = getattr(
+                        self.manager, "progress_publisher", None
+                    )
+                    self.manager.progress_publisher = self._publish
+                    try:
+                        snapshot = self.manager.scan(request_id=request_id)
+                    finally:
+                        self.manager.progress_publisher = previous_publisher
                 elif action == "sessionCleanupPreview":
                     item_ids = _cleanup_string_list(
                         command.get("itemIds") or command.get("sessionIds")
@@ -9604,6 +9686,7 @@ def run_hud_session(
     daemon_manager: CodexDaemonManager | None = None,
     loading_feedback: HudLoadingFeedback | None = None,
     launched_codex: bool = False,
+    observed_codex_launch: bool = False,
 ) -> int:
     """Run one renderer-injected HUD session."""
     del hide_until_attached
@@ -9613,6 +9696,7 @@ def run_hud_session(
         lock_already_held=lock_already_held,
         daemon_manager=daemon_manager,
         launched_codex=launched_codex,
+        observed_codex_launch=observed_codex_launch,
         loading_feedback=loading_feedback,
     )
     if renderer_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
@@ -9623,6 +9707,7 @@ def run_hud_session(
             lock_already_held=lock_already_held,
             daemon_manager=daemon_manager,
             launched_codex=True,
+            observed_codex_launch=False,
             loading_feedback=loading_feedback,
         )
     if renderer_exit == HUD_SWITCH_TO_RENDERER:
@@ -9637,6 +9722,7 @@ def run_renderer_hud_session(
     lock_already_held: bool = False,
     daemon_manager: CodexDaemonManager | None = None,
     launched_codex: bool = False,
+    observed_codex_launch: bool = False,
     loading_feedback: HudLoadingFeedback | None = None,
 ) -> int:
     """Run the in-renderer HUD over CDP, or report that it is unavailable."""
@@ -9645,7 +9731,10 @@ def run_renderer_hud_session(
         with lock_context:
             local_loading = loading_feedback
             try:
-                startup_plan = _renderer_startup_plan(launched_codex=launched_codex)
+                startup_plan = _renderer_startup_plan(
+                    launched_codex=launched_codex,
+                    observed_codex_launch=observed_codex_launch,
+                )
             except (OSError, RuntimeError) as exc:
                 if local_loading is not None:
                     local_loading.close()
@@ -9655,6 +9744,17 @@ def run_renderer_hud_session(
                     source="startup-classification",
                 )
                 return RENDERER_HUD_UNAVAILABLE
+            if startup_plan.scenario == RENDERER_STARTUP_RELAUNCH_OBSERVED:
+                if local_loading is not None:
+                    local_loading.update(
+                        title="正在切换到 Renderer HUD",
+                        message="检测到普通 Codex 启动，正在改用调试/CDP 模式…",
+                    )
+                _append_renderer_diagnostic(
+                    "renderer_observed_plain_launch_takeover",
+                    reason=startup_plan.reason,
+                )
+                return HUD_AUTO_RESTART_CODEX
             codex_was_running = startup_plan.scenario in {
                 RENDERER_STARTUP_ATTACH,
                 RENDERER_STARTUP_RESTART_REQUIRED,
@@ -9705,16 +9805,23 @@ def run_renderer_hud_session(
                 finally:
                     work_overlay.close()
                     context.close()
+            cold_start_attach = bool(
+                launched_codex
+                or startup_plan.scenario == RENDERER_STARTUP_ATTACH_OBSERVED
+            )
             renderer_cdp_timeout = (
                 RENDERER_RESTART_CDP_TIMEOUT_SECONDS
-                if launched_codex
+                if cold_start_attach
                 else (
                     DAEMON_RENDERER_CDP_TIMEOUT_SECONDS
                     if daemon_manager is not None and not codex_was_running
                     else RENDERER_CDP_TIMEOUT_SECONDS
                 )
             )
-            client = RendererHudClient(timeout_seconds=renderer_cdp_timeout)
+            client = RendererHudClient(
+                port=startup_plan.port,
+                timeout_seconds=renderer_cdp_timeout,
+            )
             update_manager = AutoUpdateManager(current_version=__version__)
             restart_requested = Event()
             exit_requested = Event()
@@ -10118,11 +10225,11 @@ def run_renderer_hud_session(
                 # renderer launcher.  An already-running app is never
                 # restarted or reconfigured by the HUD.
                 # The daemon can observe an already running Codex process, but
-                # that does not mean this invocation launched it.  Only a
-                # process started by the fixed-port launcher may wait for
-                # first-window/CDP readiness.  Existing instances take the
-                # bounded single strict attach path below.
-                wait_for_window = launched_codex or (
+                # that does not mean this invocation launched it. Fresh
+                # externally observed launches are also allowed a bounded
+                # first-window/CDP readiness wait; ordinary existing instances
+                # still take the bounded single strict attach path below.
+                wait_for_window = cold_start_attach or (
                     sys.platform.startswith("win") and not codex_was_running
                 )
                 # Startup classification is the only owner of a CDP launch.
@@ -10133,7 +10240,7 @@ def run_renderer_hud_session(
                     local_loading.update(
                         title=(
                             "正在切换到 Renderer HUD"
-                            if launched_codex
+                            if cold_start_attach
                             else "正在启动 Renderer HUD"
                         ),
                         message="正在拉起 Codex 主窗口并切到前台，确保 Renderer 注入目标正确...",
@@ -10159,7 +10266,7 @@ def run_renderer_hud_session(
                         local_loading.update(
                             title=(
                                 "正在切换到 Renderer HUD"
-                                if launched_codex
+                                if cold_start_attach
                                 else "正在启动 Renderer HUD"
                             ),
                             message="正在等待 Codex 主窗口和调试端口准备完成...",
@@ -10196,7 +10303,7 @@ def run_renderer_hud_session(
 
                 initial_timeout = (
                     RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS
-                    if launched_codex
+                    if cold_start_attach
                     else (
                         DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS
                         if wait_for_window
@@ -10207,7 +10314,7 @@ def run_renderer_hud_session(
                     local_loading.update(
                         title=(
                             "正在切换到 Renderer HUD"
-                            if launched_codex
+                            if cold_start_attach
                             else "正在启动 Renderer HUD"
                         ),
                         message="正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...",
@@ -10266,7 +10373,11 @@ def run_renderer_hud_session(
                 if not renderer_attached:
                     original_error = client.last_error
                     restart_can_help = bool(
-                        startup_plan.scenario == RENDERER_STARTUP_ATTACH
+                        startup_plan.scenario
+                        in {
+                            RENDERER_STARTUP_ATTACH,
+                            RENDERER_STARTUP_ATTACH_OBSERVED,
+                        }
                         and (
                             _renderer_initial_failure_should_recover_cdp_port(
                                 original_error
@@ -11590,7 +11701,7 @@ def run_tk_hud_session(
 
 
 def run_daemon(args: argparse.Namespace) -> int:
-    """Run the hidden Windows daemon manager, falling back when unsupported."""
+    """Run the hidden Desktop daemon manager, falling back when unsupported."""
     configure_daemon_logging()
     _attach_cli_logger_to_daemon_log()
     hide_console_window()
@@ -11615,6 +11726,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                 return 0
             startup_loading: HudLoadingFeedback | None = None
             launched_codex_for_renderer = False
+            observed_codex_launch = False
             if startup.mode == DAEMON_STARTUP_WAIT:
                 # Existing Codex: show the same compact top-right progress card
                 # immediately, then turn this exact card into the restart
@@ -11677,6 +11789,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                         daemon_manager=manager,
                         loading_feedback=startup_loading,
                         launched_codex=launched_codex_for_renderer,
+                        observed_codex_launch=observed_codex_launch,
                     )
                 else:
                     exit_code = run_hud_session(
@@ -11685,8 +11798,32 @@ def run_daemon(args: argparse.Namespace) -> int:
                         hide_until_attached=True,
                         daemon_manager=manager,
                         loading_feedback=startup_loading,
+                        observed_codex_launch=observed_codex_launch,
                     )
+                session_loading = startup_loading
                 startup_loading = None
+                observed_codex_launch = False
+                if exit_code == HUD_AUTO_RESTART_CODEX:
+                    startup_loading = session_loading
+                    if startup_loading is None:
+                        startup_loading = _create_loading_feedback(
+                            args,
+                            title="正在切换到 Renderer HUD",
+                            message="正在以调试/CDP 模式重新启动 Codex App…",
+                        ).start()
+                    else:
+                        startup_loading.update(
+                            title="正在切换到 Renderer HUD",
+                            message="正在以调试/CDP 模式重新启动 Codex App…",
+                        )
+                    if not _restart_codex_for_renderer():
+                        startup_loading.close()
+                        _LOGGER.info("daemon_observed_codex_takeover_failed")
+                        return RENDERER_HUD_UNAVAILABLE
+                    launched_codex_for_renderer = True
+                    force_renderer_retry = True
+                    _LOGGER.info("daemon_observed_codex_takeover_started")
+                    continue
                 if exit_code == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
                     startup_loading = _create_loading_feedback(
                         args,
@@ -11703,6 +11840,7 @@ def run_daemon(args: argparse.Namespace) -> int:
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
                     launched_codex_for_renderer = False
+                    observed_codex_launch = True
                     _LOGGER.info("daemon_restarting_wait_for_codex")
                     continue
                 if exit_code == CLEANUP_MAINTENANCE_REQUESTED:

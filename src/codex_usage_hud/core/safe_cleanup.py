@@ -125,6 +125,27 @@ _BACKGROUND_REQUIRED_COLUMNS = {
 _BACKGROUND_ALLOWED_TABLES = set(_BACKGROUND_REQUIRED_COLUMNS)
 _BACKGROUND_SCHEMA_VERSIONS = frozenset({"1", "2"})
 
+# Fixed-weight scan phases for progressive UI. Values sum to 100; live progress
+# stays at most 99 until the final completed/preview snapshot.
+SCAN_PHASE_WEIGHTS: tuple[tuple[str, int], ...] = (
+    ("hud", 12),
+    ("codex", 16),
+    ("processes", 8),
+    ("caches", 40),
+    ("backups", 12),
+    ("sqlite", 12),
+)
+SCAN_PHASE_COUNT = len(SCAN_PHASE_WEIGHTS)
+SCAN_PHASE_LABELS: dict[str, str] = {
+    "hud": "HUD diagnostics",
+    "codex": "Codex temporary items",
+    "processes": "Related application state",
+    "caches": "Application and developer caches",
+    "backups": "Old cleanup backups",
+    "sqlite": "Historical databases",
+    "preview": "Default safe preview",
+}
+
 
 class SafeCleanupError(RuntimeError):
     """A cleanup request was rejected before touching unverified data."""
@@ -1572,6 +1593,8 @@ class SafeCleanupManager:
         self._confirmations: dict[str, _Confirmation] = {}
         self._revision_counter = 0
         self._operation: dict[str, object] = _idle_operation()
+        # Optional sink for mid-scan snapshots (set by the worker thread).
+        self.progress_publisher: Callable[[Mapping[str, object]], None] | None = None
 
     def snapshot(self) -> dict[str, object]:
         if self._inventory is None:
@@ -1591,6 +1614,73 @@ class SafeCleanupManager:
                 "operation": dict(self._operation),
             }
         return self._inventory.to_payload(self._operation)
+
+    @staticmethod
+    def scanning_revision(request_id: str) -> str:
+        """Opaque temporary revision that must never back confirmation tokens."""
+
+        token = str(request_id or "").strip() or "pending"
+        return f"scanning:{token}"
+
+    @staticmethod
+    def is_scanning_revision(revision: object) -> bool:
+        return str(revision or "").startswith("scanning:")
+
+    def _phase_progress_ceiling(self, phase_index: int) -> int:
+        """Inclusive 1-based phase index → cumulative progress (capped at 99)."""
+
+        total = 0
+        for index, (_phase, weight) in enumerate(SCAN_PHASE_WEIGHTS, start=1):
+            if index > phase_index:
+                break
+            total += int(weight)
+        return min(99, max(0, total))
+
+    def _emit_scan_progress(
+        self,
+        *,
+        request_id: str,
+        phase: str,
+        phase_index: int,
+        progress: int,
+        items: Sequence[CleanupItem],
+        generated_at: float,
+        phase_detail: str = "",
+    ) -> None:
+        """Publish a path-neutral partial inventory while a scan is running."""
+
+        publisher = self.progress_publisher
+        if not callable(publisher):
+            return
+        phase_key = str(phase or "").strip() or "hud"
+        label = SCAN_PHASE_LABELS.get(phase_key, phase_key)
+        if phase_detail:
+            label = f"{label}: {phase_detail}"
+        discovered_bytes = sum(
+            int(item.size)
+            for item in items
+            if item.tier == "safe" and not item.blocked_reason
+        )
+        self.mark_operation(
+            request_id=request_id,
+            action="scan",
+            state="scanning",
+            progress=min(99, max(0, int(progress))),
+            phase=phase_key,
+            phaseLabel=label,
+            phaseIndex=max(1, int(phase_index)),
+            phaseCount=SCAN_PHASE_COUNT,
+            discoveredGroups=len(items),
+            discoveredBytes=discovered_bytes,
+        )
+        self._inventory = CleanupInventory(
+            revision=self.scanning_revision(request_id),
+            generated_at=float(generated_at),
+            platform=self.platform,
+            items=tuple(items),
+        )
+        self._items = {item.id: item for item in items}
+        publisher(self.snapshot())
 
     def cancel(self, *, request_id: str = "") -> dict[str, object]:
         """Invalidate one-use confirmations without touching local data."""
@@ -1710,8 +1800,38 @@ class SafeCleanupManager:
     def scan(self, *, request_id: str = "") -> dict[str, object]:
         generated_at = float(self.clock())
         items: list[CleanupItem] = []
+        request = str(request_id or "")
+
+        def report(
+            phase: str,
+            phase_index: int,
+            *,
+            progress: int | None = None,
+            phase_detail: str = "",
+        ) -> None:
+            ceiling = self._phase_progress_ceiling(phase_index)
+            prior = self._phase_progress_ceiling(phase_index - 1) if phase_index > 1 else 0
+            if progress is None:
+                value = ceiling
+            else:
+                value = max(prior, min(ceiling, int(progress)))
+            self._emit_scan_progress(
+                request_id=request,
+                phase=phase,
+                phase_index=phase_index,
+                progress=min(99, value),
+                items=items,
+                generated_at=generated_at,
+                phase_detail=phase_detail,
+            )
+
+        report("hud", 1, progress=0)
         items.extend(self._scan_hud_runtime(generated_at))
+        report("hud", 1)
+
         items.extend(self._scan_codex_candidates())
+        report("codex", 2)
+
         try:
             running = {
                 _normalize_process_name(name) for name in self.running_process_names()
@@ -1720,23 +1840,46 @@ class SafeCleanupManager:
         except Exception:
             running = set()
             process_error = "Related application state could not be verified."
+        report("processes", 3)
+
         definitions = self._configured_cache_definitions
         if definitions is None:
             definitions = platform_cache_definitions(
                 platform=self.platform, home=self.home, env=self.env
             )
-        for definition in definitions:
-            items.extend(
-                self._scan_cache_definition(
-                    definition,
-                    generated_at,
-                    running=running,
-                    process_error=process_error,
+        definitions = tuple(definitions)
+        cache_weight = next(
+            (weight for key, weight in SCAN_PHASE_WEIGHTS if key == "caches"),
+            40,
+        )
+        cache_base = self._phase_progress_ceiling(3)
+        if not definitions:
+            report("caches", 4)
+        else:
+            for index, definition in enumerate(definitions, start=1):
+                items.extend(
+                    self._scan_cache_definition(
+                        definition,
+                        generated_at,
+                        running=running,
+                        process_error=process_error,
+                    )
                 )
-            )
+                fraction = index / max(1, len(definitions))
+                report(
+                    "caches",
+                    4,
+                    progress=min(99, cache_base + int(cache_weight * fraction)),
+                    phase_detail=str(definition.label or definition.key),
+                )
+
         items.extend(self._scan_old_backups(generated_at))
+        report("backups", 5)
+
         for target in self.sqlite_targets:
             items.append(self._scan_sqlite_target(target, generated_at))
+        report("sqlite", 6)
+
         self._revision_counter += 1
         revision = f"{self._revision_counter}-{self.token_factory()}"
         self._inventory = CleanupInventory(
@@ -1747,6 +1890,11 @@ class SafeCleanupManager:
         )
         self._items = {item.id: item for item in items}
         self._confirmations.clear()
+        discovered_bytes = sum(
+            int(item.size)
+            for item in items
+            if item.tier == "safe" and not item.blocked_reason
+        )
         self._operation = {
             "id": str(request_id or self.token_factory()),
             "requestId": request_id,
@@ -1754,6 +1902,12 @@ class SafeCleanupManager:
             "state": "completed",
             "progress": 100,
             "error": "",
+            "phase": "sqlite",
+            "phaseLabel": SCAN_PHASE_LABELS["sqlite"],
+            "phaseIndex": SCAN_PHASE_COUNT,
+            "phaseCount": SCAN_PHASE_COUNT,
+            "discoveredGroups": len(items),
+            "discoveredBytes": discovered_bytes,
         }
         return self.snapshot()
 
@@ -1959,6 +2113,8 @@ class SafeCleanupManager:
         if not normalized or any(not item_id for item_id in normalized):
             raise SafeCleanupError("empty or invalid cleanup selection")
         if self._inventory is None or revision != self._inventory.revision:
+            raise SafeCleanupError("cleanup inventory revision is stale")
+        if self.is_scanning_revision(revision):
             raise SafeCleanupError("cleanup inventory revision is stale")
         try:
             return [self._items[item_id] for item_id in normalized]

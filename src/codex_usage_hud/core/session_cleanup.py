@@ -310,8 +310,26 @@ class SessionCleanupManager:
         return SessionDeleteCapability(True)
 
     def scan(self, *, request_id: str = "") -> dict[str, object]:
+        request = str(request_id or "")
+        publisher = getattr(self, "progress_publisher", None)
+        def report(phase: str, phase_label: str, phase_index: int, progress: int) -> None:
+            self.mark_operation(
+                request_id=request,
+                action="scan",
+                state="scanning",
+                progress=min(99, max(0, int(progress))),
+                phase=phase,
+                phaseLabel=phase_label,
+                phaseIndex=phase_index,
+                phaseCount=3,
+            )
+            if callable(publisher):
+                publisher(self.snapshot())
+
+        report("sessions", "Reading session index", 1, 10)
         capability = self.probe_capability()
         records, parents, edge_states, unsafe_ids, unresolved = self._load_state()
+        report("merge", "Merging root sessions and subagents", 2, 55)
         titles = self._session_index_titles()
         current_ids = self._protected_ids(self.current_session_ids)
         active_ids = self._protected_ids(self.active_session_ids)

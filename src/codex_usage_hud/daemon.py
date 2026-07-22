@@ -1,8 +1,8 @@
-"""Windows daemon helpers for waking the HUD with the Codex client.
+"""Desktop process helpers for waking the HUD with the Codex client.
 
-The implementation intentionally stays in the Python standard library.  On
-Windows it enumerates processes with Toolhelp32 through ``ctypes``; if those
-APIs are unavailable, callers can fall back to the ordinary one-shot HUD path.
+The implementation intentionally stays in the Python standard library. Windows
+uses Toolhelp32 through ``ctypes``; macOS uses a conservative ``ps`` snapshot
+fallback until a dependency-free native launch notification is available.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import ctypes
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import re
+import subprocess
 import sys
 import time
 from ctypes import wintypes
@@ -339,6 +341,84 @@ class WindowsProcessListener:
         return _WindowsProcessExitMonitor(self.kernel32, int(handle))
 
 
+def _is_macos_codex_desktop_command(command_line: str) -> bool:
+    normalized = str(command_line or "").replace("\\", "/").casefold()
+    if re.search(r"/[^/]*codex\.app/contents/macos/", normalized):
+        return True
+    configured = os.environ.get(_CODEX_APP_PATH_ENV, "").strip()
+    if not configured:
+        return False
+    configured_path = configured.replace("\\", "/").rstrip("/").casefold()
+    return bool(
+        configured_path
+        and f"{configured_path}/contents/macos/" in normalized
+    )
+
+
+class MacOSProcessListener:
+    """Conservative macOS Codex Desktop listener based on audited snapshots."""
+
+    def __init__(self, *, exclude_pid: int | None = None) -> None:
+        self.exclude_pid = exclude_pid if exclude_pid is not None else os.getpid()
+        self.enabled = sys.platform == "darwin"
+        self.error = "" if self.enabled else (
+            f"macOS process listener is unsupported on {sys.platform}"
+        )
+
+    def snapshot(self) -> ProcessSnapshot:
+        checked_at = time.monotonic()
+        if not self.enabled:
+            raise ProcessListenerError(self.error or "macOS process listener unavailable")
+        try:
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,command="],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProcessListenerError("macOS Codex process query failed") from exc
+        if result.returncode != 0:
+            raise ProcessListenerError(
+                f"macOS Codex process query returned {result.returncode}"
+            )
+
+        pids: list[int] = []
+        names: list[str] = []
+        for line in result.stdout.splitlines():
+            row = line.strip()
+            if not row:
+                continue
+            pid_text, separator, command_line = row.partition(" ")
+            if not separator or not _is_macos_codex_desktop_command(command_line):
+                continue
+            try:
+                pid = int(pid_text)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0 or pid == self.exclude_pid:
+                continue
+            pids.append(pid)
+            names.append("Codex")
+        return ProcessSnapshot(
+            found=bool(pids),
+            pids=tuple(pids),
+            names=tuple(names),
+            checked_at=checked_at,
+        )
+
+
+def current_process_listener() -> ProcessListener:
+    if sys.platform == "darwin":
+        _logger.info(
+            "daemon_process_listener_selected platform=macos mode=ps-snapshot-fallback"
+        )
+        return MacOSProcessListener()
+    _logger.info("daemon_process_listener_selected platform=windows mode=toolhelp")
+    return WindowsProcessListener()
+
+
 class _WindowsProcessExitMonitor:
     def __init__(self, kernel32: object, handle: int) -> None:
         self._kernel32 = kernel32
@@ -380,7 +460,7 @@ class CodexDaemonManager:
         exit_monitor_factory: Callable[[ProcessSnapshot], ProcessExitMonitor | None]
         | None = None,
     ) -> None:
-        self.listener = listener or WindowsProcessListener()
+        self.listener = listener if listener is not None else current_process_listener()
         self.poll_ms = max(MIN_DAEMON_POLL_MS, min(MAX_DAEMON_POLL_MS, int(poll_ms)))
         self.state = DaemonState.WAITING_FOR_CODEX
         self.last_snapshot = ProcessSnapshot(found=False, checked_at=time.monotonic())
@@ -478,11 +558,13 @@ __all__ = [
     "DaemonState",
     "DEFAULT_DAEMON_POLL_MS",
     "MAX_DAEMON_POLL_MS",
+    "MacOSProcessListener",
     "ProcessListenerError",
     "ProcessExitMonitor",
     "ProcessSnapshot",
     "WindowsProcessListener",
     "configure_daemon_logging",
+    "current_process_listener",
     "daemon_log_path",
     "hide_console_window",
     "is_codex_client_process",

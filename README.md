@@ -26,7 +26,7 @@
 
 安装后会有几个入口：
 
-- `Codex Usage HUD`：后台 daemon 入口；如果 Codex App 未启动，会以固定调试/CDP 端口拉起并注入 renderer HUD。若已运行的 Codex 未启用 CDP 或端口不匹配，右上角启动面板会等待用户点击“重启 Codex”，不会自动打断当前工作。
+- `Codex Usage HUD`：后台 daemon 入口；如果 Codex App 未启动，会以固定调试/CDP 端口拉起并注入 renderer HUD。若 HUD 已在等待期间观察到一个全新的普通 Codex 启动，会无确认地切换为 HUD/CDP 启动；如果是 HUD 启动前就已存在的 Codex、进程审计不确定或端口冲突，右上角启动面板仍会等待用户点击“重启 Codex”，不会自动打断当前工作。
 - `Stop Codex Usage HUD`：关闭正在运行的 HUD。
 - `Check for Updates`：检查 GitHub Release 是否有新安装包。
 
@@ -53,7 +53,7 @@ codex-hud --update
 
 ## 主要功能
 
-- Renderer-only：Codex 暴露配置的本地 CDP target 时，HUD 直接显示在 Codex App 内部；CDP 不可用或端口不匹配时在右上角启动面板提供一次显式重启入口，不自动重启，也不回退到 Qt/Tk 独立窗口。
+- Renderer-only：Codex 暴露配置的本地 CDP target 时，HUD 直接显示在 Codex App 内部；HUD 存活期间新启动的 Codex 会按来源区分为直接接入或一次性 CDP 接管，已有/不明确的实例仍在右上角启动面板提供显式重启入口，不回退到 Qt/Tk 独立窗口。
 - PySide6 桌面会话气泡：源码 / pip 安装时可通过 `codex-usage-hud[desktop-overlay]` 启用桌面级方形运行气泡和完成态圆气泡；主 HUD 仍保持 renderer-only。
 - Codex 主题跟随：Renderer 模式优先跟随 live 主题；没有可用 CDP target 时会保留诊断，提示重新以调试端口启动 Codex App。
 - 实时 token 与金额：输入、缓存输入、输出、推理、合计、缓存率和实时 USD 估算同屏展示。
@@ -137,7 +137,7 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 
 ### HUD 没有出现在 Codex 里
 
-先确认是从 `Codex Usage HUD` 或 `codex-hud --daemon` 启动。HUD 使用一个固定的本地 CDP/debug 端口：未检测到 Codex App 时会直接以 CDP 模式拉起并连接；检测到已运行且端口匹配的 Codex 时会直接连接；若 Codex 未启用 CDP 或端口不匹配，右上角启动面板会显示“重启 Codex”按钮，只有点击后才会关闭并按第一种路径重新拉起。`--no-startup-prompt` 仅作为旧启动项的兼容参数保留，不再改变这三种启动路径。
+先确认是从 `Codex Usage HUD` 或 `codex-hud --daemon` 启动。HUD 使用一个固定的本地 CDP/debug 端口：未检测到 Codex App 时会直接以 CDP 模式拉起并连接；检测到已运行且端口匹配的 Codex 时会直接连接；若 Codex 未启用 CDP 或端口不匹配，右上角启动面板会显示“重启 Codex”按钮，只有点击后才会关闭并按第一种路径重新拉起。HUD daemon 在 Codex 退出后仍会存活：此后新启动的 Codex 若已声明 CDP 端口会直接接入，普通启动则会自动切换为一次 HUD/CDP 启动。`--no-startup-prompt` 仅作为旧启动项的兼容参数保留，不再改变这些启动路径。
 
 ### 桌面会话气泡没有显示
 
@@ -168,7 +168,7 @@ macOS 无本机验证路径：
 ```text
 src/codex_usage_hud/
   cli.py                 CLI、daemon、更新命令入口
-  daemon.py              Windows Codex 进程监听
+  daemon.py              Windows/macOS Codex Desktop 进程监听
   ui/renderer_hud.py     Codex renderer 注入 HUD
   ui/work_overlay_qt.py  可选 PySide6 桌面会话气泡 helper
   ui/qt_hud.py           旧 Qt 独立窗口模块（默认不加载）

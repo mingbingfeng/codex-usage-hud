@@ -26,7 +26,7 @@ Download the latest Windows installer from [GitHub Releases](https://github.com/
 
 After installation, Start Menu shortcuts are available:
 
-- `Codex Usage HUD`: daemon entry; when Codex App is not running, it launches Codex directly with the fixed debug/CDP port and injects the renderer HUD. If a running Codex instance has no CDP target or uses a different port, the top-right startup panel waits for an explicit **Restart Codex** click and never interrupts current work automatically.
+- `Codex Usage HUD`: daemon entry; when Codex App is not running, it launches Codex directly with the fixed debug/CDP port and injects the renderer HUD. If the HUD observes a fresh ordinary Codex launch while waiting, it automatically switches that launch to HUD-owned CDP mode. Codex instances that predate the wait, process-audit failures, and port conflicts still require an explicit **Restart Codex** click and are never interrupted automatically.
 - `Stop Codex Usage HUD`: stops the running HUD.
 - `Check for Updates`: checks GitHub Releases for a newer installer.
 
@@ -53,7 +53,7 @@ For questions, suggestions, or discussions, head to [GitHub Issues](https://gith
 
 ## Main Features
 
-- Renderer-only HUD: when Codex exposes a local CDP target, the HUD renders inside Codex App; when CDP is unavailable, the app reports diagnostics instead of falling back to Qt/Tk standalone windows.
+- Renderer-only HUD: when Codex exposes a local CDP target, the HUD renders inside Codex App. New Codex launches observed while the HUD is alive either attach to their declared CDP port or go through one automatic CDP takeover; existing or ambiguous instances retain the explicit restart action. The app never falls back to Qt/Tk standalone windows.
 - PySide6 desktop work bubbles: source / pip installs can enable square running bubbles and completed circular bubbles with `codex-usage-hud[desktop-overlay]`; the main HUD remains renderer-only.
 - Codex theme sync: Renderer mode follows the live Codex App theme; without an available CDP target, diagnostics point you to restart Codex App with the debug port enabled.
 - Real-time tokens and cost: input, cached input, output, reasoning, total, cache hit rate, and live USD estimate.
@@ -130,7 +130,7 @@ No. `v0.1.0`, `v0.2.0`, and `v0.3.0` remain as historical alpha / preview tags. 
 
 ### The HUD does not appear inside Codex
 
-Start it from `Codex Usage HUD` or `codex-hud --daemon`. The HUD uses one fixed local CDP/debug port. If Codex App is not running, the HUD launches it directly with CDP enabled and connects once. If an existing Codex instance exposes the matching port, the HUD connects directly. If CDP is unavailable or the port does not match, the top-right startup panel offers a **Restart Codex** button; Codex is closed and relaunched only after that click. `--no-startup-prompt` remains accepted for compatibility with older startup entries but no longer changes these three paths.
+Start it from `Codex Usage HUD` or `codex-hud --daemon`. The HUD uses one fixed local CDP/debug port. If Codex App is not running, the HUD launches it directly with CDP enabled and connects once. If an existing Codex instance exposes the matching port, the HUD connects directly. If CDP is unavailable or the port does not match, the top-right startup panel offers a **Restart Codex** button; Codex is closed and relaunched only after that click. The daemon remains alive after Codex exits: a later launch with a declared CDP port is attached directly, while an ordinary launch is automatically switched through one HUD-owned CDP relaunch. `--no-startup-prompt` remains accepted for compatibility with older startup entries but no longer changes these paths.
 
 ### Desktop work bubbles do not appear
 
@@ -161,7 +161,7 @@ Project structure:
 ```text
 src/codex_usage_hud/
   cli.py                 CLI, daemon, and update command entry
-  daemon.py              Windows Codex process listener
+  daemon.py              Windows/macOS Codex Desktop process listener
   ui/renderer_hud.py     Codex renderer-injected HUD
   ui/work_overlay_qt.py  Optional PySide6 desktop work-bubble helper
   ui/qt_hud.py           Legacy Qt standalone module, not loaded by default

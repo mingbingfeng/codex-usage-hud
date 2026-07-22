@@ -176,6 +176,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   };
   const safeCleanupState = {
     data: null,
+    stableData: null,
     pendingRequestId: "",
     includeConsent: false,
     backupDirectory: "",
@@ -184,6 +185,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     autoCloseConfirmed: false,
     previewHidden: false,
     lastBackupPickerRequestId: "",
+    scanStartedAt: 0,
   };
   let cleanupActiveSection = "junk";
   let cleanupDeepExpanded = false;
@@ -196,6 +198,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     status: "all",
     time: "all",
     previewTokenShown: "",
+    scanStartedAt: 0,
   };
   let backgroundUsageFetchSeq = 0;
   let backgroundUsageDetailSeq = 0;
@@ -3244,6 +3247,174 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: var(--codex-usage-hud-muted, #9da1a8);
         font-size: 12px;
         line-height: 1.5;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-mark[data-live="true"] {
+        position: relative;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-mark[data-live="true"]::before {
+        content: "";
+        position: absolute;
+        inset: -5px;
+        border-radius: 50%;
+        border: 2px solid transparent;
+        border-top-color: var(--codex-usage-hud-accent-blue, #3b8eea);
+        border-right-color: rgba(59, 142, 234, .35);
+        animation: codex-usage-hud-cleanup-spin .9s linear infinite;
+      }
+      @keyframes codex-usage-hud-cleanup-spin { to { transform: rotate(360deg); } }
+      #${rootId} .codex-usage-hud-cleanup-scan-strip {
+        display: grid;
+        gap: 8px;
+        padding: 11px 15px 12px;
+        border-bottom: 1px solid var(--codex-usage-hud-border, #393b40);
+        background: linear-gradient(180deg, #1a2430 0%, #151a20 100%);
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-strip-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-strip-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #7db9f7;
+        font-size: 12px;
+        font-weight: 650;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-strip-meta {
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-track {
+        position: relative;
+        height: 6px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(255, 255, 255, .08);
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-fill {
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #5ea7ff, #9ccbff);
+        box-shadow: 0 0 12px rgba(94, 167, 255, .35);
+        transition: width .28s ease;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-fill[data-indeterminate="true"] {
+        width: 38% !important;
+        animation: codex-usage-hud-cleanup-indet 1.35s ease-in-out infinite;
+      }
+      @keyframes codex-usage-hud-cleanup-indet {
+        0% { transform: translateX(-120%); }
+        100% { transform: translateX(320%); }
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-stage {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 11px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-stage strong {
+        color: #cfe4ff;
+        font-weight: 600;
+      }
+      #${rootId} .codex-usage-hud-cleanup-mini-spinner {
+        width: 12px;
+        height: 12px;
+        border: 1.5px solid rgba(125, 185, 247, .25);
+        border-top-color: #7db9f7;
+        border-radius: 50%;
+        animation: codex-usage-hud-cleanup-spin .75s linear infinite;
+        flex: 0 0 auto;
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] {
+        background: linear-gradient(180deg, #1a2430, #16202a);
+        border-bottom-color: #2d3d50;
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] .codex-usage-hud-cleanup-summary-label {
+        color: #7db9f7;
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] .codex-usage-hud-cleanup-summary-value {
+        color: #d7ebff;
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] .codex-usage-hud-cleanup-summary-side {
+        color: #8eb6de;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row[data-scan-state="pending"] { opacity: .72; }
+      #${rootId} .codex-usage-hud-cleanup-row[data-scan-state="current"] {
+        background: rgba(59, 142, 234, .06);
+      }
+      #${rootId} .codex-usage-hud-cleanup-row[data-scan-state="found"] {
+        background: linear-gradient(90deg, rgba(59, 142, 234, .14), transparent 72%);
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #7db9f7;
+        font-size: 10px;
+        font-weight: 600;
+      }
+      #${rootId} .codex-usage-hud-cleanup-check[data-skeleton="true"] {
+        border-style: dashed;
+        border-color: #3a3d43;
+        background: #1a1b1e;
+      }
+      #${rootId} .codex-usage-hud-cleanup-rescan-shell {
+        position: relative;
+        min-height: 0;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+      }
+      #${rootId} .codex-usage-hud-cleanup-rescan-dim {
+        filter: saturate(.85) brightness(.88);
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-cleanup-rescan-chip {
+        position: absolute;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 34px;
+        padding: 0 14px;
+        border: 1px solid #3f5f82;
+        border-radius: 999px;
+        background: rgba(23, 32, 42, .96);
+        color: #cfe4ff;
+        font-size: 12px;
+        font-weight: 650;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, .35);
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-cleanup-head-meta[data-live="true"] { color: #7db9f7; }
+      #${rootId} .codex-usage-hud-cleanup-pulse-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #3b8eea;
+        box-shadow: 0 0 0 0 rgba(59, 142, 234, .55);
+        animation: codex-usage-hud-cleanup-pulse 1.4s ease-out infinite;
+      }
+      @keyframes codex-usage-hud-cleanup-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(59, 142, 234, .55); }
+        70% { box-shadow: 0 0 0 8px rgba(59, 142, 234, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(59, 142, 234, 0); }
+      }
+      #${rootId} .codex-usage-hud-cleanup {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        height: 100%;
       }
       #${rootId} .codex-usage-hud-settings-action[data-size="large"] {
         min-height: 38px;
@@ -6763,11 +6934,193 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return `<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(value)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div>`;
   }
 
+
+  function isCleanupScanningRevision(revision) {
+    return String(revision || "").startsWith("scanning:");
+  }
+
+  function isSafeCleanupBusy(data = safeCleanupFromPayload()) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const state = String(operation?.state || "").toLowerCase();
+    return new Set(["scanning", "accepted", "running", "queued_exit"]).has(state)
+      || !!safeCleanupState.pendingRequestId;
+  }
+
+  function isSafeCleanupScanning(data = safeCleanupFromPayload()) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const state = String(operation?.state || "").toLowerCase();
+    const action = String(operation?.action || "");
+    if (safeCleanupState.pendingRequestId && !String(data?.revision || "")) return true;
+    if (!new Set(["scanning", "accepted"]).has(state)) return false;
+    if (action && !new Set(["scan", "safeCleanupScan", ""]).has(action)) {
+      // execute/preview accepted states are not inventory scans
+      return state === "scanning";
+    }
+    return true;
+  }
+
+  function hasStableSafeCleanupInventory(data = safeCleanupState.stableData) {
+    const revision = String(data?.revision || "");
+    return !!revision && !isCleanupScanningRevision(revision);
+  }
+
+  function safeCleanupPhaseLabel(operation = {}) {
+    const phase = String(operation?.phase || "").toLowerCase();
+    const raw = String(operation?.phaseLabel || "").trim();
+    const map = {
+      hud: "HUD 诊断",
+      codex: "Codex 临时项",
+      processes: "相关应用状态",
+      caches: "应用与开发缓存",
+      backups: "旧清理备份",
+      sqlite: "历史数据库",
+      preview: "生成默认安全预览",
+      sessions: "读取会话索引",
+      merge: "归并主会话与子任务",
+      capability: "校验删除能力",
+    };
+    if (map[phase]) {
+      // Keep neutral detail after English label if backend appended ": detail"
+      if (raw.includes(":")) {
+        const detail = raw.split(":").slice(1).join(":").trim();
+        if (detail && phase === "caches") return `${map[phase]} · ${detail}`;
+      }
+      return map[phase];
+    }
+    if (raw) {
+      const english = {
+        "HUD diagnostics": "HUD 诊断",
+        "Codex temporary items": "Codex 临时项",
+        "Related application state": "相关应用状态",
+        "Application and developer caches": "应用与开发缓存",
+        "Old cleanup backups": "旧清理备份",
+        "Historical databases": "历史数据库",
+        "Default safe preview": "生成默认安全预览",
+      };
+      for (const [en, zh] of Object.entries(english)) {
+        if (raw === en || raw.startsWith(`${en}:`)) {
+          const detail = raw.startsWith(`${en}:`) ? raw.slice(en.length + 1).trim() : "";
+          return detail ? `${zh} · ${detail}` : zh;
+        }
+      }
+      return raw;
+    }
+    return "正在扫描";
+  }
+
+  function formatCleanupElapsed(startedAt) {
+    const start = Number(startedAt || 0);
+    if (!start) return "0:00";
+    const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${String(secs).padStart(2, "0")}`;
+  }
+
+  function safeCleanupScanStripHtml(data, {
+    title = "扫描进度",
+    rescan = false,
+  } = {}) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const progress = Math.max(0, Math.min(99, Number(operation?.progress || 0)));
+    const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
+    const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 6));
+    const phaseLabel = safeCleanupPhaseLabel(operation);
+    const discoveredGroups = Number(operation?.discoveredGroups ?? (Array.isArray(data?.groups) ? data.groups.length : 0));
+    const discoveredBytes = Number(operation?.discoveredBytes ?? data?.totals?.reclaimableBytes ?? 0);
+    const elapsed = formatCleanupElapsed(safeCleanupState.scanStartedAt);
+    const indeterminate = progress <= 0;
+    return `<div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>${escapeHtml(rescan ? "重新扫描" : title)}</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}</div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${indeterminate}" style="width:${Math.max(progress, indeterminate ? 38 : 4)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel)}</strong></span><span>已发现 ${discoveredGroups} 组 · ${storageFormatBytes(discoveredBytes)}</span></div></div>`;
+  }
+
+  function safeCleanupBootHtml(data, { pending = true } = {}) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
+    const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 6));
+    const phaseLabel = safeCleanupPhaseLabel(operation);
+    const elapsed = formatCleanupElapsed(safeCleanupState.scanStartedAt);
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">准备本地清理清单 · <strong>第 ${phaseIndex}/${phaseCount} 步 · ${escapeHtml(phaseLabel)}</strong></p><div class="codex-usage-hud-cleanup-scan-track" style="width:min(280px,70%);margin-top:4px"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="true" style="width:38%"></div></div><p class="codex-usage-hud-cleanup-empty-meta">已用时 ${escapeHtml(elapsed)} · 不会在扫描时删除任何文件</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel" ${pending ? "" : "disabled"}>取消扫描</button></div></section>`;
+  }
+
+  function safeCleanupPlaceholderRowsHtml(data) {
+    const groups = safeCleanupGroups(data);
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const phase = String(operation?.phase || "").toLowerCase();
+    const safeGroups = groups.filter((group) => String(group?.tier || "protected") === "safe");
+    const consentGroups = groups.filter((group) => String(group?.tier || "protected") === "consent");
+    const protectedGroups = groups.filter((group) => String(group?.tier || "protected") === "protected");
+    const selected = new Set(safeCleanupSelectedGroupIds(data));
+    const placeholders = [
+      { id: "ph-app-cache", title: "应用缓存", meta: "Chrome、Edge、VS Code", kind: "safe", phaseKey: "caches" },
+      { id: "ph-dev-cache", title: "开发工具缓存", meta: "pip、npm、NuGet、着色器", kind: "safe", phaseKey: "caches" },
+      { id: "ph-runtime", title: "运行残留", meta: "过期临时项与旧清理备份", kind: "safe", phaseKey: "codex" },
+      { id: "ph-hud", title: "HUD 诊断日志", meta: "当前与轮转日志", kind: "safe", phaseKey: "hud" },
+    ];
+    const foundRows = safeGroups.slice(0, 8).map((group) => {
+      const checked = selected.has(String(group?.id || ""));
+      const impact = safeCleanupDisplayImpact(group);
+      const items = Array.isArray(group?.items) ? group.items.length : Number(group?.items || group?.itemCount || 0);
+      const meta = [safeCleanupRetention(group), items > 0 ? `${items} 项` : ""].filter(Boolean).join(" · ");
+      return `<div class="codex-usage-hud-cleanup-row" data-scan-state="found" data-tier="${escapeHtml(String(group?.tier || "safe"))}"><span class="codex-usage-hud-cleanup-check" data-checked="${checked}" data-disabled="false"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(safeCleanupDisplayLabel(group))}</div><div class="codex-usage-hud-cleanup-row-meta">${escapeHtml(meta || "按安全策略")}</div></div><div class="codex-usage-hud-cleanup-row-impact">${escapeHtml(impact)}</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(group?.bytes)}</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
+    }).join("");
+    // If real rows already present, only show deep/protected pending extras.
+    const showPlaceholders = safeGroups.length === 0;
+    const pendingRows = showPlaceholders ? placeholders.map((item) => {
+      const isCurrent = phase === item.phaseKey || (item.phaseKey === "caches" && ["caches", "processes"].includes(phase));
+      const scanState = isCurrent ? "current" : "pending";
+      return `<div class="codex-usage-hud-cleanup-row" data-scan-state="${scanState}" data-kind="${escapeHtml(item.kind)}"><span class="codex-usage-hud-cleanup-check" data-checked="false" data-disabled="true" data-skeleton="true"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(item.title)}</div><div class="codex-usage-hud-cleanup-row-meta">${isCurrent ? "正在统计…" : escapeHtml(item.meta)}</div></div><div class="codex-usage-hud-cleanup-row-impact">${isCurrent ? `<span class="codex-usage-hud-cleanup-row-status"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描中</span>` : "排队中"}</div><div class="codex-usage-hud-cleanup-row-size" style="color:var(--codex-usage-hud-muted,#9da1a8);font-weight:600">—</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
+    }).join("") : "";
+    const consentBytes = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
+    const deepPending = !consentGroups.length;
+    const deepRow = deepPending
+      ? `<div class="codex-usage-hud-cleanup-row" data-tier="consent" data-kind="deep" data-scan-state="${["sqlite", "backups", "preview"].includes(phase) ? "current" : "pending"}"><span class="codex-usage-hud-cleanup-check" data-checked="false" data-disabled="true" data-skeleton="true"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">深度清理（可选）</div><div class="codex-usage-hud-cleanup-row-meta">${["sqlite", "backups", "preview"].includes(phase) ? "旧 Codex 诊断历史 · 计量中" : "扫描完成后可选"}</div></div><div class="codex-usage-hud-cleanup-row-impact">${["sqlite", "backups", "preview"].includes(phase) ? `<span class="codex-usage-hud-cleanup-row-status"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描中</span>` : "需备份并关闭 Codex"}</div><div class="codex-usage-hud-cleanup-row-size" style="color:var(--codex-usage-hud-muted,#9da1a8);font-weight:600">—</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`
+      : `<div class="codex-usage-hud-cleanup-row" data-tier="consent" data-kind="deep"><span class="codex-usage-hud-cleanup-check" data-checked="false" data-disabled="false"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">深度清理（可选）</div><div class="codex-usage-hud-cleanup-row-meta">旧 Codex 诊断历史 · 保留最近 24 小时</div></div><div class="codex-usage-hud-cleanup-row-impact">需备份并关闭 Codex</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(consentBytes)}</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
+    const protectedBytes = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
+    const protectedNote = protectedGroups.length
+      ? `<div class="codex-usage-hud-cleanup-protected-note"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 项</span><span>配置、凭据和会话默认受保护</span></div>`
+      : `<div class="codex-usage-hud-cleanup-protected-note" style="opacity:.55"><span>${cleanupIconSvg("shield")}受保护项统计中…</span><span>配置与会话不会入选</span></div>`;
+    return `${foundRows}${pendingRows}${deepRow}${protectedNote}`;
+  }
+
+  function safeCleanupScanningPanelHtml(data, {
+    rescan = false,
+    stableData = null,
+  } = {}) {
+    const live = data && typeof data === "object" ? data : {};
+    const operation = live?.operation && typeof live.operation === "object" ? live.operation : {};
+    const groups = safeCleanupGroups(live);
+    const discoveredBytes = Number(operation?.discoveredBytes ?? live?.totals?.reclaimableBytes ?? 0);
+    const discoveredGroups = Number(operation?.discoveredGroups ?? groups.length);
+    const strip = safeCleanupScanStripHtml(live, { rescan });
+    if (rescan && stableData && hasStableSafeCleanupInventory(stableData)) {
+      const stableTotals = stableData?.totals && typeof stableData.totals === "object" ? stableData.totals : {};
+      const stableReclaimable = stableTotals?.reclaimableBytes;
+      return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-rescan-shell"><div class="codex-usage-hud-cleanup-rescan-chip"><span class="codex-usage-hud-cleanup-mini-spinner"></span>正在重新扫描本地可清理项…</div><div class="codex-usage-hud-cleanup-rescan-dim"><div class="codex-usage-hud-cleanup-summary-band" data-scanning="true"><div><div class="codex-usage-hud-cleanup-summary-label">上次结果（将被替换）</div><div class="codex-usage-hud-cleanup-summary-value" style="font-size:20px;opacity:.8">${storageFormatBytes(stableReclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">确认清理已锁定<br>等待新清单…</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(stableData, { selectedIds: safeCleanupSelectedGroupIds(stableData) })}</div></div></div></section>`;
+    }
+    if (!groups.length && Number(operation?.progress || 0) < 12) {
+      return safeCleanupBootHtml(live, { pending: true });
+    }
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-summary-band" data-scanning="true"><div><div class="codex-usage-hud-cleanup-summary-label"><span class="codex-usage-hud-cleanup-mini-spinner"></span>累计可清理（扫描中）</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(discoveredBytes)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已发现 ${discoveredGroups} 组<br>仍在扫描更多位置…</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupPlaceholderRowsHtml(live)}</div></section>`;
+  }
+
   function safeCleanupPanelHtml() {
     const data = safeCleanupFromPayload();
-    const scanned = !!String(data?.revision || "");
+    const scanning = isSafeCleanupScanning(data);
+    const scanned = !!String(data?.revision || "") && !isCleanupScanningRevision(data?.revision);
     const pending = !!safeCleanupState.pendingRequestId;
+    const stable = hasStableSafeCleanupInventory(safeCleanupState.stableData) ? safeCleanupState.stableData : null;
+    if (scanning) {
+      return safeCleanupScanningPanelHtml(data, {
+        rescan: !!stable,
+        stableData: stable,
+      });
+    }
     if (!data || !scanned) {
+      const failed = String(data?.operation?.state || "") === "failed";
+      if (failed) {
+        const errorText = String(data?.operation?.error || "扫描未能完成");
+        return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" style="border-color:#754247;background:#2b191b;color:#ff858a">${cleanupIconSvg("alert", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">扫描未能完成</h2><p class="codex-usage-hud-cleanup-empty-meta">${escapeHtml(errorText)}</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large">${cleanupIconSvg("refresh")}重新扫描</button></div></section>`;
+      }
       return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">本机缓存、临时文件与 HUD 诊断数据</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large" ${pending ? "disabled" : ""}>${pending ? "正在扫描..." : `${cleanupIconSvg("scan")}扫描垃圾`}</button></div></section>`;
     }
     syncSafeCleanupDefaults(data);
@@ -6795,12 +7148,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const cleanupData = safeCleanupFromPayload();
     const sessionCount = Number(sessionData?.totals?.sessions || (Array.isArray(sessionData?.sessions) ? sessionData.sessions.length : 0));
     const headMeta = isSessions
-      ? (sessionCount ? `${sessionCount.toLocaleString()} 个本地会话` : "按需扫描 · 无后台轮询")
-      : (cleanupData?.revision ? escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {})) : "按需扫描 · 无后台轮询");
+      ? (new Set(["scanning", "accepted"]).has(String(sessionData?.operation?.state || "").toLowerCase()) || !!sessionCleanupState.pendingRequestId
+        ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>正在扫描会话…`
+        : (sessionCount ? `${sessionCount.toLocaleString()} 个本地会话` : "按需扫描 · 无后台轮询"))
+      : (isSafeCleanupScanning(cleanupData)
+        ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>${escapeHtml(safeCleanupPhaseLabel(cleanupData?.operation || {}) || "正在扫描…")}`
+        : (cleanupData?.revision && !isCleanupScanningRevision(cleanupData?.revision)
+          ? escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {}))
+          : "按需扫描 · 无后台轮询"));
     const body = isSessions ? sessionCleanupPanelHtml() : safeCleanupPanelHtml();
-    const junkScanned = !!String(cleanupData?.revision || "");
+    const junkScanning = isSafeCleanupScanning(cleanupData);
+    const junkScanned = !!String(cleanupData?.revision || "") && !isCleanupScanningRevision(cleanupData?.revision) && !junkScanning;
+    const junkBusy = isSafeCleanupBusy(cleanupData);
     const sessionScanned = !!String(sessionData?.revision || "");
-    const junkBusy = new Set(["scanning", "accepted", "running", "queued_exit"]).has(String(cleanupData?.operation?.state || "")) || !!safeCleanupState.pendingRequestId;
     const sessionBusy = new Set(["scanning", "accepted", "running"]).has(String(sessionData?.operation?.state || "")) || !!sessionCleanupState.pendingRequestId;
     const junkReady = String(cleanupData?.operation?.state || "") === "preview" && !!String(cleanupData?.operation?.confirmationToken || "");
     const reclaimable = cleanupData?.operation?.netEstimatedBytes ?? cleanupData?.totals?.reclaimableBytes;
@@ -6815,6 +7175,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         ? `已选 ${selectedCount} 个会话 · 含 ${descendants} 个关联子任务 · ${storageFormatBytes(bytes)}`
         : (sessionScanned ? "当前/运行中会话不可选；子任务随主会话汇总" : "上次扫描：--");
       footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" ${sessionBusy ? "disabled" : ""}>${sessionBusy ? "正在扫描..." : (sessionScanned ? "重新扫描" : "扫描会话")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-preview" data-danger="true" data-size="large" ${sessionBusy || !selectedCount || sessionData?.capability?.available !== true ? "disabled" : ""}>${cleanupIconSvg("trash")}永久删除</button></div>`;
+    } else if (junkScanning) {
+      footerMeta = "仅统计可清理项 · 扫描时不删除";
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel">取消扫描</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled>${cleanupIconSvg("check")}确认清理</button></div>`;
     } else if (!junkScanned) {
       footerMeta = `上次扫描：-- · ${cleanupIconSvg("shield")} 配置、凭据和会话默认受保护`;
       footerActions = "";
@@ -6880,6 +7243,14 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const state = String(operation?.state || "idle");
     const busy = new Set(["scanning", "accepted", "running"]).has(state) || !!sessionCleanupState.pendingRequestId;
+    if (busy && (!scanned || new Set(["scanning", "accepted"]).has(state))) {
+      const phaseLabel = safeCleanupPhaseLabel(operation);
+      const progress = Math.max(0, Math.min(99, Number(operation?.progress || 0)));
+      const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
+      const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 3));
+      const elapsed = formatCleanupElapsed(sessionCleanupState.scanStartedAt);
+      return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理" aria-busy="true"><div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描本地会话</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}</div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${progress <= 0}" style="width:${Math.max(progress, 8)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel || "读取会话索引")}</strong></span><span>筛选与删除在完成后解锁</span></div></div><div class="codex-usage-hud-cleanup-empty-state" style="min-height:180px"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话归并本地记录与关联子任务</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-cancel">取消扫描</button></div></section>`;
+    }
     if (!data || !scanned) {
       return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话整理本地记录，关联子任务会随主会话一起永久删除。</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" data-primary="true" data-size="large" ${busy ? "disabled" : ""}>${busy ? "正在扫描..." : `${cleanupIconSvg("search")}扫描会话`}</button></div></section>`;
     }
@@ -6970,8 +7341,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function requestSafeCleanupScan() {
     if (safeCleanupState.pendingRequestId) return false;
+    const current = safeCleanupFromPayload();
+    if (hasStableSafeCleanupInventory(current)) {
+      safeCleanupState.stableData = current;
+    } else if (!hasStableSafeCleanupInventory(safeCleanupState.stableData)) {
+      safeCleanupState.stableData = null;
+    }
     const requestId = typedSettingsRequestId("safe-cleanup-scan");
     safeCleanupState.pendingRequestId = requestId;
+    safeCleanupState.scanStartedAt = Date.now();
     safeCleanupState.previewHidden = false;
     safeCleanupState.previewBackupDirectory = "";
     const submitted = submitSettingsCommand(
@@ -6980,6 +7358,34 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       { preserveOverlay: true },
     );
     if (!submitted) safeCleanupState.pendingRequestId = "";
+    return submitted;
+  }
+
+  function requestSafeCleanupCancel() {
+    const requestId = typedSettingsRequestId("safe-cleanup-cancel");
+    const submitted = submitSettingsCommand(
+      { action: "safeCleanupCancel", requestId },
+      "正在取消扫描...",
+      { preserveOverlay: true },
+    );
+    if (submitted) {
+      safeCleanupState.pendingRequestId = "";
+      safeCleanupState.scanStartedAt = 0;
+    }
+    return submitted;
+  }
+
+  function requestSessionCleanupCancel() {
+    const requestId = typedSettingsRequestId("session-cleanup-cancel");
+    const submitted = submitSettingsCommand(
+      { action: "sessionCleanupCancel", requestId },
+      "正在取消会话扫描...",
+      { preserveOverlay: true },
+    );
+    if (submitted) {
+      sessionCleanupState.pendingRequestId = "";
+      sessionCleanupState.scanStartedAt = 0;
+    }
     return submitted;
   }
 
@@ -7085,6 +7491,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (sessionCleanupState.pendingRequestId) return false;
     const requestId = typedSettingsRequestId("session-cleanup-scan");
     sessionCleanupState.pendingRequestId = requestId;
+    sessionCleanupState.scanStartedAt = Date.now();
     sessionCleanupState.selectedIds.clear();
     sessionCleanupState.previewTokenShown = "";
     const submitted = submitSettingsCommand(
@@ -8890,6 +9297,18 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.preventDefault();
         event.stopPropagation();
         requestSafeCleanupScan();
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSafeCleanupCancel();
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSessionCleanupCancel();
         return;
       }
       if (action.dataset.action === "safe-cleanup-preview") {
@@ -11736,6 +12155,13 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const state = String(operation.state || "").toLowerCase();
     const action = String(operation.action || "");
     const responseRequestId = String(operation.requestId || "");
+    const revision = String(data?.revision || "");
+    if (revision && !isCleanupScanningRevision(revision) && new Set(["preview", "completed", "partial", "restored"]).has(state)) {
+      safeCleanupState.stableData = data;
+      safeCleanupState.scanStartedAt = 0;
+    } else if (state === "failed" || state === "cancelled") {
+      safeCleanupState.scanStartedAt = 0;
+    }
     if (state === "preview") {
       safeCleanupState.includeConsent = operation?.includesConsent === true;
       if (operation?.requiresBackup === true && safeCleanupState.previewBackupDirectory) {

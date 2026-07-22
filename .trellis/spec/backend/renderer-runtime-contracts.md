@@ -843,6 +843,65 @@ return attach_renderer_without_window_prepare_launch(plan.port)
 Classification owns launch/restart policy; CDP validation owns attach identity, and
 the overlay command owns user consent.
 
+## Scenario: Renderer runtime external Codex launch takeover
+
+### 1. Scope / Trigger
+
+- Trigger: daemon mode observed the verified Desktop family exit, remained alive,
+  and then detected a new verified Desktop process family.
+- Scope: runtime process-arrival provenance, exact external CDP attach, and one-shot
+  takeover of a newly launched Desktop without CDP.
+
+### 2. Signatures
+
+- Renderer entry: `run_renderer_hud_session(..., observed_codex_launch=False)`.
+- Startup states: `attach-observed` and `relaunch-observed` are valid only with
+  fresh-launch provenance; ordinary startup still uses `launch`, `attach`,
+  `restart-required`, and `attach-launched`.
+- Daemon transition: `HUD_AUTO_RESTART_CODEX` owns the passive stop -> fresh-port
+  selection -> debugger launch -> `attach-launched` sequence.
+
+### 3. Contracts
+
+- `observed_codex_launch` is set only after a daemon renderer session reported the
+  prior Desktop family absent. It is not persisted and never applies to an App
+  that predated the HUD wait.
+- One distinct declared `--remote-debugging-port` across the audited Desktop
+  family creates `attach-observed`; the exact port is selected before it listens,
+  then `/json/version`, target listing, and `pick_page_target()` must all pass.
+- A fresh Desktop family with no declared CDP port creates `relaunch-observed`.
+  The daemon may stop that family once and launch once with the existing HUD CDP
+  flags; no confirmation action is needed in this proven-fresh state.
+- Process audit failure, no audited family, or multiple distinct declared ports
+  fails closed to `restart-required` and the existing persistent action.
+- A HUD-owned recovery carries `launched_codex=True`; it must not be classified as
+  another observed plain launch.
+- The runtime may show passive startup progress for observed attach/takeover, but
+  it must not add a second modal or scan arbitrary ports.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+|---|---|
+| Fresh external process declares one CDP port | Wait through cold startup and attach that exact port without restart UI. |
+| Root process exists before renderer target | Keep waiting; do not classify as non-CDP. |
+| Fresh external process declares no CDP port | Stop that verified family once, launch with HUD CDP, and attach. |
+| Existing App predates daemon wait | Preserve explicit restart action; do not auto-stop. |
+| Audit unavailable or ports conflict | Preserve explicit restart action; do not auto-stop. |
+| HUD-owned relaunch appears | Enter `attach-launched`; suppress another takeover. |
+| Recovery fails | Return one bounded failure path; never loop indefinitely. |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a new App root exposes port 59629, its renderer appears three seconds
+  later, and the HUD attaches to 59629 without showing restart UI.
+- Good: a new ordinary App is observed after full absence, is relaunched once with
+  a fresh port, and the next attach is marked HUD-owned.
+- Base: process inspection fails or two unrelated Desktop families expose different
+  ports; the existing restart action remains visible.
+- Bad: treat a fresh root as an old App, validate the port only once, stop an App
+  that predates the wait, scan a port range, or relaunch the HUD-owned process.
+
 ## Scenario: Renderer-to-Python local detail RPC under Codex CSP
 
 ### 1. Scope / Trigger

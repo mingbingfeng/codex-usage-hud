@@ -13717,6 +13717,191 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(recovery.port, 60200)
 
+    def test_observed_renderer_startup_plan_attaches_to_declared_port(self) -> None:
+        process = cli_module._CodexDesktopProcess(
+            pid=22,
+            name="ChatGPT.exe",
+            executable_path="C:\\Codex\\ChatGPT.exe",
+            command_line="ChatGPT.exe --remote-debugging-port=59629",
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch(
+                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                return_value=[process],
+            ),
+            patch("codex_usage_hud.cli._validate_renderer_cdp_candidate") as validate,
+        ):
+            plan = cli_module._renderer_startup_plan(observed_codex_launch=True)
+            selected_port = os.environ.get(cli_module.CDP_PORT_ENV)
+
+        self.assertEqual(plan.scenario, cli_module.RENDERER_STARTUP_ATTACH_OBSERVED)
+        self.assertEqual(plan.port, 59629)
+        self.assertEqual(selected_port, "59629")
+        validate.assert_not_called()
+
+    def test_observed_plain_launch_requests_one_automatic_relaunch(self) -> None:
+        process = cli_module._CodexDesktopProcess(
+            pid=22,
+            name="ChatGPT.exe",
+            executable_path="C:\\Codex\\ChatGPT.exe",
+            command_line="ChatGPT.exe",
+        )
+        loading = MagicMock()
+
+        with (
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch(
+                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                return_value=[process],
+            ),
+            patch("codex_usage_hud.cli.build_runtime_context") as build_context,
+            patch("codex_usage_hud.cli.RendererHudClient") as client_class,
+        ):
+            exit_code = run_renderer_hud_session(
+                SimpleNamespace(),
+                lock_already_held=True,
+                observed_codex_launch=True,
+                loading_feedback=loading,
+            )
+
+        self.assertEqual(exit_code, cli_module.HUD_AUTO_RESTART_CODEX)
+        loading.update.assert_called_once()
+        build_context.assert_not_called()
+        client_class.assert_not_called()
+
+    def test_observed_cdp_launch_attaches_exact_port_without_restart_card(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_context = SimpleNamespace(
+                settings_store=SimpleNamespace(path=temp_root / "hud_settings.json"),
+                user_config=UserConfig.defaults(),
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                port=59629,
+                last_status="failed",
+                last_error="TimeoutError: timed out waiting for the delayed page target",
+                close=MagicMock(),
+                timeout_seconds=cli_module.RENDERER_RESTART_CDP_TIMEOUT_SECONDS,
+            )
+            fake_bridge = MagicMock()
+            fake_bridge.start.return_value = "http://127.0.0.1:8765"
+            startup_plan = cli_module.RendererStartupPlan(
+                scenario=cli_module.RENDERER_STARTUP_ATTACH_OBSERVED,
+                port=59629,
+                port_source="observed-desktop-process",
+            )
+            loading = MagicMock()
+
+            with (
+                patch(
+                    "codex_usage_hud.cli._renderer_startup_plan",
+                    return_value=startup_plan,
+                ) as startup_plan_fn,
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch(
+                    "codex_usage_hud.cli.RendererHudClient",
+                    return_value=fake_client,
+                ) as client_class,
+                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch(
+                    "codex_usage_hud.cli._wait_for_visible_codex_window",
+                    return_value=(True, "visible", "", 123),
+                ) as wait_window,
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=False) as wait_renderer,
+                patch(
+                    "codex_usage_hud.cli._validate_renderer_cdp_candidate",
+                    return_value=(True, ""),
+                ),
+                patch("codex_usage_hud.cli._wait_for_renderer_restart_request") as restart_card,
+                patch("codex_usage_hud.cli._loading_feedback_enabled", return_value=False),
+                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(no_startup_prompt=True),
+                    lock_already_held=True,
+                    observed_codex_launch=True,
+                    loading_feedback=loading,
+                )
+
+        self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        startup_plan_fn.assert_called_once_with(
+            launched_codex=False,
+            observed_codex_launch=True,
+        )
+        self.assertEqual(
+            client_class.call_args.kwargs,
+            {
+                "port": 59629,
+                "timeout_seconds": cli_module.RENDERER_RESTART_CDP_TIMEOUT_SECONDS,
+            },
+        )
+        wait_window.assert_called_once_with(
+            timeout_seconds=cli_module.DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            wait_renderer.call_args.kwargs["timeout_seconds"],
+            cli_module.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS,
+        )
+        restart_card.assert_not_called()
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_context.close.assert_called_once()
+
+    def test_observed_launch_ambiguity_fails_closed_to_restart_action(self) -> None:
+        processes = [
+            cli_module._CodexDesktopProcess(
+                pid=22,
+                name="ChatGPT.exe",
+                executable_path="C:\\Codex\\ChatGPT.exe",
+                command_line="ChatGPT.exe --remote-debugging-port=59629",
+            ),
+            cli_module._CodexDesktopProcess(
+                pid=23,
+                name="ChatGPT.exe",
+                executable_path="C:\\Codex\\ChatGPT.exe",
+                command_line="ChatGPT.exe --remote-debugging-port=60123",
+            ),
+        ]
+        with (
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch(
+                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                return_value=processes,
+            ),
+        ):
+            conflicting = cli_module._renderer_startup_plan(
+                observed_codex_launch=True
+            )
+        with (
+            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch(
+                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                side_effect=RuntimeError("access denied"),
+            ),
+        ):
+            audit_failed = cli_module._renderer_startup_plan(
+                observed_codex_launch=True
+            )
+
+        self.assertEqual(
+            conflicting.scenario,
+            cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+        )
+        self.assertIn("conflicting", conflicting.reason)
+        self.assertEqual(
+            audit_failed.scenario,
+            cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+        )
+        self.assertIn("audit-failed", audit_failed.reason)
+
     def test_launch_port_selection_uses_fresh_port_when_preferred_is_occupied(self) -> None:
         with (
             patch.dict(os.environ, {cli_module.CDP_PORT_ENV: "9444"}, clear=True),
@@ -14024,6 +14209,62 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(exit_code, cli_module.CLEANUP_MAINTENANCE_REQUESTED)
         self.assertEqual(manager.wait_for_codex.call_count, 2)
         self.assertEqual(run_hud.call_count, 2)
+        self.assertFalse(
+            run_hud.call_args_list[0].kwargs["observed_codex_launch"]
+        )
+        self.assertTrue(
+            run_hud.call_args_list[1].kwargs["observed_codex_launch"]
+        )
+
+    def test_daemon_automatically_relaunches_new_plain_codex_once(self) -> None:
+        manager = SimpleNamespace(
+            wait_for_codex=MagicMock(),
+            poll_seconds=0.1,
+        )
+        loading = MagicMock()
+        loading.start.return_value = loading
+        args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging"),
+            patch("codex_usage_hud.cli._attach_cli_logger_to_daemon_log"),
+            patch("codex_usage_hud.cli.hide_console_window"),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
+            patch("codex_usage_hud.cli.HudInstanceLock"),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=cli_module.DaemonStartupDecision(
+                    cli_module.DAEMON_STARTUP_WAIT,
+                ),
+            ),
+            patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
+            patch(
+                "codex_usage_hud.cli.run_hud_session",
+                side_effect=[
+                    cli_module.DAEMON_RESTART_REQUESTED,
+                    cli_module.HUD_AUTO_RESTART_CODEX,
+                ],
+            ) as run_hud,
+            patch(
+                "codex_usage_hud.cli.run_renderer_hud_session",
+                return_value=0,
+            ) as run_renderer,
+            patch(
+                "codex_usage_hud.cli._restart_codex_for_renderer",
+                return_value=True,
+            ) as restart_codex,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_hud.call_count, 2)
+        self.assertTrue(
+            run_hud.call_args_list[1].kwargs["observed_codex_launch"]
+        )
+        restart_codex.assert_called_once_with()
+        run_renderer.assert_called_once()
+        self.assertTrue(run_renderer.call_args.kwargs["launched_codex"])
+        self.assertFalse(run_renderer.call_args.kwargs["observed_codex_launch"])
 
     def test_daemon_missing_codex_returns_when_single_launch_fails(self) -> None:
         manager = SimpleNamespace(
@@ -18060,6 +18301,10 @@ class DaemonLifecycleTests(unittest.TestCase):
             patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
             patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
             patch(
+                "codex_usage_hud.cli._select_initial_renderer_cdp_port",
+                return_value=60200,
+            ),
+            patch(
                 "codex_usage_hud.cli._prepare_codex_window_for_renderer",
                 return_value=(True, "visible", "", 123),
             ) as prepare_window,
@@ -18078,6 +18323,7 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 130)
         client_class.assert_called_once_with(
+            port=60200,
             timeout_seconds=cli_module.RENDERER_RESTART_CDP_TIMEOUT_SECONDS
         )
         prepare_window.assert_called_once_with(

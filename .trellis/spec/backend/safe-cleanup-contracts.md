@@ -137,6 +137,24 @@
 - No page, session, config, filesystem, or explicit command event means no
   recurring insights or cleanup scan.
 
+### 3b. Progressive scan feedback
+
+- While `SafeCleanupManager.scan` runs, the worker may publish partial snapshots through
+  `progress_publisher` with `operation.state = "scanning"`.
+- Scanning partials use a temporary revision prefix `scanning:` and must never mint a
+  confirmation token or accept `preview` / `execute` against that revision.
+- Progressive operation fields (path-neutral only):
+
+  - `phase`, `phaseLabel`, `phaseIndex`, `phaseCount`
+  - `discoveredGroups`, `discoveredBytes`
+  - `progress` stays in `0..99` until the final completed/preview snapshot
+
+- Renderer shows boot shell / scan strip / progressive rows from these fields.
+  Confirm cleanup remains disabled until a real inventory revision reaches
+  `operation.state = "preview"` with a confirmation token.
+- Session cleanup may publish the same phase progress fields during scan without
+  partial session rows.
+
 ### 4. Validation & Error Matrix
 
 | Condition | Required behavior |

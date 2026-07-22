@@ -1,0 +1,1801 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>空间清理扫描进度 V1 · 方案 C 渐进填充</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #0d0e10;
+      --surface: #18191b;
+      --surface-2: #202124;
+      --surface-3: #292b2f;
+      --line: #393b40;
+      --line-soft: #2d2f33;
+      --text: #f1f3f5;
+      --muted: #9da1a8;
+      --muted-2: #73777f;
+      --blue: #3b8eea;
+      --blue-hover: #55a0f2;
+      --blue-bg: #17202a;
+      --green: #4ac26b;
+      --green-bg: #16261a;
+      --yellow: #d9a441;
+      --yellow-bg: #2a2418;
+      --red: #f05b61;
+      --red-bg: #2b191b;
+      --white: #ffffff;
+      --scan-blue: #7db9f7;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 1900px;
+      background: var(--page);
+      color: var(--text);
+      font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      letter-spacing: 0;
+    }
+
+    button, input { font: inherit; letter-spacing: 0; }
+    button { color: inherit; cursor: default; }
+
+    .icon {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+      flex: 0 0 auto;
+    }
+
+    .icon-lg { width: 30px; height: 30px; }
+    .icon-sm { width: 14px; height: 14px; }
+
+    .board {
+      width: 1900px;
+      margin: 0 auto;
+      padding: 28px 30px 48px;
+    }
+
+    .board-head {
+      min-height: 74px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 28px;
+      border-bottom: 1px solid var(--line-soft);
+      margin-bottom: 22px;
+      padding-bottom: 16px;
+    }
+
+    .board-title { margin: 0; font-size: 25px; line-height: 1.25; font-weight: 700; }
+    .board-subtitle { margin-top: 7px; color: var(--muted); font-size: 13px; max-width: 920px; line-height: 1.55; }
+
+    .flow-key {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      padding-top: 5px;
+      max-width: 520px;
+      justify-content: flex-end;
+    }
+
+    .flow-key strong { color: var(--text); font-weight: 600; }
+    .flow-arrow { color: var(--blue); }
+    .flow-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 0 8px;
+      border: 1px solid #3f5f82;
+      border-radius: 999px;
+      background: var(--blue-bg);
+      color: var(--scan-blue);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .states {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+    }
+
+    .state { min-width: 0; }
+
+    .state-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 28px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .state-label strong {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .step-number {
+      width: 23px;
+      height: 23px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid #486e9c;
+      border-radius: 50%;
+      color: #87bfff;
+      font-size: 11px;
+    }
+
+    .app {
+      height: 572px;
+      border: 1px solid #44464c;
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, .28);
+      position: relative;
+    }
+
+    .titlebar {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 13px 0 14px;
+      background: #303134;
+      border-bottom: 1px solid #3c3e43;
+    }
+
+    .product-title { font-size: 12px; font-weight: 700; }
+
+    .close-button, .icon-button {
+      width: 30px;
+      height: 30px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .close-button { background: #45474b; color: var(--text); }
+    .icon-button:disabled, .button:disabled { opacity: .45; }
+
+    .top-tabs {
+      height: 42px;
+      display: flex;
+      align-items: stretch;
+      gap: 3px;
+      padding: 0 12px;
+      background: #1c1d1f;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .top-tab {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 11px;
+      color: var(--muted);
+      font-size: 12px;
+      border-bottom: 2px solid transparent;
+      white-space: nowrap;
+    }
+
+    .top-tab.active { color: #79b8ff; border-bottom-color: var(--blue); }
+
+    .page {
+      height: calc(100% - 88px);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-width: 0;
+    }
+
+    .page-head {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #191a1c;
+    }
+
+    .segmented {
+      display: inline-grid;
+      grid-template-columns: repeat(2, minmax(96px, 1fr));
+      border: 1px solid #414349;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #151618;
+    }
+
+    .segment {
+      min-height: 31px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+      border-right: 1px solid #414349;
+    }
+
+    .segment:last-child { border-right: 0; }
+    .segment.active { background: #2b2d31; color: var(--text); font-weight: 650; }
+
+    .head-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted-2);
+      font-size: 11px;
+    }
+
+    .head-meta[data-live="true"] { color: var(--scan-blue); }
+
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 0 rgba(59, 142, 234, .55);
+      animation: pulse-dot 1.4s ease-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0% { box-shadow: 0 0 0 0 rgba(59, 142, 234, .55); }
+      70% { box-shadow: 0 0 0 8px rgba(59, 142, 234, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(59, 142, 234, 0); }
+    }
+
+    .content {
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .button {
+      min-height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 13px;
+      border: 1px solid #4a4d53;
+      border-radius: 5px;
+      background: #2b2d31;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .button.primary { background: var(--blue); border-color: var(--blue); color: var(--white); }
+    .button.danger { background: #c43e45; border-color: #d84a51; color: var(--white); }
+    .button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+    .button.large { min-height: 38px; padding: 0 17px; font-size: 13px; }
+    .button.subtle {
+      background: #232529;
+      border-color: #3f5f82;
+      color: #a9d1ff;
+    }
+
+    .footer {
+      min-height: 50px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 13px;
+      border-top: 1px solid var(--line);
+      background: #2c2d30;
+    }
+
+    .footer-meta {
+      color: var(--muted);
+      font-size: 11px;
+      min-width: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .footer-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+    /* —— Scan progress strip —— */
+    .scan-strip {
+      display: grid;
+      gap: 8px;
+      padding: 11px 15px 12px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #1a2430 0%, #151a20 100%);
+    }
+
+    .scan-strip-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .scan-strip-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--scan-blue);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .scan-strip-meta {
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+
+    .scan-track {
+      position: relative;
+      height: 6px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, .08);
+    }
+
+    .scan-fill {
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #5ea7ff, #9ccbff);
+      box-shadow: 0 0 12px rgba(94, 167, 255, .35);
+      transition: width .35s ease;
+    }
+
+    .scan-fill.indeterminate {
+      width: 38% !important;
+      animation: scan-indeterminate 1.35s ease-in-out infinite;
+    }
+
+    @keyframes scan-indeterminate {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(320%); }
+    }
+
+    .scan-stage-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .scan-stage-row strong {
+      color: #cfe4ff;
+      font-weight: 600;
+    }
+
+    /* —— Summary band (scanning vs done) —— */
+    .summary-band {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+      padding: 13px 15px;
+      border-bottom: 1px solid var(--line);
+      background: var(--green-bg);
+    }
+
+    .summary-band.scanning {
+      background: linear-gradient(180deg, #1a2430, #16202a);
+      border-bottom-color: #2d3d50;
+    }
+
+    .summary-band.scanning .summary-label { color: var(--scan-blue); }
+    .summary-band.scanning .summary-value {
+      color: #d7ebff;
+      font-variant-numeric: tabular-nums;
+    }
+    .summary-band.scanning .summary-side { color: #8eb6de; }
+
+    .summary-label {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: #9be5ad;
+      font-size: 12px;
+    }
+
+    .summary-value {
+      margin-top: 3px;
+      font-size: 24px;
+      line-height: 1;
+      font-weight: 750;
+      color: #c9f4d2;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .summary-side {
+      color: #9be5ad;
+      font-size: 11px;
+      text-align: right;
+      line-height: 1.45;
+    }
+
+    .summary-value .tick {
+      display: inline-block;
+      min-width: .45em;
+      color: var(--blue);
+      animation: tick-blink 1s step-end infinite;
+    }
+
+    @keyframes tick-blink {
+      50% { opacity: 0; }
+    }
+
+    /* —— Rows —— */
+    .cleanup-list {
+      min-height: 0;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .cleanup-row {
+      min-height: 54px;
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) minmax(150px, .7fr) 76px 20px;
+      gap: 9px;
+      align-items: center;
+      padding: 7px 14px;
+      border-bottom: 1px solid var(--line-soft);
+      position: relative;
+    }
+
+    .cleanup-row.deep {
+      background: var(--yellow-bg);
+      border-top: 1px solid #554525;
+      border-bottom-color: #554525;
+    }
+
+    .cleanup-row.just-found {
+      animation: row-appear .45s ease-out;
+      background: linear-gradient(90deg, rgba(59, 142, 234, .14), transparent 72%);
+    }
+
+    .cleanup-row.just-found::after {
+      content: "刚发现";
+      position: absolute;
+      right: 42px;
+      top: 6px;
+      font-size: 9px;
+      font-weight: 700;
+      color: #8dc7ff;
+      letter-spacing: .02em;
+    }
+
+    @keyframes row-appear {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .cleanup-row.pending {
+      opacity: .72;
+    }
+
+    .cleanup-row.pending .row-title,
+    .cleanup-row.pending .row-meta,
+    .cleanup-row.pending .row-impact {
+      color: var(--muted-2);
+    }
+
+    .cleanup-row.current-stage {
+      background: rgba(59, 142, 234, .06);
+    }
+
+    .checkbox {
+      width: 16px;
+      height: 16px;
+      border: 1px solid #5a5d63;
+      border-radius: 3px;
+      background: #111214;
+      display: grid;
+      place-items: center;
+      color: var(--white);
+    }
+
+    .checkbox.checked { background: var(--blue); border-color: var(--blue); }
+    .checkbox.checked::after {
+      content: "";
+      width: 7px;
+      height: 4px;
+      border-left: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      transform: translateY(-1px) rotate(-45deg);
+    }
+    .checkbox.disabled { border-color: #3b3d42; background: #202124; }
+    .checkbox.skeleton {
+      border-style: dashed;
+      border-color: #3a3d43;
+      background: #1a1b1e;
+    }
+
+    .row-title {
+      font-size: 12px;
+      font-weight: 650;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .row-meta {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .row-impact {
+      color: var(--muted);
+      font-size: 10px;
+      overflow-wrap: anywhere;
+    }
+
+    .row-size {
+      text-align: right;
+      font-size: 12px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .row-size.pending-size {
+      color: var(--muted-2);
+      font-weight: 600;
+      font-size: 11px;
+    }
+
+    .chevron { color: var(--muted-2); }
+
+    .row-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--scan-blue);
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .mini-spinner {
+      width: 12px;
+      height: 12px;
+      border: 1.5px solid rgba(125, 185, 247, .25);
+      border-top-color: var(--scan-blue);
+      border-radius: 50%;
+      animation: spin .75s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .skeleton-bar {
+      display: inline-block;
+      height: 8px;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #2a2c30 20%, #35383e 50%, #2a2c30 80%);
+      background-size: 200% 100%;
+      animation: shimmer 1.2s linear infinite;
+    }
+
+    @keyframes shimmer {
+      0% { background-position: 100% 0; }
+      100% { background-position: -100% 0; }
+    }
+
+    .protected-note {
+      min-height: 39px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 7px 14px;
+      color: var(--muted);
+      font-size: 10px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .protected-note span { display: inline-flex; align-items: center; gap: 7px; }
+    .protected-note.pending { opacity: .55; }
+
+    /* —— Instant scanning empty → shell —— */
+    .scan-boot {
+      height: 100%;
+      display: grid;
+      place-content: center;
+      justify-items: center;
+      gap: 12px;
+      text-align: center;
+      padding: 18px 24px 28px;
+    }
+
+    .scan-mark {
+      width: 62px;
+      height: 62px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #3f5f82;
+      border-radius: 50%;
+      background: #17202a;
+      color: #7db9f7;
+      position: relative;
+    }
+
+    .scan-mark.live::before {
+      content: "";
+      position: absolute;
+      inset: -5px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      border-top-color: var(--blue);
+      border-right-color: rgba(59, 142, 234, .35);
+      animation: spin .9s linear infinite;
+    }
+
+    .empty-title { font-size: 17px; font-weight: 700; }
+    .empty-meta { color: var(--muted); font-size: 12px; }
+    .empty-meta strong { color: #cfe4ff; font-weight: 600; }
+
+    .boot-track {
+      width: min(280px, 70%);
+      height: 6px;
+      margin-top: 4px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, .08);
+    }
+
+    .boot-fill {
+      width: 40%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #5ea7ff, #9ccbff);
+      animation: scan-indeterminate 1.35s ease-in-out infinite;
+    }
+
+    /* —— Re-scan overlay —— */
+    .rescan-veil {
+      position: absolute;
+      inset: 0;
+      background: rgba(10, 12, 14, .42);
+      backdrop-filter: blur(1px);
+      display: grid;
+      place-items: start center;
+      padding-top: 18px;
+      pointer-events: none;
+    }
+
+    .rescan-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 0 14px;
+      border: 1px solid #3f5f82;
+      border-radius: 999px;
+      background: rgba(23, 32, 42, .96);
+      color: #cfe4ff;
+      font-size: 12px;
+      font-weight: 650;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, .35);
+    }
+
+    .dimmed-list { filter: saturate(.85) brightness(.88); }
+
+    /* —— Session progressive —— */
+    .session-tools {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 9px;
+      padding: 10px 13px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .search {
+      min-width: 0;
+      min-height: 32px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid #44464c;
+      border-radius: 5px;
+      color: var(--muted);
+      background: #111214;
+      font-size: 11px;
+    }
+
+    .filters { display: inline-flex; align-items: center; gap: 5px; }
+
+    .filter {
+      min-height: 32px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 9px;
+      border: 1px solid #44464c;
+      border-radius: 5px;
+      background: #24262a;
+      color: var(--muted);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .filter.active { border-color: #4c78a9; color: #a9d1ff; background: #1b2632; }
+    .filter:disabled { opacity: .4; }
+
+    .session-head, .session-row {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1.35fr) minmax(0, .9fr) 88px 72px 82px;
+      gap: 9px;
+      align-items: center;
+      padding: 0 13px;
+    }
+
+    .session-head {
+      min-height: 31px;
+      color: var(--muted-2);
+      font-size: 10px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #1c1d1f;
+    }
+
+    .session-row {
+      min-height: 54px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .session-row.just-found {
+      animation: row-appear .45s ease-out;
+      background: linear-gradient(90deg, rgba(59, 142, 234, .12), transparent 70%);
+    }
+
+    .session-row.skeleton-row { opacity: .55; }
+
+    .session-title { min-width: 0; }
+    .session-title strong, .session-workdir {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-title strong { font-size: 11px; font-weight: 650; }
+    .session-title span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 9px;
+    }
+    .session-workdir { color: #c4c7cc; font-size: 10px; }
+    .session-cell { color: var(--muted); font-size: 10px; }
+    .session-size {
+      text-align: right;
+      color: #c7cad0;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .badge {
+      min-height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 7px;
+      border: 1px solid #4a4d53;
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 9px;
+      white-space: nowrap;
+    }
+
+    .badge.current { border-color: #356894; color: #8dc7ff; background: #172431; }
+    .badge.archived { border-color: #5b4b2b; color: #e2bd6c; background: #262116; }
+    .badge.loading { border-color: #3f5f82; color: #8dc7ff; background: #17202a; }
+
+    /* —— Error —— */
+    .error-panel {
+      height: 100%;
+      display: grid;
+      place-content: center;
+      justify-items: center;
+      gap: 10px;
+      text-align: center;
+      padding: 20px;
+    }
+
+    .error-mark {
+      width: 56px;
+      height: 56px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #754247;
+      border-radius: 50%;
+      background: var(--red-bg);
+      color: #ff858a;
+    }
+
+    /* —— Spec panel —— */
+    .spec-row {
+      grid-column: 1 / -1;
+      margin-top: 6px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #141517;
+      overflow: hidden;
+    }
+
+    .spec-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #191a1c;
+    }
+
+    .spec-head h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .spec-head p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .spec-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0;
+    }
+
+    .spec-card {
+      padding: 14px 15px 16px;
+      border-right: 1px solid var(--line-soft);
+      border-top: 1px solid var(--line-soft);
+    }
+
+    .spec-card:last-child { border-right: 0; }
+
+    .spec-card h3 {
+      margin: 0 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #cfe4ff;
+    }
+
+    .spec-card ul {
+      margin: 0;
+      padding-left: 16px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.65;
+    }
+
+    .spec-card li strong { color: var(--text); font-weight: 600; }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 0;
+      border-top: 1px solid var(--line-soft);
+    }
+
+    .timeline-step {
+      padding: 12px 13px 14px;
+      border-right: 1px solid var(--line-soft);
+      background: #161719;
+    }
+
+    .timeline-step:last-child { border-right: 0; }
+
+    .timeline-step .t {
+      color: var(--scan-blue);
+      font-size: 10px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+
+    .timeline-step .n {
+      font-size: 12px;
+      font-weight: 650;
+      margin-bottom: 4px;
+    }
+
+    .timeline-step .d {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.5;
+    }
+
+    .annotation {
+      margin-top: 8px;
+      color: var(--muted-2);
+      font-size: 10px;
+      line-height: 1.5;
+    }
+
+    .legend {
+      margin-top: 18px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      border: 1px solid #4a4d53;
+    }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="11" cy="11" r="4"/><path d="m16 16 3 3"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-4M4 4v6h6M4 13a8 8 0 0 0 14.9 4M20 20v-6h-6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21 19-9-16-9 16h18Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </svg>
+
+  <main class="board">
+    <header class="board-head">
+      <div>
+        <h1 class="board-title">空间清理扫描进度 V1 · 方案 C 渐进填充</h1>
+        <div class="board-subtitle">
+          点击扫描后立刻进入「在干活」态：顶部阶段条 + 摘要累计跳动 + 结果行边扫边出现。
+          不暴露绝对路径；进度按固定阶段权重推进，单阶段内用不确定细条，避免假 99%。
+        </div>
+      </div>
+      <div class="flow-key">
+        <span class="flow-chip">方案 C</span>
+        <strong>路径</strong>
+        <span>点击</span><span class="flow-arrow">→</span>
+        <span>启动壳</span><span class="flow-arrow">→</span>
+        <span>渐进列表</span><span class="flow-arrow">→</span>
+        <span>定格结果</span>
+      </div>
+    </header>
+
+    <!-- Timeline -->
+    <section class="spec-row" style="margin-bottom:22px">
+      <div class="spec-head">
+        <div>
+          <h2>扫描时间线（垃圾清理）</h2>
+          <p>与后端 `_scan_*` 流水线对齐；每阶段结束可追加 group 行并累加摘要字节。</p>
+        </div>
+      </div>
+      <div class="timeline">
+        <div class="timeline-step">
+          <div class="t">0–150ms</div>
+          <div class="n">即时响应</div>
+          <div class="d">按钮禁用 · 启动壳 / 扫描条出现 · 已用时开始计</div>
+        </div>
+        <div class="timeline-step">
+          <div class="t">阶段 1</div>
+          <div class="n">HUD 诊断</div>
+          <div class="d">首行可出现 · 摘要从 0 跳动</div>
+        </div>
+        <div class="timeline-step">
+          <div class="t">阶段 2–3</div>
+          <div class="n">Codex + 进程</div>
+          <div class="d">运行残留等行追加 · 受保护量更新</div>
+        </div>
+        <div class="timeline-step">
+          <div class="t">阶段 4</div>
+          <div class="n">平台缓存×N</div>
+          <div class="d">应用/开发缓存陆续填入 · 当前行旋转</div>
+        </div>
+        <div class="timeline-step">
+          <div class="t">阶段 5–6</div>
+          <div class="n">备份 + SQLite</div>
+          <div class="d">深度清理占位成真实行 · 默认预览绑定</div>
+        </div>
+        <div class="timeline-step">
+          <div class="t">完成</div>
+          <div class="n">定格确认面</div>
+          <div class="d">摘要变绿 · 勾选冻结 · 确认清理可用</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="states">
+      <!-- 1 Boot shell -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">1</span> 点击后 · 启动壳</strong>
+          <span>&lt;150ms 视觉响应</span>
+        </div>
+        <div class="app">
+          <div class="titlebar">
+            <span class="product-title">codex-usage-hud v1.0.5</span>
+            <button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+          <nav class="top-tabs">
+            <span class="top-tab">设置</span>
+            <span class="top-tab active">空间清理</span>
+            <span class="top-tab">用量总览</span>
+            <span class="top-tab">请作者喝咖啡</span>
+            <span class="top-tab">版本更新</span>
+          </nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented">
+                <span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span>
+                <span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span>
+              </div>
+              <span class="head-meta" data-live="true"><span class="pulse-dot"></span>正在扫描…</span>
+            </div>
+            <div class="content">
+              <div class="scan-boot">
+                <div class="scan-mark live"><svg class="icon icon-lg"><use href="#i-scan"/></svg></div>
+                <div class="empty-title">正在扫描</div>
+                <div class="empty-meta">准备本地清理清单 · <strong>第 1/6 步 · HUD 诊断</strong></div>
+                <div class="boot-track" aria-hidden="true"><div class="boot-fill"></div></div>
+                <div class="empty-meta" style="margin-top:2px">已用时 0:01 · 不会在扫描时删除任何文件</div>
+                <button class="button subtle" style="margin-top:6px">取消扫描</button>
+              </div>
+            </div>
+            <div class="footer">
+              <span class="footer-meta"><svg class="icon icon-sm"><use href="#i-shield"/></svg>配置、凭据和会话默认受保护</span>
+              <span class="footer-meta">扫描中 · 主操作已锁定</span>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">替换「尚未扫描」空态，不新开全屏层。若 300ms 内已有首个 group，可跳过启动壳直接进状态 2。</div>
+      </article>
+
+      <!-- 2 Early progressive -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">2</span> 早期渐进 · 已发现 2 组</strong>
+          <span>摘要累计 + 行出现动画</span>
+        </div>
+        <div class="app">
+          <div class="titlebar">
+            <span class="product-title">codex-usage-hud v1.0.5</span>
+            <button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+          <nav class="top-tabs">
+            <span class="top-tab">设置</span>
+            <span class="top-tab active">空间清理</span>
+            <span class="top-tab">用量总览</span>
+            <span class="top-tab">请作者喝咖啡</span>
+            <span class="top-tab">版本更新</span>
+          </nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented">
+                <span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span>
+                <span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span>
+              </div>
+              <span class="head-meta" data-live="true"><span class="pulse-dot"></span>第 3/6 步 · 应用缓存</span>
+            </div>
+            <div class="content">
+              <div class="scan-strip">
+                <div class="scan-strip-top">
+                  <div class="scan-strip-title"><span class="mini-spinner"></span>扫描进度</div>
+                  <div class="scan-strip-meta">约 33% · 已用时 0:07</div>
+                </div>
+                <div class="scan-track"><div class="scan-fill" style="width:33%"></div></div>
+                <div class="scan-stage-row">
+                  <span>当前：<strong>Chrome / Edge / VS Code 缓存</strong></span>
+                  <span>已发现 2 组 · 230 MB</span>
+                </div>
+              </div>
+              <div class="summary-band scanning">
+                <div>
+                  <div class="summary-label"><span class="mini-spinner"></span>累计可清理（扫描中）</div>
+                  <div class="summary-value">230 MB<span class="tick">|</span></div>
+                </div>
+                <div class="summary-side">已发现 2 组<br>仍在扫描更多位置…</div>
+              </div>
+              <div class="cleanup-list">
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">HUD 诊断日志</div>
+                    <div class="row-meta">当前与轮转日志 · 2 项</div>
+                  </div>
+                  <div class="row-impact">HUD 将自动恢复</div>
+                  <div class="row-size">4.2 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row just-found">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">运行残留</div>
+                    <div class="row-meta">过期临时项 · 11 项</div>
+                  </div>
+                  <div class="row-impact">不影响会话和设置</div>
+                  <div class="row-size">226 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row current-stage pending">
+                  <span class="checkbox skeleton"></span>
+                  <div>
+                    <div class="row-title">应用缓存</div>
+                    <div class="row-meta">正在统计…</div>
+                  </div>
+                  <div class="row-impact"><span class="row-status"><span class="mini-spinner"></span>扫描中</span></div>
+                  <div class="row-size pending-size">—</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row pending">
+                  <span class="checkbox skeleton"></span>
+                  <div>
+                    <div class="row-title">开发工具缓存</div>
+                    <div class="row-meta"><span class="skeleton-bar" style="width:96px"></span></div>
+                  </div>
+                  <div class="row-impact">排队中</div>
+                  <div class="row-size pending-size">—</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row deep pending">
+                  <span class="checkbox skeleton"></span>
+                  <div>
+                    <div class="row-title">深度清理（可选）</div>
+                    <div class="row-meta">扫描完成后可选</div>
+                  </div>
+                  <div class="row-impact">需备份并关闭 Codex</div>
+                  <div class="row-size pending-size">—</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="protected-note pending">
+                  <span><svg class="icon"><use href="#i-shield"/></svg>受保护项统计中…</span>
+                  <span>配置与会话不会入选</span>
+                </div>
+              </div>
+            </div>
+            <div class="footer">
+              <span class="footer-meta">仅统计可清理项 · 扫描时不删除</span>
+              <div class="footer-actions">
+                <button class="button subtle">取消扫描</button>
+                <button class="button primary large" disabled><svg class="icon"><use href="#i-check"/></svg>确认清理</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">占位行顺序固定（安全组 → 深度清理 → 受保护），避免列表跳动；真实行按发现顺序填入对应槽位或插入后重排一次。</div>
+      </article>
+
+      <!-- 3 Mid progressive -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">3</span> 中期渐进 · 主体已齐</strong>
+          <span>仍有 1 个阶段在扫</span>
+        </div>
+        <div class="app">
+          <div class="titlebar">
+            <span class="product-title">codex-usage-hud v1.0.5</span>
+            <button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+          <nav class="top-tabs">
+            <span class="top-tab">设置</span>
+            <span class="top-tab active">空间清理</span>
+            <span class="top-tab">用量总览</span>
+            <span class="top-tab">请作者喝咖啡</span>
+            <span class="top-tab">版本更新</span>
+          </nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented">
+                <span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span>
+                <span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span>
+              </div>
+              <span class="head-meta" data-live="true"><span class="pulse-dot"></span>第 5/6 步 · 历史数据库</span>
+            </div>
+            <div class="content">
+              <div class="scan-strip">
+                <div class="scan-strip-top">
+                  <div class="scan-strip-title"><span class="mini-spinner"></span>扫描进度</div>
+                  <div class="scan-strip-meta">约 78% · 已用时 0:18</div>
+                </div>
+                <div class="scan-track"><div class="scan-fill" style="width:78%"></div></div>
+                <div class="scan-stage-row">
+                  <span>当前：<strong>Codex 诊断历史与 SQLite</strong></span>
+                  <span>已发现 4 组 · 1.12 GB</span>
+                </div>
+              </div>
+              <div class="summary-band scanning">
+                <div>
+                  <div class="summary-label"><span class="mini-spinner"></span>累计可清理（扫描中）</div>
+                  <div class="summary-value">1.12 GB<span class="tick">|</span></div>
+                </div>
+                <div class="summary-side">已发现 4 组 · 默认已勾选<br>深度清理仍在计量…</div>
+              </div>
+              <div class="cleanup-list">
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">应用缓存</div>
+                    <div class="row-meta">Chrome、Edge、VS Code · 18 项</div>
+                  </div>
+                  <div class="row-impact">运行中的应用已自动跳过</div>
+                  <div class="row-size">724 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">开发工具缓存</div>
+                    <div class="row-meta">pip、npm、NuGet、着色器 · 9 项</div>
+                  </div>
+                  <div class="row-impact">后续需要时自动重建</div>
+                  <div class="row-size">326 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">运行残留</div>
+                    <div class="row-meta">过期临时项与旧清理备份</div>
+                  </div>
+                  <div class="row-impact">不影响会话和设置</div>
+                  <div class="row-size">67 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">HUD 诊断日志</div>
+                    <div class="row-meta">当前与轮转日志</div>
+                  </div>
+                  <div class="row-impact">HUD 将自动恢复</div>
+                  <div class="row-size">4.2 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row deep current-stage">
+                  <span class="checkbox skeleton"></span>
+                  <div>
+                    <div class="row-title">深度清理（可选）</div>
+                    <div class="row-meta">旧 Codex 诊断历史 · 计量中</div>
+                  </div>
+                  <div class="row-impact"><span class="row-status"><span class="mini-spinner"></span>扫描中</span></div>
+                  <div class="row-size pending-size">—</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="protected-note">
+                  <span><svg class="icon"><use href="#i-shield"/></svg>13.1 GB 正在使用或受保护 · 更新中</span>
+                  <span>扫描结束后可查看详情</span>
+                </div>
+              </div>
+            </div>
+            <div class="footer">
+              <span class="footer-meta">默认安全项可先勾选预览，确认按钮仍锁定至完成</span>
+              <div class="footer-actions">
+                <button class="button subtle">取消扫描</button>
+                <button class="button primary large" disabled><svg class="icon"><use href="#i-check"/></svg>确认清理 1.12 GB</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">确认清理仅在 revision 定稿 + confirmationToken 就绪后启用。扫描中显示的「已选/可清理」是累计提示，不构成最终预览。</div>
+      </article>
+
+      <!-- 4 Complete settle -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">4</span> 完成定格</strong>
+          <span>与 V1 结果面衔接</span>
+        </div>
+        <div class="app">
+          <div class="titlebar">
+            <span class="product-title">codex-usage-hud v1.0.5</span>
+            <button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+          <nav class="top-tabs">
+            <span class="top-tab">设置</span>
+            <span class="top-tab active">空间清理</span>
+            <span class="top-tab">用量总览</span>
+            <span class="top-tab">请作者喝咖啡</span>
+            <span class="top-tab">版本更新</span>
+          </nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented">
+                <span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span>
+                <span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span>
+              </div>
+              <span class="head-meta">刚刚完成 · 0:21</span>
+            </div>
+            <div class="content">
+              <div class="summary-band">
+                <div>
+                  <div class="summary-label"><svg class="icon"><use href="#i-check"/></svg>可安全清理</div>
+                  <div class="summary-value">1.12 GB</div>
+                </div>
+                <div class="summary-side">已选 48 项<br>预计 15–30 秒</div>
+              </div>
+              <div class="cleanup-list">
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">应用缓存</div>
+                    <div class="row-meta">Chrome、Edge、VS Code</div>
+                  </div>
+                  <div class="row-impact">运行中的应用已自动跳过</div>
+                  <div class="row-size">724 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">开发工具缓存</div>
+                    <div class="row-meta">pip、npm、NuGet、着色器</div>
+                  </div>
+                  <div class="row-impact">后续需要时自动重建</div>
+                  <div class="row-size">326 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">运行残留</div>
+                    <div class="row-meta">过期临时项与旧清理备份</div>
+                  </div>
+                  <div class="row-impact">不影响会话和设置</div>
+                  <div class="row-size">67 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row">
+                  <span class="checkbox checked"></span>
+                  <div>
+                    <div class="row-title">HUD 诊断日志</div>
+                    <div class="row-meta">当前与轮转日志</div>
+                  </div>
+                  <div class="row-impact">HUD 将自动恢复</div>
+                  <div class="row-size">4.2 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="cleanup-row deep">
+                  <span class="checkbox"></span>
+                  <div>
+                    <div class="row-title">深度清理（可选）</div>
+                    <div class="row-meta">旧 Codex 诊断历史 · 保留最近 24 小时</div>
+                  </div>
+                  <div class="row-impact">需备份并关闭 Codex</div>
+                  <div class="row-size">551 MB</div>
+                  <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                </div>
+                <div class="protected-note">
+                  <span><svg class="icon"><use href="#i-shield"/></svg>13.4 GB 正在使用或受保护</span>
+                  <span>查看扫描详情 ›</span>
+                </div>
+              </div>
+            </div>
+            <div class="footer">
+              <span class="footer-meta">执行前仍会重验路径、指纹与活动任务</span>
+              <div class="footer-actions">
+                <button class="icon-button" aria-label="重新扫描"><svg class="icon"><use href="#i-refresh"/></svg></button>
+                <button class="button primary large"><svg class="icon"><use href="#i-check"/></svg>确认清理 1.12 GB</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">完成瞬间：扫描条可 100% 闪过 300–500ms 后收起；摘要带切绿色；「刚发现」高亮全部消退。布局与 V1 结果态一致。</div>
+      </article>
+
+      <!-- 5 Rescan overlay -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">5</span> 重新扫描</strong>
+          <span>保留旧结果骨架 + 顶栏 chip</span>
+        </div>
+        <div class="app">
+          <div class="titlebar">
+            <span class="product-title">codex-usage-hud v1.0.5</span>
+            <button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+          <nav class="top-tabs">
+            <span class="top-tab">设置</span>
+            <span class="top-tab active">空间清理</span>
+            <span class="top-tab">用量总览</span>
+            <span class="top-tab">请作者喝咖啡</span>
+            <span class="top-tab">版本更新</span>
+          </nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented">
+                <span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span>
+                <span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span>
+              </div>
+              <span class="head-meta" data-live="true"><span class="pulse-dot"></span>正在重新扫描…</span>
+            </div>
+            <div class="content">
+              <div class="scan-strip">
+                <div class="scan-strip-top">
+                  <div class="scan-strip-title"><span class="mini-spinner"></span>重新扫描</div>
+                  <div class="scan-strip-meta">第 2/6 步 · 已用时 0:04</div>
+                </div>
+                <div class="scan-track"><div class="scan-fill" style="width:22%"></div></div>
+                <div class="scan-stage-row">
+                  <span>当前：<strong>Codex 临时项</strong></span>
+                  <span>旧结果仅供参考，完成后替换</span>
+                </div>
+              </div>
+              <div class="dimmed-list">
+                <div class="summary-band scanning">
+                  <div>
+                    <div class="summary-label">上次结果（将被替换）</div>
+                    <div class="summary-value" style="font-size:20px;opacity:.75">1.12 GB</div>
+                  </div>
+                  <div class="summary-side">确认清理已锁定<br>等待新清单…</div>
+                </div>
+                <div class="cleanup-list">
+                  <div class="cleanup-row" style="opacity:.7">
+                    <span class="checkbox checked"></span>
+                    <div>
+                      <div class="row-title">应用缓存</div>
+                      <div class="row-meta">Chrome、Edge、VS Code</div>
+                    </div>
+                    <div class="row-impact">运行中的应用已自动跳过</div>
+                    <div class="row-size">724 MB</div>
+                    <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                  </div>
+                  <div class="cleanup-row" style="opacity:.7">
+                    <span class="checkbox checked"></span>
+                    <div>
+                      <div class="row-title">开发工具缓存</div>
+                      <div class="row-meta">pip、npm、NuGet、着色器</div>
+                    </div>
+                    <div class="row-impact">后续需要时自动重建</div>
+                    <div class="row-size">326 MB</div>
+                    <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                  </div>
+                  <div class="cleanup-row" style="opacity:.55">
+                    <span class="checkbox checked"></span>
+                    <div>
+                      <div class="row-title">运行残留</div>
+                      <div class="row-meta">过期临时项与旧清理备份</div>
+                    </div>
+                    <div class="row-impact">不影响会话和设置</div>
+                    <div class="row-size">67 MB</div>
+                    <svg class="icon chevron"><use href="#i-chevron"/></svg>
+                  </div>
+                </div>
+              </div>
+              <div class="rescan-veil">
+                <div class="rescan-chip"><span class="mini-spinner"></span>正在重新扫描本地可清理项…</div>
+              </div>
+            </div>
+            <div class="footer">
+              <span class="footer-meta">避免闪回空态造成「数据丢了」错觉</span>
+              <div class="footer-actions">
+                <button class="button subtle">取消</button>
+                <button class="button primary large" disabled>确认清理</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">重扫不销毁上一 revision 的可见列表，直到新 revision 到达再原子替换；勾选与 confirmationToken 在重扫开始时作废。</div>
+      </article>
+
+      <!-- 6 Session progressive -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">6</span> 会话管理 · 渐进扫描</strong>
+          <span>行逐步出现 / 骨架占位</span>
+        </div>
+        <div class="app">
+          <div class="titlebar">
+            <span class="product-title">codex-usage-hud v1.0.5</span>
+            <button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+          <nav class="top-tabs">
+            <span class="top-tab">设置</span>
+            <span class="top-tab active">空间清理</span>
+            <span class="top-tab">用量总览</span>
+            <span class="top-tab">请作者喝咖啡</span>
+            <span class="top-tab">版本更新</span>
+          </nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented">
+                <span class="segment"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span>
+                <span class="segment active"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span>
+              </div>
+              <span class="head-meta" data-live="true"><span class="pulse-dot"></span>第 2/3 步 · 归并子任务</span>
+            </div>
+            <div class="content">
+              <div class="scan-strip">
+                <div class="scan-strip-top">
+                  <div class="scan-strip-title"><span class="mini-spinner"></span>扫描本地会话</div>
+                  <div class="scan-strip-meta">约 55% · 已收录 312 / ~1,000+</div>
+                </div>
+                <div class="scan-track"><div class="scan-fill" style="width:55%"></div></div>
+                <div class="scan-stage-row">
+                  <span>当前：<strong>归并主会话与关联子任务</strong></span>
+                  <span>已用时 0:09</span>
+                </div>
+              </div>
+              <div class="session-tools">
+                <div class="search" style="opacity:.5"><svg class="icon"><use href="#i-search"/></svg>扫描完成后可搜索</div>
+                <div class="filters">
+                  <span class="filter active">全部</span>
+                  <span class="filter" style="opacity:.4">已归档</span>
+                  <span class="filter" style="opacity:.4">30 天未用</span>
+                </div>
+              </div>
+              <div class="session-head">
+                <span class="checkbox disabled"></span>
+                <span>会话</span>
+                <span>工作目录</span>
+                <span>最后活动</span>
+                <span>状态</span>
+                <span style="text-align:right">占用</span>
+              </div>
+              <div class="session-row">
+                <span class="checkbox disabled"></span>
+                <div class="session-title">
+                  <strong>空间清理与会话删除改版</strong>
+                  <span>当前会话 · 运行中</span>
+                </div>
+                <span class="session-workdir">codex-usage-hud</span>
+                <span class="session-cell">刚刚</span>
+                <span class="badge current">当前</span>
+                <span class="session-size">18.4 MB</span>
+              </div>
+              <div class="session-row just-found">
+                <span class="checkbox"></span>
+                <div class="session-title">
+                  <strong>排查月度用量统计偏差</strong>
+                  <span>含 3 个关联子任务</span>
+                </div>
+                <span class="session-workdir">zjxc.moon</span>
+                <span class="session-cell">42 天前</span>
+                <span class="badge archived">已归档</span>
+                <span class="session-size">61.8 MB</span>
+              </div>
+              <div class="session-row just-found">
+                <span class="checkbox"></span>
+                <div class="session-title">
+                  <strong>旧版 Renderer 性能实验</strong>
+                  <span>无关联子任务</span>
+                </div>
+                <span class="session-workdir">codex-usage-hud</span>
+                <span class="session-cell">67 天前</span>
+                <span class="badge archived">已归档</span>
+                <span class="session-size">20.2 MB</span>
+              </div>
+              <div class="session-row skeleton-row">
+                <span class="checkbox skeleton"></span>
+                <div class="session-title">
+                  <strong><span class="skeleton-bar" style="width:140px;height:10px"></span></strong>
+                  <span><span class="skeleton-bar" style="width:88px"></span></span>
+                </div>
+                <span class="session-workdir"><span class="skeleton-bar" style="width:72px"></span></span>
+                <span class="session-cell"><span class="skeleton-bar" style="width:40px"></span></span>
+                <span class="badge loading">收录中</span>
+                <span class="session-size">—</span>
+              </div>
+              <div class="session-row skeleton-row">
+                <span class="checkbox skeleton"></span>
+                <div class="session-title">
+                  <strong><span class="skeleton-bar" style="width:120px;height:10px"></span></strong>
+                  <span><span class="skeleton-bar" style="width:70px"></span></span>
+                </div>
+                <span class="session-workdir"><span class="skeleton-bar" style="width:64px"></span></span>
+                <span class="session-cell"><span class="skeleton-bar" style="width:36px"></span></span>
+                <span class="badge loading">收录中</span>
+                <span class="session-size">—</span>
+              </div>
+            </div>
+            <div class="footer">
+              <span class="footer-meta">已收录 312 个会话 · 筛选与删除在完成后解锁</span>
+              <div class="footer-actions">
+                <button class="button subtle">取消扫描</button>
+                <button class="button danger large" disabled><svg class="icon"><use href="#i-trash"/></svg>永久删除</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">会话扫描若只能整包返回，则用「骨架 + 启动壳」即可；若后端能分批推 sessions，则采用本屏渐进。删除能力校验放在最后一步。</div>
+      </article>
+
+      <!-- 7 Failure -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">7</span> 扫描失败</strong>
+          <span>可重试 · 不丢保护文案</span>
+        </div>
+        <div class="app">
+          <div class="titlebar">
+            <span class="product-title">codex-usage-hud v1.0.5</span>
+            <button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button>
+          </div>
+          <nav class="top-tabs">
+            <span class="top-tab">设置</span>
+            <span class="top-tab active">空间清理</span>
+            <span class="top-tab">用量总览</span>
+            <span class="top-tab">请作者喝咖啡</span>
+            <span class="top-tab">版本更新</span>
+          </nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented">
+                <span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span>
+                <span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span>
+              </div>
+              <span class="head-meta">扫描失败</span>
+            </div>
+            <div class="content">
+              <div class="error-panel">
+                <div class="error-mark"><svg class="icon icon-lg"><use href="#i-alert"/></svg></div>
+                <div class="empty-title">扫描未能完成</div>
+                <div class="empty-meta" style="max-width:320px;line-height:1.55">
+                  相关应用状态无法完整校验，清单未生成。<br>
+                  <span style="color:#ffb0b4">Related application state could not be verified.</span>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:6px">
+                  <button class="button primary large"><svg class="icon"><use href="#i-refresh"/></svg>重新扫描</button>
+                  <button class="button">返回</button>
+                </div>
+              </div>
+            </div>
+            <div class="footer">
+              <span class="footer-meta"><svg class="icon icon-sm"><use href="#i-shield"/></svg>未写入任何清理变更</span>
+              <span class="footer-meta">失败安全 · fail closed</span>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">失败不展示半成品可清理量作为可执行结果。若重扫前已有旧 revision，可提供「查看上次结果」次要入口（可选，V1 可不做）。</div>
+      </article>
+
+      <!-- 8 Micro interactions note card as mock -->
+      <article class="state">
+        <div class="state-label">
+          <strong><span class="step-number">8</span> 组件细则</strong>
+          <span>实现对照用</span>
+        </div>
+        <div class="app" style="padding:0;overflow:auto">
+          <div style="padding:16px 18px 20px;display:grid;gap:14px">
+            <div>
+              <div style="font-size:13px;font-weight:700;margin-bottom:8px">进度语义</div>
+              <div style="display:grid;gap:8px;font-size:11px;color:var(--muted);line-height:1.55">
+                <div><strong style="color:var(--text)">阶段百分比</strong>：按 6 步权重累加（例 12/16/8/40/12/12），不是文件数/全盘。单阶段内部可叠加不确定细条。</div>
+                <div><strong style="color:var(--text)">摘要跳动</strong>：tabular-nums；仅累计已 complete 的 group 字节；扫描中标签为「累计可清理（扫描中）」。</div>
+                <div><strong style="color:var(--text)">刚发现</strong>：行背景蓝渐变 + 角标，约 1.2s 后消退；同帧最多高亮 1–2 行。</div>
+                <div><strong style="color:var(--text)">确认按钮</strong>：scanning / accepted 全程 disabled；仅 preview + token 就绪可点。</div>
+              </div>
+            </div>
+            <div>
+              <div style="font-size:13px;font-weight:700;margin-bottom:8px">文案字典（中性）</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:11px">
+                <div style="color:var(--muted)">stage.hud → <span style="color:var(--text)">HUD 诊断</span></div>
+                <div style="color:var(--muted)">stage.codex → <span style="color:var(--text)">Codex 临时项</span></div>
+                <div style="color:var(--muted)">stage.processes → <span style="color:var(--text)">相关应用状态</span></div>
+                <div style="color:var(--muted)">stage.caches → <span style="color:var(--text)">应用与开发缓存</span></div>
+                <div style="color:var(--muted)">stage.backups → <span style="color:var(--text)">旧清理备份</span></div>
+                <div style="color:var(--muted)">stage.sqlite → <span style="color:var(--text)">历史数据库</span></div>
+                <div style="color:var(--muted)">stage.preview → <span style="color:var(--text)">生成默认安全预览</span></div>
+                <div style="color:var(--muted)">session.merge → <span style="color:var(--text)">归并主会话与子任务</span></div>
+              </div>
+            </div>
+            <div>
+              <div style="font-size:13px;font-weight:700;margin-bottom:8px">a11y</div>
+              <div style="font-size:11px;color:var(--muted);line-height:1.55">
+                content 区 <code style="color:#cfe4ff">aria-busy="true"</code>；阶段变化 <code style="color:#cfe4ff">aria-live="polite"</code> 播报
+                「第 3 步，应用缓存，已发现 2 组」。取消按钮可键盘聚焦；扫描中分段 tab 可切换查看，但对方 tab 若也在 busy 则各自锁定主操作。
+              </div>
+            </div>
+            <div>
+              <div style="font-size:13px;font-weight:700;margin-bottom:8px">与现有 payload 扩展点（示意）</div>
+              <pre style="margin:0;padding:10px 12px;border-radius:6px;background:#111214;border:1px solid #2d2f33;color:#c4c7cc;font-size:10px;line-height:1.55;overflow:auto">operation: {
+  state: "scanning",
+  progress: 33,                 // 阶段权重
+  phase: "caches",              // 新增
+  phaseLabel: "应用与开发缓存", // 中性
+  phaseIndex: 3,
+  phaseCount: 6,
+  discoveredGroups: 2,          // 新增
+  discoveredBytes: 241172480,   // 新增
+  elapsedMs: 7000,              // 可选由 UI 自计
+  partialGroups: [ ... ]        // 或 inventory 增量
+}</pre>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">本屏为规格便签，不进入产品 UI。实现时 partialGroups 不得带绝对路径；与 safe-cleanup-contracts 一致。</div>
+      </article>
+    </section>
+
+    <section class="spec-row">
+      <div class="spec-head">
+        <div>
+          <h2>方案 C 交互合约（评审用）</h2>
+          <p>视觉稿冻结这些规则后，再进入实现；未标注「可选」的为默认应做项。</p>
+        </div>
+      </div>
+      <div class="spec-grid">
+        <div class="spec-card">
+          <h3>进入</h3>
+          <ul>
+            <li><strong>触发</strong>：扫描垃圾 / 重新扫描 / 扫描会话</li>
+            <li><strong>&lt;150ms</strong>：启动壳或扫描条</li>
+            <li><strong>按钮</strong>：主 CTA 禁用 + 取消可选</li>
+            <li><strong>不</strong>：后台静默扫</li>
+          </ul>
+        </div>
+        <div class="spec-card">
+          <h3>进行中</h3>
+          <ul>
+            <li><strong>阶段条</strong> + 当前中性文案</li>
+            <li><strong>摘要</strong>累计跳动（蓝灰扫描态）</li>
+            <li><strong>行</strong>：已发现 / 当前 / 排队占位</li>
+            <li><strong>刚发现</strong>短暂高亮</li>
+          </ul>
+        </div>
+        <div class="spec-card">
+          <h3>完成 / 失败</h3>
+          <ul>
+            <li><strong>完成</strong>：收起扫描条 · 摘要变绿 · 确认可用</li>
+            <li><strong>失败</strong>：错误空态 + 重试</li>
+            <li><strong>取消</strong>：回空态或保留旧 revision</li>
+            <li><strong>重扫</strong>：遮罩旧列表，不闪空</li>
+          </ul>
+        </div>
+        <div class="spec-card">
+          <h3>不做</h3>
+          <ul>
+            <li>假精确到文件的全盘百分比</li>
+            <li>扫描中可执行清理</li>
+            <li>暴露绝对路径 / 凭据</li>
+            <li>半成品 inventory 的 confirmationToken</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <div class="legend">
+      <span><span class="swatch" style="background:#17202a;border-color:#3f5f82"></span>扫描中表面（蓝灰）</span>
+      <span><span class="swatch" style="background:#16261a;border-color:#2f6a42"></span>完成摘要（绿）</span>
+      <span><span class="swatch" style="background:#2a2418;border-color:#554525"></span>深度清理行</span>
+      <span><span class="swatch" style="background:linear-gradient(90deg,rgba(59,142,234,.25),#18191b)"></span>刚发现高亮</span>
+      <span>文件：docs/designs/space-cleanup-scan-progress-v1.html</span>
+    </div>
+  </main>
+</body>
+</html>
