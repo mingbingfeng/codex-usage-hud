@@ -94,7 +94,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "32";
+  const version = "34";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -166,6 +166,37 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   let settingsActiveTab = "settings";
   let storageFilter = "all";
   let storagePreviewHidden = false;
+  let storageBodyScrollTop = 0;
+  let cleanupContentScrollTop = 0;
+  let sessionTableScrollTop = 0;
+  const usageInsightsState = {
+    data: null,
+    refreshRequestId: "",
+    error: "",
+  };
+  const safeCleanupState = {
+    data: null,
+    pendingRequestId: "",
+    includeConsent: false,
+    backupDirectory: "",
+    backupDirectoryDirty: false,
+    previewBackupDirectory: "",
+    autoCloseConfirmed: false,
+    previewHidden: false,
+    lastBackupPickerRequestId: "",
+  };
+  let cleanupActiveSection = "junk";
+  let cleanupDeepExpanded = false;
+  let safeCleanupPreviewTimer = 0;
+  const sessionCleanupState = {
+    data: null,
+    pendingRequestId: "",
+    selectedIds: new Set(),
+    search: "",
+    status: "all",
+    time: "all",
+    previewTokenShown: "",
+  };
   let backgroundUsageFetchSeq = 0;
   let backgroundUsageDetailSeq = 0;
   const backgroundUsageRequestTimeoutMs = 5000;
@@ -179,6 +210,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     feature: "",
     model: "",
     selectedEventId: "",
+    selectedSessionId: "",
     data: null,
     detail: null,
     loading: false,
@@ -600,6 +632,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-update-button,
       #${rootId} .codex-usage-hud-settings-button,
+      #${rootId} .codex-usage-hud-background-notification,
       #${rootId} .codex-usage-hud-resize-zone,
       #${rootId} .codex-usage-hud-main,
       #${rootId} .codex-usage-hud-panel-header,
@@ -659,6 +692,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-collapsed[data-has-badge="true"] {
         grid-template-columns: minmax(0, 1fr) auto;
+      }
+      #${rootId} .${requestClass} .codex-usage-hud-collapsed {
+        grid-template-columns: minmax(0, 1fr) 22px;
+      }
+      #${rootId} .${requestClass} .codex-usage-hud-collapsed[data-has-badge="true"] {
+        grid-template-columns: minmax(0, 1fr) auto 22px;
       }
       #${rootId} .codex-usage-hud-token-badge {
         position: relative;
@@ -810,7 +849,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-handle,
       #${rootId} .codex-usage-hud-update-button,
-      #${rootId} .codex-usage-hud-settings-button {
+      #${rootId} .codex-usage-hud-settings-button,
+      #${rootId} .codex-usage-hud-background-notification {
         display: inline-grid;
         place-items: center;
         box-sizing: border-box;
@@ -823,6 +863,46 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: #c7d4e4;
         font: 700 11px/1 "Segoe UI Symbol", "Microsoft YaHei UI", sans-serif;
         cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-background-notification {
+        position: relative;
+        width: 22px;
+        height: 22px;
+        color: var(--codex-usage-hud-info, #9ccbff);
+        font-size: 13px;
+        visibility: hidden;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity .12s ease;
+      }
+      #${rootId} .codex-usage-hud-background-notification[data-visible="true"] {
+        visibility: visible;
+        opacity: 1;
+        pointer-events: auto;
+      }
+      #${rootId} .codex-usage-hud-background-notification:hover {
+        background: rgba(156, 203, 255, .16);
+        color: #c8e3ff;
+      }
+      #${rootId} .codex-usage-hud-background-notification-count {
+        position: absolute;
+        top: -5px;
+        right: -5px;
+        min-width: 13px;
+        height: 13px;
+        display: inline-grid;
+        place-items: center;
+        box-sizing: border-box;
+        padding: 0 3px;
+        border: 1px solid var(--codex-usage-hud-request-surface, #0b1016);
+        border-radius: 7px;
+        background: var(--codex-usage-hud-error, #ff6b6b);
+        color: #fff;
+        font: 700 8px/1 Consolas, "Cascadia Mono", ui-monospace, monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-background-notification-count[hidden] {
+        display: none;
       }
       #${rootId} .codex-usage-hud-handle {
         cursor: grab;
@@ -1253,6 +1333,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) minmax(90px, 150px) 22px;
       }
       #${rootId} .${requestClass} .codex-usage-hud-panel-header {
+        grid-template-columns: auto minmax(0, 1fr) 22px;
         background: #151d27;
         margin-top: 4px;
         margin-bottom: 0;
@@ -1982,8 +2063,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-settings-dialog {
         position: relative;
-        width: min(760px, calc(100vw - 32px));
-        max-height: min(720px, calc(100vh - 32px));
+        width: min(760px, calc(100vw - 48px));
+        max-height: min(720px, calc(100vh - 48px));
         display: grid;
         grid-template-rows: auto auto minmax(0, 1fr) auto;
         border: 1px solid var(--codex-usage-hud-panel-border, #3a485a);
@@ -2021,6 +2102,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         background: var(--codex-usage-hud-accent, #f3d27a);
         color: var(--codex-usage-hud-progress-day-text, #10161d);
         font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-settings-action[data-danger="true"] {
+        background: var(--codex-usage-hud-error, #ff6b6b);
+        color: #160707;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-settings-action:disabled,
+      #${rootId} .codex-usage-hud-settings-link:disabled {
+        cursor: not-allowed;
+        opacity: .52;
       }
       #${rootId} .codex-usage-hud-settings-link {
         min-height: 0;
@@ -2064,8 +2155,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         scrollbar-color: var(--codex-usage-hud-divider, #273241) var(--codex-usage-hud-surface, #10161d);
       }
       #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] {
-        width: min(1060px, calc(100vw - 32px));
-        height: min(760px, calc(100vh - 32px));
+        width: min(1060px, calc(100vw - 48px));
+        height: min(760px, calc(100vh - 48px));
       }
       #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] .codex-usage-hud-settings-body {
         overflow: hidden;
@@ -2184,6 +2275,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-background-history {
         border-right: 1px solid var(--codex-usage-hud-divider, #273241);
       }
+      #${rootId} .codex-usage-hud-session-ranking-note {
+        padding: 0 12px 8px;
+      }
       #${rootId} .codex-usage-hud-background-section-title {
         display: flex;
         align-items: center;
@@ -2204,6 +2298,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         margin-top: 7px;
       }
       #${rootId} .codex-usage-hud-background-event {
+        position: relative;
         min-width: 0;
         width: 100%;
         display: grid;
@@ -2215,6 +2310,21 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: inherit;
         text-align: left;
         cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-background-unread-dot {
+        position: absolute;
+        top: 5px;
+        right: 5px;
+        width: 7px;
+        height: 7px;
+        border: 1px solid var(--codex-usage-hud-panel-surface, #141b24);
+        border-radius: 50%;
+        background: var(--codex-usage-hud-error, #ff6b6b);
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--codex-usage-hud-error, #ff6b6b) 22%, transparent);
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-background-event[data-unread="true"] .codex-usage-hud-background-event-head {
+        padding-right: 8px;
       }
       #${rootId} .codex-usage-hud-background-event:hover,
       #${rootId} .codex-usage-hud-background-event[data-selected="true"] {
@@ -2257,6 +2367,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         margin-left: auto;
         color: var(--codex-usage-hud-warning, #ffb86b);
       }
+      #${rootId} .codex-usage-hud-session-ranking-row .codex-usage-hud-background-event-totals > * {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       #${rootId} .codex-usage-hud-background-status {
         flex: 0 0 auto;
         padding: 2px 7px;
@@ -2266,14 +2382,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         font-size: 9px;
         font-weight: 700;
       }
-      #${rootId} .codex-usage-hud-background-status[data-tone="pending"] {
-        border-color: var(--codex-usage-hud-warning, #ffb86b);
-        color: var(--codex-usage-hud-warning, #ffb86b);
-      }
-      #${rootId} .codex-usage-hud-background-status[data-tone="confirmed"] {
-        border-color: var(--codex-usage-hud-success, #8fe3a1);
-        color: var(--codex-usage-hud-success, #8fe3a1);
-      }
       #${rootId} .codex-usage-hud-background-detail-head {
         display: flex;
         align-items: flex-start;
@@ -2282,11 +2390,22 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         padding-bottom: 10px;
         border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
       }
+      #${rootId} .codex-usage-hud-background-detail-head > div {
+        min-width: 0;
+      }
       #${rootId} .codex-usage-hud-background-detail-head h3 {
+        min-width: 0;
         margin: 0;
+        overflow: hidden;
         font-size: 15px;
         line-height: 1.35;
         letter-spacing: 0;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-background-detail-head > .codex-usage-hud-settings-action {
+        flex: 0 0 auto;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-background-detail-sub {
         color: var(--codex-usage-hud-info, #9ccbff);
@@ -2317,6 +2436,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-background-detail-grid .codex-usage-hud-background-detail-wide {
         grid-column: span 2;
+      }
+      #${rootId} .codex-usage-hud-background-detail-grid .codex-usage-hud-background-detail-full {
+        grid-column: 1 / -1;
       }
       #${rootId} .codex-usage-hud-background-requests,
       #${rootId} .codex-usage-hud-background-prompt {
@@ -2370,6 +2492,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         font: 9px/1.55 Consolas, "Cascadia Mono", ui-monospace, monospace;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+        cursor: text;
+        user-select: text;
+        -webkit-user-select: text;
       }
       #${rootId} .codex-usage-hud-background-prompt pre[data-expanded="true"] {
         max-height: 320px;
@@ -2933,6 +3058,623 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: var(--codex-usage-hud-muted, #8492a6);
         text-align: center;
       }
+      #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="storage"] {
+        width: min(980px, calc(100vw - 48px));
+        height: min(572px, calc(100vh - 48px));
+        max-height: min(572px, calc(100vh - 48px));
+        overflow: hidden;
+      }
+      #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="storage"] .codex-usage-hud-settings-body {
+        padding: 0;
+        overflow: hidden;
+        min-height: 0;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="storage"] .codex-usage-hud-settings-actions {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-cleanup-workspace {
+        min-width: 0;
+        min-height: 0;
+        height: 100%;
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        overflow: hidden;
+      }
+      #${rootId} .codex-usage-hud-cleanup-page-head {
+        min-height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 14px;
+        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 88%, transparent);
+        background: color-mix(in srgb, var(--codex-usage-hud-surface, #10161d) 86%, #191a1c);
+      }
+      #${rootId} .codex-usage-hud-cleanup-segments {
+        display: inline-grid;
+        grid-template-columns: repeat(2, minmax(96px, 1fr));
+        min-width: 0;
+        border: 1px solid #414349;
+        border-radius: 6px;
+        overflow: hidden;
+        background: #151618;
+      }
+      #${rootId} .codex-usage-hud-cleanup-segments button {
+        min-width: 96px;
+        min-height: 31px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        border: 0;
+        border-right: 1px solid #414349;
+        border-radius: 0;
+        background: transparent;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        padding: 0 12px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-cleanup-segments button:last-child { border-right: 0; }
+      #${rootId} .codex-usage-hud-cleanup-segments button[data-active="true"] {
+        background: #2b2d31;
+        color: var(--codex-usage-hud-text, #f1f3f5);
+        font-weight: 650;
+      }
+      #${rootId} .codex-usage-hud-cleanup-head-meta {
+        color: #73777f;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-cleanup-content {
+        min-width: 0;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+        position: relative;
+        scrollbar-width: thin;
+      }
+      #${rootId} .codex-usage-hud-cleanup-footer {
+        min-height: 50px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 13px;
+        border-top: 1px solid var(--codex-usage-hud-divider, #393b40);
+        background: #2c2d30;
+      }
+      #${rootId} .codex-usage-hud-cleanup-footer-meta {
+        min-width: 0;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+      #${rootId} .codex-usage-hud-cleanup-footer-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+      #${rootId} .codex-usage-hud-cleanup-workspace .codex-usage-hud-settings-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: 1px solid #4a4d53;
+        background: #2b2d31;
+        color: var(--codex-usage-hud-text, #f1f3f5);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      #${rootId} .codex-usage-hud-cleanup-workspace .codex-usage-hud-settings-action[data-primary="true"],
+      #${rootId} .codex-usage-hud-settings-confirm-card .codex-usage-hud-settings-action[data-primary="true"] {
+        background: #3b8eea;
+        border-color: #3b8eea;
+        color: #ffffff;
+      }
+      #${rootId} .codex-usage-hud-cleanup-workspace .codex-usage-hud-settings-action[data-danger="true"],
+      #${rootId} .codex-usage-hud-settings-confirm-card[data-tone="danger"] .codex-usage-hud-settings-action[data-danger="true"] {
+        background: #c43e45;
+        border-color: #d84a51;
+        color: #ffffff;
+      }
+      #${rootId} .codex-usage-hud-cleanup-icon {
+        width: 16px;
+        height: 16px;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        fill: none;
+        flex: 0 0 auto;
+      }
+      #${rootId} .codex-usage-hud-cleanup-icon-lg {
+        width: 30px;
+        height: 30px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-icon-button {
+        width: 30px;
+        height: 30px;
+        display: inline-grid;
+        place-items: center;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        cursor: pointer;
+        padding: 0;
+      }
+      #${rootId} .codex-usage-hud-cleanup-empty-state {
+        min-width: 0;
+        height: 100%;
+        min-height: 220px;
+        display: grid;
+        place-content: center;
+        justify-items: center;
+        gap: 12px;
+        text-align: center;
+        padding: 18px 16px 28px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-scan-mark {
+        width: 62px;
+        height: 62px;
+        display: grid;
+        place-items: center;
+        border: 1px solid #3f5f82;
+        border-radius: 50%;
+        background: #17202a;
+        color: #7db9f7;
+      }
+      #${rootId} .codex-usage-hud-cleanup-empty-title {
+        margin: 0;
+        color: var(--codex-usage-hud-text, #f1f3f5);
+        font-size: 17px;
+        font-weight: 700;
+        line-height: 1.25;
+      }
+      #${rootId} .codex-usage-hud-cleanup-empty-meta {
+        margin: 0;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      #${rootId} .codex-usage-hud-settings-action[data-size="large"] {
+        min-height: 38px;
+        padding: 0 17px;
+        font-size: 13px;
+      }
+      #${rootId} .codex-usage-hud-cleanup {
+        display: grid;
+        min-width: 0;
+        min-height: 100%;
+        height: 100%;
+        align-content: start;
+      }
+      #${rootId} .codex-usage-hud-cleanup:has(.codex-usage-hud-cleanup-empty-state) {
+        grid-template-rows: minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-band {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 18px;
+        align-items: center;
+        padding: 13px 15px;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #393b40);
+        background: #16261a;
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-label {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: #9be5ad;
+        font-size: 12px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-value {
+        margin-top: 3px;
+        color: #c9f4d2;
+        font-size: 24px;
+        line-height: 1;
+        font-weight: 750;
+      }
+      #${rootId} .codex-usage-hud-cleanup-summary-side {
+        color: #9be5ad;
+        font-size: 11px;
+        text-align: right;
+        line-height: 1.45;
+      }
+      #${rootId} .codex-usage-hud-cleanup-list {
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row {
+        min-width: 0;
+        min-height: 54px;
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr) minmax(150px, .7fr) 76px 20px;
+        gap: 9px;
+        align-items: center;
+        padding: 7px 14px;
+        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+      }
+      #${rootId} .codex-usage-hud-cleanup-row[data-tier="consent"],
+      #${rootId} .codex-usage-hud-cleanup-row[data-kind="deep"] {
+        background: #2a2418;
+        border-top: 1px solid #554525;
+        border-bottom-color: #554525;
+      }
+      #${rootId} .codex-usage-hud-cleanup-check {
+        width: 16px;
+        height: 16px;
+        border: 1px solid #5a5d63;
+        border-radius: 3px;
+        background: #111214;
+        display: grid;
+        place-items: center;
+        color: #fff;
+        flex: 0 0 auto;
+      }
+      #${rootId} .codex-usage-hud-cleanup-check[data-checked="true"] {
+        background: #3b8eea;
+        border-color: #3b8eea;
+      }
+      #${rootId} .codex-usage-hud-cleanup-check[data-checked="true"]::after {
+        content: "";
+        width: 7px;
+        height: 4px;
+        border-left: 2px solid currentColor;
+        border-bottom: 2px solid currentColor;
+        transform: translateY(-1px) rotate(-45deg);
+      }
+      #${rootId} .codex-usage-hud-cleanup-check[data-disabled="true"] {
+        border-color: #3b3d42;
+        background: #202124;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-main { min-width: 0; }
+      #${rootId} .codex-usage-hud-cleanup-row-title {
+        font-size: 12px;
+        font-weight: 650;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-meta {
+        margin-top: 3px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-impact {
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 10px;
+        overflow-wrap: anywhere;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-size {
+        text-align: right;
+        font-size: 12px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-chevron {
+        color: #73777f;
+        display: inline-grid;
+        place-items: center;
+      }
+      #${rootId} .codex-usage-hud-cleanup-protected-note {
+        min-height: 39px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 7px 14px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 10px;
+        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+      }
+      #${rootId} .codex-usage-hud-cleanup-protected-note span {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-cleanup-controls {
+        display: grid;
+        gap: 8px;
+        padding: 10px 14px 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+        background: color-mix(in srgb, #2a2418 55%, transparent);
+      }
+      #${rootId} .codex-usage-hud-cleanup-control {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr);
+        gap: 7px;
+        align-items: start;
+      }
+      #${rootId} .codex-usage-hud-cleanup-control input[type="checkbox"] {
+        width: 15px;
+        height: 15px;
+        margin-top: 1px;
+        accent-color: #3b8eea;
+      }
+      #${rootId} .codex-usage-hud-cleanup-backup {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-backup input {
+        min-width: 0;
+        border: 1px solid #44464c;
+        border-radius: 4px;
+        background: #111214;
+        color: var(--codex-usage-hud-text, #e8eef7);
+        padding: 6px 7px;
+        font: 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-cleanup-meta {
+        min-width: 0;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 10px;
+        overflow-wrap: anywhere;
+      }
+      #${rootId} .codex-usage-hud-cleanup-preview {
+        display: grid;
+        gap: 8px;
+        padding: 10px 14px 12px;
+        border-top: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-cleanup-preview-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-cleanup-results {
+        max-height: 130px;
+        overflow: auto;
+      }
+      #${rootId} .codex-usage-hud-cleanup-result {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+        padding: 5px 0;
+        border-top: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 72%, transparent);
+      }
+      #${rootId} .codex-usage-hud-cleanup-result span:first-child { min-width: 0; overflow-wrap: anywhere; }
+      #${rootId} .codex-usage-hud-cleanup-empty {
+        min-height: 96px;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        text-align: center;
+      }
+      #${rootId} .codex-usage-hud-cleanup-empty[data-kind="error"] { color: var(--codex-usage-hud-warning, #ffb86b); }
+      #${rootId} .codex-usage-hud-session-cleanup {
+        min-width: 0;
+        min-height: 100%;
+        height: 100%;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        align-content: start;
+      }
+      #${rootId} .codex-usage-hud-session-cleanup:has(.codex-usage-hud-cleanup-empty-state) {
+        grid-template-rows: minmax(0, 1fr);
+      }
+      #${rootId} .codex-usage-hud-session-tools {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 9px;
+        align-items: center;
+        padding: 10px 13px;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #393b40);
+      }
+      #${rootId} .codex-usage-hud-session-search {
+        min-width: 0;
+        min-height: 32px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 10px;
+        border: 1px solid #44464c;
+        border-radius: 5px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        background: #111214;
+      }
+      #${rootId} .codex-usage-hud-session-search input[type="search"] {
+        min-width: 0;
+        width: 100%;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--codex-usage-hud-text, #e8eef7);
+        font: inherit;
+        font-size: 11px;
+        padding: 0;
+      }
+      #${rootId} .codex-usage-hud-session-filters {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+      #${rootId} .codex-usage-hud-session-filter {
+        min-width: 0;
+        min-height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid #44464c;
+        border-radius: 5px;
+        background: #24262a;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        padding: 0 9px;
+        font: inherit;
+        font-size: 10px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-session-filter[data-active="true"] {
+        border-color: #4c78a9;
+        color: #a9d1ff;
+        background: #1b2632;
+      }
+      #${rootId} .codex-usage-hud-session-table {
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+        scrollbar-width: thin;
+      }
+      #${rootId} .codex-usage-hud-session-head,
+      #${rootId} .codex-usage-hud-session-row {
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1.35fr) minmax(0, .9fr) 88px 72px 82px;
+        grid-template-areas: "check title workdir time status size";
+        gap: 9px;
+        align-items: center;
+        padding: 0 13px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-session-head {
+        min-height: 31px;
+        color: #73777f;
+        font-size: 10px;
+        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+        background: #1c1d1f;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+      #${rootId} .codex-usage-hud-session-head > :nth-child(1),
+      #${rootId} .codex-usage-hud-session-row > :nth-child(1) { grid-area: check; }
+      #${rootId} .codex-usage-hud-session-head > :nth-child(2),
+      #${rootId} .codex-usage-hud-session-row > :nth-child(2) { grid-area: title; }
+      #${rootId} .codex-usage-hud-session-head > :nth-child(3),
+      #${rootId} .codex-usage-hud-session-row > :nth-child(3) { grid-area: workdir; }
+      #${rootId} .codex-usage-hud-session-head > :nth-child(4),
+      #${rootId} .codex-usage-hud-session-row > :nth-child(4) { grid-area: time; }
+      #${rootId} .codex-usage-hud-session-head > :nth-child(5),
+      #${rootId} .codex-usage-hud-session-row > :nth-child(5) { grid-area: status; }
+      #${rootId} .codex-usage-hud-session-head > :nth-child(6),
+      #${rootId} .codex-usage-hud-session-row > :nth-child(6) { grid-area: size; }
+      #${rootId} .codex-usage-hud-session-head span:last-child,
+      #${rootId} .codex-usage-hud-session-size { text-align: right; }
+      #${rootId} .codex-usage-hud-session-row {
+        min-height: 54px;
+        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+      }
+      #${rootId} .codex-usage-hud-session-row[data-selected="true"] { background: #172331; }
+      #${rootId} .codex-usage-hud-session-row[data-selectable="false"] { opacity: .55; }
+      #${rootId} .codex-usage-hud-session-row input[type="checkbox"] {
+        width: 15px;
+        height: 15px;
+        margin: 0;
+        accent-color: #3b8eea;
+      }
+      #${rootId} .codex-usage-hud-session-title {
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-session-title strong,
+      #${rootId} .codex-usage-hud-session-workdir,
+      #${rootId} .codex-usage-hud-session-title span {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-session-title strong {
+        font-size: 11px;
+        font-weight: 650;
+      }
+      #${rootId} .codex-usage-hud-session-title span {
+        margin-top: 3px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 9px;
+      }
+      #${rootId} .codex-usage-hud-session-title span[data-secondary="true"] {
+        display: none;
+      }
+      #${rootId} .codex-usage-hud-session-title span[data-kind="warning"] {
+        color: var(--codex-usage-hud-warning, #ffb86b);
+      }
+      #${rootId} .codex-usage-hud-session-workdir {
+        color: #c4c7cc;
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-session-cell {
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-session-size {
+        text-align: right;
+        color: #c7cad0;
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-session-badge {
+        min-height: 22px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 7px;
+        border: 1px solid #4a4d53;
+        border-radius: 999px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 9px;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-session-badge[data-state="current"],
+      #${rootId} .codex-usage-hud-session-badge[data-state="running"] {
+        border-color: #356894;
+        color: #8dc7ff;
+        background: #172431;
+      }
+      #${rootId} .codex-usage-hud-session-badge[data-state="archived"] {
+        border-color: #5b4b2b;
+        color: #e2bd6c;
+        background: #262116;
+      }
+      #${rootId} .codex-usage-hud-session-capability {
+        margin: 8px 13px 0;
+        padding: 8px 10px;
+        border-left: 3px solid var(--codex-usage-hud-warning, #ffb86b);
+        background: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 8%, transparent);
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        overflow-wrap: anywhere;
+      }
+      #${rootId} .codex-usage-hud-session-results {
+        min-width: 0;
+        display: grid;
+        gap: 5px;
+        padding: 9px 13px;
+        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+      }
+      #${rootId} .codex-usage-hud-session-results > div {
+        min-width: 0;
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      #${rootId} .codex-usage-hud-session-results > div span:first-child {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-session-results [data-kind="success"] { color: var(--codex-usage-hud-success, #8fe3a1); }
+      #${rootId} .codex-usage-hud-session-results [data-kind="error"] { color: var(--codex-usage-hud-warning, #ffb86b); }
       #${rootId} .codex-usage-hud-settings-confirm-layer {
         position: absolute;
         inset: 0;
@@ -2940,18 +3682,35 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         display: grid;
         place-items: center;
         padding: 24px;
-        background: color-mix(in srgb, var(--codex-usage-hud-surface, #10161d) 62%, transparent);
+        background: rgba(7, 8, 9, .72);
         backdrop-filter: blur(4px);
       }
       #${rootId} .codex-usage-hud-settings-confirm-card {
-        width: min(520px, calc(100% - 12px));
+        width: min(500px, calc(100% - 36px));
         display: grid;
         gap: 12px;
-        padding: 18px 18px 16px;
+        padding: 18px 0 0;
         border: 1px solid color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 34%, transparent);
-        border-radius: 12px;
-        background: linear-gradient(180deg, var(--codex-usage-hud-header-surface, #1e2731), var(--codex-usage-hud-surface, #10161d));
-        box-shadow: 0 22px 46px rgba(0, 0, 0, .45);
+        border-radius: 8px;
+        background: #1d1e20;
+        box-shadow: 0 22px 58px rgba(0, 0, 0, .52);
+        overflow: hidden;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-card:has(.codex-usage-hud-settings-confirm-main),
+      #${rootId} .codex-usage-hud-settings-confirm-card[data-tone="danger"] {
+        gap: 0;
+        padding: 0;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-card[data-tone="danger"] {
+        border-color: #5e3a3d;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-main {
+        padding: 18px 19px 16px;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-card > .codex-usage-hud-settings-confirm-kicker,
+      #${rootId} .codex-usage-hud-settings-confirm-card > .codex-usage-hud-settings-confirm-title,
+      #${rootId} .codex-usage-hud-settings-confirm-card > .codex-usage-hud-settings-confirm-body {
+        padding-inline: 18px;
       }
       #${rootId} .codex-usage-hud-settings-confirm-kicker {
         color: var(--codex-usage-hud-accent, #f3d27a);
@@ -2961,22 +3720,74 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         text-transform: uppercase;
       }
       #${rootId} .codex-usage-hud-settings-confirm-title {
+        margin: 0;
         color: var(--codex-usage-hud-text, #f6f9fc);
-        font-size: 18px;
-        font-weight: 800;
+        font-size: 17px;
+        font-weight: 720;
         line-height: 1.25;
       }
       #${rootId} .codex-usage-hud-settings-confirm-body {
-        color: var(--codex-usage-hud-request-text, #c7d4e4);
-        font-size: 13px;
-        line-height: 1.7;
+        margin: 0;
+        color: #c9cbd0;
+        font-size: 11px;
+        line-height: 1.6;
         white-space: pre-wrap;
       }
-      #${rootId} .codex-usage-hud-settings-confirm-actions {
+      #${rootId} .codex-usage-hud-settings-confirm-main .codex-usage-hud-settings-confirm-body {
+        margin: 8px 0 0;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-danger-mark {
+        width: 42px;
+        height: 42px;
+        display: grid;
+        place-items: center;
+        border: 1px solid #754247;
+        border-radius: 50%;
+        background: #2b191b;
+        color: #ff858a;
+        margin-bottom: 12px;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-summary {
+        margin-top: 13px;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        border: 1px solid #47494f;
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-summary div {
+        padding: 10px 11px;
+        border-right: 1px solid #47494f;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-summary div:last-child { border-right: 0; }
+      #${rootId} .codex-usage-hud-settings-confirm-summary span {
+        display: block;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 9px;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-summary strong {
+        display: block;
+        margin-top: 3px;
+        font-size: 13px;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-note {
+        margin-top: 12px;
         display: flex;
-        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 8px;
+        color: #e6bd69;
+        font-size: 10px;
+        line-height: 1.5;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-actions {
+        min-height: 52px;
+        display: flex;
+        align-items: center;
         justify-content: flex-end;
         gap: 8px;
+        padding: 9px 12px;
+        border-top: 1px solid var(--codex-usage-hud-divider, #393b40);
+        background: #292a2d;
       }
       #${rootId} .codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action {
         min-height: 34px;
@@ -3418,6 +4229,43 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-storage-summary-main {
           grid-column: 1 / -1;
         }
+        #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="storage"] {
+          width: min(980px, calc(100vw - 48px));
+          height: min(572px, calc(100vh - 48px));
+        }
+        #${rootId} .codex-usage-hud-session-tools {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-session-filters { width: 100%; }
+        #${rootId} .codex-usage-hud-session-head,
+        #${rootId} .codex-usage-hud-session-row {
+          grid-template-columns: 28px minmax(0, 1.2fr) minmax(0, .9fr) 70px 68px;
+          grid-template-areas:
+            "check title title status size"
+            "check workdir time status size";
+        }
+        #${rootId} .codex-usage-hud-session-row {
+          min-height: 54px;
+          padding-top: 8px;
+          padding-bottom: 8px;
+        }
+        #${rootId} .codex-usage-hud-session-head > :nth-child(3),
+        #${rootId} .codex-usage-hud-session-head > :nth-child(4) {
+          display: none;
+        }
+        #${rootId} .codex-usage-hud-insights-summary {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-insights-metric:nth-child(2) { border-right: 0; }
+        #${rootId} .codex-usage-hud-insights-metric:nth-child(-n + 2) { border-bottom: 1px solid var(--codex-usage-hud-divider, #273241); }
+        #${rootId} .codex-usage-hud-insights-rankings {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-insights-ranking {
+          border-right: 0;
+          border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
+        }
+        #${rootId} .codex-usage-hud-insights-ranking:last-child { border-bottom: 0; }
         #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] {
           height: calc(100vh - 24px);
         }
@@ -3530,6 +4378,61 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-storage-item-actions {
           grid-column: 2;
           justify-self: start;
+        }
+        #${rootId} .codex-usage-hud-insights-toolbar,
+        #${rootId} .codex-usage-hud-insights-background,
+        #${rootId} .codex-usage-hud-cleanup-preview-head {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        #${rootId} .codex-usage-hud-insights-range { width: 100%; }
+        #${rootId} .codex-usage-hud-cleanup-page-head {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        #${rootId} .codex-usage-hud-cleanup-row {
+          grid-template-columns: 24px minmax(0, 1fr) 64px 18px;
+        }
+        #${rootId} .codex-usage-hud-cleanup-row-impact { grid-column: 2 / -1; }
+        #${rootId} .codex-usage-hud-cleanup-backup {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-cleanup-footer {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        #${rootId} .codex-usage-hud-session-tools {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        #${rootId} .codex-usage-hud-session-filters {
+          width: 100%;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-session-head { display: none; }
+        #${rootId} .codex-usage-hud-session-row {
+          grid-template-columns: 28px minmax(0, 1fr) auto;
+          grid-template-areas:
+            "check title size"
+            "check status size";
+          min-height: 58px;
+          padding-top: 8px;
+          padding-bottom: 8px;
+        }
+        #${rootId} .codex-usage-hud-session-workdir,
+        #${rootId} .codex-usage-hud-session-cell {
+          display: none;
+        }
+        #${rootId} .codex-usage-hud-session-title span[data-secondary="true"] {
+          display: block;
+        }
+        #${rootId} .codex-usage-hud-session-badge {
+          justify-self: start;
+        }
+        #${rootId} .codex-usage-hud-session-results > div {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 2px;
         }
         #${rootId} .codex-usage-hud-background-toolbar {
           grid-template-columns: minmax(0, 1fr);
@@ -3671,6 +4574,18 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     `;
   }
 
+  function backgroundUsageNotificationMarkup() {
+    return `
+      <button type="button" class="codex-usage-hud-background-notification"
+        data-action="background-usage-open-notification" data-visible="false"
+        title="后台用量提醒" aria-label="后台用量提醒" aria-hidden="true" tabindex="-1">
+        <span aria-hidden="true">▥</span>
+        <span class="codex-usage-hud-background-notification-count"
+          data-field="backgroundUsageNotificationCount" hidden></span>
+      </button>
+    `;
+  }
+
   function panelMarkup(name, glyph, ariaLabel) {
     const glyphMarkup = glyph ? `<span class="codex-usage-hud-glyph">${glyph}</span>` : "";
     const settingsButtonMarkup = name === "top"
@@ -3687,6 +4602,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const leftControlsMarkup = name === "top"
       ? `<div class="codex-usage-hud-left-controls">${updateButtonMarkup}</div>`
       : "";
+    const backgroundNotificationMarkup = name === "request"
+      ? backgroundUsageNotificationMarkup()
+      : "";
     return `
       <div class="codex-usage-hud-panel ${PANEL[name].className}" data-panel="${name}" data-expanded="false" role="status" aria-live="polite">
         ${resizeEdgesMarkup()}
@@ -3699,6 +4617,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           </button>
           ${settingsButtonMarkup}
           ${tokenBadgeMarkup}
+          ${backgroundNotificationMarkup}
         </div>
         ${name === "top" ? topExpandedMarkup() : requestExpandedMarkup()}
       </div>
@@ -3831,6 +4750,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         <div class="codex-usage-hud-panel-header" data-action="toggle">
           <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
           <div class="codex-usage-hud-title codex-usage-hud-line" data-action="toggle" data-field="requestLineExpanded"></div>
+          ${backgroundUsageNotificationMarkup()}
         </div>
         ${requestExpandedResizeMarkup()}
       </div>
@@ -3998,10 +4918,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         createdAt: Date.now(),
         action,
         ...payload,
+        requestId,
       }));
       return requestId;
     } catch (error) {
-      backgroundUsageState.error = `后台用量命令提交失败：${error?.message || error}`;
+      backgroundUsageState.error = `用量总览命令提交失败：${error?.message || error}`;
       return "";
     }
   }
@@ -5329,7 +6250,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return ({ idle: "尚未生成清理计划", running: "正在处理存储操作", accepted: "存储操作已排队", cancelling: "正在取消存储操作", preview: "清理预览已生成", queued_exit: "已加入退出后队列", completed: "存储操作已完成", partial: "存储操作部分完成", cancelled: "存储操作已取消", failed: "存储操作失败" })[String(operation?.state || "idle")] || "存储状态待更新";
   }
 
-  function storagePanelHtml(data) {
+  function legacyStoragePanelHtml(data) {
     const totals = data?.totals && typeof data.totals === "object" ? data.totals : {};
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const allItems = Array.isArray(data?.items) ? data.items : [];
@@ -5358,6 +6279,877 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const previewHtml = operationState === "preview" && !storagePreviewHidden ? `<section class="codex-usage-hud-storage-preview" aria-live="polite"><div class="codex-usage-hud-storage-preview-head"><div><strong>清理预览</strong><div class="codex-usage-hud-storage-muted">${previewItems.length} 个项，预计释放 ${storageFormatBytes(operation?.bytes)}</div></div><span class="codex-usage-hud-storage-status" data-state="completed">Dry run</span></div><div class="codex-usage-hud-storage-preview-list">${previewItems.map((item) => `<div class="codex-usage-hud-storage-preview-row"><span class="codex-usage-hud-storage-item-path">${escapeHtml(item?.relativePath || "")}</span><span class="codex-usage-hud-storage-muted">${storageFormatBytes(item?.size)}</span></div>`).join("")}</div><p class="codex-usage-hud-storage-note">Codex 运行期间不会直接修改原始文件；执行前会再次检查 revision、锁定状态和路径指纹。</p><div class="codex-usage-hud-storage-preview-foot"><button type="button" class="codex-usage-hud-settings-link" data-action="storage-clear-preview">取消预览</button><button type="button" class="codex-usage-hud-settings-action" data-action="storage-confirm-preview" data-primary="true">${escapeHtml(managedAction ? "确认官方动作" : "加入退出后队列")}</button></div></section>` : "";
     const operationNote = operation?.error ? `：${operation.error}` : operationState === "queued_exit" ? "；Codex 完全退出后才会执行" : "";
     return `<div class="codex-usage-hud-storage"><div class="codex-usage-hud-storage-pathbar"><div class="codex-usage-hud-storage-path">${escapeHtml(data?.rootLabel || "CODEX_HOME")}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(operationState)}">${escapeHtml(storageOperationLabel(operation) + operationNote)}</span></div><div class="codex-usage-hud-storage-summary"><div class="codex-usage-hud-storage-summary-main"><p class="codex-usage-hud-storage-summary-value">${storageFormatBytes(totals?.bytes)}</p><p class="codex-usage-hud-storage-summary-label">已发现的 Codex 数据</p></div><div><p class="codex-usage-hud-storage-summary-value">${Number(totals?.files || 0).toLocaleString()}</p><p class="codex-usage-hud-storage-summary-label">文件</p></div><div><p class="codex-usage-hud-storage-summary-value">${Number(totals?.items || 0).toLocaleString()}</p><p class="codex-usage-hud-storage-summary-label">管理项</p></div></div><div class="codex-usage-hud-storage-filters" role="tablist" aria-label="文件风险筛选">${[["all", "总览"], ["candidate", "可候选"], ["managed", "官方动作"], ["blocked", "受保护"], ["unknown", "未知"]].map(([key, label]) => `<button type="button" class="codex-usage-hud-storage-filter" data-action="storage-filter" data-storage-filter="${key}" data-active="${storageFilter === key}">${label} ${key === "all" ? "" : `(${policyCounts[key]})`}</button>`).join("")}</div><div class="codex-usage-hud-storage-categories" aria-live="polite">${categoryHtml || '<div class="codex-usage-hud-storage-empty">尚未扫描，点击“重新扫描”查看本地元数据。</div>'}</div><div class="codex-usage-hud-storage-items">${itemHtml || '<div class="codex-usage-hud-storage-empty">当前筛选没有可展示的管理项。</div>'}</div>${visibleItems.length < items.length ? `<div class="codex-usage-hud-storage-muted">仅显示前 ${visibleItems.length} 项；扫描不会自动重复。</div>` : ""}${previewHtml}<p class="codex-usage-hud-storage-note">只显示相对路径和元数据；未知项、凭据、配置、SQLite、会话原始文件、活动插件运行时和 reparse point 不提供直接删除。</p></div>`;
+  }
+
+  function typedSettingsRequestId(prefix) {
+    return `${String(prefix || "request")}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  function usageInsightsFromPayload() {
+    if (usageInsightsState.data && typeof usageInsightsState.data === "object") {
+      return usageInsightsState.data;
+    }
+    const value = currentPayload()?.usageInsights;
+    return value && typeof value === "object" && Object.keys(value).length ? value : null;
+  }
+
+  function safeCleanupFromPayload() {
+    if (safeCleanupState.data && typeof safeCleanupState.data === "object") {
+      return safeCleanupState.data;
+    }
+    const value = currentPayload()?.safeCleanup;
+    return value && typeof value === "object" && Object.keys(value).length ? value : null;
+  }
+
+  function sessionCleanupFromPayload() {
+    if (sessionCleanupState.data && typeof sessionCleanupState.data === "object") {
+      return sessionCleanupState.data;
+    }
+    const value = currentPayload()?.sessionCleanup;
+    return value && typeof value === "object" && Object.keys(value).length ? value : null;
+  }
+
+  function usageInsightsFormatTokens(value) {
+    const amount = Math.max(0, Number(value) || 0);
+    if (amount >= 1000000) return `${(amount / 1000000).toFixed(amount >= 10000000 ? 0 : 1)}M`;
+    if (amount >= 1000) return `${(amount / 1000).toFixed(amount >= 100000 ? 0 : 1)}k`;
+    return Math.round(amount).toLocaleString();
+  }
+
+  function usageInsightsFormatCost(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "费用待估";
+    const amount = Math.max(0, Number(value));
+    return `$${amount < 1 ? amount.toFixed(3) : amount.toFixed(2)}`;
+  }
+
+  function usageInsightsFormatRatio(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "--";
+    const raw = Number(value);
+    const ratio = raw > 1 ? raw / 100 : raw;
+    return `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
+  }
+
+  function usageInsightsRangeItem(item, range) {
+    if (!item || typeof item !== "object") return {};
+    const scoped = item[range];
+    if (scoped && typeof scoped === "object") return { ...item, ...scoped };
+    const prefix = range === "week" ? "week" : "today";
+    return {
+      ...item,
+      tokens: item[`${prefix}Tokens`] ?? item.tokens,
+      costUsd: item[`${prefix}CostUsd`] ?? item.costUsd,
+      cacheRatio: item[`${prefix}CacheRatio`] ?? item.cacheRatio,
+      requestCount: item[`${prefix}RequestCount`] ?? item.requestCount,
+    };
+  }
+
+  function usageInsightsRangeData(data, range) {
+    const scoped = data?.[range] && typeof data[range] === "object" ? data[range] : {};
+    const totals = scoped?.totals && typeof scoped.totals === "object"
+      ? scoped.totals
+      : (data?.[`${range}Totals`] && typeof data[`${range}Totals`] === "object"
+        ? data[`${range}Totals`]
+        : (data?.totals?.[range] || data?.totals || {}));
+    const list = (name) => {
+      const values = Array.isArray(scoped?.[name]) ? scoped[name] : (Array.isArray(data?.[name]) ? data[name] : []);
+      return values.map((item) => usageInsightsRangeItem(item, range));
+    };
+    return {
+      totals,
+      sessions: list("sessions"),
+      topSessionsByUsage: list("topSessionsByUsage"),
+      topSessionsByCost: list("topSessionsByCost"),
+      models: list("models"),
+      providers: list("providers"),
+      background: scoped?.background || data?.background || {},
+      costCoverage: scoped?.costCoverage || totals?.costCoverage || data?.costCoverage || {},
+    };
+  }
+
+  function usageInsightsRankLabel(item, kind) {
+    if (kind === "sessions") return String(item?.title || item?.name || item?.sessionTitle || item?.id || item?.sessionId || "未命名会话");
+    if (kind === "models") return String(item?.model || item?.name || "未知模型");
+    return String(item?.provider || item?.name || "未知 Provider");
+  }
+
+  function usageInsightsSessionModelNames(session) {
+    const values = Array.isArray(session?.models) ? session.models : [];
+    const names = values.map((item) => String(
+      item && typeof item === "object" ? (item.model || item.name || "") : item,
+    ).trim()).filter(Boolean);
+    return Array.from(new Set(names));
+  }
+
+  function usageInsightsSessionModelSummary(session, limit = 2) {
+    const names = usageInsightsSessionModelNames(session);
+    if (!names.length) return "未知模型";
+    const visible = names.slice(0, Math.max(1, Number(limit) || 1));
+    return `${visible.join(" + ")}${names.length > visible.length ? ` +${names.length - visible.length}` : ""}`;
+  }
+
+  function usageInsightsRankingRowsHtml(items, kind, {
+    limit = 5,
+    metric = "tokens",
+    selectedSessionId = "",
+    sessionAction = "usage-insights-session",
+  } = {}) {
+    return (Array.isArray(items) ? items : []).slice(0, limit).map((item, index) => {
+      const sessionId = String(item?.id || item?.sessionId || "");
+      const label = usageInsightsRankLabel(item, kind);
+      const actionable = kind === "sessions"
+        && (item?.actionable === true || item?.canActivate === true)
+        && !!sessionId;
+      const selectable = kind === "sessions"
+        && !!sessionId
+        && sessionAction !== "usage-insights-session";
+      const opensSession = actionable && sessionAction === "usage-insights-session";
+      const tag = selectable || opensSession ? "button" : "div";
+      const action = selectable || opensSession ? sessionAction : "";
+      const actionAttrs = action
+        ? ` type="button" data-action="${escapeHtml(action)}" data-session-id="${escapeHtml(sessionId)}" data-selected="${String(sessionId === selectedSessionId)}" aria-label="${escapeHtml(selectable ? `查看会话 ${label}` : `打开会话 ${label}`)}"`
+        : "";
+      const provider = String(item?.provider || "").trim();
+      const workdir = String(item?.workdirName || "").trim();
+      const modelText = usageInsightsSessionModelSummary(item);
+      const cache = usageInsightsFormatRatio(item?.cacheRatio);
+      const coverage = item?.costCoverage && typeof item.costCoverage === "object"
+        ? item.costCoverage
+        : {};
+      const incompleteCost = coverage?.hasCompleteCost === false;
+      const hasEstimatedCost = item?.costUsd !== null && item?.costUsd !== undefined;
+      const costCoverageNote = incompleteCost
+        ? (hasEstimatedCost ? "费用部分可估" : "费用不可估")
+        : "";
+      const latestEventAt = String(item?.latestEventAt || "");
+      const meta = [
+        `工作目录 ${workdir || "--"}`,
+        `模型 ${modelText}`,
+        provider,
+        latestEventAt ? backgroundUsageTime(latestEventAt, { compact: true }) : "",
+        costCoverageNote,
+      ].filter(Boolean).join(" · ");
+      const tokens = `${usageInsightsFormatTokens(item?.tokens ?? item?.totalTokens)} tokens`;
+      const cost = usageInsightsFormatCost(item?.costUsd);
+      const cacheText = cache === "--" ? "缓存 --" : `缓存 ${cache}`;
+      const rankLabel = metric === "cost" ? "金额排名" : "用量排名";
+      return `
+        <${tag}${actionAttrs} class="codex-usage-hud-background-event codex-usage-hud-session-ranking-row">
+          <span class="codex-usage-hud-background-event-head">
+            <span class="codex-usage-hud-background-event-title" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+            <span class="codex-usage-hud-background-status" title="${escapeHtml(rankLabel)}">#${index + 1}</span>
+          </span>
+          <span class="codex-usage-hud-background-event-meta" title="${escapeHtml(meta)}">${escapeHtml(meta)}</span>
+          <span class="codex-usage-hud-background-event-totals">
+            <strong title="${escapeHtml(tokens)}">${escapeHtml(tokens)}</strong>
+            <span title="${escapeHtml(cacheText)}">${escapeHtml(cacheText)}</span>
+            <span title="${escapeHtml(cost)}">${escapeHtml(cost)}</span>
+          </span>
+        </${tag}>
+      `;
+    }).join("");
+  }
+
+  function cleanupIconSvg(name, extraClass = "") {
+    const paths = {
+      scan: '<path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="11" cy="11" r="4"/><path d="m16 16 3 3"/>',
+      trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/>',
+      refresh: '<path d="M20 11a8 8 0 0 0-14.9-4M4 4v6h6M4 13a8 8 0 0 0 14.9 4M20 20v-6h-6"/>',
+      shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>',
+      search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+      check: '<path d="m5 12 4 4L19 6"/>',
+      alert: '<path d="m21 19-9-16-9 16h18Z"/><path d="M12 9v4M12 17h.01"/>',
+      chevron: '<path d="m9 18 6-6-6-6"/>',
+    };
+    const body = paths[String(name || "")] || paths.scan;
+    const klass = ["codex-usage-hud-cleanup-icon", extraClass].filter(Boolean).join(" ");
+    return `<svg class="${klass}" viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+  }
+
+  function safeCleanupGroups(data = safeCleanupFromPayload()) {
+    return Array.isArray(data?.groups) ? data.groups : [];
+  }
+
+  function safeCleanupSelectedGroupIds(data = safeCleanupFromPayload()) {
+    return safeCleanupGroups(data)
+      .filter((group) => {
+        const tier = String(group?.tier || "protected");
+        return !!String(group?.id || "") && !String(group?.blockedReason || "")
+          && (tier === "safe" || (tier === "consent" && safeCleanupState.includeConsent));
+      })
+      .map((group) => String(group.id));
+  }
+
+  function safeCleanupRequiresOffline(data = safeCleanupFromPayload()) {
+    const selected = new Set(safeCleanupSelectedGroupIds(data));
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    return operation?.requiresOffline === true || safeCleanupGroups(data).some((group) => selected.has(String(group?.id || "")) && group?.requiresOffline === true);
+  }
+
+  function safeCleanupRequiresBackup(data = safeCleanupFromPayload()) {
+    const selected = new Set(safeCleanupSelectedGroupIds(data));
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    return operation?.requiresBackup === true || safeCleanupGroups(data).some((group) => selected.has(String(group?.id || "")) && group?.requiresBackup === true);
+  }
+
+  function safeCleanupRequiresCodexClose(data = safeCleanupFromPayload()) {
+    const selected = new Set(safeCleanupSelectedGroupIds(data));
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    return operation?.requiresCodexClose === true || safeCleanupGroups(data).some((group) => selected.has(String(group?.id || "")) && group?.requiresCodexClose === true);
+  }
+
+  function safeCleanupTierLabel(tier) {
+    return ({ safe: "可直接清理", consent: "确认后清理", protected: "始终保护" })[String(tier || "protected")] || "始终保护";
+  }
+
+  function safeCleanupDisplayLabel(group) {
+    const raw = String(group?.label || "").trim();
+    const category = String(group?.category || "").trim();
+    const labels = {
+      "Expired user temporary data": "过期用户临时数据",
+      "NuGet package cache": "NuGet 包缓存",
+      "npm download cache": "npm 下载缓存",
+      "pip download cache": "pip 下载缓存",
+      "Homebrew download cache": "Homebrew 下载缓存",
+      "Visual Studio Code cache": "Visual Studio Code 缓存",
+      "Visual Studio cache": "Visual Studio 缓存",
+      "Xcode derived data": "Xcode 派生数据",
+      "DirectX shader cache": "DirectX 着色器缓存",
+      "GPU shader cache": "GPU 着色器缓存",
+      "Chrome cache": "Chrome 缓存",
+      "Edge cache": "Edge 缓存",
+      "Old Windows crash dumps": "Windows 旧崩溃转储",
+      "Old Windows error reports": "Windows 旧错误报告",
+      "Old queued Windows error reports": "Windows 待处理旧错误报告",
+      "Old macOS diagnostic reports": "macOS 旧诊断报告",
+      "Old macOS crash reports": "macOS 旧崩溃报告",
+      "HUD diagnostics": "HUD 诊断日志",
+      "HUD overlay history": "HUD 气泡历史",
+      "Old cleanup backup": "旧清理备份",
+      "Protected HUD data": "受保护的 HUD 数据",
+      "HUD runtime data": "HUD 运行数据",
+      "Expired Codex temporary data": "过期 Codex 临时数据",
+      "Protected Codex temporary data": "受保护的 Codex 临时数据",
+      "Old Codex diagnostics": "Codex 旧诊断历史",
+      "Old background usage history": "旧后台用量历史",
+      "Retained local history": "保留中的本地历史",
+      "Protected SQLite history": "受保护的 SQLite 历史",
+    };
+    const categoryLabels = {
+      user_temp: "用户临时数据",
+      developer_cache: "开发工具缓存",
+      editor_cache: "编辑器缓存",
+      system_cache: "系统可再生成缓存",
+      browser_cache: "浏览器缓存",
+      diagnostic_history: "系统诊断历史",
+      codex_temp: "Codex 临时数据",
+      hud_diagnostics: "HUD 诊断日志",
+      hud_overlay_history: "HUD 气泡历史",
+      cleanup_backups: "旧清理备份",
+      codex_logs_history: "Codex 旧诊断历史",
+      background_usage_history: "旧后台用量历史",
+      sqlite_history: "SQLite 历史",
+    };
+    return labels[raw] || categoryLabels[category] || raw || category || "清理项";
+  }
+
+  function safeCleanupDisplayImpact(group) {
+    const raw = String(group?.blockedReason || group?.impact || "").trim();
+    const impacts = {
+      "Applications may recreate temporary files.": "应用可能会按需重新生成临时文件。",
+      "Packages may need to be downloaded again.": "后续使用时可能需要重新下载软件包。",
+      "Graphics applications may rebuild shader data on next use.": "图形应用下次使用时会重新生成着色器缓存。",
+      "The editor may rebuild cached UI and code data.": "编辑器下次使用时会重建界面和代码缓存。",
+      "Visual Studio may rebuild component and image caches.": "Visual Studio 下次使用时会重建组件和图像缓存。",
+      "Visual Studio may rebuild cached data.": "Visual Studio 下次使用时会重建缓存。",
+      "Xcode may rebuild indexes and build products.": "Xcode 下次使用时会重建索引和构建产物。",
+      "Pages and shaders may be cached again on next use.": "浏览器下次使用时会重新生成页面和着色器缓存。",
+      "Old operating-system diagnostics will no longer be available.": "清理后将无法再用这些旧系统报告排查问题。",
+      "Old HUD diagnostics will no longer be available.": "清理后将无法查看这些旧 HUD 诊断日志。",
+      "Protected HUD data remains unchanged.": "HUD 配置、状态和受保护数据保持不变。",
+      "Codex may recreate temporary staging data when needed.": "Codex 可能会在需要时重新生成临时暂存数据。",
+      "Codex temporary data remains unchanged.": "Codex 临时数据保持不变。",
+      "A previous local cleanup backup will be removed.": "将删除一份超过保留期的旧清理备份。",
+      "History older than the retention period will be permanently removed.": "保留期之前的历史将永久删除。",
+      "No history is older than the configured retention period.": "当前没有超过保留期的历史。",
+      "The database remains unchanged.": "数据库保持不变。",
+      "A related application is currently running.": "相关应用正在运行，当前保持不变。",
+      "Cleanup data contains files newer than the retention threshold.": "包含未超过保留期的项目，当前保持不变。",
+      "Cleanup data contains a reparse point or unreadable entry.": "包含重解析点或无法读取的项目，当前保持不变。",
+      "Cache data contains a reparse point or unreadable entry.": "缓存包含重解析点或无法读取的项目，当前保持不变。",
+      "Cache root could not be verified.": "无法完整验证缓存目录，当前保持不变。",
+    };
+    return impacts[raw] || raw || safeCleanupTierLabel(group?.tier);
+  }
+
+  function safeCleanupOperationLabel(operation) {
+    const state = String(operation?.state || "idle");
+    if (state === "completed" && operation?.action === "scan") return "扫描完成";
+    return ({ idle: "等待扫描", scanning: "正在扫描", accepted: "请求已提交", preview: "清理预览", running: "正在清理", queued_exit: "等待退出", completed: "清理完成", partial: "部分完成", cancelled: "已取消", failed: "清理失败", restored: "已从备份恢复" })[state] || "状态更新中";
+  }
+
+  function safeCleanupResultStateLabel(state) {
+    return ({ selected: "已选择", completed: "已清理", skipped: "已跳过", failed: "失败", restored: "已恢复" })[String(state || "")] || String(state || "状态未知");
+  }
+
+  function safeCleanupRetention(group) {
+    const settings = hudSettingsFromPayload();
+    const category = String(group?.category || group?.id || "").toLowerCase();
+    if (category === "background_usage_history") return `保留 ${Math.max(1, Number(settings.cleanup_background_retention_days || 30))} 天`;
+    if (category === "codex_logs_history") return `保留 ${Math.max(1, Number(settings.cleanup_log_retention_hours || 24))} 小时`;
+    const retention = String(group?.retention || "").trim();
+    const days = retention.match(/^(\d+) days?$/i);
+    if (days) return `保留 ${days[1]} 天`;
+    const hours = retention.match(/^(\d+) hours?$/i);
+    if (hours) return `保留 ${hours[1]} 小时`;
+    const seconds = retention.match(/^(\d+) seconds?$/i);
+    if (seconds) return `保留 ${seconds[1]} 秒`;
+    if (retention) return retention;
+    return "按安全策略";
+  }
+
+  function safeCleanupBackupLocationLabel(operation) {
+    const volumeLabels = Array.isArray(operation?.backupVolumeLabels)
+      ? operation.backupVolumeLabels.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const directoryLabels = Array.isArray(operation?.backupDirectoryLabels)
+      ? operation.backupDirectoryLabels.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const volume = String(operation?.backupVolumeLabel || volumeLabels.join("、") || "").trim();
+    const directory = String(operation?.backupDirectoryLabel || operation?.backupLabel || directoryLabels.join("、") || "").trim();
+    return [volume ? `卷 ${volume}` : "", directory && directory !== volume ? `目录 ${directory}` : ""].filter(Boolean).join(" · ");
+  }
+
+  function safeCleanupPreviewSpaceSummary(operation) {
+    const estimated = Math.max(0, Number(operation?.estimatedBytes ?? operation?.bytes ?? 0));
+    const backupBytes = Math.max(0, Number(operation?.backupBytes ?? 0));
+    const sameVolumeBytes = Math.max(0, Number(operation?.sameVolumeBackupBytes ?? 0));
+    const netEstimated = Math.max(0, Number(operation?.netEstimatedBytes ?? estimated));
+    const location = safeCleanupBackupLocationLabel(operation);
+    if (!backupBytes) return `预计释放 ${storageFormatBytes(estimated)}`;
+    if (!sameVolumeBytes) {
+      return `源盘预计释放 ${storageFormatBytes(netEstimated)} · 备份 ${storageFormatBytes(backupBytes)} 存到其他磁盘${location ? `（${location}）` : ""}，不占用源盘`;
+    }
+    if (sameVolumeBytes >= backupBytes) {
+      return `预计清理 ${storageFormatBytes(estimated)} · 同盘备份占用 ${storageFormatBytes(backupBytes)} · 源盘预计净释放 ${storageFormatBytes(netEstimated)}`;
+    }
+    return `预计清理 ${storageFormatBytes(estimated)} · 备份共 ${storageFormatBytes(backupBytes)}（同卷 ${storageFormatBytes(sameVolumeBytes)}） · 源盘预计净释放 ${storageFormatBytes(netEstimated)}`;
+  }
+
+  function safeCleanupConfirmSpaceSummary(operation) {
+    const estimated = Math.max(0, Number(operation?.estimatedBytes ?? operation?.bytes ?? 0));
+    const backupBytes = Math.max(0, Number(operation?.backupBytes ?? 0));
+    const sameVolumeBytes = Math.max(0, Number(operation?.sameVolumeBackupBytes ?? 0));
+    const netEstimated = Math.max(0, Number(operation?.netEstimatedBytes ?? estimated));
+    const location = safeCleanupBackupLocationLabel(operation);
+    if (!backupBytes) return `预计释放 ${storageFormatBytes(estimated)}`;
+    if (!sameVolumeBytes) {
+      return `预计源盘释放 ${storageFormatBytes(netEstimated)}；备份 ${storageFormatBytes(backupBytes)} 将保存到其他磁盘${location ? `（${location}）` : ""}，不占用源盘`;
+    }
+    if (sameVolumeBytes >= backupBytes) {
+      return `预计源盘净释放 ${storageFormatBytes(netEstimated)}，已扣除同卷备份 ${storageFormatBytes(backupBytes)}`;
+    }
+    return `预计源盘净释放 ${storageFormatBytes(netEstimated)}；备份共 ${storageFormatBytes(backupBytes)}，其中同卷占用 ${storageFormatBytes(sameVolumeBytes)}`;
+  }
+
+  function safeCleanupResultBackupSummary(operation) {
+    const backupBytes = Math.max(0, Number(operation?.backupBytes ?? 0));
+    if (!backupBytes) return "";
+    const location = safeCleanupBackupLocationLabel(operation);
+    const files = Array.isArray(operation?.backupFiles)
+      ? operation.backupFiles.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const visibleFiles = files.slice(0, 3).join("、");
+    const fileSuffix = files.length > 3 ? ` 等 ${files.length} 个文件` : visibleFiles;
+    return `备份 ${storageFormatBytes(backupBytes)}${location ? ` · ${location}` : ""}${fileSuffix ? ` · ${fileSuffix}` : ""}`;
+  }
+
+  function syncSafeCleanupDefaults(data = safeCleanupFromPayload()) {
+    const settings = hudSettingsFromPayload();
+    const status = currentPayload()?.settingsCommandStatus;
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const selectedDirectory = String(
+      data?.backupDirectory
+      || operation?.backupDirectory
+      || status?.cleanupBackupDirectory
+      || ""
+    ).trim();
+    if (selectedDirectory) {
+      safeCleanupState.backupDirectory = selectedDirectory;
+      safeCleanupState.backupDirectoryDirty = false;
+    } else if (!safeCleanupState.backupDirectoryDirty && !safeCleanupState.backupDirectory) {
+      safeCleanupState.backupDirectory = String(settings.cleanup_backup_directory || "").trim();
+    }
+  }
+
+  function safeCleanupGroupsHtml(data, {
+    selectedIds = [],
+  } = {}) {
+    const groups = safeCleanupGroups(data);
+    const selected = new Set((selectedIds || []).map((id) => String(id || "")).filter(Boolean));
+    const safeGroups = groups.filter((group) => String(group?.tier || "protected") === "safe");
+    const consentGroups = groups.filter((group) => String(group?.tier || "protected") === "consent");
+    const protectedGroups = groups.filter((group) => String(group?.tier || "protected") === "protected");
+    const renderRow = (group, {
+      checked = false,
+      kind = "safe",
+      interactive = false,
+    } = {}) => {
+      const tier = String(group?.tier || "protected");
+      const impact = safeCleanupDisplayImpact(group);
+      const items = Array.isArray(group?.items) ? group.items.length : Number(group?.items || group?.itemCount || 0);
+      const meta = [safeCleanupRetention(group), items > 0 ? `${items} 项` : "", group?.requiresOffline ? "需退出后维护" : ""].filter(Boolean).join(" · ");
+      const checkAttrs = interactive
+        ? `data-action="cleanup-deep-toggle" aria-expanded="${cleanupDeepExpanded}"`
+        : "";
+      return `<div class="codex-usage-hud-cleanup-row" data-tier="${escapeHtml(tier)}" data-kind="${escapeHtml(kind)}"><span class="codex-usage-hud-cleanup-check" data-checked="${checked}" data-disabled="${tier === "protected"}" ${checkAttrs}></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(safeCleanupDisplayLabel(group))}</div><div class="codex-usage-hud-cleanup-row-meta">${escapeHtml(meta || "按安全策略")}</div></div><div class="codex-usage-hud-cleanup-row-impact">${escapeHtml(impact)}</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(group?.bytes)}</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
+    };
+    const safeRows = safeGroups.slice(0, 8).map((group) => renderRow(group, {
+      checked: selected.has(String(group?.id || "")),
+      kind: "safe",
+    })).join("");
+    const consentBytes = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
+    const deepRow = consentGroups.length ? renderRow({
+      tier: "consent",
+      label: "深度清理（可选）",
+      category: "diagnostic_history",
+      retention: "24 hours",
+      impact: "需备份并关闭 Codex",
+      bytes: consentBytes,
+      items: consentGroups.length,
+      requiresOffline: consentGroups.some((group) => group?.requiresOffline),
+    }, {
+      checked: !!safeCleanupState.includeConsent,
+      kind: "deep",
+      interactive: true,
+    }) : "";
+    const expandedConsent = cleanupDeepExpanded
+      ? consentGroups.slice(0, 5).map((group) => renderRow(group, {
+        checked: selected.has(String(group?.id || "")),
+        kind: "consent",
+      })).join("")
+      : "";
+    const protectedBytes = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
+    const protectedNote = protectedGroups.length
+      ? `<div class="codex-usage-hud-cleanup-protected-note"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 项</span><span>配置、凭据和会话默认受保护</span></div>`
+      : "";
+    return `${safeRows}${deepRow}${expandedConsent}${protectedNote}`;
+  }
+
+  function safeCleanupPreviewHtml(data) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const state = String(operation?.state || "idle");
+    if (operation?.action === "scan") return "";
+    if (!new Set(["preview", "completed", "partial", "failed", "restored"]).has(state) || safeCleanupState.previewHidden) return "";
+    const results = Array.isArray(operation?.results) ? operation.results : [];
+    const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : safeCleanupSelectedGroupIds(data);
+    const groupById = new Map(safeCleanupGroups(data).map((group) => [String(group?.id || ""), group]));
+    const previewItems = results.length
+      ? results.map((item) => ({ ...(groupById.get(String(item?.id || "")) || {}), ...item }))
+      : selectedIds.map((id) => {
+        const group = groupById.get(String(id)) || {};
+        return { ...group, id, state: "selected" };
+      });
+    const previewTierOrder = { consent: 0, safe: 1, protected: 2 };
+    const orderedPreviewItems = [...previewItems].sort((left, right) => (
+      (previewTierOrder[String(left?.tier || "")] ?? 3)
+      - (previewTierOrder[String(right?.tier || "")] ?? 3)
+    ));
+    const rows = orderedPreviewItems.slice(0, 16).map((item) => `<div class="codex-usage-hud-cleanup-result"><span>${escapeHtml(safeCleanupDisplayLabel(item))}</span><span class="codex-usage-hud-cleanup-meta">${escapeHtml(item?.error || safeCleanupResultStateLabel(item?.state))}</span></div>`).join("");
+    const actual = operation?.actualBytes;
+    const value = actual === null || actual === undefined
+      ? safeCleanupPreviewSpaceSummary(operation)
+      : `实际回收 ${storageFormatBytes(actual)}`;
+    const backupSummary = actual === null || actual === undefined ? "" : safeCleanupResultBackupSummary(operation);
+    return `<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(value)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div>`;
+  }
+
+  function safeCleanupPanelHtml() {
+    const data = safeCleanupFromPayload();
+    const scanned = !!String(data?.revision || "");
+    const pending = !!safeCleanupState.pendingRequestId;
+    if (!data || !scanned) {
+      return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">本机缓存、临时文件与 HUD 诊断数据</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large" ${pending ? "disabled" : ""}>${pending ? "正在扫描..." : `${cleanupIconSvg("scan")}扫描垃圾`}</button></div></section>`;
+    }
+    syncSafeCleanupDefaults(data);
+    const totals = data?.totals && typeof data.totals === "object" ? data.totals : {};
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const operationState = String(operation?.state || "idle");
+    const previewLocked = operationState === "preview" && !safeCleanupState.previewHidden;
+    const offline = safeCleanupRequiresOffline(data);
+    const requiresBackup = safeCleanupRequiresBackup(data);
+    const requiresCodexClose = safeCleanupRequiresCodexClose(data);
+    const consentAvailable = safeCleanupGroups(data).some((group) => String(group?.tier || "") === "consent" && !String(group?.blockedReason || ""));
+    const selectedIds = previewLocked && Array.isArray(operation?.selectedIds)
+      ? operation.selectedIds.map((id) => String(id || "")).filter(Boolean)
+      : safeCleanupSelectedGroupIds(data);
+    const reclaimable = operation?.netEstimatedBytes ?? totals?.reclaimableBytes;
+    const backupControl = requiresBackup ? `<div class="codex-usage-hud-cleanup-backup"><input type="text" data-cleanup-backup-directory="true" value="${escapeHtml(safeCleanupState.backupDirectory)}" placeholder="选择备份目录" aria-label="SQLite 备份目录" ${previewLocked ? "disabled" : ""}><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-choose-backup" ${previewLocked ? "disabled" : ""}>选择目录</button></div>` : "";
+    const autoCloseControl = requiresCodexClose ? `<label class="codex-usage-hud-cleanup-control"><input type="checkbox" data-cleanup-auto-close="true" ${safeCleanupState.autoCloseConfirmed ? "checked" : ""}><span><strong>允许自动关闭并恢复 Codex App 与 HUD</strong><span class="codex-usage-hud-cleanup-meta">检测到独立 Codex CLI 或活动任务时仍会停止执行</span></span></label>` : "";
+    const controls = cleanupDeepExpanded ? `<div class="codex-usage-hud-cleanup-controls">${consentAvailable ? `<label class="codex-usage-hud-cleanup-control"><input type="checkbox" data-cleanup-consent="true" ${safeCleanupState.includeConsent ? "checked" : ""} ${previewLocked ? "disabled" : ""}><span><strong>启用深度清理</strong><span class="codex-usage-hud-cleanup-meta">包含会失去历史的诊断或 SQLite 旧记录，默认不选</span></span></label>` : ""}${backupControl}${autoCloseControl}</div>` : "";
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}可安全清理</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(reclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已选 ${selectedIds.length} 项<br>${escapeHtml(safeCleanupOperationLabel(operation))}</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(data, { selectedIds })}${controls}</div>${operationState === "preview" ? "" : safeCleanupPreviewHtml(data)}</section>`;
+  }
+
+  function storagePanelHtml() {
+    const isSessions = cleanupActiveSection === "sessions";
+    const sessionData = sessionCleanupFromPayload();
+    const cleanupData = safeCleanupFromPayload();
+    const sessionCount = Number(sessionData?.totals?.sessions || (Array.isArray(sessionData?.sessions) ? sessionData.sessions.length : 0));
+    const headMeta = isSessions
+      ? (sessionCount ? `${sessionCount.toLocaleString()} 个本地会话` : "按需扫描 · 无后台轮询")
+      : (cleanupData?.revision ? escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {})) : "按需扫描 · 无后台轮询");
+    const body = isSessions ? sessionCleanupPanelHtml() : safeCleanupPanelHtml();
+    const junkScanned = !!String(cleanupData?.revision || "");
+    const sessionScanned = !!String(sessionData?.revision || "");
+    const junkBusy = new Set(["scanning", "accepted", "running", "queued_exit"]).has(String(cleanupData?.operation?.state || "")) || !!safeCleanupState.pendingRequestId;
+    const sessionBusy = new Set(["scanning", "accepted", "running"]).has(String(sessionData?.operation?.state || "")) || !!sessionCleanupState.pendingRequestId;
+    const junkReady = String(cleanupData?.operation?.state || "") === "preview" && !!String(cleanupData?.operation?.confirmationToken || "");
+    const reclaimable = cleanupData?.operation?.netEstimatedBytes ?? cleanupData?.totals?.reclaimableBytes;
+    let footerMeta = "配置、凭据和会话默认受保护";
+    let footerActions = "";
+    if (isSessions) {
+      const selectedCount = sessionCleanupState.selectedIds.size;
+      const selectedRows = sessionCleanupRows(sessionData).filter((item) => sessionCleanupState.selectedIds.has(String(item?.id || "")));
+      const descendants = selectedRows.reduce((sum, item) => sum + Math.max(0, Number(item?.descendantCount || 0)), 0);
+      const bytes = selectedRows.reduce((sum, item) => sum + Math.max(0, Number(item?.bytes || 0)), 0);
+      footerMeta = selectedCount
+        ? `已选 ${selectedCount} 个会话 · 含 ${descendants} 个关联子任务 · ${storageFormatBytes(bytes)}`
+        : (sessionScanned ? "当前/运行中会话不可选；子任务随主会话汇总" : "上次扫描：--");
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" ${sessionBusy ? "disabled" : ""}>${sessionBusy ? "正在扫描..." : (sessionScanned ? "重新扫描" : "扫描会话")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-preview" data-danger="true" data-size="large" ${sessionBusy || !selectedCount || sessionData?.capability?.available !== true ? "disabled" : ""}>${cleanupIconSvg("trash")}永久删除</button></div>`;
+    } else if (!junkScanned) {
+      footerMeta = `上次扫描：-- · ${cleanupIconSvg("shield")} 配置、凭据和会话默认受保护`;
+      footerActions = "";
+    } else {
+      const offline = safeCleanupRequiresOffline(cleanupData);
+      const requiresBackup = safeCleanupRequiresBackup(cleanupData);
+      const requiresCodexClose = safeCleanupRequiresCodexClose(cleanupData);
+      footerMeta = `执行前仍会重验路径、指纹与活动任务${requiresBackup ? " · 需 SQLite 备份" : (requiresCodexClose ? " · 需重启 Codex" : (offline ? " · HUD 将短暂重启" : ""))}`;
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" ${junkBusy ? "disabled" : ""}>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" ${junkBusy || !junkReady ? "disabled" : ""}>${junkBusy && safeCleanupState.pendingRequestId ? "正在更新..." : `${cleanupIconSvg("check")}${junkReady ? `确认清理 ${storageFormatBytes(reclaimable)}` : "确认清理"}`}</button></div>`;
+    }
+    return `<div class="codex-usage-hud-cleanup-workspace"><div class="codex-usage-hud-cleanup-page-head"><div class="codex-usage-hud-cleanup-segments" role="tablist" aria-label="空间清理分类"><button type="button" role="tab" aria-selected="${!isSessions}" data-action="cleanup-section" data-cleanup-section="junk" data-active="${!isSessions}">${cleanupIconSvg("scan")}垃圾清理</button><button type="button" role="tab" aria-selected="${isSessions}" data-action="cleanup-section" data-cleanup-section="sessions" data-active="${isSessions}">${cleanupIconSvg("trash")}会话管理</button></div><span class="codex-usage-hud-cleanup-head-meta">${headMeta}</span></div><div class="codex-usage-hud-cleanup-content">${body}</div><div class="codex-usage-hud-cleanup-footer"><span class="codex-usage-hud-cleanup-footer-meta">${footerMeta}</span>${footerActions}</div></div>`;
+  }
+
+  function sessionCleanupRows(data = sessionCleanupFromPayload()) {
+    const search = String(sessionCleanupState.search || "").trim().toLowerCase();
+    const status = String(sessionCleanupState.status || "all");
+    const timeFilter = String(sessionCleanupState.time || "all");
+    const now = Date.now();
+    return (Array.isArray(data?.sessions) ? data.sessions : []).filter((item) => {
+      if (status === "archived" && item?.archived !== true) return false;
+      if (status === "active" && !new Set(["current", "running"]).has(String(item?.status || ""))) return false;
+      if (status === "selectable" && item?.selectable !== true) return false;
+      if (timeFilter !== "all") {
+        const updatedAt = Date.parse(String(item?.updatedAt || ""));
+        if (!Number.isFinite(updatedAt)) return false;
+        const age = Math.max(0, now - updatedAt);
+        if (timeFilter === "7d" && age > 7 * 86400000) return false;
+        if (timeFilter === "30d" && age > 30 * 86400000) return false;
+        if (timeFilter === "older" && age <= 30 * 86400000) return false;
+      }
+      if (!search) return true;
+      return `${item?.title || ""} ${item?.workdirName || ""}`.toLowerCase().includes(search);
+    });
+  }
+
+  function sessionCleanupStatusLabel(item) {
+    const status = String(item?.status || "idle");
+    return ({ idle: "普通", archived: "已归档", current: "当前", running: "运行中", unresolved: "映射异常", unavailable: "不可用" })[status] || status;
+  }
+
+  function sessionCleanupReasonLabel(value) {
+    const reason = String(value || "").trim();
+    const exact = {
+      "Not scanned yet.": "尚未扫描。",
+      "Codex CLI command is unavailable.": "未找到可用的 Codex CLI。",
+      "This Codex CLI cannot delete sessions.": "当前 Codex CLI 不支持永久删除会话。",
+      "This Codex CLI does not expose non-interactive permanent deletion.": "当前 Codex CLI 不支持非交互永久删除。",
+      "The current session cannot be permanently deleted.": "当前会话不可永久删除。",
+      "This session tree still has active work.": "该会话或关联子任务仍在运行。",
+      "The session spawn relation could not be verified.": "无法完整验证主会话与子任务关系。",
+      "The session rollout mapping could not be verified.": "无法完整验证会话本地记录映射。",
+    };
+    if (exact[reason]) return exact[reason];
+    if (reason.startsWith("Codex delete capability could not be verified")) {
+      return "无法验证 Codex 永久删除能力。";
+    }
+    return reason;
+  }
+
+  function sessionCleanupPanelHtml() {
+    const data = sessionCleanupFromPayload();
+    const scanned = !!String(data?.revision || "");
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const state = String(operation?.state || "idle");
+    const busy = new Set(["scanning", "accepted", "running"]).has(state) || !!sessionCleanupState.pendingRequestId;
+    if (!data || !scanned) {
+      return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话整理本地记录，关联子任务会随主会话一起永久删除。</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" data-primary="true" data-size="large" ${busy ? "disabled" : ""}>${busy ? "正在扫描..." : `${cleanupIconSvg("search")}扫描会话`}</button></div></section>`;
+    }
+    const capability = data?.capability && typeof data.capability === "object" ? data.capability : {};
+    const rows = sessionCleanupRows(data);
+    const visibleSelectable = rows.filter((item) => item?.selectable === true && String(item?.id || ""));
+    const allVisibleSelected = visibleSelectable.length > 0
+      && visibleSelectable.every((item) => sessionCleanupState.selectedIds.has(String(item.id)));
+    const rowHtml = rows.slice(0, 180).map((item) => {
+      const id = String(item?.id || "");
+      const selectable = item?.selectable === true && !!id;
+      const checked = selectable && sessionCleanupState.selectedIds.has(id);
+      const descendants = Math.max(0, Number(item?.descendantCount || 0));
+      const updatedAt = item?.updatedAt ? backgroundUsageTime(item.updatedAt, { compact: true }) : "--";
+      const secondary = [
+        String(item?.workdirName || ""),
+        updatedAt,
+        descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务",
+      ].filter(Boolean).join(" · ");
+      const related = descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务";
+      return `<label class="codex-usage-hud-session-row" data-selectable="${selectable}" data-selected="${checked}"><input type="checkbox" data-session-cleanup-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}><div class="codex-usage-hud-session-title"><strong title="${escapeHtml(item?.title || "未命名会话")}">${escapeHtml(item?.title || "未命名会话")}</strong><span>${escapeHtml(related)}</span><span data-secondary="true">${escapeHtml(secondary)}</span>${item?.blockedReason ? `<span data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(item.blockedReason))}</span>` : ""}</div><span class="codex-usage-hud-session-workdir" title="${escapeHtml(item?.workdirName || "")}">${escapeHtml(item?.workdirName || "--")}</span><span class="codex-usage-hud-session-cell">${escapeHtml(updatedAt)}</span><span class="codex-usage-hud-session-badge" data-state="${escapeHtml(item?.status || "idle")}">${escapeHtml(sessionCleanupStatusLabel(item))}</span><span class="codex-usage-hud-session-size">${storageFormatBytes(item?.bytes)}</span></label>`;
+    }).join("");
+    const results = Array.isArray(operation?.results) ? operation.results : [];
+    const resultHtml = results.length ? `<div class="codex-usage-hud-session-results"><strong>${state === "completed" ? "删除完成" : state === "partial" ? "部分完成" : "删除失败"}</strong>${results.map((item) => `<div><span>${escapeHtml(item?.title || "会话")}</span><span data-kind="${item?.state === "deleted" ? "success" : "error"}">${escapeHtml(item?.state === "deleted" ? "已永久删除" : item?.error || "删除失败")}</span></div>`).join("")}</div>` : "";
+    const unavailable = capability?.available === false ? `<div class="codex-usage-hud-session-capability" data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(capability?.reason) || "当前 Codex CLI 不支持永久删除，会话清单保持只读。")}</div>` : "";
+    const clipped = rows.length > 180
+      ? `<div class="codex-usage-hud-cleanup-meta" style="padding:8px 13px">当前筛选共 ${rows.length} 项，仅显示前 180 项。</div>`
+      : "";
+    const statusFilter = String(sessionCleanupState.status || "all");
+    const timeFilterChip = String(sessionCleanupState.time || "all");
+    const statusChips = [
+      ["all", "全部"],
+      ["archived", "已归档"],
+      ["active", "当前/运行中"],
+      ["selectable", "可删除"],
+    ].map(([value, label]) => `<button type="button" class="codex-usage-hud-session-filter" data-action="session-cleanup-status" data-session-cleanup-status="${value}" data-active="${statusFilter === value}" aria-pressed="${statusFilter === value}">${label}</button>`).join("");
+    const timeChips = [
+      ["all", "全部时间"],
+      ["30d", "30 天未用"],
+      ["older", "更早"],
+      ["7d", "近 7 天"],
+    ].map(([value, label]) => `<button type="button" class="codex-usage-hud-session-filter" data-action="session-cleanup-time" data-session-cleanup-time="${value}" data-active="${timeFilterChip === value}" aria-pressed="${timeFilterChip === value}">${label}</button>`).join("");
+    return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理">${unavailable}<div class="codex-usage-hud-session-tools"><div class="codex-usage-hud-session-search">${cleanupIconSvg("search")}<input type="search" data-session-cleanup-search="true" value="${escapeHtml(sessionCleanupState.search)}" placeholder="搜索标题或工作目录" aria-label="搜索会话"></div><div class="codex-usage-hud-session-filters" role="group" aria-label="会话筛选">${statusChips}${timeChips}</div></div><div class="codex-usage-hud-session-table"><div class="codex-usage-hud-session-head"><span><input type="checkbox" data-session-cleanup-select-all="true" ${allVisibleSelected ? "checked" : ""} ${visibleSelectable.length ? "" : "disabled"} aria-label="全选当前筛选"></span><span>会话</span><span>工作目录</span><span>最后活动</span><span>状态</span><span>占用</span></div>${rowHtml || '<div class="codex-usage-hud-cleanup-empty">当前筛选没有会话。</div>'}</div>${clipped}${resultHtml}</section>`;
+  }
+
+  function captureStorageUiState() {
+    const modal = document.getElementById(settingsModalId);
+    const body = modal?.querySelector?.(".codex-usage-hud-settings-body");
+    if (body) storageBodyScrollTop = body.scrollTop;
+    const cleanupContent = modal?.querySelector?.(".codex-usage-hud-cleanup-content");
+    if (cleanupContent) cleanupContentScrollTop = cleanupContent.scrollTop;
+    const sessionTable = modal?.querySelector?.(".codex-usage-hud-session-table");
+    if (sessionTable) sessionTableScrollTop = sessionTable.scrollTop;
+    const backup = modal?.querySelector?.("[data-cleanup-backup-directory='true']");
+    if (backup instanceof HTMLInputElement) safeCleanupState.backupDirectory = String(backup.value || "").trim();
+    const consent = modal?.querySelector?.("[data-cleanup-consent='true']");
+    if (consent instanceof HTMLInputElement) safeCleanupState.includeConsent = !!consent.checked;
+    const autoClose = modal?.querySelector?.("[data-cleanup-auto-close='true']");
+    if (autoClose instanceof HTMLInputElement) safeCleanupState.autoCloseConfirmed = !!autoClose.checked;
+  }
+
+  function restoreStorageUiState() {
+    const modal = document.getElementById(settingsModalId);
+    const body = modal?.querySelector?.(".codex-usage-hud-settings-body");
+    if (body) body.scrollTop = storageBodyScrollTop;
+    const cleanupContent = modal?.querySelector?.(".codex-usage-hud-cleanup-content");
+    if (cleanupContent) cleanupContent.scrollTop = cleanupContentScrollTop;
+    const sessionTable = modal?.querySelector?.(".codex-usage-hud-session-table");
+    if (sessionTable) sessionTable.scrollTop = sessionTableScrollTop;
+  }
+
+  function requestUsageInsightsRefresh({ force = false } = {}) {
+    if (usageInsightsState.refreshRequestId && !force) return false;
+    const requestId = typedSettingsRequestId("usage-insights");
+    usageInsightsState.refreshRequestId = requestId;
+    usageInsightsState.error = "";
+    const submitted = submitSettingsCommand(
+      { action: "usageInsightsRefresh", requestId },
+      "正在刷新会话排行...",
+      { preserveOverlay: true },
+    );
+    if (!submitted) {
+      usageInsightsState.refreshRequestId = "";
+      usageInsightsState.error = "无法提交会话排行刷新请求。";
+    }
+    return submitted;
+  }
+
+  function requestSafeCleanupScan() {
+    if (safeCleanupState.pendingRequestId) return false;
+    const requestId = typedSettingsRequestId("safe-cleanup-scan");
+    safeCleanupState.pendingRequestId = requestId;
+    safeCleanupState.previewHidden = false;
+    safeCleanupState.previewBackupDirectory = "";
+    const submitted = submitSettingsCommand(
+      { action: "safeCleanupScan", requestId },
+      "正在扫描可安全清理的本地数据...",
+      { preserveOverlay: true },
+    );
+    if (!submitted) safeCleanupState.pendingRequestId = "";
+    return submitted;
+  }
+
+  function requestSafeCleanupPreview() {
+    captureStorageUiState();
+    const data = safeCleanupFromPayload();
+    const groupIds = safeCleanupSelectedGroupIds(data);
+    const inventoryRevision = String(data?.revision || "");
+    const requiresBackup = safeCleanupRequiresBackup(data);
+    if (!inventoryRevision || !groupIds.length) {
+      setSettingsStatus("请先扫描可清理项。", "error");
+      return false;
+    }
+    if (requiresBackup && !safeCleanupState.backupDirectory) {
+      setSettingsStatus("SQLite 维护必须先选择备份目录。", "error");
+      return false;
+    }
+    const requestId = typedSettingsRequestId("safe-cleanup-preview");
+    safeCleanupState.pendingRequestId = requestId;
+    safeCleanupState.previewHidden = false;
+    const previewBackupDirectory = requiresBackup ? safeCleanupState.backupDirectory : "";
+    const submitted = submitSettingsCommand({
+      action: "safeCleanupPreview",
+      requestId,
+      groupIds,
+      inventoryRevision,
+      consentConfirmed: safeCleanupState.includeConsent,
+      backupDirectory: safeCleanupState.backupDirectory,
+      autoCloseAndRestore: safeCleanupState.autoCloseConfirmed,
+    }, "正在生成清理预览...", { preserveOverlay: true });
+    if (submitted) {
+      safeCleanupState.previewBackupDirectory = previewBackupDirectory;
+    } else {
+      safeCleanupState.pendingRequestId = "";
+      safeCleanupState.previewBackupDirectory = "";
+    }
+    return submitted;
+  }
+
+  function openSafeCleanupExecuteConfirm() {
+    captureStorageUiState();
+    const dialog = settingsDialogRoot();
+    const data = safeCleanupFromPayload();
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    if (!dialog || String(operation?.state || "") !== "preview") return;
+    const offline = safeCleanupRequiresOffline(data);
+    const requiresBackup = safeCleanupRequiresBackup(data);
+    const requiresCodexClose = safeCleanupRequiresCodexClose(data);
+    const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
+    const groupById = new Map(safeCleanupGroups(data).map((group) => [String(group?.id || ""), group]));
+    const includesConsent = operation?.includesConsent === true
+      || selectedIds.some((id) => String(groupById.get(String(id))?.tier || "") === "consent");
+    const previewBackupDirectory = String(safeCleanupState.previewBackupDirectory || "").trim();
+    if (requiresBackup && !previewBackupDirectory) {
+      setSettingsStatus("预览绑定的 SQLite 备份目录不可用，请取消后重新生成预览。", "error");
+      return;
+    }
+    if (requiresCodexClose && !safeCleanupState.autoCloseConfirmed) {
+      setSettingsStatus("请先确认允许自动关闭并恢复 Codex App 与 HUD。", "error");
+      return;
+    }
+    closeSettingsConfirm();
+    const layer = document.createElement("div");
+    layer.className = "codex-usage-hud-settings-confirm-layer";
+    layer.dataset.settingsConfirm = "true";
+    const offlineNote = requiresBackup
+      ? `\nSQLite 将先备份到：${escapeHtml(previewBackupDirectory)}\n活动任务或独立 Codex CLI 会阻止执行。`
+      : (requiresCodexClose ? "\nCodex App 与 HUD 会正常退出并在清理后自动恢复。活动任务或独立 Codex CLI 会阻止执行。" : (offline ? "\nHUD 会短暂退出并在清理自身日志后自动恢复。活动任务会阻止执行。" : ""));
+    const spaceSummary = safeCleanupConfirmSpaceSummary(operation);
+    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认一键清理"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">清理 ${selectedIds.length} 类本地数据？</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(spaceSummary)}。${includesConsent ? "已包含会失去历史或诊断信息的确认项。" : "仅包含可直接清理项。"}${offlineNote}</div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-execute" data-primary="true">确认清理</button></div></div>`;
+    dialog.appendChild(layer);
+    layer.querySelector('[data-action="safe-cleanup-confirm-cancel"]')?.focus?.();
+  }
+
+  function executeSafeCleanup() {
+    const data = safeCleanupFromPayload();
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const groupIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : safeCleanupSelectedGroupIds(data);
+    const requestId = typedSettingsRequestId("safe-cleanup-execute");
+    safeCleanupState.pendingRequestId = requestId;
+    closeSettingsConfirm();
+    return submitSettingsCommand({
+      action: "safeCleanupExecute",
+      requestId,
+      groupIds,
+      inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""),
+      confirmationToken: String(operation?.confirmationToken || ""),
+      autoCloseAndRestore: safeCleanupState.autoCloseConfirmed,
+    }, "清理已确认，等待安全门禁...", { preserveOverlay: true });
+  }
+
+  function scheduleSafeCleanupPreview() {
+    clearTimeout(safeCleanupPreviewTimer);
+    safeCleanupState.pendingRequestId = "pending-preview";
+    rerenderUsageInsightsIfVisible();
+    safeCleanupPreviewTimer = setTimeout(() => {
+      safeCleanupState.pendingRequestId = "";
+      requestSafeCleanupPreview();
+    }, 280);
+  }
+
+  function requestSessionCleanupScan() {
+    if (sessionCleanupState.pendingRequestId) return false;
+    const requestId = typedSettingsRequestId("session-cleanup-scan");
+    sessionCleanupState.pendingRequestId = requestId;
+    sessionCleanupState.selectedIds.clear();
+    sessionCleanupState.previewTokenShown = "";
+    const submitted = submitSettingsCommand(
+      { action: "sessionCleanupScan", requestId },
+      "正在扫描本地会话清单...",
+      { preserveOverlay: true },
+    );
+    if (!submitted) sessionCleanupState.pendingRequestId = "";
+    return submitted;
+  }
+
+  function requestSessionCleanupPreview() {
+    const data = sessionCleanupFromPayload();
+    const itemIds = Array.from(sessionCleanupState.selectedIds);
+    const revision = String(data?.revision || "");
+    if (!revision || !itemIds.length) {
+      setSettingsStatus("请先扫描并选择可删除会话。", "error");
+      return false;
+    }
+    const requestId = typedSettingsRequestId("session-cleanup-preview");
+    sessionCleanupState.pendingRequestId = requestId;
+    sessionCleanupState.previewTokenShown = "";
+    const submitted = submitSettingsCommand({
+      action: "sessionCleanupPreview",
+      requestId,
+      itemIds,
+      inventoryRevision: revision,
+    }, "正在生成永久删除确认...", { preserveOverlay: true });
+    if (!submitted) sessionCleanupState.pendingRequestId = "";
+    return submitted;
+  }
+
+  function openSessionCleanupExecuteConfirm() {
+    const dialog = settingsDialogRoot();
+    const data = sessionCleanupFromPayload();
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    if (!dialog || String(operation?.state || "") !== "preview") return;
+    const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
+    closeSettingsConfirm();
+    const layer = document.createElement("div");
+    layer.className = "codex-usage-hud-settings-confirm-layer";
+    layer.dataset.settingsConfirm = "true";
+    const descendants = Math.max(0, Number(operation?.descendantCount || 0));
+    const estimatedBytes = storageFormatBytes(operation?.estimatedBytes);
+    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" data-tone="danger" role="alertdialog" aria-modal="true" aria-label="确认永久删除会话"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-danger-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-settings-confirm-title">永久删除 ${selectedIds.length} 个会话？</h2><p class="codex-usage-hud-settings-confirm-body">会话内容、索引和关联子任务将从本机移除。此操作不会进入回收站，也无法恢复。Codex App 的归档入口无法恢复这些会话。</p><div class="codex-usage-hud-settings-confirm-summary"><div><span>主会话</span><strong>${selectedIds.length}</strong></div><div><span>关联子任务</span><strong>${descendants}</strong></div><div><span>本地数据</span><strong>${escapeHtml(estimatedBytes)}</strong></div></div><div class="codex-usage-hud-settings-confirm-note">${cleanupIconSvg("alert")}<span>执行前会再次核验会话身份与运行状态；任何活动项都会被跳过并单独报告。</span></div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-execute" data-danger="true">${cleanupIconSvg("trash")}永久删除</button></div></div>`;
+    dialog.appendChild(layer);
+    layer.querySelector('[data-action="session-cleanup-confirm-cancel"]')?.focus?.();
+  }
+
+  function executeSessionCleanup() {
+    const data = sessionCleanupFromPayload();
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const itemIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
+    const requestId = typedSettingsRequestId("session-cleanup-execute");
+    sessionCleanupState.pendingRequestId = requestId;
+    closeSettingsConfirm();
+    const submitted = submitSettingsCommand({
+      action: "sessionCleanupExecute",
+      requestId,
+      itemIds,
+      inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""),
+      confirmationToken: String(operation?.confirmationToken || ""),
+    }, "正在逐项调用 Codex 官方永久删除...", { preserveOverlay: true });
+    if (!submitted) sessionCleanupState.pendingRequestId = "";
+    return submitted;
   }
 
   function storageSelectedItemIds() {
@@ -5403,19 +7195,58 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return `估算 $${amount.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "")}`;
   }
 
+  function normalizeBackgroundUsageRange(value) {
+    const normalized = String(value || "today").trim().toLowerCase();
+    return new Set(["today", "7d", "30d", "all"]).has(normalized)
+      ? normalized
+      : "today";
+  }
+
+  function renderBackgroundUsageNotification(root, payload) {
+    const notification = payload?.backgroundUsageNotification;
+    const count = Math.max(0, Number(notification?.count || 0));
+    const eventId = String(notification?.eventId || "").trim();
+    const range = normalizeBackgroundUsageRange(notification?.range);
+    const visible = count > 0 && !!eventId;
+    root.querySelectorAll('[data-action="background-usage-open-notification"]').forEach((button) => {
+      button.dataset.visible = String(visible);
+      button.dataset.eventId = visible ? eventId : "";
+      button.dataset.backgroundRange = visible ? range : "today";
+      button.setAttribute("aria-hidden", String(!visible));
+      button.tabIndex = visible ? 0 : -1;
+      const label = visible
+        ? `${count.toLocaleString()} 条未查看后台用量，打开用量总览`
+        : "后台用量提醒";
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      const badge = button.querySelector('[data-field="backgroundUsageNotificationCount"]');
+      if (badge) {
+        badge.hidden = !visible;
+        badge.textContent = count > 99 ? "99+" : String(count);
+      }
+    });
+  }
+
+  function markBackgroundUsageEventViewed(eventId) {
+    const normalized = String(eventId || "").trim();
+    const data = backgroundUsageState.data;
+    if (!normalized || !data || !Array.isArray(data.events)) return;
+    backgroundUsageState.data = {
+      ...data,
+      events: data.events.map((event) => (
+        String(event?.eventId || "") === normalized
+          ? { ...event, unread: false }
+          : event
+      )),
+    };
+  }
+
   function backgroundUsageTime(value, { compact = false } = {}) {
     const parsed = new Date(String(value || ""));
     if (Number.isNaN(parsed.getTime())) return "--";
     return parsed.toLocaleString([], compact
       ? { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }
       : { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  }
-
-  function backgroundUsageStatusMeta(status) {
-    const key = String(status || "history");
-    if (key === "confirmed") return { label: "已确认", tone: "confirmed" };
-    if (key === "pending") return { label: "未确认", tone: "pending" };
-    return { label: "历史", tone: "history" };
   }
 
   function backgroundUsageRedactedPrompt(value) {
@@ -5427,17 +7258,20 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function backgroundUsageEventHtml(event) {
     const selected = String(event?.eventId || "") === backgroundUsageState.selectedEventId;
-    const status = backgroundUsageStatusMeta(event?.status);
+    const unread = event?.unread === true;
     const models = Array.isArray(event?.models) ? event.models.filter(Boolean) : [];
     const modelText = models.join(" + ") || "未知模型";
+    const eventTime = backgroundUsageTime(event?.lastSeenAt, { compact: true });
+    const eventTimeTitle = backgroundUsageTime(event?.lastSeenAt);
     return `
       <button type="button" class="codex-usage-hud-background-event"
-        data-action="background-usage-select" data-event-id="${escapeHtml(event?.eventId || "")}" data-selected="${selected}">
+        data-action="background-usage-select" data-event-id="${escapeHtml(event?.eventId || "")}" data-selected="${selected}" data-unread="${unread}">
+        ${unread ? '<span class="codex-usage-hud-background-unread-dot" aria-label="未查看"></span>' : ""}
         <span class="codex-usage-hud-background-event-head">
           <span class="codex-usage-hud-background-event-title">${escapeHtml(event?.featureLabel || "未知后台任务")}</span>
-          <span class="codex-usage-hud-background-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+          <span class="codex-usage-hud-background-status" title="${escapeHtml(eventTimeTitle)}">${escapeHtml(eventTime)}</span>
         </span>
-        <span class="codex-usage-hud-background-event-meta">${escapeHtml(backgroundUsageTime(event?.lastSeenAt, { compact: true }))} · ${escapeHtml(modelText)}</span>
+        <span class="codex-usage-hud-background-event-meta">${escapeHtml(modelText)}</span>
         <span class="codex-usage-hud-background-event-totals">
           <strong>${escapeHtml(humanizeTokens(event?.totalTokens || 0))} tokens</strong>
           <span>${Number(event?.requestCount || 0).toLocaleString()} 次请求</span>
@@ -5454,9 +7288,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (!detail || typeof detail !== "object") {
       return '<div class="codex-usage-hud-background-empty">选择一项后台任务查看请求明细。</div>';
     }
-    const status = backgroundUsageStatusMeta(detail.status);
     const models = Array.isArray(detail.models) ? detail.models.filter(Boolean) : [];
     const requests = Array.isArray(detail.requests) ? detail.requests : [];
+    const detailTime = backgroundUsageTime(detail.lastSeenAt, { compact: true });
+    const detailTimeTitle = backgroundUsageTime(detail.lastSeenAt);
     const rawPrompt = String(detail.prompt || "");
     const redactedPrompt = backgroundUsageRedactedPrompt(rawPrompt);
     const promptText = backgroundUsageState.promptExpanded
@@ -5478,9 +7313,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       <div class="codex-usage-hud-background-detail-head">
         <div>
           <h3>${escapeHtml(detail.featureLabel || "未知后台任务")}</h3>
-          <span class="codex-usage-hud-background-detail-sub">Codex App 非会话用量 · 本机已归因</span>
+          <span class="codex-usage-hud-background-detail-sub">Codex App 后台用量 · 本地记录</span>
         </div>
-        <span class="codex-usage-hud-background-status" data-tone="${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span>
+        <span class="codex-usage-hud-background-status" title="${escapeHtml(detailTimeTitle)}">${escapeHtml(detailTime)}</span>
       </div>
       <div class="codex-usage-hud-background-detail-grid">
         <div><span>模型</span><strong>${escapeHtml(models.join(" + ") || "未知")}</strong></div>
@@ -5498,11 +7333,173 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         <section class="codex-usage-hud-background-prompt">
           <div class="codex-usage-hud-background-section-title">
             <span>请求内容</span>
-            <button type="button" class="codex-usage-hud-settings-link" data-action="background-usage-toggle-prompt">${backgroundUsageState.promptExpanded ? "收起原文" : "展开原文"}</button>
+            <span>
+              <button type="button" class="codex-usage-hud-settings-link" data-action="background-usage-toggle-prompt">${backgroundUsageState.promptExpanded ? "收起原文" : "展开原文"}</button>
+              <button type="button" class="codex-usage-hud-settings-link" data-action="background-usage-copy-prompt">复制原文</button>
+            </span>
           </div>
           <pre data-expanded="${backgroundUsageState.promptExpanded}">${escapeHtml(promptText)}</pre>
         </section>
       ` : ""}
+    `;
+  }
+
+  function backgroundUsageSessionRankingMode() {
+    const key = String(backgroundUsageState.feature || "");
+    if (key === "__session_top_usage__") return "usage";
+    if (key === "__session_top_cost__") return "cost";
+    return "";
+  }
+
+  function backgroundUsageSessionRankingRange() {
+    if (backgroundUsageState.range === "today") return "today";
+    if (backgroundUsageState.range === "30d") return "month";
+    return "week";
+  }
+
+  function backgroundUsageSessionRankingDetailHtml(session, mode) {
+    if (!session || typeof session !== "object") {
+      return '<div class="codex-usage-hud-background-empty">选择一个会话查看用量汇总。</div>';
+    }
+    const sessionId = String(session?.id || session?.sessionId || "");
+    const actionable = (session?.actionable === true || session?.canActivate === true) && !!sessionId;
+    const coverage = session?.costCoverage && typeof session.costCoverage === "object"
+      ? session.costCoverage
+      : {};
+    const totalEvents = Math.max(0, Number(coverage?.totalEventCount || 0));
+    const pricedEvents = Math.max(0, Number(coverage?.pricedEventCount || 0));
+    const completeCost = coverage?.hasCompleteCost !== false && (!totalEvents || pricedEvents >= totalEvents);
+    const title = usageInsightsRankLabel(session, "sessions");
+    const latestEventAt = String(session?.latestEventAt || "");
+    const workdir = String(session?.workdirName || "").trim();
+    const modelNames = usageInsightsSessionModelNames(session);
+    const modelText = modelNames.join("、") || "未知模型";
+    const costText = usageInsightsFormatCost(session?.costUsd);
+    const costNote = completeCost ? "HUD 本地估算" : (session?.costUsd == null ? "费用不可估" : "费用部分可估");
+    return `
+      <div class="codex-usage-hud-background-detail-head">
+        <div>
+          <h3>${escapeHtml(title)}</h3>
+          <span class="codex-usage-hud-background-detail-sub">会话用量 · 本地聚合</span>
+        </div>
+        ${actionable ? '<button type="button" class="codex-usage-hud-settings-action" data-action="usage-insights-session" data-session-id="' + escapeHtml(sessionId) + '" data-target-title="' + escapeHtml(title) + '" data-workdir="' + escapeHtml(workdir) + '">打开会话</button>' : '<span class="codex-usage-hud-background-status">仅统计</span>'}
+      </div>
+      <div class="codex-usage-hud-background-detail-grid">
+        <div><span>Provider</span><strong>${escapeHtml(String(session?.provider || "未知"))}</strong></div>
+        <div><span>Tokens</span><strong>${escapeHtml(usageInsightsFormatTokens(session?.tokens ?? session?.totalTokens))}</strong></div>
+        <div><span>输入</span><strong>${escapeHtml(usageInsightsFormatTokens(session?.inputTokens))}</strong></div>
+        <div><span>缓存命中</span><strong>${escapeHtml(usageInsightsFormatRatio(session?.cacheRatio))}</strong></div>
+        <div><span>金额</span><strong>${escapeHtml(costText)}</strong></div>
+        <div><span>费用覆盖</span><strong>${escapeHtml(costNote)}</strong></div>
+        <div><span>已计价请求</span><strong>${Math.min(pricedEvents, totalEvents).toLocaleString()} / ${totalEvents.toLocaleString()}</strong></div>
+        <div><span>最近活动</span><strong>${escapeHtml(latestEventAt ? backgroundUsageTime(latestEventAt, { compact: true }) : "--")}</strong></div>
+        <div class="codex-usage-hud-background-detail-full" title="${escapeHtml(modelText)}"><span>使用模型${modelNames.length > 1 ? `（${modelNames.length} 个）` : ""}</span><strong>${escapeHtml(modelText)}</strong></div>
+        <div class="codex-usage-hud-background-detail-full" title="${escapeHtml(workdir)}"><span>工作目录</span><strong>${escapeHtml(workdir || "--")}</strong></div>
+      </div>
+      <section class="codex-usage-hud-background-requests">
+        <div class="codex-usage-hud-background-section-title"><span>${escapeHtml(mode === "cost" ? "金额排名" : "用量排名")}</span><span>${escapeHtml(mode === "cost" ? costText : `${usageInsightsFormatTokens(session?.tokens ?? session?.totalTokens)} tokens`)}</span></div>
+        <div class="codex-usage-hud-insights-meta">会话详情只展示本地聚合统计；打开会话后可继续查看原对话。</div>
+      </section>
+    `;
+  }
+
+  function backgroundUsageFeatureOptionsHtml(featureOptions) {
+    const sessionRankingOptions = [
+      ["__session_top_usage__", "Top10会话用量"],
+      ["__session_top_cost__", "Top10会话金额"],
+    ];
+    const selected = String(backgroundUsageState.feature || "");
+    const reserved = new Set(sessionRankingOptions.map(([key]) => key));
+    const backgroundOptions = featureOptions
+      .filter((item) => !reserved.has(String(item?.key || "")))
+      .map((item) => `<option value="${escapeHtml(item?.key || "")}" ${selected === String(item?.key || "") ? "selected" : ""}>${escapeHtml(item?.label || item?.key || "")}</option>`)
+      .join("");
+    const sessionOptions = sessionRankingOptions
+      .map(([key, label]) => `<option value="${key}" ${selected === key ? "selected" : ""}>${label}</option>`)
+      .join("");
+    return `<option value="">全部后台功能</option><optgroup label="后台任务">${backgroundOptions || '<option value="" disabled>暂无后台任务功能</option>'}</optgroup><optgroup label="用户会话排行">${sessionOptions}</optgroup>`;
+  }
+
+  function backgroundUsageSessionRankingPanelHtml(featureOptions, modelOptions) {
+    const mode = backgroundUsageSessionRankingMode();
+    const data = usageInsightsFromPayload();
+    const state = String(data?.state || data?.status || "").toLowerCase();
+    const range = backgroundUsageSessionRankingRange();
+    const scoped = data ? usageInsightsRangeData(data, range) : {};
+    const totals = scoped?.totals || {};
+    const coverage = scoped?.costCoverage || {};
+    const totalEvents = Math.max(0, Number(coverage?.totalEventCount || 0));
+    const pricedEvents = Math.max(0, Number(coverage?.pricedEventCount || 0));
+    const completeCost = coverage?.hasCompleteCost !== false && (!totalEvents || pricedEvents >= totalEvents);
+    const rankingKey = mode === "cost" ? "topSessionsByCost" : "topSessionsByUsage";
+    const sessions = Array.isArray(scoped?.[rankingKey]) ? scoped[rankingKey] : [];
+    const selectedSessionId = sessions.some((item) => String(item?.id || item?.sessionId || "") === backgroundUsageState.selectedSessionId)
+      ? backgroundUsageState.selectedSessionId
+      : String(sessions[0]?.id || sessions[0]?.sessionId || "");
+    const selectedSession = sessions.find((item) => String(item?.id || item?.sessionId || "") === selectedSessionId) || null;
+    const title = mode === "cost" ? "Top10金额" : "Top10用量";
+    const rankingRows = usageInsightsRankingRowsHtml(
+      sessions,
+      "sessions",
+      {
+        limit: 10,
+        metric: mode === "cost" ? "cost" : "tokens",
+        selectedSessionId,
+        sessionAction: "background-usage-session-select",
+      },
+    );
+    const error = String(data?.error || usageInsightsState.error || "");
+    const loading = state === "loading" || (!data && !!usageInsightsState.refreshRequestId);
+    const listHtml = loading
+      ? '<div class="codex-usage-hud-background-empty" role="status">正在汇总会话排行...</div>'
+      : error || state === "error" || state === "failed"
+        ? `<div class="codex-usage-hud-background-empty" data-kind="error" role="alert">${escapeHtml(error || "会话排行生成失败，请重试。")}</div>`
+        : `<div class="codex-usage-hud-background-event-list codex-usage-hud-session-ranking-list">${rankingRows || `<div class="codex-usage-hud-background-empty">${mode === "cost" ? "暂无可估金额的会话。" : "暂无会话用量数据。"}</div>`}</div>`;
+    const sessionCount = Number(totals?.sessionCount || 0);
+    const primaryValue = mode === "cost"
+      ? usageInsightsFormatCost(totals?.costUsd)
+      : usageInsightsFormatTokens(totals?.tokens ?? totals?.totalTokens);
+    const primaryMeta = mode === "cost"
+      ? (completeCost ? "HUD 本地估算" : "部分会话可估算")
+      : "已确认会话 token";
+    const rankingNote = mode === "cost"
+      ? "仅按有本地估算费用的会话排序"
+      : "按已确认的会话 token 排序";
+    return `
+      <div class="codex-usage-hud-background" data-background-usage-root="true"
+        data-background-usage-filter-key="${escapeHtml(backgroundUsageFilterKey())}"
+        aria-busy="${loading}">
+        <div class="codex-usage-hud-background-metrics">
+          <div><span>${escapeHtml(title)}</span><strong>${escapeHtml(primaryValue)}</strong><small>${escapeHtml(primaryMeta)}</small></div>
+          <div><span>Tokens</span><strong>${escapeHtml(usageInsightsFormatTokens(totals?.tokens ?? totals?.totalTokens))}</strong><small>本地会话统计</small></div>
+          <div><span>会话</span><strong>${sessionCount.toLocaleString()}</strong><small>最多展示 10 项</small></div>
+          <div><span>缓存命中</span><strong>${escapeHtml(usageInsightsFormatRatio(totals?.cacheRatio))}</strong><small>${escapeHtml(data?.generatedAt ? `更新于 ${backgroundUsageTime(data.generatedAt, { compact: true })}` : "本地聚合")}</small></div>
+        </div>
+        <div class="codex-usage-hud-background-toolbar">
+          <div class="codex-usage-hud-background-range" role="group" aria-label="会话排行范围">
+            ${[["today", "今天"], ["7d", "近 7 天"], ["30d", "近 30 天"]].map(([key, label]) => `<button type="button" data-action="background-usage-range" data-background-range="${key}" data-active="${backgroundUsageState.range === key}">${label}</button>`).join("")}
+          </div>
+          <select data-background-usage-filter="feature" aria-label="功能筛选">
+            ${backgroundUsageFeatureOptionsHtml(featureOptions)}
+          </select>
+          <select data-background-usage-filter="model" aria-label="模型筛选" disabled title="会话排行不按后台模型筛选">
+            <option value="">全部模型</option>
+            ${modelOptions.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="codex-usage-hud-background-master-detail" data-session-ranking="true">
+          <section class="codex-usage-hud-background-history">
+            <div class="codex-usage-hud-background-section-title"><span>${escapeHtml(title)}</span><span>${sessions.length} 项</span></div>
+            <div class="codex-usage-hud-insights-meta codex-usage-hud-session-ranking-note">${escapeHtml(rankingNote)}</div>
+            ${listHtml}
+          </section>
+          <section class="codex-usage-hud-background-detail" data-session-ranking-detail="true">
+            ${loading || error || state === "error" || state === "failed"
+              ? '<div class="codex-usage-hud-background-empty">等待会话排行就绪。</div>'
+              : backgroundUsageSessionRankingDetailHtml(selectedSession, mode)}
+          </section>
+        </div>
+      </div>
     `;
   }
 
@@ -5513,8 +7510,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const filters = data?.filters && typeof data.filters === "object" ? data.filters : {};
     const featureOptions = Array.isArray(filters.features) ? filters.features : [];
     const modelOptions = Array.isArray(filters.models) ? filters.models : [];
+    if (backgroundUsageSessionRankingMode()) {
+      return backgroundUsageSessionRankingPanelHtml(featureOptions, modelOptions);
+    }
     if (!backgroundUsageBridgeUrl()) {
-      return '<div class="codex-usage-hud-background" data-background-usage-root="true"><div class="codex-usage-hud-background-empty">后台用量审计当前不可用。</div></div>';
+      return '<div class="codex-usage-hud-background" data-background-usage-root="true"><div class="codex-usage-hud-background-empty">用量总览当前不可用。</div></div>';
     }
     const modelSummary = Array.isArray(summary.models) && summary.models.length
       ? summary.models.join(" + ")
@@ -5532,11 +7532,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         </div>
         <div class="codex-usage-hud-background-toolbar">
           <div class="codex-usage-hud-background-range" role="group" aria-label="日期范围">
-            ${[["today", "今天"], ["7d", "近 7 天"], ["30d", "近 30 天"]].map(([key, label]) => `<button type="button" data-action="background-usage-range" data-background-range="${key}" data-active="${backgroundUsageState.range === key}">${label}</button>`).join("")}
+            ${[["today", "今天"], ["7d", "近 7 天"], ["30d", "近 30 天"], ["all", "全部"]].map(([key, label]) => `<button type="button" data-action="background-usage-range" data-background-range="${key}" data-active="${backgroundUsageState.range === key}">${label}</button>`).join("")}
           </div>
           <select data-background-usage-filter="feature" aria-label="功能筛选">
-            <option value="">全部功能</option>
-            ${featureOptions.map((item) => `<option value="${escapeHtml(item?.key || "")}" ${backgroundUsageState.feature === String(item?.key || "") ? "selected" : ""}>${escapeHtml(item?.label || item?.key || "")}</option>`).join("")}
+            ${backgroundUsageFeatureOptionsHtml(featureOptions)}
           </select>
           <select data-background-usage-filter="model" aria-label="模型筛选">
             <option value="">全部模型</option>
@@ -5548,7 +7547,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           <section class="codex-usage-hud-background-history">
             <div class="codex-usage-hud-background-section-title"><span>后台任务历史</span><span>${events.length} 项</span></div>
             <div class="codex-usage-hud-background-event-list">
-              ${events.map(backgroundUsageEventHtml).join("") || `<div class="codex-usage-hud-background-empty">${backgroundUsageState.loading ? "正在读取后台用量..." : "当前筛选没有后台任务。"}</div>`}
+              ${events.map(backgroundUsageEventHtml).join("") || `<div class="codex-usage-hud-background-empty">${backgroundUsageState.loading ? "正在读取用量总览..." : "当前筛选没有后台任务。"}</div>`}
             </div>
           </section>
           <section class="codex-usage-hud-background-detail"
@@ -5643,7 +7642,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         if (requestId !== backgroundUsageState.queryRequestId) return;
         backgroundUsageQueryTimeoutId = 0;
         backgroundUsageState.loading = false;
-        backgroundUsageState.error = "后台用量读取超时，请重试。";
+        backgroundUsageState.error = "用量总览读取超时，请重试。";
       } else {
         if (
           requestId !== backgroundUsageState.detailRequestId
@@ -5660,14 +7659,18 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     else backgroundUsageDetailTimeoutId = timeoutId;
   }
 
-  async function fetchBackgroundUsageWithTimeout(url) {
+  async function fetchBackgroundUsageWithTimeout(url, options = {}) {
     const controller = new AbortController();
     const timeoutId = setTimeout(
       () => controller.abort(),
       backgroundUsageRequestTimeoutMs,
     );
     try {
-      return await fetch(url, { cache: "no-store", signal: controller.signal });
+      return await fetch(url, {
+        cache: "no-store",
+        ...options,
+        signal: controller.signal,
+      });
     } finally {
       clearTimeout(timeoutId);
     }
@@ -5683,10 +7686,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     restoreBackgroundUsageScrollPositions();
   }
 
-  async function loadBackgroundUsageDetail(eventId) {
+  async function loadBackgroundUsageDetail(eventId, { markViewed = false } = {}) {
     const normalized = String(eventId || "").trim();
     const url = backgroundUsageEndpoint("/detail");
-    if (!normalized) return;
+    if (!normalized || backgroundUsageSessionRankingMode()) return;
     const requestSeq = ++backgroundUsageDetailSeq;
     backgroundUsageState.detailLoading = true;
     backgroundUsageState.promptExpanded = false;
@@ -5695,7 +7698,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     syncBackgroundUsagePanel();
     const bindingRequestId = submitBackgroundUsageCommand(
       "backgroundUsageDetail",
-      { eventId: normalized },
+      { eventId: normalized, markViewed: markViewed === true },
     );
     if (bindingRequestId) {
       backgroundUsageState.detailRequestId = bindingRequestId;
@@ -5704,12 +7707,28 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
     if (!url) {
       backgroundUsageState.detailLoading = false;
-      backgroundUsageState.error ||= "后台用量桥接未连接";
+      backgroundUsageState.error ||= "用量总览桥接未连接";
       syncBackgroundUsagePanel();
       return;
     }
     url.searchParams.set("eventId", normalized);
     try {
+      if (markViewed) {
+        const confirmUrl = backgroundUsageEndpoint("/confirm");
+        if (!confirmUrl) throw new Error("用量总览确认桥接未连接");
+        const confirmResponse = await fetchBackgroundUsageWithTimeout(
+          confirmUrl.toString(),
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ eventId: normalized }),
+          },
+        );
+        const confirmPayload = await confirmResponse.json();
+        if (!confirmResponse.ok || confirmPayload?.status !== "ok") {
+          throw new Error(confirmPayload?.message || `HTTP ${confirmResponse.status}`);
+        }
+      }
       const response = await fetchBackgroundUsageWithTimeout(url.toString());
       const payload = await response.json();
       if (!response.ok || payload?.status !== "ok") {
@@ -5717,6 +7736,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       if (requestSeq !== backgroundUsageDetailSeq || backgroundUsageState.selectedEventId !== normalized) return;
       backgroundUsageState.detail = payload.backgroundUsageDetail || null;
+      if (markViewed && backgroundUsageState.detail?.unread === false) {
+        markBackgroundUsageEventViewed(normalized);
+      }
       backgroundUsageState.error = "";
     } catch (error) {
       if (requestSeq !== backgroundUsageDetailSeq) return;
@@ -5732,6 +7754,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   }
 
   async function loadBackgroundUsage({ eventId = "", force = false } = {}) {
+    if (backgroundUsageSessionRankingMode()) {
+      clearBackgroundUsageRequestTimeout("query");
+      clearBackgroundUsageRequestTimeout("detail");
+      backgroundUsageState.loading = false;
+      backgroundUsageState.detailLoading = false;
+      const insights = usageInsightsFromPayload();
+      const state = String(insights?.state || insights?.status || "").toLowerCase();
+      if (force || !insights || state === "idle" || state === "failed" || state === "error") {
+        requestUsageInsightsRefresh({ force });
+      }
+      syncBackgroundUsagePanel();
+      return;
+    }
     const url = backgroundUsageEndpoint();
     const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
     const requestedEventId = String(eventId || backgroundUsageState.selectedEventId || "").trim();
@@ -5768,7 +7803,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
     if (!url) {
       backgroundUsageState.loading = false;
-      backgroundUsageState.error ||= "后台用量桥接未连接";
+      backgroundUsageState.error ||= "用量总览桥接未连接";
       syncBackgroundUsagePanel();
       return;
     }
@@ -5797,8 +7832,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     } catch (error) {
       if (requestSeq !== backgroundUsageFetchSeq) return;
       backgroundUsageState.error = error?.name === "AbortError"
-        ? "后台用量读取超时，请重试。"
-        : `后台用量读取失败：${error?.message || error}`;
+        ? "用量总览读取超时，请重试。"
+        : `用量总览读取失败：${error?.message || error}`;
       backgroundUsageState.data = null;
       backgroundUsageState.detail = null;
       syncBackgroundUsagePanel();
@@ -5819,6 +7854,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (settingsActiveTab === "backgroundUsage") {
         captureBackgroundUsageScrollPositions();
       }
+      if (settingsActiveTab === "storage") captureStorageUiState();
     }
     const settings = hudSettingsFromPayload();
     const activeTab = ["storage", "backgroundUsage", "support", "about"].includes(tab) ? tab : "settings";
@@ -5829,7 +7865,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const defaultStatus = activeTab === "about"
       ? "可检查 GitHub Release 并启动 Windows 安装器。"
       : activeTab === "storage"
-        ? "扫描只在用户点击时发生；默认只读。"
+        ? "扫描与永久删除只在用户明确操作时执行。"
         : activeTab === "backgroundUsage"
           ? "Tokens 来自本机日志；费用均为 HUD 估算。"
         : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件");
@@ -5841,24 +7877,27 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         </div>
         <div class="codex-usage-hud-settings-tabs" role="tablist">
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="settings" data-active="${activeTab === "settings"}">设置</button>
-          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="storage" data-active="${activeTab === "storage"}">存储</button>
-          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="backgroundUsage" data-active="${activeTab === "backgroundUsage"}">后台用量</button>
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="storage" data-active="${activeTab === "storage"}">空间清理</button>
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="backgroundUsage" data-active="${activeTab === "backgroundUsage"}">用量总览</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="support" data-active="${activeTab === "support"}">请作者喝咖啡</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="about" data-active="${activeTab === "about"}">版本更新</button>
         </div>
         <div class="codex-usage-hud-settings-body">
-          ${activeTab === "support" ? supportPanelHtml(settings, path) : activeTab === "about" ? aboutPanelHtml(path) : activeTab === "storage" ? storagePanelHtml(fileManagementFromPayload()) : activeTab === "backgroundUsage" ? backgroundUsagePanelHtml() : settingsPanelHtml(settings, bridge, path)}
+          ${activeTab === "support" ? supportPanelHtml(settings, path) : activeTab === "about" ? aboutPanelHtml(path) : activeTab === "storage" ? storagePanelHtml() : activeTab === "backgroundUsage" ? backgroundUsagePanelHtml() : settingsPanelHtml(settings, bridge, path)}
         </div>
         <div class="codex-usage-hud-settings-actions">
           <div class="codex-usage-hud-settings-status" data-settings-status="true">${escapeHtml(status || defaultStatus)}</div>
           <div>
-            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "storage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="storage-scan">重新扫描</button> <button type="button" class="codex-usage-hud-settings-action" data-action="storage-preview" data-primary="true">生成预览</button>' : activeTab === "backgroundUsage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="background-usage-refresh">刷新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
+            ${activeTab === "settings" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-export">导出 JSON</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-restart" hidden>立即重启 HUD</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-save" data-primary="true">保存</button>' : activeTab === "backgroundUsage" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="background-usage-refresh">刷新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>' : activeTab === "about" ? '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-check-update">检查更新</button> <button type="button" class="codex-usage-hud-settings-action" data-action="settings-install-update" data-primary="true">安装更新</button>' : '<button type="button" class="codex-usage-hud-settings-action" data-action="settings-close" data-primary="true">关闭</button>'}
           </div>
         </div>
       </div>
     `;
     modal.hidden = false;
     updateAboutActionButtons(currentUpdateState());
+    if (activeTab === "storage") {
+      restoreStorageUiState();
+    }
     if (activeTab === "backgroundUsage") {
       restoreBackgroundUsageScrollPositions();
       const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
@@ -6541,6 +8580,23 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       });
     }, { capture: true, passive: false });
     root.addEventListener("input", (event) => {
+      const backupInput = event.target?.closest?.('[data-cleanup-backup-directory="true"]');
+      if (backupInput && root.contains(backupInput)) {
+        safeCleanupState.backupDirectory = String(backupInput.value || "").trim();
+        safeCleanupState.backupDirectoryDirty = true;
+        return;
+      }
+      const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
+      if (sessionSearch && root.contains(sessionSearch)) {
+        const selection = Number(sessionSearch.selectionStart || 0);
+        sessionCleanupState.search = String(sessionSearch.value || "");
+        sessionCleanupState.selectedIds.clear();
+        renderSettingsModal("storage");
+        const next = root.querySelector('[data-session-cleanup-search="true"]');
+        next?.focus?.();
+        next?.setSelectionRange?.(selection, selection);
+        return;
+      }
       const editor = event.target?.closest?.('[data-provider-editor="true"]');
       if (!editor || !root.contains(editor)) return;
       const scopeToggle = event.target?.closest?.(
@@ -6556,13 +8612,60 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       markSettingsProviderDirty();
     });
     root.addEventListener("change", (event) => {
+      const consent = event.target?.closest?.('[data-cleanup-consent="true"]');
+      if (consent && root.contains(consent)) {
+        safeCleanupState.includeConsent = !!consent.checked;
+        safeCleanupState.previewHidden = true;
+        scheduleSafeCleanupPreview();
+        return;
+      }
+      const backup = event.target?.closest?.('[data-cleanup-backup-directory="true"]');
+      if (backup && root.contains(backup)) {
+        safeCleanupState.backupDirectory = String(backup.value || "").trim();
+        safeCleanupState.backupDirectoryDirty = true;
+        scheduleSafeCleanupPreview();
+        return;
+      }
+      const autoClose = event.target?.closest?.('[data-cleanup-auto-close="true"]');
+      if (autoClose && root.contains(autoClose)) {
+        safeCleanupState.autoCloseConfirmed = !!autoClose.checked;
+        return;
+      }
+
+      const sessionSelectAll = event.target?.closest?.('[data-session-cleanup-select-all="true"]');
+      if (sessionSelectAll && root.contains(sessionSelectAll)) {
+        for (const item of sessionCleanupRows()) {
+          const id = String(item?.id || "");
+          if (!id || item?.selectable !== true) continue;
+          if (sessionSelectAll.checked) sessionCleanupState.selectedIds.add(id);
+          else sessionCleanupState.selectedIds.delete(id);
+        }
+        renderSettingsModal("storage");
+        return;
+      }
+      const sessionItem = event.target?.closest?.('[data-session-cleanup-id]');
+      if (sessionItem && root.contains(sessionItem)) {
+        const id = String(sessionItem.dataset.sessionCleanupId || "");
+        if (sessionItem.checked) sessionCleanupState.selectedIds.add(id);
+        else sessionCleanupState.selectedIds.delete(id);
+        renderSettingsModal("storage");
+        return;
+      }
       const filter = event.target?.closest?.("[data-background-usage-filter]");
       if (!filter || !root.contains(filter)) return;
       const key = String(filter.dataset.backgroundUsageFilter || "");
       if (key === "feature") backgroundUsageState.feature = String(filter.value || "");
       if (key === "model") backgroundUsageState.model = String(filter.value || "");
+      if (backgroundUsageSessionRankingMode()) {
+        backgroundUsageState.model = "";
+        if (backgroundUsageState.range === "all") {
+          backgroundUsageState.range = "7d";
+        }
+      }
       backgroundUsageState.selectedEventId = "";
+      backgroundUsageState.selectedSessionId = "";
       backgroundUsageState.detail = null;
+      backgroundUsageState.error = "";
       void loadBackgroundUsage({ force: true });
     });
     root.addEventListener("keydown", (event) => {
@@ -6634,6 +8737,30 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         renderActivityTimeline(root, currentPayload()?.topDetails || {});
         return;
       }
+      if (action.dataset.action === "background-usage-open-notification") {
+        event.preventDefault();
+        event.stopPropagation();
+        const eventId = String(action.dataset.eventId || "").trim();
+        if (!eventId) return;
+        const requestId = submitBackgroundUsageCommand(
+          "openBackgroundUsage",
+          { eventId },
+        );
+        if (!requestId) {
+          backgroundUsageState.range = normalizeBackgroundUsageRange(
+            action.dataset.backgroundRange,
+          );
+          backgroundUsageState.feature = "";
+          backgroundUsageState.model = "";
+          backgroundUsageState.selectedSessionId = "";
+          backgroundUsageState.selectedEventId = eventId;
+          backgroundUsageState.data = null;
+          backgroundUsageState.detail = null;
+          backgroundUsageState.loadedRevision = -1;
+          renderSettingsModal("backgroundUsage");
+        }
+        return;
+      }
       if (action.dataset.action === "settings-open") {
         event.preventDefault();
         event.stopPropagation();
@@ -6652,13 +8779,58 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         renderSettingsModal(action.dataset.tab || "settings");
         return;
       }
+      if (action.dataset.action === "cleanup-section") {
+        event.preventDefault();
+        event.stopPropagation();
+        cleanupActiveSection = String(action.dataset.cleanupSection || "junk");
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-status") {
+        event.preventDefault();
+        event.stopPropagation();
+        sessionCleanupState.status = String(action.dataset.sessionCleanupStatus || "all");
+        sessionCleanupState.selectedIds.clear();
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-time") {
+        event.preventDefault();
+        event.stopPropagation();
+        sessionCleanupState.time = String(action.dataset.sessionCleanupTime || "all");
+        sessionCleanupState.selectedIds.clear();
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "cleanup-deep-toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        cleanupDeepExpanded = !cleanupDeepExpanded;
+        if (!cleanupDeepExpanded && safeCleanupState.includeConsent) {
+          safeCleanupState.includeConsent = false;
+          scheduleSafeCleanupPreview();
+        } else {
+          renderSettingsModal("storage");
+        }
+        return;
+      }
       if (action.dataset.action === "background-usage-range") {
         event.preventDefault();
         event.stopPropagation();
-        backgroundUsageState.range = String(action.dataset.backgroundRange || "today");
+        backgroundUsageState.range = normalizeBackgroundUsageRange(
+          action.dataset.backgroundRange,
+        );
         backgroundUsageState.selectedEventId = "";
+        backgroundUsageState.selectedSessionId = "";
         backgroundUsageState.detail = null;
         void loadBackgroundUsage({ force: true });
+        return;
+      }
+      if (action.dataset.action === "background-usage-session-select") {
+        event.preventDefault();
+        event.stopPropagation();
+        backgroundUsageState.selectedSessionId = String(action.dataset.sessionId || "").trim();
+        syncBackgroundUsagePanel();
         return;
       }
       if (action.dataset.action === "background-usage-select") {
@@ -6670,7 +8842,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         backgroundUsageState.detail = null;
         backgroundUsageState.promptExpanded = false;
         syncBackgroundUsagePanel();
-        void loadBackgroundUsageDetail(eventId);
+        void loadBackgroundUsageDetail(eventId, { markViewed: true });
         return;
       }
       if (action.dataset.action === "background-usage-toggle-prompt") {
@@ -6680,10 +8852,131 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         syncBackgroundUsagePanel();
         return;
       }
+      if (action.dataset.action === "background-usage-copy-prompt") {
+        event.preventDefault();
+        event.stopPropagation();
+        const rawPrompt = String(backgroundUsageState.detail?.prompt || "");
+        void copyHudText(rawPrompt).then((ok) => {
+          setSettingsStatus(ok ? "已复制请求原文。" : "请求原文复制失败。", ok ? "" : "error");
+          flashCopyState(action, ok);
+        });
+        return;
+      }
       if (action.dataset.action === "background-usage-refresh") {
         event.preventDefault();
         event.stopPropagation();
         void loadBackgroundUsage({ force: true });
+        return;
+      }
+      if (action.dataset.action === "usage-insights-session") {
+        event.preventDefault();
+        event.stopPropagation();
+        const sessionId = String(action.dataset.sessionId || "").trim();
+        if (!sessionId) return;
+        const submitted = submitSettingsCommand(
+          {
+            action: "openUsageInsightsSession",
+            sessionId,
+            targetTitle: String(action.dataset.targetTitle || "").trim(),
+            workdir: String(action.dataset.workdir || "").trim(),
+          },
+          "正在打开所选会话...",
+          { preserveOverlay: true },
+        );
+        if (submitted) closeSettingsModal();
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-scan") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSafeCleanupScan();
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSafeCleanupPreview();
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-confirm") {
+        event.preventDefault();
+        event.stopPropagation();
+        const cleanup = safeCleanupFromPayload();
+        const cleanupOperation = cleanup?.operation && typeof cleanup.operation === "object" ? cleanup.operation : {};
+        if (cleanupOperation?.includesConsent === true || cleanupOperation?.requiresBackup === true || cleanupOperation?.requiresCodexClose === true) {
+          openSafeCleanupExecuteConfirm();
+        } else {
+          executeSafeCleanup();
+        }
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-confirm-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-execute") {
+        event.preventDefault();
+        event.stopPropagation();
+        executeSafeCleanup();
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        safeCleanupState.previewHidden = true;
+        safeCleanupState.previewBackupDirectory = "";
+        submitSettingsCommand(
+          { action: "safeCleanupCancel", requestId: typedSettingsRequestId("safe-cleanup-cancel") },
+          "已请求取消清理操作。",
+          { preserveOverlay: true },
+        );
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-choose-backup") {
+        event.preventDefault();
+        event.stopPropagation();
+        const requestId = typedSettingsRequestId("safe-cleanup-backup");
+        submitSettingsCommand(
+          {
+            action: "safeCleanupChooseBackupDirectory",
+            requestId,
+            currentDirectory: safeCleanupState.backupDirectory,
+          },
+          "正在选择 SQLite 备份目录...",
+          { preserveOverlay: true },
+        );
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-scan") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSessionCleanupScan();
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSessionCleanupPreview();
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-confirm-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        sessionCleanupState.previewTokenShown = "";
+        submitSettingsCommand(
+          { action: "sessionCleanupCancel", requestId: typedSettingsRequestId("session-cleanup-cancel") },
+          "已取消永久删除确认。",
+          { preserveOverlay: true },
+        );
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-execute") {
+        event.preventDefault();
+        event.stopPropagation();
+        executeSessionCleanup();
         return;
       }
       if (action.dataset.action === "storage-filter") {
@@ -8776,7 +11069,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const tooltip = overflowBadge ? `${fullText || label} | ${overflowBadge}` : fullText;
     rail.title = tooltip;
     rail.setAttribute("aria-label", tooltip);
-    
+
     function progressTextLayer(className, textClass = "codex-usage-hud-progress-text") {
       const layer = document.createElement("span");
       layer.className = className;
@@ -9148,7 +11441,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const provided = payload?.payloadDomains && typeof payload.payloadDomains === "object"
       ? payload.payloadDomains
       : {};
-    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "backgroundUsage", "diagnostics", "fileManagement"];
+    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "backgroundUsage", "diagnostics", "fileManagement", "usageInsights", "safeCleanup", "sessionCleanup"];
     const domains = {};
     if (Object.keys(provided).length > 0) {
       for (const name of allDomains) {
@@ -9212,6 +11505,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     });
     renderTopDetails(root, payload || {});
     renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!(payload?.newSession || payload?.pendingSession));
+    renderBackgroundUsageNotification(root, payload || {});
     applyActiveSessionSequence(payload);
   }
 
@@ -9242,6 +11536,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
       node.classList.toggle(errorClass, payload?.requestStatus === "error");
     });
+    renderBackgroundUsageNotification(root, payload || {});
     applyActiveSessionSequence(payload);
   }
 
@@ -9264,7 +11559,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return detailEventId && detailEventId === eventId ? detail : null;
   }
 
-  function applyBackgroundUsagePayload(_root, payload) {
+  function applyBackgroundUsagePayload(root, payload) {
+    renderBackgroundUsageNotification(root, payload || {});
     const response = payload?.settingsCommandStatus?.backgroundUsageResponse;
     const openEventId = String(
       payload?.settingsCommandStatus?.backgroundUsageOpenEventId || ""
@@ -9272,6 +11568,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (response && typeof response === "object") {
       const kind = String(response.kind || "");
       const requestId = String(response.requestId || "");
+      const responseError = String(response.error || "");
       if (kind === "query") {
         if (requestId !== backgroundUsageState.queryRequestId) return;
         clearBackgroundUsageRequestTimeout("query");
@@ -9288,9 +11585,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           response.payload,
           backgroundUsageState.selectedEventId,
         );
-        backgroundUsageState.error = String(response.error || "");
+        backgroundUsageState.error = responseError;
         syncBackgroundUsagePanel();
-        if (backgroundUsageState.selectedEventId) {
+        if (!responseError && backgroundUsageState.selectedEventId) {
           void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
         }
         return;
@@ -9301,7 +11598,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         clearBackgroundUsageRequestTimeout("detail");
         backgroundUsageState.detailLoading = false;
         backgroundUsageState.detail = response.payload || null;
-        backgroundUsageState.error = String(response.error || "");
+        if (backgroundUsageState.detail?.unread === false) {
+          markBackgroundUsageEventViewed(response.eventId);
+        }
+        backgroundUsageState.error = responseError;
         syncBackgroundUsagePanel();
         return;
       }
@@ -9312,9 +11612,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         backgroundUsageDetailSeq += 1;
         backgroundUsageState.queryRequestId = "";
         backgroundUsageState.detailRequestId = "";
-        backgroundUsageState.range = "today";
+        backgroundUsageState.range = normalizeBackgroundUsageRange(
+          response?.payload?.range,
+        );
         backgroundUsageState.feature = "";
         backgroundUsageState.model = "";
+        backgroundUsageState.selectedSessionId = "";
         backgroundUsageState.loading = false;
         backgroundUsageState.detailLoading = false;
         backgroundUsageState.data = response.payload || null;
@@ -9333,7 +11636,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           backgroundUsageState.selectedEventId,
         );
         backgroundUsageState.promptExpanded = false;
-        backgroundUsageState.error = String(response.error || "");
+        backgroundUsageState.error = responseError;
         const hasPreview = !!backgroundUsageState.detail;
         renderSettingsModal("backgroundUsage");
         if (hasPreview && backgroundUsageState.selectedEventId) {
@@ -9345,9 +11648,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (openEventId) {
       clearBackgroundUsageRequestTimeout("query");
       clearBackgroundUsageRequestTimeout("detail");
-      backgroundUsageState.range = "today";
+      const notification = payload?.backgroundUsageNotification;
+      backgroundUsageState.range = normalizeBackgroundUsageRange(
+        String(notification?.eventId || "") === openEventId
+          ? notification?.range
+          : "today",
+      );
       backgroundUsageState.feature = "";
       backgroundUsageState.model = "";
+      backgroundUsageState.selectedSessionId = "";
       backgroundUsageState.selectedEventId = openEventId;
       backgroundUsageState.data = null;
       backgroundUsageState.detail = null;
@@ -9375,6 +11684,114 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (body) body.scrollTop = scrollTop;
   }
 
+  function rerenderUsageInsightsIfVisible() {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden) return;
+    if (settingsActiveTab === "storage") {
+      const scrollTop = modal.querySelector(".codex-usage-hud-settings-body")?.scrollTop || 0;
+      renderSettingsModal("storage");
+      const body = modal.querySelector(".codex-usage-hud-settings-body");
+      if (body) body.scrollTop = scrollTop;
+      return;
+    }
+    if (
+      settingsActiveTab === "backgroundUsage"
+      && backgroundUsageSessionRankingMode()
+    ) {
+      syncBackgroundUsagePanel();
+    }
+  }
+
+  function applyUsageInsightsPayload(_root, payload) {
+    const data = payload?.usageInsights;
+    if (!data || typeof data !== "object") return;
+    usageInsightsState.data = data;
+    const state = String(data.state || "").toLowerCase();
+    const responseRequestId = String(data.requestId || "");
+    if (
+      state !== "loading"
+      && (!usageInsightsState.refreshRequestId || responseRequestId === usageInsightsState.refreshRequestId)
+    ) {
+      usageInsightsState.refreshRequestId = "";
+    }
+    usageInsightsState.error = String(data.error || "");
+    rerenderUsageInsightsIfVisible();
+  }
+
+  function applySafeCleanupPayload(_root, payload) {
+    const data = payload?.safeCleanup;
+    if (!data || typeof data !== "object") return;
+    const commandStatus = payload?.settingsCommandStatus && typeof payload.settingsCommandStatus === "object"
+      ? payload.settingsCommandStatus
+      : {};
+    const pickerRequestId = String(commandStatus?.safeCleanupRequestId || "");
+    const pickerDirectory = String(commandStatus?.cleanupBackupDirectory || "").trim();
+    const pickerChanged = !!pickerRequestId
+      && !!pickerDirectory
+      && pickerRequestId !== safeCleanupState.lastBackupPickerRequestId;
+    if (pickerRequestId) safeCleanupState.lastBackupPickerRequestId = pickerRequestId;
+    safeCleanupState.data = data;
+    syncSafeCleanupDefaults(data);
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const state = String(operation.state || "").toLowerCase();
+    const action = String(operation.action || "");
+    const responseRequestId = String(operation.requestId || "");
+    if (state === "preview") {
+      safeCleanupState.includeConsent = operation?.includesConsent === true;
+      if (operation?.requiresBackup === true && safeCleanupState.previewBackupDirectory) {
+        safeCleanupState.backupDirectory = safeCleanupState.previewBackupDirectory;
+      }
+    } else if (
+      new Set(["scan", "cancel", "execute", "safeCleanupScan", "safeCleanupCancel", "safeCleanupExecute"]).has(action)
+      || (action === "safeCleanupPreview" && state === "failed")
+    ) {
+      safeCleanupState.previewBackupDirectory = "";
+    }
+    if (
+      !new Set(["scanning", "accepted", "running", "queued_exit"]).has(state)
+      && (!safeCleanupState.pendingRequestId || responseRequestId === safeCleanupState.pendingRequestId)
+    ) {
+      safeCleanupState.pendingRequestId = "";
+    }
+    if (
+      pickerChanged
+      && safeCleanupState.includeConsent
+      && safeCleanupRequiresBackup(data)
+      && state !== "preview"
+    ) {
+      safeCleanupState.previewHidden = true;
+      scheduleSafeCleanupPreview();
+      return;
+    }
+    rerenderUsageInsightsIfVisible();
+  }
+
+  function applySessionCleanupPayload(_root, payload) {
+    const data = payload?.sessionCleanup;
+    if (!data || typeof data !== "object") return;
+    sessionCleanupState.data = data;
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    const validIds = new Set(sessions.filter((item) => item?.selectable === true).map((item) => String(item?.id || "")));
+    sessionCleanupState.selectedIds = new Set(
+      Array.from(sessionCleanupState.selectedIds).filter((id) => validIds.has(id)),
+    );
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const state = String(operation?.state || "").toLowerCase();
+    const responseRequestId = String(operation?.requestId || "");
+    if (
+      !new Set(["scanning", "accepted", "running"]).has(state)
+      && (!sessionCleanupState.pendingRequestId || responseRequestId === sessionCleanupState.pendingRequestId)
+    ) {
+      sessionCleanupState.pendingRequestId = "";
+    }
+    rerenderUsageInsightsIfVisible();
+    const token = String(operation?.confirmationToken || "");
+    if (state === "preview" && token && token !== sessionCleanupState.previewTokenShown) {
+      sessionCleanupState.previewTokenShown = token;
+      queueMicrotask(() => openSessionCleanupExecuteConfirm());
+    }
+  }
+
   function applyPayloadDomains(root, payload, domains) {
     if ("currentSession" in domains) {
       applyCurrentSessionPayload(root, { ...(payload || {}), ...(domains.currentSession || {}) });
@@ -9399,6 +11816,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
     if ("fileManagement" in domains) {
       applyFileManagementPayload(root, { ...(payload || {}), ...(domains.fileManagement || {}) });
+    }
+    if ("usageInsights" in domains) {
+      applyUsageInsightsPayload(root, { ...(payload || {}), ...(domains.usageInsights || {}) });
+    }
+    if ("safeCleanup" in domains) {
+      applySafeCleanupPayload(root, { ...(payload || {}), ...(domains.safeCleanup || {}) });
+    }
+    if ("sessionCleanup" in domains) {
+      applySessionCleanupPayload(root, { ...(payload || {}), ...(domains.sessionCleanup || {}) });
     }
   }
 
@@ -9757,8 +12183,12 @@ class RendererHudPayload:
     settings_bridge_url: str = ""
     background_usage_bridge_url: str = ""
     background_usage_revision: int = 0
+    background_usage_notification: dict[str, object] = field(default_factory=dict)
     settings_command_status: dict[str, object] = field(default_factory=dict)
     file_management: dict[str, object] = field(default_factory=dict)
+    usage_insights: dict[str, object] = field(default_factory=dict)
+    safe_cleanup: dict[str, object] = field(default_factory=dict)
+    session_cleanup: dict[str, object] = field(default_factory=dict)
     work_overlay_selectable_max: int = 6
     desktop_overlay_dependency: dict[str, object] = field(default_factory=dict)
     support_images: list[dict[str, str]] = field(default_factory=list)
@@ -9810,8 +12240,12 @@ class RendererHudPayload:
             "settingsBridgeUrl": self.settings_bridge_url,
             "backgroundUsageBridgeUrl": self.background_usage_bridge_url,
             "backgroundUsageRevision": int(self.background_usage_revision),
+            "backgroundUsageNotification": dict(self.background_usage_notification),
             "settingsCommandStatus": dict(self.settings_command_status),
             "fileManagement": dict(self.file_management),
+            "usageInsights": dict(self.usage_insights),
+            "safeCleanup": dict(self.safe_cleanup),
+            "sessionCleanup": dict(self.session_cleanup),
             "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
             "desktopOverlayDependency": dict(self.desktop_overlay_dependency),
             "supportImages": [dict(item) for item in self.support_images],
@@ -9884,6 +12318,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "followReason",
         "followElapsedMs",
         "followTiming",
+        "backgroundUsageNotification",
     )
     current_session_keys = (
         "topLine",
@@ -9918,6 +12353,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "preSendHasPrices",
         "activityWarning",
         "activityReadingFile",
+        "backgroundUsageNotification",
     )
     budget_keys = ("topProgress",)
     settings_keys = (
@@ -9935,10 +12371,14 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
     background_usage_keys = (
         "backgroundUsageBridgeUrl",
         "backgroundUsageRevision",
+        "backgroundUsageNotification",
         "settingsCommandStatus",
     )
     diagnostics_keys = ("debug", "runtimeErrors")
     file_management = payload.get("fileManagement")
+    usage_insights = payload.get("usageInsights")
+    safe_cleanup = payload.get("safeCleanup")
+    session_cleanup = payload.get("sessionCleanup")
 
     def pick(keys: tuple[str, ...]) -> dict[str, object]:
         return {key: payload[key] for key in keys if key in payload}
@@ -9954,6 +12394,12 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
     }
     if isinstance(file_management, dict) and file_management:
         domains["fileManagement"] = {"fileManagement": dict(file_management)}
+    if isinstance(usage_insights, dict) and usage_insights:
+        domains["usageInsights"] = {"usageInsights": dict(usage_insights)}
+    if isinstance(safe_cleanup, dict) and safe_cleanup:
+        domains["safeCleanup"] = {"safeCleanup": dict(safe_cleanup)}
+    if isinstance(session_cleanup, dict) and session_cleanup:
+        domains["sessionCleanup"] = {"sessionCleanup": dict(session_cleanup)}
     return domains
 
 
@@ -10542,6 +12988,7 @@ class RendererHudClient:
         settings_bridge_url: str = "",
         background_usage_bridge_url: str = "",
         background_usage_revision: int = 0,
+        background_usage_notification: dict[str, object] | None = None,
         settings_command_status: dict[str, object] | None = None,
         update_state: dict[str, object] | None = None,
         debug: bool = False,
@@ -10551,6 +12998,9 @@ class RendererHudClient:
         provider_registry: dict[str, object] | None = None,
         app_provider: str = "",
         file_management: dict[str, object] | None = None,
+        usage_insights: dict[str, object] | None = None,
+        safe_cleanup: dict[str, object] | None = None,
+        session_cleanup: dict[str, object] | None = None,
     ) -> bool:
         started = time.perf_counter()
         support_images = [] if self._support_images_sent else support_qr_payload()
@@ -10568,6 +13018,7 @@ class RendererHudClient:
             settings_bridge_url=settings_bridge_url,
             background_usage_bridge_url=background_usage_bridge_url,
             background_usage_revision=background_usage_revision,
+            background_usage_notification=background_usage_notification,
             settings_command_status=settings_command_status,
             support_images=support_images,
             theme=_renderer_theme_payload(theme_snapshot),
@@ -10579,6 +13030,9 @@ class RendererHudClient:
             provider_registry=provider_registry,
             app_provider=app_provider,
             file_management=file_management,
+            usage_insights=usage_insights,
+            safe_cleanup=safe_cleanup,
+            session_cleanup=session_cleanup,
         ).to_json()
         update_ok = self.update_payload(payload)
         metrics = dict(self.last_update_metrics)
@@ -10945,6 +13399,7 @@ def payload_from_snapshot(
     settings_bridge_url: str = "",
     background_usage_bridge_url: str = "",
     background_usage_revision: int = 0,
+    background_usage_notification: dict[str, object] | None = None,
     settings_command_status: dict[str, object] | None = None,
     support_images: list[dict[str, str]] | None = None,
     theme: dict[str, object] | None = None,
@@ -10956,6 +13411,9 @@ def payload_from_snapshot(
     provider_registry: dict[str, object] | None = None,
     app_provider: str = "",
     file_management: dict[str, object] | None = None,
+    usage_insights: dict[str, object] | None = None,
+    safe_cleanup: dict[str, object] | None = None,
+    session_cleanup: dict[str, object] | None = None,
 ) -> RendererHudPayload:
     new_session = _is_new_session_snapshot(snapshot)
     pending_session = _is_pending_session_snapshot(snapshot)
@@ -11047,8 +13505,12 @@ def payload_from_snapshot(
         settings_bridge_url=settings_bridge_url,
         background_usage_bridge_url=background_usage_bridge_url,
         background_usage_revision=max(0, int(background_usage_revision or 0)),
+        background_usage_notification=dict(background_usage_notification or {}),
         settings_command_status=settings_command_status or {},
         file_management=file_management or {},
+        usage_insights=usage_insights or {},
+        safe_cleanup=safe_cleanup or {},
+        session_cleanup=session_cleanup or {},
         work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),
         desktop_overlay_dependency=desktop_overlay_dependency or {},
         support_images=support_images or [],
@@ -11072,6 +13534,7 @@ def session_switch_payload_from_snapshot(
     snapshot: ParsedSession,
     *,
     settings_path: Path | str | None = None,
+    background_usage_notification: dict[str, object] | None = None,
 ) -> dict[str, object]:
     session_cost = _session_cost(snapshot)
     warnings_dismissed = (
@@ -11118,6 +13581,7 @@ def session_switch_payload_from_snapshot(
         "followReason": str(snapshot.follow_reason or ""),
         "followElapsedMs": _follow_elapsed_ms(snapshot),
         "followTiming": dict(snapshot.follow_timing or {}),
+        "backgroundUsageNotification": dict(background_usage_notification or {}),
     }
     payload = dict(domain)
     payload["payloadDomains"] = {"sessionSwitch": dict(domain)}

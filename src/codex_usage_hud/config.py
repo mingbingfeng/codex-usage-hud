@@ -31,6 +31,8 @@ VALID_DISPLAY_MODES = {"renderer"}
 DEFAULT_SUPPORT_URL = "https://github.com/mingbingfeng/codex-usage-hud"
 DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
 DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED = False
+DEFAULT_CLEANUP_LOG_RETENTION_HOURS = 24
+DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS = 30
 JSON_WRITE_REPLACE_RETRIES = 8
 JSON_WRITE_REPLACE_DELAY_SECONDS = 0.01
 
@@ -151,11 +153,17 @@ class ProviderSettings:
     weekly_adjustment_usd: float = 0.0
 
     @classmethod
-    def from_dict(cls, value: Any) -> "ProviderSettings | None":
+    def from_dict(
+        cls,
+        value: Any,
+        *,
+        provider: str = "",
+    ) -> "ProviderSettings | None":
         if not isinstance(value, Mapping):
             return None
         prices = default_model_prices()
-        prices.update(normalize_model_prices(value.get("model_prices")))
+        parsed_prices = normalize_model_prices(value.get("model_prices"))
+        prices.update(_normalize_provider_model_prices(parsed_prices, provider))
         return cls(
             model_prices=prices,
             pricing_url=_optional_str(value.get("pricing_url")) or "",
@@ -194,6 +202,11 @@ class UserConfig:
     selected_providers: list[str] = field(default_factory=list)
     notification_only_providers: list[str] = field(default_factory=list)
     support_url: str = DEFAULT_SUPPORT_URL
+    cleanup_backup_directory: str = ""
+    cleanup_log_retention_hours: int = DEFAULT_CLEANUP_LOG_RETENTION_HOURS
+    cleanup_background_retention_days: int = (
+        DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS
+    )
 
     @classmethod
     def defaults(cls) -> "UserConfig":
@@ -270,6 +283,21 @@ class UserConfig:
             selected_providers=selected_providers,
             notification_only_providers=notification_only_providers,
             support_url=_optional_str(value.get("support_url")) or DEFAULT_SUPPORT_URL,
+            cleanup_backup_directory=(
+                _optional_str(value.get("cleanup_backup_directory")) or ""
+            ),
+            cleanup_log_retention_hours=_bounded_int(
+                value.get("cleanup_log_retention_hours"),
+                defaults.cleanup_log_retention_hours,
+                minimum=1,
+                maximum=24 * 30,
+            ),
+            cleanup_background_retention_days=_bounded_int(
+                value.get("cleanup_background_retention_days"),
+                defaults.cleanup_background_retention_days,
+                minimum=1,
+                maximum=3650,
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -292,6 +320,11 @@ class UserConfig:
             "selected_providers": list(self.selected_providers),
             "notification_only_providers": list(self.notification_only_providers),
             "support_url": self.support_url,
+            "cleanup_backup_directory": self.cleanup_backup_directory,
+            "cleanup_log_retention_hours": int(self.cleanup_log_retention_hours),
+            "cleanup_background_retention_days": int(
+                self.cleanup_background_retention_days
+            ),
             "model_prices": {
                 name: price.to_dict()
                 for name, price in sorted(self.model_prices.items())
@@ -575,10 +608,37 @@ def normalize_provider_settings(value: Any) -> dict[str, ProviderSettings]:
     settings: dict[str, ProviderSettings] = {}
     for raw_provider, raw_settings in value.items():
         provider = normalize_provider(raw_provider)
-        parsed = ProviderSettings.from_dict(raw_settings)
+        parsed = ProviderSettings.from_dict(raw_settings, provider=provider)
         if provider and parsed is not None:
             settings[provider] = parsed
     return settings
+
+
+def _normalize_provider_model_prices(
+    prices: Mapping[str, ModelPrice],
+    provider: str,
+) -> dict[str, ModelPrice]:
+    """Collapse legacy provider-prefixed rows inside one provider table."""
+    normalized_provider = normalize_provider(provider)
+    if not normalized_provider:
+        return dict(prices)
+
+    normalized: dict[str, ModelPrice] = {}
+    priorities: dict[str, int] = {}
+    for key, price in prices.items():
+        model = str(price.model or "").strip()
+        explicit_provider = normalize_provider(price.provider)
+        scoped_key = f"{normalized_provider}/{model}" if model else ""
+        is_current_provider_row = bool(model) and (
+            explicit_provider == normalized_provider
+            or (not explicit_provider and key == scoped_key)
+        )
+        canonical_key = model if is_current_provider_row and key == scoped_key else key
+        priority = 1 if is_current_provider_row else 0
+        if priority >= priorities.get(canonical_key, -1):
+            normalized[canonical_key] = price
+            priorities[canonical_key] = priority
+    return normalized
 
 
 def normalize_base_url(value: Any) -> str:
@@ -796,8 +856,23 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _bounded_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    parsed = _optional_int(value)
+    if parsed is None:
+        parsed = int(default)
+    return max(int(minimum), min(int(maximum), parsed))
+
+
 __all__ = [
     "DEFAULT_BUDGET_THRESHOLDS",
+    "DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS",
+    "DEFAULT_CLEANUP_LOG_RETENTION_HOURS",
     "DEFAULT_DAILY_BUDGET_USD",
     "DEFAULT_DAILY_RESET_TIME",
     "DEFAULT_DISPLAY_MODE",

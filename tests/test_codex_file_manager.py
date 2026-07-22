@@ -38,6 +38,24 @@ class CodexFileManagerTests(unittest.TestCase):
             manager = self.make_manager(root)
             self.assertEqual(manager.snapshot()["revision"], "")
             self.assertEqual(manager.snapshot()["items"], [])
+            self.assertEqual(manager.cleanup_candidates(), ())
+
+    def test_cleanup_candidate_projection_exports_only_raw_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / ".tmp" / "staging-old"
+            candidate.parent.mkdir()
+            candidate.write_bytes(b"candidate")
+            (root / "unknown.bin").write_bytes(b"protected")
+            manager = self.make_manager(root)
+
+            manager.scan()
+            projected = manager.cleanup_candidates()
+
+            self.assertEqual(len(projected), 1)
+            self.assertEqual(projected[0].path, candidate)
+            self.assertEqual(projected[0].approved_root, root)
+            self.assertEqual(projected[0].size, len(b"candidate"))
 
     def test_config_root_resolution_is_deferred_until_explicit_scan(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -706,6 +706,11 @@ class RendererHudPayloadTests(unittest.TestCase):
                 "http://127.0.0.1:8765/background-usage?access_token=test"
             ),
             background_usage_revision=7,
+            background_usage_notification={
+                "count": 3,
+                "eventId": "event-3",
+                "range": "7d",
+            },
             settings_command_status={"lastCommand": "saved"},
             theme={"variant": "dark"},
             update_state={"visible": True, "phase": "ready"},
@@ -748,6 +753,23 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(domains["overlay"]["workOverlaySelectableMax"], 3)
         self.assertEqual(domains["overlay"]["desktopOverlayDependency"], {"available": True})
         self.assertEqual(domains["backgroundUsage"]["backgroundUsageRevision"], 7)
+        expected_notification = {
+            "count": 3,
+            "eventId": "event-3",
+            "range": "7d",
+        }
+        self.assertEqual(
+            domains["currentSession"]["backgroundUsageNotification"],
+            expected_notification,
+        )
+        self.assertEqual(
+            domains["sessionSwitch"]["backgroundUsageNotification"],
+            expected_notification,
+        )
+        self.assertEqual(
+            domains["backgroundUsage"]["backgroundUsageNotification"],
+            expected_notification,
+        )
         self.assertIn(
             "access_token=test",
             domains["backgroundUsage"]["backgroundUsageBridgeUrl"],
@@ -770,10 +792,65 @@ class RendererHudPayloadTests(unittest.TestCase):
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
         self.assertIn('data-tab="backgroundUsage"', script)
-        self.assertIn('>后台用量</button>', script)
+        self.assertIn('>用量总览</button>', script)
+        self.assertIn('"Top10会话用量"', script)
+        self.assertIn('"Top10会话金额"', script)
+        self.assertIn('全部后台功能', script)
+        self.assertIn('label="后台任务"', script)
+        self.assertIn('label="用户会话排行"', script)
+        self.assertIn("function backgroundUsageSessionRankingMode", script)
+        self.assertIn("function backgroundUsageSessionRankingPanelHtml", script)
+        self.assertIn("function backgroundUsageSessionRankingDetailHtml", script)
+        self.assertIn('sessionAction: "background-usage-session-select"', script)
+        self.assertIn('data-session-ranking-detail="true"', script)
+        self.assertIn('"background-usage-session-select"', script)
+        self.assertNotIn(
+            '.codex-usage-hud-background-master-detail[data-session-ranking="true"] {\n'
+            '        grid-template-columns: minmax(0, 1fr);',
+            script,
+        )
+        self.assertIn('backgroundUsageState.range === "30d") return "month"', script)
+        self.assertIn('[["today", "今天"], ["7d", "近 7 天"], ["30d", "近 30 天"]]', script)
+        self.assertIn("usageInsightsRankingRowsHtml", script)
+        self.assertIn(
+            'class="codex-usage-hud-background-event '
+            'codex-usage-hud-session-ranking-row"',
+            script,
+        )
+        self.assertIn(
+            'codex-usage-hud-background-event-list '
+            'codex-usage-hud-session-ranking-list',
+            script,
+        )
+        self.assertIn(
+            'const workdir = String(item?.workdirName || "").trim();',
+            script,
+        )
+        self.assertIn('`工作目录 ${workdir || "--"}`', script)
+        self.assertIn('`模型 ${modelText}`', script)
+        self.assertIn("function usageInsightsSessionModelNames", script)
+        self.assertIn("使用模型${modelNames.length > 1", script)
+        self.assertIn('data-target-title="', script)
+        self.assertIn('data-workdir="', script)
+        self.assertIn("if (submitted) closeSettingsModal();", script)
+        self.assertIn(
+            ".codex-usage-hud-background-detail-head > .codex-usage-hud-settings-action",
+            script,
+        )
+        self.assertIn("codex-usage-hud-background-detail-full", script)
+        self.assertIn(
+            ".codex-usage-hud-session-ranking-row "
+            ".codex-usage-hud-background-event-totals > *",
+            script,
+        )
         self.assertIn('data-background-usage-filter="feature"', script)
         self.assertIn('data-background-usage-filter="model"', script)
         self.assertIn('data-action="background-usage-range"', script)
+        self.assertIn(
+            'if (backgroundUsageState.range === "all") {\n'
+            '          backgroundUsageState.range = "7d";',
+            script,
+        )
         self.assertIn("HUD 估算", script)
         self.assertIn("本机日志值", script)
         self.assertIn(
@@ -790,7 +867,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
 
-        detail_start = script.index("async function loadBackgroundUsageDetail(eventId)")
+        detail_start = script.index("async function loadBackgroundUsageDetail(eventId,")
         list_start = script.index("async function loadBackgroundUsage(", detail_start)
         self.assertIn(
             'backgroundUsageEndpoint("/detail")',
@@ -812,6 +889,57 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("backgroundUsageHistoryScrollTops", script)
         self.assertIn("backgroundUsageDetailScrollTops", script)
         self.assertIn("backgroundUsageDetailLoaded", script)
+        self.assertIn('data-action="background-usage-open-notification"', script)
+        self.assertIn("backgroundUsageNotificationCount", script)
+        self.assertIn("codex-usage-hud-background-unread-dot", script)
+        self.assertIn('{ markViewed: true }', script)
+        self.assertIn("markViewed: markViewed === true", script)
+        self.assertIn('["all", "全部"]', script)
+        self.assertIn(
+            "backgroundUsageState.range = normalizeBackgroundUsageRange(\n"
+            "          response?.payload?.range,",
+            script,
+        )
+        self.assertIn(
+            ".codex-usage-hud-collapsed[data-has-badge=\"true\"] {\n"
+            "        grid-template-columns: minmax(0, 1fr) auto 22px;",
+            script,
+        )
+        submit_start = script.index("function submitBackgroundUsageCommand")
+        submit_end = script.index("function readThemeStorage", submit_start)
+        submit_contract = script[submit_start:submit_end]
+        self.assertIn("id: requestId", submit_contract)
+        self.assertIn("requestId,", submit_contract)
+        ranking_start = script.index("async function loadBackgroundUsage(")
+        ranking_end = script.index("function renderSettingsModal", ranking_start)
+        ranking_contract = script[ranking_start:ranking_end]
+        self.assertIn("if (force || !insights", ranking_contract)
+        self.assertIn("requestUsageInsightsRefresh({ force });", ranking_contract)
+        self.assertIn(
+            "const incompleteCost = coverage?.hasCompleteCost === false;",
+            script,
+        )
+        self.assertIn("费用不可估", script)
+        self.assertIn("Codex App 后台用量 · 本地记录", script)
+        self.assertNotIn('label: "待处理"', script)
+        self.assertNotIn('label: "已处理"', script)
+        self.assertNotIn("function backgroundUsageStatusMeta", script)
+        self.assertIn(
+            "const eventTime = backgroundUsageTime(event?.lastSeenAt, { compact: true });",
+            script,
+        )
+        self.assertIn(
+            '<span class="codex-usage-hud-background-event-meta">${escapeHtml(modelText)}</span>',
+            script,
+        )
+        self.assertIn(
+            "const detailTime = backgroundUsageTime(detail.lastSeenAt, { compact: true });",
+            script,
+        )
+        self.assertNotIn("本机已归因", script)
+        self.assertIn('data-action="background-usage-copy-prompt"', script)
+        self.assertIn("user-select: text;", script)
+        self.assertIn("-webkit-user-select: text;", script)
 
         jump_start = script.index("function applyBackgroundUsagePayload")
         jump_end = script.index("function applyFileManagementPayload", jump_start)
@@ -826,9 +954,165 @@ class RendererHudPayloadTests(unittest.TestCase):
             "if (requestId !== backgroundUsageState.queryRequestId) return;",
             jump_contract,
         )
+        self.assertIn(
+            "if (!responseError && backgroundUsageState.selectedEventId)",
+            jump_contract,
+        )
         self.assertNotIn(
             "loadBackgroundUsage({ eventId: openEventId, force: true })",
             jump_contract,
+        )
+
+    def test_renderer_usage_insights_safe_cleanup_contract(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('data-tab="storage"', script)
+        self.assertIn('>空间清理</button>', script)
+        self.assertIn('data-cleanup-section="junk"', script)
+        self.assertIn('data-cleanup-section="sessions"', script)
+        self.assertIn('data-action="session-cleanup-status"', script)
+        self.assertIn('data-action="session-cleanup-time"', script)
+        self.assertIn('codex-usage-hud-session-filter', script)
+        self.assertIn('data-session-cleanup-select-all="true"', script)
+        self.assertIn('data-danger="true"', script)
+        # Visual structure contracts against docs/designs/space-cleanup-session-delete-v1.html
+        self.assertIn("codex-usage-hud-cleanup-page-head", script)
+        self.assertIn("codex-usage-hud-cleanup-segments", script)
+        self.assertIn("grid-template-columns: repeat(2, minmax(96px, 1fr))", script)
+        self.assertIn("min-height: 31px", script)
+        self.assertIn("codex-usage-hud-cleanup-footer", script)
+        self.assertIn("min-height: 50px", script)
+        self.assertIn("height: min(572px, calc(100vh - 48px))", script)
+        self.assertIn("calc(100vw - 48px)", script)
+        self.assertIn("codex-usage-hud-cleanup-empty-state", script)
+        self.assertIn("codex-usage-hud-cleanup-scan-mark", script)
+        self.assertIn("codex-usage-hud-cleanup-empty-title", script)
+        self.assertIn("尚未扫描", script)
+        self.assertIn('data-size="large"', script)
+        self.assertIn("codex-usage-hud-cleanup-summary-band", script)
+        self.assertIn("background: #16261a", script)
+        self.assertIn("codex-usage-hud-cleanup-row", script)
+        self.assertIn("min-height: 54px", script)
+        self.assertIn('data-kind="deep"', script)
+        self.assertIn("codex-usage-hud-cleanup-protected-note", script)
+        self.assertIn("codex-usage-hud-session-head", script)
+        self.assertIn("grid-template-columns: 28px minmax(0, 1.35fr) minmax(0, .9fr) 88px 72px 82px", script)
+        self.assertIn(">会话</span>", script)
+        self.assertIn(">工作目录</span>", script)
+        self.assertIn(">最后活动</span>", script)
+        self.assertIn(">状态</span>", script)
+        self.assertIn(">占用</span>", script)
+        self.assertIn("codex-usage-hud-session-search", script)
+        self.assertIn(
+            'span[data-secondary="true"] {\n'
+            "        display: none;\n"
+            "      }",
+            script,
+        )
+        self.assertIn("cleanupContentScrollTop", script)
+        self.assertIn("sessionTableScrollTop", script)
+        self.assertIn('data-tone="danger"', script)
+        self.assertIn("codex-usage-hud-settings-confirm-danger-mark", script)
+        self.assertIn('grid-template-areas: "check title workdir time status size"', script)
+        self.assertIn("check title title status size", script)
+        self.assertIn("background: #3b8eea", script)
+        self.assertIn("background: #c43e45", script)
+        self.assertIn('session-filter[data-active="true"]', script)
+        self.assertIn("codex-usage-hud-settings-confirm-summary", script)
+        self.assertIn("codex-usage-hud-settings-confirm-note", script)
+        self.assertIn("function cleanupIconSvg", script)
+        self.assertIn(
+            'sessionCleanupState.search = String(sessionSearch.value || "");\n'
+            "        sessionCleanupState.selectedIds.clear();",
+            script,
+        )
+        self.assertIn(
+            'sessionCleanupState.status = String(action.dataset.sessionCleanupStatus || "all");\n'
+            "        sessionCleanupState.selectedIds.clear();",
+            script,
+        )
+        self.assertIn(
+            'sessionCleanupState.time = String(action.dataset.sessionCleanupTime || "all");\n'
+            "        sessionCleanupState.selectedIds.clear();",
+            script,
+        )
+        self.assertIn("function sessionCleanupReasonLabel", script)
+        self.assertIn('action: "sessionCleanupPreview"', script)
+        self.assertIn('action: "sessionCleanupExecute"', script)
+        self.assertIn('action: "sessionCleanupCancel"', script)
+        self.assertIn("Codex App 的归档入口无法恢复这些会话", script)
+        self.assertIn(
+            "const body = isSessions ? sessionCleanupPanelHtml() : safeCleanupPanelHtml();",
+            script,
+        )
+        self.assertNotIn("function usageInsightsPanelHtml", script)
+        self.assertIn("function safeCleanupRequiresCodexClose", script)
+        self.assertIn("group?.requiresCodexClose === true", script)
+        self.assertIn(
+            "requiresCodexClose && !safeCleanupState.autoCloseConfirmed",
+            script,
+        )
+        self.assertIn("SQLite 维护必须先选择备份目录。", script)
+        self.assertIn("Codex App 与 HUD 会正常退出并在清理后自动恢复", script)
+        self.assertIn('action: "safeCleanupPreview"', script)
+        self.assertIn('action: "safeCleanupExecute"', script)
+        self.assertNotIn('data-action="safe-cleanup-preview"', script)
+        self.assertIn("pickerChanged", script)
+        self.assertIn("scheduleSafeCleanupPreview();", script)
+        self.assertIn('operation?.action === "scan"', script)
+        self.assertIn('return "扫描完成"', script)
+        self.assertIn("function safeCleanupResultStateLabel", script)
+        self.assertIn("function safeCleanupDisplayLabel", script)
+        self.assertIn("function safeCleanupDisplayImpact", script)
+        self.assertIn('system_cache: "系统可再生成缓存"', script)
+        self.assertIn('diagnostic_history: "系统诊断历史"', script)
+        self.assertIn('"DirectX shader cache": "DirectX 着色器缓存"', script)
+        self.assertIn('"Old macOS diagnostic reports": "macOS 旧诊断报告"', script)
+        self.assertIn(
+            '"Old operating-system diagnostics will no longer be available."',
+            script,
+        )
+        self.assertIn("const groupById = new Map", script)
+        self.assertIn("const previewTierOrder = { consent: 0, safe: 1, protected: 2 };", script)
+        self.assertIn("const orderedPreviewItems = [...previewItems].sort", script)
+        self.assertIn("orderedPreviewItems.slice(0, 16)", script)
+        self.assertIn("${protectedGroups.length} 项", script)
+        self.assertIn("${items} 项", script)
+        self.assertIn("已选 ${selectedIds.length} 项", script)
+        self.assertIn("function safeCleanupPreviewSpaceSummary", script)
+        self.assertIn("function safeCleanupConfirmSpaceSummary", script)
+        self.assertIn("function safeCleanupResultBackupSummary", script)
+        self.assertIn("operation?.sameVolumeBackupBytes", script)
+        self.assertIn("operation?.netEstimatedBytes", script)
+        self.assertIn("源盘预计净释放", script)
+        self.assertIn("存到其他磁盘", script)
+        self.assertIn("不占用源盘", script)
+        self.assertIn("backupVolumeLabel", script)
+        self.assertIn("backupDirectoryLabel", script)
+        self.assertIn("operation?.backupFiles", script)
+        self.assertNotIn(
+            "备份约 ${storageFormatBytes(totals?.backupBytes)}",
+            script,
+        )
+        self.assertIn('category === "codex_logs_history"', script)
+        self.assertIn('if (operation?.action === "scan") return "";', script)
+        self.assertIn('previewBackupDirectory: ""', script)
+        self.assertIn('const previewLocked = operationState === "preview"', script)
+        self.assertIn('${previewLocked ? "disabled" : ""}', script)
+        confirm_start = script.index("function openSafeCleanupExecuteConfirm")
+        execute_start = script.index("function executeSafeCleanup", confirm_start)
+        confirm_contract = script[confirm_start:execute_start]
+        self.assertIn("operation?.includesConsent === true", confirm_contract)
+        self.assertIn("safeCleanupState.previewBackupDirectory", confirm_contract)
+        self.assertIn("safeCleanupConfirmSpaceSummary(operation)", confirm_contract)
+        self.assertNotIn("safeCleanupState.includeConsent ?", confirm_contract)
+        execute_end = script.index("function storageSelectedItemIds", execute_start)
+        execute_contract = script[execute_start:execute_end]
+        self.assertNotIn("consentConfirmed:", execute_contract)
+        self.assertNotIn("backupDirectory:", execute_contract)
+        self.assertNotIn(
+            'selectedIds.map((id) => ({ id, state: "selected" }))',
+            script,
         )
 
     def test_renderer_payload_can_emit_domain_only_update(self) -> None:
@@ -902,6 +1186,38 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(partial["fileManagement"]["revision"], "1-opaque")
         self.assertNotIn("topLine", partial)
         self.assertNotIn("relative/absolute", str(partial))
+
+    def test_renderer_payload_can_emit_private_session_cleanup_domain(self) -> None:
+        session_cleanup = {
+            "revision": "2-opaque",
+            "capability": {"available": True},
+            "sessions": [
+                {
+                    "id": "opaque-session-item",
+                    "title": "Old task",
+                    "workdirName": "project-a",
+                    "selectable": True,
+                    "descendantCount": 2,
+                }
+            ],
+            "operation": {"state": "idle"},
+        }
+        payload = payload_from_snapshot(
+            ParsedSession(status="parsed"),
+            session_cleanup=session_cleanup,
+        )
+
+        partial = payload.to_domain_json("sessionCleanup")
+
+        self.assertEqual(set(partial["payloadDomains"]), {"sessionCleanup"})
+        self.assertEqual(partial["sessionCleanup"]["revision"], "2-opaque")
+        self.assertEqual(
+            partial["sessionCleanup"]["sessions"][0]["id"],
+            "opaque-session-item",
+        )
+        self.assertNotIn("topLine", partial)
+        self.assertNotIn("10000000-0000-4000-8000-000000000001", repr(partial))
+        self.assertNotIn("C:\\Users", repr(partial))
 
     def test_update_payload_reports_failed_update_without_reinstall_retry(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
@@ -1185,7 +1501,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "32";', script)
+        self.assertIn('const version = "34";', script)
         self.assertIn("function applyCachedActiveSessionPayload", script)
         self.assertIn("function cacheActiveSessionPayload", script)
         self.assertIn("if (payload?.cachedPreview) return;", script)

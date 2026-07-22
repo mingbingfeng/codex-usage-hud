@@ -126,6 +126,39 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(config.to_dict()["provider_settings"]["muyuan"]["pricing_url"], "https://pricing.example/muyuan.json")
         self.assertEqual(config.to_dict()["notification_only_providers"], ["notice"])
 
+    def test_provider_settings_collapse_legacy_prefixed_duplicate_prices(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "provider_settings": {
+                    "custom": {
+                        "model_prices": {
+                            "gpt-5.6-sol": {
+                                "input": 2,
+                                "cached_input": 0.2,
+                                "output": 12,
+                                "reasoning": 12,
+                            },
+                            "custom/gpt-5.6-sol": {
+                                "model": "gpt-5.6-sol",
+                                "provider": "custom",
+                                "input": 5,
+                                "cached_input": 0.5,
+                                "output": 30,
+                                "reasoning": 30,
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+        prices = config.provider_settings["custom"].model_prices
+
+        self.assertEqual(list(prices).count("gpt-5.6-sol"), 1)
+        self.assertNotIn("custom/gpt-5.6-sol", prices)
+        self.assertEqual(prices["gpt-5.6-sol"].input, 5.0)
+        self.assertEqual(prices["gpt-5.6-sol"].provider, "custom")
+
     def test_legacy_prices_migrate_per_discovered_provider_without_copying_adjustment(self) -> None:
         config = UserConfig.from_dict(
             {
@@ -186,6 +219,32 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(config.work_overlay_max_items, 0)
         self.assertNotIn("work_overlay_enabled", config.to_dict())
         self.assertEqual(config.to_dict()["work_overlay_max_items"], 0)
+
+    def test_cleanup_settings_round_trip_with_conservative_bounds(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "cleanup_backup_directory": r"D:\Codex backups",
+                "cleanup_log_retention_hours": 0,
+                "cleanup_background_retention_days": 99999,
+            }
+        )
+
+        self.assertEqual(config.cleanup_backup_directory, r"D:\Codex backups")
+        self.assertEqual(config.cleanup_log_retention_hours, 1)
+        self.assertEqual(config.cleanup_background_retention_days, 3650)
+        payload = config.to_dict()
+        self.assertEqual(payload["cleanup_backup_directory"], r"D:\Codex backups")
+        self.assertEqual(payload["cleanup_log_retention_hours"], 1)
+        self.assertEqual(payload["cleanup_background_retention_days"], 3650)
+
+        defaults = UserConfig.from_dict(
+            {
+                "cleanup_log_retention_hours": "invalid",
+                "cleanup_background_retention_days": None,
+            }
+        )
+        self.assertEqual(defaults.cleanup_log_retention_hours, 24)
+        self.assertEqual(defaults.cleanup_background_retention_days, 30)
 
     def test_display_mode_normalizes_legacy_modes_to_renderer(self) -> None:
         self.assertEqual(normalize_display_mode("auto"), "renderer")

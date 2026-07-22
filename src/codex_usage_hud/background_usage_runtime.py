@@ -136,16 +136,21 @@ class BackgroundUsageRuntime:
     def watcher_polling_cause(self) -> str:
         return str(getattr(self._watcher, "polling_cause", "") or "")
 
-    def close(self) -> None:
+    @property
+    def worker_alive(self) -> bool:
+        return self._worker.is_alive()
+
+    def close(self, timeout: float = 2.0) -> bool:
         if self._closed.is_set():
-            return
+            return not self._worker.is_alive()
         self._closed.set()
         self._wake.set()
         try:
             self._watcher.close()
         finally:
             if self._worker.is_alive():
-                self._worker.join(timeout=2.0)
+                self._worker.join(timeout=max(0.0, float(timeout)))
+        return not self._worker.is_alive()
 
     def _on_source_changed(self, reasons: set[str], paths: set[Path]) -> None:
         del paths

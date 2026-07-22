@@ -22,8 +22,6 @@ import stat
 import subprocess
 import threading
 import time
-from typing import Any
-
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10: fail closed without a dependency.
@@ -112,6 +110,19 @@ class InventoryItem:
         if self.allowed_actions:
             payload["allowedActions"] = list(self.allowed_actions)
         return payload
+
+
+@dataclass(frozen=True)
+class CodexCleanupCandidate:
+    """Python-only projection of one raw-mutation candidate."""
+
+    path: Path
+    approved_root: Path
+    size: int
+    file_count: int
+    mtime: float
+    fingerprint: str
+    lstat: tuple[int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -409,6 +420,34 @@ class CodexFileManager:
         if inventory is None:
             return _empty_inventory_payload(operation)
         return inventory.to_payload(operation)
+
+    def cleanup_candidates(self) -> tuple[CodexCleanupCandidate, ...]:
+        """Return only already-scanned raw candidates for local orchestration."""
+
+        with self._lock:
+            inventory = self._inventory
+        if inventory is None:
+            return ()
+        roots = dict(self.roots.scan_roots())
+        candidates: list[CodexCleanupCandidate] = []
+        for item in inventory.items:
+            if item.policy != "candidate":
+                continue
+            root = roots.get(item.root_key)
+            if root is None:
+                continue
+            candidates.append(
+                CodexCleanupCandidate(
+                    path=item._path,
+                    approved_root=root,
+                    size=item.size,
+                    file_count=item.file_count,
+                    mtime=item.mtime,
+                    fingerprint=item._fingerprint,
+                    lstat=item._lstat,
+                )
+            )
+        return tuple(candidates)
 
     def scan(self, *, request_id: str = "") -> dict[str, object]:
         self._cancel.clear()
@@ -1390,6 +1429,7 @@ def path_is_locked(path: Path) -> bool:
 
 
 __all__ = [
+    "CodexCleanupCandidate",
     "CodexFileManager",
     "CodexFileManagerWorker",
     "CodexRoots",

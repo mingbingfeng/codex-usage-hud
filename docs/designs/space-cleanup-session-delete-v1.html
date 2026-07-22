@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>空间清理与会话删除 V1</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #0d0e10;
+      --surface: #18191b;
+      --surface-2: #202124;
+      --surface-3: #292b2f;
+      --line: #393b40;
+      --line-soft: #2d2f33;
+      --text: #f1f3f5;
+      --muted: #9da1a8;
+      --muted-2: #73777f;
+      --blue: #3b8eea;
+      --blue-hover: #55a0f2;
+      --green: #4ac26b;
+      --green-bg: #16261a;
+      --yellow: #d9a441;
+      --yellow-bg: #2a2418;
+      --red: #f05b61;
+      --red-bg: #2b191b;
+      --white: #ffffff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 1900px;
+      min-height: 1390px;
+      background: var(--page);
+      color: var(--text);
+      font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+      letter-spacing: 0;
+    }
+
+    button, input { font: inherit; letter-spacing: 0; }
+    button { color: inherit; }
+
+    .icon {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: none;
+      flex: 0 0 auto;
+    }
+
+    .icon-lg { width: 30px; height: 30px; }
+
+    .board {
+      width: 1900px;
+      margin: 0 auto;
+      padding: 28px 30px 34px;
+    }
+
+    .board-head {
+      height: 74px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 28px;
+      border-bottom: 1px solid var(--line-soft);
+      margin-bottom: 22px;
+    }
+
+    .board-title { margin: 0; font-size: 25px; line-height: 1.25; font-weight: 700; }
+    .board-subtitle { margin-top: 7px; color: var(--muted); font-size: 13px; }
+
+    .flow-key {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      padding-top: 5px;
+    }
+
+    .flow-key strong { color: var(--text); font-weight: 600; }
+    .flow-arrow { color: var(--blue); }
+
+    .states {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+    }
+
+    .state {
+      min-width: 0;
+    }
+
+    .state-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 28px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .state-label strong {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .step-number {
+      width: 23px;
+      height: 23px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid #486e9c;
+      border-radius: 50%;
+      color: #87bfff;
+      font-size: 11px;
+    }
+
+    .app {
+      height: 572px;
+      border: 1px solid #44464c;
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: 0 14px 34px rgba(0, 0, 0, .28);
+      position: relative;
+    }
+
+    .titlebar {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 13px 0 14px;
+      background: #303134;
+      border-bottom: 1px solid #3c3e43;
+    }
+
+    .product-title { font-size: 12px; font-weight: 700; }
+
+    .close-button, .icon-button {
+      width: 30px;
+      height: 30px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .close-button { background: #45474b; color: var(--text); }
+
+    .top-tabs {
+      height: 42px;
+      display: flex;
+      align-items: stretch;
+      gap: 3px;
+      padding: 0 12px;
+      background: #1c1d1f;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .top-tab {
+      display: inline-flex;
+      align-items: center;
+      padding: 0 11px;
+      color: var(--muted);
+      font-size: 12px;
+      border-bottom: 2px solid transparent;
+      white-space: nowrap;
+    }
+
+    .top-tab.active { color: #79b8ff; border-bottom-color: var(--blue); }
+
+    .page {
+      height: calc(100% - 88px);
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-width: 0;
+    }
+
+    .page-head {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #191a1c;
+    }
+
+    .segmented {
+      display: inline-grid;
+      grid-template-columns: repeat(2, minmax(96px, 1fr));
+      border: 1px solid #414349;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #151618;
+    }
+
+    .segment {
+      min-height: 31px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+      border-right: 1px solid #414349;
+    }
+
+    .segment:last-child { border-right: 0; }
+    .segment.active { background: #2b2d31; color: var(--text); font-weight: 650; }
+
+    .head-meta { color: var(--muted-2); font-size: 11px; }
+
+    .content {
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .scan-empty {
+      height: 100%;
+      display: grid;
+      place-content: center;
+      justify-items: center;
+      gap: 12px;
+      text-align: center;
+      padding-bottom: 18px;
+    }
+
+    .scan-mark {
+      width: 62px;
+      height: 62px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #3f5f82;
+      border-radius: 50%;
+      background: #17202a;
+      color: #7db9f7;
+    }
+
+    .empty-title { font-size: 17px; font-weight: 700; }
+    .empty-meta { color: var(--muted); font-size: 12px; }
+
+    .button {
+      min-height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 13px;
+      border: 1px solid #4a4d53;
+      border-radius: 5px;
+      background: #2b2d31;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .button.primary { background: var(--blue); border-color: var(--blue); color: var(--white); }
+    .button.danger { background: #c43e45; border-color: #d84a51; color: var(--white); }
+    .button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+    .button.large { min-height: 38px; padding: 0 17px; font-size: 13px; }
+
+    .footer {
+      min-height: 50px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 13px;
+      border-top: 1px solid var(--line);
+      background: #2c2d30;
+    }
+
+    .footer-meta { color: var(--muted); font-size: 11px; min-width: 0; }
+    .footer-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+    .summary-band {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+      padding: 13px 15px;
+      border-bottom: 1px solid var(--line);
+      background: var(--green-bg);
+    }
+
+    .summary-label { display: flex; align-items: center; gap: 9px; color: #9be5ad; font-size: 12px; }
+    .summary-value { margin-top: 3px; font-size: 24px; line-height: 1; font-weight: 750; color: #c9f4d2; }
+    .summary-side { color: #9be5ad; font-size: 11px; text-align: right; }
+
+    .cleanup-list { min-height: 0; }
+
+    .cleanup-row {
+      min-height: 54px;
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) minmax(150px, .7fr) 76px 20px;
+      gap: 9px;
+      align-items: center;
+      padding: 7px 14px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .cleanup-row.deep {
+      background: var(--yellow-bg);
+      border-top: 1px solid #554525;
+      border-bottom-color: #554525;
+    }
+
+    .checkbox {
+      width: 16px;
+      height: 16px;
+      border: 1px solid #5a5d63;
+      border-radius: 3px;
+      background: #111214;
+      display: grid;
+      place-items: center;
+      color: var(--white);
+    }
+
+    .checkbox.checked { background: var(--blue); border-color: var(--blue); }
+    .checkbox.checked::after { content: ""; width: 7px; height: 4px; border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-1px) rotate(-45deg); }
+    .checkbox.disabled { border-color: #3b3d42; background: #202124; }
+
+    .row-title { font-size: 12px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-meta { margin-top: 3px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-impact { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+    .row-size { text-align: right; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .chevron { color: var(--muted-2); }
+
+    .protected-note {
+      min-height: 39px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 7px 14px;
+      color: var(--muted);
+      font-size: 10px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .protected-note span { display: inline-flex; align-items: center; gap: 7px; }
+
+    .session-tools {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 9px;
+      padding: 10px 13px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .search {
+      min-width: 0;
+      min-height: 32px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid #44464c;
+      border-radius: 5px;
+      color: var(--muted);
+      background: #111214;
+      font-size: 11px;
+    }
+
+    .filters { display: inline-flex; align-items: center; gap: 5px; }
+
+    .filter {
+      min-height: 32px;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 9px;
+      border: 1px solid #44464c;
+      border-radius: 5px;
+      background: #24262a;
+      color: var(--muted);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .filter.active { border-color: #4c78a9; color: #a9d1ff; background: #1b2632; }
+
+    .session-head, .session-row {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1.35fr) minmax(0, .9fr) 88px 72px 82px;
+      gap: 9px;
+      align-items: center;
+      padding: 0 13px;
+    }
+
+    .session-head {
+      min-height: 31px;
+      color: var(--muted-2);
+      font-size: 10px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #1c1d1f;
+    }
+
+    .session-row {
+      min-height: 54px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .session-row.selected { background: #172331; }
+    .session-row.blocked { opacity: .55; }
+    .session-title { min-width: 0; }
+    .session-title strong, .session-workdir { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-title strong { font-size: 11px; font-weight: 650; }
+    .session-title span { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-workdir { color: #c4c7cc; font-size: 10px; }
+    .session-cell { color: var(--muted); font-size: 10px; }
+    .session-size { text-align: right; color: #c7cad0; font-size: 10px; font-variant-numeric: tabular-nums; }
+
+    .badge {
+      min-height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 7px;
+      border: 1px solid #4a4d53;
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 9px;
+      white-space: nowrap;
+    }
+
+    .badge.current { border-color: #356894; color: #8dc7ff; background: #172431; }
+    .badge.archived { border-color: #5b4b2b; color: #e2bd6c; background: #262116; }
+
+    .modal-layer {
+      position: absolute;
+      inset: 88px 0 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(7, 8, 9, .72);
+    }
+
+    .confirm-dialog {
+      width: min(500px, calc(100% - 36px));
+      border: 1px solid #5e3a3d;
+      border-radius: 8px;
+      background: #1d1e20;
+      box-shadow: 0 22px 58px rgba(0, 0, 0, .52);
+      overflow: hidden;
+    }
+
+    .confirm-main { padding: 18px 19px 16px; }
+    .danger-mark { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid #754247; border-radius: 50%; background: var(--red-bg); color: #ff858a; margin-bottom: 12px; }
+    .confirm-title { margin: 0; font-size: 17px; font-weight: 720; }
+    .confirm-copy { margin: 8px 0 13px; color: #c9cbd0; font-size: 11px; line-height: 1.6; }
+
+    .confirm-summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid #47494f;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .confirm-summary div { padding: 10px 11px; border-right: 1px solid #47494f; }
+    .confirm-summary div:last-child { border-right: 0; }
+    .confirm-summary span { display: block; color: var(--muted); font-size: 9px; }
+    .confirm-summary strong { display: block; margin-top: 3px; font-size: 13px; }
+
+    .confirm-note { margin-top: 12px; display: flex; align-items: flex-start; gap: 8px; color: #e6bd69; font-size: 10px; line-height: 1.5; }
+
+    .confirm-actions {
+      min-height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 9px 12px;
+      border-top: 1px solid var(--line);
+      background: #292a2d;
+    }
+
+    .annotation {
+      margin-top: 8px;
+      color: var(--muted-2);
+      font-size: 10px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="11" cy="11" r="4"/><path d="m16 16 3 3"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-4M4 4v6h6M4 13a8 8 0 0 0 14.9 4M20 20v-6h-6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21 19-9-16-9 16h18Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h6l2 2h10v11H3z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </svg>
+
+  <main class="board">
+    <header class="board-head">
+      <div>
+        <h1 class="board-title">设置页改版 V1：空间清理 + 永久删除会话</h1>
+        <div class="board-subtitle">默认垃圾清理仅保留两个主动作；不可恢复的会话删除独立成管理视图。</div>
+      </div>
+      <div class="flow-key"><strong>默认路径</strong><span>扫描垃圾</span><span class="flow-arrow">→</span><span>确认清理</span><span>·</span><span>高级项按需展开</span></div>
+    </header>
+
+    <section class="states">
+      <article class="state">
+        <div class="state-label"><strong><span class="step-number">1</span> 扫描前</strong><span>唯一主动作</span></div>
+        <div class="app">
+          <div class="titlebar"><span class="product-title">codex-usage-hud v1.0.5</span><button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button></div>
+          <nav class="top-tabs"><span class="top-tab">设置</span><span class="top-tab active">空间清理</span><span class="top-tab">用量总览</span><span class="top-tab">请作者喝咖啡</span><span class="top-tab">版本更新</span></nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented"><span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span><span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span></div>
+              <span class="head-meta">按需扫描 · 无后台轮询</span>
+            </div>
+            <div class="content">
+              <div class="scan-empty">
+                <div class="scan-mark"><svg class="icon icon-lg"><use href="#i-scan"/></svg></div>
+                <div class="empty-title">尚未扫描</div>
+                <div class="empty-meta">本机缓存、临时文件与 HUD 诊断数据</div>
+                <button class="button primary large"><svg class="icon"><use href="#i-scan"/></svg>扫描垃圾</button>
+              </div>
+            </div>
+            <div class="footer"><span class="footer-meta">上次扫描：--</span><span class="footer-meta"><svg class="icon" style="vertical-align:middle"><use href="#i-shield"/></svg> 配置、凭据和会话默认受保护</span></div>
+          </div>
+        </div>
+        <div class="annotation">打开页面不自动扫盘；用户点击后才生成一次 inventory 和默认安全预览。</div>
+      </article>
+
+      <article class="state">
+        <div class="state-label"><strong><span class="step-number">2</span> 扫描结果</strong><span>第二次点击直接执行</span></div>
+        <div class="app">
+          <div class="titlebar"><span class="product-title">codex-usage-hud v1.0.5</span><button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button></div>
+          <nav class="top-tabs"><span class="top-tab">设置</span><span class="top-tab active">空间清理</span><span class="top-tab">用量总览</span><span class="top-tab">请作者喝咖啡</span><span class="top-tab">版本更新</span></nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented"><span class="segment active"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span><span class="segment"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span></div>
+              <span class="head-meta">刚刚完成</span>
+            </div>
+            <div class="content">
+              <div class="summary-band">
+                <div><div class="summary-label"><svg class="icon"><use href="#i-check"/></svg>可安全清理</div><div class="summary-value">1.12 GB</div></div>
+                <div class="summary-side">已选 48 项<br>预计 15-30 秒</div>
+              </div>
+              <div class="cleanup-list">
+                <div class="cleanup-row"><span class="checkbox checked"></span><div><div class="row-title">应用缓存</div><div class="row-meta">Chrome、Edge、VS Code</div></div><div class="row-impact">运行中的应用已自动跳过</div><div class="row-size">724 MB</div><svg class="icon chevron"><use href="#i-chevron"/></svg></div>
+                <div class="cleanup-row"><span class="checkbox checked"></span><div><div class="row-title">开发工具缓存</div><div class="row-meta">pip、npm、NuGet、着色器</div></div><div class="row-impact">后续需要时自动重建</div><div class="row-size">326 MB</div><svg class="icon chevron"><use href="#i-chevron"/></svg></div>
+                <div class="cleanup-row"><span class="checkbox checked"></span><div><div class="row-title">运行残留</div><div class="row-meta">过期临时项与旧清理备份</div></div><div class="row-impact">不影响会话和设置</div><div class="row-size">67 MB</div><svg class="icon chevron"><use href="#i-chevron"/></svg></div>
+                <div class="cleanup-row"><span class="checkbox checked"></span><div><div class="row-title">HUD 诊断日志</div><div class="row-meta">当前与轮转日志</div></div><div class="row-impact">HUD 将自动恢复</div><div class="row-size">4.2 MB</div><svg class="icon chevron"><use href="#i-chevron"/></svg></div>
+                <div class="cleanup-row deep"><span class="checkbox"></span><div><div class="row-title">深度清理（可选）</div><div class="row-meta">旧 Codex 诊断历史 · 保留最近 24 小时</div></div><div class="row-impact">需备份并关闭 Codex</div><div class="row-size">551 MB</div><svg class="icon chevron"><use href="#i-chevron"/></svg></div>
+                <div class="protected-note"><span><svg class="icon"><use href="#i-shield"/></svg>13.4 GB 正在使用或受保护</span><span>查看扫描详情 ›</span></div>
+              </div>
+            </div>
+            <div class="footer"><span class="footer-meta">执行前仍会重验路径、指纹与活动任务</span><div class="footer-actions"><button class="icon-button" aria-label="重新扫描"><svg class="icon"><use href="#i-refresh"/></svg></button><button class="button primary large"><svg class="icon"><use href="#i-check"/></svg>确认清理 1.12 GB</button></div></div>
+          </div>
+        </div>
+        <div class="annotation">显式“生成清理预览”被移除；当前结果本身就是绑定 revision/token 的确认面。</div>
+      </article>
+
+      <article class="state">
+        <div class="state-label"><strong><span class="step-number">3</span> 会话管理</strong><span>主会话归并子 agent</span></div>
+        <div class="app">
+          <div class="titlebar"><span class="product-title">codex-usage-hud v1.0.5</span><button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button></div>
+          <nav class="top-tabs"><span class="top-tab">设置</span><span class="top-tab active">空间清理</span><span class="top-tab">用量总览</span><span class="top-tab">请作者喝咖啡</span><span class="top-tab">版本更新</span></nav>
+          <div class="page">
+            <div class="page-head">
+              <div class="segmented"><span class="segment"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span><span class="segment active"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span></div>
+              <span class="head-meta">1,049 个本地会话</span>
+            </div>
+            <div class="content">
+              <div class="session-tools"><div class="search"><svg class="icon"><use href="#i-search"/></svg>搜索标题或工作目录</div><div class="filters"><span class="filter active">全部</span><span class="filter">已归档 191</span><span class="filter">30 天未用</span></div></div>
+              <div class="session-head"><span class="checkbox"></span><span>会话</span><span>工作目录</span><span>最后活动</span><span>状态</span><span style="text-align:right">占用</span></div>
+              <div class="session-row blocked"><span class="checkbox disabled"></span><div class="session-title"><strong>空间清理与会话删除改版</strong><span>当前会话 · 运行中</span></div><span class="session-workdir">codex-usage-hud</span><span class="session-cell">刚刚</span><span class="badge current">当前</span><span class="session-size">18.4 MB</span></div>
+              <div class="session-row selected"><span class="checkbox checked"></span><div class="session-title"><strong>排查月度用量统计偏差</strong><span>含 3 个关联子任务</span></div><span class="session-workdir">zjxc.moon</span><span class="session-cell">42 天前</span><span class="badge archived">已归档</span><span class="session-size">61.8 MB</span></div>
+              <div class="session-row selected"><span class="checkbox checked"></span><div class="session-title"><strong>旧版 Renderer 性能实验</strong><span>无关联子任务</span></div><span class="session-workdir">codex-usage-hud</span><span class="session-cell">67 天前</span><span class="badge archived">已归档</span><span class="session-size">20.2 MB</span></div>
+              <div class="session-row"><span class="checkbox"></span><div class="session-title"><strong>发布脚本兼容性检查</strong><span>无关联子任务</span></div><span class="session-workdir">gateway</span><span class="session-cell">8 天前</span><span class="badge">普通</span><span class="session-size">9.7 MB</span></div>
+              <div class="session-row"><span class="checkbox"></span><div class="session-title"><strong>扫描项目路由核对</strong><span>含 1 个关联子任务</span></div><span class="session-workdir">scan_project</span><span class="session-cell">12 天前</span><span class="badge">普通</span><span class="session-size">13.1 MB</span></div>
+            </div>
+            <div class="footer"><span class="footer-meta">已选 2 个会话 · 含 3 个关联子任务 · 82.0 MB</span><div class="footer-actions"><button class="button danger large"><svg class="icon"><use href="#i-trash"/></svg>永久删除</button></div></div>
+          </div>
+        </div>
+        <div class="annotation">当前/运行中会话不可选；子 agent 不重复占行，删除影响在主会话上明确汇总。</div>
+      </article>
+
+      <article class="state">
+        <div class="state-label"><strong><span class="step-number">4</span> 永久删除确认</strong><span>不可恢复操作单独强确认</span></div>
+        <div class="app">
+          <div class="titlebar"><span class="product-title">codex-usage-hud v1.0.5</span><button class="close-button" aria-label="关闭"><svg class="icon"><use href="#i-x"/></svg></button></div>
+          <nav class="top-tabs"><span class="top-tab">设置</span><span class="top-tab active">空间清理</span><span class="top-tab">用量总览</span><span class="top-tab">请作者喝咖啡</span><span class="top-tab">版本更新</span></nav>
+          <div class="page">
+            <div class="page-head"><div class="segmented"><span class="segment"><svg class="icon"><use href="#i-scan"/></svg>垃圾清理</span><span class="segment active"><svg class="icon"><use href="#i-trash"/></svg>会话管理</span></div><span class="head-meta">2 个会话已选</span></div>
+            <div class="content"><div class="session-tools"><div class="search"><svg class="icon"><use href="#i-search"/></svg>搜索标题或工作目录</div><div class="filters"><span class="filter active">全部</span><span class="filter">已归档 191</span></div></div><div class="session-head"><span></span><span>会话</span><span>工作目录</span><span>最后活动</span><span>状态</span><span>占用</span></div><div class="session-row selected"><span class="checkbox checked"></span><div class="session-title"><strong>排查月度用量统计偏差</strong><span>含 3 个关联子任务</span></div><span class="session-workdir">zjxc.moon</span><span class="session-cell">42 天前</span><span class="badge archived">已归档</span><span class="session-size">61.8 MB</span></div><div class="session-row selected"><span class="checkbox checked"></span><div class="session-title"><strong>旧版 Renderer 性能实验</strong><span>无关联子任务</span></div><span class="session-workdir">codex-usage-hud</span><span class="session-cell">67 天前</span><span class="badge archived">已归档</span><span class="session-size">20.2 MB</span></div></div>
+            <div class="footer"><span class="footer-meta">已选 2 个会话</span><button class="button danger"><svg class="icon"><use href="#i-trash"/></svg>永久删除</button></div>
+          </div>
+          <div class="modal-layer">
+            <div class="confirm-dialog" role="alertdialog" aria-modal="true">
+              <div class="confirm-main">
+                <div class="danger-mark"><svg class="icon icon-lg"><use href="#i-trash"/></svg></div>
+                <h2 class="confirm-title">永久删除 2 个会话？</h2>
+                <p class="confirm-copy">会话内容、索引和关联子任务将从本机移除。此操作不会进入回收站，也无法恢复。</p>
+                <div class="confirm-summary"><div><span>主会话</span><strong>2</strong></div><div><span>关联子任务</span><strong>3</strong></div><div><span>本地数据</span><strong>82.0 MB</strong></div></div>
+                <div class="confirm-note"><svg class="icon"><use href="#i-alert"/></svg><span>执行前会再次检查 canonical ID 和运行状态；任何活动项都会被跳过并单独报告。</span></div>
+              </div>
+              <div class="confirm-actions"><button class="button">取消</button><button class="button danger"><svg class="icon"><use href="#i-trash"/></svg>永久删除</button></div>
+            </div>
+          </div>
+        </div>
+        <div class="annotation">真正删除由官方 `codex delete --force` 完成；HUD 不直接改写会话数据库。</div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

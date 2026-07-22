@@ -21,6 +21,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 | [Renderer Runtime Contracts](./renderer-runtime-contracts.md) | Renderer active-session and work-overlay event contracts | Current |
 | [Provider Registry Contracts](./provider-registry-contracts.md) | Provider pricing, scope, migration, and session attribution contracts | Current |
+| [Safe Cleanup Contracts](./safe-cleanup-contracts.md) | Usage insights, tiered cleanup, permanent session deletion, offline SQLite maintenance, and recovery contracts | Current |
 
 ---
 

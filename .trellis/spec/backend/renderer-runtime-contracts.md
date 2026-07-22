@@ -354,6 +354,7 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 
 - Local payload: `work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]`.
 - Local command: `activateSession` with `sessionId`, `targetTitle`, `title`, `workdir`, `requestedAt`, and `current`.
+- Settings command: `openUsageInsightsSession(sessionId, targetTitle, workdir)` calls `SessionSwitchController.activate_session(..., backend_names=("cdp",))`.
 - External observation only: pet notifications expose an internal `localConversationId`, `status`, `updatedAtMs`, `waitingRequest`, and opaque `actionPath`; these fields are evidence for behavior comparison, not a local API signature.
 
 ### 3. Contracts
@@ -363,12 +364,17 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 - Progress text must come from structured `status`, `statusText`, `lastText`, `progress`, and `updatedAt` fields produced by the existing snapshot/parser path, not from a second renderer DOM reader.
 - A renderer active-session event wakes the runtime event bus and refreshes the exact current session/work overlay. Bounded follow-up timers are allowed only for selection application acknowledgement and provisional new-session reconciliation.
 - The external pet's `open-in-main-window` / `actionPath` behavior may be used as a reverse-engineering reference, but the local stable jump boundary remains `activateSession(sessionId)` through the existing session-switch controller.
+- A settings Top10 jump is CDP-only. CDP may expand the exact workdir project, then bounded known nested controls (`show more` or explicit sidebar section toggles), rechecking the canonical UUID after every expansion. It must stop with an error when the UUID remains unavailable.
+- Settings Top10 jumps must never fall through to a keyboard/search/clipboard backend. A stale search shortcut can leave focus in the composer and paste the target title into the user's draft.
+- When a canonical UUID is supplied, title matching is not an identity fallback. A jump succeeds only after the renderer's active row reports the requested canonical UUID.
 
 ### 4. Validation & Error Matrix
 
 | Condition | Required behavior |
 |---|---|
 | Canonical session ID available | Refresh exact session and allow `activateSession`. |
+| Top10 target is inside a collapsed project or nested `show more` list | Expand known layers for a bounded number of cycles, requery the exact UUID, click once, and confirm the active UUID. |
+| Top10 canonical UUID is still absent after bounded expansion | Return a CDP error and leave the composer/clipboard untouched; do not use keyboard search. |
 | `client-new-thread:*`, blank, or unmapped ID | Keep explicit pending state unless one candidate passes every constrained provisional-recovery check. |
 | Structured activity/status update | Update preview through the event-driven snapshot path. |
 | CDP target unavailable | Record the renderer/CDP error and keep the bounded fallback; do not copy private pet IPC. |
@@ -377,14 +383,17 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 ### 5. Good/Base/Bad Cases
 
 - Good: one canonical session ID flows from renderer binding to tracker, snapshot, `statusText`/`progress`, and overlay click command.
+- Good: a Top10 target hidden behind both a collapsed project and `show more` is expanded and activated by exact UUID through CDP, then the active UUID is confirmed.
 - Base: the pet package confirms an opaque target path, but local CDP is absent; use the local session switch backend and report the missing live gate.
-- Bad: hard-code a private `actionPath`, use title/workdir as identity, or add an idle whole-document poll to imitate the pet's freshness.
+- Bad: hard-code a private `actionPath`, use title/workdir as identity, let Top10 fall through to a keyboard shortcut, or add an idle whole-document poll to imitate the pet's freshness.
 
 ### 6. Tests Required
 
 - `tests/test_renderer_hud.py`: assert active-session event and bounded follow-up contracts, including pending canonical-ID behavior.
 - `tests/test_active_session.py`: assert exact UUID mapping and rejection of provisional/unmatched fallback.
 - `tests/test_ui.py`: assert `statusText`/`progress` payload propagation, `card_to_completed` transitions, and `activateSession` fields.
+- `tests/test_cdp_probe.py`: assert project and nested expansion are bounded, UUID matching precedes title matching, and activation waits for the requested active UUID.
+- `tests/test_platforms.py` and `tests/test_ui.py`: assert `backend_names=("cdp",)` skips the keyboard backend for `openUsageInsightsSession` while ordinary overlay activation keeps its existing fallback policy.
 - Live acceptance, when a CDP target is available: record the target session ID, status transitions, and whether a target-session click required a second Codex App interaction.
 
 ### 7. Wrong vs Correct
@@ -392,15 +401,20 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 #### Wrong
 
 ```python
-# Treating a private external route as a stable public contract.
-open_codex_route(item["actionPath"])
+# A failed CDP lookup falls through to an old shortcut and can paste into the composer.
+controller.activate_session(session_id=session_id, title=title)
 ```
 
 #### Correct
 
 ```python
-# Keep the local stable command boundary and canonical identity.
-write_overlay_command({"action": "activateSession", "sessionId": item["sessionId"]})
+# Top10 stays on the canonical CDP path and fails closed.
+controller.activate_session(
+    session_id=session_id,
+    title=title,
+    workdir=workdir,
+    backend_names=("cdp",),
+)
 ```
 
 ## Scenario: App-server observer capability gate

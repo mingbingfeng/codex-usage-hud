@@ -17,7 +17,7 @@ import unittest
 
 import pytest
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
@@ -32,11 +32,8 @@ import codex_usage_hud.cli as cli_module
 import codex_usage_hud.ui.qt_hud as qt_hud_module
 import codex_usage_hud.ui.tk_hud as tk_hud_module
 from codex_usage_hud.cli import (
-    AUTO_RENDERER_TIMEOUT_FAILURE_LIMIT,
     ACTIVE_WORK_STALE_SECONDS,
     DAEMON_STARTUP_RENDERER,
-    DAEMON_RESTART_REQUESTED,
-    DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
     DesktopWorkOverlay,
     HudAlreadyRunningError,
     HudInstanceLock,
@@ -74,7 +71,6 @@ from codex_usage_hud.cli import (
     snapshot_to_text,
     run_daemon,
     run_hud_session,
-    run_loading_feedback_helper,
     run_work_overlay_helper,
     run_tk_hud_session,
     cleanup_stale_loading_feedback_files,
@@ -405,6 +401,122 @@ class _FileBackedUsageParser:
         )
 
 
+class _InsightsUsageParser:
+    def __init__(self) -> None:
+        self.loads: list[Path] = []
+
+    def load_records_lenient(self, path: Path) -> list[dict[str, object]]:
+        self.loads.append(path)
+        session = json.loads(path.read_text(encoding="utf-8"))
+        records = [session]
+        delegated_source_id = str(session.get("delegatedSourceId") or "")
+        if delegated_source_id:
+            records.append(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "<codex_delegation>"
+                                    f"<source_thread_id>{delegated_source_id}"
+                                    "</source_thread_id>"
+                                    "<input>Continue the task.</input>"
+                                    "</codex_delegation>"
+                                ),
+                            }
+                        ],
+                    },
+                }
+            )
+        return records
+
+    def usage_events(self, records: list[dict[str, object]]) -> list[SimpleNamespace]:
+        raw_events = records[0].get("events")
+        events = raw_events if isinstance(raw_events, list) else []
+        return [
+            SimpleNamespace(
+                timestamp=datetime.fromisoformat(str(event["timestamp"])),
+                model=str(event.get("model") or ""),
+                input_tokens=int(event.get("inputTokens") or 0),
+                cached_tokens=int(event.get("cachedTokens") or 0),
+                cache_write_tokens=int(event.get("cacheWriteTokens") or 0),
+                output_tokens=int(event.get("outputTokens") or 0),
+                reasoning_tokens=int(event.get("reasoningTokens") or 0),
+                total_tokens=int(event.get("tokens") or 0),
+                cost_usd=event.get("costUsd"),
+            )
+            for event in events
+            if isinstance(event, dict)
+        ]
+
+    def session_meta_payload(self, records: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "id": records[0].get("sessionId"),
+            "model_provider": records[0].get("provider"),
+            "cwd": records[0].get("cwd"),
+            "parent_thread_id": records[0].get("parentSessionId"),
+            "thread_source": (
+                "subagent"
+                if records[0].get("parentSessionId")
+                or records[0].get("delegatedSourceId")
+                else ""
+            ),
+        }
+
+    def session_model_provider(self, records: list[dict[str, object]]) -> str:
+        return str(records[0].get("provider") or "unknown")
+
+    def summarize_usage_events(
+        self,
+        events: list[SimpleNamespace],
+        start: datetime,
+    ) -> UsageSummary:
+        summary = UsageSummary()
+        for event in events:
+            event_time = event.timestamp.astimezone(start.tzinfo)
+            if event_time < start:
+                continue
+            summary.tokens += event.total_tokens
+            summary.input_tokens += event.input_tokens
+            summary.cached_tokens += event.cached_tokens
+            summary.cache_write_tokens += event.cache_write_tokens
+            summary.output_tokens += event.output_tokens
+            summary.reasoning_tokens += event.reasoning_tokens
+            summary.cost_usd += float(event.cost_usd or 0.0)
+        summary.cost_usd = round(summary.cost_usd, 6)
+        return summary
+
+
+def _write_usage_insight_session(
+    path: Path,
+    *,
+    session_id: str,
+    provider: str,
+    events: list[dict[str, object]],
+    cwd: str = "",
+    parent_session_id: str = "",
+    delegated_source_id: str = "",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "sessionId": session_id,
+                "provider": provider,
+                "cwd": cwd,
+                "parentSessionId": parent_session_id,
+                "delegatedSourceId": delegated_source_id,
+                "events": events,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _walk_widgets(widget: tk.Misc) -> list[tk.Misc]:
     widgets = [widget]
     for child in widget.winfo_children():
@@ -728,6 +840,562 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual((custom_day.tokens, custom_day.cost_usd), (100, 1.0))
         self.assertEqual((muyuan_day.tokens, muyuan_day.cost_usd), (200, 2.0))
         self.assertEqual(len(parser.loads), 2)
+
+    def test_usage_insights_reuses_one_parse_for_day_and_week_breakdowns(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser, min_rescan_seconds=60.0)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            session_path = sessions_root / "rollout-current.jsonl"
+            _write_usage_insight_session(
+                session_path,
+                session_id="10000000-0000-4000-8000-000000000001",
+                provider="custom",
+                events=[
+                    {
+                        "timestamp": "2026-07-20T08:00:00+00:00",
+                        "model": "gpt-today",
+                        "tokens": 100,
+                        "inputTokens": 80,
+                        "cachedTokens": 40,
+                        "outputTokens": 20,
+                        "costUsd": 1.0,
+                    },
+                    {
+                        "timestamp": "2026-07-18T08:00:00+00:00",
+                        "model": "gpt-earlier",
+                        "tokens": 200,
+                        "inputTokens": 100,
+                        "cachedTokens": 25,
+                        "outputTokens": 100,
+                        "costUsd": 2.0,
+                    },
+                ],
+            )
+
+            cache.summarize(sessions_root, day_start, week_start)
+            with patch.object(Path, "rglob", side_effect=AssertionError("insights scanned")):
+                insights = cache.insights(sessions_root, day_start, week_start)
+            cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                allow_stale=True,
+            )
+            cached_again = cache.insights(sessions_root, day_start, week_start)
+
+        self.assertEqual(len(parser.loads), 1)
+        self.assertTrue(insights["ready"])
+        self.assertEqual(insights["today"]["totals"]["tokens"], 100)
+        self.assertEqual(insights["week"]["totals"]["tokens"], 300)
+        self.assertEqual(insights["today"]["totals"]["cacheRatio"], 0.5)
+        self.assertEqual(
+            {row["model"] for row in insights["today"]["models"]},
+            {"gpt-today"},
+        )
+        self.assertEqual(
+            {row["model"] for row in insights["week"]["models"]},
+            {"gpt-today", "gpt-earlier"},
+        )
+        session = insights["today"]["sessions"][0]
+        self.assertEqual(session["sessionId"], "10000000-0000-4000-8000-000000000001")
+        self.assertTrue(session["canActivate"])
+        self.assertFalse(session["archived"])
+        self.assertEqual(insights, cached_again)
+
+    def test_usage_insights_exposes_top_ten_sessions_by_usage_and_cost(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser, min_rescan_seconds=60.0)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            for index in range(12):
+                _write_usage_insight_session(
+                    sessions_root / f"rollout-{index}.jsonl",
+                    session_id=f"10000000-0000-4000-8000-{index:012d}",
+                    provider="custom",
+                    events=[
+                        {
+                            "timestamp": "2026-07-20T08:00:00+00:00",
+                            "model": "gpt-test",
+                            "tokens": (index + 1) * 100,
+                            "inputTokens": (index + 1) * 80,
+                            "cachedTokens": index * 5,
+                            "costUsd": None if index == 11 else float(12 - index),
+                        }
+                    ],
+                )
+            _write_usage_insight_session(
+                sessions_root / "rollout-month-only.jsonl",
+                session_id="10000000-0000-4000-8000-000000000012",
+                provider="custom",
+                events=[
+                    {
+                        "timestamp": "2026-07-01T08:00:00+00:00",
+                        "model": "gpt-test",
+                        "tokens": 100_000,
+                        "inputTokens": 80_000,
+                        "cachedTokens": 0,
+                        "costUsd": 100.0,
+                    }
+                ],
+            )
+
+            cache.summarize(sessions_root, day_start, week_start)
+            insights = cache.insights(sessions_root, day_start, week_start)
+
+        top_usage = insights["today"]["topSessionsByUsage"]
+        top_cost = insights["today"]["topSessionsByCost"]
+        month_top_usage = insights["month"]["topSessionsByUsage"]
+        month_top_cost = insights["month"]["topSessionsByCost"]
+        self.assertEqual(len(top_usage), 10)
+        self.assertEqual(len(top_cost), 10)
+        self.assertEqual(
+            [row["tokens"] for row in top_usage],
+            sorted((row["tokens"] for row in top_usage), reverse=True),
+        )
+        self.assertTrue(all(row["costUsd"] is not None for row in top_cost))
+        self.assertEqual(
+            [row["costUsd"] for row in top_cost],
+            sorted((row["costUsd"] for row in top_cost), reverse=True),
+        )
+        self.assertEqual(top_usage[0]["sessionId"], "10000000-0000-4000-8000-000000000011")
+        self.assertEqual(top_cost[0]["sessionId"], "10000000-0000-4000-8000-000000000000")
+        self.assertEqual(len(month_top_usage), 10)
+        self.assertEqual(len(month_top_cost), 10)
+        self.assertEqual(
+            month_top_usage[0]["sessionId"],
+            "10000000-0000-4000-8000-000000000012",
+        )
+        self.assertEqual(
+            month_top_cost[0]["sessionId"],
+            "10000000-0000-4000-8000-000000000012",
+        )
+
+    def test_usage_insights_groups_subagents_into_root_session(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser, min_rescan_seconds=60.0)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        root_id = "10000000-0000-4000-8000-000000000101"
+        child_id = "10000000-0000-4000-8000-000000000102"
+        grandchild_id = "10000000-0000-4000-8000-000000000103"
+        other_id = "10000000-0000-4000-8000-000000000104"
+
+        def event(
+            tokens: int,
+            cost_usd: float,
+            model: str,
+        ) -> list[dict[str, object]]:
+            return [
+                {
+                    "timestamp": "2026-07-20T08:00:00+00:00",
+                    "model": model,
+                    "tokens": tokens,
+                    "inputTokens": tokens - 10,
+                    "cachedTokens": 10,
+                    "outputTokens": 10,
+                    "costUsd": cost_usd,
+                }
+            ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            _write_usage_insight_session(
+                sessions_root / "rollout-root.jsonl",
+                session_id=root_id,
+                provider="custom",
+                cwd=r"E:\Project\codex-usage-hud",
+                events=event(100, 1.0, "gpt-root"),
+            )
+            _write_usage_insight_session(
+                sessions_root / "rollout-child.jsonl",
+                session_id=child_id,
+                parent_session_id=root_id,
+                provider="custom",
+                cwd=r"E:\Project\codex-usage-hud",
+                events=event(200, 2.0, "gpt-child"),
+            )
+            _write_usage_insight_session(
+                sessions_root / "rollout-grandchild.jsonl",
+                session_id=grandchild_id,
+                parent_session_id=child_id,
+                provider="custom",
+                cwd=r"E:\Project\codex-usage-hud",
+                events=event(300, 3.0, "gpt-grandchild"),
+            )
+            _write_usage_insight_session(
+                sessions_root / "rollout-other.jsonl",
+                session_id=other_id,
+                provider="custom",
+                cwd=r"E:\Work\scan_project",
+                events=event(400, 4.0, "gpt-other"),
+            )
+
+            cache.summarize(sessions_root, day_start, week_start)
+            insights = cache.insights(sessions_root, day_start, week_start)
+
+        today = insights["today"]
+        sessions = today["sessions"]
+        root = next(row for row in sessions if row["sessionId"] == root_id)
+        self.assertEqual(today["totals"]["tokens"], 1_000)
+        self.assertEqual(today["totals"]["sessionCount"], 2)
+        self.assertEqual(sum(row["tokens"] for row in today["models"]), 1_000)
+        self.assertEqual(today["providers"][0]["tokens"], 1_000)
+        self.assertEqual((root["tokens"], root["costUsd"]), (600, 6.0))
+        self.assertEqual(
+            {
+                row["model"]: (row["tokens"], row["costUsd"])
+                for row in root["models"]
+            },
+            {
+                "gpt-root": (100, 1.0),
+                "gpt-child": (200, 2.0),
+                "gpt-grandchild": (300, 3.0),
+            },
+        )
+        self.assertEqual(root["workdirName"], "codex-usage-hud")
+        self.assertTrue(root["canActivate"])
+        self.assertEqual(today["topSessionsByUsage"][0]["sessionId"], root_id)
+        self.assertEqual(today["topSessionsByCost"][0]["sessionId"], root_id)
+        self.assertFalse(
+            {child_id, grandchild_id}
+            & {str(row["sessionId"]) for row in sessions}
+        )
+        self.assertNotIn(r"E:\Project", repr(insights))
+
+    def test_usage_insights_groups_legacy_delegated_subagent_into_root(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser, min_rescan_seconds=60.0)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        root_id = "10000000-0000-4000-8000-000000000201"
+        child_id = "10000000-0000-4000-8000-000000000202"
+        root_event = {
+            "timestamp": "2026-07-20T08:00:00+00:00",
+            "model": "gpt-root",
+            "tokens": 100,
+            "inputTokens": 90,
+            "outputTokens": 10,
+            "costUsd": 1.0,
+        }
+        child_event = {
+            **root_event,
+            "model": "gpt-child",
+            "tokens": 200,
+            "inputTokens": 190,
+            "costUsd": 2.0,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            _write_usage_insight_session(
+                sessions_root / "rollout-root.jsonl",
+                session_id=root_id,
+                provider="custom",
+                events=[root_event],
+            )
+            _write_usage_insight_session(
+                sessions_root / "rollout-child.jsonl",
+                session_id=child_id,
+                delegated_source_id=root_id,
+                provider="custom",
+                events=[child_event],
+            )
+
+            cache.summarize(sessions_root, day_start, week_start)
+            today = cache.insights(sessions_root, day_start, week_start)["today"]
+
+        self.assertEqual(today["totals"]["sessionCount"], 1)
+        self.assertEqual(len(today["sessions"]), 1)
+        self.assertEqual(today["sessions"][0]["sessionId"], root_id)
+        self.assertEqual(today["sessions"][0]["tokens"], 300)
+        self.assertEqual(
+            [row["model"] for row in today["sessions"][0]["models"]],
+            ["gpt-child", "gpt-root"],
+        )
+
+    def test_usage_insights_top_ten_sessions_remain_actionable(self) -> None:
+        top_usage_id = "10000000-0000-4000-8000-000000000009"
+        top_cost_id = "10000000-0000-4000-8000-000000000010"
+        context = SimpleNamespace(
+            usage_insights_payload={
+                "today": {
+                    "sessions": [],
+                    "topSessionsByUsage": [
+                        {"id": top_usage_id, "actionable": True},
+                    ],
+                    "topSessionsByCost": [
+                        {"sessionId": top_cost_id, "canActivate": True},
+                    ],
+                },
+                "week": {
+                    "topSessionsByUsage": [
+                        {
+                            "id": "10000000-0000-4000-8000-000000000011",
+                            "actionable": False,
+                        },
+                    ],
+                },
+                "month": {
+                    "topSessionsByCost": [
+                        {
+                            "id": "10000000-0000-4000-8000-000000000012",
+                            "actionable": True,
+                        },
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(
+            cli_module._usage_insights_actionable_session_ids(context),
+            {
+                top_usage_id,
+                top_cost_id,
+                "10000000-0000-4000-8000-000000000012",
+            },
+        )
+
+    def test_usage_insights_session_open_reuses_bubble_activation_context(self) -> None:
+        session_id = "10000000-0000-4000-8000-000000000009"
+        context = SimpleNamespace(
+            usage_insights_payload={
+                "today": {
+                    "topSessionsByUsage": [
+                        {"id": session_id, "actionable": True},
+                    ],
+                },
+            }
+        )
+        controller = MagicMock()
+        controller.activate_session.return_value = SessionSwitchResult(
+            ok=True,
+            status="switched",
+        )
+
+        with patch(
+            "codex_usage_hud.cli._refocus_codex_window_after_current_session_click",
+            return_value=(True, "visible", "", 123),
+        ):
+            status = _handle_renderer_settings_command(
+                {
+                    "action": "openUsageInsightsSession",
+                    "sessionId": session_id,
+                    "targetTitle": "中文会话标题",
+                    "workdir": "codex-usage-hud",
+                },
+                context,
+                MagicMock(),
+                MagicMock(),
+                session_controller=controller,
+            )
+
+        controller.activate_session.assert_called_once_with(
+            session_id=session_id,
+            title="中文会话标题",
+            workdir="codex-usage-hud",
+            backend_names=("cdp",),
+        )
+        self.assertEqual(status["kind"], "")
+        self.assertIn("已切换", status["message"])
+
+    def test_usage_insights_refresh_paths_replaces_cached_contributions(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser, min_rescan_seconds=60.0)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            session_path = sessions_root / "rollout-current.jsonl"
+            _write_usage_insight_session(
+                session_path,
+                session_id="10000000-0000-4000-8000-000000000002",
+                provider="custom",
+                events=[{
+                    "timestamp": "2026-07-20T08:00:00+00:00",
+                    "model": "gpt-old",
+                    "tokens": 100,
+                    "inputTokens": 80,
+                    "cachedTokens": 20,
+                    "costUsd": 1.0,
+                }],
+            )
+            cache.summarize(sessions_root, day_start, week_start)
+            initial_revision = cache.insights(
+                sessions_root,
+                day_start,
+                week_start,
+            )["revision"]
+            _write_usage_insight_session(
+                session_path,
+                session_id="10000000-0000-4000-8000-000000000002",
+                provider="custom",
+                events=[{
+                    "timestamp": "2026-07-20T09:00:00+00:00",
+                    "model": "gpt-new",
+                    "tokens": 250,
+                    "inputTokens": 200,
+                    "cachedTokens": 100,
+                    "costUsd": 2.5,
+                }],
+            )
+
+            cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                allow_stale=True,
+                refresh_paths=(session_path,),
+            )
+            insights = cache.insights(sessions_root, day_start, week_start)
+
+        self.assertEqual(len(parser.loads), 2)
+        self.assertGreater(insights["revision"], initial_revision)
+        self.assertEqual(insights["today"]["totals"]["tokens"], 250)
+        self.assertEqual(
+            [row["model"] for row in insights["today"]["models"]],
+            ["gpt-new"],
+        )
+
+    def test_usage_insights_honors_provider_scope_without_reparse(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            for index, (provider, tokens) in enumerate(
+                (("custom", 100), ("muyuan", 200)),
+                start=3,
+            ):
+                _write_usage_insight_session(
+                    sessions_root / f"rollout-{provider}.jsonl",
+                    session_id=f"10000000-0000-4000-8000-{index:012d}",
+                    provider=provider,
+                    events=[{
+                        "timestamp": "2026-07-20T08:00:00+00:00",
+                        "model": f"gpt-{provider}",
+                        "tokens": tokens,
+                        "inputTokens": tokens,
+                        "cachedTokens": 0,
+                        "costUsd": float(tokens) / 100.0,
+                    }],
+                )
+            cache.summarize(sessions_root, day_start, week_start)
+            load_count = len(parser.loads)
+
+            insights = cache.insights(
+                sessions_root,
+                day_start,
+                week_start,
+                included_providers={" CUSTOM "},
+            )
+
+        self.assertEqual(len(parser.loads), load_count)
+        self.assertEqual(insights["providerScope"], ["custom"])
+        self.assertEqual(insights["today"]["totals"]["tokens"], 100)
+        self.assertEqual(
+            [row["provider"] for row in insights["today"]["providers"]],
+            ["custom"],
+        )
+        self.assertEqual(
+            [row["provider"] for row in insights["today"]["sessions"]],
+            ["custom"],
+        )
+
+    def test_usage_insights_marks_archived_session_non_actionable(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            archived_root = root / "archived_sessions"
+            for path, session_id in (
+                (
+                    sessions_root / "active.jsonl",
+                    "10000000-0000-4000-8000-000000000005",
+                ),
+                (
+                    archived_root / "archived.jsonl",
+                    "10000000-0000-4000-8000-000000000006",
+                ),
+            ):
+                _write_usage_insight_session(
+                    path,
+                    session_id=session_id,
+                    provider="custom",
+                    events=[{
+                        "timestamp": "2026-07-20T08:00:00+00:00",
+                        "model": "gpt-shared",
+                        "tokens": 100,
+                        "inputTokens": 100,
+                        "cachedTokens": 50,
+                        "costUsd": 1.0,
+                    }],
+                )
+            cache.summarize(sessions_root, day_start, week_start)
+            insights = cache.insights(sessions_root, day_start, week_start)
+
+        sessions = {
+            row["sessionId"]: row for row in insights["today"]["sessions"]
+        }
+        self.assertFalse(sessions["10000000-0000-4000-8000-000000000005"]["archived"])
+        self.assertTrue(sessions["10000000-0000-4000-8000-000000000005"]["canActivate"])
+        self.assertTrue(sessions["10000000-0000-4000-8000-000000000006"]["archived"])
+        self.assertFalse(sessions["10000000-0000-4000-8000-000000000006"]["canActivate"])
+
+    def test_usage_insights_reports_incomplete_price_coverage(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser)  # type: ignore[arg-type]
+        day_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+        week_start = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            _write_usage_insight_session(
+                sessions_root / "partial-price.jsonl",
+                session_id="10000000-0000-4000-8000-000000000007",
+                provider="custom",
+                events=[
+                    {
+                        "timestamp": "2026-07-20T08:00:00+00:00",
+                        "model": "gpt-priced",
+                        "tokens": 100,
+                        "inputTokens": 80,
+                        "cachedTokens": 40,
+                        "costUsd": 1.25,
+                    },
+                    {
+                        "timestamp": "2026-07-20T09:00:00+00:00",
+                        "model": "gpt-unpriced",
+                        "tokens": 50,
+                        "inputTokens": 40,
+                        "cachedTokens": 0,
+                        "costUsd": None,
+                    },
+                ],
+            )
+            cache.summarize(sessions_root, day_start, week_start)
+            insights = cache.insights(sessions_root, day_start, week_start)
+
+        totals = insights["today"]["totals"]
+        self.assertEqual(totals["costUsd"], 1.25)
+        self.assertEqual(
+            totals["costCoverage"],
+            {
+                "pricedEventCount": 1,
+                "totalEventCount": 2,
+                "hasCompleteCost": False,
+            },
+        )
+        self.assertFalse(
+            insights["today"]["sessions"][0]["costCoverage"]["hasCompleteCost"]
+        )
 
     def test_renderer_current_session_path_filter_matches_only_current_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2043,6 +2711,7 @@ class BudgetHelperTests(unittest.TestCase):
         item = background_usage_to_work_item(
             {
                 "eventId": event_id,
+                "featureKey": "memory_consolidation",
                 "featureLabel": "Memory consolidation",
                 "models": ["gpt-5.6-terra"],
                 "requestCount": 9,
@@ -2061,6 +2730,8 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["kind"], "background_usage")
         self.assertEqual(payload["eventId"], event_id)
         self.assertEqual(payload["status"], "background_usage")
+        self.assertEqual(payload["title"], "记忆整理")
+        self.assertEqual(payload["statusLabel"], "Codex App 后台任务：记忆整理")
         self.assertEqual(payload["modelName"], "gpt-5.6-terra")
         self.assertEqual(payload["workdirName"], "查看后台用量记录")
         self.assertIn("估算", payload["costText"])
@@ -11170,6 +11841,38 @@ class TkSnapshotPumpTests(unittest.TestCase):
 
 
 class DaemonLifecycleTests(unittest.TestCase):
+    def test_background_usage_response_retry_is_bounded_and_typed(self) -> None:
+        self.assertEqual(
+            cli_module.BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS,
+            (0.15, 0.35, 0.75),
+        )
+        self.assertEqual(
+            cli_module._background_usage_response_retry_delay_seconds(1),
+            0.15,
+        )
+        self.assertEqual(
+            cli_module._background_usage_response_retry_delay_seconds(3),
+            0.75,
+        )
+        self.assertIsNone(
+            cli_module._background_usage_response_retry_delay_seconds(4)
+        )
+        self.assertTrue(
+            cli_module._has_pending_background_usage_response(
+                {"backgroundUsageResponse": {"kind": "query", "requestId": "q-1"}}
+            )
+        )
+        self.assertFalse(
+            cli_module._has_pending_background_usage_response(
+                {"backgroundUsageResponse": {"kind": "query", "requestId": ""}}
+            )
+        )
+        self.assertFalse(
+            cli_module._has_pending_background_usage_response(
+                {"backgroundUsageResponse": {"kind": "unknown", "requestId": "q-1"}}
+            )
+        )
+
     def test_renderer_background_usage_commands_return_typed_responses(self) -> None:
         query_payload = {
             "revision": 4,
@@ -11188,7 +11891,7 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         query_status = _handle_renderer_settings_command(
             {
-                "id": "query-1",
+                "id": "query-transport-1",
                 "action": "backgroundUsageQuery",
                 "filters": {
                     "range": "7d",
@@ -11203,7 +11906,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         detail_status = _handle_renderer_settings_command(
             {
-                "id": "detail-1",
+                "id": "detail-transport-1",
                 "action": "backgroundUsageDetail",
                 "eventId": "event-1",
             },
@@ -11224,7 +11927,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         query_response = query_status["backgroundUsageResponse"]
         self.assertEqual(query_response["kind"], "query")
-        self.assertEqual(query_response["requestId"], "query-1")
+        self.assertEqual(query_response["requestId"], "query-transport-1")
         self.assertEqual(
             query_response["payload"]["selectedDetail"],
             {"eventId": "event-1", "hasPrompt": True},
@@ -11242,11 +11945,94 @@ class DaemonLifecycleTests(unittest.TestCase):
             detail_status["backgroundUsageResponse"],
             {
                 "kind": "detail",
-                "requestId": "detail-1",
+                "requestId": "detail-transport-1",
                 "eventId": "event-1",
                 "payload": detail_payload,
                 "error": "",
             },
+        )
+
+    def test_renderer_background_usage_detail_marks_viewed_only_when_explicit(self) -> None:
+        runtime = SimpleNamespace(
+            detail=MagicMock(
+                return_value={"eventId": "event-1", "unread": False}
+            ),
+            confirm=MagicMock(return_value=True),
+        )
+        context = SimpleNamespace(background_usage_runtime=runtime)
+
+        _handle_renderer_settings_command(
+            {
+                "id": "detail-preview",
+                "action": "backgroundUsageDetail",
+                "eventId": "event-1",
+                "markViewed": False,
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+        runtime.confirm.assert_not_called()
+
+        status = _handle_renderer_settings_command(
+            {
+                "id": "detail-click",
+                "action": "backgroundUsageDetail",
+                "eventId": "event-1",
+                "markViewed": True,
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        runtime.confirm.assert_called_once_with("event-1")
+        self.assertFalse(
+            status["backgroundUsageResponse"]["payload"]["unread"]
+        )
+
+    def test_background_usage_notification_projection_is_session_scoped(self) -> None:
+        runtime = SimpleNamespace(
+            notification_for_session=MagicMock(
+                return_value={
+                    "count": 4,
+                    "eventId": "event-4",
+                    "range": "30d",
+                    "internal": "not-rendered",
+                }
+            )
+        )
+        context = SimpleNamespace(background_usage_runtime=runtime)
+
+        notification = cli_module._background_usage_notification_for_session(
+            context,
+            "session-4",
+        )
+
+        runtime.notification_for_session.assert_called_once_with("session-4")
+        self.assertEqual(
+            notification,
+            {"count": 4, "eventId": "event-4", "range": "30d"},
+        )
+
+    def test_background_usage_notification_rejects_malformed_count(self) -> None:
+        runtime = SimpleNamespace(
+            notification_for_session=MagicMock(
+                return_value={
+                    "count": "not-a-number",
+                    "eventId": "event-4",
+                    "range": "today",
+                }
+            )
+        )
+        context = SimpleNamespace(background_usage_runtime=runtime)
+
+        self.assertEqual(
+            cli_module._background_usage_notification_for_session(
+                context,
+                "session-4",
+            ),
+            {},
         )
 
     def test_renderer_background_usage_open_returns_today_preview_without_prompt(
@@ -11272,7 +12058,11 @@ class DaemonLifecycleTests(unittest.TestCase):
         context = SimpleNamespace(background_usage_runtime=runtime)
 
         status = _handle_renderer_settings_command(
-            {"id": "open-1", "action": "openBackgroundUsage", "eventId": event_id},
+            {
+                "id": "open-transport-1",
+                "action": "openBackgroundUsage",
+                "eventId": event_id,
+            },
             context,
             MagicMock(),
             MagicMock(),
@@ -11288,6 +12078,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(status["backgroundUsageOpenEventId"], event_id)
         response = status["backgroundUsageResponse"]
         self.assertEqual(response["kind"], "open")
+        self.assertEqual(response["requestId"], "open-transport-1")
         self.assertEqual(response["eventId"], event_id)
         self.assertEqual(response["payload"]["selectedEventId"], event_id)
         self.assertEqual(
@@ -11299,6 +12090,328 @@ class DaemonLifecycleTests(unittest.TestCase):
             },
         )
         self.assertNotIn("prompt", response["payload"]["selectedDetail"])
+
+    def test_renderer_background_usage_open_expands_range_for_old_reminder(self) -> None:
+        event_id = "10000000-0000-4000-8000-000000000003"
+        runtime = SimpleNamespace(
+            range_for_event=MagicMock(return_value="7d"),
+            query=MagicMock(
+                return_value={
+                    "revision": 8,
+                    "range": "7d",
+                    "events": [{"eventId": event_id}],
+                    "selectedEventId": event_id,
+                }
+            ),
+            detail=MagicMock(return_value={"eventId": event_id}),
+        )
+
+        status = _handle_renderer_settings_command(
+            {
+                "id": "open-old-reminder",
+                "action": "openBackgroundUsage",
+                "eventId": event_id,
+            },
+            SimpleNamespace(background_usage_runtime=runtime),
+            MagicMock(),
+            MagicMock(),
+        )
+
+        runtime.range_for_event.assert_called_once_with(event_id)
+        runtime.query.assert_called_once_with(
+            range_key="7d",
+            feature="",
+            model="",
+            event_id=event_id,
+        )
+        self.assertEqual(
+            status["backgroundUsageResponse"]["payload"]["range"],
+            "7d",
+        )
+
+    def test_renderer_background_usage_errors_return_correlated_responses(
+        self,
+    ) -> None:
+        runtime = SimpleNamespace(
+            query=MagicMock(side_effect=RuntimeError("runtime unavailable")),
+            detail=None,
+        )
+        context = SimpleNamespace(background_usage_runtime=runtime)
+
+        query_status = _handle_renderer_settings_command(
+            {
+                "id": "query-error-1",
+                "action": "backgroundUsageQuery",
+                "filters": {},
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+        detail_status = _handle_renderer_settings_command(
+            {
+                "id": "detail-error-1",
+                "action": "backgroundUsageDetail",
+                "eventId": "event-1",
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        self.assertEqual(
+            query_status["backgroundUsageResponse"],
+            {
+                "kind": "query",
+                "requestId": "query-error-1",
+                "payload": None,
+                "error": "用量总览读取失败：runtime unavailable",
+            },
+        )
+        self.assertEqual(
+            detail_status["backgroundUsageResponse"],
+            {
+                "kind": "detail",
+                "requestId": "detail-error-1",
+                "payload": None,
+                "eventId": "event-1",
+                "error": "用量总览当前不可用。",
+            },
+        )
+
+    def test_safe_cleanup_active_task_blocks_before_process_or_plan_changes(self) -> None:
+        manager = MagicMock()
+        manager.selection_requirements.return_value = {
+            "requiresOffline": True,
+            "requiresBackup": True,
+            "requiresCodexClose": True,
+        }
+        context = SimpleNamespace()
+        command = {
+            "requestId": "cleanup-active",
+            "groupIds": ["sqlite-item"],
+            "inventoryRevision": "revision-1",
+            "confirmationToken": "confirmation-1",
+            "autoCloseAndRestore": True,
+        }
+        with (
+            patch(
+                "codex_usage_hud.cli._safe_cleanup_active_task_ids",
+                return_value=("active-session",),
+            ),
+            patch(
+                "codex_usage_hud.cli._running_standalone_codex_cli_pids"
+            ) as standalone_pids,
+            patch(
+                "codex_usage_hud.cli._request_codex_desktop_close"
+            ) as close_desktop,
+        ):
+            with self.assertRaisesRegex(cli_module.SafeCleanupError, "活动任务"):
+                cli_module._execute_safe_cleanup_command(context, manager, command)
+
+        manager.create_plan.assert_not_called()
+        standalone_pids.assert_not_called()
+        close_desktop.assert_not_called()
+
+    def test_safe_cleanup_native_backup_picker_persists_selected_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            selected = Path(temporary).resolve()
+            current = selected.parent
+            settings_store = MagicMock()
+            settings_store.load.return_value = UserConfig()
+            context = SimpleNamespace(settings_store=settings_store)
+            command = {
+                "id": "transport-backup-picker",
+                "requestId": "backup-picker-1",
+                "action": "safeCleanupChooseBackupDirectory",
+                "currentDirectory": str(current),
+            }
+
+            with (
+                patch(
+                    "codex_usage_hud.cli._choose_safe_cleanup_backup_directory",
+                    return_value=selected,
+                ) as choose_directory,
+                patch("codex_usage_hud.cli._save_renderer_user_config") as save_config,
+            ):
+                status = _handle_renderer_settings_command(
+                    command,
+                    context,
+                    MagicMock(),
+                    MagicMock(),
+                )
+
+            choose_directory.assert_called_once_with(str(current))
+            saved_config = save_config.call_args.args[1]
+            self.assertEqual(saved_config.cleanup_backup_directory, str(selected))
+            self.assertEqual(status["cleanupBackupDirectory"], str(selected))
+            self.assertEqual(status["safeCleanupRequestId"], "backup-picker-1")
+
+    def test_safe_cleanup_activity_gate_includes_observed_waiting_work(self) -> None:
+        item = WorkStatusItem(
+            id="work-1",
+            session_id="session-1",
+            title="Waiting task",
+            status="waiting_user",
+            status_label="Waiting",
+            detail="Approval required",
+        )
+        context = SimpleNamespace(
+            _work_overlay_visible_item_cache={item.id: item},
+        )
+
+        active = cli_module._safe_cleanup_active_task_ids(context)
+
+        self.assertEqual(active, ("session-1",))
+
+    def test_safe_cleanup_codex_candidate_requires_close_consent_without_backup(
+        self,
+    ) -> None:
+        manager = MagicMock()
+        manager.selection_requirements.return_value = {
+            "requiresOffline": True,
+            "requiresBackup": False,
+            "requiresCodexClose": True,
+        }
+        with patch(
+            "codex_usage_hud.cli._safe_cleanup_active_task_ids"
+        ) as active_tasks:
+            with self.assertRaisesRegex(cli_module.SafeCleanupError, "明确同意"):
+                cli_module._execute_safe_cleanup_command(
+                    SimpleNamespace(),
+                    manager,
+                    {
+                        "requestId": "cleanup-codex-temp",
+                        "groupIds": ["codex-temp"],
+                        "inventoryRevision": "revision-1",
+                        "confirmationToken": "confirmation-1",
+                        "autoCloseAndRestore": False,
+                    },
+                )
+
+        active_tasks.assert_not_called()
+        manager.create_plan.assert_not_called()
+
+    def test_safe_cleanup_standalone_cli_blocks_before_desktop_or_plan_changes(self) -> None:
+        manager = MagicMock()
+        manager.selection_requirements.return_value = {
+            "requiresOffline": True,
+            "requiresBackup": True,
+            "requiresCodexClose": True,
+        }
+        command = {
+            "requestId": "cleanup-cli",
+            "groupIds": ["sqlite-item"],
+            "inventoryRevision": "revision-1",
+            "confirmationToken": "confirmation-1",
+            "autoCloseAndRestore": True,
+        }
+        with (
+            patch(
+                "codex_usage_hud.cli._safe_cleanup_active_task_ids",
+                return_value=(),
+            ),
+            patch(
+                "codex_usage_hud.cli._running_standalone_codex_cli_pids",
+                return_value=(321,),
+            ),
+            patch(
+                "codex_usage_hud.cli._audited_running_codex_desktop_processes"
+            ) as desktop_processes,
+        ):
+            with self.assertRaisesRegex(cli_module.SafeCleanupError, "独立 Codex CLI"):
+                cli_module._execute_safe_cleanup_command(
+                    SimpleNamespace(),
+                    manager,
+                    command,
+                )
+
+        manager.create_plan.assert_not_called()
+        desktop_processes.assert_not_called()
+
+    def test_safe_cleanup_background_shutdown_timeout_keeps_runtime_reference(self) -> None:
+        runtime = SimpleNamespace(
+            request_scan=MagicMock(),
+            wait_until_idle=MagicMock(return_value=False),
+            close=MagicMock(return_value=False),
+            worker_alive=True,
+        )
+        context = SimpleNamespace(background_usage_runtime=runtime)
+
+        with self.assertRaisesRegex(cli_module.SafeCleanupError, "安全停止"):
+            cli_module._close_background_usage_for_cleanup(context)
+
+        self.assertIs(context.background_usage_runtime, runtime)
+        runtime.request_scan.assert_called_once_with()
+        runtime.wait_until_idle.assert_called_once_with(
+            cli_module.SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS
+        )
+        runtime.close.assert_called_once_with(
+            cli_module.SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS
+        )
+
+    def test_cleanup_helper_and_restart_commands_preserve_runtime_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "python.exe"
+            frozen_executable = root / "codex-usage-hud.exe"
+            plan = root / "plan.json"
+            result = root / "result.json"
+            with (
+                patch.object(sys, "platform", "linux"),
+                patch.object(sys, "executable", str(executable)),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "hud",
+                        "--cleanup-maintenance-helper",
+                        "--cleanup-plan-file",
+                        "old-plan.json",
+                        "--cleanup-result-file",
+                        "old-result.json",
+                        "--profile",
+                        "custom",
+                    ],
+                ),
+                patch.object(sys, "frozen", False, create=True),
+            ):
+                source_helper = cli_module._cleanup_helper_command(plan, result)
+                source_restart = cli_module._cleanup_restart_command(daemon_mode=True)
+            with (
+                patch.object(sys, "platform", "win32"),
+                patch.object(sys, "executable", str(frozen_executable)),
+                patch.object(sys, "argv", ["hud", "--profile", "custom"]),
+                patch.object(sys, "frozen", True, create=True),
+            ):
+                frozen_helper = cli_module._cleanup_helper_command(plan, result)
+                frozen_restart = cli_module._cleanup_restart_command(daemon_mode=True)
+
+        source_prefix = [str(executable.resolve()), "-m", "codex_usage_hud"]
+        self.assertEqual(source_helper[:3], source_prefix)
+        self.assertEqual(
+            source_helper[3:],
+            [
+                "--cleanup-maintenance-helper",
+                "--cleanup-plan-file",
+                str(plan),
+                "--cleanup-result-file",
+                str(result),
+            ],
+        )
+        self.assertEqual(source_restart[:3], tuple(source_prefix))
+        self.assertEqual(source_restart[3:], ("--profile", "custom", "--daemon"))
+        self.assertEqual(frozen_helper[0], str(frozen_executable.resolve()))
+        self.assertNotIn("-m", frozen_helper)
+        self.assertEqual(
+            frozen_restart,
+            (
+                str(frozen_executable.resolve()),
+                "--profile",
+                "custom",
+                "--daemon",
+            ),
+        )
 
     def test_renderer_storage_command_is_immediately_acked_to_worker(self) -> None:
         worker = SimpleNamespace(enqueue=MagicMock(return_value={"status": "accepted", "requestId": "storage-1"}))
@@ -11312,6 +12425,32 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(status["fileManagementRequestId"], "storage-1")
         self.assertIn("排队", status["message"])
         worker.enqueue.assert_called_once_with({"action": "scan", "requestId": "storage-1"})
+
+    def test_renderer_session_cleanup_command_is_immediately_acked_to_worker(self) -> None:
+        worker = SimpleNamespace(
+            enqueue=MagicMock(
+                return_value={
+                    "status": "accepted",
+                    "requestId": "session-cleanup-1",
+                }
+            )
+        )
+        context = SimpleNamespace(session_cleanup_worker=worker)
+        command = {
+            "action": "sessionCleanupScan",
+            "requestId": "session-cleanup-1",
+        }
+
+        status = _handle_renderer_settings_command(
+            command,
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        self.assertEqual(status["sessionCleanupRequestId"], "session-cleanup-1")
+        self.assertIn("扫描", status["message"])
+        worker.enqueue.assert_called_once_with(command)
 
     def test_renderer_settings_command_merges_partial_save_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -12321,6 +13460,75 @@ class DaemonLifecycleTests(unittest.TestCase):
             (59629,),
         )
 
+    def test_windows_cleanup_close_posts_wm_close_with_explicit_ctypes_signatures(
+        self,
+    ) -> None:
+        import ctypes
+
+        class FakeFunction:
+            def __init__(self, implementation: Callable[..., object]) -> None:
+                self.implementation = implementation
+                self.argtypes: object = None
+                self.restype: object = None
+                self.calls: list[tuple[object, ...]] = []
+
+            def __call__(self, *args: object) -> object:
+                self.calls.append(args)
+                return self.implementation(*args)
+
+        process = cli_module._CodexDesktopProcess(
+            pid=22,
+            name="ChatGPT.exe",
+            executable_path="C:\\Codex\\ChatGPT.exe",
+            command_line="ChatGPT.exe",
+        )
+
+        def assign_pid(_hwnd: object, pointer: object) -> int:
+            pointer._obj.value = process.pid
+            return 1
+
+        get_window_pid = FakeFunction(assign_pid)
+        is_window_visible = FakeFunction(lambda _hwnd: 1)
+        post_message = FakeFunction(lambda *_args: 1)
+        enum_windows = FakeFunction(lambda callback, lparam: callback(1001, lparam))
+        user32 = SimpleNamespace(
+            GetWindowThreadProcessId=get_window_pid,
+            IsWindowVisible=is_window_visible,
+            PostMessageW=post_message,
+            EnumWindows=enum_windows,
+        )
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(ctypes, "WinDLL", return_value=user32, create=True),
+            patch.object(
+                ctypes,
+                "WINFUNCTYPE",
+                new=lambda *_types: lambda callback: callback,
+                create=True,
+            ),
+            patch(
+                "codex_usage_hud.cli._process_exists",
+                return_value=False,
+            ),
+        ):
+            closed = cli_module._request_windows_codex_desktop_close(
+                [process],
+                timeout_seconds=0.5,
+            )
+
+        self.assertTrue(closed)
+        for function in (
+            get_window_pid,
+            is_window_visible,
+            post_message,
+            enum_windows,
+        ):
+            self.assertIsNotNone(function.argtypes)
+            self.assertIsNotNone(function.restype)
+        self.assertEqual(len(post_message.calls), 1)
+        self.assertEqual(post_message.calls[0][1], 0x0010)
+
     def test_macos_process_query_requires_codex_app_executable(self) -> None:
         completed = SimpleNamespace(
             returncode=0,
@@ -12780,6 +13988,42 @@ class DaemonLifecycleTests(unittest.TestCase):
         launch_app.assert_called_once_with(debugger=True)
         run_renderer.assert_called_once()
         self.assertTrue(run_renderer.call_args.kwargs["launched_codex"])
+
+    def test_daemon_restarts_for_code_10_but_exits_for_cleanup_code_11(self) -> None:
+        manager = SimpleNamespace(
+            wait_for_codex=MagicMock(),
+            poll_seconds=0.1,
+        )
+        loading = MagicMock()
+        loading.start.return_value = loading
+        args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
+
+        with (
+            patch("codex_usage_hud.cli.configure_daemon_logging"),
+            patch("codex_usage_hud.cli._attach_cli_logger_to_daemon_log"),
+            patch("codex_usage_hud.cli.hide_console_window"),
+            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
+            patch("codex_usage_hud.cli.HudInstanceLock"),
+            patch(
+                "codex_usage_hud.cli._daemon_startup_decision",
+                return_value=cli_module.DaemonStartupDecision(
+                    cli_module.DAEMON_STARTUP_WAIT,
+                ),
+            ),
+            patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
+            patch(
+                "codex_usage_hud.cli.run_hud_session",
+                side_effect=[
+                    cli_module.DAEMON_RESTART_REQUESTED,
+                    cli_module.CLEANUP_MAINTENANCE_REQUESTED,
+                ],
+            ) as run_hud,
+        ):
+            exit_code = run_daemon(args)
+
+        self.assertEqual(exit_code, cli_module.CLEANUP_MAINTENANCE_REQUESTED)
+        self.assertEqual(manager.wait_for_codex.call_count, 2)
+        self.assertEqual(run_hud.call_count, 2)
 
     def test_daemon_missing_codex_returns_when_single_launch_fails(self) -> None:
         manager = SimpleNamespace(
@@ -14006,6 +15250,286 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual([event.type for event in events], ["settings_command_received"])
         self.assertEqual(events[0].source, "settings_bridge")
         self.assertEqual(events[0].context["action"], "exit")
+
+    def test_renderer_loop_retries_undelivered_background_usage_response_once(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}\n", encoding="utf-8")
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+            background_runtime = SimpleNamespace(
+                query=MagicMock(
+                    return_value={
+                        "revision": 1,
+                        "events": [],
+                        "selectedEventId": "",
+                    }
+                ),
+                detail=MagicMock(return_value=None),
+                confirm=MagicMock(return_value=True),
+                pending_today=MagicMock(return_value=[]),
+                store=SimpleNamespace(revision=MagicMock(return_value=1)),
+            )
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                background_usage_runtime=background_runtime,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(side_effect=[False, True]),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(
+                close=MagicMock(),
+                background_usage_url="http://127.0.0.1:8765/background-usage",
+            )
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_query(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls == 1:
+                    callback = callbacks["command"]
+                    assert callable(callback)
+                    callback(
+                        {
+                            "id": "background-query-1",
+                            "action": "backgroundUsageQuery",
+                            "filters": {},
+                        }
+                    )
+                elif delay_calls >= 6:
+                    raise KeyboardInterrupt
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.cli._record_cdp_update_failure"),
+                patch(
+                    "codex_usage_hud.cli.BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS",
+                    (0.0, 0.0, 0.0),
+                ),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_query,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(fake_client.update.call_count, 1)
+        self.assertEqual(fake_client.update_payload.call_count, 2)
+        first_payload, second_payload = [
+            call.args[0] for call in fake_client.update_payload.call_args_list
+        ]
+        self.assertEqual(
+            set(first_payload["payloadDomains"]),
+            {"backgroundUsage"},
+        )
+        self.assertEqual(
+            set(second_payload["payloadDomains"]),
+            {"backgroundUsage"},
+        )
+        self.assertEqual(
+            first_payload["settingsCommandStatus"]["backgroundUsageResponse"][
+                "requestId"
+            ],
+            "background-query-1",
+        )
+        self.assertEqual(
+            second_payload["settingsCommandStatus"]["backgroundUsageResponse"][
+                "requestId"
+            ],
+            "background-query-1",
+        )
+
+    def test_renderer_loop_stops_background_usage_retries_after_exhaustion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            session_file = temp_root / "session.jsonl"
+            session_file.write_text("{}\n", encoding="utf-8")
+            settings_path = temp_root / "hud_settings.json"
+            settings_path.write_text("{}\n", encoding="utf-8")
+            runtime_events = RuntimeEventBus()
+            callbacks: dict[str, object] = {}
+            background_runtime = SimpleNamespace(
+                query=MagicMock(
+                    return_value={
+                        "revision": 1,
+                        "events": [],
+                        "selectedEventId": "",
+                    }
+                ),
+                detail=MagicMock(return_value=None),
+                confirm=MagicMock(return_value=True),
+                pending_today=MagicMock(return_value=[]),
+                store=SimpleNamespace(revision=MagicMock(return_value=1)),
+            )
+            fake_context = SimpleNamespace(
+                poll_ms=500,
+                settings_store=SimpleNamespace(
+                    path=settings_path,
+                    mtime=MagicMock(return_value=settings_path.stat().st_mtime),
+                ),
+                user_config=UserConfig.defaults(),
+                session_resolver=SimpleNamespace(
+                    resolve=MagicMock(return_value=(session_file, "renderer:Live Thread")),
+                ),
+                runtime_events=runtime_events,
+                background_usage_runtime=background_runtime,
+                close=MagicMock(),
+            )
+            fake_client = SimpleNamespace(
+                last_status="ok",
+                last_error="",
+                timeout_seconds=1.0,
+                take_settings_command=MagicMock(return_value=None),
+                update=MagicMock(return_value=True),
+                update_payload=MagicMock(return_value=False),
+                close=MagicMock(),
+            )
+            fake_work_overlay = MagicMock()
+            fake_update_state = SimpleNamespace(to_dict=lambda: {"phase": "idle"})
+            fake_update_manager = SimpleNamespace(
+                tick=MagicMock(return_value=fake_update_state),
+                status=MagicMock(return_value=fake_update_state),
+                close=MagicMock(),
+            )
+            fake_command_pump = SimpleNamespace(start=MagicMock(), close=MagicMock())
+            fake_bridge = SimpleNamespace(
+                close=MagicMock(),
+                background_usage_url="http://127.0.0.1:8765/background-usage",
+            )
+            snapshot = ParsedSession(status="parsed", session_path=session_file)
+            delay_calls = 0
+
+            def bridge_factory(*args: object, **kwargs: object) -> object:
+                del args
+                callbacks["command"] = kwargs["command_callback"]
+                fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
+                return fake_bridge
+
+            def delay_then_enqueue_query(*args: object, **kwargs: object) -> float:
+                nonlocal delay_calls
+                del args, kwargs
+                delay_calls += 1
+                if delay_calls == 1:
+                    callback = callbacks["command"]
+                    assert callable(callback)
+                    callback(
+                        {
+                            "id": "background-query-exhausted",
+                            "action": "backgroundUsageQuery",
+                            "filters": {},
+                        }
+                    )
+                elif delay_calls >= 6:
+                    raise KeyboardInterrupt
+                return 0.0
+
+            with (
+                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
+                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
+                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
+                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch(
+                    "codex_usage_hud.cli._WorkOverlayCommandPump",
+                    return_value=fake_command_pump,
+                ),
+                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch(
+                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    return_value=(True, "visible", "", 123),
+                ),
+                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
+                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.cli._record_cdp_update_failure"),
+                patch(
+                    "codex_usage_hud.cli.BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS",
+                    (0.0, 0.0, 0.0),
+                ),
+                patch(
+                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    side_effect=delay_then_enqueue_query,
+                ),
+            ):
+                exit_code = run_renderer_hud_session(
+                    SimpleNamespace(),
+                    lock_already_held=True,
+                )
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(fake_client.update_payload.call_count, 4)
+        self.assertEqual(delay_calls, 6)
+        response_ids = [
+            call.args[0]["settingsCommandStatus"]["backgroundUsageResponse"][
+                "requestId"
+            ]
+            for call in fake_client.update_payload.call_args_list
+        ]
+        self.assertEqual(response_ids, ["background-query-exhausted"] * 4)
 
     def test_renderer_loop_handles_check_update_command_with_settings_only_payload(
         self,
@@ -15500,7 +17024,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 patch(
                     "codex_usage_hud.cli.active_work_items_for_snapshot",
                     return_value=[],
-                ) as active_work_items,
+                ),
                 patch(
                     "codex_usage_hud.cli._renderer_refresh_delay_seconds",
                     side_effect=delay_then_wakeup,
@@ -15644,7 +17168,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 patch(
                     "codex_usage_hud.cli.active_work_items_for_snapshot",
                     return_value=[],
-                ) as active_work_items,
+                ),
                 patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
                 patch(
                     "codex_usage_hud.cli._renderer_refresh_delay_seconds",

@@ -19,6 +19,12 @@ from .codex_file_manager import (
     InventoryItem,
     resolve_codex_roots,
 )
+from .session_cleanup import (
+    SessionCleanupError,
+    SessionCleanupItem,
+    SessionCleanupManager,
+    SessionDeleteCapability,
+)
 from .parser import (
     Activity,
     ConfirmedTokens,
@@ -35,6 +41,7 @@ from .parser import (
     UsageSummary,
     WorkStatusItem,
     extract_log_field,
+    extract_session_thread_identity,
     message_text,
     parse_timestamp,
     short_session_id,
@@ -76,8 +83,13 @@ __all__ = [
     "estimate_attachments",
     "estimate_tokens",
     "extract_log_field",
+    "extract_session_thread_identity",
     "message_text",
     "parse_timestamp",
     "resolve_codex_roots",
+    "SessionCleanupError",
+    "SessionCleanupItem",
+    "SessionCleanupManager",
+    "SessionDeleteCapability",
     "short_session_id",
 ]

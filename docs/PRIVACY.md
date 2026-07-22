@@ -1,11 +1,11 @@
 # Privacy Policy for codex-usage-hud
 
-`codex-usage-hud` 的首要原则是 `local-first privacy`。这个项目的职责，是在你的机器上读取本地可访问的 Codex 使用记录，并在本地完成解析、统计与显示。默认仍是只读分析器；“存储”页的写操作必须由用户显式启用并完成 dry-run 与二次确认。
+`codex-usage-hud` 的首要原则是 `local-first privacy`。这个项目的职责，是在你的机器上读取本地可访问的 Codex 使用记录，并在本地完成解析、统计与显示。默认仍是只读分析器；“空间清理”中的垃圾清理和会话永久删除必须由用户显式发起，并完成各自独立的预览与确认。
 
 ## 核心承诺
 
 - 只在本地运行。
-- 只读本地日志与本地数据库；显式启用的本地文件管理写操作是单独列出的例外。
+- 默认只读本地日志与本地数据库；显式启用的白名单缓存删除、SQLite 本地备份与行级维护是单独列出的例外。
 - 绝对不联网。
 - 绝对不上传任何内容。
 - 绝对不把 prompt、response、token 统计、路径信息或元数据发送给作者、维护者或任何第三方。
@@ -27,13 +27,27 @@
 - 计算本地 HUD 所需指标
 - 在本地终端显示结果
 
-本项目不应主动修改这些原始数据源，也不应把它们复制到远端位置。存储管理器不会 raw 修改原始 JSONL、SQLite、WAL/SHM、凭据、配置或未知项；会话、插件和登录状态只通过用户确认的官方 Codex 动作处理。
+本项目不会在后台主动修改这些原始数据源，也不会把它们复制到远端位置。垃圾清理不会 raw 修改原始 JSONL、凭据、配置或未知项；会话、插件和登录状态只通过用户确认的官方 Codex 动作处理。会话永久删除只调用官方 `codex delete --force <UUID>`，不直接改写 state DB、session index 或 rollout。SQLite 只在下述显式本地维护例外中按已知 schema 删除保留期以前的行，主库与 WAL/SHM 不会作为普通文件删除。
 
 ## 显式本地文件管理例外
 
-设置里的“存储”页只有在用户点击扫描、预览和确认后才会访问对应的本地元数据。renderer payload 只包含中性的根标签、相对路径、分类、大小、mtime、风险和操作状态，不包含 prompt、response、token、凭据或文件内容。
+设置里的“空间清理”只有在用户点击扫描、预览和确认后才会访问对应的本地元数据。垃圾清理 payload 只包含中性标签、分类、大小、保留期、风险和操作状态；会话管理 payload 只包含 opaque ID、标题、工作目录末级名称、更新时间、状态、估算大小和关联子任务数。两者都不包含 prompt、response、凭据、canonical UUID、绝对 rollout 路径、原始数据库行或文件内容。
 
-raw 清理第一版仅允许过期且未被配置引用的临时 staging/clone 项，并在执行前按 inventory revision、canonical path、lstat 指纹和锁定状态重新验证。Codex、app-server 或插件同步运行时，操作只会排队到退出后；HUD 不会自动杀进程。SQLite 主库与 `-wal`/`-shm` 是不可拆分的受保护组。未知文件、symlink/junction/reparse point、`auth.json`、`config.toml`、`secrets`、会话 transcript 和活动插件 cache 默认禁止 raw 删除。
+清理分为三层：
+
+- “可直接清理”只包含固定白名单、可再生成的数据，例如过期且未被配置引用的 staging/clone、HUD 自有诊断日志、失效运行时残留，以及已确认的用户临时/开发工具/浏览器/着色器缓存。Windows 路径只在当前用户的 Local AppData 下，macOS 额外覆盖 Homebrew 下载缓存与 Xcode DerivedData；相关应用运行时整类跳过。
+- “确认后清理”只包含用户明确同意放弃的历史。超过 7 天的 Windows/macOS 崩溃与错误报告可单独清理；`logs_2.sqlite` 默认保留最近 24 小时，HUD 后台用量审计默认保留最近 30 天。仅选择系统诊断报告时不会创建或要求 SQLite 备份。
+- “始终保护”包含未知文件、symlink/junction/reparse point、`auth.json`、`config.toml`、`secrets`、会话 transcript、活动插件、活动 overlay 状态，以及 `state_5.sqlite`、`goals_1.sqlite`、`memories_1.sqlite`。
+
+回收站/废纸篓不会被当成普通缓存目录处理。它们包含用户可能仍要恢复的原始文件，并且 Windows 必须通过原生 Shell 合同证明当前用户边界；当前一键清理不会扫描或删除这些位置。
+
+所有路径项在执行前按 inventory revision、opaque ID、canonical path、lstat/fingerprint、路径边界和锁状态重新验证。HUD 自有日志只从 HUD runtime 根内的固定名称/轮转后缀识别；落在根外的显式日志路径不会因为名称相似而被删除。
+
+会话管理只展示 canonical 根会话，子 agent 和嵌套子 agent 归并为关联数量。当前会话、运行中的会话、存在活动子任务、spawn 关系或 rollout 映射无法证明的会话不可选择。确认 token 绑定 inventory revision 与 opaque ID；官方命令返回后还会只读核对根会话及其后代是否已从 state DB、session index 和 active/archived rollout 中消失。官方能力缺失或核验失败时不会降级为 raw 删除。
+
+SQLite 维护必须在 Codex App、HUD/daemon 和数据库连接退出后由本地维护 helper 执行。每次修改前必须用 SQLite backup API 在用户选择的本地目录创建完整备份并通过完整性检查；备份失败、空间不足、schema 不匹配、文件被占用或活动任务存在时，源库保持不变。独立 Codex CLI 无法可靠恢复其终端现场，因此检测到这类进程时离线维护会暂停并提示用户手动退出，不会强杀。
+
+本地备份可能包含与源 SQLite 相同的敏感诊断内容。请把备份目录视为敏感数据目录，不要同步到公开网盘、Issue 附件或不受信任的位置。HUD 不会上传、分享或自动清除本次成功备份；超过保留期的 HUD 命名旧备份只会在后续清理预览中单独列出。
 
 ## 我们绝不会做的事
 

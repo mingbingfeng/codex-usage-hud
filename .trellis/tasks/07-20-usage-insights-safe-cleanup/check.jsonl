@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/safe-cleanup-contracts.md", "reason": "Verify tiered cleanup, session delete, and space-cleanup renderer layout contracts."}
+{"file": ".trellis/spec/backend/renderer-runtime-contracts.md", "reason": "Confirm cleanup remains renderer-only and does not add Qt/Tk or polling surfaces."}

@@ -5,12 +5,12 @@ from __future__ import annotations
 import argparse
 import copy
 from contextlib import nullcontext
-import gc
 import importlib.metadata as importlib_metadata
 import importlib.util
 import json
 import logging
 import os
+import queue
 import re
 import shlex
 import signal
@@ -19,13 +19,14 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
 from threading import Event
-from typing import Any, Mapping
+from typing import Any
 
 from . import __version__
 from .background_usage_runtime import (
@@ -63,14 +64,32 @@ from .core import (
     UsageSummary,
     WorkStatusItem,
     detect_reading_activity,
+    extract_session_thread_identity,
+    message_text,
 )
 from .core.runtime_events import RuntimeEvent, RuntimeEventBus
-from .core.background_usage import BACKGROUND_USAGE_KIND
+from .core.background_usage import BACKGROUND_USAGE_KIND, background_feature_label
 from .core.runtime_errors import RuntimeErrorRegistry
 from .core.codex_file_manager import (
+    CodexCleanupCandidate,
     CodexFileManager,
     CodexFileManagerWorker,
     FileManagementError,
+)
+from .core.safe_cleanup import (
+    CleanupPlanError,
+    MaintenancePlan,
+    SQLiteTarget,
+    SafeCleanupError,
+    SafeCleanupManager,
+    read_maintenance_result,
+    run_maintenance_plan,
+    run_maintenance_plan_file,
+    write_maintenance_plan,
+)
+from .core.session_cleanup import (
+    SessionCleanupError,
+    SessionCleanupManager,
 )
 from .daemon import (
     CodexDaemonManager,
@@ -110,7 +129,6 @@ from .settings_bridge import SettingsBridgeServer
 from .ui.renderer_hud import (
     RendererHudClient,
     payload_from_snapshot,
-    remove_renderer_hud_from_pages,
     session_switch_payload_from_snapshot,
     wait_for_renderer,
 )
@@ -140,6 +158,7 @@ DEFAULT_ACTIVE_SESSION_POLL_MS = 500
 DEFAULT_AUTO_SWITCH_IDLE_SECONDS = 30.0
 NATIVE_SEARCH_SESSION_SWITCH_ENV = "CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH"
 DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
+USAGE_INSIGHTS_TOP_SESSION_LIMIT = 10
 RENDERER_IDLE_POLL_MS = 1500
 RENDERER_FILE_WATCHER_FALLBACK_SECONDS = 5.0
 RENDERER_FILE_EVENT_DEBOUNCE_SECONDS = 0.75
@@ -151,10 +170,12 @@ HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
 DAEMON_RESTART_REQUESTED = 10
+CLEANUP_MAINTENANCE_REQUESTED = 11
 RENDERER_HUD_UNAVAILABLE = 20
 HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
 RENDERER_CDP_TIMEOUT_SECONDS = 0.35
+BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS = (0.15, 0.35, 0.75)
 DAEMON_RENDERER_CDP_TIMEOUT_SECONDS = 1.5
 RENDERER_INITIAL_TIMEOUT_SECONDS = 0.75
 RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS = 2.0
@@ -212,6 +233,11 @@ WORK_OVERLAY_RESTART_ACTION = "restartCodex"
 WORK_OVERLAY_SYSTEM_ACTION_READY = "systemActionReady"
 WORK_OVERLAY_RESTART_ACTION_ID = "restart-codex-for-renderer"
 WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS = 2.0
+SAFE_CLEANUP_RESULT_FILENAME = "safe-cleanup-result.json"
+SAFE_CLEANUP_PLAN_PREFIX = "safe-cleanup-plan-"
+SAFE_CLEANUP_ACTIVE_SESSION_SCAN_LIMIT = 64
+SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS = 5.0
+SAFE_CLEANUP_PROCESS_CLOSE_TIMEOUT_SECONDS = 8.0
 DESKTOP_OVERLAY_PACKAGE = "PySide6"
 DESKTOP_OVERLAY_PIP_SPEC = "PySide6>=6.8"
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
@@ -871,6 +897,85 @@ def _work_overlay_command(state_path: Path) -> list[str]:
     ]
 
 
+def _cleanup_helper_command(plan_path: Path, result_path: Path) -> list[str]:
+    arguments = [
+        "--cleanup-maintenance-helper",
+        "--cleanup-plan-file",
+        str(plan_path),
+        "--cleanup-result-file",
+        str(result_path),
+    ]
+    if getattr(sys, "frozen", False):
+        return [str(Path(sys.executable).resolve()), *arguments]
+    helper_python = Path(sys.executable).resolve()
+    if sys.platform.startswith("win") and helper_python.name.casefold() == "python.exe":
+        candidate = helper_python.with_name("pythonw.exe")
+        if candidate.exists():
+            helper_python = candidate
+    return [str(helper_python), "-m", "codex_usage_hud", *arguments]
+
+
+def _cleanup_restart_command(*, daemon_mode: bool) -> tuple[str, ...]:
+    raw = list(sys.argv[1:])
+    filtered: list[str] = []
+    skip_next = False
+    value_options = {"--cleanup-plan-file", "--cleanup-result-file"}
+    for argument in raw:
+        if skip_next:
+            skip_next = False
+            continue
+        if argument in value_options:
+            skip_next = True
+            continue
+        if argument == "--cleanup-maintenance-helper":
+            continue
+        filtered.append(argument)
+    if daemon_mode and "--daemon" not in filtered:
+        filtered.append("--daemon")
+    executable = Path(sys.executable).resolve()
+    if sys.platform.startswith("win") and executable.name.casefold() == "python.exe":
+        candidate = executable.with_name("pythonw.exe")
+        if candidate.exists():
+            executable = candidate
+    if getattr(sys, "frozen", False):
+        return (str(executable), *filtered)
+    return (str(executable), "-m", "codex_usage_hud", *filtered)
+
+
+def _launch_cleanup_maintenance_helper(
+    plan_path: Path,
+    result_path: Path,
+) -> subprocess.Popen[Any]:
+    return subprocess.Popen(
+        _cleanup_helper_command(plan_path, result_path),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        creationflags=(
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if sys.platform.startswith("win")
+            else 0
+        ),
+        start_new_session=not sys.platform.startswith("win"),
+    )
+
+
+def run_cleanup_maintenance_helper(
+    plan_file: str | os.PathLike[str],
+    result_file: str | os.PathLike[str],
+) -> int:
+    try:
+        result = run_maintenance_plan_file(
+            Path(plan_file),
+            Path(result_file),
+        )
+    except Exception as exc:
+        _LOGGER.exception("safe_cleanup_helper_failed error=%s", exc)
+        return 1
+    return 0 if result.state in {"completed", "partial"} else 1
+
+
 def _work_overlay_owner_pid(path: Path) -> int | None:
     match = re.match(r"work-overlay-(\d+)-\d+\.json$", path.name, re.IGNORECASE)
     if not match:
@@ -1015,7 +1120,10 @@ def background_usage_to_work_item(
             updated_at = datetime.fromisoformat(updated_text.replace("Z", "+00:00"))
         except ValueError:
             updated_at = None
-    feature_label = str(summary.get("featureLabel") or "未知后台任务").strip()
+    feature_label = background_feature_label(
+        summary.get("featureKey"),
+        summary.get("featureLabel"),
+    )
     endpoint = str(summary.get("endpoint") or "/responses").strip()
     return WorkStatusItem(
         id=event_id,
@@ -1023,7 +1131,7 @@ def background_usage_to_work_item(
         kind=BACKGROUND_USAGE_KIND,
         title=feature_label,
         status=BACKGROUND_USAGE_KIND,
-        status_label="Codex App 后台任务使用了额度",
+        status_label=f"Codex App 后台任务：{feature_label}",
         detail=f"{request_count} 次 API 请求",
         model_name=model_name,
         status_text=f"{request_count} 次请求",
@@ -1062,6 +1170,39 @@ def _background_usage_work_items(context: object) -> list[WorkStatusItem]:
         if item is not None:
             items.append(item)
     return items
+
+
+def _background_usage_notification_for_session(
+    context: object,
+    session_id: object,
+) -> dict[str, object]:
+    runtime = getattr(context, "background_usage_runtime", None)
+    notification_for_session = getattr(runtime, "notification_for_session", None)
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id or not callable(notification_for_session):
+        return {}
+    try:
+        raw = notification_for_session(normalized_session_id)
+    except Exception as exc:
+        _LOGGER.debug(
+            "background_usage_notification_query_failed session_id=%s error=%s",
+            normalized_session_id,
+            exc,
+        )
+        return {}
+    if not isinstance(raw, Mapping):
+        return {}
+    try:
+        count = max(0, int(raw.get("count") or 0))
+    except (TypeError, ValueError, OverflowError):
+        return {}
+    event_id = str(raw.get("eventId") or "").strip()
+    if count <= 0 or not event_id:
+        return {}
+    range_key = str(raw.get("range") or "today").strip().lower()
+    if range_key not in {"today", "7d", "30d", "all"}:
+        range_key = "today"
+    return {"count": count, "eventId": event_id, "range": range_key}
 
 
 def _work_overlay_items_with_background_usage(
@@ -2571,7 +2712,9 @@ def _remote_debugging_ports_from_command_line(command_line: object) -> tuple[int
     return tuple(ports)
 
 
-def _windows_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
+def _windows_running_codex_processes() -> list[_CodexDesktopProcess]:
+    """Return exact Windows Codex/App rows or raise when they cannot be audited."""
+
     if not sys.platform.startswith("win"):
         return []
     script = (
@@ -2590,21 +2733,15 @@ def _windows_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        _LOGGER.info("renderer_cdp_process_query_failed platform=windows error=%s", exc)
-        return []
+        raise RuntimeError("Windows Codex process query failed") from exc
     if result.returncode != 0 or not result.stdout.strip():
-        _LOGGER.info(
-            "renderer_cdp_process_query_failed platform=windows code=%s",
-            result.returncode,
+        raise RuntimeError(
+            f"Windows Codex process query returned {result.returncode}"
         )
-        return []
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        _LOGGER.info(
-            "renderer_cdp_process_query_failed platform=windows error=%s", exc
-        )
-        return []
+        raise RuntimeError("Windows Codex process query returned invalid JSON") from exc
     rows = payload if isinstance(payload, list) else [payload]
     processes: list[_CodexDesktopProcess] = []
     for row in rows:
@@ -2612,7 +2749,7 @@ def _windows_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
             continue
         name = str(row.get("Name") or "").strip()
         executable_path = str(row.get("ExecutablePath") or "").strip()
-        if not is_codex_client_process(name, executable_path):
+        if Path(name).stem.casefold() not in {"chatgpt", "codex"}:
             continue
         try:
             pid = int(row.get("ProcessId") or 0)
@@ -2629,6 +2766,19 @@ def _windows_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
             )
         )
     return processes
+
+
+def _windows_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
+    try:
+        processes = _windows_running_codex_processes()
+    except RuntimeError as exc:
+        _LOGGER.info("renderer_cdp_process_query_failed platform=windows error=%s", exc)
+        return []
+    return [
+        process
+        for process in processes
+        if is_codex_client_process(process.name, process.executable_path)
+    ]
 
 
 def _is_macos_codex_desktop_command(executable: str, command_line: str) -> bool:
@@ -2716,6 +2866,154 @@ def _running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
     if sys.platform == "darwin":
         return _macos_running_codex_desktop_processes()
     return []
+
+
+def _audited_running_codex_desktop_processes() -> list[_CodexDesktopProcess]:
+    if sys.platform.startswith("win"):
+        return [
+            process
+            for process in _windows_running_codex_processes()
+            if is_codex_client_process(process.name, process.executable_path)
+        ]
+    if sys.platform == "darwin":
+        processes = _macos_running_codex_desktop_processes()
+        if not processes:
+            raise RuntimeError("Codex Desktop process could not be verified")
+        return processes
+    raise RuntimeError(f"Codex Desktop process audit is unsupported on {sys.platform}")
+
+
+def _running_standalone_codex_cli_pids() -> tuple[int, ...]:
+    """Return standalone Codex CLI PIDs, failing closed when audit is unavailable."""
+
+    if sys.platform.startswith("win"):
+        rows = _windows_running_codex_processes()
+        return tuple(
+            sorted(
+                {
+                    process.pid
+                    for process in rows
+                    if Path(process.name).stem.casefold() == "codex"
+                    and not is_codex_client_process(
+                        process.name,
+                        process.executable_path,
+                    )
+                }
+            )
+        )
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,comm=,command="],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("macOS Codex process query failed") from exc
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"macOS Codex process query returned {result.returncode}"
+            )
+        pids: set[int] = set()
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except (TypeError, ValueError):
+                continue
+            executable = parts[1]
+            command_line = parts[2] if len(parts) > 2 else executable
+            if Path(executable).name.casefold() != "codex":
+                continue
+            if _is_macos_codex_desktop_command(executable, command_line):
+                continue
+            if pid > 0 and pid != os.getpid():
+                pids.add(pid)
+        return tuple(sorted(pids))
+    raise RuntimeError(f"Codex process audit is unsupported on {sys.platform}")
+
+
+def _request_windows_codex_desktop_close(
+    processes: Sequence[_CodexDesktopProcess],
+    *,
+    timeout_seconds: float = SAFE_CLEANUP_PROCESS_CLOSE_TIMEOUT_SECONDS,
+) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    target_pids = {int(process.pid) for process in processes if int(process.pid) > 0}
+    if not target_pids:
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        enum_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        get_window_pid = user32.GetWindowThreadProcessId
+        get_window_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        get_window_pid.restype = wintypes.DWORD
+        is_window_visible = user32.IsWindowVisible
+        is_window_visible.argtypes = [wintypes.HWND]
+        is_window_visible.restype = wintypes.BOOL
+        post_message = user32.PostMessageW
+        post_message.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        post_message.restype = wintypes.BOOL
+        enum_windows = user32.EnumWindows
+        enum_windows.argtypes = [enum_type, wintypes.LPARAM]
+        enum_windows.restype = wintypes.BOOL
+        posted: set[int] = set()
+
+        def close_window(hwnd: int, _lparam: int) -> bool:
+            pid = wintypes.DWORD()
+            get_window_pid(wintypes.HWND(hwnd), ctypes.byref(pid))
+            value = int(pid.value)
+            if value not in target_pids:
+                return True
+            if not is_window_visible(wintypes.HWND(hwnd)):
+                return True
+            if post_message(wintypes.HWND(hwnd), 0x0010, 0, 0):
+                posted.add(value)
+            return True
+
+        if not enum_windows(enum_type(close_window), 0):
+            return False
+    except Exception as exc:
+        _LOGGER.info("safe_cleanup_desktop_close_failed error=%s", exc)
+        return False
+    if not posted:
+        return False
+    deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        if not any(_process_exists(pid) for pid in target_pids):
+            return True
+        time.sleep(0.1)
+    return not any(_process_exists(pid) for pid in target_pids)
+
+
+def _request_codex_desktop_close(
+    processes: Sequence[_CodexDesktopProcess],
+    *,
+    timeout_seconds: float = SAFE_CLEANUP_PROCESS_CLOSE_TIMEOUT_SECONDS,
+) -> bool:
+    if not processes:
+        return True
+    if sys.platform.startswith("win"):
+        return _request_windows_codex_desktop_close(
+            processes,
+            timeout_seconds=timeout_seconds,
+        )
+    if sys.platform == "darwin":
+        return _stop_macos_codex_app(timeout_seconds=timeout_seconds)
+    return False
 
 
 def _append_renderer_cdp_candidate(
@@ -3714,6 +4012,7 @@ def _handle_work_overlay_command(
     *,
     prepare_window: bool = True,
     activation_meta: dict[str, object] | None = None,
+    backend_names: tuple[str, ...] | None = None,
 ) -> SessionSwitchResult | None:
     action = str(command.get("action") or "").strip()
     if action != "activateSession":
@@ -3728,14 +4027,25 @@ def _handle_work_overlay_command(
         _LOGGER.info("work_overlay_command_ignored reason=missing_target")
         return None
 
+    def activate_session() -> SessionSwitchResult:
+        workdir = str(command.get("workdir") or "").strip()
+        if backend_names is None:
+            return session_controller.activate_session(
+                session_id=session_id,
+                title=target_title,
+                workdir=workdir,
+            )
+        return session_controller.activate_session(
+            session_id=session_id,
+            title=target_title,
+            workdir=workdir,
+            backend_names=backend_names,
+        )
+
     # CDP can reach a live Codex renderer without first foregrounding the
     # desktop window.  Defer the expensive window preparation until transport
     # or backend failure, then retry once as the bounded recovery path.
-    result = session_controller.activate_session(
-        session_id=session_id,
-        title=target_title,
-        workdir=str(command.get("workdir") or "").strip(),
-    )
+    result = activate_session()
     window_prepared = False
     if (
         prepare_window
@@ -3753,11 +4063,7 @@ def _handle_work_overlay_command(
                 window_hwnd,
                 window_reason,
             )
-        result = session_controller.activate_session(
-            session_id=session_id,
-            title=target_title,
-            workdir=str(command.get("workdir") or "").strip(),
-        )
+        result = activate_session()
     if activation_meta is not None:
         activation_meta["windowPrepared"] = window_prepared
     _LOGGER.info(
@@ -4413,14 +4719,56 @@ def usage_before_today_in_week(
 
 
 @dataclass
+class _UsageInsightAggregate:
+    summary: UsageSummary = field(default_factory=UsageSummary)
+    priced_event_count: int = 0
+    total_event_count: int = 0
+    latest_event_at: datetime | None = None
+
+
+@dataclass
 class _UsageCacheEntry:
     mtime: float | None
     file_size: int | None
     day_start: datetime
     week_start: datetime
+    month_start: datetime
     model_provider: str
     summary_day: UsageSummary
     summary_week: UsageSummary
+    summary_month: UsageSummary
+    session_id: str = ""
+    parent_session_id: str = ""
+    session_key: str = ""
+    session_title: str = ""
+    workdir_name: str = ""
+    archived: bool = False
+    can_activate: bool = False
+    models_day: dict[str, _UsageInsightAggregate] = field(default_factory=dict)
+    models_week: dict[str, _UsageInsightAggregate] = field(default_factory=dict)
+    models_month: dict[str, _UsageInsightAggregate] = field(default_factory=dict)
+    day_priced_event_count: int = 0
+    day_total_event_count: int = 0
+    week_priced_event_count: int = 0
+    week_total_event_count: int = 0
+    month_priced_event_count: int = 0
+    month_total_event_count: int = 0
+    day_latest_event_at: datetime | None = None
+    week_latest_event_at: datetime | None = None
+    month_latest_event_at: datetime | None = None
+
+
+@dataclass
+class _UsageInsightSessionAggregate:
+    session_id: str
+    session_key: str
+    title: str
+    provider: str
+    workdir_name: str
+    archived: bool
+    can_activate: bool
+    models: dict[tuple[str, str], _UsageInsightAggregate] = field(default_factory=dict)
+    usage: _UsageInsightAggregate = field(default_factory=_UsageInsightAggregate)
 
 
 class UsageSummaryCache:
@@ -4439,6 +4787,8 @@ class UsageSummaryCache:
         self._last_scan_at = 0.0
         self._last_day_total = UsageSummary()
         self._last_week_total = UsageSummary()
+        self._insights_revision = 0
+        self._insights_generated_at: datetime | None = None
 
     @staticmethod
     def _cache_path(path: Path) -> Path:
@@ -4461,6 +4811,515 @@ class UsageSummaryCache:
             seen.add(root)
             ordered.append(root)
         return tuple(ordered)
+
+    def _touch_insights(self) -> None:
+        self._insights_revision += 1
+        self._insights_generated_at = datetime.now().astimezone()
+
+    def _session_meta_payload(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        payload: Mapping[str, Any] = {}
+        payload_reader = getattr(self._parser, "session_meta_payload", None)
+        if callable(payload_reader):
+            raw_payload = payload_reader(records)
+            if isinstance(raw_payload, Mapping):
+                payload = raw_payload
+        if not payload:
+            for record in records:
+                if record.get("type") != "session_meta":
+                    continue
+                raw_payload = record.get("payload")
+                if isinstance(raw_payload, Mapping):
+                    payload = raw_payload
+                    break
+        return payload
+
+    @staticmethod
+    def _canonical_session_id(value: object) -> str:
+        candidate = str(value or "").strip()
+        try:
+            canonical = str(uuid.UUID(candidate))
+        except (ValueError, AttributeError, TypeError):
+            return ""
+        return canonical if candidate.casefold() == canonical else ""
+
+    @classmethod
+    def _delegated_source_session_id(
+        cls,
+        records: Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Recover the parent ID from legacy desktop subagent prompts."""
+        for record in records:
+            if record.get("type") != "response_item":
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            if payload.get("type") != "message" or payload.get("role") != "user":
+                continue
+            text = message_text(payload)
+            if "<codex_delegation" not in text:
+                continue
+            match = re.search(
+                r"<source_thread_id>\s*([^<]+?)\s*</source_thread_id>",
+                text,
+                re.IGNORECASE,
+            )
+            if match:
+                parent_id = cls._canonical_session_id(match.group(1))
+                if parent_id:
+                    return parent_id
+        return ""
+
+    def _is_archived_path(
+        self,
+        path: Path,
+        scan_roots: Sequence[Path],
+    ) -> bool:
+        resolved = self._cache_path(path)
+        for root in scan_roots:
+            if root.name.casefold() != "archived_sessions":
+                continue
+            try:
+                resolved.relative_to(self._cache_path(root))
+            except ValueError:
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _event_value(event: object, name: str, default: object = None) -> object:
+        if isinstance(event, Mapping):
+            return event.get(name, default)
+        return getattr(event, name, default)
+
+    @staticmethod
+    def _window_event_time(
+        event: object,
+        start_at: datetime,
+    ) -> datetime | None:
+        timestamp = UsageSummaryCache._event_value(event, "timestamp")
+        if not isinstance(timestamp, datetime):
+            return None
+        if start_at.tzinfo is None:
+            event_time = (
+                timestamp.astimezone().replace(tzinfo=None)
+                if timestamp.tzinfo is not None
+                else timestamp
+            )
+        elif timestamp.tzinfo is None:
+            event_time = timestamp.replace(tzinfo=start_at.tzinfo)
+        else:
+            event_time = timestamp.astimezone(start_at.tzinfo)
+        return event_time if event_time >= start_at else None
+
+    @staticmethod
+    def _nonnegative_event_int(event: object, name: str) -> int:
+        try:
+            return max(0, int(UsageSummaryCache._event_value(event, name, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _summary_for_usage_event(cls, event: object) -> tuple[UsageSummary, bool]:
+        input_tokens = cls._nonnegative_event_int(event, "input_tokens")
+        cached_tokens = min(
+            input_tokens,
+            cls._nonnegative_event_int(event, "cached_tokens"),
+        )
+        raw_cost = cls._event_value(event, "cost_usd")
+        try:
+            cost = None if raw_cost is None else max(0.0, float(raw_cost))
+        except (TypeError, ValueError):
+            cost = None
+        return (
+            UsageSummary(
+                tokens=cls._nonnegative_event_int(event, "total_tokens"),
+                input_tokens=input_tokens,
+                cached_tokens=cached_tokens,
+                cache_write_tokens=min(
+                    input_tokens - cached_tokens,
+                    cls._nonnegative_event_int(event, "cache_write_tokens"),
+                ),
+                output_tokens=cls._nonnegative_event_int(event, "output_tokens"),
+                reasoning_tokens=cls._nonnegative_event_int(event, "reasoning_tokens"),
+                cost_usd=round(cost or 0.0, 6),
+            ),
+            cost is not None,
+        )
+
+    @staticmethod
+    def _merge_insight_aggregate(
+        target: _UsageInsightAggregate,
+        summary: UsageSummary,
+        *,
+        priced_event_count: int,
+        total_event_count: int,
+        latest_event_at: datetime | None,
+    ) -> None:
+        _merge_usage(target.summary, summary)
+        target.priced_event_count += max(0, int(priced_event_count))
+        target.total_event_count += max(0, int(total_event_count))
+        if latest_event_at is not None and (
+            target.latest_event_at is None or latest_event_at > target.latest_event_at
+        ):
+            target.latest_event_at = latest_event_at
+
+    @classmethod
+    def _model_insights_for_window(
+        cls,
+        events: Sequence[object],
+        start_at: datetime,
+    ) -> tuple[dict[str, _UsageInsightAggregate], int, int, datetime | None]:
+        models: dict[str, _UsageInsightAggregate] = {}
+        priced_event_count = 0
+        total_event_count = 0
+        latest_event_at: datetime | None = None
+        for event in events:
+            event_time = cls._window_event_time(event, start_at)
+            if event_time is None:
+                continue
+            model = str(cls._event_value(event, "model", "") or "").strip() or "unknown"
+            summary, priced = cls._summary_for_usage_event(event)
+            aggregate = models.setdefault(model, _UsageInsightAggregate())
+            cls._merge_insight_aggregate(
+                aggregate,
+                summary,
+                priced_event_count=int(priced),
+                total_event_count=1,
+                latest_event_at=event_time,
+            )
+            priced_event_count += int(priced)
+            total_event_count += 1
+            if latest_event_at is None or event_time > latest_event_at:
+                latest_event_at = event_time
+        return models, priced_event_count, total_event_count, latest_event_at
+
+    @staticmethod
+    def _insight_aggregate_payload(
+        aggregate: _UsageInsightAggregate,
+    ) -> dict[str, object]:
+        summary = aggregate.summary
+        input_tokens = max(0, int(summary.input_tokens or 0))
+        cached_tokens = min(input_tokens, max(0, int(summary.cached_tokens or 0)))
+        total_event_count = max(0, int(aggregate.total_event_count))
+        priced_event_count = min(
+            total_event_count,
+            max(0, int(aggregate.priced_event_count)),
+        )
+        cost_usd: float | None = round(
+            max(0.0, float(summary.cost_usd or 0.0)),
+            6,
+        )
+        if total_event_count > 0 and priced_event_count == 0:
+            cost_usd = None
+        return {
+            "tokens": max(0, int(summary.tokens or 0)),
+            "inputTokens": input_tokens,
+            "cachedTokens": cached_tokens,
+            "cacheWriteTokens": max(0, int(summary.cache_write_tokens or 0)),
+            "outputTokens": max(0, int(summary.output_tokens or 0)),
+            "reasoningTokens": max(0, int(summary.reasoning_tokens or 0)),
+            "costUsd": cost_usd,
+            "cacheRatio": (
+                round(cached_tokens / input_tokens, 6)
+                if input_tokens > 0
+                else None
+            ),
+            "costCoverage": {
+                "pricedEventCount": priced_event_count,
+                "totalEventCount": total_event_count,
+                "hasCompleteCost": priced_event_count == total_event_count,
+            },
+            "latestEventAt": (
+                aggregate.latest_event_at.isoformat(timespec="seconds")
+                if aggregate.latest_event_at is not None
+                else ""
+            ),
+        }
+
+    def _window_insights(
+        self,
+        entries: Sequence[_UsageCacheEntry],
+        *,
+        window: str,
+        start_at: datetime,
+        limit: int,
+    ) -> dict[str, object]:
+        total = _UsageInsightAggregate()
+        provider_totals: dict[str, _UsageInsightAggregate] = {}
+        model_totals: dict[tuple[str, str], _UsageInsightAggregate] = {}
+        session_entries = {
+            entry.session_id: entry
+            for entry in entries
+            if entry.session_id
+        }
+        session_groups: dict[str, _UsageInsightSessionAggregate] = {}
+
+        def root_session(
+            entry: _UsageCacheEntry,
+        ) -> tuple[str, _UsageCacheEntry | None]:
+            if not entry.session_id:
+                return f"file:{entry.session_key}", entry
+            current = entry
+            chain = [entry.session_id]
+            while current.parent_session_id:
+                parent_id = current.parent_session_id
+                if parent_id in chain:
+                    cycle = chain[chain.index(parent_id) :]
+                    root_id = min(cycle)
+                    return root_id, session_entries.get(root_id)
+                chain.append(parent_id)
+                parent = session_entries.get(parent_id)
+                if parent is None:
+                    return parent_id, None
+                current = parent
+            return current.session_id, current
+
+        for entry in entries:
+            if window == "day":
+                summary = entry.summary_day
+                models = entry.models_day
+                priced_event_count = entry.day_priced_event_count
+                total_event_count = entry.day_total_event_count
+                latest_event_at = entry.day_latest_event_at
+            elif window == "week":
+                summary = entry.summary_week
+                models = entry.models_week
+                priced_event_count = entry.week_priced_event_count
+                total_event_count = entry.week_total_event_count
+                latest_event_at = entry.week_latest_event_at
+            else:
+                summary = entry.summary_month
+                models = entry.models_month
+                priced_event_count = entry.month_priced_event_count
+                total_event_count = entry.month_total_event_count
+                latest_event_at = entry.month_latest_event_at
+            aggregate = _UsageInsightAggregate(
+                summary=replace(summary),
+                priced_event_count=priced_event_count,
+                total_event_count=total_event_count,
+                latest_event_at=latest_event_at,
+            )
+            self._merge_insight_aggregate(
+                total,
+                aggregate.summary,
+                priced_event_count=aggregate.priced_event_count,
+                total_event_count=aggregate.total_event_count,
+                latest_event_at=aggregate.latest_event_at,
+            )
+            provider_total = provider_totals.setdefault(
+                entry.model_provider,
+                _UsageInsightAggregate(),
+            )
+            self._merge_insight_aggregate(
+                provider_total,
+                aggregate.summary,
+                priced_event_count=aggregate.priced_event_count,
+                total_event_count=aggregate.total_event_count,
+                latest_event_at=aggregate.latest_event_at,
+            )
+            for model, model_aggregate in models.items():
+                target = model_totals.setdefault(
+                    (entry.model_provider, model),
+                    _UsageInsightAggregate(),
+                )
+                self._merge_insight_aggregate(
+                    target,
+                    model_aggregate.summary,
+                    priced_event_count=model_aggregate.priced_event_count,
+                    total_event_count=model_aggregate.total_event_count,
+                    latest_event_at=model_aggregate.latest_event_at,
+                )
+            if aggregate.total_event_count or aggregate.summary.tokens:
+                root_id, root_entry = root_session(entry)
+                metadata_entry = root_entry or entry
+                group = session_groups.get(root_id)
+                if group is None:
+                    group = _UsageInsightSessionAggregate(
+                        session_id=(root_id if entry.session_id else ""),
+                        session_key=metadata_entry.session_key,
+                        title=metadata_entry.session_title,
+                        provider=metadata_entry.model_provider,
+                        workdir_name=(
+                            metadata_entry.workdir_name or entry.workdir_name
+                        ),
+                        archived=bool(metadata_entry.archived),
+                        can_activate=bool(
+                            root_entry is not None and root_entry.can_activate
+                        ),
+                    )
+                    session_groups[root_id] = group
+                for model, model_aggregate in models.items():
+                    model_key = (entry.model_provider, model)
+                    target_model = group.models.setdefault(
+                        model_key,
+                        _UsageInsightAggregate(),
+                    )
+                    self._merge_insight_aggregate(
+                        target_model,
+                        model_aggregate.summary,
+                        priced_event_count=model_aggregate.priced_event_count,
+                        total_event_count=model_aggregate.total_event_count,
+                        latest_event_at=model_aggregate.latest_event_at,
+                    )
+                self._merge_insight_aggregate(
+                    group.usage,
+                    aggregate.summary,
+                    priced_event_count=aggregate.priced_event_count,
+                    total_event_count=aggregate.total_event_count,
+                    latest_event_at=aggregate.latest_event_at,
+                )
+
+        sessions = [
+            {
+                "sessionId": group.session_id,
+                "sessionKey": group.session_key,
+                "title": group.title,
+                "provider": group.provider,
+                "workdirName": group.workdir_name,
+                "archived": group.archived,
+                "canActivate": group.can_activate,
+                "models": [
+                    {
+                        "model": model,
+                        "provider": provider,
+                        **self._insight_aggregate_payload(model_aggregate),
+                    }
+                    for (provider, model), model_aggregate in sorted(
+                        group.models.items(),
+                        key=lambda item: (
+                            -int(item[1].summary.tokens or 0),
+                            str(item[0][1]).casefold(),
+                            str(item[0][0]).casefold(),
+                        ),
+                    )
+                ],
+                **self._insight_aggregate_payload(group.usage),
+            }
+            for group in session_groups.values()
+        ]
+
+        def rank_key(item: Mapping[str, object]) -> tuple[int, int, str]:
+            return (
+                -int(item.get("tokens") or 0),
+                -int(item.get("inputTokens") or 0),
+                str(
+                    item.get("sessionKey")
+                    or item.get("model")
+                    or item.get("provider")
+                    or ""
+                ).casefold(),
+            )
+
+        model_rows = [
+            {
+                "model": model,
+                "provider": provider,
+                **self._insight_aggregate_payload(aggregate),
+            }
+            for (provider, model), aggregate in model_totals.items()
+        ]
+        provider_rows = [
+            {
+                "provider": provider,
+                **self._insight_aggregate_payload(aggregate),
+            }
+            for provider, aggregate in provider_totals.items()
+        ]
+        sessions.sort(key=rank_key)
+        cost_ranked_sessions = [
+            item
+            for item in sessions
+            if item.get("costUsd") is not None
+        ]
+        cost_ranked_sessions.sort(
+            key=lambda item: (
+                -float(item.get("costUsd") or 0.0),
+                -int(item.get("tokens") or 0),
+                str(item.get("sessionKey") or "").casefold(),
+            )
+        )
+        model_rows.sort(key=rank_key)
+        provider_rows.sort(key=rank_key)
+        totals_payload = self._insight_aggregate_payload(total)
+        totals_payload["sessionCount"] = len(sessions)
+        return {
+            "startAt": start_at.isoformat(timespec="seconds"),
+            "totals": totals_payload,
+            "costCoverage": dict(totals_payload["costCoverage"]),
+            "sessions": sessions[:limit],
+            "topSessionsByUsage": sessions[:USAGE_INSIGHTS_TOP_SESSION_LIMIT],
+            "topSessionsByCost": cost_ranked_sessions[
+                :USAGE_INSIGHTS_TOP_SESSION_LIMIT
+            ],
+            "models": model_rows[:limit],
+            "providers": provider_rows[:limit],
+        }
+
+    def insights(
+        self,
+        sessions_root: Path,
+        day_start: datetime,
+        week_start: datetime,
+        *,
+        included_providers: Iterable[str] | None = None,
+        limit: int = 8,
+    ) -> dict[str, object]:
+        """Project already-cached usage contributions without filesystem work."""
+        sessions_root = self._cache_path(sessions_root)
+        scan_roots = self._scan_roots(sessions_root)
+        scan_key = (scan_roots, day_start, week_start)
+        month_start = day_start - timedelta(days=29)
+        ready = self._last_scan_key == scan_key
+        providers = None
+        if included_providers is not None:
+            providers = {
+                str(provider or "").strip().lower()
+                for provider in included_providers
+                if str(provider or "").strip()
+            }
+        entries = [
+            entry
+            for path, entry in self._entries.items()
+            if ready
+            and entry.day_start == day_start
+            and entry.week_start == week_start
+            and entry.month_start == month_start
+            and self._path_under_scan_roots(path, scan_roots)
+            and (providers is None or entry.model_provider in providers)
+        ]
+        row_limit = max(1, min(100, int(limit)))
+        return {
+            "ready": ready,
+            "revision": int(self._insights_revision),
+            "generatedAt": (
+                self._insights_generated_at.isoformat(timespec="seconds")
+                if self._insights_generated_at is not None
+                else ""
+            ),
+            "providerScope": sorted(providers) if providers is not None else None,
+            "today": self._window_insights(
+                entries,
+                window="day",
+                start_at=day_start,
+                limit=row_limit,
+            ),
+            "week": self._window_insights(
+                entries,
+                window="week",
+                start_at=week_start,
+                limit=row_limit,
+            ),
+            "month": self._window_insights(
+                entries,
+                window="month",
+                start_at=month_start,
+                limit=row_limit,
+            ),
+        }
 
     def summarize(
         self,
@@ -4509,22 +5368,32 @@ class UsageSummaryCache:
 
         day_total = UsageSummary()
         week_total = UsageSummary()
+        previous_scan_key = self._last_scan_key
+        revision_before_scan = self._insights_revision
 
         existing_roots = [root for root in scan_roots if root.exists()]
         if not existing_roots:
+            had_entries = bool(self._entries)
+            self._entries.clear()
             self._last_scan_key = scan_key
             self._last_scan_at = now
             self._last_day_total = day_total
             self._last_week_total = week_total
+            if had_entries or previous_scan_key != scan_key:
+                self._touch_insights()
             return day_total, week_total
 
         seen_paths: set[Path] = set()
         for root in existing_roots:
+            archived = root.name.casefold() == "archived_sessions"
             for path in root.rglob("*.jsonl"):
                 path = self._cache_path(path)
                 seen_paths.add(path)
-                summary_day, summary_week = self._summaries_for_file(
-                    path, day_start, week_start
+                summary_day, summary_week, _summary_month = self._summaries_for_file(
+                    path,
+                    day_start,
+                    week_start,
+                    archived=archived,
                 )
                 _merge_usage(day_total, summary_day)
                 _merge_usage(week_total, summary_week)
@@ -4532,11 +5401,14 @@ class UsageSummaryCache:
         for cached_path in list(self._entries):
             if cached_path not in seen_paths:
                 del self._entries[cached_path]
+                self._touch_insights()
 
         self._last_scan_key = scan_key
         self._last_scan_at = now
         self._last_day_total = replace(day_total)
         self._last_week_total = replace(week_total)
+        if previous_scan_key != scan_key and revision_before_scan == self._insights_revision:
+            self._touch_insights()
         return self._totals_for_providers(
             scan_roots,
             day_start,
@@ -4593,6 +5465,7 @@ class UsageSummaryCache:
             entry is not None
             and entry.day_start == day_start
             and entry.week_start == week_start
+            and entry.month_start == day_start - timedelta(days=29)
         ):
             return entry
         return None
@@ -4616,14 +5489,16 @@ class UsageSummaryCache:
             old_week = old_entry.summary_week if old_entry is not None else empty
 
             if path.exists():
-                new_day, new_week = self._summaries_for_file(
+                new_day, new_week, _new_month = self._summaries_for_file(
                     path,
                     day_start,
                     week_start,
                     force=True,
+                    archived=self._is_archived_path(path, scan_roots),
                 )
             else:
-                self._entries.pop(path, None)
+                if self._entries.pop(path, None) is not None:
+                    self._touch_insights()
                 new_day = empty
                 new_week = empty
 
@@ -4640,11 +5515,14 @@ class UsageSummaryCache:
         week_start: datetime,
         *,
         force: bool = False,
-    ) -> tuple[UsageSummary, UsageSummary]:
+        archived: bool | None = None,
+    ) -> tuple[UsageSummary, UsageSummary, UsageSummary]:
         try:
             stat = path.stat()
         except OSError:
-            return UsageSummary(), UsageSummary()
+            if self._entries.pop(path, None) is not None:
+                self._touch_insights()
+            return UsageSummary(), UsageSummary(), UsageSummary()
 
         entry = self._entries.get(path)
         if (
@@ -4654,13 +5532,17 @@ class UsageSummaryCache:
             and entry.file_size == stat.st_size
             and entry.day_start == day_start
             and entry.week_start == week_start
+            and entry.month_start == day_start - timedelta(days=29)
+            and (archived is None or entry.archived == archived)
         ):
-            return entry.summary_day, entry.summary_week
+            return entry.summary_day, entry.summary_week, entry.summary_month
 
         try:
             records = self._parser.load_records_lenient(path)
         except OSError:
-            return UsageSummary(), UsageSummary()
+            if self._entries.pop(path, None) is not None:
+                self._touch_insights()
+            return UsageSummary(), UsageSummary(), UsageSummary()
 
         events = self._parser.usage_events(records)
         provider_reader = getattr(self._parser, "session_model_provider", None)
@@ -4671,16 +5553,416 @@ class UsageSummaryCache:
         ) or "unknown"
         summary_day = self._parser.summarize_usage_events(events, day_start)
         summary_week = self._parser.summarize_usage_events(events, week_start)
+        month_start = day_start - timedelta(days=29)
+        summary_month = self._parser.summarize_usage_events(events, month_start)
+        (
+            models_day,
+            day_priced_event_count,
+            day_total_event_count,
+            day_latest_event_at,
+        ) = self._model_insights_for_window(events, day_start)
+        (
+            models_week,
+            week_priced_event_count,
+            week_total_event_count,
+            week_latest_event_at,
+        ) = self._model_insights_for_window(events, week_start)
+        (
+            models_month,
+            month_priced_event_count,
+            month_total_event_count,
+            month_latest_event_at,
+        ) = self._model_insights_for_window(events, month_start)
+        session_meta = self._session_meta_payload(records)
+        session_id = self._canonical_session_id(session_meta.get("id"))
+        session_title = " ".join(
+            str(
+                session_meta.get("title")
+                or session_meta.get("session_title")
+                or session_meta.get("name")
+                or ""
+            ).split()
+        )
+        _thread_source, raw_parent_id, _agent_nickname, is_subagent = (
+            extract_session_thread_identity(session_meta)
+        )
+        if is_subagent and not raw_parent_id:
+            raw_parent_id = self._delegated_source_session_id(records)
+        parent_session_id = (
+            self._canonical_session_id(raw_parent_id) if is_subagent else ""
+        )
+        if parent_session_id == session_id:
+            parent_session_id = ""
+        is_archived = bool(archived) if archived is not None else (
+            "archived_sessions" in {part.casefold() for part in path.parts}
+        )
         self._entries[path] = _UsageCacheEntry(
             mtime=stat.st_mtime,
             file_size=stat.st_size,
             day_start=day_start,
             week_start=week_start,
+            month_start=month_start,
             model_provider=model_provider,
             summary_day=summary_day,
             summary_week=summary_week,
+            summary_month=summary_month,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            session_key=path.stem,
+            session_title=session_title,
+            workdir_name=_workdir_leaf(session_meta.get("cwd")),
+            archived=is_archived,
+            can_activate=bool(session_id) and not is_archived,
+            models_day=models_day,
+            models_week=models_week,
+            models_month=models_month,
+            day_priced_event_count=day_priced_event_count,
+            day_total_event_count=day_total_event_count,
+            week_priced_event_count=week_priced_event_count,
+            week_total_event_count=week_total_event_count,
+            month_priced_event_count=month_priced_event_count,
+            month_total_event_count=month_total_event_count,
+            day_latest_event_at=day_latest_event_at,
+            week_latest_event_at=week_latest_event_at,
+            month_latest_event_at=month_latest_event_at,
         )
-        return summary_day, summary_week
+        self._touch_insights()
+        return summary_day, summary_week, summary_month
+
+
+class _UsageInsightsWorker:
+    """Run explicit usage refreshes without blocking the renderer loop."""
+
+    def __init__(self, context: object) -> None:
+        self._context = context
+        self._lock = threading.Lock()
+        self._wake = Event()
+        self._closed = Event()
+        self._request_id = ""
+        self._worker = threading.Thread(
+            target=self._run,
+            name="codex-usage-hud-insights",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def request_refresh(self, *, request_id: str = "") -> bool:
+        if self._closed.is_set():
+            return False
+        with self._lock:
+            self._request_id = str(request_id or "")
+        current = dict(
+            getattr(self._context, "usage_insights_payload", {}) or {}
+        )
+        current.update(
+            {
+                "state": "loading",
+                "error": "",
+                "requestId": str(request_id or ""),
+            }
+        )
+        setattr(self._context, "usage_insights_payload", current)
+        self._publish(current)
+        self._wake.set()
+        return True
+
+    def close(self) -> None:
+        self._closed.set()
+        self._wake.set()
+        if self._worker.is_alive():
+            self._worker.join(timeout=2.0)
+
+    def _run(self) -> None:
+        while not self._closed.is_set():
+            self._wake.wait()
+            self._wake.clear()
+            if self._closed.is_set():
+                break
+            with self._lock:
+                request_id = self._request_id
+                self._request_id = ""
+            try:
+                context = self._context
+                day_start, week_start = current_budget_windows(
+                    getattr(context, "user_config", UserConfig.defaults())
+                )
+                usage_cache = getattr(context, "usage_cache")
+                usage_cache.summarize(
+                    Path(getattr(context, "sessions_root")),
+                    day_start,
+                    week_start,
+                    force_rescan=True,
+                    included_providers=_effective_provider_scope(context),
+                )
+                payload = _build_usage_insights_payload(context)
+                payload["state"] = "ready" if payload.get("ready") else "idle"
+                payload["requestId"] = request_id
+            except Exception as exc:
+                _LOGGER.exception("usage_insights_refresh_failed")
+                payload = {
+                    "state": "failed",
+                    "ready": False,
+                    "requestId": request_id,
+                    "error": str(exc) or type(exc).__name__,
+                }
+            setattr(self._context, "usage_insights_payload", payload)
+            self._publish(payload)
+
+    def _publish(self, payload: Mapping[str, object]) -> None:
+        event_bus = getattr(self._context, "runtime_events", None)
+        publish = getattr(event_bus, "publish", None)
+        if callable(publish):
+            publish(
+                "usage_insights_changed",
+                source="usage_insights",
+                context={
+                    "requestId": str(payload.get("requestId") or ""),
+                    "revision": int(payload.get("revision") or 0),
+                    "state": str(payload.get("state") or ""),
+                },
+            )
+
+
+class _SafeCleanupWorker:
+    """Serialize explicit cleanup scans and plans without idle polling."""
+
+    _ACTIONS = {
+        "safeCleanupScan",
+        "safeCleanupPreview",
+        "safeCleanupExecute",
+        "safeCleanupCancel",
+    }
+
+    def __init__(self, context: object, manager: SafeCleanupManager) -> None:
+        self._context = context
+        self.manager = manager
+        self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
+        self._closed = Event()
+        self._worker = threading.Thread(
+            target=self._run,
+            name="codex-usage-hud-safe-cleanup",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def enqueue(self, command: Mapping[str, object]) -> dict[str, object]:
+        action = str(command.get("action") or "").strip()
+        if action not in self._ACTIONS:
+            raise SafeCleanupError("unsupported safe-cleanup command")
+        if self._closed.is_set():
+            raise SafeCleanupError("safe cleanup worker is closed")
+        request_id = str(command.get("requestId") or "").strip()
+        if not request_id:
+            request_id = uuid.uuid4().hex
+        payload = dict(command)
+        payload["requestId"] = request_id
+        if action == "safeCleanupCancel":
+            snapshot = self.manager.cancel(request_id=request_id)
+            self._publish(snapshot)
+        else:
+            self.manager.mark_operation(
+                request_id=request_id,
+                action=action,
+                state="scanning" if action == "safeCleanupScan" else "accepted",
+                progress=0,
+            )
+            self._publish(self.manager.snapshot())
+            self._queue.put_nowait(payload)
+        return {"status": "accepted", "requestId": request_id, "action": action}
+
+    def close(self, timeout_seconds: float = 2.0) -> bool:
+        if self._closed.is_set():
+            return not self._worker.is_alive()
+        self._closed.set()
+        self._queue.put_nowait(None)
+        if self._worker is not threading.current_thread() and self._worker.is_alive():
+            self._worker.join(timeout=max(0.0, float(timeout_seconds)))
+        return not self._worker.is_alive()
+
+    def _run(self) -> None:
+        while True:
+            command = self._queue.get()
+            if command is None:
+                return
+            action = str(command.get("action") or "")
+            request_id = str(command.get("requestId") or "")
+            try:
+                if action == "safeCleanupScan":
+                    snapshot = self.manager.scan(request_id=request_id)
+                    default_ids = _cleanup_string_list(
+                        snapshot.get("defaultSelectedIds")
+                    )
+                    revision = str(snapshot.get("revision") or "")
+                    if default_ids and revision:
+                        snapshot = self.manager.preview(
+                            default_ids,
+                            revision,
+                            request_id=request_id,
+                        )
+                elif action == "safeCleanupPreview":
+                    backup_text = str(command.get("backupDirectory") or "").strip()
+                    snapshot = self.manager.preview(
+                        _cleanup_string_list(command.get("groupIds")),
+                        str(command.get("inventoryRevision") or ""),
+                        consent=bool(command.get("consentConfirmed")),
+                        backup_directory=Path(backup_text) if backup_text else None,
+                        request_id=request_id,
+                    )
+                else:
+                    snapshot = _execute_safe_cleanup_command(
+                        self._context,
+                        self.manager,
+                        command,
+                    )
+            except Exception as exc:
+                snapshot = self.manager.mark_operation(
+                    request_id=request_id,
+                    action=action,
+                    state="failed",
+                    progress=100,
+                    error=str(exc) or type(exc).__name__,
+                )
+            self._publish(snapshot)
+
+    def _publish(self, payload: Mapping[str, object]) -> None:
+        snapshot = dict(payload)
+        setattr(self._context, "safe_cleanup_payload", snapshot)
+        event_bus = getattr(self._context, "runtime_events", None)
+        publish = getattr(event_bus, "publish", None)
+        if not callable(publish):
+            return
+        operation = snapshot.get("operation")
+        values = operation if isinstance(operation, Mapping) else {}
+        publish(
+            "safe_cleanup_changed",
+            source="safe_cleanup",
+            context={
+                "requestId": str(values.get("requestId") or ""),
+                "action": str(values.get("action") or ""),
+                "state": str(values.get("state") or ""),
+                "revision": str(snapshot.get("revision") or ""),
+            },
+        )
+
+
+class _SessionCleanupWorker:
+    """Serialize explicit session inventory and official delete commands."""
+
+    _ACTIONS = {
+        "sessionCleanupScan",
+        "sessionCleanupPreview",
+        "sessionCleanupExecute",
+        "sessionCleanupCancel",
+    }
+
+    def __init__(self, context: object, manager: SessionCleanupManager) -> None:
+        self._context = context
+        self.manager = manager
+        self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
+        self._closed = Event()
+        self._worker = threading.Thread(
+            target=self._run,
+            name="codex-usage-hud-session-cleanup",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def enqueue(self, command: Mapping[str, object]) -> dict[str, object]:
+        action = str(command.get("action") or "").strip()
+        if action not in self._ACTIONS:
+            raise SessionCleanupError("unsupported session-cleanup command")
+        if self._closed.is_set():
+            raise SessionCleanupError("session cleanup worker is closed")
+        request_id = str(command.get("requestId") or "").strip() or uuid.uuid4().hex
+        payload = dict(command)
+        payload["requestId"] = request_id
+        if action == "sessionCleanupCancel":
+            self._publish(self.manager.cancel(request_id=request_id))
+        else:
+            self._publish(
+                self.manager.mark_operation(
+                    request_id=request_id,
+                    action=action,
+                    state="scanning" if action == "sessionCleanupScan" else "accepted",
+                    progress=0,
+                )
+            )
+            self._queue.put_nowait(payload)
+        return {"status": "accepted", "requestId": request_id, "action": action}
+
+    def close(self, timeout_seconds: float = 2.0) -> bool:
+        if self._closed.is_set():
+            return not self._worker.is_alive()
+        self._closed.set()
+        self._queue.put_nowait(None)
+        if self._worker is not threading.current_thread() and self._worker.is_alive():
+            self._worker.join(timeout=max(0.0, float(timeout_seconds)))
+        return not self._worker.is_alive()
+
+    def _run(self) -> None:
+        while True:
+            command = self._queue.get()
+            if command is None:
+                return
+            action = str(command.get("action") or "")
+            request_id = str(command.get("requestId") or "")
+            try:
+                if action == "sessionCleanupScan":
+                    snapshot = self.manager.scan(request_id=request_id)
+                elif action == "sessionCleanupPreview":
+                    item_ids = _cleanup_string_list(
+                        command.get("itemIds") or command.get("sessionIds")
+                    )
+                    snapshot = self.manager.preview(
+                        item_ids,
+                        str(command.get("inventoryRevision") or ""),
+                        request_id=request_id,
+                    )
+                else:
+                    item_ids = _cleanup_string_list(
+                        command.get("itemIds") or command.get("sessionIds")
+                    )
+                    snapshot = self.manager.execute(
+                        item_ids,
+                        str(command.get("inventoryRevision") or ""),
+                        str(command.get("confirmationToken") or ""),
+                        request_id=request_id,
+                    )
+            except Exception as exc:
+                snapshot = self.manager.mark_operation(
+                    request_id=request_id,
+                    action=action,
+                    state="failed",
+                    progress=100,
+                    error=str(exc) or type(exc).__name__,
+                )
+            self._publish(snapshot)
+
+    def _publish(self, payload: Mapping[str, object]) -> None:
+        snapshot = dict(payload)
+        setattr(self._context, "session_cleanup_payload", snapshot)
+        event_bus = getattr(self._context, "runtime_events", None)
+        publish = getattr(event_bus, "publish", None)
+        if not callable(publish):
+            return
+        operation = snapshot.get("operation")
+        values = operation if isinstance(operation, Mapping) else {}
+        publish(
+            "session_cleanup_changed",
+            source="session_cleanup",
+            context={
+                "requestId": str(values.get("requestId") or ""),
+                "action": str(values.get("action") or ""),
+                "state": str(values.get("state") or ""),
+                "revision": str(snapshot.get("revision") or ""),
+            },
+        )
+
+
+def _cleanup_string_list(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
 
 
 def _session_path_key(path: Path | None) -> str:
@@ -5291,6 +6573,182 @@ def _effective_provider_scope(
     return None
 
 
+def _background_usage_insights_summary(
+    context: object,
+    *,
+    range_key: str,
+) -> dict[str, object]:
+    runtime = getattr(context, "background_usage_runtime", None)
+    query = getattr(runtime, "query", None)
+    if not callable(query):
+        return {
+            "available": False,
+            "requestCount": 0,
+            "totalTokens": 0,
+            "estimatedCostUsd": None,
+            "costComplete": False,
+            "pendingCount": 0,
+        }
+    try:
+        raw = query(
+            range_key=range_key,
+            feature="",
+            model="",
+            event_id="",
+        )
+        summary = raw.get("summary") if isinstance(raw, Mapping) else None
+        values = dict(summary) if isinstance(summary, Mapping) else {}
+        pending_count = 0
+        if range_key == "today":
+            pending_today = getattr(runtime, "pending_today", None)
+            if callable(pending_today):
+                pending_count = len(pending_today())
+        return {
+            "available": True,
+            "requestCount": max(0, int(values.get("requestCount") or 0)),
+            "totalTokens": max(0, int(values.get("totalTokens") or 0)),
+            "estimatedCostUsd": values.get("estimatedCostUsd"),
+            "costComplete": bool(values.get("costComplete", False)),
+            "pendingCount": max(0, int(pending_count)),
+            "range": range_key,
+            "separateFromSessionTotals": True,
+        }
+    except Exception as exc:
+        _LOGGER.debug(
+            "usage_insights_background_summary_failed range=%s error=%s",
+            range_key,
+            exc,
+        )
+        return {
+            "available": False,
+            "requestCount": 0,
+            "totalTokens": 0,
+            "estimatedCostUsd": None,
+            "costComplete": False,
+            "pendingCount": 0,
+        }
+
+
+def _usage_insights_session_title(context: object, session_id: str) -> str:
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        return ""
+    tracker = getattr(context, "active_session_tracker", None)
+    for method_name in ("title_from_thread_id", "title_from_session_index_id"):
+        resolver = getattr(tracker, method_name, None)
+        if not callable(resolver):
+            continue
+        try:
+            title = " ".join(str(resolver(normalized) or "").split())
+        except Exception:
+            continue
+        if title:
+            return title
+    return f"会话 {normalized[:8]}"
+
+
+def _build_usage_insights_payload(context: object) -> dict[str, object]:
+    day_start, week_start = current_budget_windows(
+        getattr(context, "user_config", UserConfig.defaults())
+    )
+    usage_cache = getattr(context, "usage_cache")
+    payload = dict(
+        usage_cache.insights(
+            Path(getattr(context, "sessions_root")),
+            day_start,
+            week_start,
+            included_providers=_effective_provider_scope(context),
+        )
+    )
+    background_by_window = {
+        "today": _background_usage_insights_summary(
+            context,
+            range_key="today",
+        ),
+        "week": _background_usage_insights_summary(
+            context,
+            range_key="7d",
+        ),
+        "month": _background_usage_insights_summary(
+            context,
+            range_key="30d",
+        ),
+    }
+    title_cache: dict[str, str] = {}
+    for window_name in ("today", "week", "month"):
+        raw_window = payload.get(window_name)
+        window = dict(raw_window) if isinstance(raw_window, Mapping) else {}
+        totals = dict(window.get("totals") or {})
+        coverage = dict(totals.get("costCoverage") or {})
+        def project_sessions(value: object) -> list[dict[str, object]]:
+            sessions: list[dict[str, object]] = []
+            if not isinstance(value, list):
+                return sessions
+            for raw_session in value:
+                if not isinstance(raw_session, Mapping):
+                    continue
+                session = dict(raw_session)
+                session_id = str(session.get("sessionId") or "").strip()
+                can_activate = bool(session.get("canActivate")) and bool(session_id)
+                title = " ".join(str(session.get("title") or "").split())
+                if session_id and not title:
+                    title = title_cache.get(session_id, "")
+                if session_id and not title:
+                    title = _usage_insights_session_title(context, session_id)
+                if session_id and title:
+                    title_cache[session_id] = title
+                session.update(
+                    {
+                        "id": session_id,
+                        "title": title or "未命名会话",
+                        "actionable": can_activate,
+                    }
+                )
+                sessions.append(session)
+            return sessions
+
+        sessions = project_sessions(window.get("sessions"))
+        top_sessions_by_usage = project_sessions(window.get("topSessionsByUsage"))
+        top_sessions_by_cost = project_sessions(window.get("topSessionsByCost"))
+        totals["sessionCount"] = max(
+            len(sessions),
+            int(totals.get("sessionCount") or 0),
+        )
+        window.update(
+            {
+                "totals": totals,
+                "costCoverage": coverage,
+                "sessions": sessions,
+                "topSessionsByUsage": top_sessions_by_usage,
+                "topSessionsByCost": top_sessions_by_cost,
+                "background": background_by_window[window_name],
+            }
+        )
+        payload[window_name] = window
+    payload.update(
+        {
+            "state": "ready" if bool(payload.get("ready")) else "idle",
+            "error": "",
+            "backgroundSeparate": True,
+        }
+    )
+    return payload
+
+
+def _refresh_usage_insights_payload(context: object) -> dict[str, object]:
+    try:
+        payload = _build_usage_insights_payload(context)
+    except Exception as exc:
+        _LOGGER.debug("usage_insights_projection_failed error=%s", exc)
+        payload = {
+            "state": "failed",
+            "ready": False,
+            "error": str(exc) or type(exc).__name__,
+        }
+    setattr(context, "usage_insights_payload", payload)
+    return payload
+
+
 def _effective_notification_provider_scope(
     context: "RuntimeContext | object",
     snapshot: ParsedSession | None = None,
@@ -5443,6 +6901,222 @@ def active_work_items_for_snapshot(
     return selected
 
 
+def _safe_cleanup_active_task_ids(context: object) -> tuple[str, ...]:
+    """Reparse recent sessions without provider or visible-item filtering."""
+
+    visible_cache = getattr(context, "_work_overlay_visible_item_cache", None)
+    if isinstance(visible_cache, Mapping):
+        observed = [
+            str(item.session_id or item.id)
+            for item in visible_cache.values()
+            if isinstance(item, WorkStatusItem)
+            and item.status in {"running", "tool", "active", "waiting_user"}
+            and str(item.session_id or item.id).strip()
+        ]
+        if observed:
+            return tuple(dict.fromkeys(observed))
+
+    resolver = getattr(context, "session_resolver", None)
+    current_path: Path | None = None
+    resolve = getattr(resolver, "resolve", None)
+    if callable(resolve):
+        try:
+            resolved, _source = resolve()
+            current_path = Path(resolved) if resolved is not None else None
+        except Exception as exc:
+            raise SafeCleanupError("current task state could not be verified") from exc
+    parser = getattr(context, "parser", None)
+    parse_file = getattr(parser, "parse_file", None)
+    if not callable(parse_file):
+        raise SafeCleanupError("session parser is unavailable for the activity gate")
+    sessions_root = Path(getattr(context, "sessions_root"))
+    paths = _recent_session_files(
+        sessions_root,
+        current_path=current_path,
+        limit=SAFE_CLEANUP_ACTIVE_SESSION_SCAN_LIMIT,
+    )
+    now = datetime.now().astimezone()
+    active: list[str] = []
+    current_key = _session_path_key(current_path)
+    for path in paths:
+        try:
+            parsed = parse_file(path)
+        except Exception as exc:
+            raise SafeCleanupError("recent task state could not be verified") from exc
+        item = _work_item_from_snapshot(
+            parsed,
+            current=_session_path_key(path) == current_key,
+            now=now,
+        )
+        if item is None or item.status not in {
+            "running",
+            "tool",
+            "active",
+            "waiting_user",
+        }:
+            continue
+        active.append(str(item.session_id or item.id or path.stem))
+    return tuple(dict.fromkeys(active))
+
+
+def _ensure_safe_cleanup_activity_idle(context: object) -> None:
+    active = _safe_cleanup_active_task_ids(context)
+    if active:
+        raise SafeCleanupError(
+            f"检测到 {len(active)} 个活动任务；未关闭应用，也未修改任何数据。"
+        )
+
+
+def _close_background_usage_for_cleanup(context: object) -> None:
+    runtime = getattr(context, "background_usage_runtime", None)
+    if runtime is None:
+        return
+    request_scan = getattr(runtime, "request_scan", None)
+    wait_until_idle = getattr(runtime, "wait_until_idle", None)
+    close = getattr(runtime, "close", None)
+    if not callable(request_scan) or not callable(wait_until_idle) or not callable(close):
+        raise SafeCleanupError("后台用量运行时无法安全停机。")
+    request_scan()
+    idle = bool(wait_until_idle(SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS))
+    closed = close(SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS)
+    worker_alive = bool(getattr(runtime, "worker_alive", False))
+    if not idle or closed is False or worker_alive:
+        raise SafeCleanupError("后台用量归档未能在超时前安全停止；未执行清理。")
+    setattr(context, "background_usage_runtime", None)
+
+
+def _close_file_manager_for_cleanup(context: object) -> None:
+    worker = getattr(context, "file_manager_worker", None)
+    if worker is None:
+        return
+    close = getattr(worker, "close", None)
+    if not callable(close):
+        raise SafeCleanupError("旧存储管理 worker 无法安全停止。")
+    close()
+    setattr(context, "file_manager_worker", None)
+
+
+def _cleanup_plan_file(plan: MaintenancePlan) -> Path:
+    return hud_runtime_dir() / f"{SAFE_CLEANUP_PLAN_PREFIX}{plan.id}.json"
+
+
+def _execute_safe_cleanup_command(
+    context: object,
+    manager: SafeCleanupManager,
+    command: Mapping[str, object],
+) -> dict[str, object]:
+    request_id = str(command.get("requestId") or "")
+    item_ids = _cleanup_string_list(command.get("groupIds"))
+    revision = str(command.get("inventoryRevision") or "")
+    token = str(command.get("confirmationToken") or "")
+    requirements = manager.selection_requirements(item_ids, revision)
+    requires_offline = bool(requirements.get("requiresOffline"))
+    requires_backup = bool(requirements.get("requiresBackup"))
+    requires_codex_close = bool(requirements.get("requiresCodexClose"))
+    if requires_codex_close and not bool(command.get("autoCloseAndRestore")):
+        raise SafeCleanupError("该清理需要明确同意自动关闭并恢复 Codex App 与 HUD。")
+
+    _ensure_safe_cleanup_activity_idle(context)
+    desktop_processes: list[_CodexDesktopProcess] = []
+    if requires_codex_close:
+        standalone = _running_standalone_codex_cli_pids()
+        if standalone:
+            raise SafeCleanupError(
+                "检测到独立 Codex CLI；请先在对应终端中正常退出后再清理 SQLite。"
+            )
+        desktop_processes = _audited_running_codex_desktop_processes()
+        if not desktop_processes:
+            raise SafeCleanupError("Codex App 进程状态无法验证；未执行 SQLite 维护。")
+
+    result_path = _safe_cleanup_result_path() if requires_offline else None
+    restart_command = (
+        tuple(getattr(context, "cleanup_restart_command", ()) or ())
+        if requires_offline
+        else ()
+    )
+    if requires_offline and not restart_command:
+        restart_command = _cleanup_restart_command(
+            daemon_mode=bool(getattr(context, "cleanup_daemon_mode", False))
+        )
+    plan = manager.create_plan(
+        item_ids,
+        revision,
+        token,
+        parent_pid=os.getpid() if requires_offline else 0,
+        wait_pids=(
+            tuple(process.pid for process in desktop_processes)
+            if requires_codex_close
+            else ()
+        ),
+        result_path=result_path,
+        restart_command=list(restart_command),
+    )
+    if not requires_offline:
+        manager.mark_operation(
+            id=plan.id,
+            request_id=request_id,
+            action="execute",
+            state="running",
+            progress=20,
+            selectedIds=item_ids,
+            estimatedBytes=sum(action.estimated_bytes for action in plan.actions),
+        )
+        result = run_maintenance_plan(plan)
+        return manager.apply_maintenance_result(result, request_id=request_id)
+
+    _ensure_safe_cleanup_activity_idle(context)
+    if requires_codex_close and _running_standalone_codex_cli_pids():
+        raise SafeCleanupError(
+            "检测到独立 Codex CLI；SQLite 维护已停止，未修改任何数据。"
+        )
+    plan_path = _cleanup_plan_file(plan)
+    write_maintenance_plan(plan_path, plan)
+    desktop_closed = False
+    try:
+        if requires_backup:
+            _close_background_usage_for_cleanup(context)
+        _close_file_manager_for_cleanup(context)
+        _ensure_safe_cleanup_activity_idle(context)
+        if requires_codex_close and _running_standalone_codex_cli_pids():
+            raise SafeCleanupError(
+                "关闭前检测到独立 Codex CLI；SQLite 维护已停止。"
+            )
+        if requires_codex_close:
+            if not _request_codex_desktop_close(desktop_processes):
+                raise SafeCleanupError(
+                    "Codex App 未能正常退出；没有强制结束进程，也未执行清理。"
+                )
+            desktop_closed = True
+        _launch_cleanup_maintenance_helper(plan_path, result_path or _safe_cleanup_result_path())
+    except Exception:
+        try:
+            plan_path.unlink()
+        except OSError:
+            pass
+        if desktop_closed:
+            launch_codex_app(debugger=True)
+        raise
+
+    snapshot = manager.mark_operation(
+        id=plan.id,
+        request_id=request_id,
+        action="execute",
+        state="queued_exit",
+        progress=30,
+        selectedIds=item_ids,
+        estimatedBytes=sum(action.estimated_bytes for action in plan.actions),
+        requiresOffline=True,
+        requiresBackup=requires_backup,
+        requiresCodexClose=requires_codex_close,
+    )
+    exit_event = getattr(context, "cleanup_exit_requested", None)
+    set_exit = getattr(exit_event, "set", None)
+    if not callable(set_exit):
+        raise SafeCleanupError("HUD 维护退出信号不可用。")
+    set_exit()
+    return snapshot
+
+
 class _RendererActiveWorkPump:
     """Build recent-work items off the latency-critical renderer loop."""
 
@@ -5576,6 +7250,81 @@ class _VisibleAppErrorCache:
         return ""
 
 
+def _safe_cleanup_result_path() -> Path:
+    return hud_runtime_dir() / SAFE_CLEANUP_RESULT_FILENAME
+
+
+def _build_safe_cleanup_manager(context: object) -> SafeCleanupManager:
+    config = getattr(context, "user_config", UserConfig.defaults())
+    sqlite_targets: list[SQLiteTarget] = []
+    logs_path = getattr(context, "sqlite_log_path", None)
+    if logs_path is not None:
+        sqlite_targets.append(SQLiteTarget(Path(logs_path), "logs"))
+    background_path = hud_runtime_dir() / BACKGROUND_USAGE_DATABASE_FILENAME
+    sqlite_targets.append(SQLiteTarget(background_path, "background"))
+    backup_text = str(getattr(config, "cleanup_backup_directory", "") or "").strip()
+
+    def codex_candidates() -> tuple[CodexCleanupCandidate, ...]:
+        file_manager = getattr(context, "file_manager", None)
+        if file_manager is None:
+            raise SafeCleanupError("Codex file inventory is unavailable")
+        payload = file_manager.scan(request_id="safe-cleanup")
+        operation = payload.get("operation") if isinstance(payload, Mapping) else None
+        state = str(operation.get("state") or "") if isinstance(operation, Mapping) else ""
+        if state != "completed":
+            raise SafeCleanupError("Codex file inventory did not complete")
+        return tuple(file_manager.cleanup_candidates())
+
+    manager = SafeCleanupManager(
+        platform=sys.platform,
+        hud_runtime_root=hud_runtime_dir(),
+        sqlite_targets=tuple(sqlite_targets),
+        codex_candidate_provider=codex_candidates,
+        backup_roots=(Path(backup_text),) if backup_text else (),
+        log_retention_hours=float(
+            getattr(config, "cleanup_log_retention_hours", 24) or 24
+        ),
+        background_retention_days=float(
+            getattr(config, "cleanup_background_retention_days", 30) or 30
+        ),
+    )
+    result_path = _safe_cleanup_result_path()
+    try:
+        if result_path.is_file():
+            result = read_maintenance_result(result_path)
+            manager.apply_maintenance_result(result)
+            result_path.unlink()
+    except (OSError, CleanupPlanError, SafeCleanupError) as exc:
+        _LOGGER.info("safe_cleanup_result_load_failed error=%s", exc)
+    return manager
+
+
+def _session_cleanup_current_ids(context: object) -> tuple[str, ...]:
+    values: list[str] = []
+    values.append(str(getattr(context, "cleanup_current_session_id", "") or ""))
+    resolver = getattr(context, "session_resolver", None)
+    values.append(str(getattr(resolver, "session_id", "") or ""))
+    tracker = getattr(context, "active_session_tracker", None)
+    values.append(str(getattr(tracker, "latest_session_id", "") or ""))
+    return tuple(values)
+
+
+def _session_cleanup_active_ids(context: object) -> tuple[str, ...]:
+    values = getattr(context, "cleanup_active_session_ids", set())
+    return tuple(str(value) for value in values)
+
+
+def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
+    return SessionCleanupManager(
+        state_db_path=Path(getattr(context, "state_db_path")),
+        sessions_root=Path(getattr(context, "sessions_root")),
+        session_index_path=Path(getattr(context, "session_index_path")),
+        current_session_ids=lambda: _session_cleanup_current_ids(context),
+        active_session_ids=lambda: _session_cleanup_active_ids(context),
+        environment=os.environ,
+    )
+
+
 @dataclass
 class RuntimeContext:
     platform: BasePlatform
@@ -5611,6 +7360,19 @@ class RuntimeContext:
     file_manager_worker: CodexFileManagerWorker | None = None
     file_management_payload: dict[str, object] = field(default_factory=dict)
     background_usage_runtime: BackgroundUsageRuntime | None = None
+    usage_insights_payload: dict[str, object] = field(default_factory=dict)
+    usage_insights_worker: _UsageInsightsWorker | None = None
+    safe_cleanup_manager: SafeCleanupManager | None = None
+    safe_cleanup_worker: _SafeCleanupWorker | None = None
+    safe_cleanup_payload: dict[str, object] = field(default_factory=dict)
+    session_cleanup_manager: SessionCleanupManager | None = None
+    session_cleanup_worker: _SessionCleanupWorker | None = None
+    session_cleanup_payload: dict[str, object] = field(default_factory=dict)
+    cleanup_current_session_id: str = ""
+    cleanup_active_session_ids: set[str] = field(default_factory=set)
+    cleanup_exit_requested: Event = field(default_factory=Event)
+    cleanup_restart_command: tuple[str, ...] = ()
+    cleanup_daemon_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.runtime_errors.event_bus is None:
@@ -5639,10 +7401,39 @@ class RuntimeContext:
                     self.file_manager,
                     on_update=self._on_file_manager_update,
                 )
+        if self.renderer_mode:
+            self.usage_insights_payload = _refresh_usage_insights_payload(self)
+            if self.usage_insights_worker is None:
+                self.usage_insights_worker = _UsageInsightsWorker(self)
+            if self.safe_cleanup_manager is None:
+                self.safe_cleanup_manager = _build_safe_cleanup_manager(self)
+            self.safe_cleanup_payload = self.safe_cleanup_manager.snapshot()
+            if self.safe_cleanup_worker is None:
+                self.safe_cleanup_worker = _SafeCleanupWorker(
+                    self,
+                    self.safe_cleanup_manager,
+                )
+            if self.session_cleanup_manager is None:
+                self.session_cleanup_manager = _build_session_cleanup_manager(self)
+            self.session_cleanup_payload = self.session_cleanup_manager.snapshot()
+            if self.session_cleanup_worker is None:
+                self.session_cleanup_worker = _SessionCleanupWorker(
+                    self,
+                    self.session_cleanup_manager,
+                )
 
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
         _stop_active_session_tracker(self)
+        if self.safe_cleanup_worker is not None:
+            self.safe_cleanup_worker.close()
+            self.safe_cleanup_worker = None
+        if self.session_cleanup_worker is not None:
+            self.session_cleanup_worker.close()
+            self.session_cleanup_worker = None
+        if self.usage_insights_worker is not None:
+            self.usage_insights_worker.close()
+            self.usage_insights_worker = None
         if self.background_usage_runtime is not None:
             self.background_usage_runtime.close()
             self.background_usage_runtime = None
@@ -6131,6 +7922,20 @@ def _apply_user_config_to_runtime_context(
             provider=str(getattr(context, "app_provider", "") or ""),
             price_table=next_config.price_table(),
         )
+    cleanup_manager = getattr(context, "safe_cleanup_manager", None)
+    if cleanup_manager is not None:
+        cleanup_manager.log_retention_hours = max(
+            1.0 / 60.0,
+            float(next_config.cleanup_log_retention_hours),
+        )
+        cleanup_manager.background_retention_days = max(
+            1.0 / 24.0,
+            float(next_config.cleanup_background_retention_days),
+        )
+        backup_text = str(next_config.cleanup_backup_directory or "").strip()
+        cleanup_manager.backup_roots = (
+            (Path(backup_text).expanduser().absolute(),) if backup_text else ()
+        )
 
 
 def _partial_domains_for_changed_user_config(
@@ -6167,6 +7972,16 @@ def _partial_domains_for_settings_command(
     action = str(command.get("action") or "").strip()
     if action in FILE_MANAGEMENT_COMMANDS:
         return {"settings", "fileManagement"}
+    if action in SAFE_CLEANUP_COMMANDS:
+        return {"settings", "safeCleanup"}
+    if action in SESSION_CLEANUP_COMMANDS:
+        return {"settings", "sessionCleanup"}
+    if action == "usageInsightsRefresh":
+        return {"settings", "usageInsights"}
+    if action == "openUsageInsightsSession":
+        return {"settings"}
+    if action == "openBackgroundUsageFromInsights":
+        return {"backgroundUsage"}
     if action == "save":
         changed_keys = _changed_user_config_keys(previous_config, current_config)
         return _partial_domains_for_changed_user_config(changed_keys)
@@ -6247,6 +8062,51 @@ def _renderer_settings_status(
     return payload
 
 
+def _background_usage_response_status(
+    kind: str,
+    request_id: str,
+    *,
+    payload: object = None,
+    event_id: str = "",
+    error: str = "",
+) -> dict[str, object]:
+    """Build one correlated local background-usage RPC response."""
+    status = _renderer_settings_status("")
+    response: dict[str, object] = {
+        "kind": kind,
+        "requestId": request_id,
+        "payload": payload,
+        "error": error,
+    }
+    if event_id:
+        response["eventId"] = event_id
+    status["backgroundUsageResponse"] = response
+    if kind == "open":
+        status["backgroundUsageOpenEventId"] = event_id
+    return status
+
+
+def _background_usage_response_retry_delay_seconds(
+    attempt: int,
+) -> float | None:
+    """Return the bounded delay before retrying an undelivered local RPC response."""
+    index = int(attempt) - 1
+    if index < 0 or index >= len(BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS):
+        return None
+    return BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS[index]
+
+
+def _has_pending_background_usage_response(status: Mapping[str, object]) -> bool:
+    response = status.get("backgroundUsageResponse")
+    if not isinstance(response, Mapping):
+        return False
+    return bool(
+        str(response.get("requestId") or "").strip()
+        and str(response.get("kind") or "").strip()
+        in {"query", "detail", "open"}
+    )
+
+
 def _background_usage_query_payload_with_preview(
     runtime: object,
     *,
@@ -6257,7 +8117,7 @@ def _background_usage_query_payload_with_preview(
 ) -> dict[str, object]:
     query = getattr(runtime, "query", None)
     if not callable(query):
-        raise RuntimeError("后台用量当前不可用。")
+        raise RuntimeError("用量总览当前不可用。")
     raw_payload = query(
         range_key=range_key,
         feature=feature,
@@ -6299,6 +8159,27 @@ FILE_MANAGEMENT_COMMANDS = {
     "logout",
 }
 
+USAGE_INSIGHTS_COMMANDS = {
+    "usageInsightsRefresh",
+    "openUsageInsightsSession",
+    "openBackgroundUsageFromInsights",
+}
+
+SAFE_CLEANUP_COMMANDS = {
+    "safeCleanupScan",
+    "safeCleanupPreview",
+    "safeCleanupExecute",
+    "safeCleanupCancel",
+    "safeCleanupChooseBackupDirectory",
+}
+
+SESSION_CLEANUP_COMMANDS = {
+    "sessionCleanupScan",
+    "sessionCleanupPreview",
+    "sessionCleanupExecute",
+    "sessionCleanupCancel",
+}
+
 
 def _handle_renderer_file_management_command(
     command: Mapping[str, Any],
@@ -6320,7 +8201,7 @@ def _handle_renderer_file_management_command(
         accepted = worker.enqueue(command)
     except FileManagementError as exc:
         return _renderer_settings_status(str(exc), kind="error")
-    request_id = str(accepted.get("requestId") or command.get("id") or "")
+    request_id = str(accepted.get("requestId") or command.get("requestId") or "")
     labels = {
         "scan": "存储扫描已排队；不会读取文件内容。",
         "preview": "清理预览已排队；执行前会再次校验。",
@@ -6337,6 +8218,222 @@ def _handle_renderer_file_management_command(
     return status
 
 
+def _choose_safe_cleanup_backup_directory(current: str = "") -> Path | None:
+    if sys.platform.startswith("win"):
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$dialog.Description = 'Select a SQLite backup directory'; "
+            "$dialog.ShowNewFolderButton = $true; "
+            "if ($env:CODEX_USAGE_HUD_CLEANUP_PICKER_INITIAL) { "
+            "$dialog.SelectedPath = $env:CODEX_USAGE_HUD_CLEANUP_PICKER_INITIAL }; "
+            "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
+            "[Console]::Out.Write($dialog.SelectedPath) }"
+        )
+        environment = dict(os.environ)
+        environment["CODEX_USAGE_HUD_CLEANUP_PICKER_INITIAL"] = str(current or "")
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=environment,
+            check=False,
+        )
+        selected = result.stdout.strip() if result.returncode == 0 else ""
+    elif sys.platform == "darwin":
+        result = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                'POSIX path of (choose folder with prompt "Select a SQLite backup directory")',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+            check=False,
+        )
+        selected = result.stdout.strip() if result.returncode == 0 else ""
+    else:
+        raise SafeCleanupError("当前平台不支持原生备份目录选择器。")
+    if not selected:
+        return None
+    try:
+        path = Path(selected).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise SafeCleanupError("所选备份目录无法验证。") from exc
+    if not path.is_dir():
+        raise SafeCleanupError("所选备份位置不是目录。")
+    return path
+
+
+def _handle_renderer_safe_cleanup_command(
+    command: Mapping[str, Any],
+    context: RuntimeContext,
+) -> dict[str, object]:
+    action = str(command.get("action") or "").strip()
+    request_id = str(command.get("requestId") or "").strip()
+    if action not in SAFE_CLEANUP_COMMANDS:
+        return _renderer_settings_status(
+            f"无法处理未知安全清理命令：{action or 'empty'}",
+            kind="error",
+        )
+    if action == "safeCleanupChooseBackupDirectory":
+        selected = _choose_safe_cleanup_backup_directory(
+            str(command.get("currentDirectory") or "")
+        )
+        if selected is None:
+            return _renderer_settings_status("已取消选择备份目录。")
+        config = replace(
+            context.settings_store.load(),
+            cleanup_backup_directory=str(selected),
+        )
+        _save_renderer_user_config(context, config)
+        status = _renderer_settings_status("已选择并保存 SQLite 备份目录。")
+        status["cleanupBackupDirectory"] = str(selected)
+        status["safeCleanupRequestId"] = request_id
+        return status
+    worker = getattr(context, "safe_cleanup_worker", None)
+    enqueue = getattr(worker, "enqueue", None)
+    if not callable(enqueue):
+        return _renderer_settings_status(
+            "安全清理运行时当前不可用。",
+            kind="error",
+        )
+    accepted = enqueue(command)
+    accepted_request_id = str(accepted.get("requestId") or request_id)
+    labels = {
+        "safeCleanupScan": "安全清理扫描已开始。",
+        "safeCleanupPreview": "正在生成可重验的清理预览。",
+        "safeCleanupExecute": "清理请求已进入活动任务与进程安全门禁。",
+        "safeCleanupCancel": "已取消当前清理预览。",
+    }
+    status = _renderer_settings_status(labels.get(action, "安全清理命令已提交。"))
+    status["safeCleanupRequestId"] = accepted_request_id
+    status["safeCleanupAction"] = action
+    return status
+
+
+def _handle_renderer_session_cleanup_command(
+    command: Mapping[str, Any],
+    context: RuntimeContext,
+) -> dict[str, object]:
+    action = str(command.get("action") or "").strip()
+    if action not in SESSION_CLEANUP_COMMANDS:
+        return _renderer_settings_status(
+            f"无法处理未知会话清理命令：{action or 'empty'}",
+            kind="error",
+        )
+    worker = getattr(context, "session_cleanup_worker", None)
+    enqueue = getattr(worker, "enqueue", None)
+    if not callable(enqueue):
+        return _renderer_settings_status("会话永久删除当前不可用。", kind="error")
+    try:
+        accepted = enqueue(command)
+    except SessionCleanupError as exc:
+        return _renderer_settings_status(str(exc), kind="error")
+    request_id = str(accepted.get("requestId") or command.get("requestId") or "")
+    labels = {
+        "sessionCleanupScan": "会话清单扫描已开始。",
+        "sessionCleanupPreview": "正在生成永久删除确认。",
+        "sessionCleanupExecute": "永久删除请求已进入官方 Codex 命令门禁。",
+        "sessionCleanupCancel": "已取消会话删除确认。",
+    }
+    status = _renderer_settings_status(labels.get(action, "会话清理命令已提交。"))
+    status["sessionCleanupRequestId"] = request_id
+    status["sessionCleanupAction"] = action
+    return status
+
+
+def _usage_insights_actionable_session_ids(context: object) -> set[str]:
+    payload = getattr(context, "usage_insights_payload", {})
+    if not isinstance(payload, Mapping):
+        return set()
+    result: set[str] = set()
+    for window_name in ("today", "week", "month"):
+        window = payload.get(window_name)
+        if not isinstance(window, Mapping):
+            continue
+        for collection_name in (
+            "sessions",
+            "topSessionsByUsage",
+            "topSessionsByCost",
+        ):
+            sessions = window.get(collection_name)
+            if not isinstance(sessions, list):
+                continue
+            for item in sessions:
+                if not isinstance(item, Mapping) or not bool(
+                    item.get("actionable", item.get("canActivate", False))
+                ):
+                    continue
+                session_id = str(
+                    item.get("id") or item.get("sessionId") or ""
+                ).strip()
+                try:
+                    canonical = str(uuid.UUID(session_id))
+                except (ValueError, AttributeError, TypeError):
+                    continue
+                if canonical == session_id.casefold():
+                    result.add(canonical)
+    return result
+
+
+def _handle_renderer_usage_insights_command(
+    command: Mapping[str, Any],
+    context: RuntimeContext,
+    *,
+    session_controller: SessionSwitchController | None,
+) -> dict[str, object]:
+    action = str(command.get("action") or "").strip()
+    request_id = str(command.get("requestId") or "")
+    if action == "usageInsightsRefresh":
+        worker = getattr(context, "usage_insights_worker", None)
+        request_refresh = getattr(worker, "request_refresh", None)
+        if not callable(request_refresh) or not request_refresh(request_id=request_id):
+            return _renderer_settings_status(
+                "用量洞察刷新器当前不可用。",
+                kind="error",
+            )
+        status = _renderer_settings_status("用量洞察刷新已开始。")
+        status["usageInsightsRequestId"] = request_id
+        return status
+    if action != "openUsageInsightsSession":
+        return _renderer_settings_status(
+            f"无法处理未知用量洞察命令：{action or 'empty'}",
+            kind="error",
+        )
+    session_id = str(command.get("sessionId") or "").strip().casefold()
+    if session_id not in _usage_insights_actionable_session_ids(context):
+        return _renderer_settings_status(
+            "该会话已归档、标识不完整或不在当前洞察结果中，未执行跳转。",
+            kind="error",
+        )
+    if session_controller is None:
+        return _renderer_settings_status(
+            "当前 Renderer 会话切换器不可用。",
+            kind="error",
+        )
+    result = _handle_work_overlay_command(
+        {
+            "action": "activateSession",
+            "sessionId": session_id,
+            "targetTitle": str(command.get("targetTitle") or "").strip(),
+            "workdir": str(command.get("workdir") or "").strip(),
+        },
+        session_controller,
+        prepare_window=True,
+        backend_names=("cdp",),
+    )
+    if result is None or not (result.ok or result.status == "already-active"):
+        return _renderer_settings_status(
+            result.message if result is not None and result.message else "无法打开该会话。",
+            kind="error",
+        )
+    return _renderer_settings_status("已切换到所选会话。")
+
+
 def _handle_renderer_settings_command(
     command: Mapping[str, Any],
     context: RuntimeContext,
@@ -6344,11 +8441,25 @@ def _handle_renderer_settings_command(
     exit_requested: Event,
     update_manager: AutoUpdateManager | None = None,
     work_overlay: DesktopWorkOverlay | None = None,
+    session_controller: SessionSwitchController | None = None,
 ) -> dict[str, object]:
     action = str(command.get("action") or "").strip()
+    background_usage_request_id = str(
+        command.get("requestId") or command.get("id") or ""
+    ).strip()
     try:
         if action in FILE_MANAGEMENT_COMMANDS:
             return _handle_renderer_file_management_command(command, context)
+        if action in SAFE_CLEANUP_COMMANDS:
+            return _handle_renderer_safe_cleanup_command(command, context)
+        if action in SESSION_CLEANUP_COMMANDS:
+            return _handle_renderer_session_cleanup_command(command, context)
+        if action in {"usageInsightsRefresh", "openUsageInsightsSession"}:
+            return _handle_renderer_usage_insights_command(
+                command,
+                context,
+                session_controller=session_controller,
+            )
         if action == "backgroundUsageQuery":
             runtime = getattr(context, "background_usage_runtime", None)
             raw_filters = command.get("filters")
@@ -6360,51 +8471,56 @@ def _handle_renderer_settings_command(
                 model=str(filters.get("model") or ""),
                 event_id=str(filters.get("eventId") or ""),
             )
-            status = _renderer_settings_status("")
-            status["backgroundUsageResponse"] = {
-                "kind": "query",
-                "requestId": str(command.get("id") or ""),
-                "payload": payload,
-            }
-            return status
+            return _background_usage_response_status(
+                "query",
+                background_usage_request_id,
+                payload=payload,
+            )
         if action == "backgroundUsageDetail":
             runtime = getattr(context, "background_usage_runtime", None)
             detail = getattr(runtime, "detail", None)
-            if not callable(detail):
-                return _renderer_settings_status(
-                    "后台用量当前不可用。",
-                    kind="error",
-                )
             event_id = str(command.get("eventId") or "").strip()
+            if not callable(detail):
+                return _background_usage_response_status(
+                    "detail",
+                    background_usage_request_id,
+                    event_id=event_id,
+                    error="用量总览当前不可用。",
+                )
+            if command.get("markViewed") is True:
+                confirm = getattr(runtime, "confirm", None)
+                if callable(confirm):
+                    confirm(event_id)
             payload = detail(event_id) if event_id else None
-            status = _renderer_settings_status("")
-            status["backgroundUsageResponse"] = {
-                "kind": "detail",
-                "requestId": str(command.get("id") or ""),
-                "eventId": event_id,
-                "payload": payload,
-                "error": "" if payload is not None else "后台用量事件不存在。",
-            }
-            return status
-        if action == "openBackgroundUsage":
+            return _background_usage_response_status(
+                "detail",
+                background_usage_request_id,
+                payload=payload,
+                event_id=event_id,
+                error="" if payload is not None else "后台用量事件不存在。",
+            )
+        if action in {"openBackgroundUsage", "openBackgroundUsageFromInsights"}:
             event_id = str(command.get("eventId") or "").strip()
             runtime = getattr(context, "background_usage_runtime", None)
+            range_key = "today"
+            range_for_event = getattr(runtime, "range_for_event", None)
+            if event_id and callable(range_for_event):
+                candidate = str(range_for_event(event_id) or "today").strip().lower()
+                if candidate in {"today", "7d", "30d", "all"}:
+                    range_key = candidate
             payload = _background_usage_query_payload_with_preview(
                 runtime,
-                range_key="today",
+                range_key=range_key,
                 feature="",
                 model="",
                 event_id=event_id,
             )
-            status = _renderer_settings_status("")
-            status["backgroundUsageOpenEventId"] = event_id
-            status["backgroundUsageResponse"] = {
-                "kind": "open",
-                "requestId": str(command.get("id") or ""),
-                "eventId": event_id,
-                "payload": payload,
-            }
-            return status
+            return _background_usage_response_status(
+                "open",
+                background_usage_request_id,
+                payload=payload,
+                event_id=event_id,
+            )
         if action == "save":
             config = _config_from_settings_payload(
                 context.settings_store.load(),
@@ -6589,6 +8705,19 @@ def _handle_renderer_settings_command(
             kind="error",
         )
     except Exception as exc:
+        response_kind = {
+            "backgroundUsageQuery": "query",
+            "backgroundUsageDetail": "detail",
+            "openBackgroundUsage": "open",
+            "openBackgroundUsageFromInsights": "open",
+        }.get(action)
+        if response_kind:
+            return _background_usage_response_status(
+                response_kind,
+                background_usage_request_id,
+                event_id=str(command.get("eventId") or "").strip(),
+                error=f"用量总览读取失败：{exc}",
+            )
         return _renderer_settings_status(
             f"设置命令执行失败：{exc}",
             kind="error",
@@ -7048,6 +9177,7 @@ def build_snapshot(
             context.budget_thresholds,
         )
         snapshot.budget_error = "" if context.sessions_root.exists() else snapshot.error
+        _refresh_usage_insights_payload(context)
     usage_summarized_at_ms = int(time.time() * 1000)
     if refresh_active_work_items:
         snapshot.active_work_items = active_work_items_for_snapshot(
@@ -7066,7 +9196,38 @@ def build_snapshot(
         "usageSummarizedAt": usage_summarized_at_ms,
         "runtimeEnrichedAt": int(time.time() * 1000),
     }
+    _update_session_cleanup_activity(context, snapshot)
     return snapshot
+
+
+def _update_session_cleanup_activity(
+    context: RuntimeContext,
+    snapshot: ParsedSession,
+) -> None:
+    session_id = str(snapshot.session_id or "").strip()
+    try:
+        canonical = str(uuid.UUID(session_id))
+    except (AttributeError, TypeError, ValueError):
+        canonical = ""
+    context.cleanup_current_session_id = (
+        canonical if canonical == session_id.casefold() else ""
+    )
+    active: set[str] = set()
+    if context.cleanup_current_session_id and (
+        snapshot.request.status == "running"
+        or snapshot.slow.current_gap_active
+        or snapshot.activity.kind in {"tool call", "agent", "assistant"}
+    ):
+        active.add(context.cleanup_current_session_id)
+    for item in snapshot.active_work_items:
+        value = str(item.session_id or "").strip()
+        try:
+            canonical = str(uuid.UUID(value))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if canonical == value.casefold() and str(item.status or "") not in {"recent"}:
+            active.add(canonical)
+    context.cleanup_active_session_ids = active
 
 
 def _apply_pre_send_and_activity(
@@ -7376,6 +9537,21 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--cleanup-maintenance-helper",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--cleanup-plan-file",
+        default="",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--cleanup-result-file",
+        default="",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -7500,6 +9676,10 @@ def run_renderer_hud_session(
                     return RENDERER_HUD_UNAVAILABLE
                 launched_codex = True
             context = build_runtime_context(args)
+            context.cleanup_daemon_mode = daemon_manager is not None
+            context.cleanup_restart_command = _cleanup_restart_command(
+                daemon_mode=context.cleanup_daemon_mode
+            )
             display_mode = normalize_display_mode(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
@@ -7574,6 +9754,9 @@ def run_renderer_hud_session(
                         "session_snapshot_hydrated",
                         "file_management_changed",
                         "background_usage_changed",
+                        "usage_insights_changed",
+                        "safe_cleanup_changed",
+                        "session_cleanup_changed",
                     }:
                         command_refresh_requested.set()
                     elif event_type == "active_session_changed":
@@ -7634,8 +9817,14 @@ def run_renderer_hud_session(
                     confirm = getattr(runtime, "confirm", None)
                     return bool(callable(confirm) and confirm(event_id))
                 if action == "openBackgroundUsage":
+                    request_id = f"background-overlay-{uuid.uuid4().hex}"
                     enqueue_renderer_command(
-                        {"action": "openBackgroundUsage", "eventId": event_id}
+                        {
+                            "id": request_id,
+                            "requestId": request_id,
+                            "action": "openBackgroundUsage",
+                            "eventId": event_id,
+                        }
                     )
                     return True
                 return False
@@ -8237,8 +10426,33 @@ def run_renderer_hud_session(
                     latest_active_work_refresh_at: float = 0.0
                     active_work_refresh_pending: bool = False
                     active_work_refresh_not_before: float = 0.0
+                    background_usage_response_retry_attempts: int = 0
+                    background_usage_response_retry_not_before: float = 0.0
 
                 loop_state = _RendererLoopState()
+
+                def reset_background_usage_response_retry() -> None:
+                    loop_state.background_usage_response_retry_attempts = 0
+                    loop_state.background_usage_response_retry_not_before = 0.0
+
+                def schedule_background_usage_response_retry() -> None:
+                    if not _has_pending_background_usage_response(
+                        loop_state.settings_command_status
+                    ):
+                        return
+                    next_attempt = (
+                        loop_state.background_usage_response_retry_attempts + 1
+                    )
+                    delay = _background_usage_response_retry_delay_seconds(
+                        next_attempt
+                    )
+                    if delay is None:
+                        reset_background_usage_response_retry()
+                        return
+                    loop_state.background_usage_response_retry_attempts = next_attempt
+                    loop_state.background_usage_response_retry_not_before = (
+                        time.monotonic() + delay
+                    )
 
                 def current_event_session() -> str | None:
                     snapshot = loop_state.latest_snapshot
@@ -8302,6 +10516,28 @@ def run_renderer_hud_session(
                             "settings", "fileManagement", force_fast=True
                         )
                         return
+                    if action in SAFE_CLEANUP_COMMANDS:
+                        request.request_domains(
+                            "settings", "safeCleanup", force_fast=True
+                        )
+                        return
+                    if action in SESSION_CLEANUP_COMMANDS:
+                        request.request_domains(
+                            "settings", "sessionCleanup", force_fast=True
+                        )
+                        return
+                    if action == "usageInsightsRefresh":
+                        request.request_domains(
+                            "settings", "usageInsights", force_fast=True
+                        )
+                        return
+                    if action == "openUsageInsightsSession":
+                        request.request_domains("settings", force_fast=True)
+                        return
+                    if action == "openBackgroundUsageFromInsights":
+                        request.request_background_usage()
+                        request.request_domains("backgroundUsage", force_fast=True)
+                        return
                     if action == "dismissWarningsToday":
                         request.request_domains(
                             "currentSession",
@@ -8334,8 +10570,46 @@ def run_renderer_hud_session(
                     request: _RendererEventRefreshRequest,
                 ) -> None:
                     del event
+                    _refresh_usage_insights_payload(context)
                     request.request_background_usage()
-                    request.request_domains("backgroundUsage", force_fast=True)
+                    request.request_domains(
+                        "backgroundUsage",
+                        "usageInsights",
+                        force_fast=True,
+                    )
+
+                def handle_usage_insights_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_domains(
+                        "settings",
+                        "usageInsights",
+                        force_fast=True,
+                    )
+
+                def handle_safe_cleanup_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_domains(
+                        "settings",
+                        "safeCleanup",
+                        force_fast=True,
+                    )
+
+                def handle_session_cleanup_changed(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_domains(
+                        "settings",
+                        "sessionCleanup",
+                        force_fast=True,
+                    )
 
                 def handle_runtime_error(
                     event: object,
@@ -8421,6 +10695,9 @@ def run_renderer_hud_session(
                     "renderer_theme_changed": handle_renderer_theme_changed,
                     "file_management_changed": handle_file_management_changed,
                     "background_usage_changed": handle_background_usage_changed,
+                    "usage_insights_changed": handle_usage_insights_changed,
+                    "safe_cleanup_changed": handle_safe_cleanup_changed,
+                    "session_cleanup_changed": handle_session_cleanup_changed,
                 }
 
                 def refresh_request_for_events(
@@ -8597,6 +10874,17 @@ def run_renderer_hud_session(
                             )
                         )
                     event_refresh_request = refresh_request_for_events(local_events)
+                    if _has_pending_background_usage_response(
+                        loop_state.settings_command_status
+                    ) and (
+                        loop_state.background_usage_response_retry_attempts > 0
+                        and time.monotonic()
+                        >= loop_state.background_usage_response_retry_not_before
+                    ):
+                        event_refresh_request.request_domains(
+                            "backgroundUsage",
+                            force_fast=True,
+                        )
                     return _RendererTickInputs(
                         started=started_at,
                         update_state=update_state_value,
@@ -8614,6 +10902,13 @@ def run_renderer_hud_session(
                     if not inputs.command:
                         return
                     previous_config = context.user_config
+                    if str(inputs.command.get("action") or "").strip() in {
+                        "openBackgroundUsage",
+                        "openBackgroundUsageFromInsights",
+                        "backgroundUsageQuery",
+                        "backgroundUsageDetail",
+                    }:
+                        reset_background_usage_response_retry()
                     loop_state.settings_command_status = _handle_renderer_settings_command(
                         inputs.command,
                         context,
@@ -8621,6 +10916,7 @@ def run_renderer_hud_session(
                         exit_requested,
                         update_manager,
                         work_overlay,
+                        session_controller,
                     )
                     inputs.update_state = update_manager.status().to_dict()
                     mode_switch = str(
@@ -8867,6 +11163,7 @@ def run_renderer_hud_session(
                         loop_state.latest_active_work_refresh_at = time.monotonic()
                         loop_state.active_work_refresh_pending = False
                         loop_state.active_work_refresh_not_before = 0.0
+                    _update_session_cleanup_activity(context, fresh)
                     loop_state.latest_snapshot = fresh
                     loop_state.latest_budget_signature = _renderer_budget_signature(context)
                     fresh.follow_timing["payloadSendStartedAt"] = int(
@@ -8881,6 +11178,12 @@ def run_renderer_hud_session(
                                 session_switch_payload_from_snapshot(
                                     fresh,
                                     settings_path=context.settings_store.path,
+                                    background_usage_notification=(
+                                        _background_usage_notification_for_session(
+                                            context,
+                                            fresh.session_id,
+                                        )
+                                    ),
                                 )
                             )
                         )
@@ -8897,6 +11200,12 @@ def run_renderer_hud_session(
                                 if background_usage_runtime is not None
                                 else 0
                             ),
+                            background_usage_notification=(
+                                _background_usage_notification_for_session(
+                                    context,
+                                    fresh.session_id,
+                                )
+                            ),
                             settings_command_status=loop_state.settings_command_status,
                             update_state=inputs.update_state,
                             debug=_runtime_debug_enabled(),
@@ -8907,6 +11216,15 @@ def run_renderer_hud_session(
                             app_provider=str(getattr(context, "app_provider", "") or ""),
                             file_management=dict(
                                 getattr(context, "file_management_payload", {}) or {}
+                            ),
+                            usage_insights=dict(
+                                getattr(context, "usage_insights_payload", {}) or {}
+                            ),
+                            safe_cleanup=dict(
+                                getattr(context, "safe_cleanup_payload", {}) or {}
+                            ),
+                            session_cleanup=dict(
+                                getattr(context, "session_cleanup_payload", {}) or {}
                             ),
                         )
                     update_ms = (time.perf_counter() - update_started) * 1000.0
@@ -8962,11 +11280,16 @@ def run_renderer_hud_session(
                                 + RENDERER_ACTIVE_WORK_AFTER_SESSION_DELAY_SECONDS
                             )
                             command_refresh_requested.set()
+                        if _has_pending_background_usage_response(
+                            loop_state.settings_command_status
+                        ):
+                            reset_background_usage_response_retry()
                         loop_state.settings_command_status = {}
                         loop_state.failures = 0
                         _resolve_cdp_update_failure(context)
                     else:
                         loop_state.failures += 1
+                        schedule_background_usage_response_retry()
                         _record_cdp_update_failure(
                             context,
                             client,
@@ -8996,6 +11319,12 @@ def run_renderer_hud_session(
                             if background_usage_runtime is not None
                             else 0
                         ),
+                        background_usage_notification=(
+                            _background_usage_notification_for_session(
+                                context,
+                                snapshot.session_id,
+                            )
+                        ),
                         settings_command_status=loop_state.settings_command_status,
                         theme=inputs.event_refresh_request.theme_payload,
                         update_state=inputs.update_state,
@@ -9007,6 +11336,15 @@ def run_renderer_hud_session(
                         app_provider=str(getattr(context, "app_provider", "") or ""),
                         file_management=dict(
                             getattr(context, "file_management_payload", {}) or {}
+                        ),
+                        usage_insights=dict(
+                            getattr(context, "usage_insights_payload", {}) or {}
+                        ),
+                        safe_cleanup=dict(
+                            getattr(context, "safe_cleanup_payload", {}) or {}
+                        ),
+                        session_cleanup=dict(
+                            getattr(context, "session_cleanup_payload", {}) or {}
                         ),
                     ).to_domain_json(*sorted(inputs.event_refresh_request.domains))
                     if not payload:
@@ -9026,11 +11364,13 @@ def run_renderer_hud_session(
                                 )
                             )
                         ):
+                            reset_background_usage_response_retry()
                             loop_state.settings_command_status = {}
                         loop_state.failures = 0
                         _resolve_cdp_update_failure(context)
                         return True
                     loop_state.failures += 1
+                    schedule_background_usage_response_retry()
                     _record_cdp_update_failure(
                         context,
                         client,
@@ -9094,6 +11434,17 @@ def run_renderer_hud_session(
                                 - time.monotonic(),
                             ),
                         )
+                    if _has_pending_background_usage_response(
+                        loop_state.settings_command_status
+                    ) and loop_state.background_usage_response_retry_attempts > 0:
+                        delay_value = min(
+                            delay_value,
+                            max(
+                                0.05,
+                                loop_state.background_usage_response_retry_not_before
+                                - time.monotonic(),
+                            ),
+                        )
                     return delay_value
 
                 while True:
@@ -9115,6 +11466,10 @@ def run_renderer_hud_session(
                     apply_settings_command(tick)
                     apply_background_usage_change(tick)
                     apply_partial_settings_file_change(tick)
+                    cleanup_exit = getattr(context, "cleanup_exit_requested", None)
+                    if bool(getattr(cleanup_exit, "is_set", lambda: False)()):
+                        _LOGGER.info("renderer_hud_cleanup_maintenance_requested")
+                        return CLEANUP_MAINTENANCE_REQUESTED
                     if exit_requested.is_set():
                         _LOGGER.info("renderer_hud_exit_requested")
                         return 0
@@ -9350,6 +11705,9 @@ def run_daemon(args: argparse.Namespace) -> int:
                     launched_codex_for_renderer = False
                     _LOGGER.info("daemon_restarting_wait_for_codex")
                     continue
+                if exit_code == CLEANUP_MAINTENANCE_REQUESTED:
+                    _LOGGER.info("daemon_exiting_for_cleanup_maintenance")
+                    return CLEANUP_MAINTENANCE_REQUESTED
                 if force_renderer_retry and exit_code == RENDERER_HUD_UNAVAILABLE:
                     _LOGGER.info("daemon_renderer_unavailable_retrying")
                     time.sleep(manager.poll_seconds)
@@ -9363,9 +11721,16 @@ def run_daemon(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI entry point."""
     configure_stdout()
-    _enable_crash_diagnostics()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "cleanup_maintenance_helper", False):
+        if not args.cleanup_plan_file or not args.cleanup_result_file:
+            return 2
+        return run_cleanup_maintenance_helper(
+            args.cleanup_plan_file,
+            args.cleanup_result_file,
+        )
+    _enable_crash_diagnostics()
     _init_force_desktop_overlay_missing_from_env()
     if getattr(args, "loading_feedback_helper", False):
         return run_loading_feedback_helper(args.loading_feedback_state_file)

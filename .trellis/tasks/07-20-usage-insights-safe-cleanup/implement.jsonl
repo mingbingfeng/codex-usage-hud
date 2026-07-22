@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/safe-cleanup-contracts.md", "reason": "Implement against cleanup, session delete, and renderer layout contracts."}
+{"file": ".trellis/spec/backend/renderer-runtime-contracts.md", "reason": "Keep renderer domain/event boundaries while wiring cleanup UI."}

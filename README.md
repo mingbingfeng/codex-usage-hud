@@ -101,6 +101,10 @@ codex-hud --update
 
 安装器会在替换文件前先运行 `codex-hud --stop`，避免旧 HUD 进程占用可执行文件。
 
+更新检查始终以 GitHub Release API 为准。下载先尝试官方地址；若 GitHub 安装包线路在中国大陆不可达，会自动依次尝试备用下载线路，并继续支持断点续传。无论实际从哪条线路取得文件，HUD 都会核对 GitHub 发布的文件名、大小和 SHA-256；校验失败的文件不会启动安装器。
+
+发布时请将构建产出的安装包和同名 `.sha256` 文件一起上传到 GitHub Release，详见 [更新分发与安全](docs/UPDATE_DELIVERY.md)。
+
 当前发行策略：
 
 - 官方发布仍以 Windows 安装包为主，默认安装包不内置 PySide6 桌面气泡依赖。
@@ -117,7 +121,7 @@ codex-hud --update
 - HUD daemon 日志：`%LOCALAPPDATA%\codex-usage-hud\daemon.log`
 - 默认安装目录：`%LOCALAPPDATA%\Programs\codex-usage-hud`
 
-设置里的“存储”页默认只显示本地元数据，并且只在用户点击“重新扫描”时工作。候选清理必须先生成 dry-run 预览、再二次确认；Codex 运行期间只会排队，不会自动结束任务。第一版只把过期且未被配置引用的临时 staging/clone 项列为 raw 清理候选，SQLite/WAL/SHM、JSONL 会话、插件运行时、凭据、配置、未知项和 reparse point 始终受保护。会话、插件和登录状态只能通过对应的官方 `codex archive/delete/plugin remove/logout` 动作管理。
+设置里的“空间清理”分为“垃圾清理”和“会话管理”。默认垃圾流程只有“扫描垃圾 -> 确认清理”两个主要动作：固定白名单的 HUD 日志、过期临时项和可再生成系统/开发缓存默认选中；超过 7 天的系统诊断报告与旧 SQLite 历史属于折叠的单独同意项，SQLite 在离线维护前还会强制创建本地备份。会话管理按主会话归并子任务，永久删除只调用官方 `codex delete --force`，当前/运行中/关系无法证明的会话始终不可选。凭据、配置、未知项、reparse point、回收站/废纸篓、`state_5.sqlite`、`goals_1.sqlite` 和 `memories_1.sqlite` 不进入普通垃圾清理。用量排行继续保留在“用量总览”，没有相关事件时不会新增轮询。
 
 ## Codex 主题同步
 
@@ -141,7 +145,7 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 
 ### 会上传我的提示词或日志吗？
 
-不会。项目只读取本机日志和数据库，不做遥测、不上传 prompt/response，也不要求云端账号。显式启用“存储”页的本地清理属于受保护的例外：它只接受 inventory 发出的 opaque item id，执行前会重验 revision、路径和锁定状态，且不会 raw 删除 JSONL/SQLite。提交 issue 前请阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
+不会。项目只在本机读取和处理日志/数据库，不做遥测、不上传 prompt/response，也不要求云端账号。显式启用“空间清理”属于受保护的例外：垃圾清理只接受 inventory 发出的 opaque item id，执行前会重验 revision、路径、指纹和锁定状态；SQLite 只按已知 schema 做带备份的离线行级维护，不 raw 删除主库或 WAL/SHM。会话永久删除只把 Python 端核验过的 canonical UUID 交给官方 Codex CLI，UUID 和绝对 rollout 路径不会进入 renderer payload。提交 issue 前请阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
 
 ## 开发
 
