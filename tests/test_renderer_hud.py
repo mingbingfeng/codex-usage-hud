@@ -1785,6 +1785,26 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("离开后重新计时", script)
         self.assertNotIn("到点会优先弹出 PySide6", script)
 
+    def test_rest_reminder_toast_receives_pointer_events(self) -> None:
+        """HUD root is pointer-events:none; toast + buttons must re-enable hits."""
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        toast_css_start = script.index(".codex-usage-hud-rest-toast {")
+        toast_css_end = script.index("}", toast_css_start)
+        toast_css = script[toast_css_start:toast_css_end]
+        self.assertIn("pointer-events: auto", toast_css)
+
+        # Interactive whitelist also includes the toast class so children inherit.
+        whitelist_start = script.index(".codex-usage-hud-settings-modal,")
+        whitelist_end = script.index("pointer-events: auto;", whitelist_start)
+        whitelist = script[whitelist_start:whitelist_end]
+        self.assertIn("codex-usage-hud-rest-toast", whitelist)
+
+        self.assertIn('data-action="rest-reminder-ack"', script)
+        self.assertIn('data-action="rest-reminder-postpone"', script)
+        self.assertIn('action: "restReminderAck"', script)
+        self.assertIn('action: "restReminderPostpone"', script)
+
     def test_payload_can_include_support_qr_images(self) -> None:
         snapshot = ParsedSession(status="waiting")
         images = support_qr_payload()

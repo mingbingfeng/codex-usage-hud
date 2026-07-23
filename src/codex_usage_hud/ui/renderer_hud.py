@@ -646,7 +646,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-panel-header,
       #${rootId} .codex-usage-hud-top-body,
       #${rootId} .codex-usage-hud-request-list,
-      #${rootId} .codex-usage-hud-settings-modal {
+      #${rootId} .codex-usage-hud-settings-modal,
+      #${rootId} .codex-usage-hud-rest-toast {
         pointer-events: auto;
       }
       #${rootId} .${topClass} {
@@ -4236,9 +4237,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
         display: none;
         gap: 10px;
+        /* Root is pointer-events:none; toast must re-enable hit testing. */
+        pointer-events: auto;
       }
       #${rootId} .codex-usage-hud-rest-toast[data-visible="true"] {
         display: grid;
+      }
+      #${rootId} .codex-usage-hud-rest-toast button {
+        pointer-events: auto;
+        cursor: pointer;
       }
       #${rootId} .codex-usage-hud-rest-toast-title {
         color: var(--codex-usage-hud-accent, #f3d27a);
