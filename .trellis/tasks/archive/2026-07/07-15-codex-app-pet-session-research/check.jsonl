@@ -1,4 +1,0 @@
-{"file":"src/codex_usage_hud/ui/renderer_hud.py","reason":"Review event sources, deduplication, cleanup, and no-idle-polling behavior."}
-{"file":"src/codex_usage_hud/cli.py","reason":"Verify active-session wakeup, exact mapping, session-file refresh, and overlay payload flow."}
-{"file":"tests/test_renderer_hud.py","reason":"Run focused renderer injection and active-session regression tests."}
-{"file":"tests/test_ui.py","reason":"Run focused file-event, snapshot, and work-overlay transition tests."}

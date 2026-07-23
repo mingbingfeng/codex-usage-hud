@@ -7326,7 +7326,10 @@ def _execute_safe_cleanup_command(
     if callable(publish):
         publish(manager.snapshot())
 
-    _ensure_safe_cleanup_activity_idle(context)
+    # Active tasks only block offline / Codex-close cleanup. Default safe path
+    # deletes (regenerable caches) must still run while Codex is working.
+    if requires_offline or requires_codex_close:
+        _ensure_safe_cleanup_activity_idle(context)
     desktop_processes: list[_CodexDesktopProcess] = []
     if requires_codex_close:
         standalone = _running_standalone_codex_cli_pids()
@@ -7425,6 +7428,49 @@ def _execute_safe_cleanup_command(
                 publish(manager.snapshot())
 
         result = run_maintenance_plan(plan, progress_callback=_on_execute_progress)
+        preplan_skips = manager.consume_preplan_skips(plan.id)
+        if not isinstance(preplan_skips, list):
+            preplan_skips = []
+        if preplan_skips:
+            merged_actions = tuple(preplan_skips) + tuple(result.actions)
+            success = sum(
+                1
+                for action in merged_actions
+                if action.state in {"deleted", "completed"}
+            )
+            skipped = sum(1 for action in merged_actions if action.state == "skipped")
+            restored = sum(1 for action in merged_actions if action.state == "restored")
+            hard_failures = sum(1 for action in merged_actions if action.state == "failed")
+            if hard_failures and not success and not restored:
+                state = "failed"
+            elif restored and not success and not hard_failures:
+                state = "restored"
+            elif success and not hard_failures:
+                state = "completed"
+            elif success or restored:
+                state = "partial"
+            else:
+                state = "partial"
+            skip_note = (
+                f"{skipped} item(s) skipped (locked, busy, or changed)"
+                if skipped and state == "completed"
+                else ""
+            )
+            incomplete = hard_failures + skipped + restored
+            result = replace(
+                result,
+                actions=merged_actions,
+                state=state,
+                error=(
+                    skip_note
+                    if skip_note
+                    else (
+                        f"{incomplete} cleanup action(s) did not complete"
+                        if incomplete and state != "completed"
+                        else ""
+                    )
+                ),
+            )
         return manager.apply_maintenance_result(result, request_id=request_id)
 
     _ensure_safe_cleanup_activity_idle(context)

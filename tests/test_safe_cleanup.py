@@ -25,6 +25,7 @@ from codex_usage_hud.core.safe_cleanup import (
     SQLiteTarget,
     SafeCleanupError,
     SafeCleanupManager,
+    _is_soft_revalidate_skip,
     audit_sqlite_target,
     platform_cache_definitions,
     read_maintenance_plan,
@@ -962,6 +963,202 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
                 )
 
             self.assertTrue(cache.is_dir())
+
+    def test_bulk_plan_soft_skips_changed_items_and_keeps_stable_targets(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temp_root = root / "Temp"
+            temp_root.mkdir()
+            stable = temp_root / "stable-cache"
+            stable.mkdir()
+            (stable / "blob").write_bytes(b"stable-bytes")
+            volatile = temp_root / "volatile-cache"
+            volatile.mkdir()
+            (volatile / "blob").write_bytes(b"before")
+            manager = SafeCleanupManager(
+                platform="win32",
+                home=root,
+                env={"TEMP": str(temp_root), "TMP": str(temp_root)},
+                hud_runtime_root=root / "missing-runtime",
+                cache_definitions=(
+                    CacheDefinition(
+                        key="user_temp",
+                        category="user_temp",
+                        path=temp_root,
+                        label="Expired user temporary data",
+                        impact="Applications may recreate temporary files.",
+                        mode="expired_children",
+                        min_age_seconds=0,
+                    ),
+                ),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: set(),
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            inventory = manager.scan()
+            selected = list(inventory["defaultSelectedIds"])
+            self.assertEqual(len(selected), 2)
+            preview = manager.preview(selected, inventory["revision"])
+            (volatile / "blob").write_bytes(b"after-scan")
+
+            plan = manager.create_plan(
+                selected,
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+
+            self.assertEqual(len(plan.actions), 1)
+            self.assertEqual(Path(plan.actions[0].path), stable)
+            preplan = manager.consume_preplan_skips(plan.id)
+            self.assertEqual(len(preplan), 1)
+            self.assertEqual(preplan[0].state, "skipped")
+            self.assertIn("changed after scan", preplan[0].error)
+
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            self.assertEqual(result.actions[0].state, "deleted")
+            self.assertEqual(result.state, "completed")
+            self.assertFalse(stable.exists())
+            self.assertTrue(volatile.exists())
+
+            # Soft skips + successful deletes present as a completed cleaner pass.
+            merged = tuple(preplan) + tuple(result.actions)
+            success = sum(1 for row in merged if row.state in {"deleted", "completed"})
+            skipped = sum(1 for row in merged if row.state == "skipped")
+            hard = sum(1 for row in merged if row.state == "failed")
+            self.assertGreater(success, 0)
+            self.assertGreater(skipped, 0)
+            self.assertEqual(hard, 0)
+            self.assertEqual(
+                "completed" if success and not hard else "partial",
+                "completed",
+            )
+
+    def test_helper_success_with_skips_is_completed_not_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            keep = root / "keep-cache"
+            drop = root / "drop-cache"
+            keep.mkdir()
+            drop.mkdir()
+            (keep / "a").write_bytes(b"keep-me")
+            (drop / "b").write_bytes(b"drop-me")
+            manager = SafeCleanupManager(
+                platform="win32",
+                hud_runtime_root=root / "missing-runtime",
+                cache_definitions=(
+                    CacheDefinition(
+                        key="keep",
+                        category="browser_cache",
+                        path=keep,
+                        label="Keep cache",
+                        impact="Rebuilt later.",
+                    ),
+                    CacheDefinition(
+                        key="drop",
+                        category="browser_cache",
+                        path=drop,
+                        label="Drop cache",
+                        impact="Rebuilt later.",
+                    ),
+                ),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: set(),
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            inventory = manager.scan()
+            ids = list(inventory["defaultSelectedIds"])
+            self.assertEqual(len(ids), 2)
+            preview = manager.preview(ids, inventory["revision"])
+            plan = manager.create_plan(
+                ids,
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lambda path: path == drop,
+            )
+            states = {action.item_id: action.state for action in result.actions}
+            self.assertEqual(set(states.values()), {"deleted", "skipped"})
+            self.assertEqual(result.state, "completed")
+            self.assertIn("skipped", result.error.casefold())
+            self.assertFalse(keep.exists())
+            self.assertTrue(drop.exists())
+
+    def test_single_changed_item_still_fails_plan_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temp_root = root / "Temp"
+            temp_root.mkdir()
+            only = temp_root / "only-cache"
+            only.mkdir()
+            (only / "blob").write_bytes(b"before")
+            manager = SafeCleanupManager(
+                platform="win32",
+                home=root,
+                env={"TEMP": str(temp_root), "TMP": str(temp_root)},
+                hud_runtime_root=root / "missing-runtime",
+                cache_definitions=(
+                    CacheDefinition(
+                        key="user_temp",
+                        category="user_temp",
+                        path=temp_root,
+                        label="Expired user temporary data",
+                        impact="Applications may recreate temporary files.",
+                        mode="expired_children",
+                        min_age_seconds=0,
+                    ),
+                ),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: set(),
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            inventory = manager.scan()
+            item_id = inventory["defaultSelectedIds"][0]
+            preview = manager.preview([item_id], inventory["revision"])
+            (only / "blob").write_bytes(b"after-scan")
+            with self.assertRaisesRegex(SafeCleanupError, "no targets remain"):
+                manager.create_plan(
+                    [item_id],
+                    inventory["revision"],
+                    preview["operation"]["confirmationToken"],
+                )
+            self.assertTrue(only.exists())
+
+    def test_revalidate_soft_skip_classifier_keeps_filesystem_gates_hard(self) -> None:
+        soft_errors = (
+            "cleanup item changed after scan",
+            "cleanup item metadata changed after scan",
+            "cleanup path is no longer available",
+        )
+        hard_errors = (
+            "cleanup path escaped its approved root",
+            "cleanup path changed after scan",
+            "reparse paths are protected",
+            "approved root is not a plain directory",
+            "cleanup path could not be fully verified after scan",
+        )
+        for message in soft_errors:
+            with self.subTest(message=message):
+                self.assertTrue(_is_soft_revalidate_skip(SafeCleanupError(message)))
+        for message in hard_errors:
+            with self.subTest(message=message):
+                self.assertFalse(_is_soft_revalidate_skip(SafeCleanupError(message)))
 
     def test_stale_revision_and_protected_selection_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

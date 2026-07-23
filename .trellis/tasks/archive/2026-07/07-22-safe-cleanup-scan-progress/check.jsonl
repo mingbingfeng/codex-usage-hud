@@ -1,4 +1,0 @@
-{"file": ".trellis/spec/backend/safe-cleanup-contracts.md", "reason": "Verify progressive fields stay path-neutral"}
-{"file": "docs/designs/space-cleanup-scan-progress-v1.html", "reason": "UI must match approved progressive states"}
-{"file": ".trellis/tasks/07-22-safe-cleanup-scan-progress/prd.md", "reason": "Acceptance criteria"}
-{"file": ".trellis/tasks/07-22-safe-cleanup-scan-progress/design.md", "reason": "Technical design constraints"}

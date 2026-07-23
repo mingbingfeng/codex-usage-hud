@@ -1,3 +1,0 @@
-{"file":"src/codex_usage_hud/ui/renderer_hud.py","reason":"Add composer send/submit event wiring and bounded active-session follow-up reporting."}
-{"file":"tests/test_renderer_hud.py","reason":"Protect injected composer reconciliation behavior and cleanup contract."}
-{"file":"tests/test_ui.py","reason":"Verify active-session refresh produces the completed work-overlay transition without a session click."}

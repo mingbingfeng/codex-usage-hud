@@ -12404,6 +12404,73 @@ class DaemonLifecycleTests(unittest.TestCase):
         standalone_pids.assert_not_called()
         close_desktop.assert_not_called()
 
+    def test_safe_cleanup_online_safe_path_ignores_active_tasks(self) -> None:
+        """Default regenerable-cache cleanup must not cancel for active Codex work."""
+
+        from codex_usage_hud.core.safe_cleanup import MaintenancePlan, MaintenanceResult
+
+        plan = MaintenancePlan(
+            id="plan-online-safe",
+            created_at=1.0,
+            expires_at=1000.0,
+            parent_pid=0,
+            wait_pids=(),
+            wait_timeout_seconds=0.0,
+            backup_directory="",
+            actions=(),
+            result_path="",
+            restart_command=(),
+        )
+        result = MaintenanceResult(
+            plan_id=plan.id,
+            state="completed",
+            started_at=1.0,
+            completed_at=2.0,
+            actions=(),
+            error="",
+        )
+        manager = MagicMock()
+        manager.selection_requirements.return_value = {
+            "requiresOffline": False,
+            "requiresBackup": False,
+            "requiresCodexClose": False,
+        }
+        manager.create_plan.return_value = plan
+        manager.apply_maintenance_result.return_value = {
+            "revision": "revision-1",
+            "operation": {"state": "completed", "action": "execute"},
+        }
+        manager.snapshot.return_value = {"revision": "revision-1", "operation": {}}
+        context = SimpleNamespace(safe_cleanup_worker=SimpleNamespace(_publish=MagicMock()))
+        command = {
+            "requestId": "cleanup-online-safe",
+            "groupIds": ["cache-item"],
+            "inventoryRevision": "revision-1",
+            "confirmationToken": "confirmation-1",
+            "autoCloseAndRestore": False,
+        }
+        with (
+            patch(
+                "codex_usage_hud.cli._safe_cleanup_active_task_ids",
+                return_value=("active-session",),
+            ) as active_tasks,
+            patch(
+                "codex_usage_hud.cli.run_maintenance_plan",
+                return_value=result,
+            ) as run_plan,
+        ):
+            snapshot = cli_module._execute_safe_cleanup_command(
+                context, manager, command
+            )
+
+        active_tasks.assert_not_called()
+        manager.create_plan.assert_called_once()
+        run_plan.assert_called_once()
+        manager.apply_maintenance_result.assert_called_once_with(
+            result, request_id="cleanup-online-safe"
+        )
+        self.assertEqual(snapshot["operation"]["state"], "completed")
+
     def test_safe_cleanup_native_backup_picker_persists_selected_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             selected = Path(temporary).resolve()

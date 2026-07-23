@@ -1129,6 +1129,49 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('previewBackupDirectory: ""', script)
         self.assertIn('const previewLocked = operationState === "preview"', script)
         self.assertIn('${previewLocked ? "disabled" : ""}', script)
+        self.assertIn('return "清理完成（部分项已跳过）"', script)
+        self.assertIn('return "清理失败"', script)
+        self.assertIn('return "本次未删除（目标已跳过）"', script)
+        self.assertIn("function safeCleanupErrorText", script)
+        label_start = script.index("function safeCleanupOperationLabel")
+        label_end = script.index("function safeCleanupResultStateLabel", label_start)
+        label_fn = script[label_start:label_end]
+        self.assertNotIn('failed: "需要处理"', label_fn)
+        self.assertNotIn('return "需要处理"', label_fn)
+        self.assertIn('return "清理失败"', label_fn)
+        preview_html_start = script.index("function safeCleanupPreviewHtml")
+        preview_html_end = script.index("function isCleanupScanningRevision", preview_html_start)
+        preview_html = script[preview_html_start:preview_html_end]
+        self.assertIn("const showResultRows = new Set([\"completed\", \"partial\", \"failed\", \"restored\"]).has(state);", preview_html)
+        self.assertIn("? safeCleanupResultGroupsHtml(data, selectedIds, results)", preview_html)
+        self.assertIn("safeCleanupErrorText(operation?.error)", preview_html)
+        self.assertNotIn(
+            "const rows = safeCleanupResultGroupsHtml(data, selectedIds, results);",
+            preview_html,
+        )
+        refresh_start = script.index("function refreshStoragePanelIfVisible")
+        refresh_end = script.index("function requestUsageInsightsRefresh", refresh_start)
+        refresh_contract = script[refresh_start:refresh_end]
+        self.assertIn('settingsActiveTab !== "storage"', refresh_contract)
+        self.assertIn("const focus = captureStorageFocus(body);", refresh_contract)
+        self.assertIn("body.innerHTML = storagePanelHtml();", refresh_contract)
+        self.assertIn("restoreStorageFocus(body, focus);", refresh_contract)
+        focus_start = script.index("function captureStorageFocus")
+        focus_end = script.index("function requestUsageInsightsRefresh", focus_start)
+        self.assertIn('candidate.matches?.(":disabled")', script[focus_start:focus_end])
+        ticker_start = script.index("function ensureSafeCleanupLiveTicker")
+        ticker_end = script.index("function rerenderUsageInsightsIfVisible", ticker_start)
+        ticker_contract = script[ticker_start:ticker_end]
+        self.assertIn("updateSafeCleanupElapsedNodes();", ticker_contract)
+        self.assertNotIn("rerenderUsageInsightsIfVisible();", ticker_contract)
+        self.assertNotIn('renderSettingsModal("storage")', ticker_contract)
+        file_payload_start = script.index("function applyFileManagementPayload")
+        file_payload_end = script.index("function updateSafeCleanupElapsedNodes", file_payload_start)
+        file_payload_contract = script[file_payload_start:file_payload_end]
+        self.assertIn("refreshStoragePanelIfVisible();", file_payload_contract)
+        self.assertNotIn('renderSettingsModal("storage")', file_payload_contract)
+        self.assertIn('data-safe-cleanup-elapsed="scan"', script)
+        self.assertIn('data-safe-cleanup-elapsed="execute"', script)
         confirm_start = script.index("function openSafeCleanupExecuteConfirm")
         execute_start = script.index("function executeSafeCleanup", confirm_start)
         confirm_contract = script[confirm_start:execute_start]

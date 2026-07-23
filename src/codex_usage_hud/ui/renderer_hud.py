@@ -7235,18 +7235,54 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function safeCleanupOperationLabel(operation) {
     const state = String(operation?.state || "idle");
+    const error = String(operation?.error || "");
     if (state === "completed" && operation?.action === "scan") return "扫描完成";
+    if (state === "completed") {
+      // Success with optional soft skips still reads as a finished cleaner pass.
+      if (/skipped|跳过|locked|busy|changed/i.test(error)) {
+        return "清理完成（部分项已跳过）";
+      }
+      return "清理完成";
+    }
     if (state === "failed") {
-      const error = String(operation?.error || "");
       if (error.includes("清理已取消") || error.includes("未修改任何数据") || error.includes("未执行")) {
         return "已取消";
       }
+      // Prefer a terminal failure label over a dead-end "needs action" state.
+      return "清理失败";
     }
-    return ({ idle: "等待扫描", scanning: "正在扫描", accepted: "请求已提交", preview: "清理预览", running: "正在清理", queued_exit: "等待退出", completed: "清理完成", partial: "部分完成（部分项已跳过）", cancelled: "已取消", failed: "需要处理", restored: "已从备份恢复" })[state] || "状态更新中";
+    if (state === "partial") {
+      if (!Number(operation?.actualBytes || 0)) {
+        return "本次未删除（目标已跳过）";
+      }
+      return "部分完成（部分项已跳过）";
+    }
+    return ({ idle: "等待扫描", scanning: "正在扫描", accepted: "请求已提交", preview: "清理预览", running: "正在清理", queued_exit: "等待退出", cancelled: "已取消", restored: "已从备份恢复" })[state] || "状态更新中";
   }
 
   function safeCleanupResultStateLabel(state) {
     return ({ selected: "等待清理", running: "清理中", completed: "已完成", deleted: "已删除", skipped: "已跳过", failed: "未完成", partial: "部分完成", restored: "已恢复" })[String(state || "")] || String(state || "状态未知");
+  }
+
+  function safeCleanupErrorText(error) {
+    const raw = String(error || "").trim();
+    if (!raw) return "";
+    const map = [
+      [/(\d+)\s*item\(s\)\s*skipped \(locked, busy, or changed\)/i, "$1 项已跳过（占用中、忙碌或扫描后已变化）"],
+      [/(\d+)\s*cleanup action\(s\) did not complete/i, "$1 项未能完成"],
+      [/cleanup item is locked/i, "目标正被占用，已跳过"],
+      [/cleanup item changed after scan/i, "扫描后内容已变化，已跳过"],
+      [/cleanup item metadata changed after scan/i, "扫描后元数据已变化，已跳过"],
+      [/a related application is currently running/i, "相关应用正在运行，已跳过"],
+      [/a related application started after the cleanup scan/i, "扫描后相关应用已启动，已取消该项"],
+      [/cleanup items changed after scan; no targets remain executable/i, "选中目标在扫描后均已变化，请重新扫描"],
+      [/cleanup inventory revision is stale/i, "清单已过期，请重新扫描"],
+      [/confirmation token is missing or expired/i, "确认已过期，请重新预览"],
+    ];
+    for (const [pattern, label] of map) {
+      if (pattern.test(raw)) return raw.replace(pattern, label);
+    }
+    return raw;
   }
 
   function safeCleanupRetention(group) {
@@ -7491,17 +7527,27 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const state = String(operation?.state || "idle");
     if (operation?.action === "scan") return "";
-    if (!new Set(["preview", "completed", "partial", "failed", "restored", "accepted", "running", "queued_exit"]).has(state) || safeCleanupState.previewHidden) return "";
+    if (!new Set(["preview", "completed", "partial", "failed", "restored", "cancelled"]).has(state) || safeCleanupState.previewHidden) return "";
     const results = Array.isArray(operation?.results) ? operation.results : [];
     const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : safeCleanupSelectedGroupIds(data);
     if (state === "preview" && !safeCleanupPreviewMatchesSelection(data)) return "";
-    const rows = safeCleanupResultGroupsHtml(data, selectedIds, results);
     const actual = operation?.actualBytes;
     const value = actual === null || actual === undefined
       ? safeCleanupPreviewSpaceSummary(operation)
       : `实际回收 ${storageFormatBytes(actual)}`;
     const backupSummary = actual === null || actual === undefined ? "" : safeCleanupResultBackupSummary(operation);
-    return `<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(value)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows || '<div class="codex-usage-hud-cleanup-meta">当前没有已选目标。</div>'}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div>`;
+    // Preview reuses the upper selection list. Only terminal result states
+    // render a dedicated result list so selection and outcomes are not duplicated.
+    const showResultRows = new Set(["completed", "partial", "failed", "restored"]).has(state);
+    const rows = showResultRows
+      ? safeCleanupResultGroupsHtml(data, selectedIds, results)
+      : "";
+    const resultsHtml = showResultRows
+      ? `<div class="codex-usage-hud-cleanup-results">${rows || '<div class="codex-usage-hud-cleanup-meta">当前没有已选目标。</div>'}</div>`
+      : "";
+    const friendlyError = safeCleanupErrorText(operation?.error);
+    const errorKind = state === "completed" ? "note" : "error";
+    return `<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(value)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div>${resultsHtml}${friendlyError ? `<div class="codex-usage-hud-cleanup-meta" data-kind="${errorKind}">${escapeHtml(friendlyError)}</div>` : ""}</div>`;
   }
 
 
@@ -7626,9 +7672,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const actualBytes = Number(operation?.actualBytes || 0);
     const elapsed = formatCleanupElapsed(startedAt || (mode === "execute" ? safeCleanupState.executeStartedAt : safeCleanupState.scanStartedAt));
     const indeterminate = progress <= 0;
+    const elapsedHtml = `<span data-safe-cleanup-elapsed="${escapeHtml(mode)}">${escapeHtml(elapsed)}</span>`;
     const meta = mode === "execute"
-      ? `第 ${phaseIndex}/${phaseCount} 项 · ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}`
-      : `第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}`;
+      ? `第 ${phaseIndex}/${phaseCount} 项 · ${progress || 1}% · 已用时 ${elapsedHtml}`
+      : `第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${elapsedHtml}`;
     const stageRight = mode === "execute"
       ? `已处理 ${doneCount}/${phaseCount} · 已回收 ${storageFormatBytes(actualBytes)}`
       : `已发现 ${discoveredGroups} 组 · ${storageFormatBytes(discoveredBytes)}`;
@@ -7641,7 +7688,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 6));
     const phaseLabel = safeCleanupPhaseLabel(operation);
     const elapsed = formatCleanupElapsed(safeCleanupState.scanStartedAt);
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">准备本地清理清单 · <strong>第 ${phaseIndex}/${phaseCount} 步 · ${escapeHtml(phaseLabel)}</strong></p><div class="codex-usage-hud-cleanup-scan-track" style="width:min(280px,70%);margin-top:4px"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="true" style="width:38%"></div></div><p class="codex-usage-hud-cleanup-empty-meta">已用时 ${escapeHtml(elapsed)} · 不会在扫描时删除任何文件</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel" ${pending ? "" : "disabled"}>取消扫描</button></div></section>`;
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">准备本地清理清单 · <strong>第 ${phaseIndex}/${phaseCount} 步 · ${escapeHtml(phaseLabel)}</strong></p><div class="codex-usage-hud-cleanup-scan-track" style="width:min(280px,70%);margin-top:4px"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="true" style="width:38%"></div></div><p class="codex-usage-hud-cleanup-empty-meta">已用时 <span data-safe-cleanup-elapsed="scan">${escapeHtml(elapsed)}</span> · 不会在扫描时删除任何文件</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel" ${pending ? "" : "disabled"}>取消扫描</button></div></section>`;
   }
 
   function safeCleanupPlaceholderRowsHtml(data) {
@@ -7833,7 +7880,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       const progress = Math.max(0, Math.min(100, Number(operation?.progress || 0)));
       const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
       const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 1));
-      footerMeta = `正在清理 ${phaseIndex}/${phaseCount} · ${progress || 1}% · 已用时 ${formatCleanupElapsed(safeCleanupState.executeStartedAt)}`;
+      footerMeta = `正在清理 ${phaseIndex}/${phaseCount} · ${progress || 1}% · 已用时 <span data-safe-cleanup-elapsed="execute">${escapeHtml(formatCleanupElapsed(safeCleanupState.executeStartedAt))}</span>`;
       footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" disabled>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>正在清理 ${progress || 1}%</button></div>`;
     } else {
       const offline = safeCleanupRequiresOffline(cleanupData);
@@ -7979,6 +8026,69 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (cleanupContent) cleanupContent.scrollTop = cleanupContentScrollTop;
     const sessionTable = modal?.querySelector?.(".codex-usage-hud-session-table");
     if (sessionTable) sessionTable.scrollTop = sessionTableScrollTop;
+  }
+
+  function captureStorageFocus(body) {
+    const active = document.activeElement;
+    if (!body || !(active instanceof HTMLElement) || !body.contains(active)) return null;
+    const identityAttributes = [
+      "data-action",
+      "data-cleanup-group-id",
+      "data-item-id",
+      "data-session-cleanup-id",
+      "data-setting-key",
+      "data-cleanup-backup-directory",
+      "data-cleanup-consent",
+      "data-cleanup-auto-close",
+      "data-session-cleanup-search",
+      "data-session-cleanup-select-all",
+    ];
+    const identity = identityAttributes
+      .filter((name) => active.hasAttribute(name))
+      .map((name) => [name, active.getAttribute(name) || ""]);
+    if (!identity.length) return null;
+    return {
+      tagName: active.tagName.toLowerCase(),
+      identity,
+      selectionStart: typeof active.selectionStart === "number" ? active.selectionStart : null,
+      selectionEnd: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+    };
+  }
+
+  function restoreStorageFocus(body, descriptor) {
+    if (!body || !descriptor || !Array.isArray(descriptor.identity)) return;
+    const candidates = body.querySelectorAll(descriptor.tagName || "*");
+    for (const candidate of candidates) {
+      if (!descriptor.identity.every(([name, value]) => candidate.getAttribute(name) === value)) continue;
+      if (candidate.matches?.(":disabled") || candidate.disabled === true) return;
+      try {
+        candidate.focus({ preventScroll: true });
+      } catch (_) {
+        candidate.focus?.();
+      }
+      if (
+        typeof descriptor.selectionStart === "number"
+        && typeof candidate.setSelectionRange === "function"
+      ) {
+        try {
+          candidate.setSelectionRange(descriptor.selectionStart, descriptor.selectionEnd ?? descriptor.selectionStart);
+        } catch (_) {}
+      }
+      return;
+    }
+  }
+
+  function refreshStoragePanelIfVisible() {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "storage") return false;
+    const body = modal.querySelector(".codex-usage-hud-settings-body");
+    if (!body) return false;
+    const focus = captureStorageFocus(body);
+    captureStorageUiState();
+    body.innerHTML = storagePanelHtml();
+    restoreStorageUiState();
+    restoreStorageFocus(body, focus);
+    return true;
   }
 
   function requestUsageInsightsRefresh({ force = false } = {}) {
@@ -13196,10 +13306,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (!modal || modal.hidden || settingsActiveTab !== "storage") return;
     if (String(payload?.fileManagement?.operation?.state || "") === "preview") storagePreviewHidden = false;
     else storagePreviewHidden = true;
-    const scrollTop = modal.querySelector(".codex-usage-hud-settings-body")?.scrollTop || 0;
-    renderSettingsModal("storage");
-    const body = modal.querySelector(".codex-usage-hud-settings-body");
-    if (body) body.scrollTop = scrollTop;
+    refreshStoragePanelIfVisible();
+  }
+
+  function updateSafeCleanupElapsedNodes() {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "storage") return;
+    for (const node of modal.querySelectorAll("[data-safe-cleanup-elapsed]")) {
+      const mode = String(node.dataset.safeCleanupElapsed || "scan");
+      const startedAt = mode === "execute"
+        ? safeCleanupState.executeStartedAt
+        : safeCleanupState.scanStartedAt;
+      node.textContent = formatCleanupElapsed(startedAt);
+    }
   }
 
   function ensureSafeCleanupLiveTicker() {
@@ -13220,9 +13339,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         safeCleanupLiveTimer = 0;
         return;
       }
-      if (settingsActiveTab === "storage") {
-        rerenderUsageInsightsIfVisible();
-      }
+      updateSafeCleanupElapsedNodes();
     }, 1000);
   }
 
@@ -13230,10 +13347,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden) return;
     if (settingsActiveTab === "storage") {
-      const scrollTop = modal.querySelector(".codex-usage-hud-settings-body")?.scrollTop || 0;
-      renderSettingsModal("storage");
-      const body = modal.querySelector(".codex-usage-hud-settings-body");
-      if (body) body.scrollTop = scrollTop;
+      refreshStoragePanelIfVisible();
       return;
     }
     if (

@@ -2114,6 +2114,9 @@ class SafeCleanupManager:
         self._confirmations: dict[str, _Confirmation] = {}
         self._revision_counter = 0
         self._operation: dict[str, object] = _idle_operation()
+        # Soft revalidate skips retained from the most recent create_plan so
+        # online execute can merge them into the final maintenance result.
+        self._preplan_skips: dict[str, object] = {}
         # Optional sink for mid-scan snapshots (set by the worker thread).
         self.progress_publisher: Callable[[Mapping[str, object]], None] | None = None
 
@@ -2263,6 +2266,24 @@ class SafeCleanupManager:
         operation.update(values)
         self._operation = operation
         return self.snapshot()
+
+    def consume_preplan_skips(self, plan_id: str) -> list[MaintenanceActionResult]:
+        """Return and clear soft skips recorded for ``plan_id`` during create_plan."""
+
+        payload = self._preplan_skips
+        self._preplan_skips = {}
+        if str(payload.get("planId") or "") != str(plan_id or ""):
+            return []
+        rows = payload.get("results")
+        if not isinstance(rows, list):
+            return []
+        results: list[MaintenanceActionResult] = []
+        for row in rows:
+            try:
+                results.append(MaintenanceActionResult.from_dict(row))
+            except Exception:
+                continue
+        return results
 
     def apply_maintenance_result(
         self,
@@ -2566,15 +2587,37 @@ class SafeCleanupManager:
                 for candidate in self._load_codex_candidates()
             }
         actions: list[MaintenanceAction] = []
+        skipped: list[MaintenanceActionResult] = []
+        planned_items: list[CleanupItem] = []
         for item in items:
-            self._revalidate_item(
-                item,
-                revision,
-                current_codex_candidates=current_codex_candidates,
-            )
+            try:
+                self._revalidate_item(
+                    item,
+                    revision,
+                    current_codex_candidates=current_codex_candidates,
+                )
+            except SafeCleanupError as exc:
+                # Match helper delete soft-skips: a bulk selection must not fail
+                # closed just because a few regenerable temp trees mutated after
+                # scan (common for Windows TEMP / chrome_BITS_*). Hard gates
+                # (related processes, protected, SQLite, codex_temp policy)
+                # still fail the whole plan.
+                if item.action == "sqlite" or not _is_soft_revalidate_skip(exc):
+                    raise
+                skipped.append(
+                    MaintenanceActionResult(
+                        item_id=item.id,
+                        category=item.category,
+                        state="skipped",
+                        estimated_bytes=item.size,
+                        error=_safe_error(exc),
+                    )
+                )
+                continue
             if item._path is None or item._approved_root is None:
                 raise SafeCleanupError("cleanup item has no approved path")
             sqlite_audit = item._sqlite
+            planned_items.append(item)
             actions.append(
                 MaintenanceAction(
                     item_id=item.id,
@@ -2607,6 +2650,12 @@ class SafeCleanupManager:
                     vacuum_min_bytes=self.vacuum_min_reclaim_bytes,
                 )
             )
+        if not actions:
+            if skipped:
+                raise SafeCleanupError(
+                    "cleanup items changed after scan; no targets remain executable"
+                )
+            raise SafeCleanupError("empty or invalid cleanup selection")
         backup_directory = confirmation.backup_directory
         if (
             any(action.kind == "sqlite" for action in actions)
@@ -2637,6 +2686,12 @@ class SafeCleanupManager:
             result_path=encoded_result_path,
             restart_command=restart_argv,
         )
+        # Preserve soft-skipped rows so online execute can surface them as
+        # partial skips instead of silently dropping selected IDs.
+        self._preplan_skips = {
+            "planId": plan.id,
+            "results": [row.to_dict() for row in skipped],
+        }
         self._operation = {
             "id": plan.id,
             "requestId": "",
@@ -2645,8 +2700,9 @@ class SafeCleanupManager:
             "progress": 100,
             "error": "",
             "inventoryRevision": revision,
-            "selectedIds": [item.id for item in items],
-            "estimatedBytes": sum(item.size for item in items),
+            "selectedIds": [item.id for item in planned_items],
+            "estimatedBytes": sum(item.size for item in planned_items),
+            "skippedBeforeExecute": len(skipped),
         }
         return plan
 
@@ -2746,11 +2802,17 @@ class SafeCleanupManager:
                 raise SafeCleanupError("SQLite runtime group changed after scan")
         else:
             measured = _measure_path(resolved)
-            if (
-                measured.contains_reparse
-                or measured.errors
-                or (not allows_growth and measured.fingerprint != item._fingerprint)
-            ):
+            # Keep filesystem policy failures fail-closed. A generic
+            # fingerprint mismatch is the only content race that can be
+            # treated as a per-item soft skip here; reparse points and an
+            # incomplete audit must never be downgraded to that path.
+            if measured.contains_reparse:
+                raise SafeCleanupError("reparse paths are protected")
+            if measured.errors:
+                raise SafeCleanupError(
+                    "cleanup path could not be fully verified after scan"
+                )
+            if not allows_growth and measured.fingerprint != item._fingerprint:
                 raise SafeCleanupError("cleanup item changed after scan")
             if item.related_processes and not item.requires_offline:
                 try:
@@ -3180,6 +3242,23 @@ class SafeCleanupManager:
             sqlite_audit=audit,
             size=audit.estimated_bytes,
         )
+
+
+def _is_soft_revalidate_skip(error: BaseException) -> bool:
+    """True when a path-delete revalidation failure should skip one item only.
+
+    Soft skips cover TOCTOU / availability races between scan and plan creation.
+    Hard policy failures (related process started, protected item, SQLite group
+    drift, Codex temp policy) still abort the whole plan.
+    """
+
+    message = str(error or "").casefold()
+    soft_markers = (
+        "cleanup item changed after scan",
+        "cleanup item metadata changed after scan",
+        "cleanup path is no longer available",
+    )
+    return any(marker in message for marker in soft_markers)
 
 
 def _duration_label(seconds: float) -> str:
@@ -3800,11 +3879,21 @@ def run_maintenance_plan(
         state = "failed"
     elif restored and not success and not hard_failures:
         state = "restored"
-    elif success and not hard_failures and not skipped and not restored:
+    elif success and not hard_failures:
+        # Mature cleaners treat "deleted what we could + skipped busy items"
+        # as a successful pass, not a job that still needs user triage.
         state = "completed"
-    else:
-        # Mixed outcomes, pure skips, or soft issues become partial (not a job failure).
+    elif success or restored:
+        # Some work landed, but hard failures also occurred.
         state = "partial"
+    else:
+        # Pure skips / no mutations — not a hard failure.
+        state = "partial"
+    skip_note = (
+        f"{skipped} item(s) skipped (locked, busy, or changed)"
+        if skipped and state == "completed"
+        else ""
+    )
     incomplete = hard_failures + skipped + restored
     return MaintenanceResult(
         plan_id=plan.id,
@@ -3813,9 +3902,13 @@ def run_maintenance_plan(
         completed_at=float(clock()),
         actions=tuple(results),
         error=(
-            f"{incomplete} cleanup action(s) did not complete"
-            if incomplete and state != "completed"
-            else ""
+            skip_note
+            if skip_note
+            else (
+                f"{incomplete} cleanup action(s) did not complete"
+                if incomplete and state != "completed"
+                else ""
+            )
         ),
     )
 
