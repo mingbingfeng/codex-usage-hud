@@ -958,9 +958,32 @@ class RendererHudPayloadTests(unittest.TestCase):
             "if (!responseError && backgroundUsageState.selectedEventId)",
             jump_contract,
         )
+        # Auto-located open from the bottom-right badge must mark the event viewed.
+        self.assertIn(
+            "void loadBackgroundUsageDetail(\n"
+            "            backgroundUsageState.selectedEventId,\n"
+            "            { markViewed: true },",
+            jump_contract,
+        )
+        self.assertIn(
+            "markBackgroundUsageEventViewed(openEventId)",
+            jump_contract,
+        )
         self.assertNotIn(
             "loadBackgroundUsage({ eventId: openEventId, force: true })",
             jump_contract,
+        )
+        open_click_start = script.index(
+            'if (action.dataset.action === "background-usage-open-notification")'
+        )
+        open_click_end = script.index(
+            'if (action.dataset.action === "settings-open")',
+            open_click_start,
+        )
+        open_click_contract = script[open_click_start:open_click_end]
+        self.assertIn(
+            "void loadBackgroundUsageDetail(eventId, { markViewed: true })",
+            open_click_contract,
         )
 
     def test_renderer_usage_insights_safe_cleanup_contract(self) -> None:
@@ -1054,7 +1077,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         )
         self.assertNotIn("function usageInsightsPanelHtml", script)
         self.assertIn("function safeCleanupRequiresCodexClose", script)
-        self.assertIn("group?.requiresCodexClose === true", script)
+        self.assertIn("item?.requiresCodexClose === true", script)
         self.assertIn(
             "requiresCodexClose && !safeCleanupState.autoCloseConfirmed",
             script,
@@ -1079,13 +1102,13 @@ class RendererHudPayloadTests(unittest.TestCase):
             '"Old operating-system diagnostics will no longer be available."',
             script,
         )
-        self.assertIn("const groupById = new Map", script)
-        self.assertIn("const previewTierOrder = { consent: 0, safe: 1, protected: 2 };", script)
-        self.assertIn("const orderedPreviewItems = [...previewItems].sort", script)
-        self.assertIn("orderedPreviewItems.slice(0, 16)", script)
-        self.assertIn("${protectedGroups.length} 项", script)
-        self.assertIn("${items} 项", script)
-        self.assertIn("已选 ${selectedIds.length} 项", script)
+        self.assertIn("function safeCleanupPresentationGroups", script)
+        self.assertIn("function safeCleanupResultGroupsHtml", script)
+        self.assertIn("const safeRows = safeGroups.map", script)
+        self.assertNotIn("safeGroups.slice(0, 8)", script)
+        self.assertNotIn("orderedPreviewItems.slice(0, 16)", script)
+        self.assertIn("${protectedGroups.length} 类 / ${protectedTargets} 个目标", script)
+        self.assertIn("已选 ${selectedGroups.length} 类 / ${selectedIds.length} 个目标", script)
         self.assertIn("function safeCleanupPreviewSpaceSummary", script)
         self.assertIn("function safeCleanupConfirmSpaceSummary", script)
         self.assertIn("function safeCleanupResultBackupSummary", script)
@@ -1119,6 +1142,81 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("backupDirectory:", execute_contract)
         self.assertNotIn(
             'selectedIds.map((id) => ({ id, state: "selected" }))',
+            script,
+        )
+
+    def test_renderer_safe_cleanup_grouping_and_path_details_contract(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('inventoryRevision: ""', script)
+        self.assertIn("selectedIds: new Set()", script)
+        self.assertIn("expandedGroupIds: new Set()", script)
+        self.assertIn("function syncSafeCleanupSelection", script)
+        self.assertIn("safeCleanupState.inventoryRevision !== revision", script)
+        self.assertIn("data?.defaultSelectedIds", script)
+        self.assertIn("safeCleanupState.expandedGroupIds.clear();", script)
+
+        projection_start = script.index("function safeCleanupPresentationKey")
+        projection_end = script.index("function safeCleanupTierLabel", projection_start)
+        projection_contract = script[projection_start:projection_end]
+        for field in (
+            "item?.category",
+            "item?.tier",
+            "item?.label",
+            "item?.retention",
+            "item?.impact",
+            "item?.blockedReason",
+            "item?.requiresOffline",
+            "item?.requiresBackup",
+            "item?.requiresCodexClose",
+            "item?.relatedProcesses",
+        ):
+            self.assertIn(field, projection_contract)
+        self.assertIn("group.bytes +=", projection_contract)
+        self.assertIn("group.files +=", projection_contract)
+        self.assertIn("group.targetCount += 1", projection_contract)
+        self.assertIn("group.executableIds.push(itemId)", projection_contract)
+        self.assertIn("oldestModifiedAt", projection_contract)
+        self.assertIn("newestModifiedAt", projection_contract)
+
+        self.assertIn('data-action="safe-cleanup-group-toggle"', script)
+        self.assertIn('data-action="safe-cleanup-group-expand"', script)
+        self.assertIn('data-action="safe-cleanup-copy-path"', script)
+        self.assertIn('data-action="safe-cleanup-reveal"', script)
+        self.assertIn("codex-usage-hud-cleanup-target-path", script)
+        self.assertIn("overflow-wrap: anywhere", script)
+        self.assertIn("user-select: text", script)
+        self.assertIn("safeCleanupRawItems().find", script)
+        self.assertIn("copyHudText(path)", script)
+
+        reveal_start = script.index("function requestSafeCleanupReveal")
+        reveal_end = script.index("function openSafeCleanupExecuteConfirm", reveal_start)
+        reveal_contract = script[reveal_start:reveal_end]
+        self.assertIn('action: "safeCleanupReveal"', reveal_contract)
+        self.assertIn("inventoryRevision", reveal_contract)
+        self.assertIn("itemId: normalizedItemId", reveal_contract)
+        self.assertNotIn("path:", reveal_contract)
+
+        self.assertIn(
+            "safeCleanupPresentationGroups(data, { itemIds: selectedIds, results: completeResults })",
+            script,
+        )
+        self.assertIn("fallbackState: state === \"accepted\"", script)
+        self.assertIn("safeCleanupAggregateResultState", script)
+        self.assertIn("selectedGroupCount", script)
+        self.assertIn("${selectedGroupCount} 类、${selectedIds.length} 个本地目标", script)
+
+    def test_session_cleanup_confirm_survives_same_token_repaint(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('layer.dataset.sessionCleanupConfirm = "true";', script)
+        self.assertIn('layer.dataset.sessionCleanupConfirmToken = token;', script)
+        self.assertIn("function restoreSessionCleanupConfirm(expectedToken)", script)
+        self.assertIn("restoreSessionCleanupConfirm(sessionCleanupConfirmToken);", script)
+        self.assertIn("currentToken !== token", script)
+        self.assertIn("restoreSessionCleanupConfirm(token);", script)
+        self.assertNotIn(
+            'closeSettingsConfirm();\n        sessionCleanupState.previewTokenShown = "";',
             script,
         )
 
@@ -1508,7 +1606,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "34";', script)
+        self.assertIn('const version = "35";', script)
         self.assertIn("function applyCachedActiveSessionPayload", script)
         self.assertIn("function cacheActiveSessionPayload", script)
         self.assertIn("if (payload?.cachedPreview) return;", script)
@@ -1623,6 +1721,16 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertGreater(len(images[1]["src"]), 1000)
         self.assertTrue(Path(paths[0]["path"]).exists())
         self.assertTrue(Path(paths[1]["path"]).exists())
+
+    def test_rest_reminder_settings_use_product_copy_and_live_countdown(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn("专注休息提醒", script)
+        self.assertIn("本轮开始", script)
+        self.assertIn("距离下一次提醒", script)
+        self.assertIn("data-rest-reminder-start", script)
+        self.assertIn("setInterval(syncRestReminderCountdown, 1000)", script)
+        self.assertNotIn("到点会优先弹出 PySide6", script)
 
     def test_payload_can_include_support_qr_images(self) -> None:
         snapshot = ParsedSession(status="waiting")

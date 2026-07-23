@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from codex_usage_hud.core.safe_cleanup import (
     platform_cache_definitions,
     read_maintenance_plan,
     read_maintenance_result,
+    reveal_cleanup_path,
     run_maintenance_plan,
     run_maintenance_plan_file,
     write_maintenance_plan,
@@ -190,6 +192,7 @@ class SafeCleanupInventoryTests(unittest.TestCase):
             }
             for name in safe_names | protected_names:
                 (runtime / name).write_bytes(name.encode("ascii"))
+            (runtime / "unknown.bin").write_text("sensitive-payload-marker")
             manager = self.make_manager(
                 runtime,
                 pid_active=lambda pid: pid == 111,
@@ -203,14 +206,25 @@ class SafeCleanupInventoryTests(unittest.TestCase):
             ]
             self.assertEqual(len(safe), len(safe_names))
             self.assertEqual(len(protected), len(protected_names))
-            self.assertEqual(
-                set(payload["defaultSelectedIds"]), {group["id"] for group in safe}
-            )
+            self.assertEqual(payload["defaultSelectedIds"], [])
             self.assertTrue(all(group["requiresOffline"] for group in safe))
             self.assertTrue(all(not group["requiresBackup"] for group in safe))
+            offline_safe_ids = {
+                group["id"]
+                for group in safe
+                if group["requiresOffline"]
+            }
+            self.assertTrue(offline_safe_ids)
+            # Offline HUD diagnostics stay selectable but are not one-click defaults.
+            for item_id in offline_safe_ids:
+                manager.preview([item_id], payload["revision"])
             encoded = json.dumps(payload)
-            self.assertNotIn(str(runtime), encoded)
-            self.assertNotIn("unknown.bin", encoded)
+            visible_paths = {Path(str(group["path"])) for group in payload["groups"]}
+            self.assertEqual(
+                visible_paths,
+                {runtime.resolve() / name for name in safe_names | protected_names},
+            )
+            self.assertNotIn("sensitive-payload-marker", encoded)
 
     def test_active_overlay_command_history_is_protected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -242,6 +256,106 @@ class SafeCleanupInventoryTests(unittest.TestCase):
             group = self.make_manager(runtime).scan()["groups"][0]
             self.assertEqual(group["tier"], "protected")
             self.assertTrue(target.exists())
+
+    def test_cleanup_payload_exposes_exact_local_target_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temp_root = root / "temp"
+            target = temp_root / "old-bundle"
+            target.mkdir(parents=True)
+            (target / "payload.bin").write_bytes(b"payload")
+            _set_mtime(target / "payload.bin", NOW - (2 * DAY))
+            _set_mtime(target, NOW - (2 * DAY))
+            definition = CacheDefinition(
+                key="temp",
+                category="user_temp",
+                path=temp_root,
+                label="Temporary data",
+                impact="Rebuilt later.",
+                mode="expired_children",
+                min_age_seconds=DAY,
+            )
+            manager = self.make_manager(
+                root / "missing-runtime",
+                cache_definitions=(definition,),
+            )
+
+            inventory = manager.scan()
+            group = inventory["groups"][0]
+
+            self.assertEqual(group["path"], str(target.resolve()))
+            self.assertEqual(group["pathKind"], "directory")
+            self.assertTrue(str(group["modifiedAt"]).endswith("Z"))
+            self.assertEqual(
+                manager.resolve_reveal_path(group["id"], inventory["revision"]),
+                target.resolve(),
+            )
+            with self.assertRaisesRegex(SafeCleanupError, "stale"):
+                manager.resolve_reveal_path(group["id"], "old-revision")
+            with self.assertRaisesRegex(SafeCleanupError, "stale"):
+                manager.resolve_reveal_path(
+                    group["id"],
+                    SafeCleanupManager.scanning_revision("pending-scan"),
+                )
+            with self.assertRaisesRegex(SafeCleanupError, "unknown"):
+                manager.resolve_reveal_path("unknown-item", inventory["revision"])
+
+            # Disappeared targets must fail before any Explorer/Finder launch.
+            shutil.rmtree(target)
+            with self.assertRaisesRegex(SafeCleanupError, "no longer available|escaped"):
+                manager.resolve_reveal_path(group["id"], inventory["revision"])
+
+    def test_native_reveal_uses_argument_vectors_without_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target_file = root / "file with spaces.txt"
+            target_file.write_text("payload")
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def launch(command: list[str], **kwargs: object) -> object:
+                calls.append((command, kwargs))
+                return object()
+
+            self.assertEqual(
+                reveal_cleanup_path(root, platform="win32", launcher=launch),
+                ("explorer.exe", str(root.resolve())),
+            )
+            self.assertEqual(
+                reveal_cleanup_path(
+                    target_file, platform="win32", launcher=launch
+                ),
+                ("explorer.exe", "/select,", str(target_file.resolve())),
+            )
+            self.assertEqual(
+                reveal_cleanup_path(root, platform="darwin", launcher=launch),
+                ("open", str(root.resolve())),
+            )
+            self.assertEqual(
+                reveal_cleanup_path(
+                    target_file, platform="darwin", launcher=launch
+                ),
+                ("open", "-R", str(target_file.resolve())),
+            )
+            self.assertEqual(len(calls), 4)
+            self.assertTrue(all(call[1]["shell"] is False for call in calls))
+
+    def test_native_reveal_rejects_reparse_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks are unavailable")
+
+            with self.assertRaisesRegex(SafeCleanupError, "reparse"):
+                reveal_cleanup_path(
+                    link,
+                    platform="win32",
+                    launcher=lambda *_args, **_kwargs: None,
+                )
 
     def test_only_expired_exact_cleanup_backup_names_are_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -419,6 +533,38 @@ class SafeCleanupInventoryTests(unittest.TestCase):
             )
             self.assertEqual(windows_by_key["directx_shader"].tier, "safe")
             for key in (
+                "yarn",
+                "pnpm",
+                "bun",
+                "go_mod",
+                "cargo_registry",
+                "maven",
+                "uv",
+                "poetry",
+                "composer",
+                "huggingface",
+                "torch",
+                "modelscope",
+                "ollama_models",
+                "playwright",
+                "cypress",
+                "electron",
+                "ccache",
+                "sccache",
+                "android_cache",
+                "scoop_cache",
+            ):
+                self.assertIn(key, windows_by_key)
+                self.assertEqual(windows_by_key[key].tier, "safe")
+            self.assertEqual(
+                windows_by_key["huggingface"].path,
+                win_home / ".cache" / "huggingface",
+            )
+            self.assertEqual(
+                windows_by_key["playwright"].path,
+                local / "ms-playwright",
+            )
+            for key in (
                 "windows_crash_dumps",
                 "windows_error_archive",
                 "windows_error_queue",
@@ -426,8 +572,13 @@ class SafeCleanupInventoryTests(unittest.TestCase):
                 self.assertEqual(windows_by_key[key].tier, "consent")
                 self.assertEqual(windows_by_key[key].mode, "expired_children")
                 self.assertEqual(windows_by_key[key].min_age_seconds, 7 * DAY)
-            self.assertFalse(
-                any("$Recycle.Bin" in str(item.path) for item in windows)
+            # User-scoped Recycle Bin SID folders are optional candidates when readable.
+            self.assertTrue(
+                all(
+                    item.mode == "expired_children"
+                    for item in windows
+                    if "recycle_bin" in item.key
+                )
             )
             browser_paths = [
                 item.path for item in windows if item.category == "browser_cache"
@@ -468,12 +619,35 @@ class SafeCleanupInventoryTests(unittest.TestCase):
             mac_by_key = {item.key: item for item in mac}
             self.assertEqual(mac_by_key["homebrew"].tier, "safe")
             self.assertEqual(mac_by_key["xcode_derived_data"].tier, "safe")
+            for key in (
+                "yarn",
+                "pnpm",
+                "bun",
+                "go_mod",
+                "cargo_registry",
+                "maven",
+                "uv",
+                "poetry",
+                "huggingface",
+                "playwright",
+                "ollama_models",
+            ):
+                self.assertIn(key, mac_by_key)
+                self.assertEqual(mac_by_key[key].tier, "safe")
+            self.assertEqual(
+                mac_by_key["uv"].path,
+                mac_home / "Library" / "Caches" / "uv",
+            )
+            self.assertNotIn("scoop_cache", mac_by_key)
             for key in ("macos_diagnostic_reports", "macos_crash_reports"):
                 self.assertEqual(mac_by_key[key].tier, "consent")
                 self.assertEqual(mac_by_key[key].mode, "expired_children")
                 self.assertEqual(mac_by_key[key].min_age_seconds, 7 * DAY)
             self.assertFalse(any(item.path.name == "Cookies" for item in mac))
-            self.assertFalse(any(item.path.name == ".Trash" for item in mac))
+            self.assertTrue(
+                any(item.key == "recycle_bin" for item in mac)
+                or not (mac_home / ".Trash").exists()
+            )
 
     def test_codex_temp_candidates_join_default_cleanup_without_sqlite_backup(
         self,
@@ -615,6 +789,65 @@ class SafeCleanupInventoryTests(unittest.TestCase):
 
 
 
+
+    def test_run_maintenance_plan_emits_per_action_progress(self) -> None:
+        events: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "a.cache"
+            second = root / "b.cache"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two-bytes")
+            manager = SafeCleanupManager(
+                platform="win32",
+                home=root,
+                env={},
+                hud_runtime_root=root / "hud",
+                cache_definitions=(
+                    CacheDefinition(
+                        key="a",
+                        category="developer_cache",
+                        path=first,
+                        label="A cache",
+                        impact="rebuild",
+                    ),
+                    CacheDefinition(
+                        key="b",
+                        category="developer_cache",
+                        path=second,
+                        label="B cache",
+                        impact="rebuild",
+                    ),
+                ),
+                sqlite_targets=(),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: (),
+                lock_probe=lambda _path: False,
+            )
+            (root / "hud").mkdir()
+            inventory = manager.scan(request_id="exec-progress")
+            ids = [
+                group["id"]
+                for group in inventory["groups"]
+                if group["tier"] == "safe" and not group.get("blockedReason")
+            ]
+            self.assertGreaterEqual(len(ids), 2)
+            preview = manager.preview(ids[:2], inventory["revision"], request_id="exec-progress")
+            plan = manager.create_plan(
+                ids[:2],
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+            result = run_maintenance_plan(plan, progress_callback=events.append)
+            self.assertIn(result.state, {"completed", "partial"})
+            self.assertTrue(events, "expected per-action execute progress events")
+            self.assertTrue(any(int(event.get("progress") or 0) >= 25 for event in events))
+            self.assertTrue(any(event.get("stage") == "start" for event in events))
+            self.assertTrue(any(event.get("stage") == "done" for event in events))
+            self.assertEqual(max(int(event.get("total") or 0) for event in events), 2)
+
+
 class SafeCleanupConfirmationTests(unittest.TestCase):
     def make_manager(
         self,
@@ -643,7 +876,11 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
             log.write_bytes(b"before")
             manager = self.make_manager(runtime)
             inventory = manager.scan()
-            item_id = inventory["defaultSelectedIds"][0]
+            item_id = next(
+                group["id"]
+                for group in inventory["groups"]
+                if group["tier"] == "safe" and group["category"] == "hud_diagnostics"
+            )
             preview = manager.preview([item_id], inventory["revision"])
             token = preview["operation"]["confirmationToken"]
             log.write_bytes(b"x")
@@ -659,7 +896,11 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
             log.write_bytes(b"before")
             manager = self.make_manager(runtime)
             inventory = manager.scan()
-            item_id = inventory["defaultSelectedIds"][0]
+            item_id = next(
+                group["id"]
+                for group in inventory["groups"]
+                if group["tier"] == "safe" and group["category"] == "hud_diagnostics"
+            )
             preview = manager.preview([item_id], inventory["revision"])
             with log.open("ab") as handle:
                 handle.write(b" during-preview")
@@ -951,7 +1192,11 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
             lock_probe=lambda _path: False,
         )
         inventory = manager.scan()
-        item_id = inventory["defaultSelectedIds"][0]
+        item_id = next(
+            group["id"]
+            for group in inventory["groups"]
+            if group["tier"] == "safe" and group["category"] == "hud_diagnostics"
+        )
         preview = manager.preview([item_id], inventory["revision"])
         plan = manager.create_plan(
             [item_id],
@@ -1336,7 +1581,11 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
                 lock_probe=lambda _path: False,
             )
             inventory = manager.scan()
-            item_id = inventory["defaultSelectedIds"][0]
+            item_id = next(
+                group["id"]
+                for group in inventory["groups"]
+                if group["tier"] == "safe" and group["category"] == "hud_diagnostics"
+            )
             preview = manager.preview([item_id], inventory["revision"])
             plan = manager.create_plan(
                 [item_id],
@@ -1350,7 +1599,8 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
                 pid_active=lambda _pid: False,
                 lock_probe=lambda path: path == log,
             )
-            self.assertEqual(locked.actions[0].state, "failed")
+            self.assertEqual(locked.actions[0].state, "skipped")
+            self.assertEqual(locked.state, "partial")
             self.assertTrue(log.exists())
             log.write_bytes(b"x")
             changed = run_maintenance_plan(
@@ -1360,7 +1610,8 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
                 lock_probe=lambda _path: False,
                 running_process_names=lambda: set(),
             )
-            self.assertEqual(changed.actions[0].state, "failed")
+            self.assertEqual(changed.actions[0].state, "skipped")
+            self.assertEqual(changed.state, "partial")
             self.assertTrue(log.exists())
 
     def test_related_process_start_after_plan_blocks_helper_deletion(self) -> None:
@@ -1405,7 +1656,8 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
                 running_process_names=lambda: {"chrome.exe"},
             )
 
-            self.assertEqual(result.actions[0].state, "failed")
+            self.assertEqual(result.actions[0].state, "skipped")
+            self.assertEqual(result.state, "partial")
             self.assertTrue(cache.is_dir())
 
     def test_helper_rejects_plan_path_outside_approved_root(self) -> None:
@@ -1428,7 +1680,11 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
                 lock_probe=lambda _path: False,
             )
             inventory = manager.scan()
-            item_id = inventory["defaultSelectedIds"][0]
+            item_id = next(
+                group["id"]
+                for group in inventory["groups"]
+                if group["tier"] == "safe" and group["category"] == "hud_diagnostics"
+            )
             preview = manager.preview([item_id], inventory["revision"])
             plan = manager.create_plan(
                 [item_id],
@@ -1504,7 +1760,7 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
                 monotonic=lambda: 0,
                 sleep=lambda _seconds: None,
             )
-            self.assertEqual(result.state, "failed")
+            self.assertEqual(result.state, "partial")
             self.assertEqual(result.actions[0].state, "skipped")
             self.assertTrue(target.exists())
 

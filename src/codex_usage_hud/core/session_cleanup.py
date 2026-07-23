@@ -90,6 +90,9 @@ class _Confirmation:
 
 
 CommandRunner = Callable[[Sequence[str], Mapping[str, str]], Any]
+UsageSnapshotPrepare = Callable[[SessionCleanupItem], object]
+UsageSnapshotCommit = Callable[[object], None]
+UsageSnapshotDiscard = Callable[[object], None]
 
 
 def _default_command_runner(
@@ -196,6 +199,9 @@ class SessionCleanupManager:
         active_session_ids: Callable[[], Iterable[str]] | None = None,
         codex_command: Sequence[str] = ("codex",),
         command_runner: CommandRunner = _default_command_runner,
+        usage_snapshot_prepare: UsageSnapshotPrepare | None = None,
+        usage_snapshot_commit: UsageSnapshotCommit | None = None,
+        usage_snapshot_discard: UsageSnapshotDiscard | None = None,
         environment: Mapping[str, str] | None = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
@@ -208,6 +214,9 @@ class SessionCleanupManager:
         self.active_session_ids = active_session_ids or (lambda: ())
         self.codex_command = tuple(str(part) for part in codex_command if str(part))
         self.command_runner = command_runner
+        self.usage_snapshot_prepare = usage_snapshot_prepare
+        self.usage_snapshot_commit = usage_snapshot_commit
+        self.usage_snapshot_discard = usage_snapshot_discard
         self.environment = dict(os.environ if environment is None else environment)
         self.clock = clock
         self.token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
@@ -466,8 +475,12 @@ class SessionCleanupManager:
                 "actualBytes": 0,
                 "error": "",
             }
+            usage_receipt: object | None = None
+            delete_accepted = False
             try:
                 self._revalidate(item)
+                if self.usage_snapshot_prepare is not None:
+                    usage_receipt = self.usage_snapshot_prepare(item)
                 command = (*self.codex_command, "delete", "--force", item._session_id)
                 completed = self.command_runner(command, self.environment)
                 if int(getattr(completed, "returncode", 1) or 0) != 0:
@@ -477,8 +490,20 @@ class SessionCleanupManager:
                     raise SessionCleanupError(
                         detail[:240] or "Codex CLI rejected permanent deletion."
                     )
+                delete_accepted = True
                 self._verify_deleted(item)
+                if usage_receipt and self.usage_snapshot_commit is not None:
+                    self.usage_snapshot_commit(usage_receipt)
             except Exception as exc:
+                if (
+                    usage_receipt
+                    and not delete_accepted
+                    and self.usage_snapshot_discard is not None
+                ):
+                    try:
+                        self.usage_snapshot_discard(usage_receipt)
+                    except Exception:
+                        pass
                 result_row["error"] = (
                     str(exc)[:240]
                     if isinstance(exc, SessionCleanupError)

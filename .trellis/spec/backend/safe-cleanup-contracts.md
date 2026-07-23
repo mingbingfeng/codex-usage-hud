@@ -33,13 +33,18 @@
   emit only top-level children whose complete trees are older than the cutoff;
   blocked or unverifiable children become `protected` regardless of the
   configured tier.
-- Renderer commands use two distinct contracts:
+- Renderer commands use three distinct contracts:
   - `safeCleanupPreview` sends `groupIds`, `inventoryRevision`,
     `consentConfirmed`, and `backupDirectory`.
   - `safeCleanupExecute` sends the preview-bound `groupIds`,
     `inventoryRevision`, `confirmationToken`, and the current
     `autoCloseAndRestore` permission. It must not reinterpret resubmitted
     consent or backup-directory fields.
+  - `safeCleanupReveal` sends only `inventoryRevision` and opaque `itemId`.
+    It must not accept a renderer-supplied path. Python resolves the path
+    from the current inventory, rechecks absolute/approved-root/existence/
+    reparse constraints, then launches Explorer or Finder with an argument
+    vector and `shell=False`.
 - Hidden helper command:
 
   ```text
@@ -54,10 +59,23 @@
 
 ### 3. Contracts
 
-- Renderer payloads contain opaque item IDs, neutral labels, categories,
-  counts, bytes, retention, impact, process requirements, and aggregate usage.
-  They do not contain cleanup source paths, prompts, responses, credentials, or
-  raw database rows.
+- Safe-cleanup renderer payloads contain opaque item IDs, neutral labels,
+  categories, counts, bytes, retention, impact, process requirements, aggregate
+  usage, and local display metadata for each deletion unit: absolute `path`,
+  `pathKind` (`file` | `directory` | `unknown`), and `modifiedAt`. Those path
+  fields exist only for local auditability (expanded details, copy path, and
+  native reveal). They must never be uploaded, written to unrelated logs, or
+  treated as mutation authority. Payloads still must not include prompts,
+  responses, credentials, or raw database rows.
+- The renderer groups raw inventory items into presentation categories by the
+  full safety tuple (`category`, `tier`, `label`, `retention`, `impact`,
+  `blockedReason`, process/backup requirements). Grouping never crosses tier or
+  blocked-reason boundaries. Category selection expands to every executable
+  child opaque ID. Preview and execute continue to send raw item IDs only;
+  presentation group IDs are never accepted as deletion or reveal authority.
+- Every selected cleanup target must remain visible in a current category or its
+  expanded details. The renderer must not silently truncate selected safe rows
+  (for example with `slice(0, 8)`) while still confirming those IDs.
 - `sessions`, `topSessionsByUsage`, and `topSessionsByCost` rank canonical root
   user threads, not rollout files. A subagent and any nested subagents contribute
   their post-fork usage exactly once to the root thread aggregate and never
@@ -98,18 +116,23 @@
   `operation.selectedIds` / `operation.includesConsent` plus the renderer's
   preview-time directory snapshot. The Python confirmation token remains the
   authority if renderer state drifts.
-- Truncated preview/result lists order `consent` groups before `safe` groups so
+- Preview/result presentation groups order `consent` before `safe` so
   history-loss items remain visible even when many default cache groups are
-  selected.
+  selected. Selected targets stay fully enumerable; scrolling stays inside the
+  content pane.
 - `protected` items have no executable action. Unknown files, reparse points,
   active runtime data, config, credentials, sessions, `state_5.sqlite`,
   `goals_1.sqlite`, and `memories_1.sqlite` remain protected. Recycle Bin/Trash
   is not a path definition until a dedicated native action can preserve its
-  current-user and recoverability contracts.
-- Every path action is bound to one inventory revision, opaque ID, canonical
-  approved root, `lstat` identity, content fingerprint, and lock/process gates.
-  Current HUD logs may grow append-only between scan and helper execution;
-  replacement, truncation, reparse, or identity change is rejected.
+  current-user and recoverability contracts. Protected or consent items may still
+  support read-only reveal when their stored path remains verifiable.
+- Mutation path actions remain bound to one inventory revision, opaque ID,
+  canonical approved root, `lstat` identity, content fingerprint, and
+  lock/process gates. Reveal is read-only: it reuses revision + opaque ID +
+  approved-root/existence/reparse checks, but does not require deletion
+  fingerprint or process gates. Current HUD logs may grow append-only between
+  scan and helper execution; replacement, truncation, reparse, or identity
+  change is rejected for mutation.
 - Related system/browser/editor caches are rechecked both when creating the plan
   and in the helper. If a related process is running, the whole cache definition
   remains unchanged.
@@ -160,6 +183,10 @@
 | Condition | Required behavior |
 | --- | --- |
 | Inventory revision or confirmation token is stale | Reject before creating a plan. |
+| Reveal uses a stale, scanning, or empty inventory revision | Reject before launching Explorer/Finder. |
+| Reveal uses an unknown opaque ID or item without a stored path | Reject before launching Explorer/Finder. |
+| Reveal target escaped approved root, disappeared, or is a reparse point | Reject before launching Explorer/Finder. |
+| Reveal command includes a path field | Ignore the path; resolve only from revision + opaque item ID. |
 | A rollout is a direct or nested subagent | Merge its live usage into the canonical root session; do not emit a child ranking row. |
 | A subagent references a root rollout that is unavailable | Keep one non-actionable root-ID aggregate; do not fall back to opening the child. |
 | A background event carries any reminder acknowledgement state | Render `lastSeenAt` in the row/detail header and keep acknowledgement labels out of the history UI. |
@@ -209,11 +236,16 @@
 - Base: a relevant app is running, no history exceeds retention, or backup space
   is insufficient; the affected group is protected/skipped and other inventory
   remains usable.
-- Bad: raw-delete a SQLite/WAL/SHM file, expose absolute source paths to the
-  renderer, describe cleanup bytes as net reclaim while a same-volume backup is
-  required, treat user consent as an override for active tasks, accept arbitrary
-  extra schema objects, rebuild consent text from mutable controls, or force-kill
-  an independent CLI and claim it was restored.
+- Good: multiple same-rule `%TEMP%` children appear as one presentation category
+  with summed bytes/targets/files; expanding shows each absolute path and the
+  user can copy or reveal via opaque ID only.
+- Bad: raw-delete a SQLite/WAL/SHM file, upload absolute cleanup paths or write
+  them into unrelated logs, accept a renderer-supplied path for reveal/delete,
+  silently hide selected targets with a top-N slice, describe cleanup bytes as
+  net reclaim while a same-volume backup is required, treat user consent as an
+  override for active tasks, accept arbitrary extra schema objects, rebuild
+  consent text from mutable controls, or force-kill an independent CLI and claim
+  it was restored.
 
 ### 6. Tests Required
 
@@ -221,8 +253,12 @@
   - fixed HUD log whitelist and protected runtime files;
   - Windows/macOS shader/developer cache definitions, seven-day diagnostic
     consent, non-SQLite backup independence, and Recycle Bin/Trash exclusion;
-  - opaque payloads, revision/token expiry, path escape, reparse, fingerprint,
-    lock, process-start, and append-only log growth checks;
+  - opaque payloads, local path/`pathKind`/`modifiedAt` display fields,
+    revision/token expiry, path escape, reparse, fingerprint, lock,
+    process-start, and append-only log growth checks;
+  - reveal resolution rejects stale revision, unknown ID, missing path, escaped
+    boundary, and reparse targets; native argv covers Windows Explorer and
+    macOS Finder for file and directory targets with `shell=False`;
   - real `logs_2.sqlite` table/index fixture including `_sqlx_migrations`, 24-hour
     deletion, backup integrity, VACUUM, failure restoration, unknown table,
     trigger/view, extra column/index, index-shape, and failed migration rejection;
@@ -233,21 +269,26 @@
   - same-volume versus cross-volume preview accounting and result projection
     that strips absolute backup paths while retaining neutral location labels.
 - `tests/test_ui.py`: active-task, independent CLI, background runtime shutdown,
-  Codex close, helper launch, daemon exit code, recovery result flow, and native
-  backup-directory selection persistence with request correlation; usage
-  insights also cover recursive subagent-to-root aggregation, unchanged overall
-  totals, root actionability, and workdir-leaf privacy.
+  Codex close, helper launch, daemon exit code, recovery result flow, native
+  backup-directory selection persistence with request correlation, and
+  `safeCleanupReveal` request correlation that resolves opaque IDs only and
+  ignores forged path fields; usage insights also cover recursive
+  subagent-to-root aggregation, unchanged overall totals, root actionability,
+  and workdir-leaf privacy.
 - `tests/test_renderer_hud.py`: domain-only updates, immutable preview-bound
-  consent/backup controls and confirmation copy, readable group/result labels,
-  net-reclaim/cross-volume copy, consent-first truncated preview ordering,
-  execute-command field boundaries, no opaque IDs as visible copy,
+  consent/backup controls and confirmation copy, presentation-group aggregation
+  and selection expansion, expandable path details, copy/reveal command fields
+  without a path argument, no silent selected-row truncation, readable
+  group/result labels, net-reclaim/cross-volume copy, consent-first preview
+  ordering, execute-command field boundaries, no opaque IDs as visible copy,
   background history timestamps replacing reminder acknowledgement labels,
   and space-cleanup visual structure contracts (compact segments, 572px dialog,
   empty-state, summary band / 54px rows, six-column session head, danger
   confirm).
 - Live Windows acceptance: open Space Cleanup in the real renderer, scan and
-  preview only, verify all three tiers, HUD logs default-selected, SQLite
-  unchecked with 24-hour retention, no horizontal overflow, and no deletion.
+  preview only, verify grouped categories with expandable exact paths, all
+  three tiers, HUD logs default-selected, SQLite unchecked with 24-hour
+  retention, no horizontal overflow at desktop/760px/520px, and no deletion.
 - macOS remains covered by platform adapter contract tests plus a manual smoke
   checklist when a machine is available.
 
@@ -311,7 +352,8 @@ revalidated.
   previews a selected root-session batch, or permanently deletes that batch.
 - Scope: Windows CLI wrapper resolution, state/index/rollout inventory, spawn
   tree grouping, renderer selection state, one-shot confirmation, official
-  delete execution, and post-command verification.
+  delete execution, compact usage preservation, post-command verification, and
+  the existing `UsageSummaryCache` projection.
 - Permanent deletion is independent from garbage cleanup. It never creates a
   path-deletion or direct SQLite fallback.
 
@@ -327,6 +369,11 @@ revalidated.
 - `SessionCleanupManager.execute(item_ids, revision, confirmation_token,
   request_id="") -> dict` serially invokes the official command and verifies
   each selected family after the command returns.
+- `DeletedUsageLedger.prepare(...) -> str`, `commit(transaction_id)`, and
+  `discard(transaction_id)` bind a compact pending usage snapshot to the
+  destructive command. `UsageSummaryCache.summarize(...)` loads committed
+  ledger contributions; `UsageSummaryCache.insights(...)` projects that
+  already-cached state without new filesystem work.
 - The only mutation command is:
 
   ```text
@@ -354,6 +401,21 @@ revalidated.
   for the selected root, then requires the root and every recorded descendant
   to be absent from the state DB, session index, and active/archived rollout
   paths. A zero exit code without this evidence is a failure.
+- Before invoking the CLI, every selected family with usage in the current
+  30-local-day retention window must be reduced to metering-only events in
+  `deleted-session-usage.json` under the HUD runtime directory. The ledger may
+  contain timestamps, provider/model, token fields, price coverage, root UUID,
+  family UUIDs, title, and workdir leaf; it must not contain prompts, responses,
+  or committed rollout paths.
+- Ledger writes are atomic. Preparation persists `pending`; a nonzero CLI exit
+  discards it, and successful DB/index/rollout verification commits it. If the
+  process exits after the rollout family disappears but before commit, the next
+  explicit usage scan promotes that pending row. Events older than the last 30
+  local calendar dates are pruned from both pending and committed rows.
+- Committed deleted usage participates in day, week, rolling-30-day,
+  provider/model, cost-coverage, and Top10 session projections. A deleted root
+  remains non-actionable. If any recorded family UUID still has a live rollout,
+  the ledger row is suppressed so usage is never double counted.
 - Scan, preview, and execute use their own revision, opaque IDs, and one-shot
   token. Batch execution is serial; a failed item does not erase the success or
   retryability of other items.
@@ -375,7 +437,11 @@ revalidated.
 | Spawn ancestry is cyclic, ambiguous, or changes after scan | Protect or reject the family without invoking the CLI. |
 | Search, status, or time filter changes | Clear all selected opaque IDs before repaint and disable delete. |
 | Revision, selected IDs, or token differ from preview | Reject before invoking the CLI and consume no unrelated token. |
+| Usage cannot be parsed or the pending ledger cannot be written | Reject that item before invoking `codex delete --force`. |
+| CLI exits nonzero after usage preparation | Discard the pending usage row and keep the live rollout as the only source. |
+| CLI succeeds but the process stops before ledger commit | Recover pending usage only when every recorded rollout path is absent. |
 | CLI exits zero but DB, index, or rollout evidence remains | Mark that item failed; never raw-delete the residue. |
+| A committed ledger family also exists in live rollouts | Use the live rollout contribution and suppress the ledger family. |
 | One item in a batch fails | Return `partial`, preserve per-item results, and leave failed items retryable after rescan. |
 
 ### 5. Good/Base/Bad Cases
@@ -386,18 +452,28 @@ revalidated.
 - Good: one selectable row is checked, then the user changes to the
   Current/Running filter; the selected count becomes zero and Permanent Delete
   is disabled even though the old row is no longer visible.
+- Good: a root and nested subagent are permanently deleted; their compact
+  metering events still contribute exactly once to today's and this week's
+  tokens/cost, while their ranking row is no longer actionable.
 - Base: the installed CLI has no non-interactive delete command; users can
   inspect the grouped inventory but cannot select or execute rows.
+- Base: a selected family has no usage in the retention window; deletion needs
+  no ledger row and all existing safety gates still apply.
 - Bad: use `shell=True`, pass a renderer-supplied UUID to the CLI, invoke delete
-  once per child, retain hidden selections across filters, or treat exit code
-  zero as proof that deletion completed.
+  once per child, retain hidden selections across filters, delete before a
+  preservable usage snapshot exists, or count live and ledger copies together.
 
 ### 6. Tests Required
 
 - `tests/test_session_cleanup.py`: root/descendant grouping and payload privacy;
   current/running/ambiguous graph protection; `.CMD` resolution through the
   supplied `PATH`; force-only capability; revision/token single use; official
-  root command; DB/index/rollout family verification; and partial batch results.
+  root command; DB/index/rollout family verification; usage prepare/commit/
+  discard ordering; snapshot failure before command; and partial batch results.
+- `tests/test_ui.py`: deleting a root/child rollout family preserves identical
+  day/week/month tokens and cost, incomplete price coverage, provider filtering,
+  one root ranking row, and non-actionability; interrupted pending rows recover
+  only after source removal, and events older than 30 local dates are pruned.
 - `tests/test_renderer_hud.py`: contract assertions require each search/status/
   time assignment to be immediately followed by `selectedIds.clear()`.
 - Isolated end-to-end gate: use a temporary `CODEX_HOME` with active, archived,
@@ -429,6 +505,14 @@ resolved = shutil.which(command[0], path=environment.get("PATH"))
 argv = [resolved or command[0], *command[1:]]
 subprocess.run(argv, shell=False, env=dict(environment), check=False)
 # Then verify the root and recorded descendants in DB, index, and rollouts.
+```
+
+```python
+receipt = usage_cache.prepare_deleted_session_usage(item)
+result = run_official_delete(item)
+verify_family_absent(item)
+usage_cache.commit_deleted_session_usage(receipt)
+# The next explicit summarize merges the compact ledger with live rollouts.
 ```
 
 ```javascript

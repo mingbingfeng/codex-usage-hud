@@ -91,6 +91,8 @@ from codex_usage_hud.config import (
 )
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
 from codex_usage_hud.core.runtime_errors import RuntimeErrorRegistry
+from codex_usage_hud.core.deleted_usage import DeletedUsageLedger
+from codex_usage_hud.core.session_cleanup import SessionCleanupItem
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.platforms.codex_theme import CodexThemeExport, CodexThemeSnapshot, HudThemeTokens
 from codex_usage_hud.ui import QtHudWindow
@@ -803,6 +805,189 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(day_total.tokens, 56)
         self.assertEqual(week_total.tokens, 50)
         self.assertEqual(parser.loads, 2)
+
+    def test_deleted_session_ledger_preserves_usage_without_rollout_files(self) -> None:
+        parser = _InsightsUsageParser()
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = day_start - timedelta(days=day_start.weekday())
+        root_id = "20000000-0000-4000-8000-000000000001"
+        child_id = "20000000-0000-4000-8000-000000000002"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            root_rollout = sessions_root / "root.jsonl"
+            child_rollout = sessions_root / "child.jsonl"
+            timestamp = (day_start + timedelta(hours=2)).isoformat()
+            _write_usage_insight_session(
+                root_rollout,
+                session_id=root_id,
+                provider="custom",
+                cwd=str(root / "project-a"),
+                events=[
+                    {
+                        "timestamp": timestamp,
+                        "model": "gpt-root",
+                        "tokens": 100,
+                        "inputTokens": 80,
+                        "cachedTokens": 40,
+                        "outputTokens": 20,
+                        "costUsd": 1.25,
+                    }
+                ],
+            )
+            _write_usage_insight_session(
+                child_rollout,
+                session_id=child_id,
+                parent_session_id=root_id,
+                provider="custom",
+                cwd=str(root / "project-a"),
+                events=[
+                    {
+                        "timestamp": timestamp,
+                        "model": "gpt-child",
+                        "tokens": 50,
+                        "inputTokens": 40,
+                        "outputTokens": 10,
+                        "costUsd": None,
+                    }
+                ],
+            )
+            ledger_path = root / "runtime" / "deleted-session-usage.json"
+            ledger = DeletedUsageLedger(ledger_path)
+            cache = UsageSummaryCache(  # type: ignore[arg-type]
+                parser,
+                deleted_usage_ledger=ledger,
+            )
+            before_day, before_week = cache.summarize(
+                sessions_root, day_start, week_start
+            )
+            item = SessionCleanupItem(
+                id="opaque-root",
+                title="Deleted root",
+                workdir_name="project-a",
+                updated_at=timestamp,
+                status="idle",
+                archived=False,
+                size=root_rollout.stat().st_size + child_rollout.stat().st_size,
+                descendant_count=1,
+                selectable=True,
+                blocked_reason="",
+                _session_id=root_id,
+                _descendant_ids=(child_id,),
+                _rollout_paths=(root_rollout, child_rollout),
+            )
+
+            receipt = cache.prepare_deleted_session_usage(item)
+            root_rollout.unlink()
+            child_rollout.unlink()
+            cache.commit_deleted_session_usage(receipt)
+            after_day, after_week = cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                force_rescan=True,
+            )
+            with patch.object(
+                ledger,
+                "sessions",
+                side_effect=AssertionError("insights must use cached ledger data"),
+            ):
+                insights = cache.insights(sessions_root, day_start, week_start)
+            custom_day, _ = cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                allow_stale=True,
+                included_providers={"custom"},
+            )
+            other_day, _ = cache.summarize(
+                sessions_root,
+                day_start,
+                week_start,
+                allow_stale=True,
+                included_providers={"other"},
+            )
+            ledger_text = ledger_path.read_text(encoding="utf-8")
+
+        self.assertEqual(after_day, before_day)
+        self.assertEqual(after_week, before_week)
+        self.assertEqual(after_day.tokens, 150)
+        self.assertEqual(after_day.cost_usd, 1.25)
+        self.assertEqual(custom_day.tokens, 150)
+        self.assertEqual(other_day.tokens, 0)
+        self.assertEqual(insights["today"]["totals"]["tokens"], 150)
+        self.assertEqual(insights["week"]["totals"]["tokens"], 150)
+        self.assertEqual(insights["month"]["totals"]["tokens"], 150)
+        self.assertEqual(insights["today"]["totals"]["sessionCount"], 1)
+        session = insights["today"]["sessions"][0]
+        self.assertEqual(session["title"], "Deleted root")
+        self.assertFalse(session["canActivate"])
+        self.assertEqual(
+            session["costCoverage"],
+            {
+                "pricedEventCount": 1,
+                "totalEventCount": 2,
+                "hasCompleteCost": False,
+            },
+        )
+        self.assertNotIn(str(root_rollout), ledger_text)
+        self.assertNotIn(str(child_rollout), ledger_text)
+        self.assertNotIn("prompt", ledger_text)
+
+    def test_deleted_session_ledger_recovers_pending_and_prunes_old_events(self) -> None:
+        parser = _InsightsUsageParser()
+        now = datetime.now(timezone.utc)
+        recent = now - timedelta(hours=1)
+        expired = now - timedelta(days=31)
+        session_id = "20000000-0000-4000-8000-000000000003"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rollout = root / "sessions" / "session.jsonl"
+            _write_usage_insight_session(
+                rollout,
+                session_id=session_id,
+                provider="custom",
+                events=[
+                    {
+                        "timestamp": recent.isoformat(),
+                        "model": "gpt-recent",
+                        "tokens": 10,
+                        "inputTokens": 8,
+                        "outputTokens": 2,
+                        "costUsd": 0.1,
+                    },
+                    {
+                        "timestamp": expired.isoformat(),
+                        "model": "gpt-expired",
+                        "tokens": 999,
+                        "inputTokens": 900,
+                        "outputTokens": 99,
+                        "costUsd": 9.99,
+                    },
+                ],
+            )
+            ledger_path = root / "deleted-session-usage.json"
+            ledger = DeletedUsageLedger(ledger_path)
+            receipt = ledger.prepare(
+                session_id=session_id,
+                family_session_ids=(session_id,),
+                title="Recover pending",
+                workdir_name="project-b",
+                rollout_paths=(rollout,),
+                parser=parser,
+                now=now,
+            )
+            self.assertTrue(receipt)
+
+            rollout.unlink()
+            sessions = ledger.sessions(now=now)
+            payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual([event.model for event in sessions[0].events], ["gpt-recent"])
+        self.assertEqual(payload["pending"], {})
+        self.assertIn(session_id, payload["committed"])
 
     def test_usage_summary_cache_filters_cached_provider_contributions_without_rescan(self) -> None:
         parser = _FileBackedUsageParser()
@@ -12040,10 +12225,11 @@ class DaemonLifecycleTests(unittest.TestCase):
     ) -> None:
         event_id = "10000000-0000-4000-8000-000000000003"
         runtime = SimpleNamespace(
+            confirm=MagicMock(return_value=True),
             query=MagicMock(
                 return_value={
                     "revision": 7,
-                    "events": [{"eventId": event_id}],
+                    "events": [{"eventId": event_id, "unread": False}],
                     "selectedEventId": event_id,
                 }
             ),
@@ -12052,6 +12238,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                     "eventId": event_id,
                     "prompt": "must not enter the open payload",
                     "requests": [{"model": "gpt-5.6-terra"}],
+                    "unread": False,
                 }
             ),
         )
@@ -12068,6 +12255,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             MagicMock(),
         )
 
+        runtime.confirm.assert_called_once_with(event_id)
         runtime.query.assert_called_once_with(
             range_key="today",
             feature="",
@@ -12087,6 +12275,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "eventId": event_id,
                 "requests": [{"model": "gpt-5.6-terra"}],
                 "hasPrompt": True,
+                "unread": False,
             },
         )
         self.assertNotIn("prompt", response["payload"]["selectedDetail"])
@@ -12094,6 +12283,7 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_renderer_background_usage_open_expands_range_for_old_reminder(self) -> None:
         event_id = "10000000-0000-4000-8000-000000000003"
         runtime = SimpleNamespace(
+            confirm=MagicMock(return_value=True),
             range_for_event=MagicMock(return_value="7d"),
             query=MagicMock(
                 return_value={
@@ -12117,6 +12307,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             MagicMock(),
         )
 
+        runtime.confirm.assert_called_once_with(event_id)
         runtime.range_for_event.assert_called_once_with(event_id)
         runtime.query.assert_called_once_with(
             range_key="7d",
@@ -12246,6 +12437,66 @@ class DaemonLifecycleTests(unittest.TestCase):
             self.assertEqual(saved_config.cleanup_backup_directory, str(selected))
             self.assertEqual(status["cleanupBackupDirectory"], str(selected))
             self.assertEqual(status["safeCleanupRequestId"], "backup-picker-1")
+
+    def test_safe_cleanup_reveal_resolves_opaque_item_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary).resolve()
+            manager = MagicMock()
+            manager.resolve_reveal_path.return_value = target
+            context = SimpleNamespace(
+                safe_cleanup_worker=SimpleNamespace(manager=manager)
+            )
+            command = {
+                "id": "transport-reveal",
+                "requestId": "reveal-1",
+                "action": "safeCleanupReveal",
+                "inventoryRevision": "revision-1",
+                "itemId": "opaque-item-1",
+            }
+
+            with patch("codex_usage_hud.cli.reveal_cleanup_path") as reveal:
+                status = _handle_renderer_settings_command(
+                    command,
+                    context,
+                    MagicMock(),
+                    MagicMock(),
+                )
+
+            manager.resolve_reveal_path.assert_called_once_with(
+                "opaque-item-1", "revision-1"
+            )
+            reveal.assert_called_once_with(target)
+            self.assertEqual(status["safeCleanupRequestId"], "reveal-1")
+            self.assertEqual(status["safeCleanupAction"], "safeCleanupReveal")
+            self.assertNotIn(str(target), str(status["message"]))
+
+    def test_safe_cleanup_reveal_never_accepts_renderer_path_authority(self) -> None:
+        manager = MagicMock()
+        manager.resolve_reveal_path.side_effect = cli_module.SafeCleanupError(
+            "unknown cleanup item id"
+        )
+        context = SimpleNamespace(
+            safe_cleanup_worker=SimpleNamespace(manager=manager)
+        )
+        command = {
+            "requestId": "reveal-forged",
+            "action": "safeCleanupReveal",
+            "inventoryRevision": "revision-1",
+            "path": "C:\\forged\\target",
+        }
+
+        with patch("codex_usage_hud.cli.reveal_cleanup_path") as reveal:
+            status = _handle_renderer_settings_command(
+                command,
+                context,
+                MagicMock(),
+                MagicMock(),
+            )
+
+        manager.resolve_reveal_path.assert_called_once_with("", "revision-1")
+        reveal.assert_not_called()
+        self.assertEqual(status["kind"], "error")
+        self.assertEqual(status["safeCleanupRequestId"], "reveal-forged")
 
     def test_safe_cleanup_activity_gate_includes_observed_waiting_work(self) -> None:
         item = WorkStatusItem(
@@ -12822,20 +13073,22 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn("codex_usage_hud.ui.tk_hud=False", result.stdout)
         self.assertIn("codex_usage_hud.ui.work_overlay_qt=False", result.stdout)
 
-    def test_main_defaults_to_renderer_first_from_auto_config(self) -> None:
+    def test_main_defaults_to_renderer_daemon_from_auto_config(self) -> None:
         config = UserConfig.defaults()
 
         with (
             patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
+            patch("codex_usage_hud.cli.run_hud_session") as run_session,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main([])
 
         self.assertEqual(exit_code, 0)
-        args = run_session.call_args.args[0]
+        args = run_daemon.call_args.args[0]
         self.assertTrue(args.renderer_hud)
         self.assertEqual(args.runtime_hud_mode, "renderer")
+        run_session.assert_not_called()
 
     def test_build_runtime_context_uses_renderer_bridge_instead_of_native_title_watcher(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -12999,13 +13252,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main(["--hud-mode", "renderer"])
 
         self.assertEqual(exit_code, 0)
-        args = run_session.call_args.args[0]
+        args = run_daemon.call_args.args[0]
         self.assertTrue(args.renderer_hud)
         self.assertEqual(args.runtime_hud_mode, "renderer")
 
@@ -13015,13 +13268,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main([])
 
         self.assertEqual(exit_code, 0)
-        args = run_session.call_args.args[0]
+        args = run_daemon.call_args.args[0]
         self.assertTrue(args.renderer_hud)
         self.assertEqual(args.runtime_hud_mode, "renderer")
         self.assertIsNone(args.standalone_hud_mode)
@@ -13032,13 +13285,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_session,
+            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main([])
 
         self.assertEqual(exit_code, 0)
-        args = run_session.call_args.args[0]
+        args = run_daemon.call_args.args[0]
         self.assertTrue(args.renderer_hud)
         self.assertEqual(args.runtime_hud_mode, "renderer")
         self.assertIsNone(args.standalone_hud_mode)

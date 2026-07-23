@@ -18,7 +18,7 @@ from .windows_tracker import CodexWindowTracker
 
 _VK_CONTROL = 0x11
 _VK_A = 0x41
-_VK_G = 0x47
+_VK_K = 0x4B
 _VK_V = 0x56
 _VK_1 = 0x31
 _CF_UNICODETEXT = 13
@@ -245,7 +245,7 @@ def _temporary_clipboard_text(value: str):
 
 
 class WindowsSearchSessionSwitchBackend:
-    """Use Codex's own Ctrl+G search flow without CDP."""
+    """Use Codex's own Ctrl+K search flow without CDP."""
 
     name = "windows-search"
 
@@ -329,7 +329,7 @@ class WindowsSearchSessionSwitchBackend:
                     active_title=active_title_before,
                     message="clipboard access failed",
                 )
-            if not _send_virtual_keys(_VK_CONTROL, _VK_G):
+            if not _send_virtual_keys(_VK_CONTROL, _VK_K):
                 return SessionSwitchResult(
                     ok=False,
                     status="sendinput-error",

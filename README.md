@@ -33,12 +33,15 @@
 也可以在命令行使用：
 
 ```powershell
+codex-hud
 codex-hud --once
 codex-hud --daemon
 codex-hud --stop
 codex-hud --check-update
 codex-hud --update
 ```
+
+`codex-hud` 的普通持久启动默认进入 daemon；`--daemon` 作为显式兼容写法保留。
 
 ## 赞助商
 
@@ -145,7 +148,7 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 
 ### 会上传我的提示词或日志吗？
 
-不会。项目只在本机读取和处理日志/数据库，不做遥测、不上传 prompt/response，也不要求云端账号。显式启用“空间清理”属于受保护的例外：垃圾清理只接受 inventory 发出的 opaque item id，执行前会重验 revision、路径、指纹和锁定状态；SQLite 只按已知 schema 做带备份的离线行级维护，不 raw 删除主库或 WAL/SHM。会话永久删除只把 Python 端核验过的 canonical UUID 交给官方 Codex CLI，UUID 和绝对 rollout 路径不会进入 renderer payload。提交 issue 前请阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
+不会。项目只在本机读取和处理日志/数据库，不做遥测、不上传 prompt/response，也不要求云端账号。显式启用“空间清理”属于受保护的例外：垃圾清理会在本地 Renderer 的展开详情中显示白名单目标的绝对路径，便于复制或在 Explorer/Finder 中核对；清理与打开位置命令仍只接受 inventory 发出的 opaque item id，执行前会重验 revision、路径、指纹和锁定状态，Renderer 显示的路径本身不是操作权限。SQLite 只按已知 schema 做带备份的离线行级维护，不 raw 删除主库或 WAL/SHM。会话永久删除只把 Python 端核验过的 canonical UUID 交给官方 Codex CLI，UUID 和绝对 rollout 路径不会进入 renderer payload。提交 issue 前请阅读 [docs/PRIVACY.md](docs/PRIVACY.md)。
 
 ## 开发
 

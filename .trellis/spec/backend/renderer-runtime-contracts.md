@@ -366,6 +366,7 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 - The external pet's `open-in-main-window` / `actionPath` behavior may be used as a reverse-engineering reference, but the local stable jump boundary remains `activateSession(sessionId)` through the existing session-switch controller.
 - A settings Top10 jump is CDP-only. CDP may expand the exact workdir project, then bounded known nested controls (`show more` or explicit sidebar section toggles), rechecking the canonical UUID after every expansion. It must stop with an error when the UUID remains unavailable.
 - Settings Top10 jumps must never fall through to a keyboard/search/clipboard backend. A stale search shortcut can leave focus in the composer and paste the target title into the user's draft.
+- The ordinary Windows work-overlay fallback uses the current Codex search chord `Ctrl+K` before `Ctrl+A`, `Ctrl+V`, and the result shortcut. `Ctrl+G` is forbidden because current Codex assigns it to in-thread Find Next rather than session search.
 - When a canonical UUID is supplied, title matching is not an identity fallback. A jump succeeds only after the renderer's active row reports the requested canonical UUID.
 
 ### 4. Validation & Error Matrix
@@ -375,6 +376,7 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 | Canonical session ID available | Refresh exact session and allow `activateSession`. |
 | Top10 target is inside a collapsed project or nested `show more` list | Expand known layers for a bounded number of cycles, requery the exact UUID, click once, and confirm the active UUID. |
 | Top10 canonical UUID is still absent after bounded expansion | Return a CDP error and leave the composer/clipboard untouched; do not use keyboard search. |
+| Ordinary overlay CDP activation fails and Windows fallback is enabled | Open search with `Ctrl+K`; never send the legacy `Ctrl+G` chord. |
 | `client-new-thread:*`, blank, or unmapped ID | Keep explicit pending state unless one candidate passes every constrained provisional-recovery check. |
 | Structured activity/status update | Update preview through the event-driven snapshot path. |
 | CDP target unavailable | Record the renderer/CDP error and keep the bounded fallback; do not copy private pet IPC. |
@@ -394,6 +396,7 @@ The mapping event is latency-critical while unrelated filesystem writes remain d
 - `tests/test_ui.py`: assert `statusText`/`progress` payload propagation, `card_to_completed` transitions, and `activateSession` fields.
 - `tests/test_cdp_probe.py`: assert project and nested expansion are bounded, UUID matching precedes title matching, and activation waits for the requested active UUID.
 - `tests/test_platforms.py` and `tests/test_ui.py`: assert `backend_names=("cdp",)` skips the keyboard backend for `openUsageInsightsSession` while ordinary overlay activation keeps its existing fallback policy.
+- `tests/test_platforms.py`: assert the ordinary Windows fallback sends `Ctrl+K` as its first chord, followed by select-all, paste, and the result shortcut.
 - Live acceptance, when a CDP target is available: record the target session ID, status transitions, and whether a target-session click required a second Codex App interaction.
 
 ### 7. Wrong vs Correct
@@ -854,6 +857,8 @@ the overlay command owns user consent.
 
 ### 2. Signatures
 
+- CLI entry: `main(argv: Sequence[str] | None = None) -> int`; every persistent
+  invocation routes to `run_daemon(args)` after explicit helper/action exits.
 - Renderer entry: `run_renderer_hud_session(..., observed_codex_launch=False)`.
 - Startup states: `attach-observed` and `relaunch-observed` are valid only with
   fresh-launch provenance; ordinary startup still uses `launch`, `attach`,
@@ -863,6 +868,11 @@ the overlay command owns user consent.
 
 ### 3. Contracts
 
+- No arguments, renderer options, and other normal persistent launch options all
+  enter the daemon lifecycle. `--daemon` remains an explicit compatibility spelling,
+  not the only way to enable process-arrival monitoring.
+- Helper modes, `--check-update`, `--update`, `--stop`, and `--once` keep their
+  existing early-return behavior. Explicit `--daemon --once` remains invalid.
 - `observed_codex_launch` is set only after a daemon renderer session reported the
   prior Desktop family absent. It is not persisted and never applies to an App
   that predated the HUD wait.
@@ -883,6 +893,8 @@ the overlay command owns user consent.
 
 | Condition | Required behavior |
 |---|---|
+| `codex-hud` starts with no arguments | Enter `run_daemon()` and keep process-arrival monitoring after Codex exits. |
+| A helper or one-shot action is requested | Complete that action without entering the daemon lifecycle. |
 | Fresh external process declares one CDP port | Wait through cold startup and attach that exact port without restart UI. |
 | Root process exists before renderer target | Keep waiting; do not classify as non-CDP. |
 | Fresh external process declares no CDP port | Stop that verified family once, launch with HUD CDP, and attach. |
@@ -897,10 +909,40 @@ the overlay command owns user consent.
   later, and the HUD attaches to 59629 without showing restart UI.
 - Good: a new ordinary App is observed after full absence, is relaunched once with
   a fresh port, and the next attach is marked HUD-owned.
+- Good: a source checkout starts `python -m codex_usage_hud.cli` without flags and
+  receives the same daemon lifecycle as the installed shortcut.
 - Base: process inspection fails or two unrelated Desktop families expose different
   ports; the existing restart action remains visible.
 - Bad: treat a fresh root as an old App, validate the port only once, stop an App
-  that predates the wait, scan a port range, or relaunch the HUD-owned process.
+  that predates the wait, scan a port range, relaunch the HUD-owned process, or let
+  a no-argument process look alive while bypassing `run_daemon()`.
+
+### 6. Tests Required
+
+- `tests/test_ui.py`: assert `main([])` and persistent renderer options call
+  `run_daemon()` and never call the direct single-session entry.
+- `tests/test_ui.py`: retain focused routing coverage for helper, update, stop, and
+  once modes so daemon-by-default cannot absorb one-shot actions.
+- `tests/test_daemon.py` and the existing live acceptance remain authoritative for
+  observed plain/CDP launch takeover after the daemon is running.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+if args.daemon:
+    return run_daemon(args)
+return run_hud_session(args)  # Looks persistent but cannot observe the next App.
+```
+
+#### Correct
+
+```python
+if args.once:
+    return run_once_snapshot(args)
+return run_daemon(args)  # All normal persistent launches share one lifecycle.
+```
 
 ## Scenario: Renderer-to-Python local detail RPC under Codex CSP
 

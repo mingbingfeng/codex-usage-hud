@@ -7731,6 +7731,95 @@ class TokenHudWindow:
         settings = self.user_settings
         support = tk.Frame(body, bg=HUD_BG)
         support.pack(fill="both", expand=True)
+
+        rest = tk.Frame(
+            support,
+            bg=HUD_PANEL_BG,
+            padx=10,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground=HUD_DIVIDER,
+        )
+        rest.pack(fill="x", pady=(0, 12))
+        tk.Label(
+            rest,
+            text="☕ 护眼休息提醒",
+            anchor="w",
+            bg=HUD_PANEL_BG,
+            fg=HUD_TEXT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(fill="x")
+        self._rest_reminder_enabled_var = tk.BooleanVar(
+            value=bool(settings.rest_reminder_enabled)
+        )
+        tk.Checkbutton(
+            rest,
+            text="开启定期休息提醒（默认关闭）",
+            variable=self._rest_reminder_enabled_var,
+            onvalue=True,
+            offvalue=False,
+            anchor="w",
+            bg=HUD_PANEL_BG,
+            fg=HUD_TEXT,
+            selectcolor=HUD_PANEL_BG,
+            activebackground=HUD_PANEL_BG,
+            activeforeground=HUD_TEXT,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(fill="x", pady=(6, 4))
+        row = tk.Frame(rest, bg=HUD_PANEL_BG)
+        row.pack(fill="x", pady=(4, 0))
+        self._rest_reminder_interval_var = tk.StringVar(
+            value=str(int(settings.rest_reminder_interval_minutes))
+        )
+        self._rest_reminder_postpone_var = tk.StringVar(
+            value=str(int(settings.rest_reminder_postpone_minutes))
+        )
+        self._rest_reminder_idle_reset_var = tk.StringVar(
+            value=str(int(settings.rest_reminder_idle_reset_minutes))
+        )
+        for label, var in (
+            ("间隔分钟", self._rest_reminder_interval_var),
+            ("延后分钟", self._rest_reminder_postpone_var),
+            ("空闲重置", self._rest_reminder_idle_reset_var),
+        ):
+            cell = tk.Frame(row, bg=HUD_PANEL_BG)
+            cell.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            tk.Label(
+                cell,
+                text=label,
+                anchor="w",
+                bg=HUD_PANEL_BG,
+                fg=_theme_secondary_text(HUD_PANEL_BG),
+                font=("Microsoft YaHei UI", 8),
+            ).pack(fill="x")
+            tk.Entry(
+                cell,
+                textvariable=var,
+                width=8,
+                bg=HUD_BG,
+                fg=HUD_TEXT,
+                insertbackground=HUD_TEXT,
+                relief="flat",
+            ).pack(fill="x", pady=(2, 0))
+        tk.Label(
+            rest,
+            text="到点优先弹 PySide6 居中窗口并尽量发系统通知；无 PySide6 时降级 HUD 提示。",
+            justify="left",
+            anchor="w",
+            bg=HUD_PANEL_BG,
+            fg=_theme_secondary_text(HUD_PANEL_BG),
+            wraplength=640,
+            font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x", pady=(8, 0))
+        tk.Button(
+            rest,
+            text="保存休息提醒设置",
+            command=self._save_rest_reminder_settings,
+            **_settings_primary_button_kwargs(),
+            padx=10,
+            pady=3,
+        ).pack(anchor="e", pady=(8, 0))
+
         tk.Label(
             support,
             text="如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。",
@@ -8319,9 +8408,42 @@ class TokenHudWindow:
             "weekly_adjustment_usd": self._settings_entry_value("weekly_adjustment_usd") or "0",
             "pricing_url": self._settings_entry_value("pricing_url"),
             "support_url": self.user_settings.support_url,
+            "rest_reminder_enabled": self.user_settings.rest_reminder_enabled,
+            "rest_reminder_interval_minutes": self.user_settings.rest_reminder_interval_minutes,
+            "rest_reminder_postpone_minutes": self.user_settings.rest_reminder_postpone_minutes,
+            "rest_reminder_idle_reset_minutes": self.user_settings.rest_reminder_idle_reset_minutes,
             "model_prices": price_payload,
         }
+        if getattr(self, "_rest_reminder_enabled_var", None) is not None:
+            raw["rest_reminder_enabled"] = bool(self._rest_reminder_enabled_var.get())
+        if getattr(self, "_rest_reminder_interval_var", None) is not None:
+            raw["rest_reminder_interval_minutes"] = self._rest_reminder_interval_var.get()
+        if getattr(self, "_rest_reminder_postpone_var", None) is not None:
+            raw["rest_reminder_postpone_minutes"] = self._rest_reminder_postpone_var.get()
+        if getattr(self, "_rest_reminder_idle_reset_var", None) is not None:
+            raw["rest_reminder_idle_reset_minutes"] = self._rest_reminder_idle_reset_var.get()
         return UserConfig.from_dict(raw)
+
+    def _save_rest_reminder_settings(self) -> None:
+        try:
+            current = self.user_settings_store.load()
+            merged = current.to_dict()
+            if getattr(self, "_rest_reminder_enabled_var", None) is not None:
+                merged["rest_reminder_enabled"] = bool(self._rest_reminder_enabled_var.get())
+            if getattr(self, "_rest_reminder_interval_var", None) is not None:
+                merged["rest_reminder_interval_minutes"] = self._rest_reminder_interval_var.get()
+            if getattr(self, "_rest_reminder_postpone_var", None) is not None:
+                merged["rest_reminder_postpone_minutes"] = self._rest_reminder_postpone_var.get()
+            if getattr(self, "_rest_reminder_idle_reset_var", None) is not None:
+                merged["rest_reminder_idle_reset_minutes"] = self._rest_reminder_idle_reset_var.get()
+            config = UserConfig.from_dict(merged)
+            self.user_settings_store.save(config)
+        except (OSError, ValueError) as exc:
+            self._set_settings_status(f"保存失败：{exc}", kind="error")
+            messagebox.showerror("保存失败", str(exc), parent=self._settings_dialog)
+            return
+        self.user_settings = config
+        self._set_settings_status("休息提醒设置已保存。")
 
     def _settings_save(
         self,

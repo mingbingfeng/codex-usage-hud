@@ -69,7 +69,10 @@ codex-hud --daemon
   are unchecked. `logs_2.sqlite` must show the 24-hour retention and background
   usage history must show 30 days.
 - Generate the default preview and confirm it requires only the stated HUD/app
-  restart, does not request a SQLite backup, and exposes no absolute source path.
+  restart and does not request a SQLite backup. Expand a grouped category and
+  confirm every target shows its absolute local path; copying returns that exact
+  path, while `打开位置` sends only revision + opaque item ID and opens the
+  verified target in Finder.
 - On disposable fixture databases, opt into each SQLite group and verify a
   user-selected backup directory, backup integrity, cutoff deletion, VACUUM,
   post-check, and failure restoration. Do not use a real user database for this

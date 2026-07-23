@@ -94,7 +94,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "34";
+  const version = "35";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -177,7 +177,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   const safeCleanupState = {
     data: null,
     stableData: null,
+    inventoryRevision: "",
+    selectedIds: new Set(),
+    expandedGroupIds: new Set(),
     pendingRequestId: "",
+    executeStartedAt: 0,
     includeConsent: false,
     backupDirectory: "",
     backupDirectoryDirty: false,
@@ -188,8 +192,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     scanStartedAt: 0,
   };
   let cleanupActiveSection = "junk";
-  let cleanupDeepExpanded = false;
   let safeCleanupPreviewTimer = 0;
+  let safeCleanupLiveTimer = 0;
+  let restReminderCountdownTimer = 0;
   const sessionCleanupState = {
     data: null,
     pendingRequestId: "",
@@ -3482,6 +3487,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-cleanup-check {
         width: 16px;
         height: 16px;
+        min-width: 16px;
+        padding: 0;
         border: 1px solid #5a5d63;
         border-radius: 3px;
         background: #111214;
@@ -3489,6 +3496,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         place-items: center;
         color: #fff;
         flex: 0 0 auto;
+        cursor: pointer;
       }
       #${rootId} .codex-usage-hud-cleanup-check[data-checked="true"] {
         background: #3b8eea;
@@ -3502,9 +3510,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         border-bottom: 2px solid currentColor;
         transform: translateY(-1px) rotate(-45deg);
       }
+      #${rootId} .codex-usage-hud-cleanup-check[data-partial="true"]::after {
+        content: "";
+        width: 7px;
+        height: 2px;
+        background: currentColor;
+      }
       #${rootId} .codex-usage-hud-cleanup-check[data-disabled="true"] {
         border-color: #3b3d42;
         background: #202124;
+        cursor: default;
       }
       #${rootId} .codex-usage-hud-cleanup-row-main { min-width: 0; }
       #${rootId} .codex-usage-hud-cleanup-row-title {
@@ -3534,9 +3549,102 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         font-variant-numeric: tabular-nums;
       }
       #${rootId} .codex-usage-hud-cleanup-row-chevron {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
         color: #73777f;
         display: inline-grid;
         place-items: center;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-chevron:hover {
+        background: rgba(255, 255, 255, .06);
+        color: var(--codex-usage-hud-text, #e8eef7);
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-chevron .codex-usage-hud-cleanup-icon {
+        transition: transform .16s ease;
+      }
+      #${rootId} .codex-usage-hud-cleanup-row-chevron[aria-expanded="true"] .codex-usage-hud-cleanup-icon {
+        transform: rotate(90deg);
+      }
+      #${rootId} .codex-usage-hud-cleanup-result-mark {
+        width: 16px;
+        height: 16px;
+        display: inline-grid;
+        place-items: center;
+        color: #8fcfa0;
+        font-size: 11px;
+        font-weight: 750;
+      }
+      #${rootId} .codex-usage-hud-cleanup-result-mark[data-state="failed"],
+      #${rootId} .codex-usage-hud-cleanup-result-mark[data-state="partial"] {
+        color: #f0b66a;
+      }
+      #${rootId} .codex-usage-hud-cleanup-details {
+        min-width: 0;
+        display: grid;
+        margin-left: 38px;
+        padding: 0 14px 8px 0;
+        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+        background: rgba(255, 255, 255, .012);
+      }
+      #${rootId} .codex-usage-hud-cleanup-target {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+        padding: 9px 0;
+        border-top: 1px solid rgba(255, 255, 255, .045);
+      }
+      #${rootId} .codex-usage-hud-cleanup-target:first-child { border-top: 0; }
+      #${rootId} .codex-usage-hud-cleanup-target-head {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+        gap: 8px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-target-path {
+        min-width: 0;
+        color: #d5d9df;
+        font: 10.5px/1.45 Consolas, "Cascadia Mono", ui-monospace, monospace;
+        letter-spacing: 0;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      #${rootId} .codex-usage-hud-cleanup-target-actions {
+        display: inline-flex;
+        gap: 3px;
+      }
+      #${rootId} .codex-usage-hud-cleanup-target-action {
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: #8c929b;
+        display: inline-grid;
+        place-items: center;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-cleanup-target-action:hover {
+        border-color: #474b52;
+        background: rgba(255, 255, 255, .055);
+        color: #e3e6eb;
+      }
+      #${rootId} .codex-usage-hud-cleanup-target-meta,
+      #${rootId} .codex-usage-hud-cleanup-target-note {
+        min-width: 0;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 9.5px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
       }
       #${rootId} .codex-usage-hud-cleanup-protected-note {
         min-height: 39px;
@@ -3548,6 +3656,21 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: var(--codex-usage-hud-muted, #9da1a8);
         font-size: 10px;
         border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
+      }
+      #${rootId} .codex-usage-hud-cleanup-protected-note > button {
+        width: 100%;
+        min-width: 0;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
       }
       #${rootId} .codex-usage-hud-cleanup-protected-note span {
         display: inline-flex;
@@ -4013,6 +4136,95 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         gap: 12px;
         color: var(--codex-usage-hud-text, #dde7f2);
         line-height: 1.55;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-card {
+        display: grid;
+        gap: 10px;
+        padding: 12px;
+        border-radius: 12px;
+        border: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
+        background: color-mix(in srgb, var(--codex-usage-hud-panel-surface, #141b24) 92%, #f3d27a 8%);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-title {
+        color: var(--codex-usage-hud-accent, #f3d27a);
+        font-weight: 700;
+        font-size: 13px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-toggle {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        font-size: 12px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-grid label {
+        display: grid;
+        gap: 4px;
+        font-size: 11px;
+        color: var(--codex-usage-hud-request-muted, #a9bcd2);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-grid input {
+        width: 100%;
+        box-sizing: border-box;
+        border-radius: 8px;
+        border: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
+        background: var(--codex-usage-hud-surface, #10161d);
+        color: var(--codex-usage-hud-text, #dde7f2);
+        padding: 6px 8px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        padding: 9px 10px;
+        border-radius: 9px;
+        background: color-mix(in srgb, var(--codex-usage-hud-surface, #10161d) 82%, #f3d27a 18%);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status-item {
+        display: grid;
+        gap: 2px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status-label {
+        color: var(--codex-usage-hud-request-muted, #a9bcd2);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status-value {
+        color: var(--codex-usage-hud-text, #dde7f2);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-rest-toast {
+        position: fixed;
+        left: 50%;
+        top: 18%;
+        transform: translateX(-50%);
+        z-index: 2147483000;
+        width: min(420px, calc(100vw - 32px));
+        padding: 14px 16px;
+        border-radius: 14px;
+        border: 1px solid var(--codex-usage-hud-panel-border, #3a4a5c);
+        background: var(--codex-usage-hud-panel-surface, #141b24);
+        color: var(--codex-usage-hud-text, #dce7f2);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+        display: none;
+        gap: 10px;
+      }
+      #${rootId} .codex-usage-hud-rest-toast[data-visible="true"] {
+        display: grid;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-title {
+        color: var(--codex-usage-hud-accent, #f3d27a);
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
       }
       #${rootId} .codex-usage-hud-support a {
         color: var(--codex-usage-hud-info, #9ccbff);
@@ -4562,9 +4774,18 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           flex-direction: column;
         }
         #${rootId} .codex-usage-hud-cleanup-row {
-          grid-template-columns: 24px minmax(0, 1fr) 64px 18px;
+          grid-template-columns: 24px minmax(0, 1fr) 64px 24px;
         }
         #${rootId} .codex-usage-hud-cleanup-row-impact { grid-column: 2 / -1; }
+        #${rootId} .codex-usage-hud-cleanup-details {
+          margin-left: 14px;
+          padding-right: 14px;
+        }
+        #${rootId} .codex-usage-hud-cleanup-protected-note > button {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 4px;
+        }
         #${rootId} .codex-usage-hud-cleanup-backup {
           grid-template-columns: minmax(0, 1fr);
         }
@@ -4757,6 +4978,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     `;
   }
 
+  function restReminderToastMarkup() {
+    return `
+      <div class="codex-usage-hud-rest-toast" data-rest-reminder-toast="true" data-visible="false" role="dialog" aria-live="polite">
+        <div class="codex-usage-hud-rest-toast-title">☕ 该休息一下了</div>
+        <div data-rest-reminder-message="true">站起来走走，让眼睛放松片刻。</div>
+        <div class="codex-usage-hud-rest-toast-actions">
+          <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-postpone" hidden>稍后提醒</button>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-ack" data-primary="true">我休息好了</button>
+        </div>
+      </div>
+    `;
+  }
+
   function panelMarkup(name, glyph, ariaLabel) {
     const glyphMarkup = glyph ? `<span class="codex-usage-hud-glyph">${glyph}</span>` : "";
     const settingsButtonMarkup = name === "top"
@@ -4935,6 +5169,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         ? `<div class="codex-usage-hud-token-breakdown" data-field="requestComposerBreakdown" role="tooltip" hidden></div>`
         : ""}
       <div class="codex-usage-hud-runtime-errors" data-field="runtimeErrorsPanel" hidden></div>
+      ${restReminderToastMarkup()}
     `;
   }
 
@@ -5000,6 +5235,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       provider_registry: {},
       app_provider: "",
       support_url: "https://github.com/mingbingfeng/codex-usage-hud",
+      rest_reminder_enabled: false,
+      rest_reminder_interval_minutes: 45,
+      rest_reminder_postpone_minutes: 10,
+      rest_reminder_idle_reset_minutes: 5,
       model_prices: {},
     };
   }
@@ -6630,42 +6869,205 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       check: '<path d="m5 12 4 4L19 6"/>',
       alert: '<path d="m21 19-9-16-9 16h18Z"/><path d="M12 9v4M12 17h.01"/>',
       chevron: '<path d="m9 18 6-6-6-6"/>',
+      copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+      folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M2 10h20"/>',
     };
     const body = paths[String(name || "")] || paths.scan;
     const klass = ["codex-usage-hud-cleanup-icon", extraClass].filter(Boolean).join(" ");
     return `<svg class="${klass}" viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
   }
 
-  function safeCleanupGroups(data = safeCleanupFromPayload()) {
+  const safeCleanupDeepGroupId = "__safe_cleanup_deep__";
+  const safeCleanupProtectedGroupId = "__safe_cleanup_protected__";
+
+  function safeCleanupRawItems(data = safeCleanupFromPayload()) {
     return Array.isArray(data?.groups) ? data.groups : [];
   }
 
+  function safeCleanupItemIsExecutable(item) {
+    const tier = String(item?.tier || "protected");
+    return !!String(item?.id || "")
+      && !String(item?.blockedReason || "")
+      && (tier === "safe" || tier === "consent");
+  }
+
+  function safeCleanupPresentationKey(item) {
+    const relatedProcesses = Array.isArray(item?.relatedProcesses)
+      ? item.relatedProcesses.map((value) => String(value || "")).sort()
+      : [];
+    return JSON.stringify([
+      String(item?.category || ""),
+      String(item?.tier || "protected"),
+      String(item?.label || ""),
+      String(item?.retention || ""),
+      String(item?.impact || ""),
+      String(item?.blockedReason || ""),
+      item?.requiresOffline === true,
+      item?.requiresBackup === true,
+      item?.requiresCodexClose === true,
+      relatedProcesses,
+    ]);
+  }
+
+  function safeCleanupAggregateResultState(entries) {
+    const states = entries.map((entry) => String(entry?.state || "").toLowerCase()).filter(Boolean);
+    if (!states.length) return "";
+    const unique = new Set(states);
+    if (unique.has("failed")) return unique.size === 1 ? "failed" : "partial";
+    if (unique.has("skipped")) return unique.size === 1 ? "skipped" : "partial";
+    if (unique.has("running")) return "running";
+    if (unique.has("selected")) return "selected";
+    if (unique.has("restored")) return unique.size === 1 ? "restored" : "partial";
+    if ([...unique].every((state) => state === "completed" || state === "deleted")) return "completed";
+    return states[0];
+  }
+
+  function safeCleanupPresentationGroups(data = safeCleanupFromPayload(), {
+    itemIds = null,
+    results = [],
+  } = {}) {
+    const selected = Array.isArray(itemIds)
+      ? new Set(itemIds.map((id) => String(id || "")).filter(Boolean))
+      : null;
+    const resultById = new Map((Array.isArray(results) ? results : [])
+      .map((result) => [String(result?.id || ""), result])
+      .filter(([id]) => !!id));
+    const grouped = new Map();
+    safeCleanupRawItems(data).forEach((item, sourceIndex) => {
+      const itemId = String(item?.id || "");
+      if (!itemId || (selected && !selected.has(itemId))) return;
+      const key = safeCleanupPresentationKey(item);
+      let group = grouped.get(key);
+      if (!group) {
+        group = {
+          id: key,
+          presentationId: key,
+          sourceIndex,
+          category: String(item?.category || ""),
+          tier: String(item?.tier || "protected"),
+          label: String(item?.label || ""),
+          retention: String(item?.retention || ""),
+          impact: String(item?.impact || ""),
+          blockedReason: String(item?.blockedReason || ""),
+          requiresOffline: item?.requiresOffline === true,
+          requiresBackup: item?.requiresBackup === true,
+          requiresCodexClose: item?.requiresCodexClose === true,
+          relatedProcesses: Array.isArray(item?.relatedProcesses) ? [...item.relatedProcesses] : [],
+          entries: [],
+          itemIds: [],
+          executableIds: [],
+          bytes: 0,
+          files: 0,
+          items: 0,
+          targetCount: 0,
+          actualBytes: 0,
+          deletedRows: 0,
+          hasResults: false,
+          oldestModifiedAt: "",
+          newestModifiedAt: "",
+          state: "",
+        };
+        grouped.set(key, group);
+      }
+      const result = resultById.get(itemId);
+      const entry = result ? { ...item, ...result, id: itemId } : { ...item, id: itemId };
+      group.entries.push(entry);
+      group.itemIds.push(itemId);
+      if (safeCleanupItemIsExecutable(item)) group.executableIds.push(itemId);
+      group.bytes += Math.max(0, Number(item?.bytes || 0));
+      group.files += Math.max(0, Number(item?.files || 0));
+      group.targetCount += 1;
+      group.items = group.targetCount;
+      if (result) {
+        group.hasResults = true;
+        group.actualBytes += Math.max(0, Number(result?.actualBytes || 0));
+        group.deletedRows += Math.max(0, Number(result?.deletedRows || 0));
+      }
+    });
+    const tierOrder = { consent: 0, safe: 1, protected: 2 };
+    return [...grouped.values()].map((group) => {
+      group.entries.sort((left, right) => String(left?.path || "").localeCompare(String(right?.path || "")));
+      const modified = group.entries
+        .map((entry) => ({ raw: String(entry?.modifiedAt || ""), value: Date.parse(String(entry?.modifiedAt || "")) }))
+        .filter((entry) => entry.raw && Number.isFinite(entry.value))
+        .sort((left, right) => left.value - right.value);
+      group.oldestModifiedAt = modified[0]?.raw || "";
+      group.newestModifiedAt = modified[modified.length - 1]?.raw || "";
+      group.state = safeCleanupAggregateResultState(group.entries);
+      return group;
+    }).sort((left, right) => (
+      (tierOrder[String(left?.tier || "protected")] ?? 3)
+      - (tierOrder[String(right?.tier || "protected")] ?? 3)
+      || Number(left?.sourceIndex || 0) - Number(right?.sourceIndex || 0)
+    ));
+  }
+
+  function safeCleanupGroups(data = safeCleanupFromPayload()) {
+    return safeCleanupPresentationGroups(data);
+  }
+
+  function syncSafeCleanupSelection(data = safeCleanupFromPayload()) {
+    const revision = String(data?.revision || "");
+    if (!revision || isCleanupScanningRevision(revision)) return;
+    const validIds = new Set(safeCleanupRawItems(data)
+      .filter(safeCleanupItemIsExecutable)
+      .map((item) => String(item.id)));
+    if (safeCleanupState.inventoryRevision !== revision) {
+      safeCleanupState.inventoryRevision = revision;
+      safeCleanupState.selectedIds = new Set((Array.isArray(data?.defaultSelectedIds) ? data.defaultSelectedIds : [])
+        .map((id) => String(id || ""))
+        .filter((id) => validIds.has(id)));
+      safeCleanupState.expandedGroupIds.clear();
+    } else {
+      safeCleanupState.selectedIds = new Set(
+        [...safeCleanupState.selectedIds].filter((id) => validIds.has(id)),
+      );
+    }
+    const itemById = new Map(safeCleanupRawItems(data).map((item) => [String(item?.id || ""), item]));
+    safeCleanupState.includeConsent = [...safeCleanupState.selectedIds]
+      .some((id) => String(itemById.get(id)?.tier || "") === "consent");
+  }
+
   function safeCleanupSelectedGroupIds(data = safeCleanupFromPayload()) {
-    return safeCleanupGroups(data)
-      .filter((group) => {
-        const tier = String(group?.tier || "protected");
-        return !!String(group?.id || "") && !String(group?.blockedReason || "")
-          && (tier === "safe" || (tier === "consent" && safeCleanupState.includeConsent));
-      })
-      .map((group) => String(group.id));
+    const validIds = new Set(safeCleanupRawItems(data)
+      .filter(safeCleanupItemIsExecutable)
+      .map((item) => String(item.id)));
+    return [...safeCleanupState.selectedIds].filter((id) => validIds.has(id));
+  }
+
+  function safeCleanupPreviewMatchesSelection(data = safeCleanupFromPayload()) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const previewIds = Array.isArray(operation?.selectedIds)
+      ? operation.selectedIds.map((id) => String(id || "")).filter(Boolean)
+      : [];
+    const selectedIds = safeCleanupSelectedGroupIds(data);
+    if (previewIds.length !== selectedIds.length) return false;
+    const previewSet = new Set(previewIds);
+    return selectedIds.every((id) => previewSet.has(id));
   }
 
   function safeCleanupRequiresOffline(data = safeCleanupFromPayload()) {
     const selected = new Set(safeCleanupSelectedGroupIds(data));
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    return operation?.requiresOffline === true || safeCleanupGroups(data).some((group) => selected.has(String(group?.id || "")) && group?.requiresOffline === true);
+    const operationBound = !safeCleanupState.previewHidden && safeCleanupPreviewMatchesSelection(data);
+    return (operationBound && operation?.requiresOffline === true)
+      || safeCleanupRawItems(data).some((item) => selected.has(String(item?.id || "")) && item?.requiresOffline === true);
   }
 
   function safeCleanupRequiresBackup(data = safeCleanupFromPayload()) {
     const selected = new Set(safeCleanupSelectedGroupIds(data));
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    return operation?.requiresBackup === true || safeCleanupGroups(data).some((group) => selected.has(String(group?.id || "")) && group?.requiresBackup === true);
+    const operationBound = !safeCleanupState.previewHidden && safeCleanupPreviewMatchesSelection(data);
+    return (operationBound && operation?.requiresBackup === true)
+      || safeCleanupRawItems(data).some((item) => selected.has(String(item?.id || "")) && item?.requiresBackup === true);
   }
 
   function safeCleanupRequiresCodexClose(data = safeCleanupFromPayload()) {
     const selected = new Set(safeCleanupSelectedGroupIds(data));
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    return operation?.requiresCodexClose === true || safeCleanupGroups(data).some((group) => selected.has(String(group?.id || "")) && group?.requiresCodexClose === true);
+    const operationBound = !safeCleanupState.previewHidden && safeCleanupPreviewMatchesSelection(data);
+    return (operationBound && operation?.requiresCodexClose === true)
+      || safeCleanupRawItems(data).some((item) => selected.has(String(item?.id || "")) && item?.requiresCodexClose === true);
   }
 
   function safeCleanupTierLabel(tier) {
@@ -6680,14 +7082,46 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       "NuGet package cache": "NuGet 包缓存",
       "npm download cache": "npm 下载缓存",
       "pip download cache": "pip 下载缓存",
+      "Yarn download cache": "Yarn 下载缓存",
+      "pnpm store cache": "pnpm 存储缓存",
+      "Bun install cache": "Bun 安装缓存",
+      "Go module cache": "Go 模块缓存",
+      "Cargo registry cache": "Cargo 注册表缓存",
+      "Cargo git checkout cache": "Cargo Git 检出缓存",
+      "Gradle dependency cache": "Gradle 依赖缓存",
+      "Maven local repository": "Maven 本地仓库",
+      "uv download cache": "uv 下载缓存",
+      "Poetry cache": "Poetry 缓存",
+      "Composer package cache": "Composer 包缓存",
+      "Hugging Face model cache": "Hugging Face 模型缓存",
+      "PyTorch hub cache": "PyTorch 模型缓存",
+      "ModelScope model cache": "ModelScope 模型缓存",
+      "Ollama model weights": "Ollama 模型权重",
+      "Playwright browser cache": "Playwright 浏览器缓存",
+      "Cypress binary cache": "Cypress 二进制缓存",
+      "Electron download cache": "Electron 下载缓存",
+      "ccache compiler cache": "ccache 编译缓存",
+      "sccache compiler cache": "sccache 编译缓存",
+      "Android SDK cache": "Android SDK 缓存",
+      "Android SDK temporary cache": "Android SDK 临时缓存",
+      "Scoop package cache": "Scoop 包缓存",
       "Homebrew download cache": "Homebrew 下载缓存",
       "Visual Studio Code cache": "Visual Studio Code 缓存",
       "Visual Studio cache": "Visual Studio 缓存",
+      "JetBrains IDE cache": "JetBrains IDE 缓存",
+      "Cursor cache": "Cursor 缓存",
+      "Discord cache": "Discord 缓存",
+      "Slack cache": "Slack 缓存",
       "Xcode derived data": "Xcode 派生数据",
       "DirectX shader cache": "DirectX 着色器缓存",
       "GPU shader cache": "GPU 着色器缓存",
+      "Windows thumbnail cache": "Windows 缩略图缓存",
+      "Recycle Bin items": "回收站项目",
+      "Trash items": "废纸篓项目",
       "Chrome cache": "Chrome 缓存",
       "Edge cache": "Edge 缓存",
+      "Brave cache": "Brave 缓存",
+      "Firefox cache": "Firefox 缓存",
       "Old Windows crash dumps": "Windows 旧崩溃转储",
       "Old Windows error reports": "Windows 旧错误报告",
       "Old queued Windows error reports": "Windows 待处理旧错误报告",
@@ -6728,12 +7162,31 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const impacts = {
       "Applications may recreate temporary files.": "应用可能会按需重新生成临时文件。",
       "Packages may need to be downloaded again.": "后续使用时可能需要重新下载软件包。",
+      "Modules may need to be downloaded again.": "后续使用时可能需要重新下载模块。",
+      "Crates may need to be downloaded again.": "后续使用时可能需要重新下载 crate。",
+      "Git dependencies may need to be fetched again.": "后续使用时可能需要重新获取 Git 依赖。",
+      "Dependencies may need to be downloaded again.": "后续使用时可能需要重新下载依赖。",
+      "Artifacts may need to be downloaded again.": "后续使用时可能需要重新下载构件。",
+      "Models and datasets may need to be downloaded again.": "后续使用时可能需要重新下载模型和数据集。",
+      "Models may need to be downloaded again.": "后续使用时可能需要重新下载模型。",
+      "Local models may need to be downloaded again.": "后续使用时可能需要重新下载本地模型。",
+      "Browser binaries may need to be downloaded again.": "后续使用时可能需要重新下载浏览器二进制文件。",
+      "Electron binaries may need to be downloaded again.": "后续使用时可能需要重新下载 Electron 二进制文件。",
+      "Compilations may take longer until the cache is rebuilt.": "在缓存重建前，编译可能会变慢。",
+      "Android tooling may rebuild cache data.": "Android 工具链可能会重建缓存数据。",
+      "Android tooling may recreate temporary downloads.": "Android 工具链可能会重新创建临时下载。",
       "Graphics applications may rebuild shader data on next use.": "图形应用下次使用时会重新生成着色器缓存。",
       "The editor may rebuild cached UI and code data.": "编辑器下次使用时会重建界面和代码缓存。",
+      "The IDE may rebuild indexes and local caches.": "IDE 下次使用时会重建索引和本地缓存。",
+      "The application may rebuild cached UI data.": "应用下次使用时会重建界面缓存。",
+      "Explorer may rebuild thumbnails on next browse.": "资源管理器下次浏览时会重建缩略图。",
+      "Deleted files in the Recycle Bin will be permanently removed.": "回收站中的已删除文件将被永久移除。",
+      "Deleted files in Trash will be permanently removed.": "废纸篓中的已删除文件将被永久移除。",
       "Visual Studio may rebuild component and image caches.": "Visual Studio 下次使用时会重建组件和图像缓存。",
       "Visual Studio may rebuild cached data.": "Visual Studio 下次使用时会重建缓存。",
       "Xcode may rebuild indexes and build products.": "Xcode 下次使用时会重建索引和构建产物。",
       "Pages and shaders may be cached again on next use.": "浏览器下次使用时会重新生成页面和着色器缓存。",
+      "Pages may be cached again on next use.": "浏览器下次使用时会重新生成页面缓存。",
       "Old operating-system diagnostics will no longer be available.": "清理后将无法再用这些旧系统报告排查问题。",
       "Old HUD diagnostics will no longer be available.": "清理后将无法查看这些旧 HUD 诊断日志。",
       "Protected HUD data remains unchanged.": "HUD 配置、状态和受保护数据保持不变。",
@@ -6755,11 +7208,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function safeCleanupOperationLabel(operation) {
     const state = String(operation?.state || "idle");
     if (state === "completed" && operation?.action === "scan") return "扫描完成";
-    return ({ idle: "等待扫描", scanning: "正在扫描", accepted: "请求已提交", preview: "清理预览", running: "正在清理", queued_exit: "等待退出", completed: "清理完成", partial: "部分完成", cancelled: "已取消", failed: "清理失败", restored: "已从备份恢复" })[state] || "状态更新中";
+    if (state === "failed") {
+      const error = String(operation?.error || "");
+      if (error.includes("清理已取消") || error.includes("未修改任何数据") || error.includes("未执行")) {
+        return "已取消";
+      }
+    }
+    return ({ idle: "等待扫描", scanning: "正在扫描", accepted: "请求已提交", preview: "清理预览", running: "正在清理", queued_exit: "等待退出", completed: "清理完成", partial: "部分完成（部分项已跳过）", cancelled: "已取消", failed: "需要处理", restored: "已从备份恢复" })[state] || "状态更新中";
   }
 
   function safeCleanupResultStateLabel(state) {
-    return ({ selected: "已选择", completed: "已清理", skipped: "已跳过", failed: "失败", restored: "已恢复" })[String(state || "")] || String(state || "状态未知");
+    return ({ selected: "等待清理", running: "清理中", completed: "已完成", deleted: "已删除", skipped: "已跳过", failed: "未完成", partial: "部分完成", restored: "已恢复" })[String(state || "")] || String(state || "状态未知");
   }
 
   function safeCleanupRetention(group) {
@@ -6852,6 +7311,97 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
   }
 
+  function safeCleanupSourceSummary(group, data = safeCleanupFromPayload()) {
+    const category = String(group?.category || "");
+    const platform = String(data?.platform || "").toLowerCase();
+    const sources = {
+      user_temp: platform.startsWith("win") ? "%TEMP%" : "用户临时目录",
+      codex_temp: "Codex 临时目录",
+      hud_diagnostics: "HUD 本地诊断目录",
+      hud_overlay_history: "HUD 本地运行目录",
+      cleanup_backups: "HUD 清理备份目录",
+      codex_logs_history: "Codex 本地诊断库",
+      background_usage_history: "HUD 本地用量库",
+      sqlite_history: "本地 SQLite 历史库",
+    };
+    return sources[category] || "本地缓存目录";
+  }
+
+  function safeCleanupModifiedRangeLabel(group) {
+    const oldest = String(group?.oldestModifiedAt || "");
+    const newest = String(group?.newestModifiedAt || "");
+    if (!oldest && !newest) return "";
+    const oldestLabel = backgroundUsageTime(oldest || newest, { compact: true });
+    const newestLabel = backgroundUsageTime(newest || oldest, { compact: true });
+    if (oldestLabel === newestLabel) return `修改于 ${newestLabel}`;
+    return `最早 ${oldestLabel} · 最近 ${newestLabel}`;
+  }
+
+  function safeCleanupPathKindLabel(value) {
+    return ({ file: "文件", directory: "目录", unknown: "类型未知" })[String(value || "unknown")] || "类型未知";
+  }
+
+  function safeCleanupGroupDetailsHtml(group, { showResults = false } = {}) {
+    const rows = (Array.isArray(group?.entries) ? group.entries : []).map((entry) => {
+      const itemId = String(entry?.id || "");
+      const path = String(entry?.path || "");
+      const modified = String(entry?.modifiedAt || "") ? backgroundUsageTime(entry.modifiedAt) : "时间未知";
+      const resultState = String(entry?.state || "");
+      const stateLabel = resultState
+        ? safeCleanupResultStateLabel(resultState)
+        : safeCleanupTierLabel(entry?.tier);
+      const meta = [
+        safeCleanupPathKindLabel(entry?.pathKind),
+        storageFormatBytes(entry?.bytes),
+        `${Math.max(0, Number(entry?.files || 0)).toLocaleString()} 个文件`,
+        modified,
+        safeCleanupRetention(entry),
+        stateLabel,
+      ].filter(Boolean).join(" · ");
+      const note = String(entry?.error || "").trim() || safeCleanupDisplayImpact(entry);
+      const actions = path && itemId
+        ? `<span class="codex-usage-hud-cleanup-target-actions"><button type="button" class="codex-usage-hud-cleanup-target-action" data-action="safe-cleanup-copy-path" data-item-id="${escapeHtml(itemId)}" title="复制完整路径" aria-label="复制完整路径">${cleanupIconSvg("copy")}</button><button type="button" class="codex-usage-hud-cleanup-target-action" data-action="safe-cleanup-reveal" data-item-id="${escapeHtml(itemId)}" title="在资源管理器或 Finder 中打开位置" aria-label="在系统文件管理器中打开位置">${cleanupIconSvg("folder")}</button></span>`
+        : "";
+      return `<div class="codex-usage-hud-cleanup-target" data-state="${escapeHtml(resultState || String(entry?.tier || "protected"))}"><div class="codex-usage-hud-cleanup-target-head"><code class="codex-usage-hud-cleanup-target-path" title="${escapeHtml(path || "路径不可用")}">${escapeHtml(path || "路径不可用")}</code>${actions}</div><div class="codex-usage-hud-cleanup-target-meta">${escapeHtml(meta)}</div>${note ? `<div class="codex-usage-hud-cleanup-target-note" data-result="${showResults}">${escapeHtml(note)}</div>` : ""}</div>`;
+    }).join("");
+    return `<div class="codex-usage-hud-cleanup-details" data-cleanup-details="${escapeHtml(group?.presentationId || "")}">${rows || '<div class="codex-usage-hud-cleanup-target-note">没有可显示的目标详情。</div>'}</div>`;
+  }
+
+  function safeCleanupGroupRowHtml(group, {
+    selectedIds = [],
+    kind = "safe",
+    interactive = true,
+    showResults = false,
+  } = {}) {
+    const selected = new Set((selectedIds || []).map((id) => String(id || "")).filter(Boolean));
+    const executableIds = Array.isArray(group?.executableIds) ? group.executableIds : [];
+    const selectedCount = executableIds.filter((id) => selected.has(String(id))).length;
+    const checked = executableIds.length > 0 && selectedCount === executableIds.length;
+    const partial = selectedCount > 0 && selectedCount < executableIds.length;
+    const tier = String(group?.tier || "protected");
+    const presentationId = String(group?.presentationId || group?.id || "");
+    const expanded = safeCleanupState.expandedGroupIds.has(presentationId);
+    const source = safeCleanupSourceSummary(group);
+    const modified = safeCleanupModifiedRangeLabel(group);
+    const meta = [
+      source,
+      `${Math.max(0, Number(group?.targetCount || 0)).toLocaleString()} 个目标`,
+      `${Math.max(0, Number(group?.files || 0)).toLocaleString()} 个文件`,
+      safeCleanupRetention(group),
+      modified,
+    ].filter(Boolean).join(" · ");
+    const resultState = String(group?.state || "selected");
+    const impact = showResults
+      ? [safeCleanupResultStateLabel(resultState), group?.hasResults ? `实际 ${storageFormatBytes(group?.actualBytes)}` : ""].filter(Boolean).join(" · ")
+      : safeCleanupDisplayImpact(group);
+    const size = showResults && group?.hasResults ? group.actualBytes : group?.bytes;
+    const selector = showResults
+      ? `<span class="codex-usage-hud-cleanup-result-mark" data-state="${escapeHtml(resultState)}" aria-label="${escapeHtml(safeCleanupResultStateLabel(resultState))}">${resultState === "completed" ? "✓" : (resultState === "running" ? "…" : (resultState === "selected" ? "○" : "–"))}</span>`
+      : `<button type="button" class="codex-usage-hud-cleanup-check" role="checkbox" aria-checked="${partial ? "mixed" : checked}" data-checked="${checked}" data-partial="${partial}" data-disabled="${!interactive || !executableIds.length}" data-action="safe-cleanup-group-toggle" data-cleanup-group-id="${escapeHtml(presentationId)}" ${!interactive || !executableIds.length ? "disabled" : ""} aria-label="${escapeHtml(`${checked ? "取消选择" : "选择"}${safeCleanupDisplayLabel(group)}`)}"></button>`;
+    const chevron = `<button type="button" class="codex-usage-hud-cleanup-row-chevron" data-action="safe-cleanup-group-expand" data-cleanup-group-id="${escapeHtml(presentationId)}" aria-expanded="${expanded}" title="${expanded ? "收起路径详情" : "展开路径详情"}" aria-label="${expanded ? "收起路径详情" : "展开路径详情"}">${cleanupIconSvg("chevron")}</button>`;
+    return `<div class="codex-usage-hud-cleanup-group" data-group-id="${escapeHtml(presentationId)}" data-expanded="${expanded}"><div class="codex-usage-hud-cleanup-row" data-tier="${escapeHtml(tier)}" data-kind="${escapeHtml(kind)}" data-result-state="${escapeHtml(showResults ? resultState : "")}">${selector}<div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(safeCleanupDisplayLabel(group))}</div><div class="codex-usage-hud-cleanup-row-meta" title="${escapeHtml(meta)}">${escapeHtml(meta || "按安全策略")}</div></div><div class="codex-usage-hud-cleanup-row-impact">${escapeHtml(impact)}</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(size)}</div>${chevron}</div>${expanded ? safeCleanupGroupDetailsHtml(group, { showResults }) : ""}</div>`;
+  }
+
   function safeCleanupGroupsHtml(data, {
     selectedIds = [],
   } = {}) {
@@ -6860,83 +7410,88 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const safeGroups = groups.filter((group) => String(group?.tier || "protected") === "safe");
     const consentGroups = groups.filter((group) => String(group?.tier || "protected") === "consent");
     const protectedGroups = groups.filter((group) => String(group?.tier || "protected") === "protected");
-    const renderRow = (group, {
-      checked = false,
-      kind = "safe",
-      interactive = false,
-    } = {}) => {
-      const tier = String(group?.tier || "protected");
-      const impact = safeCleanupDisplayImpact(group);
-      const items = Array.isArray(group?.items) ? group.items.length : Number(group?.items || group?.itemCount || 0);
-      const meta = [safeCleanupRetention(group), items > 0 ? `${items} 项` : "", group?.requiresOffline ? "需退出后维护" : ""].filter(Boolean).join(" · ");
-      const checkAttrs = interactive
-        ? `data-action="cleanup-deep-toggle" aria-expanded="${cleanupDeepExpanded}"`
-        : "";
-      return `<div class="codex-usage-hud-cleanup-row" data-tier="${escapeHtml(tier)}" data-kind="${escapeHtml(kind)}"><span class="codex-usage-hud-cleanup-check" data-checked="${checked}" data-disabled="${tier === "protected"}" ${checkAttrs}></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(safeCleanupDisplayLabel(group))}</div><div class="codex-usage-hud-cleanup-row-meta">${escapeHtml(meta || "按安全策略")}</div></div><div class="codex-usage-hud-cleanup-row-impact">${escapeHtml(impact)}</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(group?.bytes)}</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
-    };
-    const safeRows = safeGroups.slice(0, 8).map((group) => renderRow(group, {
-      checked: selected.has(String(group?.id || "")),
+    const interactive = !isSafeCleanupBusy(data);
+    const safeRows = safeGroups.map((group) => safeCleanupGroupRowHtml(group, {
+      selectedIds,
       kind: "safe",
+      interactive,
     })).join("");
+    const consentIds = consentGroups.flatMap((group) => group.executableIds || []);
+    const consentSelectedCount = consentIds.filter((id) => selected.has(String(id))).length;
+    const consentChecked = consentIds.length > 0 && consentSelectedCount === consentIds.length;
+    const consentPartial = consentSelectedCount > 0 && consentSelectedCount < consentIds.length;
     const consentBytes = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    const deepRow = consentGroups.length ? renderRow({
-      tier: "consent",
-      label: "深度清理（可选）",
-      category: "diagnostic_history",
-      retention: "24 hours",
-      impact: "需备份并关闭 Codex",
-      bytes: consentBytes,
-      items: consentGroups.length,
-      requiresOffline: consentGroups.some((group) => group?.requiresOffline),
-    }, {
-      checked: !!safeCleanupState.includeConsent,
-      kind: "deep",
-      interactive: true,
-    }) : "";
-    const expandedConsent = cleanupDeepExpanded
-      ? consentGroups.slice(0, 5).map((group) => renderRow(group, {
-        checked: selected.has(String(group?.id || "")),
+    const consentTargets = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.targetCount || 0)), 0);
+    const consentFiles = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.files || 0)), 0);
+    const deepExpanded = safeCleanupState.expandedGroupIds.has(safeCleanupDeepGroupId);
+    const deepRow = consentGroups.length ? `<div class="codex-usage-hud-cleanup-row" data-tier="consent" data-kind="deep"><button type="button" class="codex-usage-hud-cleanup-check" role="checkbox" aria-checked="${consentPartial ? "mixed" : consentChecked}" data-checked="${consentChecked}" data-partial="${consentPartial}" data-disabled="${!interactive || !consentIds.length}" data-action="safe-cleanup-consent-toggle" ${!interactive || !consentIds.length ? "disabled" : ""} aria-label="${consentChecked ? "取消全部深度清理" : "选择全部深度清理"}"></button><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">深度清理（可选）</div><div class="codex-usage-hud-cleanup-row-meta">${consentGroups.length} 类 · ${consentTargets} 个目标 · ${consentFiles.toLocaleString()} 个文件</div></div><div class="codex-usage-hud-cleanup-row-impact">需单独确认，部分项需备份或退出</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(consentBytes)}</div><button type="button" class="codex-usage-hud-cleanup-row-chevron" data-action="cleanup-deep-toggle" aria-expanded="${deepExpanded}" title="${deepExpanded ? "收起深度清理分类" : "展开深度清理分类"}" aria-label="${deepExpanded ? "收起深度清理分类" : "展开深度清理分类"}">${cleanupIconSvg("chevron")}</button></div>` : "";
+    const expandedConsent = deepExpanded
+      ? consentGroups.map((group) => safeCleanupGroupRowHtml(group, {
+        selectedIds,
         kind: "consent",
+        interactive,
       })).join("")
       : "";
     const protectedBytes = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
+    const protectedTargets = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.targetCount || 0)), 0);
+    const protectedExpanded = safeCleanupState.expandedGroupIds.has(safeCleanupProtectedGroupId);
     const protectedNote = protectedGroups.length
-      ? `<div class="codex-usage-hud-cleanup-protected-note"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 项</span><span>配置、凭据和会话默认受保护</span></div>`
+      ? `<div class="codex-usage-hud-cleanup-protected-note"><button type="button" data-action="safe-cleanup-protected-toggle" aria-expanded="${protectedExpanded}"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 类 / ${protectedTargets} 个目标</span><span>查看路径 ${cleanupIconSvg("chevron")}</span></button></div>${protectedExpanded ? protectedGroups.map((group) => safeCleanupGroupRowHtml(group, { selectedIds, kind: "protected", interactive: false })).join("") : ""}`
       : "";
     return `${safeRows}${deepRow}${expandedConsent}${protectedNote}`;
+  }
+
+  function safeCleanupResultGroupsHtml(data, selectedIds, results, { fallbackState = "selected" } = {}) {
+    const resultById = new Map((Array.isArray(results) ? results : [])
+      .map((result) => [String(result?.id || ""), result])
+      .filter(([id]) => !!id));
+    const completeResults = (Array.isArray(selectedIds) ? selectedIds : []).map((id) => {
+      const normalizedId = String(id || "");
+      return resultById.get(normalizedId) || { id: normalizedId, state: fallbackState };
+    });
+    return safeCleanupPresentationGroups(data, { itemIds: selectedIds, results: completeResults })
+      .map((group) => safeCleanupGroupRowHtml(group, {
+        selectedIds,
+        kind: `result-${String(group?.tier || "protected")}`,
+        interactive: false,
+        showResults: true,
+      }))
+      .join("");
   }
 
   function safeCleanupPreviewHtml(data) {
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const state = String(operation?.state || "idle");
     if (operation?.action === "scan") return "";
-    if (!new Set(["preview", "completed", "partial", "failed", "restored"]).has(state) || safeCleanupState.previewHidden) return "";
+    if (!new Set(["preview", "completed", "partial", "failed", "restored", "accepted", "running", "queued_exit"]).has(state) || safeCleanupState.previewHidden) return "";
     const results = Array.isArray(operation?.results) ? operation.results : [];
     const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : safeCleanupSelectedGroupIds(data);
-    const groupById = new Map(safeCleanupGroups(data).map((group) => [String(group?.id || ""), group]));
-    const previewItems = results.length
-      ? results.map((item) => ({ ...(groupById.get(String(item?.id || "")) || {}), ...item }))
-      : selectedIds.map((id) => {
-        const group = groupById.get(String(id)) || {};
-        return { ...group, id, state: "selected" };
-      });
-    const previewTierOrder = { consent: 0, safe: 1, protected: 2 };
-    const orderedPreviewItems = [...previewItems].sort((left, right) => (
-      (previewTierOrder[String(left?.tier || "")] ?? 3)
-      - (previewTierOrder[String(right?.tier || "")] ?? 3)
-    ));
-    const rows = orderedPreviewItems.slice(0, 16).map((item) => `<div class="codex-usage-hud-cleanup-result"><span>${escapeHtml(safeCleanupDisplayLabel(item))}</span><span class="codex-usage-hud-cleanup-meta">${escapeHtml(item?.error || safeCleanupResultStateLabel(item?.state))}</span></div>`).join("");
+    if (state === "preview" && !safeCleanupPreviewMatchesSelection(data)) return "";
+    const rows = safeCleanupResultGroupsHtml(data, selectedIds, results);
     const actual = operation?.actualBytes;
     const value = actual === null || actual === undefined
       ? safeCleanupPreviewSpaceSummary(operation)
       : `实际回收 ${storageFormatBytes(actual)}`;
     const backupSummary = actual === null || actual === undefined ? "" : safeCleanupResultBackupSummary(operation);
-    return `<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(value)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div>`;
+    return `<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(value)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows || '<div class="codex-usage-hud-cleanup-meta">当前没有已选目标。</div>'}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div>`;
   }
 
 
   function isCleanupScanningRevision(revision) {
     return String(revision || "").startsWith("scanning:");
+  }
+
+  function isSafeCleanupExecuting(data = safeCleanupFromPayload()) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const state = String(operation?.state || "").toLowerCase();
+    const action = String(operation?.action || "");
+    const isExecuteAction = !action
+      || new Set(["execute", "safeCleanupExecute"]).has(action);
+    if (safeCleanupState.pendingRequestId && String(safeCleanupState.pendingRequestId).startsWith("safe-cleanup-execute")) {
+      return true;
+    }
+    if (!isExecuteAction) return false;
+    return new Set(["accepted", "running", "queued_exit"]).has(state);
   }
 
   function isSafeCleanupBusy(data = safeCleanupFromPayload()) {
@@ -6978,6 +7533,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       sessions: "读取会话索引",
       merge: "归并主会话与子任务",
       capability: "校验删除能力",
+      prepare: "准备清理",
+      execute: "正在删除",
+      queued_exit: "等待退出后清理",
+
     };
     if (map[phase]) {
       // Keep neutral detail after English label if backend appended ": detail"
@@ -7020,17 +7579,32 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function safeCleanupScanStripHtml(data, {
     title = "扫描进度",
     rescan = false,
+    mode = "scan",
+    startedAt = 0,
   } = {}) {
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const progress = Math.max(0, Math.min(99, Number(operation?.progress || 0)));
+    const maxProgress = mode === "execute" ? 100 : 99;
+    const progress = Math.max(0, Math.min(maxProgress, Number(operation?.progress || 0)));
     const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
-    const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 6));
+    const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || (mode === "execute" ? 1 : 6)));
     const phaseLabel = safeCleanupPhaseLabel(operation);
     const discoveredGroups = Number(operation?.discoveredGroups ?? (Array.isArray(data?.groups) ? data.groups.length : 0));
     const discoveredBytes = Number(operation?.discoveredBytes ?? data?.totals?.reclaimableBytes ?? 0);
-    const elapsed = formatCleanupElapsed(safeCleanupState.scanStartedAt);
+    const results = Array.isArray(operation?.results) ? operation.results : [];
+    const doneCount = results.filter((item) => {
+      const state = String(item?.state || "").toLowerCase();
+      return new Set(["deleted", "completed", "skipped", "failed", "restored"]).has(state);
+    }).length;
+    const actualBytes = Number(operation?.actualBytes || 0);
+    const elapsed = formatCleanupElapsed(startedAt || (mode === "execute" ? safeCleanupState.executeStartedAt : safeCleanupState.scanStartedAt));
     const indeterminate = progress <= 0;
-    return `<div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>${escapeHtml(rescan ? "重新扫描" : title)}</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}</div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${indeterminate}" style="width:${Math.max(progress, indeterminate ? 38 : 4)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel)}</strong></span><span>已发现 ${discoveredGroups} 组 · ${storageFormatBytes(discoveredBytes)}</span></div></div>`;
+    const meta = mode === "execute"
+      ? `第 ${phaseIndex}/${phaseCount} 项 · ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}`
+      : `第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}`;
+    const stageRight = mode === "execute"
+      ? `已处理 ${doneCount}/${phaseCount} · 已回收 ${storageFormatBytes(actualBytes)}`
+      : `已发现 ${discoveredGroups} 组 · ${storageFormatBytes(discoveredBytes)}`;
+    return `<div class="codex-usage-hud-cleanup-scan-strip" data-mode="${escapeHtml(mode)}" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>${escapeHtml(rescan ? "重新扫描" : title)}</div><div class="codex-usage-hud-cleanup-scan-strip-meta">${meta}</div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${indeterminate}" style="width:${Math.max(progress, indeterminate ? 38 : 4)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel)}</strong></span><span>${stageRight}</span></div></div>`;
   }
 
   function safeCleanupBootHtml(data, { pending = true } = {}) {
@@ -7056,8 +7630,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       { id: "ph-runtime", title: "运行残留", meta: "过期临时项与旧清理备份", kind: "safe", phaseKey: "codex" },
       { id: "ph-hud", title: "HUD 诊断日志", meta: "当前与轮转日志", kind: "safe", phaseKey: "hud" },
     ];
-    const foundRows = safeGroups.slice(0, 8).map((group) => {
-      const checked = selected.has(String(group?.id || ""));
+    const foundRows = safeGroups.map((group) => {
+      const executableIds = Array.isArray(group?.executableIds) ? group.executableIds : [];
+      const checked = executableIds.length > 0 && executableIds.every((id) => selected.has(String(id)));
       const impact = safeCleanupDisplayImpact(group);
       const items = Array.isArray(group?.items) ? group.items.length : Number(group?.items || group?.itemCount || 0);
       const meta = [safeCleanupRetention(group), items > 0 ? `${items} 项` : ""].filter(Boolean).join(" · ");
@@ -7077,7 +7652,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       : `<div class="codex-usage-hud-cleanup-row" data-tier="consent" data-kind="deep"><span class="codex-usage-hud-cleanup-check" data-checked="false" data-disabled="false"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">深度清理（可选）</div><div class="codex-usage-hud-cleanup-row-meta">旧 Codex 诊断历史 · 保留最近 24 小时</div></div><div class="codex-usage-hud-cleanup-row-impact">需备份并关闭 Codex</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(consentBytes)}</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
     const protectedBytes = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
     const protectedNote = protectedGroups.length
-      ? `<div class="codex-usage-hud-cleanup-protected-note"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 项</span><span>配置、凭据和会话默认受保护</span></div>`
+      ? `<div class="codex-usage-hud-cleanup-protected-note"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 类</span><span>配置、凭据和会话默认受保护</span></div>`
       : `<div class="codex-usage-hud-cleanup-protected-note" style="opacity:.55"><span>${cleanupIconSvg("shield")}受保护项统计中…</span><span>配置与会话不会入选</span></div>`;
     return `${foundRows}${pendingRows}${deepRow}${protectedNote}`;
   }
@@ -7103,9 +7678,37 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-summary-band" data-scanning="true"><div><div class="codex-usage-hud-cleanup-summary-label"><span class="codex-usage-hud-cleanup-mini-spinner"></span>累计可清理（扫描中）</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(discoveredBytes)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已发现 ${discoveredGroups} 组<br>仍在扫描更多位置…</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupPlaceholderRowsHtml(live)}</div></section>`;
   }
 
+  function safeCleanupExecutingPanelHtml(data) {
+    const live = data && typeof data === "object" ? data : {};
+    const operation = live?.operation && typeof live.operation === "object" ? live.operation : {};
+    const state = String(operation?.state || "running").toLowerCase();
+    const title = state === "queued_exit"
+      ? "等待退出后清理"
+      : (state === "accepted" ? "准备清理" : "正在清理");
+    const strip = safeCleanupScanStripHtml(live, {
+      title,
+      mode: "execute",
+      startedAt: safeCleanupState.executeStartedAt,
+    });
+    const selectedIds = Array.isArray(operation?.selectedIds)
+      ? operation.selectedIds.map((id) => String(id || "")).filter(Boolean)
+      : safeCleanupSelectedGroupIds(live);
+    const results = Array.isArray(operation?.results) ? operation.results : [];
+    const rows = safeCleanupResultGroupsHtml(live, selectedIds, results, {
+      fallbackState: state === "accepted" ? "selected" : "running",
+    });
+    const note = state === "queued_exit"
+      ? "HUD 即将退出，离线清理会在退出后继续，完成后自动恢复。"
+      : (state === "accepted"
+        ? "正在检查活动任务与进程占用，通过后开始删除。"
+        : "正在逐项删除；被占用或无法删除的项会自动跳过。");
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(note)}</div></div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows || `<div class="codex-usage-hud-cleanup-meta">等待清理项清单…</div>`}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div></section>`;
+  }
+
   function safeCleanupPanelHtml() {
     const data = safeCleanupFromPayload();
     const scanning = isSafeCleanupScanning(data);
+    const executing = isSafeCleanupExecuting(data);
     const scanned = !!String(data?.revision || "") && !isCleanupScanningRevision(data?.revision);
     const pending = !!safeCleanupState.pendingRequestId;
     const stable = hasStableSafeCleanupInventory(safeCleanupState.stableData) ? safeCleanupState.stableData : null;
@@ -7115,6 +7718,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         stableData: stable,
       });
     }
+    if (executing) {
+      return safeCleanupExecutingPanelHtml(data);
+    }
     if (!data || !scanned) {
       const failed = String(data?.operation?.state || "") === "failed";
       if (failed) {
@@ -7123,23 +7729,27 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">本机缓存、临时文件与 HUD 诊断数据</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large" ${pending ? "disabled" : ""}>${pending ? "正在扫描..." : `${cleanupIconSvg("scan")}扫描垃圾`}</button></div></section>`;
     }
+    syncSafeCleanupSelection(data);
     syncSafeCleanupDefaults(data);
-    const totals = data?.totals && typeof data.totals === "object" ? data.totals : {};
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const operationState = String(operation?.state || "idle");
-    const previewLocked = operationState === "preview" && !safeCleanupState.previewHidden;
-    const offline = safeCleanupRequiresOffline(data);
+    const previewLocked = operationState === "preview"
+      && !safeCleanupState.previewHidden
+      && safeCleanupPreviewMatchesSelection(data);
     const requiresBackup = safeCleanupRequiresBackup(data);
     const requiresCodexClose = safeCleanupRequiresCodexClose(data);
-    const consentAvailable = safeCleanupGroups(data).some((group) => String(group?.tier || "") === "consent" && !String(group?.blockedReason || ""));
-    const selectedIds = previewLocked && Array.isArray(operation?.selectedIds)
-      ? operation.selectedIds.map((id) => String(id || "")).filter(Boolean)
-      : safeCleanupSelectedGroupIds(data);
-    const reclaimable = operation?.netEstimatedBytes ?? totals?.reclaimableBytes;
+    const selectedIds = safeCleanupSelectedGroupIds(data);
+    const selectedGroups = safeCleanupPresentationGroups(data, { itemIds: selectedIds });
+    const reclaimable = previewLocked
+      ? (operation?.netEstimatedBytes ?? operation?.estimatedBytes)
+      : selectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
     const backupControl = requiresBackup ? `<div class="codex-usage-hud-cleanup-backup"><input type="text" data-cleanup-backup-directory="true" value="${escapeHtml(safeCleanupState.backupDirectory)}" placeholder="选择备份目录" aria-label="SQLite 备份目录" ${previewLocked ? "disabled" : ""}><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-choose-backup" ${previewLocked ? "disabled" : ""}>选择目录</button></div>` : "";
     const autoCloseControl = requiresCodexClose ? `<label class="codex-usage-hud-cleanup-control"><input type="checkbox" data-cleanup-auto-close="true" ${safeCleanupState.autoCloseConfirmed ? "checked" : ""}><span><strong>允许自动关闭并恢复 Codex App 与 HUD</strong><span class="codex-usage-hud-cleanup-meta">检测到独立 Codex CLI 或活动任务时仍会停止执行</span></span></label>` : "";
-    const controls = cleanupDeepExpanded ? `<div class="codex-usage-hud-cleanup-controls">${consentAvailable ? `<label class="codex-usage-hud-cleanup-control"><input type="checkbox" data-cleanup-consent="true" ${safeCleanupState.includeConsent ? "checked" : ""} ${previewLocked ? "disabled" : ""}><span><strong>启用深度清理</strong><span class="codex-usage-hud-cleanup-meta">包含会失去历史的诊断或 SQLite 旧记录，默认不选</span></span></label>` : ""}${backupControl}${autoCloseControl}</div>` : "";
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}可安全清理</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(reclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已选 ${selectedIds.length} 项<br>${escapeHtml(safeCleanupOperationLabel(operation))}</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(data, { selectedIds })}${controls}</div>${operationState === "preview" ? "" : safeCleanupPreviewHtml(data)}</section>`;
+    const deepExpanded = safeCleanupState.expandedGroupIds.has(safeCleanupDeepGroupId);
+    const controls = deepExpanded && (backupControl || autoCloseControl)
+      ? `<div class="codex-usage-hud-cleanup-controls">${backupControl}${autoCloseControl}</div>`
+      : "";
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}当前选择</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(reclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已选 ${selectedGroups.length} 类 / ${selectedIds.length} 个目标<br>${escapeHtml(safeCleanupOperationLabel(operation))}</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(data, { selectedIds })}${controls}</div>${safeCleanupPreviewHtml(data)}</section>`;
   }
 
   function storagePanelHtml() {
@@ -7153,17 +7763,26 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         : (sessionCount ? `${sessionCount.toLocaleString()} 个本地会话` : "按需扫描 · 无后台轮询"))
       : (isSafeCleanupScanning(cleanupData)
         ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>${escapeHtml(safeCleanupPhaseLabel(cleanupData?.operation || {}) || "正在扫描…")}`
-        : (cleanupData?.revision && !isCleanupScanningRevision(cleanupData?.revision)
-          ? escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {}))
-          : "按需扫描 · 无后台轮询"));
+        : (isSafeCleanupExecuting(cleanupData)
+          ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>${escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {}) || "正在清理")}`
+          : (cleanupData?.revision && !isCleanupScanningRevision(cleanupData?.revision)
+            ? escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {}))
+            : "按需扫描 · 无后台轮询")));
     const body = isSessions ? sessionCleanupPanelHtml() : safeCleanupPanelHtml();
     const junkScanning = isSafeCleanupScanning(cleanupData);
     const junkScanned = !!String(cleanupData?.revision || "") && !isCleanupScanningRevision(cleanupData?.revision) && !junkScanning;
     const junkBusy = isSafeCleanupBusy(cleanupData);
     const sessionScanned = !!String(sessionData?.revision || "");
     const sessionBusy = new Set(["scanning", "accepted", "running"]).has(String(sessionData?.operation?.state || "")) || !!sessionCleanupState.pendingRequestId;
-    const junkReady = String(cleanupData?.operation?.state || "") === "preview" && !!String(cleanupData?.operation?.confirmationToken || "");
-    const reclaimable = cleanupData?.operation?.netEstimatedBytes ?? cleanupData?.totals?.reclaimableBytes;
+    const selectedCleanupIds = safeCleanupSelectedGroupIds(cleanupData);
+    const selectedCleanupGroups = safeCleanupPresentationGroups(cleanupData, { itemIds: selectedCleanupIds });
+    const junkReady = String(cleanupData?.operation?.state || "") === "preview"
+      && !!String(cleanupData?.operation?.confirmationToken || "")
+      && !safeCleanupState.previewHidden
+      && safeCleanupPreviewMatchesSelection(cleanupData);
+    const reclaimable = junkReady
+      ? (cleanupData?.operation?.netEstimatedBytes ?? cleanupData?.operation?.estimatedBytes)
+      : selectedCleanupGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
     let footerMeta = "配置、凭据和会话默认受保护";
     let footerActions = "";
     if (isSessions) {
@@ -7181,12 +7800,24 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     } else if (!junkScanned) {
       footerMeta = `上次扫描：-- · ${cleanupIconSvg("shield")} 配置、凭据和会话默认受保护`;
       footerActions = "";
+    } else if (isSafeCleanupExecuting(cleanupData)) {
+      const operation = cleanupData?.operation && typeof cleanupData.operation === "object" ? cleanupData.operation : {};
+      const progress = Math.max(0, Math.min(100, Number(operation?.progress || 0)));
+      const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
+      const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 1));
+      footerMeta = `正在清理 ${phaseIndex}/${phaseCount} · ${progress || 1}% · 已用时 ${formatCleanupElapsed(safeCleanupState.executeStartedAt)}`;
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" disabled>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>正在清理 ${progress || 1}%</button></div>`;
     } else {
       const offline = safeCleanupRequiresOffline(cleanupData);
       const requiresBackup = safeCleanupRequiresBackup(cleanupData);
       const requiresCodexClose = safeCleanupRequiresCodexClose(cleanupData);
-      footerMeta = `执行前仍会重验路径、指纹与活动任务${requiresBackup ? " · 需 SQLite 备份" : (requiresCodexClose ? " · 需重启 Codex" : (offline ? " · HUD 将短暂重启" : ""))}`;
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" ${junkBusy ? "disabled" : ""}>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" ${junkBusy || !junkReady ? "disabled" : ""}>${junkBusy && safeCleanupState.pendingRequestId ? "正在更新..." : `${cleanupIconSvg("check")}${junkReady ? `确认清理 ${storageFormatBytes(reclaimable)}` : "确认清理"}`}</button></div>`;
+      footerMeta = `已选 ${selectedCleanupGroups.length} 类 / ${selectedCleanupIds.length} 个目标 · 执行前重验路径与指纹${requiresBackup ? " · 需 SQLite 备份" : (requiresCodexClose ? " · 需重启 Codex" : (offline ? " · HUD 将短暂重启" : ""))}`;
+      const confirmLabel = junkBusy
+        ? (String(cleanupData?.operation?.state || "") === "accepted"
+          ? "准备清理..."
+          : "正在清理...")
+        : `${cleanupIconSvg("check")}${junkReady ? `确认清理 ${storageFormatBytes(reclaimable)}` : "确认清理"}`;
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" ${junkBusy ? "disabled" : ""}>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" ${junkBusy || !junkReady ? "disabled" : ""}>${confirmLabel}</button></div>`;
     }
     return `<div class="codex-usage-hud-cleanup-workspace"><div class="codex-usage-hud-cleanup-page-head"><div class="codex-usage-hud-cleanup-segments" role="tablist" aria-label="空间清理分类"><button type="button" role="tab" aria-selected="${!isSessions}" data-action="cleanup-section" data-cleanup-section="junk" data-active="${!isSessions}">${cleanupIconSvg("scan")}垃圾清理</button><button type="button" role="tab" aria-selected="${isSessions}" data-action="cleanup-section" data-cleanup-section="sessions" data-active="${isSessions}">${cleanupIconSvg("trash")}会话管理</button></div><span class="codex-usage-hud-cleanup-head-meta">${headMeta}</span></div><div class="codex-usage-hud-cleanup-content">${body}</div><div class="codex-usage-hud-cleanup-footer"><span class="codex-usage-hud-cleanup-footer-meta">${footerMeta}</span>${footerActions}</div></div>`;
   }
@@ -7352,6 +7983,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     safeCleanupState.scanStartedAt = Date.now();
     safeCleanupState.previewHidden = false;
     safeCleanupState.previewBackupDirectory = "";
+    ensureSafeCleanupLiveTicker();
+    rerenderUsageInsightsIfVisible();
     const submitted = submitSettingsCommand(
       { action: "safeCleanupScan", requestId },
       "正在扫描可安全清理的本地数据...",
@@ -7371,6 +8004,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (submitted) {
       safeCleanupState.pendingRequestId = "";
       safeCleanupState.scanStartedAt = 0;
+      safeCleanupState.executeStartedAt = 0;
     }
     return submitted;
   }
@@ -7387,6 +8021,36 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       sessionCleanupState.scanStartedAt = 0;
     }
     return submitted;
+  }
+
+  function refreshSafeCleanupSelection(data = safeCleanupFromPayload()) {
+    const itemById = new Map(safeCleanupRawItems(data).map((item) => [String(item?.id || ""), item]));
+    safeCleanupState.includeConsent = [...safeCleanupState.selectedIds]
+      .some((id) => String(itemById.get(id)?.tier || "") === "consent");
+    safeCleanupState.previewHidden = true;
+    safeCleanupState.previewBackupDirectory = "";
+    if (!safeCleanupSelectedGroupIds(data).length) {
+      clearTimeout(safeCleanupPreviewTimer);
+      if (safeCleanupState.pendingRequestId === "pending-preview") safeCleanupState.pendingRequestId = "";
+      setSettingsStatus("未选择清理目标。", "");
+      rerenderUsageInsightsIfVisible();
+      return;
+    }
+    scheduleSafeCleanupPreview();
+  }
+
+  function toggleSafeCleanupItemIds(itemIds, data = safeCleanupFromPayload()) {
+    const validIds = (Array.isArray(itemIds) ? itemIds : [])
+      .map((id) => String(id || ""))
+      .filter(Boolean);
+    if (!validIds.length) return false;
+    const allSelected = validIds.every((id) => safeCleanupState.selectedIds.has(id));
+    validIds.forEach((id) => {
+      if (allSelected) safeCleanupState.selectedIds.delete(id);
+      else safeCleanupState.selectedIds.add(id);
+    });
+    refreshSafeCleanupSelection(data);
+    return true;
   }
 
   function requestSafeCleanupPreview() {
@@ -7425,19 +8089,40 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return submitted;
   }
 
+  function requestSafeCleanupReveal(itemId) {
+    const data = safeCleanupFromPayload();
+    const normalizedItemId = String(itemId || "").trim();
+    const inventoryRevision = String(data?.revision || "");
+    if (!normalizedItemId || !inventoryRevision || isCleanupScanningRevision(inventoryRevision)) {
+      setSettingsStatus("该路径已过期，请重新扫描后再打开。", "error");
+      return false;
+    }
+    return submitSettingsCommand({
+      action: "safeCleanupReveal",
+      requestId: typedSettingsRequestId("safe-cleanup-reveal"),
+      inventoryRevision,
+      itemId: normalizedItemId,
+    }, "正在打开本地位置...", { preserveOverlay: true });
+  }
+
   function openSafeCleanupExecuteConfirm() {
     captureStorageUiState();
     const dialog = settingsDialogRoot();
     const data = safeCleanupFromPayload();
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     if (!dialog || String(operation?.state || "") !== "preview") return;
+    if (safeCleanupState.previewHidden || !safeCleanupPreviewMatchesSelection(data)) {
+      setSettingsStatus("清理选择已变化，请等待新预览。", "error");
+      return;
+    }
     const offline = safeCleanupRequiresOffline(data);
     const requiresBackup = safeCleanupRequiresBackup(data);
     const requiresCodexClose = safeCleanupRequiresCodexClose(data);
     const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
-    const groupById = new Map(safeCleanupGroups(data).map((group) => [String(group?.id || ""), group]));
+    const itemById = new Map(safeCleanupRawItems(data).map((item) => [String(item?.id || ""), item]));
     const includesConsent = operation?.includesConsent === true
-      || selectedIds.some((id) => String(groupById.get(String(id))?.tier || "") === "consent");
+      || selectedIds.some((id) => String(itemById.get(String(id))?.tier || "") === "consent");
+    const selectedGroupCount = safeCleanupPresentationGroups(data, { itemIds: selectedIds }).length;
     const previewBackupDirectory = String(safeCleanupState.previewBackupDirectory || "").trim();
     if (requiresBackup && !previewBackupDirectory) {
       setSettingsStatus("预览绑定的 SQLite 备份目录不可用，请取消后重新生成预览。", "error");
@@ -7455,7 +8140,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       ? `\nSQLite 将先备份到：${escapeHtml(previewBackupDirectory)}\n活动任务或独立 Codex CLI 会阻止执行。`
       : (requiresCodexClose ? "\nCodex App 与 HUD 会正常退出并在清理后自动恢复。活动任务或独立 Codex CLI 会阻止执行。" : (offline ? "\nHUD 会短暂退出并在清理自身日志后自动恢复。活动任务会阻止执行。" : ""));
     const spaceSummary = safeCleanupConfirmSpaceSummary(operation);
-    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认一键清理"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">清理 ${selectedIds.length} 类本地数据？</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(spaceSummary)}。${includesConsent ? "已包含会失去历史或诊断信息的确认项。" : "仅包含可直接清理项。"}${offlineNote}</div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-execute" data-primary="true">确认清理</button></div></div>`;
+    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认一键清理"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">清理 ${selectedGroupCount} 类、${selectedIds.length} 个本地目标？</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(spaceSummary)}。${includesConsent ? "已包含会失去历史或诊断信息的确认项。" : "仅包含可直接清理项。"}${offlineNote}</div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-execute" data-primary="true">确认清理</button></div></div>`;
     dialog.appendChild(layer);
     layer.querySelector('[data-action="safe-cleanup-confirm-cancel"]')?.focus?.();
   }
@@ -7463,18 +8148,60 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function executeSafeCleanup() {
     const data = safeCleanupFromPayload();
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    if (String(operation?.state || "") !== "preview" || safeCleanupState.previewHidden || !safeCleanupPreviewMatchesSelection(data)) {
+      setSettingsStatus("清理选择尚未完成预览，请稍候。", "error");
+      return false;
+    }
     const groupIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : safeCleanupSelectedGroupIds(data);
     const requestId = typedSettingsRequestId("safe-cleanup-execute");
     safeCleanupState.pendingRequestId = requestId;
+    safeCleanupState.executeStartedAt = Date.now();
+    safeCleanupState.previewHidden = false;
+    if (safeCleanupState.data && typeof safeCleanupState.data === "object") {
+      const previous = safeCleanupState.data.operation && typeof safeCleanupState.data.operation === "object"
+        ? safeCleanupState.data.operation
+        : {};
+      safeCleanupState.data = {
+        ...safeCleanupState.data,
+        operation: {
+          ...previous,
+          requestId,
+          action: "safeCleanupExecute",
+          state: "accepted",
+          progress: 5,
+          phase: "prepare",
+          phaseLabel: "Preparing cleanup",
+          phaseIndex: 1,
+          phaseCount: Math.max(1, groupIds.length || Number(previous?.phaseCount || 1)),
+          selectedIds: groupIds,
+          results: groupIds.map((id) => ({
+            id,
+            state: "selected",
+            estimatedBytes: 0,
+            actualBytes: 0,
+            deletedRows: 0,
+            error: "",
+          })),
+        },
+      };
+    }
     closeSettingsConfirm();
-    return submitSettingsCommand({
+    ensureSafeCleanupLiveTicker();
+    rerenderUsageInsightsIfVisible();
+    const submitted = submitSettingsCommand({
       action: "safeCleanupExecute",
       requestId,
       groupIds,
       inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""),
       confirmationToken: String(operation?.confirmationToken || ""),
       autoCloseAndRestore: safeCleanupState.autoCloseConfirmed,
-    }, "清理已确认，等待安全门禁...", { preserveOverlay: true });
+    }, "清理已确认，正在检查安全门禁...", { preserveOverlay: true });
+    if (!submitted) {
+      safeCleanupState.pendingRequestId = "";
+      safeCleanupState.executeStartedAt = 0;
+      rerenderUsageInsightsIfVisible();
+    }
+    return submitted;
   }
 
   function scheduleSafeCleanupPreview() {
@@ -7483,7 +8210,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     rerenderUsageInsightsIfVisible();
     safeCleanupPreviewTimer = setTimeout(() => {
       safeCleanupState.pendingRequestId = "";
-      requestSafeCleanupPreview();
+      const submitted = requestSafeCleanupPreview();
+      if (!submitted) {
+        rerenderUsageInsightsIfVisible();
+        const data = safeCleanupFromPayload();
+        const selectedIds = safeCleanupSelectedGroupIds(data);
+        const missingBackup = safeCleanupRequiresBackup(data) && !safeCleanupState.backupDirectory;
+        setSettingsStatus(
+          !selectedIds.length
+            ? "未选择清理目标。"
+            : (missingBackup ? "SQLite 维护必须先选择备份目录。" : "无法提交清理预览。"),
+          "error",
+        );
+      }
     }, 280);
   }
 
@@ -7528,17 +8267,42 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const dialog = settingsDialogRoot();
     const data = sessionCleanupFromPayload();
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    if (!dialog || String(operation?.state || "") !== "preview") return;
+    const token = String(operation?.confirmationToken || "");
+    if (!dialog || String(operation?.state || "") !== "preview" || !token) return;
     const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
     closeSettingsConfirm();
     const layer = document.createElement("div");
     layer.className = "codex-usage-hud-settings-confirm-layer";
     layer.dataset.settingsConfirm = "true";
+    layer.dataset.sessionCleanupConfirm = "true";
+    layer.dataset.sessionCleanupConfirmToken = token;
     const descendants = Math.max(0, Number(operation?.descendantCount || 0));
     const estimatedBytes = storageFormatBytes(operation?.estimatedBytes);
     layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" data-tone="danger" role="alertdialog" aria-modal="true" aria-label="确认永久删除会话"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-danger-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-settings-confirm-title">永久删除 ${selectedIds.length} 个会话？</h2><p class="codex-usage-hud-settings-confirm-body">会话内容、索引和关联子任务将从本机移除。此操作不会进入回收站，也无法恢复。Codex App 的归档入口无法恢复这些会话。</p><div class="codex-usage-hud-settings-confirm-summary"><div><span>主会话</span><strong>${selectedIds.length}</strong></div><div><span>关联子任务</span><strong>${descendants}</strong></div><div><span>本地数据</span><strong>${escapeHtml(estimatedBytes)}</strong></div></div><div class="codex-usage-hud-settings-confirm-note">${cleanupIconSvg("alert")}<span>执行前会再次核验会话身份与运行状态；任何活动项都会被跳过并单独报告。</span></div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-execute" data-danger="true">${cleanupIconSvg("trash")}永久删除</button></div></div>`;
     dialog.appendChild(layer);
     layer.querySelector('[data-action="session-cleanup-confirm-cancel"]')?.focus?.();
+  }
+
+  function restoreSessionCleanupConfirm(expectedToken) {
+    const token = String(expectedToken || "");
+    if (!token) return;
+    queueMicrotask(() => {
+      const modal = document.getElementById(settingsModalId);
+      const data = sessionCleanupFromPayload();
+      const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+      const currentToken = String(operation?.confirmationToken || "");
+      if (
+        !modal
+        || modal.hidden
+        || settingsActiveTab !== "storage"
+        || cleanupActiveSection !== "sessions"
+        || String(operation?.state || "") !== "preview"
+        || currentToken !== token
+      ) return;
+      const existing = modal.querySelector('[data-session-cleanup-confirm="true"]');
+      if (String(existing?.dataset.sessionCleanupConfirmToken || "") === token) return;
+      openSessionCleanupExecuteConfirm();
+    });
   }
 
   function executeSessionCleanup() {
@@ -7636,16 +8400,27 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function markBackgroundUsageEventViewed(eventId) {
     const normalized = String(eventId || "").trim();
+    if (!normalized) return;
     const data = backgroundUsageState.data;
-    if (!normalized || !data || !Array.isArray(data.events)) return;
-    backgroundUsageState.data = {
-      ...data,
-      events: data.events.map((event) => (
-        String(event?.eventId || "") === normalized
-          ? { ...event, unread: false }
-          : event
-      )),
-    };
+    if (data && Array.isArray(data.events)) {
+      backgroundUsageState.data = {
+        ...data,
+        events: data.events.map((event) => (
+          String(event?.eventId || "") === normalized
+            ? { ...event, unread: false }
+            : event
+        )),
+      };
+    }
+    if (
+      backgroundUsageState.detail
+      && String(backgroundUsageState.detail?.eventId || "") === normalized
+    ) {
+      backgroundUsageState.detail = {
+        ...backgroundUsageState.detail,
+        unread: false,
+      };
+    }
   }
 
   function backgroundUsageTime(value, { compact = false } = {}) {
@@ -8256,6 +9031,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const root = document.getElementById(rootId);
     const modal = document.getElementById(settingsModalId);
     if (!root || !modal) return;
+    const sessionCleanupConfirmToken = String(
+      modal.querySelector('[data-session-cleanup-confirm="true"]')?.dataset.sessionCleanupConfirmToken || "",
+    );
     if (!modal.hidden) {
       captureSettingsProviderForm();
       if (settingsActiveTab === "backgroundUsage") {
@@ -8301,9 +9079,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       </div>
     `;
     modal.hidden = false;
+    ensureRestReminderCountdownTicker();
     updateAboutActionButtons(currentUpdateState());
     if (activeTab === "storage") {
       restoreStorageUiState();
+      restoreSessionCleanupConfirm(sessionCleanupConfirmToken);
     }
     if (activeTab === "backgroundUsage") {
       restoreBackgroundUsageScrollPositions();
@@ -8311,6 +9091,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (!backgroundUsageState.data || backgroundUsageState.loadedRevision !== revision) {
         void loadBackgroundUsage({ force: true });
       } else if (backgroundUsageState.selectedEventId && !backgroundUsageState.detail) {
+        // Keep default markViewed=false here: explicit list click and the open
+        // notification path pass markViewed:true themselves.
         void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
       }
     }
@@ -8378,6 +9160,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function supportPanelHtml(settings, path) {
     const url = String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud");
     const images = Array.isArray(currentPayload()?.supportImages) ? currentPayload().supportImages : [];
+    const enabled = !!settings.rest_reminder_enabled;
+    const interval = Math.min(180, Math.max(15, Math.round(Number(settings.rest_reminder_interval_minutes) || 45)));
+    const postpone = Math.min(30, Math.max(5, Math.round(Number(settings.rest_reminder_postpone_minutes) || 10)));
+    const idleReset = Math.min(60, Math.max(0, Math.round(Number(settings.rest_reminder_idle_reset_minutes) || 5)));
     const qrItems = images.map((item) => `
       <div class="codex-usage-hud-support-qr">
         <div class="codex-usage-hud-support-qr-title">
@@ -8389,6 +9175,39 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     `).join("");
     return `
       <div class="codex-usage-hud-support">
+        <div class="codex-usage-hud-rest-reminder-card">
+          <div class="codex-usage-hud-rest-reminder-title">☕ 专注休息提醒</div>
+          <label class="codex-usage-hud-rest-reminder-toggle">
+            <input type="checkbox" data-setting-key="rest_reminder_enabled" ${enabled ? "checked" : ""}>
+            <span>开启休息提醒</span>
+          </label>
+          <div class="codex-usage-hud-rest-reminder-grid">
+            <label>
+                <span>专注时长（分钟）</span>
+              <input data-setting-key="rest_reminder_interval_minutes" type="number" min="15" max="180" step="1" value="${escapeHtml(interval)}">
+            </label>
+            <label>
+                <span>稍后提醒（分钟）</span>
+              <input data-setting-key="rest_reminder_postpone_minutes" type="number" min="5" max="30" step="1" value="${escapeHtml(postpone)}">
+            </label>
+            <label>
+                <span>离开后重新计时（分钟，0=关闭）</span>
+              <input data-setting-key="rest_reminder_idle_reset_minutes" type="number" min="0" max="60" step="1" value="${escapeHtml(idleReset)}">
+            </label>
+          </div>
+          <div class="codex-usage-hud-rest-reminder-status" aria-live="polite">
+            <div class="codex-usage-hud-rest-reminder-status-item">
+              <span class="codex-usage-hud-rest-reminder-status-label">本轮开始</span>
+              <strong class="codex-usage-hud-rest-reminder-status-value" data-rest-reminder-start="true">--:--:--</strong>
+            </div>
+            <div class="codex-usage-hud-rest-reminder-status-item">
+              <span class="codex-usage-hud-rest-reminder-status-label">距离下一次提醒</span>
+              <strong class="codex-usage-hud-rest-reminder-status-value" data-rest-reminder-remaining="true">--:--:--</strong>
+            </div>
+          </div>
+          <div class="codex-usage-hud-support-note">开启后会在专注时长结束时轻柔提醒你休息，不会锁定屏幕；你可以稍后再提醒一次。</div>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-save">保存提醒设置</button>
+        </div>
         <div class="codex-usage-hud-support-note">如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。</div>
         <div class="codex-usage-hud-support-qr-grid">
           ${qrItems || '<div class="codex-usage-hud-support-note">赞赏码资源未加载，请等待 HUD 刷新。</div>'}
@@ -8428,6 +9247,52 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (!(node instanceof HTMLButtonElement)) return;
     if (label) node.textContent = label;
     node.disabled = !!disabled;
+  }
+
+  function formatRestReminderClock(milliseconds) {
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "--:--:--";
+    return new Date(milliseconds).toLocaleTimeString("zh-CN", {
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    });
+  }
+
+  function formatRestReminderRemaining(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "--:--:--";
+    const total = Math.max(0, Math.ceil(seconds));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const remainder = total % 60;
+    return [hours, minutes, remainder].map((value) => String(value).padStart(2, "0")).join(":");
+  }
+
+  function syncRestReminderCountdown() {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "support") return;
+    const timing = currentPayload()?.restReminder;
+    const enabled = !!timing?.enabled;
+    const start = modal.querySelector('[data-rest-reminder-start="true"]');
+    const remaining = modal.querySelector('[data-rest-reminder-remaining="true"]');
+    if (start) start.textContent = enabled
+      ? formatRestReminderClock(Number(timing?.timerStartedAtMs))
+      : "开启后计时";
+    if (remaining) remaining.textContent = enabled
+      ? formatRestReminderRemaining((Number(timing?.nextReminderAtMs) - Date.now()) / 1000)
+      : "未开启";
+  }
+
+  function ensureRestReminderCountdownTicker() {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "support") {
+      if (restReminderCountdownTimer) {
+        clearInterval(restReminderCountdownTimer);
+        restReminderCountdownTimer = 0;
+      }
+      return;
+    }
+    syncRestReminderCountdown();
+    if (!restReminderCountdownTimer) {
+      restReminderCountdownTimer = setInterval(syncRestReminderCountdown, 1000);
+    }
   }
 
   function updateAboutActionButtons(state) {
@@ -8638,7 +9503,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     ));
     const allProvidersSelected = draft.order.every((provider) => selectedProviders.includes(provider));
     const displayMode = "renderer";
-    return {
+    const next = {
       ...settings,
       daily_budget_usd: numberValue("daily_budget_usd", settings.daily_budget_usd),
       weekly_budget_usd: numberValue("weekly_budget_usd", settings.weekly_budget_usd),
@@ -8665,13 +9530,42 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       support_url: String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud").trim(),
       model_prices: settings.model_prices,
     };
+    // Rest-reminder controls live on the support tab; keep previous values when absent.
+    if (settingNode("rest_reminder_enabled")) {
+      next.rest_reminder_enabled = !!settingNode("rest_reminder_enabled").checked;
+    }
+    if (settingNode("rest_reminder_interval_minutes")) {
+      next.rest_reminder_interval_minutes = integerValue(
+        "rest_reminder_interval_minutes",
+        Number(settings.rest_reminder_interval_minutes) || 45,
+        15,
+        180,
+      );
+    }
+    if (settingNode("rest_reminder_postpone_minutes")) {
+      next.rest_reminder_postpone_minutes = integerValue(
+        "rest_reminder_postpone_minutes",
+        Number(settings.rest_reminder_postpone_minutes) || 10,
+        5,
+        30,
+      );
+    }
+    if (settingNode("rest_reminder_idle_reset_minutes")) {
+      next.rest_reminder_idle_reset_minutes = integerValue(
+        "rest_reminder_idle_reset_minutes",
+        Number(settings.rest_reminder_idle_reset_minutes) || 5,
+        0,
+        60,
+      );
+    }
+    return next;
   }
 
-  function saveSettingsFromModal() {
+  function saveSettingsFromModal({ section = "" } = {}) {
     const settings = collectSettingsForm();
     const submitted = submitSettingsCommand(
-      { action: "save", settings },
-      "保存请求已提交，等待 HUD daemon 写入本地配置..."
+      { action: "save", settings, ...(section ? { section } : {}) },
+      section === "restReminder" ? "正在保存提醒设置..." : "正在保存设置..."
     );
     if (submitted) {
       settingsDirtyProviders.clear();
@@ -8885,6 +9779,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       clearBackgroundUsageRequestTimeout("detail");
     }
     modal.hidden = true;
+    ensureRestReminderCountdownTicker();
     settingsProviderDraft = null;
     settingsDirtyProviders.clear();
   }
@@ -9165,6 +10060,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           backgroundUsageState.detail = null;
           backgroundUsageState.loadedRevision = -1;
           renderSettingsModal("backgroundUsage");
+          // No binding path: open + auto-locate still counts as viewing.
+          void loadBackgroundUsageDetail(eventId, { markViewed: true });
         }
         return;
       }
@@ -9209,16 +10106,67 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         renderSettingsModal("storage");
         return;
       }
+      if (action.dataset.action === "safe-cleanup-group-toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        const groupId = String(action.dataset.cleanupGroupId || "");
+        const group = safeCleanupGroups().find((item) => String(item?.presentationId || "") === groupId);
+        if (group) toggleSafeCleanupItemIds(group.executableIds);
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-consent-toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        const consentIds = safeCleanupGroups()
+          .filter((group) => String(group?.tier || "") === "consent")
+          .flatMap((group) => group.executableIds || []);
+        toggleSafeCleanupItemIds(consentIds);
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-group-expand") {
+        event.preventDefault();
+        event.stopPropagation();
+        captureStorageUiState();
+        const groupId = String(action.dataset.cleanupGroupId || "");
+        if (safeCleanupState.expandedGroupIds.has(groupId)) safeCleanupState.expandedGroupIds.delete(groupId);
+        else safeCleanupState.expandedGroupIds.add(groupId);
+        renderSettingsModal("storage");
+        return;
+      }
       if (action.dataset.action === "cleanup-deep-toggle") {
         event.preventDefault();
         event.stopPropagation();
-        cleanupDeepExpanded = !cleanupDeepExpanded;
-        if (!cleanupDeepExpanded && safeCleanupState.includeConsent) {
-          safeCleanupState.includeConsent = false;
-          scheduleSafeCleanupPreview();
-        } else {
-          renderSettingsModal("storage");
-        }
+        captureStorageUiState();
+        if (safeCleanupState.expandedGroupIds.has(safeCleanupDeepGroupId)) safeCleanupState.expandedGroupIds.delete(safeCleanupDeepGroupId);
+        else safeCleanupState.expandedGroupIds.add(safeCleanupDeepGroupId);
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-protected-toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        captureStorageUiState();
+        if (safeCleanupState.expandedGroupIds.has(safeCleanupProtectedGroupId)) safeCleanupState.expandedGroupIds.delete(safeCleanupProtectedGroupId);
+        else safeCleanupState.expandedGroupIds.add(safeCleanupProtectedGroupId);
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-copy-path") {
+        event.preventDefault();
+        event.stopPropagation();
+        const itemId = String(action.dataset.itemId || "");
+        const item = safeCleanupRawItems().find((entry) => String(entry?.id || "") === itemId);
+        const path = String(item?.path || "");
+        void copyHudText(path).then((ok) => {
+          setSettingsStatus(ok ? "已复制完整路径。" : "路径复制失败。", ok ? "" : "error");
+          flashCopyState(action, ok);
+        });
+        return;
+      }
+      if (action.dataset.action === "safe-cleanup-reveal") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSafeCleanupReveal(action.dataset.itemId);
         return;
       }
       if (action.dataset.action === "background-usage-range") {
@@ -9384,7 +10332,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.preventDefault();
         event.stopPropagation();
         closeSettingsConfirm();
-        sessionCleanupState.previewTokenShown = "";
         submitSettingsCommand(
           { action: "sessionCleanupCancel", requestId: typedSettingsRequestId("session-cleanup-cancel") },
           "已取消永久删除确认。",
@@ -9477,6 +10424,28 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.preventDefault();
         event.stopPropagation();
         void saveSettingsFromModal();
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-save") {
+        event.preventDefault();
+        event.stopPropagation();
+        void saveSettingsFromModal({ section: "restReminder" });
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-ack") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSettingsCommand({ action: "restReminderAck" }, "正在开始新一轮专注计时...");
+        const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
+        if (toast) toast.dataset.visible = "false";
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-postpone") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSettingsCommand({ action: "restReminderPostpone" }, "正在安排稍后提醒...");
+        const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
+        if (toast) toast.dataset.visible = "false";
         return;
       }
       if (action.dataset.action === "settings-exit") {
@@ -11963,7 +12932,35 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     applyTheme(root, payload || {});
     renderUpdateButtons(root, payload || {});
     applySettingsCommandStatus(payload || {});
+    renderRestReminderToast(root, payload || {});
     refreshComposerBadgeState(root);
+  }
+
+  function renderRestReminderToast(root, payload) {
+    const host = root || document.getElementById(rootId);
+    if (!host) return;
+    let toast = host.querySelector('[data-rest-reminder-toast="true"]');
+    if (!toast) {
+      host.insertAdjacentHTML("beforeend", restReminderToastMarkup());
+      toast = host.querySelector('[data-rest-reminder-toast="true"]');
+    }
+    if (!toast) return;
+    const reminder = payload?.restReminder && typeof payload.restReminder === "object"
+      ? payload.restReminder
+      : {};
+    const visible = !!reminder.visible;
+    toast.dataset.visible = visible ? "true" : "false";
+    const messageNode = toast.querySelector('[data-rest-reminder-message="true"]');
+    if (messageNode) {
+      messageNode.textContent = String(reminder.message || "站起来走走，让眼睛放松片刻。");
+    }
+    const postponeBtn = toast.querySelector('[data-action="rest-reminder-postpone"]');
+    if (postponeBtn) {
+      const canPostpone = !!reminder.canPostpone;
+      postponeBtn.hidden = !canPostpone;
+      const minutes = Math.max(1, Math.round(Number(reminder.postponeMinutes) || 10));
+      postponeBtn.textContent = `延后 ${minutes} 分钟`;
+    }
   }
 
   function applyOverlayPayload(_root, _payload) {
@@ -12058,8 +13055,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         backgroundUsageState.error = responseError;
         const hasPreview = !!backgroundUsageState.detail;
         renderSettingsModal("backgroundUsage");
+        // Auto-located open path: mark the jumped-to event as viewed.
         if (hasPreview && backgroundUsageState.selectedEventId) {
-          void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
+          void loadBackgroundUsageDetail(
+            backgroundUsageState.selectedEventId,
+            { markViewed: true },
+          );
+        } else if (backgroundUsageState.selectedEventId) {
+          markBackgroundUsageEventViewed(backgroundUsageState.selectedEventId);
+          syncBackgroundUsagePanel();
         }
         return;
       }
@@ -12081,6 +13085,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       backgroundUsageState.detail = null;
       backgroundUsageState.loadedRevision = -1;
       backgroundUsageState.promptExpanded = false;
+      // Fallback open path (no correlated open response yet): still mark viewed.
+      markBackgroundUsageEventViewed(openEventId);
       renderSettingsModal("backgroundUsage");
       return;
     }
@@ -12101,6 +13107,30 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     renderSettingsModal("storage");
     const body = modal.querySelector(".codex-usage-hud-settings-body");
     if (body) body.scrollTop = scrollTop;
+  }
+
+  function ensureSafeCleanupLiveTicker() {
+    const data = safeCleanupFromPayload();
+    const live = isSafeCleanupScanning(data) || isSafeCleanupExecuting(data);
+    if (!live) {
+      if (safeCleanupLiveTimer) {
+        clearInterval(safeCleanupLiveTimer);
+        safeCleanupLiveTimer = 0;
+      }
+      return;
+    }
+    if (safeCleanupLiveTimer) return;
+    safeCleanupLiveTimer = setInterval(() => {
+      const current = safeCleanupFromPayload();
+      if (!isSafeCleanupScanning(current) && !isSafeCleanupExecuting(current)) {
+        clearInterval(safeCleanupLiveTimer);
+        safeCleanupLiveTimer = 0;
+        return;
+      }
+      if (settingsActiveTab === "storage") {
+        rerenderUsageInsightsIfVisible();
+      }
+    }, 1000);
   }
 
   function rerenderUsageInsightsIfVisible() {
@@ -12150,6 +13180,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       && pickerRequestId !== safeCleanupState.lastBackupPickerRequestId;
     if (pickerRequestId) safeCleanupState.lastBackupPickerRequestId = pickerRequestId;
     safeCleanupState.data = data;
+    syncSafeCleanupSelection(data);
     syncSafeCleanupDefaults(data);
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const state = String(operation.state || "").toLowerCase();
@@ -12163,7 +13194,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       safeCleanupState.scanStartedAt = 0;
     }
     if (state === "preview") {
-      safeCleanupState.includeConsent = operation?.includesConsent === true;
       if (operation?.requiresBackup === true && safeCleanupState.previewBackupDirectory) {
         safeCleanupState.backupDirectory = safeCleanupState.previewBackupDirectory;
       }
@@ -12178,17 +13208,25 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       && (!safeCleanupState.pendingRequestId || responseRequestId === safeCleanupState.pendingRequestId)
     ) {
       safeCleanupState.pendingRequestId = "";
+      if (new Set(["completed", "partial", "failed", "cancelled", "restored", "preview"]).has(state)) {
+        safeCleanupState.executeStartedAt = 0;
+      }
+    } else if (new Set(["accepted", "running", "queued_exit"]).has(state)
+      && new Set(["execute", "safeCleanupExecute"]).has(action)
+      && !safeCleanupState.executeStartedAt) {
+      safeCleanupState.executeStartedAt = Date.now();
     }
     if (
       pickerChanged
       && safeCleanupState.includeConsent
       && safeCleanupRequiresBackup(data)
-      && state !== "preview"
+      && (state !== "preview" || safeCleanupState.previewHidden)
     ) {
       safeCleanupState.previewHidden = true;
       scheduleSafeCleanupPreview();
       return;
     }
+    ensureSafeCleanupLiveTicker();
     rerenderUsageInsightsIfVisible();
   }
 
@@ -12214,7 +13252,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const token = String(operation?.confirmationToken || "");
     if (state === "preview" && token && token !== sessionCleanupState.previewTokenShown) {
       sessionCleanupState.previewTokenShown = token;
-      queueMicrotask(() => openSessionCleanupExecuteConfirm());
+      restoreSessionCleanupConfirm(token);
     }
   }
 
@@ -12357,6 +13395,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     cancelAnimationFrame(window[rafName] || 0);
     cancelAnimationFrame(window[composerBadgeRafName] || 0);
     clearInterval(window[runningTimerName] || 0);
+    clearInterval(restReminderCountdownTimer);
+    restReminderCountdownTimer = 0;
     clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
     clearBackgroundUsageRequestTimeout("query");
@@ -12610,6 +13650,7 @@ class RendererHudPayload:
     background_usage_bridge_url: str = ""
     background_usage_revision: int = 0
     background_usage_notification: dict[str, object] = field(default_factory=dict)
+    rest_reminder: dict[str, object] = field(default_factory=dict)
     settings_command_status: dict[str, object] = field(default_factory=dict)
     file_management: dict[str, object] = field(default_factory=dict)
     usage_insights: dict[str, object] = field(default_factory=dict)
@@ -12667,6 +13708,7 @@ class RendererHudPayload:
             "backgroundUsageBridgeUrl": self.background_usage_bridge_url,
             "backgroundUsageRevision": int(self.background_usage_revision),
             "backgroundUsageNotification": dict(self.background_usage_notification),
+            "restReminder": dict(self.rest_reminder),
             "settingsCommandStatus": dict(self.settings_command_status),
             "fileManagement": dict(self.file_management),
             "usageInsights": dict(self.usage_insights),
@@ -12788,6 +13830,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "settingsPath",
         "settingsBridgeUrl",
         "settingsCommandStatus",
+        "restReminder",
         "supportImages",
         "theme",
         "updateState",
@@ -13415,6 +14458,7 @@ class RendererHudClient:
         background_usage_bridge_url: str = "",
         background_usage_revision: int = 0,
         background_usage_notification: dict[str, object] | None = None,
+        rest_reminder: dict[str, object] | None = None,
         settings_command_status: dict[str, object] | None = None,
         update_state: dict[str, object] | None = None,
         debug: bool = False,
@@ -13445,6 +14489,7 @@ class RendererHudClient:
             background_usage_bridge_url=background_usage_bridge_url,
             background_usage_revision=background_usage_revision,
             background_usage_notification=background_usage_notification,
+            rest_reminder=rest_reminder,
             settings_command_status=settings_command_status,
             support_images=support_images,
             theme=_renderer_theme_payload(theme_snapshot),
@@ -13826,6 +14871,7 @@ def payload_from_snapshot(
     background_usage_bridge_url: str = "",
     background_usage_revision: int = 0,
     background_usage_notification: dict[str, object] | None = None,
+    rest_reminder: dict[str, object] | None = None,
     settings_command_status: dict[str, object] | None = None,
     support_images: list[dict[str, str]] | None = None,
     theme: dict[str, object] | None = None,
@@ -13932,6 +14978,7 @@ def payload_from_snapshot(
         background_usage_bridge_url=background_usage_bridge_url,
         background_usage_revision=max(0, int(background_usage_revision or 0)),
         background_usage_notification=dict(background_usage_notification or {}),
+        rest_reminder=dict(rest_reminder or {}),
         settings_command_status=settings_command_status or {},
         file_management=file_management or {},
         usage_insights=usage_insights or {},

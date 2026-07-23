@@ -92,6 +92,7 @@ try:  # pragma: no cover - exercised through QtHudWindow construction.
     from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPaintEvent, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
+        QCheckBox,
         QComboBox,
         QDialog,
         QFrame,
@@ -106,6 +107,7 @@ try:  # pragma: no cover - exercised through QtHudWindow construction.
         QScrollArea,
         QSizeGrip,
         QSizePolicy,
+        QSpinBox,
         QStackedLayout,
         QTabWidget,
         QTableWidget,
@@ -2171,6 +2173,52 @@ if QApplication is not None:
             layout = QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(12)
+
+            rest_card = QFrame()
+            rest_card.setObjectName("qtHudMetricBox")
+            rest_layout = QVBoxLayout(rest_card)
+            rest_layout.setContentsMargins(10, 10, 10, 10)
+            rest_layout.setSpacing(8)
+            rest_layout.addWidget(_HudLabel("☕ 护眼休息提醒", role="strong"))
+            self.rest_reminder_enabled = QCheckBox("开启定期休息提醒（默认关闭）")
+            self.rest_reminder_enabled.setChecked(
+                bool(self._window.user_settings.rest_reminder_enabled)
+            )
+            rest_layout.addWidget(self.rest_reminder_enabled)
+            rest_form = QGridLayout()
+            rest_form.setHorizontalSpacing(10)
+            rest_form.setVerticalSpacing(8)
+            self.rest_reminder_interval = QSpinBox()
+            self.rest_reminder_interval.setRange(15, 180)
+            self.rest_reminder_interval.setValue(
+                int(self._window.user_settings.rest_reminder_interval_minutes)
+            )
+            self.rest_reminder_postpone = QSpinBox()
+            self.rest_reminder_postpone.setRange(5, 30)
+            self.rest_reminder_postpone.setValue(
+                int(self._window.user_settings.rest_reminder_postpone_minutes)
+            )
+            self.rest_reminder_idle_reset = QSpinBox()
+            self.rest_reminder_idle_reset.setRange(0, 60)
+            self.rest_reminder_idle_reset.setValue(
+                int(self._window.user_settings.rest_reminder_idle_reset_minutes)
+            )
+            rest_form.addWidget(_HudLabel("间隔（分钟）", role="caption"), 0, 0)
+            rest_form.addWidget(self.rest_reminder_interval, 1, 0)
+            rest_form.addWidget(_HudLabel("延后（分钟）", role="caption"), 0, 1)
+            rest_form.addWidget(self.rest_reminder_postpone, 1, 1)
+            rest_form.addWidget(_HudLabel("空闲重置（分钟，0=关）", role="caption"), 0, 2)
+            rest_form.addWidget(self.rest_reminder_idle_reset, 1, 2)
+            rest_layout.addLayout(rest_form)
+            rest_layout.addWidget(
+                _HudLabel(
+                    "到点优先弹 PySide6 居中窗口并尽量发系统通知；无 PySide6 时降级 HUD 提示。不锁屏，可延后一次。",
+                    role="muted",
+                    wrap=True,
+                )
+            )
+            layout.addWidget(rest_card)
+
             layout.addWidget(
                 _HudLabel(
                     "如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。",
@@ -2368,6 +2416,27 @@ if QApplication is not None:
                     "budget_thresholds": self.thresholds.text(),
                     "weekly_adjustment_usd": self.weekly_adjustment.text().strip() or "0",
                     "model_prices": self._price_payload(),
+                    "rest_reminder_enabled": bool(
+                        getattr(self, "rest_reminder_enabled", None)
+                        and self.rest_reminder_enabled.isChecked()
+                    )
+                    if getattr(self, "rest_reminder_enabled", None) is not None
+                    else current.rest_reminder_enabled,
+                    "rest_reminder_interval_minutes": int(
+                        self.rest_reminder_interval.value()
+                    )
+                    if getattr(self, "rest_reminder_interval", None) is not None
+                    else current.rest_reminder_interval_minutes,
+                    "rest_reminder_postpone_minutes": int(
+                        self.rest_reminder_postpone.value()
+                    )
+                    if getattr(self, "rest_reminder_postpone", None) is not None
+                    else current.rest_reminder_postpone_minutes,
+                    "rest_reminder_idle_reset_minutes": int(
+                        self.rest_reminder_idle_reset.value()
+                    )
+                    if getattr(self, "rest_reminder_idle_reset", None) is not None
+                    else current.rest_reminder_idle_reset_minutes,
                 }
             )
             config = UserConfig.from_dict(merged)

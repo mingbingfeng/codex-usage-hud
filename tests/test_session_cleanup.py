@@ -258,6 +258,100 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertFalse(rollouts[ROOT_ID].exists())
         self.assertFalse(rollouts[CHILD_ID].exists())
 
+    def test_delete_commits_prepared_usage_only_after_cascade_verification(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, rollouts, _runner, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        events: list[tuple[str, object]] = []
+
+        def prepare(item) -> str:
+            self.assertTrue(all(path.exists() for path in item._rollout_paths))
+            events.append(("prepare", item._session_id))
+            return "usage-receipt"
+
+        def commit(receipt: object) -> None:
+            self.assertTrue(all(not path.exists() for path in selected_paths))
+            events.append(("commit", receipt))
+
+        manager.usage_snapshot_prepare = prepare
+        manager.usage_snapshot_commit = commit
+        manager.usage_snapshot_discard = lambda receipt: events.append(
+            ("discard", receipt)
+        )
+        scan = manager.scan()
+        root_row = next(row for row in scan["sessions"] if row["title"] == "Root")
+        selected_paths = {rollouts[ROOT_ID], rollouts[CHILD_ID]}
+        preview = manager.preview([root_row["id"]], scan["revision"])
+
+        result = manager.execute(
+            [root_row["id"]],
+            scan["revision"],
+            preview["operation"]["confirmationToken"],
+        )
+
+        self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(
+            events,
+            [("prepare", ROOT_ID), ("commit", "usage-receipt")],
+        )
+
+    def test_delete_failure_discards_pending_usage_snapshot(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, _rollouts, runner, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        runner.fail_ids.add(SECOND_ID)
+        events: list[tuple[str, object]] = []
+        manager.usage_snapshot_prepare = lambda item: "pending-usage"
+        manager.usage_snapshot_commit = lambda receipt: events.append(
+            ("commit", receipt)
+        )
+        manager.usage_snapshot_discard = lambda receipt: events.append(
+            ("discard", receipt)
+        )
+        scan = manager.scan()
+        row = next(row for row in scan["sessions"] if row["title"] == "Archived")
+        preview = manager.preview([row["id"]], scan["revision"])
+
+        result = manager.execute(
+            [row["id"]],
+            scan["revision"],
+            preview["operation"]["confirmationToken"],
+        )
+
+        self.assertEqual(result["operation"]["state"], "failed")
+        self.assertEqual(events, [("discard", "pending-usage")])
+
+    def test_usage_snapshot_failure_prevents_official_delete(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, _rollouts, runner, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        scan = manager.scan()
+        row = next(row for row in scan["sessions"] if row["title"] == "Root")
+        preview = manager.preview([row["id"]], scan["revision"])
+        force_commands_before = [
+            command for command in runner.commands if "--force" in command
+        ]
+
+        def fail_prepare(_item) -> object:
+            raise SessionCleanupError("usage snapshot unavailable")
+
+        manager.usage_snapshot_prepare = fail_prepare
+        result = manager.execute(
+            [row["id"]],
+            scan["revision"],
+            preview["operation"]["confirmationToken"],
+        )
+
+        self.assertEqual(result["operation"]["state"], "failed")
+        self.assertEqual(
+            [command for command in runner.commands if "--force" in command],
+            force_commands_before,
+        )
+        self.assertIn(
+            "usage snapshot unavailable",
+            result["operation"]["results"][0]["error"],
+        )
+
     def test_confirmation_is_single_use_and_revision_bound(self) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, _rollouts, _runner, manager = fixture

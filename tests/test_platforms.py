@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
@@ -18,6 +19,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.platforms import get_current_platform
+from codex_usage_hud.platforms import session_switch as session_switch_module
 from codex_usage_hud.platforms.base import BasePlatform
 from codex_usage_hud.platforms.linux import LinuxPlatform
 from codex_usage_hud.platforms.macos import MacOSPlatform
@@ -25,6 +27,7 @@ from codex_usage_hud.platforms.session_switch import (
     SessionSwitchController,
     SessionSwitchRequest,
     SessionSwitchResult,
+    WindowsSearchSessionSwitchBackend,
 )
 from codex_usage_hud.platforms.windows import (
     MOUSE_HOOK_ENV,
@@ -208,6 +211,67 @@ class SessionSwitchControllerTests(unittest.TestCase):
         self.assertEqual(result.backend, "cdp")
         self.assertEqual(len(cdp.requests), 1)
         self.assertEqual(len(keyboard.requests), 0)
+
+    def test_windows_search_backend_opens_current_codex_search_with_ctrl_k(self) -> None:
+        platform = SimpleNamespace(
+            get_active_conversation_title=mock.Mock(
+                side_effect=["Previous Thread", "Target Thread"]
+            )
+        )
+        tracker = SimpleNamespace(enabled=True, activate_main_window=mock.Mock(return_value=123))
+        backend = WindowsSearchSessionSwitchBackend(
+            platform,
+            timeout_seconds=0.5,
+            settle_seconds=0.1,
+            poll_seconds=0.05,
+        )
+
+        with (
+            mock.patch.object(session_switch_module.sys, "platform", "win32"),
+            mock.patch.object(
+                session_switch_module,
+                "CodexWindowTracker",
+                return_value=tracker,
+            ),
+            mock.patch.object(
+                session_switch_module,
+                "_temporary_clipboard_text",
+                return_value=nullcontext(True),
+            ),
+            mock.patch.object(
+                session_switch_module,
+                "_send_virtual_keys",
+                return_value=True,
+            ) as send_keys,
+            mock.patch.object(session_switch_module.time, "sleep"),
+        ):
+            result = backend.activate(
+                SessionSwitchRequest(session_id="thread-1", title="Target Thread")
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.backend, "windows-search")
+        self.assertEqual(
+            send_keys.call_args_list,
+            [
+                mock.call(
+                    session_switch_module._VK_CONTROL,
+                    session_switch_module._VK_K,
+                ),
+                mock.call(
+                    session_switch_module._VK_CONTROL,
+                    session_switch_module._VK_A,
+                ),
+                mock.call(
+                    session_switch_module._VK_CONTROL,
+                    session_switch_module._VK_V,
+                ),
+                mock.call(
+                    session_switch_module._VK_CONTROL,
+                    session_switch_module._VK_1,
+                ),
+            ],
+        )
 
 
 class WindowsActiveTitleTests(unittest.TestCase):

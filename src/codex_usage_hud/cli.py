@@ -67,6 +67,7 @@ from .core import (
     extract_session_thread_identity,
     message_text,
 )
+from .core.rest_reminder import RestReminderPresenter
 from .core.runtime_events import RuntimeEvent, RuntimeEventBus
 from .core.background_usage import BACKGROUND_USAGE_KIND, background_feature_label
 from .core.runtime_errors import RuntimeErrorRegistry
@@ -76,6 +77,11 @@ from .core.codex_file_manager import (
     CodexFileManagerWorker,
     FileManagementError,
 )
+from .core.deleted_usage import (
+    DeletedUsageEvent,
+    DeletedUsageLedger,
+    DeletedUsageLedgerError,
+)
 from .core.safe_cleanup import (
     CleanupPlanError,
     MaintenancePlan,
@@ -83,12 +89,14 @@ from .core.safe_cleanup import (
     SafeCleanupError,
     SafeCleanupManager,
     read_maintenance_result,
+    reveal_cleanup_path,
     run_maintenance_plan,
     run_maintenance_plan_file,
     write_maintenance_plan,
 )
 from .core.session_cleanup import (
     SessionCleanupError,
+    SessionCleanupItem,
     SessionCleanupManager,
 )
 from .daemon import (
@@ -238,6 +246,7 @@ WORK_OVERLAY_RESTART_ACTION_ID = "restart-codex-for-renderer"
 WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS = 2.0
 SAFE_CLEANUP_RESULT_FILENAME = "safe-cleanup-result.json"
 SAFE_CLEANUP_PLAN_PREFIX = "safe-cleanup-plan-"
+DELETED_SESSION_USAGE_FILENAME = "deleted-session-usage.json"
 SAFE_CLEANUP_ACTIVE_SESSION_SCAN_LIMIT = 64
 SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS = 5.0
 SAFE_CLEANUP_PROCESS_CLOSE_TIMEOUT_SECONDS = 8.0
@@ -4832,10 +4841,13 @@ class UsageSummaryCache:
         parser: JsonlSessionParser,
         *,
         min_rescan_seconds: float = DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS,
+        deleted_usage_ledger: DeletedUsageLedger | None = None,
     ) -> None:
         self._parser = parser
         self._min_rescan_seconds = max(0.0, float(min_rescan_seconds))
+        self._deleted_usage_ledger = deleted_usage_ledger
         self._entries: dict[Path, _UsageCacheEntry] = {}
+        self._deleted_entries: list[_UsageCacheEntry] = []
         self._last_scan_key: tuple[tuple[Path, ...], datetime, datetime] | None = None
         self._last_scan_at = 0.0
         self._last_day_total = UsageSummary()
@@ -4868,6 +4880,112 @@ class UsageSummaryCache:
     def _touch_insights(self) -> None:
         self._insights_revision += 1
         self._insights_generated_at = datetime.now().astimezone()
+
+    def prepare_deleted_session_usage(self, item: SessionCleanupItem) -> str:
+        if self._deleted_usage_ledger is None:
+            raise DeletedUsageLedgerError(
+                "Deleted-session usage ledger is not configured."
+            )
+        return self._deleted_usage_ledger.prepare(
+            session_id=item._session_id,
+            family_session_ids=(item._session_id, *item._descendant_ids),
+            title=item.title,
+            workdir_name=item.workdir_name,
+            rollout_paths=item._rollout_paths,
+            parser=self._parser,
+        )
+
+    def commit_deleted_session_usage(self, receipt: object) -> None:
+        if self._deleted_usage_ledger is None:
+            raise DeletedUsageLedgerError(
+                "Deleted-session usage ledger is not configured."
+            )
+        self._deleted_usage_ledger.commit(str(receipt or ""))
+        self._touch_insights()
+
+    def discard_deleted_session_usage(self, receipt: object) -> None:
+        if self._deleted_usage_ledger is not None:
+            self._deleted_usage_ledger.discard(str(receipt or ""))
+
+    def _deleted_usage_entries(
+        self,
+        day_start: datetime,
+        week_start: datetime,
+        live_session_ids: set[str],
+    ) -> list[_UsageCacheEntry]:
+        ledger = self._deleted_usage_ledger
+        if ledger is None:
+            return []
+        try:
+            sessions = ledger.sessions()
+        except DeletedUsageLedgerError as exc:
+            _LOGGER.warning("deleted_session_usage_load_failed error=%s", exc)
+            return []
+        month_start = day_start - timedelta(days=29)
+        entries: list[_UsageCacheEntry] = []
+        for session in sessions:
+            if live_session_ids.intersection(session.family_session_ids):
+                continue
+            providers: dict[str, list[DeletedUsageEvent]] = {}
+            for event in session.events:
+                providers.setdefault(event.provider, []).append(event)
+            for provider, events in providers.items():
+                summary_day = self._parser.summarize_usage_events(events, day_start)
+                summary_week = self._parser.summarize_usage_events(events, week_start)
+                summary_month = self._parser.summarize_usage_events(events, month_start)
+                (
+                    models_day,
+                    day_priced_event_count,
+                    day_total_event_count,
+                    day_latest_event_at,
+                ) = self._model_insights_for_window(events, day_start)
+                (
+                    models_week,
+                    week_priced_event_count,
+                    week_total_event_count,
+                    week_latest_event_at,
+                ) = self._model_insights_for_window(events, week_start)
+                (
+                    models_month,
+                    month_priced_event_count,
+                    month_total_event_count,
+                    month_latest_event_at,
+                ) = self._model_insights_for_window(events, month_start)
+                entries.append(
+                    _UsageCacheEntry(
+                        mtime=None,
+                        file_size=None,
+                        day_start=day_start,
+                        week_start=week_start,
+                        month_start=month_start,
+                        model_provider=provider,
+                        summary_day=summary_day,
+                        summary_week=summary_week,
+                        summary_month=summary_month,
+                        session_id=session.session_id,
+                        session_key=(
+                            "deleted-session-"
+                            + uuid.uuid5(uuid.NAMESPACE_URL, session.session_id).hex[:16]
+                        ),
+                        session_title=session.title,
+                        workdir_name=session.workdir_name,
+                        archived=True,
+                        can_activate=False,
+                        models_day=models_day,
+                        models_week=models_week,
+                        models_month=models_month,
+                        day_priced_event_count=day_priced_event_count,
+                        day_total_event_count=day_total_event_count,
+                        week_priced_event_count=week_priced_event_count,
+                        week_total_event_count=week_total_event_count,
+                        month_priced_event_count=month_priced_event_count,
+                        month_total_event_count=month_total_event_count,
+                        day_latest_event_at=day_latest_event_at,
+                        week_latest_event_at=week_latest_event_at,
+                        month_latest_event_at=month_latest_event_at,
+                    )
+                )
+        return entries
 
     def _session_meta_payload(
         self,
@@ -5344,6 +5462,14 @@ class UsageSummaryCache:
             and self._path_under_scan_roots(path, scan_roots)
             and (providers is None or entry.model_provider in providers)
         ]
+        deleted_entries = list(self._deleted_entries) if ready else []
+        if providers is not None:
+            deleted_entries = [
+                entry
+                for entry in deleted_entries
+                if entry.model_provider in providers
+            ]
+        entries.extend(deleted_entries)
         row_limit = max(1, min(100, int(limit)))
         return {
             "ready": ready,
@@ -5423,18 +5549,31 @@ class UsageSummaryCache:
         week_total = UsageSummary()
         previous_scan_key = self._last_scan_key
         revision_before_scan = self._insights_revision
+        previous_deleted_entries = list(self._deleted_entries)
 
         existing_roots = [root for root in scan_roots if root.exists()]
         if not existing_roots:
             had_entries = bool(self._entries)
             self._entries.clear()
+            deleted_entries = self._deleted_usage_entries(day_start, week_start, set())
+            self._deleted_entries = deleted_entries
+            if deleted_entries != previous_deleted_entries:
+                self._touch_insights()
+            for entry in deleted_entries:
+                _merge_usage(day_total, entry.summary_day)
+                _merge_usage(week_total, entry.summary_week)
             self._last_scan_key = scan_key
             self._last_scan_at = now
             self._last_day_total = day_total
             self._last_week_total = week_total
             if had_entries or previous_scan_key != scan_key:
                 self._touch_insights()
-            return day_total, week_total
+            return self._totals_for_providers(
+                scan_roots,
+                day_start,
+                week_start,
+                included_providers,
+            )
 
         seen_paths: set[Path] = set()
         for root in existing_roots:
@@ -5455,6 +5594,20 @@ class UsageSummaryCache:
             if cached_path not in seen_paths:
                 del self._entries[cached_path]
                 self._touch_insights()
+
+        live_session_ids = {
+            entry.session_id for entry in self._entries.values() if entry.session_id
+        }
+        self._deleted_entries = self._deleted_usage_entries(
+            day_start,
+            week_start,
+            live_session_ids,
+        )
+        if self._deleted_entries != previous_deleted_entries:
+            self._touch_insights()
+        for entry in self._deleted_entries:
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
 
         self._last_scan_key = scan_key
         self._last_scan_at = now
@@ -5491,6 +5644,11 @@ class UsageSummaryCache:
             if entry.model_provider not in providers:
                 continue
             if not self._path_under_scan_roots(path, scan_roots):
+                continue
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
+        for entry in self._deleted_entries:
+            if entry.model_provider not in providers:
                 continue
             _merge_usage(day_total, entry.summary_day)
             _merge_usage(week_total, entry.summary_week)
@@ -5890,12 +6048,19 @@ class _SafeCleanupWorker:
                         command,
                     )
             except Exception as exc:
+                message = str(exc) or type(exc).__name__
+                cancelled_like = (
+                    message.startswith("清理已取消")
+                    or "未修改任何数据" in message
+                    or "未执行" in message
+                    or "未关闭应用" in message
+                )
                 snapshot = self.manager.mark_operation(
                     request_id=request_id,
                     action=action,
-                    state="failed",
+                    state="cancelled" if cancelled_like else "failed",
                     progress=100,
-                    error=str(exc) or type(exc).__name__,
+                    error=message,
                 )
             self._publish(snapshot)
 
@@ -6010,6 +6175,12 @@ class _SessionCleanupWorker:
                         str(command.get("confirmationToken") or ""),
                         request_id=request_id,
                     )
+                    operation = snapshot.get("operation")
+                    if (
+                        isinstance(operation, Mapping)
+                        and int(operation.get("deletedCount") or 0) > 0
+                    ):
+                        self._refresh_usage_after_delete(request_id)
             except Exception as exc:
                 snapshot = self.manager.mark_operation(
                     request_id=request_id,
@@ -6019,6 +6190,35 @@ class _SessionCleanupWorker:
                     error=str(exc) or type(exc).__name__,
                 )
             self._publish(snapshot)
+
+    def _refresh_usage_after_delete(self, request_id: str) -> None:
+        try:
+            day_start, week_start = current_budget_windows(
+                getattr(self._context, "user_config", UserConfig.defaults())
+            )
+            usage_cache = getattr(self._context, "usage_cache")
+            usage_cache.summarize(
+                Path(getattr(self._context, "sessions_root")),
+                day_start,
+                week_start,
+                force_rescan=True,
+                included_providers=_effective_provider_scope(self._context),
+            )
+            payload = _refresh_usage_insights_payload(self._context)
+            event_bus = getattr(self._context, "runtime_events", None)
+            publish = getattr(event_bus, "publish", None)
+            if callable(publish):
+                publish(
+                    "usage_insights_changed",
+                    source="session_cleanup",
+                    context={
+                        "requestId": request_id,
+                        "revision": int(payload.get("revision") or 0),
+                        "state": str(payload.get("state") or ""),
+                    },
+                )
+        except Exception as exc:
+            _LOGGER.exception("deleted_session_usage_refresh_failed error=%s", exc)
 
     def _publish(self, payload: Mapping[str, object]) -> None:
         snapshot = dict(payload)
@@ -7045,7 +7245,7 @@ def _ensure_safe_cleanup_activity_idle(context: object) -> None:
     active = _safe_cleanup_active_task_ids(context)
     if active:
         raise SafeCleanupError(
-            f"检测到 {len(active)} 个活动任务；未关闭应用，也未修改任何数据。"
+            f"清理已取消：检测到 {len(active)} 个活动任务；未关闭应用，也未修改任何数据。"
         )
 
 
@@ -7098,6 +7298,34 @@ def _execute_safe_cleanup_command(
     if requires_codex_close and not bool(command.get("autoCloseAndRestore")):
         raise SafeCleanupError("该清理需要明确同意自动关闭并恢复 Codex App 与 HUD。")
 
+    # Publish a prepare phase before the potentially slow activity gate so the UI
+    # never sits on a blank "正在更新" state after the user confirms cleanup.
+    manager.mark_operation(
+        request_id=request_id,
+        action="execute",
+        state="running",
+        progress=8,
+        selectedIds=item_ids,
+        phase="prepare",
+        phaseLabel="prepare",
+        phaseIndex=1,
+        phaseCount=max(1, len(item_ids)),
+        results=[
+            {
+                "id": item_id,
+                "state": "selected",
+                "estimatedBytes": 0,
+                "actualBytes": 0,
+                "deletedRows": 0,
+                "error": "",
+            }
+            for item_id in item_ids
+        ],
+    )
+    publish = getattr(getattr(context, "safe_cleanup_worker", None), "_publish", None)
+    if callable(publish):
+        publish(manager.snapshot())
+
     _ensure_safe_cleanup_activity_idle(context)
     desktop_processes: list[_CodexDesktopProcess] = []
     if requires_codex_close:
@@ -7134,16 +7362,69 @@ def _execute_safe_cleanup_command(
         restart_command=list(restart_command),
     )
     if not requires_offline:
+        selected_ids = list(item_ids)
+        estimated_bytes = sum(action.estimated_bytes for action in plan.actions)
         manager.mark_operation(
             id=plan.id,
             request_id=request_id,
             action="execute",
             state="running",
-            progress=20,
-            selectedIds=item_ids,
-            estimatedBytes=sum(action.estimated_bytes for action in plan.actions),
+            progress=10,
+            selectedIds=selected_ids,
+            estimatedBytes=estimated_bytes,
+            phase="prepare",
+            phaseLabel="prepare",
+            phaseIndex=1,
+            phaseCount=max(1, len(plan.actions)),
+            results=[
+                {
+                    "id": action.item_id,
+                    "category": action.category,
+                    "state": "selected",
+                    "estimatedBytes": int(action.estimated_bytes),
+                    "actualBytes": 0,
+                    "deletedRows": 0,
+                    "error": "",
+                }
+                for action in plan.actions
+            ],
         )
-        result = run_maintenance_plan(plan)
+        # Surface the accepted/running state before the first heavy action.
+        publish = getattr(getattr(context, "safe_cleanup_worker", None), "_publish", None)
+        if callable(publish):
+            publish(manager.snapshot())
+
+        def _on_execute_progress(event: Mapping[str, object]) -> None:
+            rows = event.get("results")
+            index = int(event.get("index") or 0)
+            total = max(1, int(event.get("total") or 1))
+            item_id = str(event.get("itemId") or "")
+            stage = str(event.get("stage") or "")
+            phase_label = (
+                f"execute: item {index}/{total}"
+                if stage == "start"
+                else f"execute: done {index}/{total}"
+            )
+            manager.mark_operation(
+                id=plan.id,
+                request_id=request_id,
+                action="execute",
+                state="running",
+                progress=int(event.get("progress") or 25),
+                selectedIds=selected_ids,
+                estimatedBytes=int(event.get("estimatedBytes") or estimated_bytes),
+                actualBytes=int(event.get("actualBytes") or 0),
+                phase="execute",
+                phaseLabel=phase_label,
+                phaseIndex=max(1, index),
+                phaseCount=total,
+                currentItemId=item_id,
+                results=list(rows) if isinstance(rows, list) else [],
+            )
+            if callable(publish):
+                publish(manager.snapshot())
+
+        result = run_maintenance_plan(plan, progress_callback=_on_execute_progress)
         return manager.apply_maintenance_result(result, request_id=request_id)
 
     _ensure_safe_cleanup_activity_idle(context)
@@ -7187,9 +7468,25 @@ def _execute_safe_cleanup_command(
         progress=30,
         selectedIds=item_ids,
         estimatedBytes=sum(action.estimated_bytes for action in plan.actions),
+        phase="queued_exit",
+        phaseLabel="Waiting for HUD to exit before offline cleanup",
+        phaseIndex=1,
+        phaseCount=max(1, len(plan.actions)),
         requiresOffline=True,
         requiresBackup=requires_backup,
         requiresCodexClose=requires_codex_close,
+        results=[
+            {
+                "id": action.item_id,
+                "category": action.category,
+                "state": "selected",
+                "estimatedBytes": int(action.estimated_bytes),
+                "actualBytes": 0,
+                "deletedRows": 0,
+                "error": "",
+            }
+            for action in plan.actions
+        ],
     )
     exit_event = getattr(context, "cleanup_exit_requested", None)
     set_exit = getattr(exit_event, "set", None)
@@ -7396,6 +7693,38 @@ def _session_cleanup_active_ids(context: object) -> tuple[str, ...]:
     return tuple(str(value) for value in values)
 
 
+def _build_usage_summary_cache(parser: JsonlSessionParser) -> UsageSummaryCache:
+    return UsageSummaryCache(
+        parser,
+        deleted_usage_ledger=DeletedUsageLedger(
+            hud_runtime_dir() / DELETED_SESSION_USAGE_FILENAME
+        ),
+    )
+
+
+def _prepare_session_cleanup_usage(
+    context: object, item: SessionCleanupItem
+) -> object:
+    try:
+        return getattr(context, "usage_cache").prepare_deleted_session_usage(item)
+    except DeletedUsageLedgerError as exc:
+        raise SessionCleanupError(str(exc)) from exc
+
+
+def _commit_session_cleanup_usage(context: object, receipt: object) -> None:
+    try:
+        getattr(context, "usage_cache").commit_deleted_session_usage(receipt)
+    except DeletedUsageLedgerError as exc:
+        raise SessionCleanupError(str(exc)) from exc
+
+
+def _discard_session_cleanup_usage(context: object, receipt: object) -> None:
+    try:
+        getattr(context, "usage_cache").discard_deleted_session_usage(receipt)
+    except DeletedUsageLedgerError:
+        pass
+
+
 def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
     return SessionCleanupManager(
         state_db_path=Path(getattr(context, "state_db_path")),
@@ -7403,6 +7732,15 @@ def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
         session_index_path=Path(getattr(context, "session_index_path")),
         current_session_ids=lambda: _session_cleanup_current_ids(context),
         active_session_ids=lambda: _session_cleanup_active_ids(context),
+        usage_snapshot_prepare=lambda item: _prepare_session_cleanup_usage(
+            context, item
+        ),
+        usage_snapshot_commit=lambda receipt: _commit_session_cleanup_usage(
+            context, receipt
+        ),
+        usage_snapshot_discard=lambda receipt: _discard_session_cleanup_usage(
+            context, receipt
+        ),
         environment=os.environ,
     )
 
@@ -7455,10 +7793,14 @@ class RuntimeContext:
     cleanup_exit_requested: Event = field(default_factory=Event)
     cleanup_restart_command: tuple[str, ...] = ()
     cleanup_daemon_mode: bool = False
+    rest_reminder: RestReminderPresenter | None = None
 
     def __post_init__(self) -> None:
         if self.runtime_errors.event_bus is None:
             self.runtime_errors.event_bus = self.runtime_events
+        if self.rest_reminder is None:
+            self.rest_reminder = RestReminderPresenter()
+            self.rest_reminder.configure(self.user_config, force_reset=True)
         _ensure_runtime_error_diagnostics(self)
         if self.session_snapshot_cache is None:
             self.session_snapshot_cache = SessionSnapshotCache(
@@ -7995,7 +8337,7 @@ def _apply_user_config_to_runtime_context(
         if sse_tracker is not None:
             sse_tracker.cost_estimator = estimator
         if parser is not None:
-            setattr(context, "usage_cache", UsageSummaryCache(parser))
+            setattr(context, "usage_cache", _build_usage_summary_cache(parser))
         _configure_ui_cost_estimators(estimator)
     background_usage_runtime = getattr(context, "background_usage_runtime", None)
     reconfigure_background_usage = getattr(background_usage_runtime, "reconfigure", None)
@@ -8018,6 +8360,9 @@ def _apply_user_config_to_runtime_context(
         cleanup_manager.backup_roots = (
             (Path(backup_text).expanduser().absolute(),) if backup_text else ()
         )
+    rest_reminder = getattr(context, "rest_reminder", None)
+    if rest_reminder is not None:
+        rest_reminder.configure(next_config)
 
 
 def _partial_domains_for_changed_user_config(
@@ -8025,6 +8370,12 @@ def _partial_domains_for_changed_user_config(
 ) -> set[str] | None:
     ui_keys = {"display_mode"}
     overlay_keys = {"work_overlay_max_items"}
+    rest_keys = {
+        "rest_reminder_enabled",
+        "rest_reminder_interval_minutes",
+        "rest_reminder_postpone_minutes",
+        "rest_reminder_idle_reset_minutes",
+    }
     pricing_keys = {"pricing_url", "model_prices"}
     budget_keys = {
         "daily_budget_usd",
@@ -8032,7 +8383,7 @@ def _partial_domains_for_changed_user_config(
         "budget_thresholds",
         "weekly_adjustment_usd",
     }
-    safe_keys = ui_keys | overlay_keys | pricing_keys | budget_keys
+    safe_keys = ui_keys | overlay_keys | rest_keys | pricing_keys | budget_keys
     if changed_keys and not changed_keys.issubset(safe_keys):
         return None
     domains = {"settings"}
@@ -8253,6 +8604,7 @@ SAFE_CLEANUP_COMMANDS = {
     "safeCleanupExecute",
     "safeCleanupCancel",
     "safeCleanupChooseBackupDirectory",
+    "safeCleanupReveal",
 }
 
 SESSION_CLEANUP_COMMANDS = {
@@ -8361,6 +8713,31 @@ def _handle_renderer_safe_cleanup_command(
             f"无法处理未知安全清理命令：{action or 'empty'}",
             kind="error",
         )
+    if action == "safeCleanupReveal":
+        worker = getattr(context, "safe_cleanup_worker", None)
+        manager = getattr(worker, "manager", None)
+        resolve_target = getattr(manager, "resolve_reveal_path", None)
+        if not callable(resolve_target):
+            status = _renderer_settings_status(
+                "安全清理运行时当前不可用。",
+                kind="error",
+            )
+            status["safeCleanupRequestId"] = request_id
+            return status
+        try:
+            target = resolve_target(
+                str(command.get("itemId") or ""),
+                str(command.get("inventoryRevision") or ""),
+            )
+            reveal_cleanup_path(target)
+        except SafeCleanupError as exc:
+            status = _renderer_settings_status(str(exc), kind="error")
+            status["safeCleanupRequestId"] = request_id
+            return status
+        status = _renderer_settings_status("已在系统文件管理器中打开目标位置。")
+        status["safeCleanupRequestId"] = request_id
+        status["safeCleanupAction"] = action
+        return status
     if action == "safeCleanupChooseBackupDirectory":
         selected = _choose_safe_cleanup_backup_directory(
             str(command.get("currentDirectory") or "")
@@ -8584,6 +8961,13 @@ def _handle_renderer_settings_command(
         if action in {"openBackgroundUsage", "openBackgroundUsageFromInsights"}:
             event_id = str(command.get("eventId") or "").strip()
             runtime = getattr(context, "background_usage_runtime", None)
+            # Opening the overview with an auto-located event counts as viewing it.
+            # Confirm before query so the returned list/preview already show unread=false
+            # and the bottom-right notification badge can clear.
+            if event_id:
+                confirm = getattr(runtime, "confirm", None)
+                if callable(confirm):
+                    confirm(event_id)
             range_key = "today"
             range_for_event = getattr(runtime, "range_for_event", None)
             if event_id and callable(range_for_event):
@@ -8609,8 +8993,20 @@ def _handle_renderer_settings_command(
                 command.get("settings"),
             )
             _save_renderer_user_config(context, config)
+            if str(command.get("section") or "") == "restReminder":
+                return _renderer_settings_status("提醒设置已保存，新的专注计时已开始。")
+            return _renderer_settings_status("设置已保存，相关显示会自动刷新。")
+        if action == "restReminderAck":
+            presenter = getattr(context, "rest_reminder", None)
+            if presenter is not None:
+                presenter.acknowledge()
+            return _renderer_settings_status("休息完成，新一轮专注计时已开始。")
+        if action == "restReminderPostpone":
+            presenter = getattr(context, "rest_reminder", None)
+            postponed = bool(presenter.postpone()) if presenter is not None else False
             return _renderer_settings_status(
-                "已保存到本地配置；预算、价格和 Renderer 显示会自动刷新。",
+                "已安排稍后提醒。" if postponed else "这次提醒已经延后过了。",
+                kind="" if postponed else "error",
             )
         if action == "applyDisplayMode":
             config = _config_from_settings_payload(
@@ -8942,7 +9338,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         sse_tracker=sse_tracker,
         active_session_tracker=active_session_tracker,
         session_resolver=session_resolver,
-        usage_cache=UsageSummaryCache(parser),
+        usage_cache=_build_usage_summary_cache(parser),
         app_provider=provider_registry.app_provider,
         provider_registry=provider_registry,
         pre_send_estimator=pre_send_estimator,
@@ -9472,8 +9868,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--daemon",
         action="store_true",
         help=(
-            "Run as a hidden Windows daemon: wait for Codex, show the HUD, "
-            "and exit when Codex closes."
+            "Explicitly run the default persistent daemon: wait for Codex, "
+            "show the HUD, and keep watching after Codex closes."
         ),
     )
     parser.add_argument(
@@ -10619,6 +11015,9 @@ def run_renderer_hud_session(
                     if action in {"checkUpdate", "installUpdate", "updateAction"}:
                         request.request_domains("settings", force_fast=True)
                         return
+                    if action in {"restReminderAck", "restReminderPostpone"}:
+                        request.request_domains("settings", force_fast=True)
+                        return
                     if action in {"installDesktopOverlay", "enableDesktopOverlay"}:
                         request.request_domains("settings", "overlay", force_fast=True)
                         return
@@ -10767,6 +11166,13 @@ def run_renderer_hud_session(
                     del event
                     request.request_domains("settings", force_fast=True)
 
+                def handle_rest_reminder_due(
+                    event: object,
+                    request: _RendererEventRefreshRequest,
+                ) -> None:
+                    del event
+                    request.request_domains("settings", force_fast=True)
+
                 def handle_renderer_theme_changed(
                     event: object,
                     request: _RendererEventRefreshRequest,
@@ -10803,6 +11209,7 @@ def run_renderer_hud_session(
                     "settings_changed": handle_settings_changed,
                     "settings_command_received": handle_settings_command_received,
                     "update_state_changed": handle_update_state_changed,
+                    "rest_reminder_due": handle_rest_reminder_due,
                     "renderer_theme_changed": handle_renderer_theme_changed,
                     "file_management_changed": handle_file_management_changed,
                     "background_usage_changed": handle_background_usage_changed,
@@ -10861,6 +11268,23 @@ def run_renderer_hud_session(
                             )
                     update_state_value = update_manager.tick().to_dict()
                     update_state_signature = _json_signature(update_state_value)
+                    rest_reminder = getattr(context, "rest_reminder", None)
+                    rest_reminder_payload = None
+                    if rest_reminder is not None:
+                        try:
+                            rest_reminder_payload = rest_reminder.tick()
+                        except Exception:
+                            _LOGGER.debug("rest_reminder_tick_failed", exc_info=True)
+                            rest_reminder_payload = None
+                    if rest_reminder_payload is not None:
+                        # Renderer fallback toast needs a settings-domain push.
+                        if callable(runtime_event_publish):
+                            runtime_event_publish(
+                                "rest_reminder_due",
+                                source="rest_reminder",
+                                session=current_event_session(),
+                                context=dict(rest_reminder_payload),
+                            )
                     if loop_state.latest_update_state_signature is None:
                         loop_state.latest_update_state_signature = update_state_signature
                         loop_state.latest_update_state = dict(update_state_value)
@@ -11317,6 +11741,11 @@ def run_renderer_hud_session(
                                     fresh.session_id,
                                 )
                             ),
+                            rest_reminder=(
+                                getattr(context, "rest_reminder", None).renderer_payload()
+                                if getattr(context, "rest_reminder", None) is not None
+                                else {"visible": False}
+                            ),
                             settings_command_status=loop_state.settings_command_status,
                             update_state=inputs.update_state,
                             debug=_runtime_debug_enabled(),
@@ -11435,6 +11864,11 @@ def run_renderer_hud_session(
                                 context,
                                 snapshot.session_id,
                             )
+                        ),
+                        rest_reminder=(
+                            getattr(context, "rest_reminder", None).renderer_payload()
+                            if getattr(context, "rest_reminder", None) is not None
+                            else {"visible": False}
                         ),
                         settings_command_status=loop_state.settings_command_status,
                         theme=inputs.event_refresh_request.theme_payload,
@@ -11559,6 +11993,16 @@ def run_renderer_hud_session(
                     return delay_value
 
                 while True:
+                    cleanup_exit = getattr(context, "cleanup_exit_requested", None)
+                    cleanup_exit_set = bool(
+                        getattr(cleanup_exit, "is_set", lambda: False)()
+                    )
+                    if cleanup_exit_set:
+                        # Offline cleanup must exit the HUD process so the helper
+                        # can wait on parent_pid. Never treat Codex close as a
+                        # normal daemon restart while cleanup is in flight.
+                        _LOGGER.info("renderer_hud_cleanup_maintenance_requested")
+                        return CLEANUP_MAINTENANCE_REQUESTED
                     if (
                         daemon_manager is not None
                         and time.monotonic() >= loop_state.next_daemon_check_at
@@ -11895,10 +12339,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.once:
         return run_once_snapshot(args)
 
-    if args.daemon:
-        return run_daemon(args)
-
-    return run_hud_session(args)
+    # Every persistent entry uses the daemon lifecycle. This prevents a normal
+    # no-argument launch from looking alive while missing later Codex launches.
+    return run_daemon(args)
 
 
 if __name__ == "__main__":

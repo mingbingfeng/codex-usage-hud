@@ -31,7 +31,7 @@
 
 ## 显式本地文件管理例外
 
-设置里的“空间清理”只有在用户点击扫描、预览和确认后才会访问对应的本地元数据。垃圾清理 payload 只包含中性标签、分类、大小、保留期、风险和操作状态；会话管理 payload 只包含 opaque ID、标题、工作目录末级名称、更新时间、状态、估算大小和关联子任务数。两者都不包含 prompt、response、凭据、canonical UUID、绝对 rollout 路径、原始数据库行或文件内容。
+设置里的“空间清理”只有在用户点击扫描、预览和确认后才会访问对应的本地元数据。为了让用户能审计即将删除的确切目标，垃圾清理 payload 除中性标签、分类、大小、保留期、风险和操作状态外，还会把白名单清理目标的绝对路径、文件/目录类型和修改时间发送到同一进程内的本地 Renderer；这些路径只用于展开详情、复制路径和打开本地文件管理器，不会上传、写入无关日志或作为任意删除权限。会话管理 payload 仍只包含 opaque ID、标题、工作目录末级名称、更新时间、状态、估算大小和关联子任务数。两者都不包含 prompt、response、凭据、canonical UUID、绝对 rollout 路径、原始数据库行或文件内容。
 
 清理分为三层：
 
@@ -41,9 +41,11 @@
 
 回收站/废纸篓不会被当成普通缓存目录处理。它们包含用户可能仍要恢复的原始文件，并且 Windows 必须通过原生 Shell 合同证明当前用户边界；当前一键清理不会扫描或删除这些位置。
 
-所有路径项在执行前按 inventory revision、opaque ID、canonical path、lstat/fingerprint、路径边界和锁状态重新验证。HUD 自有日志只从 HUD runtime 根内的固定名称/轮转后缀识别；落在根外的显式日志路径不会因为名称相似而被删除。
+Renderer 的“打开位置”命令只提交 inventory revision 与 opaque item ID，不提交路径。Python 端从当前 inventory 重新解析 canonical path，并核验绝对路径、批准根、目标存在性和 reparse 状态后，才会以参数数组打开 Explorer 或 Finder。所有删除路径在执行前还会继续按 lstat/fingerprint、路径边界、锁和进程状态重新验证。HUD 自有日志只从 HUD runtime 根内的固定名称/轮转后缀识别；落在根外的显式日志路径不会因为名称相似而被删除。
 
 会话管理只展示 canonical 根会话，子 agent 和嵌套子 agent 归并为关联数量。当前会话、运行中的会话、存在活动子任务、spawn 关系或 rollout 映射无法证明的会话不可选择。确认 token 绑定 inventory revision 与 opaque ID；官方命令返回后还会只读核对根会话及其后代是否已从 state DB、session index 和 active/archived rollout 中消失。官方能力缺失或核验失败时不会降级为 raw 删除。
+
+为了让永久删除会话不改变 HUD 的本地用量与消费金额统计，HUD 会在执行官方删除前，把最近 30 个本地日历日内的计量事件压缩写入 HUD runtime 下的 `deleted-session-usage.json`。正式记录仅保存根/关联会话 ID、标题、工作目录末级名称、时间、provider/model、token 分项、金额及金额覆盖状态，不保存 prompt、response 或 rollout 路径。删除事务尚未完成时，pending 记录会短暂保存绝对 rollout 路径以便异常退出后判断官方删除是否已经移除源文件；命令失败会撤销 pending，提交成功后路径立即移除。超过保留期的 pending 和正式计量事件都会在下一次显式用量扫描时裁剪，不上传到远端。
 
 SQLite 维护必须在 Codex App、HUD/daemon 和数据库连接退出后由本地维护 helper 执行。每次修改前必须用 SQLite backup API 在用户选择的本地目录创建完整备份并通过完整性检查；备份失败、空间不足、schema 不匹配、文件被占用或活动任务存在时，源库保持不变。独立 Codex CLI 无法可靠恢复其终端现场，因此检测到这类进程时离线维护会暂停并提示用户手动退出，不会强杀。
 

@@ -1,9 +1,9 @@
 """Conservative local cleanup inventory and offline maintenance primitives.
 
 The module performs no work during construction.  Callers explicitly scan,
-preview, and create a short-lived maintenance plan.  Absolute paths and
-filesystem fingerprints remain in Python-owned state and on the local helper
-plan; renderer payloads contain only opaque identifiers and neutral labels.
+preview, and create a short-lived maintenance plan.  Cleanup payloads may show
+the exact local target path for auditability, but mutation authority remains
+bound to Python-owned inventory state, opaque IDs, and filesystem fingerprints.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ CleanupTier = Literal["safe", "consent", "protected"]
 CacheMode = Literal["root", "expired_children"]
 SQLiteKind = Literal["logs", "background"]
 ActionKind = Literal["delete_path", "sqlite"]
+PathKind = Literal["file", "directory", "unknown"]
 
 TIERS: tuple[CleanupTier, ...] = ("safe", "consent", "protected")
 PLAN_VERSION = 1
@@ -233,6 +234,7 @@ class CleanupItem:
     blocked_reason: str = ""
     related_processes: tuple[str, ...] = ()
     action: str = ""
+    modified_at: float = 0.0
     _path: Path | None = field(default=None, repr=False, compare=False)
     _approved_root: Path | None = field(default=None, repr=False, compare=False)
     _fingerprint: str = field(default="", repr=False, compare=False)
@@ -242,6 +244,15 @@ class CleanupItem:
     _sqlite: _SQLiteAudit | None = field(default=None, repr=False, compare=False)
 
     def to_payload(self) -> dict[str, object]:
+        path_text = ""
+        path_kind: PathKind = "unknown"
+        if self._path is not None:
+            path_text = os.fspath(_absolute_path(self._path))
+            if self._lstat[2]:
+                if stat.S_ISDIR(self._lstat[2]):
+                    path_kind = "directory"
+                elif stat.S_ISREG(self._lstat[2]):
+                    path_kind = "file"
         return {
             "id": self.id,
             "category": self.category,
@@ -257,6 +268,11 @@ class CleanupItem:
             "requiresCodexClose": bool(self.requires_codex_close),
             "blockedReason": self.blocked_reason,
             "relatedProcesses": list(self.related_processes),
+            "path": path_text,
+            "pathKind": path_kind,
+            "modifiedAt": (
+                _iso_timestamp(self.modified_at) if self.modified_at > 0 else ""
+            ),
         }
 
 
@@ -305,7 +321,9 @@ class CleanupInventory:
             "defaultSelectedIds": [
                 item.id
                 for item in self.items
-                if item.tier == "safe" and not item.blocked_reason
+                if item.tier == "safe"
+                and not item.blocked_reason
+                and not item.requires_offline
             ],
             "operation": operation_payload,
         }
@@ -1008,6 +1026,66 @@ def default_hud_runtime_root(
     return _absolute_path(base / "codex-usage-hud")
 
 
+
+def _plain_child_files(parent: Path, *, prefix: str = "") -> list[Path]:
+    """Return plain (non-reparse) files under parent, optionally name-prefixed."""
+
+    needle = str(prefix or "").casefold()
+    try:
+        with os.scandir(parent) as entries:
+            result: list[Path] = []
+            for entry in entries:
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode) or _is_reparse(info):
+                    continue
+                if needle and not entry.name.casefold().startswith(needle):
+                    continue
+                result.append(Path(entry.path))
+            return sorted(result, key=lambda path: path.name.casefold())
+    except OSError:
+        return []
+
+
+def _windows_recycle_bin_roots(
+    *,
+    user_home: Path,
+    env: Mapping[str, str],
+) -> list[Path]:
+    """Best-effort user Recycle Bin roots that do not require elevation."""
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        absolute = _absolute_path(path)
+        key = _path_key(absolute)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(absolute)
+
+    # Classic per-volume $Recycle.Bin is often ACL-restricted; still try
+    # the current home drive SID folder when it is readable as a directory.
+    home_drive = str(user_home.drive or Path.home().drive or "C:").rstrip("\\/")
+    if home_drive:
+        recycle = Path(f"{home_drive}\\$Recycle.Bin")
+        for child in _plain_child_directories(recycle):
+            # Prefer interactive user SIDs (S-1-5-21-...); skip well-known system SIDs.
+            if not child.name.casefold().startswith("s-1-5-21-"):
+                continue
+            add(child)
+
+    # Some profiles expose a virtual Recycle Bin under the known folder path.
+    local = Path(env.get("LOCALAPPDATA") or user_home / "AppData" / "Local")
+    candidate = local / "Microsoft" / "Windows" / "Recycle Bin"
+    if candidate.exists():
+        add(candidate)
+    return roots
+
+
 def _plain_child_directories(parent: Path) -> list[Path]:
     try:
         with os.scandir(parent) as entries:
@@ -1022,6 +1100,307 @@ def _plain_child_directories(parent: Path) -> list[Path]:
             return sorted(result, key=lambda path: path.name.casefold())
     except OSError:
         return []
+
+
+def _env_path(
+    environment: Mapping[str, str],
+    name: str,
+    *fallbacks: Path,
+) -> Path:
+    value = environment.get(name)
+    if value:
+        return Path(value)
+    if not fallbacks:
+        raise ValueError(f"no fallback path for {name}")
+    return fallbacks[0]
+
+
+def _add_shared_package_manager_caches(
+    add,
+    *,
+    user_home: Path,
+    environment: Mapping[str, str],
+    local: Path | None,
+    caches: Path | None,
+) -> None:
+    """Register shared user-scoped package, ML, and tooling caches (P0/P1).
+
+    Only regenerable download/build caches. Project workspaces, virtualenvs,
+    Docker images, and credential stores stay out of scope.
+    """
+
+    yarn_fallbacks: list[Path] = []
+    if local is not None:
+        yarn_fallbacks.append(local / "Yarn" / "Cache")
+    if caches is not None:
+        yarn_fallbacks.append(caches / "Yarn")
+    yarn_fallbacks.append(user_home / ".cache" / "yarn")
+    add(
+        "yarn",
+        "developer_cache",
+        _env_path(environment, "YARN_CACHE_FOLDER", *yarn_fallbacks),
+        "Yarn download cache",
+        "Packages may need to be downloaded again.",
+        ("yarn", "node"),
+    )
+
+    pnpm_fallbacks: list[Path] = []
+    if environment.get("PNPM_HOME"):
+        pnpm_fallbacks.append(Path(environment["PNPM_HOME"]) / "store")
+    if local is not None:
+        pnpm_fallbacks.append(local / "pnpm" / "store")
+    if caches is not None:
+        pnpm_fallbacks.append(caches / "pnpm")
+    pnpm_fallbacks.append(user_home / ".local" / "share" / "pnpm" / "store")
+    add(
+        "pnpm",
+        "developer_cache",
+        _env_path(environment, "PNPM_STORE_PATH", *pnpm_fallbacks),
+        "pnpm store cache",
+        "Packages may need to be downloaded again.",
+        ("pnpm", "node"),
+    )
+    add(
+        "bun",
+        "developer_cache",
+        _env_path(
+            environment,
+            "BUN_INSTALL_CACHE_DIR",
+            user_home / ".bun" / "install" / "cache",
+        ),
+        "Bun install cache",
+        "Packages may need to be downloaded again.",
+        ("bun",),
+    )
+    add(
+        "go_mod",
+        "developer_cache",
+        _env_path(environment, "GOMODCACHE", user_home / "go" / "pkg" / "mod"),
+        "Go module cache",
+        "Modules may need to be downloaded again.",
+        ("go",),
+    )
+    cargo_home = _env_path(environment, "CARGO_HOME", user_home / ".cargo")
+    add(
+        "cargo_registry",
+        "developer_cache",
+        cargo_home / "registry",
+        "Cargo registry cache",
+        "Crates may need to be downloaded again.",
+        ("cargo", "rustc"),
+    )
+    add(
+        "cargo_git",
+        "developer_cache",
+        cargo_home / "git",
+        "Cargo git checkout cache",
+        "Git dependencies may need to be fetched again.",
+        ("cargo", "rustc"),
+    )
+    gradle_home = _env_path(environment, "GRADLE_USER_HOME", user_home / ".gradle")
+    add(
+        "gradle",
+        "developer_cache",
+        gradle_home / "caches",
+        "Gradle dependency cache",
+        "Dependencies may need to be downloaded again.",
+        ("java", "gradle", "gradlew"),
+    )
+    add(
+        "maven",
+        "developer_cache",
+        user_home / ".m2" / "repository",
+        "Maven local repository",
+        "Artifacts may need to be downloaded again.",
+        ("java", "mvn"),
+    )
+
+    # P1: language package managers, ML model caches, browser automation.
+    uv_fallbacks: list[Path] = []
+    if local is not None:
+        uv_fallbacks.append(local / "uv" / "cache")
+    if caches is not None:
+        uv_fallbacks.append(caches / "uv")
+    uv_fallbacks.append(user_home / ".cache" / "uv")
+    add(
+        "uv",
+        "developer_cache",
+        _env_path(environment, "UV_CACHE_DIR", *uv_fallbacks),
+        "uv download cache",
+        "Packages may need to be downloaded again.",
+        ("uv", "python"),
+    )
+    poetry_fallbacks: list[Path] = []
+    if local is not None:
+        poetry_fallbacks.append(local / "pypoetry" / "Cache")
+    if caches is not None:
+        poetry_fallbacks.append(caches / "pypoetry")
+    poetry_fallbacks.append(user_home / ".cache" / "pypoetry")
+    add(
+        "poetry",
+        "developer_cache",
+        _env_path(environment, "POETRY_CACHE_DIR", *poetry_fallbacks),
+        "Poetry cache",
+        "Packages may need to be downloaded again.",
+        ("poetry", "python"),
+    )
+    composer_fallbacks: list[Path] = [user_home / ".composer"]
+    if local is not None:
+        composer_fallbacks.append(local / "Composer")
+    composer_home = _env_path(environment, "COMPOSER_HOME", *composer_fallbacks)
+    add(
+        "composer",
+        "developer_cache",
+        composer_home / "cache",
+        "Composer package cache",
+        "Packages may need to be downloaded again.",
+        ("composer", "php"),
+    )
+    if local is not None:
+        add(
+            "composer_files",
+            "developer_cache",
+            local / "Composer" / "files",
+            "Composer package cache",
+            "Packages may need to be downloaded again.",
+            ("composer", "php"),
+        )
+    hf_fallbacks: list[Path] = [user_home / ".cache" / "huggingface"]
+    if local is not None:
+        hf_fallbacks.append(local / "huggingface")
+    add(
+        "huggingface",
+        "developer_cache",
+        _env_path(environment, "HF_HOME", *hf_fallbacks),
+        "Hugging Face model cache",
+        "Models and datasets may need to be downloaded again.",
+        ("python", "huggingface-cli"),
+    )
+    torch_fallbacks: list[Path] = [user_home / ".cache" / "torch"]
+    if local is not None:
+        torch_fallbacks.append(local / "torch")
+    add(
+        "torch",
+        "developer_cache",
+        _env_path(environment, "TORCH_HOME", *torch_fallbacks),
+        "PyTorch hub cache",
+        "Models may need to be downloaded again.",
+        ("python",),
+    )
+    add(
+        "modelscope",
+        "developer_cache",
+        _env_path(
+            environment,
+            "MODELSCOPE_CACHE",
+            user_home / ".cache" / "modelscope",
+        ),
+        "ModelScope model cache",
+        "Models may need to be downloaded again.",
+        ("python",),
+    )
+    ollama_fallbacks: list[Path] = [user_home / ".ollama" / "models"]
+    if local is not None:
+        ollama_fallbacks.append(local / "Ollama" / "models")
+    add(
+        "ollama_models",
+        "developer_cache",
+        _env_path(environment, "OLLAMA_MODELS", *ollama_fallbacks),
+        "Ollama model weights",
+        "Local models may need to be downloaded again.",
+        ("ollama",),
+    )
+    playwright_fallbacks: list[Path] = []
+    if local is not None:
+        playwright_fallbacks.append(local / "ms-playwright")
+    if caches is not None:
+        playwright_fallbacks.append(caches / "ms-playwright")
+    playwright_fallbacks.append(user_home / ".cache" / "ms-playwright")
+    add(
+        "playwright",
+        "developer_cache",
+        _env_path(environment, "PLAYWRIGHT_BROWSERS_PATH", *playwright_fallbacks),
+        "Playwright browser cache",
+        "Browser binaries may need to be downloaded again.",
+        ("node", "playwright"),
+    )
+    cypress_fallbacks: list[Path] = []
+    if local is not None:
+        cypress_fallbacks.append(local / "Cypress" / "Cache")
+    if caches is not None:
+        cypress_fallbacks.append(caches / "Cypress")
+    cypress_fallbacks.append(user_home / ".cache" / "Cypress")
+    add(
+        "cypress",
+        "developer_cache",
+        _env_path(environment, "CYPRESS_CACHE_FOLDER", *cypress_fallbacks),
+        "Cypress binary cache",
+        "Browser binaries may need to be downloaded again.",
+        ("cypress", "node"),
+    )
+    electron_fallbacks: list[Path] = []
+    if local is not None:
+        electron_fallbacks.append(local / "electron" / "Cache")
+    if caches is not None:
+        electron_fallbacks.append(caches / "electron")
+    electron_fallbacks.append(user_home / ".cache" / "electron")
+    add(
+        "electron",
+        "developer_cache",
+        _env_path(environment, "ELECTRON_CACHE", *electron_fallbacks),
+        "Electron download cache",
+        "Electron binaries may need to be downloaded again.",
+        ("electron", "node"),
+    )
+    ccache_fallbacks: list[Path] = []
+    if local is not None:
+        ccache_fallbacks.append(local / "ccache")
+    ccache_fallbacks.extend((user_home / ".ccache", user_home / ".cache" / "ccache"))
+    add(
+        "ccache",
+        "developer_cache",
+        _env_path(environment, "CCACHE_DIR", *ccache_fallbacks),
+        "ccache compiler cache",
+        "Compilations may take longer until the cache is rebuilt.",
+        ("ccache", "clang", "gcc", "cl"),
+    )
+    sccache_fallbacks: list[Path] = [user_home / ".cache" / "sccache"]
+    if local is not None:
+        sccache_fallbacks.append(local / "Mozilla" / "sccache")
+    add(
+        "sccache",
+        "developer_cache",
+        _env_path(environment, "SCCACHE_DIR", *sccache_fallbacks),
+        "sccache compiler cache",
+        "Compilations may take longer until the cache is rebuilt.",
+        ("sccache", "rustc", "cargo"),
+    )
+    add(
+        "android_cache",
+        "developer_cache",
+        user_home / ".android" / "cache",
+        "Android SDK cache",
+        "Android tooling may rebuild cache data.",
+        ("adb", "emulator", "java"),
+    )
+    if local is not None:
+        add(
+            "android_build_cache",
+            "developer_cache",
+            local / "Android" / "Sdk" / ".temp",
+            "Android SDK temporary cache",
+            "Android tooling may recreate temporary downloads.",
+            ("adb", "java", "sdkmanager"),
+        )
+        scoop_root = _env_path(environment, "SCOOP", user_home / "scoop")
+        add(
+            "scoop_cache",
+            "developer_cache",
+            scoop_root / "cache",
+            "Scoop package cache",
+            "Packages may need to be downloaded again.",
+            ("scoop",),
+        )
 
 
 def platform_cache_definitions(
@@ -1154,6 +1533,71 @@ def platform_cache_definitions(
             "Packages may need to be downloaded again.",
             ("pip",),
         )
+        _add_shared_package_manager_caches(
+            add,
+            user_home=user_home,
+            environment=environment,
+            local=local,
+            caches=None,
+        )
+        jetbrains = local / "JetBrains"
+        for index, product in enumerate(_plain_child_directories(jetbrains)):
+            for child_name in ("caches", "index", "LocalHistory"):
+                add(
+                    f"jetbrains_{index}_{child_name.casefold()}",
+                    "editor_cache",
+                    product / child_name,
+                    "JetBrains IDE cache",
+                    "The IDE may rebuild indexes and local caches.",
+                    (
+                        "idea64",
+                        "pycharm64",
+                        "webstorm64",
+                        "clion64",
+                        "goland64",
+                        "rider64",
+                        "phpstorm64",
+                        "datagrip64",
+                    ),
+                )
+        for app_key, app_dir, processes in (
+            ("cursor", roaming / "Cursor", ("cursor",)),
+            ("discord", roaming / "discord", ("discord",)),
+            ("slack", roaming / "Slack", ("slack",)),
+        ):
+            for name in ("Cache", "Code Cache", "GPUCache", "CachedData", "DawnCache"):
+                add(
+                    f"{app_key}_{name.casefold().replace(' ', '_')}",
+                    "editor_cache",
+                    app_dir / name,
+                    f"{app_key.title()} cache",
+                    "The application may rebuild cached UI data.",
+                    processes,
+                )
+        explorer = local / "Microsoft" / "Windows" / "Explorer"
+        for index, child in enumerate(
+            _plain_child_files(explorer, prefix="thumbcache_")
+        ):
+            add(
+                f"thumbcache_{index}",
+                "system_cache",
+                child,
+                "Windows thumbnail cache",
+                "Explorer may rebuild thumbnails on next browse.",
+                ("explorer",),
+            )
+        for sid_root in _windows_recycle_bin_roots(
+            user_home=user_home, env=environment
+        ):
+            add(
+                f"recycle_bin_{(sid_root.name or 'items')[:48]}",
+                "user_temp",
+                sid_root,
+                "Recycle Bin items",
+                "Deleted files in the Recycle Bin will be permanently removed.",
+                mode="expired_children",
+                min_age=DEFAULT_TEMP_MIN_AGE_SECONDS,
+            )
         for name in ("Cache", "Code Cache", "GPUCache", "CachedData", "DawnCache"):
             add(
                 f"vscode_{name.casefold().replace(' ', '_')}",
@@ -1177,7 +1621,24 @@ def platform_cache_definitions(
         browser_specs = (
             ("chrome", local / "Google" / "Chrome" / "User Data", ("chrome",)),
             ("edge", local / "Microsoft" / "Edge" / "User Data", ("msedge",)),
+            (
+                "brave",
+                local / "BraveSoftware" / "Brave-Browser" / "User Data",
+                ("brave",),
+            ),
         )
+        firefox_root = roaming / "Mozilla" / "Firefox" / "Profiles"
+        for profile_index, profile in enumerate(
+            _plain_child_directories(firefox_root)
+        ):
+            add(
+                f"firefox_{profile_index}_cache2",
+                "browser_cache",
+                profile / "cache2",
+                "Firefox cache",
+                "Pages may be cached again on next use.",
+                ("firefox",),
+            )
     elif platform_name == "darwin":
         caches = user_home / "Library" / "Caches"
         support = user_home / "Library" / "Application Support"
@@ -1195,7 +1656,9 @@ def platform_cache_definitions(
         add(
             "nuget",
             "developer_cache",
-            user_home / ".nuget" / "packages",
+            Path(
+                environment.get("NUGET_PACKAGES") or user_home / ".nuget" / "packages"
+            ),
             "NuGet package cache",
             "Packages may need to be downloaded again.",
             ("dotnet", "msbuild"),
@@ -1234,6 +1697,13 @@ def platform_cache_definitions(
             "Xcode may rebuild indexes and build products.",
             ("xcode", "xcodebuild"),
         )
+        _add_shared_package_manager_caches(
+            add,
+            user_home=user_home,
+            environment=environment,
+            local=None,
+            caches=caches,
+        )
         for key, path, label in (
             (
                 "macos_diagnostic_reports",
@@ -1257,6 +1727,30 @@ def platform_cache_definitions(
                 mode="expired_children",
                 min_age=DEFAULT_DIAGNOSTIC_MIN_AGE_SECONDS,
             )
+        jetbrains = caches / "JetBrains"
+        for index, product in enumerate(_plain_child_directories(jetbrains)):
+            add(
+                f"jetbrains_{index}",
+                "editor_cache",
+                product,
+                "JetBrains IDE cache",
+                "The IDE may rebuild indexes and local caches.",
+                ("idea", "pycharm", "webstorm", "clion", "goland", "rider", "phpstorm"),
+            )
+        for app_key, app_name, processes in (
+            ("cursor", "Cursor", ("cursor",)),
+            ("discord", "discord", ("discord",)),
+            ("slack", "Slack", ("slack",)),
+        ):
+            for name in ("Cache", "Code Cache", "GPUCache", "CachedData", "DawnCache"):
+                add(
+                    f"{app_key}_{name.casefold().replace(' ', '_')}",
+                    "editor_cache",
+                    support / app_name / name,
+                    f"{app_key.title()} cache",
+                    "The application may rebuild cached UI data.",
+                    processes,
+                )
         for name in ("Cache", "Code Cache", "GPUCache", "CachedData", "DawnCache"):
             add(
                 f"vscode_{name.casefold().replace(' ', '_')}",
@@ -1277,6 +1771,32 @@ def platform_cache_definitions(
         browser_specs = (
             ("chrome", caches / "Google" / "Chrome", ("google chrome",)),
             ("edge", caches / "Microsoft Edge", ("microsoft edge",)),
+            (
+                "brave",
+                caches / "BraveSoftware" / "Brave-Browser",
+                ("brave browser",),
+            ),
+        )
+        firefox_profiles = caches / "Firefox" / "Profiles"
+        for profile_index, profile in enumerate(
+            _plain_child_directories(firefox_profiles)
+        ):
+            add(
+                f"firefox_{profile_index}",
+                "browser_cache",
+                profile,
+                "Firefox cache",
+                "Pages may be cached again on next use.",
+                ("firefox",),
+            )
+        add(
+            "recycle_bin",
+            "user_temp",
+            user_home / ".Trash",
+            "Trash items",
+            "Deleted files in Trash will be permanently removed.",
+            mode="expired_children",
+            min_age=DEFAULT_TEMP_MIN_AGE_SECONDS,
         )
     else:
         return ()
@@ -1304,6 +1824,7 @@ def platform_cache_definitions(
                     processes,
                 )
     return tuple(definitions)
+
 
 
 def _matches_hud_log(name: str) -> bool:
@@ -1615,6 +2136,24 @@ class SafeCleanupManager:
             }
         return self._inventory.to_payload(self._operation)
 
+    def resolve_reveal_path(self, item_id: str, revision: str) -> Path:
+        """Resolve one scanned item for a read-only local reveal action.
+
+        Reveal is intentionally less restrictive than a deletion plan: it does
+        not require a safe/consent tier or a stable content fingerprint.  It
+        still requires the current inventory, approved-root boundary, and a
+        plain existing path so a renderer cannot turn this into arbitrary
+        process launch or path traversal.
+        """
+
+        item = self._selected_items((item_id,), revision)[0]
+        if item._path is None or item._approved_root is None:
+            raise SafeCleanupError("cleanup item has no revealable path")
+        resolved = _secure_existing_path(item._approved_root, item._path)
+        if _path_key(resolved) != _path_key(item._path):
+            raise SafeCleanupError("cleanup path changed after scan")
+        return resolved
+
     @staticmethod
     def scanning_revision(request_id: str) -> str:
         """Opaque temporary revision that must never back confirmation tokens."""
@@ -1647,7 +2186,12 @@ class SafeCleanupManager:
         generated_at: float,
         phase_detail: str = "",
     ) -> None:
-        """Publish a path-neutral partial inventory while a scan is running."""
+        """Publish a partial inventory while a scan is running.
+
+        Operation progress fields stay path-neutral. Item payloads may include
+        local display path metadata for the renderer, but the temporary
+        ``scanning:`` revision must never back reveal, preview, or execute.
+        """
 
         publisher = self.progress_publisher
         if not callable(publisher):
@@ -2264,6 +2808,7 @@ class SafeCleanupManager:
             blocked_reason=blocked_reason,
             related_processes=tuple(related_processes),
             action=action,
+            modified_at=max(0.0, float(measured.mtime)),
             _path=path,
             _approved_root=approved_root,
             _fingerprint=fingerprint
@@ -2951,6 +3496,15 @@ def _run_delete_action(
             estimated_bytes=action.estimated_bytes,
             actual_bytes=measured.size,
         )
+    except SafeCleanupError as exc:
+        # Best-effort delete: occupancy / TOCTOU / reparse are skips, not job failure.
+        return MaintenanceActionResult(
+            item_id=action.item_id,
+            category=action.category,
+            state="skipped",
+            estimated_bytes=action.estimated_bytes,
+            error=_safe_error(exc),
+        )
     except Exception as exc:
         return MaintenanceActionResult(
             item_id=action.item_id,
@@ -3079,6 +3633,7 @@ def run_maintenance_plan(
     disk_usage: Callable[[Path], Any] = shutil.disk_usage,
     running_process_names: Callable[[], Iterable[str]] = _system_running_process_names,
     sqlite_failure_hook: Callable[[str, Path], None] | None = None,
+    progress_callback: Callable[[Mapping[str, object]], None] | None = None,
 ) -> MaintenanceResult:
     """Run a validated plan without killing processes or launching applications."""
 
@@ -3116,13 +3671,14 @@ def run_maintenance_plan(
             )
             for action in plan.actions
         )
+        # Do not surface this as a hard failure: nothing was mutated.
         return MaintenanceResult(
             plan_id=plan.id,
-            state="failed",
+            state="partial",
             started_at=started_at,
             completed_at=float(clock()),
             actions=skipped,
-            error="required processes are still active",
+            error="required processes are still active; cleanup items were skipped",
         )
     if float(clock()) > plan.expires_at:
         skipped = tuple(
@@ -3153,7 +3709,68 @@ def run_maintenance_plan(
         backup_directory = _canonical_directory(requested_backup_directory, create=True)
         _validate_plan_backup_directory(backup_directory, plan.actions)
     results: list[MaintenanceActionResult] = []
-    for action in plan.actions:
+    total_actions = max(1, len(plan.actions))
+
+    def _emit_progress(
+        *,
+        index: int,
+        action: MaintenanceAction,
+        stage: str,
+        result: MaintenanceActionResult | None = None,
+    ) -> None:
+        if not callable(progress_callback):
+            return
+        completed = len(results)
+        # Reserve 0-24 for orchestration; action work occupies 25-95.
+        if stage == "start":
+            fraction = max(0, index - 1) / total_actions
+        else:
+            fraction = index / total_actions
+        progress = 25 + int(70 * fraction)
+        rows: list[dict[str, object]] = [
+            {
+                "id": item.item_id,
+                "category": item.category,
+                "state": item.state,
+                "estimatedBytes": int(item.estimated_bytes),
+                "actualBytes": int(item.actual_bytes),
+                "deletedRows": int(item.deleted_rows),
+                "error": item.error,
+            }
+            for item in results
+        ]
+        if result is None:
+            rows.append(
+                {
+                    "id": action.item_id,
+                    "category": action.category,
+                    "state": "running",
+                    "estimatedBytes": int(action.estimated_bytes),
+                    "actualBytes": 0,
+                    "deletedRows": 0,
+                    "error": "",
+                }
+            )
+        progress_callback(
+            {
+                "index": int(index),
+                "total": int(total_actions),
+                "completed": int(completed if result is None else completed),
+                "stage": stage,
+                "itemId": action.item_id,
+                "category": action.category,
+                "kind": action.kind,
+                "progress": min(95, max(25, progress)),
+                "results": rows,
+                "actualBytes": sum(int(item.actual_bytes) for item in results),
+                "estimatedBytes": sum(
+                    int(item.estimated_bytes) for item in plan.actions
+                ),
+            }
+        )
+
+    for index, action in enumerate(plan.actions, start=1):
+        _emit_progress(index=index, action=action, stage="start")
         if action.kind == "delete_path":
             result = _run_delete_action(
                 action,
@@ -3174,21 +3791,32 @@ def run_maintenance_plan(
                 failure_hook=sqlite_failure_hook,
             )
         results.append(result)
-    failures = sum(result.state not in {"deleted", "completed"} for result in results)
-    state = (
-        "completed"
-        if not failures
-        else "failed"
-        if failures == len(results)
-        else "partial"
-    )
+        _emit_progress(index=index, action=action, stage="done", result=result)
+    success = sum(1 for result in results if result.state in {"deleted", "completed"})
+    skipped = sum(1 for result in results if result.state == "skipped")
+    restored = sum(1 for result in results if result.state == "restored")
+    hard_failures = sum(1 for result in results if result.state == "failed")
+    if hard_failures and not success and not restored:
+        state = "failed"
+    elif restored and not success and not hard_failures:
+        state = "restored"
+    elif success and not hard_failures and not skipped and not restored:
+        state = "completed"
+    else:
+        # Mixed outcomes, pure skips, or soft issues become partial (not a job failure).
+        state = "partial"
+    incomplete = hard_failures + skipped + restored
     return MaintenanceResult(
         plan_id=plan.id,
         state=state,
         started_at=started_at,
         completed_at=float(clock()),
         actions=tuple(results),
-        error=f"{failures} cleanup action(s) did not complete" if failures else "",
+        error=(
+            f"{incomplete} cleanup action(s) did not complete"
+            if incomplete and state != "completed"
+            else ""
+        ),
     )
 
 
@@ -3236,8 +3864,12 @@ def _helper_result_path(
     return plan_source, result
 
 
-def _launch_restart_command(command: Sequence[str]) -> object:
-    return subprocess.Popen(
+def _launch_detached_command(
+    command: Sequence[str],
+    *,
+    launcher: Callable[..., object] = subprocess.Popen,
+) -> object:
+    return launcher(
         list(command),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -3250,6 +3882,56 @@ def _launch_restart_command(command: Sequence[str]) -> object:
         ),
         start_new_session=not sys.platform.startswith("win"),
     )
+
+
+def _launch_restart_command(command: Sequence[str]) -> object:
+    return _launch_detached_command(command)
+
+
+def reveal_cleanup_path(
+    path: Path,
+    *,
+    platform: str | None = None,
+    launcher: Callable[..., object] = subprocess.Popen,
+) -> tuple[str, ...]:
+    """Open a verified cleanup target in the native file manager.
+
+    The caller must resolve the path from a current inventory item first.  This
+    helper performs a final plain-file/directory check and accepts an injected
+    launcher so tests never open a real Explorer or Finder window.
+    """
+
+    absolute = _absolute_path(path)
+    try:
+        info = os.lstat(absolute)
+    except OSError as exc:
+        raise SafeCleanupError("cleanup target is no longer available") from exc
+    if _is_reparse(info):
+        raise SafeCleanupError("reparse paths are protected")
+    is_directory = stat.S_ISDIR(info.st_mode)
+    if not is_directory and not stat.S_ISREG(info.st_mode):
+        raise SafeCleanupError("cleanup target is not a file or directory")
+
+    platform_name = (platform or sys.platform).casefold()
+    if platform_name.startswith("win"):
+        command = (
+            ("explorer.exe", os.fspath(absolute))
+            if is_directory
+            else ("explorer.exe", "/select,", os.fspath(absolute))
+        )
+    elif platform_name == "darwin":
+        command = (
+            ("open", os.fspath(absolute))
+            if is_directory
+            else ("open", "-R", os.fspath(absolute))
+        )
+    else:
+        raise SafeCleanupError("当前平台不支持打开清理目标")
+    try:
+        _launch_detached_command(command, launcher=launcher)
+    except OSError as exc:
+        raise SafeCleanupError("无法打开清理目标位置") from exc
+    return command
 
 
 def _failed_maintenance_result(
@@ -3343,6 +4025,7 @@ __all__ = [
     "audit_sqlite_target",
     "default_hud_runtime_root",
     "platform_cache_definitions",
+    "reveal_cleanup_path",
     "read_maintenance_plan",
     "read_maintenance_result",
     "run_maintenance_plan",

@@ -33,6 +33,16 @@ DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
 DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED = False
 DEFAULT_CLEANUP_LOG_RETENTION_HOURS = 24
 DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS = 30
+DEFAULT_REST_REMINDER_ENABLED = False
+DEFAULT_REST_REMINDER_INTERVAL_MINUTES = 45
+DEFAULT_REST_REMINDER_POSTPONE_MINUTES = 10
+DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES = 5
+REST_REMINDER_INTERVAL_MIN = 15
+REST_REMINDER_INTERVAL_MAX = 180
+REST_REMINDER_POSTPONE_MIN = 5
+REST_REMINDER_POSTPONE_MAX = 30
+REST_REMINDER_IDLE_RESET_MIN = 0
+REST_REMINDER_IDLE_RESET_MAX = 60
 JSON_WRITE_REPLACE_RETRIES = 8
 JSON_WRITE_REPLACE_DELAY_SECONDS = 0.01
 
@@ -202,6 +212,10 @@ class UserConfig:
     selected_providers: list[str] = field(default_factory=list)
     notification_only_providers: list[str] = field(default_factory=list)
     support_url: str = DEFAULT_SUPPORT_URL
+    rest_reminder_enabled: bool = DEFAULT_REST_REMINDER_ENABLED
+    rest_reminder_interval_minutes: int = DEFAULT_REST_REMINDER_INTERVAL_MINUTES
+    rest_reminder_postpone_minutes: int = DEFAULT_REST_REMINDER_POSTPONE_MINUTES
+    rest_reminder_idle_reset_minutes: int = DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES
     cleanup_backup_directory: str = ""
     cleanup_log_retention_hours: int = DEFAULT_CLEANUP_LOG_RETENTION_HOURS
     cleanup_background_retention_days: int = (
@@ -283,6 +297,27 @@ class UserConfig:
             selected_providers=selected_providers,
             notification_only_providers=notification_only_providers,
             support_url=_optional_str(value.get("support_url")) or DEFAULT_SUPPORT_URL,
+            rest_reminder_enabled=_optional_bool(value.get("rest_reminder_enabled"))
+            if value.get("rest_reminder_enabled") is not None
+            else defaults.rest_reminder_enabled,
+            rest_reminder_interval_minutes=_bounded_int(
+                value.get("rest_reminder_interval_minutes"),
+                defaults.rest_reminder_interval_minutes,
+                minimum=REST_REMINDER_INTERVAL_MIN,
+                maximum=REST_REMINDER_INTERVAL_MAX,
+            ),
+            rest_reminder_postpone_minutes=_bounded_int(
+                value.get("rest_reminder_postpone_minutes"),
+                defaults.rest_reminder_postpone_minutes,
+                minimum=REST_REMINDER_POSTPONE_MIN,
+                maximum=REST_REMINDER_POSTPONE_MAX,
+            ),
+            rest_reminder_idle_reset_minutes=_bounded_int(
+                value.get("rest_reminder_idle_reset_minutes"),
+                defaults.rest_reminder_idle_reset_minutes,
+                minimum=REST_REMINDER_IDLE_RESET_MIN,
+                maximum=REST_REMINDER_IDLE_RESET_MAX,
+            ),
             cleanup_backup_directory=(
                 _optional_str(value.get("cleanup_backup_directory")) or ""
             ),
@@ -320,6 +355,12 @@ class UserConfig:
             "selected_providers": list(self.selected_providers),
             "notification_only_providers": list(self.notification_only_providers),
             "support_url": self.support_url,
+            "rest_reminder_enabled": bool(self.rest_reminder_enabled),
+            "rest_reminder_interval_minutes": int(self.rest_reminder_interval_minutes),
+            "rest_reminder_postpone_minutes": int(self.rest_reminder_postpone_minutes),
+            "rest_reminder_idle_reset_minutes": int(
+                self.rest_reminder_idle_reset_minutes
+            ),
             "cleanup_backup_directory": self.cleanup_backup_directory,
             "cleanup_log_retention_hours": int(self.cleanup_log_retention_hours),
             "cleanup_background_retention_days": int(
