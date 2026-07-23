@@ -4140,13 +4140,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-rest-reminder-card {
         display: grid;
         gap: 10px;
-        padding: 12px;
-        border-radius: 12px;
-        border: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
-        background: color-mix(in srgb, var(--codex-usage-hud-panel-surface, #141b24) 92%, #f3d27a 8%);
+        padding: 14px 0 16px;
+        border-top: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
+        border-bottom: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
       }
       #${rootId} .codex-usage-hud-rest-reminder-title {
-        color: var(--codex-usage-hud-accent, #f3d27a);
+        color: var(--codex-usage-hud-text, #dde7f2);
         font-weight: 700;
         font-size: 13px;
       }
@@ -4158,7 +4157,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-rest-reminder-grid {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
       }
       #${rootId} .codex-usage-hud-rest-reminder-grid label {
@@ -4182,7 +4181,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         gap: 8px;
         padding: 9px 10px;
         border-radius: 9px;
-        background: color-mix(in srgb, var(--codex-usage-hud-surface, #10161d) 82%, #f3d27a 18%);
+        background: var(--codex-usage-hud-surface, #10161d);
       }
       #${rootId} .codex-usage-hud-rest-reminder-status-item {
         display: grid;
@@ -4197,6 +4196,30 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: var(--codex-usage-hud-text, #dde7f2);
         font-size: 13px;
         font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-schedule {
+        display: grid;
+        grid-template-columns: 90px minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        padding-top: 8px;
+        border-top: 1px solid color-mix(in srgb, var(--codex-usage-hud-panel-border, #2e3846) 65%, transparent);
+        color: var(--codex-usage-hud-request-muted, #a9bcd2);
+        font-size: 11px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-schedule input {
+        width: 94px;
+        box-sizing: border-box;
+        border-radius: 6px;
+        border: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
+        background: var(--codex-usage-hud-surface, #10161d);
+        color: var(--codex-usage-hud-text, #dde7f2);
+        padding: 5px 6px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-range {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
       }
       #${rootId} .codex-usage-hud-rest-toast {
         position: fixed;
@@ -5239,6 +5262,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       rest_reminder_interval_minutes: 45,
       rest_reminder_postpone_minutes: 10,
       rest_reminder_idle_reset_minutes: 5,
+      rest_reminder_work_start_time: "09:00",
+      rest_reminder_work_end_time: "18:00",
+      rest_reminder_lunch_enabled: true,
+      rest_reminder_lunch_start_time: "12:00",
+      rest_reminder_lunch_end_time: "13:30",
       model_prices: {},
     };
   }
@@ -9164,6 +9192,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const interval = Math.min(180, Math.max(15, Math.round(Number(settings.rest_reminder_interval_minutes) || 45)));
     const postpone = Math.min(30, Math.max(5, Math.round(Number(settings.rest_reminder_postpone_minutes) || 10)));
     const idleReset = Math.min(60, Math.max(0, Math.round(Number(settings.rest_reminder_idle_reset_minutes) || 5)));
+    const workStart = String(settings.rest_reminder_work_start_time || "09:00");
+    const workEnd = String(settings.rest_reminder_work_end_time || "18:00");
+    const lunchEnabled = settings.rest_reminder_lunch_enabled !== false;
+    const lunchStart = String(settings.rest_reminder_lunch_start_time || "12:00");
+    const lunchEnd = String(settings.rest_reminder_lunch_end_time || "13:30");
+    const reminder = currentPayload()?.restReminder && typeof currentPayload().restReminder === "object"
+      ? currentPayload().restReminder : {};
+    const startTime = formatRestReminderInputTime(Number(reminder.timerStartedAtMs));
+    const notification = reminder.notification && typeof reminder.notification === "object"
+      ? reminder.notification : {};
+    const notificationLabel = notification.status === "failed"
+      ? `系统通知不可用${notification.error ? `：${notification.error}` : ""}`
+      : notification.status === "sent" ? "系统通知已发送" : "系统通知待测试";
     const qrItems = images.map((item) => `
       <div class="codex-usage-hud-support-qr">
         <div class="codex-usage-hud-support-qr-title">
@@ -9176,7 +9217,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return `
       <div class="codex-usage-hud-support">
         <div class="codex-usage-hud-rest-reminder-card">
-          <div class="codex-usage-hud-rest-reminder-title">☕ 专注休息提醒</div>
+          <div class="codex-usage-hud-rest-reminder-title">专注休息提醒</div>
           <label class="codex-usage-hud-rest-reminder-toggle">
             <input type="checkbox" data-setting-key="rest_reminder_enabled" ${enabled ? "checked" : ""}>
             <span>开启休息提醒</span>
@@ -9191,8 +9232,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
               <input data-setting-key="rest_reminder_postpone_minutes" type="number" min="5" max="30" step="1" value="${escapeHtml(postpone)}">
             </label>
             <label>
-                <span>离开后重新计时（分钟，0=关闭）</span>
+                <span>离开多久算作休息</span>
               <input data-setting-key="rest_reminder_idle_reset_minutes" type="number" min="0" max="60" step="1" value="${escapeHtml(idleReset)}">
+            </label>
+            <label>
+              <span>本轮开始时间</span>
+              <input data-rest-reminder-start-time="true" type="time" value="${escapeHtml(startTime)}">
             </label>
           </div>
           <div class="codex-usage-hud-rest-reminder-status" aria-live="polite">
@@ -9205,7 +9250,21 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
               <strong class="codex-usage-hud-rest-reminder-status-value" data-rest-reminder-remaining="true">--:--:--</strong>
             </div>
           </div>
-          <div class="codex-usage-hud-support-note">开启后会在专注时长结束时轻柔提醒你休息，不会锁定屏幕；你可以稍后再提醒一次。</div>
+          <div class="codex-usage-hud-support-note">回来时开始新一轮；午休和非工作时段不会运行提醒。</div>
+          <div class="codex-usage-hud-rest-reminder-schedule">
+            <span>工作时间</span>
+            <span class="codex-usage-hud-rest-reminder-range"><input data-setting-key="rest_reminder_work_start_time" type="time" value="${escapeHtml(workStart)}"><span>至</span><input data-setting-key="rest_reminder_work_end_time" type="time" value="${escapeHtml(workEnd)}"></span>
+            <span>时段外暂停</span>
+          </div>
+          <div class="codex-usage-hud-rest-reminder-schedule">
+            <span>午休暂停</span>
+            <span class="codex-usage-hud-rest-reminder-range"><input data-setting-key="rest_reminder_lunch_start_time" type="time" value="${escapeHtml(lunchStart)}"><span>至</span><input data-setting-key="rest_reminder_lunch_end_time" type="time" value="${escapeHtml(lunchEnd)}"></span>
+            <label><input data-setting-key="rest_reminder_lunch_enabled" type="checkbox" ${lunchEnabled ? "checked" : ""}> 启用</label>
+          </div>
+          <div class="codex-usage-hud-rest-reminder-schedule">
+            <span>系统通知</span><span class="codex-usage-hud-support-note" data-rest-reminder-notification="true">${escapeHtml(notificationLabel)}</span>
+            <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-test-notification">发送测试通知</button>
+          </div>
           <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-save">保存提醒设置</button>
         </div>
         <div class="codex-usage-hud-support-note">如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。</div>
@@ -9256,6 +9315,14 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     });
   }
 
+  function formatRestReminderInputTime(milliseconds) {
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "09:00";
+    const value = new Date(milliseconds);
+    return [value.getHours(), value.getMinutes()]
+      .map((item) => String(item).padStart(2, "0"))
+      .join(":");
+  }
+
   function formatRestReminderRemaining(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0) return "--:--:--";
     const total = Math.max(0, Math.ceil(seconds));
@@ -9269,7 +9336,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden || settingsActiveTab !== "support") return;
     const timing = currentPayload()?.restReminder;
-    const enabled = !!timing?.enabled;
+    const enabled = !!timing?.enabled && timing?.running !== false;
     const start = modal.querySelector('[data-rest-reminder-start="true"]');
     const remaining = modal.querySelector('[data-rest-reminder-remaining="true"]');
     if (start) start.textContent = enabled
@@ -9557,6 +9624,26 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         0,
         60,
       );
+    }
+    [
+      "rest_reminder_work_start_time",
+      "rest_reminder_work_end_time",
+      "rest_reminder_lunch_start_time",
+      "rest_reminder_lunch_end_time",
+    ].forEach((key) => {
+      if (settingNode(key)) next[key] = String(read(key) || settings[key] || "");
+    });
+    if (settingNode("rest_reminder_lunch_enabled")) {
+      next.rest_reminder_lunch_enabled = !!settingNode("rest_reminder_lunch_enabled").checked;
+    }
+    const startNode = modal?.querySelector('[data-rest-reminder-start-time="true"]');
+    if (startNode?.value) {
+      const [hour, minute] = String(startNode.value).split(":").map(Number);
+      if (Number.isFinite(hour) && Number.isFinite(minute)) {
+        const started = new Date();
+        started.setHours(hour, minute, 0, 0);
+        next.rest_reminder_timer_started_at_ms = started.getTime();
+      }
     }
     return next;
   }
@@ -10446,6 +10533,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         submitSettingsCommand({ action: "restReminderPostpone" }, "正在安排稍后提醒...");
         const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
         if (toast) toast.dataset.visible = "false";
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-test-notification") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSettingsCommand({ action: "restReminderTestNotification" }, "正在发送系统通知测试...");
         return;
       }
       if (action.dataset.action === "settings-exit") {

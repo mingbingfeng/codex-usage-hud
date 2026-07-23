@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>请作者喝咖啡 · UI 设计稿</title>
+  <link rel="icon" href="data:,">
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #0b0d0f;
+      --surface: #171b1f;
+      --surface-alt: #121619;
+      --surface-soft: #1d2327;
+      --line: #30383d;
+      --line-soft: #252b2f;
+      --text: #edf1f2;
+      --muted: #9aa5aa;
+      --faint: #6f7b80;
+      --accent: #e6c66f;
+      --accent-soft: rgba(230, 198, 111, .1);
+      --green: #73d5a0;
+      --orange: #efa96a;
+      --danger: #ef8c8c;
+      font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { min-width: 320px; margin: 0; background: var(--page); color: var(--text); font-size: 13px; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .board { width: min(1100px, calc(100vw - 28px)); margin: 0 auto; padding: 22px 0 30px; }
+    .board-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: var(--muted); font-size: 11px; }
+    .board-meta strong { color: var(--accent); font-weight: 650; }
+    .preview-tools { display: inline-flex; align-items: center; gap: 7px; }
+    .preview-tools label { color: var(--faint); }
+    .preview-tools select { min-height: 27px; border: 1px solid var(--line); border-radius: 5px; padding: 0 7px; background: var(--surface-alt); color: var(--text); }
+
+    .settings-window { display: grid; grid-template-rows: 47px 43px minmax(0, 1fr) 51px; height: min(790px, calc(100vh - 91px)); min-height: 620px; overflow: hidden; border: 1px solid #3a4449; border-radius: 8px; background: var(--surface); box-shadow: 0 22px 60px rgba(0, 0, 0, .38); }
+    .window-head, .window-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 15px; background: #15191c; }
+    .window-head { border-bottom: 1px solid var(--line-soft); }
+    .window-title { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; }
+    .window-title svg { width: 16px; height: 16px; color: var(--accent); }
+    .close-button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; }
+    .close-button:hover { background: var(--surface-soft); color: var(--text); }
+    .close-button svg { width: 15px; height: 15px; }
+
+    .tabs { display: flex; align-items: end; gap: 5px; overflow-x: auto; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); scrollbar-width: none; }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab { position: relative; flex: 0 0 auto; height: 43px; border: 0; border-bottom: 2px solid transparent; padding: 0 10px; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
+    .tab:hover { color: var(--text); }
+    .tab[data-active="true"] { border-bottom-color: var(--accent); color: var(--accent); }
+
+    .body { min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+    .body-inner { width: min(930px, 100%); margin: 0 auto; padding: 24px 28px 20px; }
+    .support-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: 19px; line-height: 1.25; }
+    .heading-note { margin: 0; color: var(--muted); font-size: 11px; }
+
+    .qr-area { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 28px; padding-top: 18px; }
+    .qr-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
+    .qr-heading h2 { margin: 0; font-size: 15px; }
+    .qr-heading span { color: var(--faint); font-size: 10px; }
+    .qr-grid { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 12px; }
+    .qr-item { display: grid; justify-items: center; gap: 7px; min-width: 0; padding: 10px 10px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-alt); }
+    .qr-item img { display: block; width: min(100%, 160px); aspect-ratio: 1; object-fit: contain; border-radius: 4px; background: #fff; }
+    .qr-label { display: flex; align-items: center; gap: 6px; color: var(--text); font-weight: 650; }
+    .qr-label svg { width: 13px; height: 13px; color: var(--accent); }
+    .qr-hint { color: var(--faint); font-size: 10px; }
+    .support-aside { display: grid; align-content: start; gap: 14px; padding-top: 28px; }
+    .support-aside p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+    .support-aside strong { color: var(--text); font-weight: 650; }
+    .support-link { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 11px; text-decoration: none; }
+    .support-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+    .support-link svg { width: 13px; height: 13px; }
+    .path-line { padding-top: 11px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 10px; overflow-wrap: anywhere; }
+
+    .reminder { padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+    .reminder-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+    .reminder-title { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; }
+    .reminder-title svg { width: 16px; height: 16px; color: var(--accent); }
+    .toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; white-space: nowrap; }
+    .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+    .toggle-track { position: relative; width: 36px; height: 20px; border-radius: 999px; background: var(--line); transition: background .16s ease; }
+    .toggle-track::after { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #f7f8f8; content: ""; transition: transform .16s ease; }
+    .toggle input:checked + .toggle-track { background: var(--green); }
+    .toggle input:checked + .toggle-track::after { transform: translateX(16px); }
+
+    .reminder-status { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 15px; min-height: 48px; padding: 0 12px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); background: rgba(255, 255, 255, .015); }
+    .status-main { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+    .status-main svg { width: 14px; height: 14px; color: var(--green); flex: 0 0 auto; }
+    .status-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-main span { color: var(--muted); font-size: 11px; }
+    .status-cell { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+    .status-label { color: var(--faint); font-size: 10px; }
+    .status-value { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 700; }
+    .notification-state { display: inline-flex; align-items: center; gap: 5px; color: var(--green); font-size: 11px; white-space: nowrap; }
+    .notification-state svg { width: 13px; height: 13px; }
+
+    .rule-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 11px 0 12px; }
+    .field { display: grid; gap: 5px; min-width: 0; }
+    .field label { color: var(--muted); font-size: 10px; }
+    .field small { display: none; }
+    .input, .select { width: 100%; min-height: 31px; border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; outline: none; background: var(--surface-soft); color: var(--text); font-variant-numeric: tabular-nums; }
+    .input:focus, .select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(230, 198, 111, .1); }
+    .schedule-line { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 40px; border-top: 1px solid var(--line-soft); }
+    .schedule-label { color: var(--muted); font-size: 11px; }
+    .time-range { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+    .time-range .input { width: 96px; }
+    .range-separator { color: var(--faint); }
+    .schedule-help { color: var(--faint); font-size: 10px; text-align: right; }
+    .test-button { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; background: var(--surface-soft); color: var(--muted); cursor: pointer; }
+    .test-button:hover { border-color: #5a666c; color: var(--text); }
+    .test-button svg { width: 13px; height: 13px; }
+
+    .window-actions { border-top: 1px solid var(--line); }
+    .save-state { color: var(--muted); font-size: 11px; }
+    .save-state[data-kind="success"] { color: var(--green); }
+    .save-state[data-kind="warning"] { color: var(--orange); }
+    .actions-right { display: inline-flex; gap: 7px; }
+    .action { display: inline-flex; align-items: center; gap: 6px; min-height: 29px; border: 1px solid var(--line); border-radius: 5px; padding: 0 9px; background: var(--surface-soft); color: var(--text); cursor: pointer; }
+    .action:hover { border-color: #5a666c; }
+    .action[data-primary="true"] { border-color: transparent; background: var(--accent); color: #17140d; font-weight: 700; }
+    .action svg { width: 13px; height: 13px; }
+    .toast { position: fixed; right: 20px; bottom: 20px; display: inline-flex; align-items: center; gap: 7px; max-width: calc(100vw - 40px); padding: 9px 11px; border: 1px solid rgba(115, 213, 160, .4); border-radius: 5px; background: #17221d; color: var(--green); opacity: 0; pointer-events: none; transform: translateY(6px); transition: opacity .16s ease, transform .16s ease; }
+    .toast[data-visible="true"] { opacity: 1; transform: translateY(0); }
+    .toast svg { width: 14px; height: 14px; }
+
+    body[data-preview-state="lunch"] .status-main svg, body[data-preview-state="lunch"] .status-main strong { color: var(--orange); }
+    body[data-preview-state="off"] .status-main svg, body[data-preview-state="off"] .status-main strong { color: var(--faint); }
+
+    @media (max-width: 820px) {
+      .settings-window { height: calc(100vh - 82px); min-height: 650px; }
+      .body-inner { padding: 20px 18px; }
+      .qr-area { grid-template-columns: minmax(0, 1fr) 190px; gap: 17px; }
+      .qr-grid { gap: 8px; }
+      .rule-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 620px) {
+      .board { width: calc(100vw - 16px); padding-top: 10px; }
+      .board-meta { align-items: flex-start; flex-direction: column; }
+      .settings-window { height: calc(100vh - 92px); min-height: 720px; grid-template-rows: 47px 43px minmax(0, 1fr) auto; }
+      .body-inner { padding: 17px 13px; }
+      .support-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+      .qr-area { grid-template-columns: minmax(0, 1fr); }
+      .support-aside { padding-top: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .path-line { grid-column: 1 / -1; }
+      .reminder-status { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; padding: 8px 10px; }
+      .status-main { grid-column: 1 / -1; }
+      .notification-state { grid-column: 1 / -1; }
+      .rule-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+      .schedule-line { grid-template-columns: 92px minmax(0, 1fr); }
+      .schedule-help { grid-column: 2; text-align: left; padding-bottom: 7px; }
+      .window-actions { align-items: flex-start; flex-direction: column; gap: 8px; padding: 9px 12px; }
+      .actions-right { width: 100%; }
+      .actions-right .action { flex: 1 1 0; justify-content: center; }
+    }
+  </style>
+</head>
+<body data-preview-state="focus">
+  <div class="board">
+    <div class="board-meta">
+      <span><strong>设计稿 v2</strong> · 保持“请作者喝咖啡”页面，二维码为主</span>
+      <div class="preview-tools"><label for="preview-state">提醒状态</label><select id="preview-state" aria-label="提醒状态"><option value="focus">专注中</option><option value="lunch">午休暂停</option><option value="off">非工作时段</option></select></div>
+    </div>
+
+    <section class="settings-window" aria-label="请作者喝咖啡设置页设计稿">
+      <header class="window-head">
+        <div class="window-title"><i data-lucide="coffee"></i><span>codex-usage-hud v1.1</span></div>
+        <button class="close-button" type="button" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <nav class="tabs" role="tablist" aria-label="设置页签">
+        <button class="tab" type="button">设置</button>
+        <button class="tab" type="button">空间清理</button>
+        <button class="tab" type="button">用量总览</button>
+        <button class="tab" type="button" data-active="true">请作者喝咖啡</button>
+        <button class="tab" type="button">版本更新</button>
+      </nav>
+
+      <main class="body">
+        <div class="body-inner">
+          <div class="support-heading"><div><h1>请作者喝咖啡</h1><p class="heading-note">如果这个 HUD 对你有帮助，欢迎扫码支持维护。</p></div></div>
+
+          <section class="reminder" aria-label="专注休息提醒">
+            <div class="reminder-head"><div class="reminder-title"><i data-lucide="timer"></i><span>专注休息提醒</span></div><label class="toggle" title="开启或暂停专注休息提醒"><input id="enabled" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span><span id="enabled-label">已启用</span></label></div>
+            <div class="reminder-status" aria-live="polite">
+              <div class="status-main"><i data-lucide="circle-play"></i><strong id="status-title">专注中</strong><span id="status-subtitle">下一次提醒 10:00</span></div>
+              <div class="status-cell"><span class="status-label">本轮开始</span><span class="status-value" id="status-start">09:15</span></div>
+              <div class="notification-state" id="notification-state"><i data-lucide="bell-ring"></i><span>系统通知已启用</span></div>
+            </div>
+            <div class="rule-grid">
+              <div class="field"><label for="focus-minutes">专注时长（分钟）</label><input class="input" id="focus-minutes" type="number" min="15" max="180" value="45"><small>每轮结束发送提醒</small></div>
+              <div class="field"><label for="postpone-minutes">稍后提醒（分钟）</label><input class="input" id="postpone-minutes" type="number" min="5" max="30" value="10"><small>每轮最多延后一次</small></div>
+              <div class="field"><label for="start-time">本轮开始时间</label><input class="input" id="start-time" type="time" value="09:15"><small>可校正当前这一轮</small></div>
+              <div class="field"><label for="idle-minutes">离开多久算作休息</label><input class="input" id="idle-minutes" type="number" min="0" max="60" value="5"><small>回来时开始新一轮</small></div>
+            </div>
+            <div class="schedule-line"><span class="schedule-label">工作时间</span><div class="time-range"><input class="input" type="time" value="09:00" aria-label="上班时间"><span class="range-separator">至</span><input class="input" type="time" value="18:00" aria-label="下班时间"></div><span class="schedule-help">时段外不运行</span></div>
+            <div class="schedule-line"><span class="schedule-label">午休暂停</span><div class="time-range"><input class="input" type="time" value="12:00" aria-label="午休开始时间"><span class="range-separator">至</span><input class="input" type="time" value="13:30" aria-label="午休结束时间"></div><span class="schedule-help"><label class="toggle"><input id="lunch-enabled" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span><span>启用</span></label></span></div>
+            <div class="schedule-line"><span class="schedule-label">通知通道</span><span class="schedule-help" id="notification-help" style="text-align:left">到点发送系统通知，同时显示 HUD 内提示</span><button class="test-button" id="test-notification" type="button"><i data-lucide="send"></i><span>发送测试通知</span></button></div>
+          </section>
+
+          <section class="qr-area" aria-label="赞赏二维码">
+            <div>
+              <div class="qr-heading"><h2>扫码支持</h2><span>二维码保持首要视觉位置</span></div>
+              <div class="qr-grid">
+                <div class="qr-item"><img src="../src/codex_usage_hud/assets/sponsor_alipay.png" alt="支付宝赞赏二维码"><div class="qr-label"><i data-lucide="scan-line"></i><span>支付宝</span></div><span class="qr-hint">打开支付宝扫一扫</span></div>
+                <div class="qr-item"><img src="../src/codex_usage_hud/assets/sponsor_wechat.png" alt="微信赞赏二维码"><div class="qr-label"><i data-lucide="scan-line"></i><span>微信</span></div><span class="qr-hint">打开微信扫一扫</span></div>
+              </div>
+            </div>
+            <aside class="support-aside">
+              <p><strong>感谢你的支持</strong><br>赞赏会用于持续维护、兼容性验证和问题修复。</p>
+              <a class="support-link" href="https://github.com/mingbingfeng/codex-usage-hud" target="_blank" rel="noreferrer"><span>项目主页</span><i data-lucide="external-link"></i></a>
+              <div class="path-line">当前配置文件：<br>%LOCALAPPDATA%\\codex-usage-hud\\settings.json</div>
+            </aside>
+          </section>
+        </div>
+      </main>
+
+      <footer class="window-actions"><span class="save-state" id="save-state">二维码内容不受提醒设置影响</span><div class="actions-right"><button class="action" id="reset" type="button"><i data-lucide="rotate-ccw"></i><span>恢复默认</span></button><button class="action" data-primary="true" id="save" type="button"><i data-lucide="save"></i><span>保存提醒设置</span></button></div></footer>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"><i data-lucide="check-circle-2"></i><span id="toast-text">测试通知已发送</span></div>
+
+  <script>
+    const body = document.body;
+    const stateSelect = document.getElementById("preview-state");
+    const enabled = document.getElementById("enabled");
+    const enabledLabel = document.getElementById("enabled-label");
+    const lunchEnabled = document.getElementById("lunch-enabled");
+    const statusTitle = document.getElementById("status-title");
+    const statusSubtitle = document.getElementById("status-subtitle");
+    const saveState = document.getElementById("save-state");
+    const notificationState = document.getElementById("notification-state");
+    const notificationHelp = document.getElementById("notification-help");
+    const toast = document.getElementById("toast");
+    const toastText = document.getElementById("toast-text");
+    let toastTimer = 0;
+
+    function refreshIcons() {
+      if (window.lucide?.createIcons) window.lucide.createIcons({ attrs: { "stroke-width": 1.8 } });
+    }
+
+    function applyState(value) {
+      body.dataset.previewState = value;
+      if (!enabled.checked) value = "off";
+      if (value === "lunch") {
+        statusTitle.textContent = "午休暂停";
+        statusSubtitle.textContent = "13:30 恢复，新一轮从恢复时刻开始";
+      } else if (value === "off") {
+        statusTitle.textContent = enabled.checked ? "非工作时段" : "已暂停";
+        statusSubtitle.textContent = enabled.checked ? "下一个工作日开始后自动恢复" : "保存后重新开启提醒";
+      } else {
+        statusTitle.textContent = "专注中";
+        statusSubtitle.textContent = "下一次提醒 10:00";
+      }
+      refreshIcons();
+    }
+
+    function showToast(message) {
+      toastText.textContent = message;
+      toast.dataset.visible = "true";
+      window.clearTimeout(toastTimer);
+      toastTimer = window.setTimeout(() => { toast.dataset.visible = "false"; }, 2400);
+    }
+
+    stateSelect.addEventListener("change", () => applyState(stateSelect.value));
+    enabled.addEventListener("change", () => {
+      enabledLabel.textContent = enabled.checked ? "已启用" : "已暂停";
+      applyState(stateSelect.value);
+      saveState.textContent = enabled.checked ? "提醒已开启，保存后生效" : "提醒已暂停，保存后生效";
+      saveState.dataset.kind = "warning";
+    });
+    lunchEnabled.addEventListener("change", () => {
+      saveState.textContent = lunchEnabled.checked ? "午休暂停已开启，保存后生效" : "午休暂停已关闭，保存后生效";
+      saveState.dataset.kind = "warning";
+    });
+    document.getElementById("start-time").addEventListener("change", (event) => {
+      document.getElementById("status-start").textContent = event.target.value || "09:15";
+      saveState.textContent = "本轮开始时间已修改，保存后生效";
+      saveState.dataset.kind = "warning";
+    });
+    document.getElementById("test-notification").addEventListener("click", () => {
+      notificationState.innerHTML = "<i data-lucide=\"circle-check\"></i><span>系统通知测试成功</span>";
+      notificationHelp.textContent = "系统通知通道可用，实际提醒到点会发送同类通知";
+      showToast("测试通知已发送");
+      refreshIcons();
+    });
+    document.getElementById("save").addEventListener("click", () => {
+      saveState.textContent = "已保存，新的提醒规则立即生效";
+      saveState.dataset.kind = "success";
+      showToast("提醒设置已保存");
+    });
+    document.getElementById("reset").addEventListener("click", () => {
+      enabled.checked = true;
+      enabledLabel.textContent = "已启用";
+      lunchEnabled.checked = true;
+      document.getElementById("focus-minutes").value = "45";
+      document.getElementById("postpone-minutes").value = "10";
+      document.getElementById("start-time").value = "09:15";
+      document.getElementById("idle-minutes").value = "5";
+      document.getElementById("status-start").textContent = "09:15";
+      saveState.textContent = "已恢复默认值，保存后生效";
+      saveState.dataset.kind = "warning";
+      applyState("focus");
+      stateSelect.value = "focus";
+    });
+
+    refreshIcons();
+    applyState("focus");
+  </script>
+</body>
+</html>

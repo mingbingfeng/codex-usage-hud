@@ -9,9 +9,11 @@ from __future__ import annotations
 import ctypes
 import logging
 import random
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 # Keep defaults local to avoid circular import with config -> core package init.
@@ -19,6 +21,11 @@ DEFAULT_REST_REMINDER_ENABLED = False
 DEFAULT_REST_REMINDER_INTERVAL_MINUTES = 45
 DEFAULT_REST_REMINDER_POSTPONE_MINUTES = 10
 DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES = 5
+DEFAULT_REST_REMINDER_WORK_START_TIME = "09:00"
+DEFAULT_REST_REMINDER_WORK_END_TIME = "18:00"
+DEFAULT_REST_REMINDER_LUNCH_ENABLED = True
+DEFAULT_REST_REMINDER_LUNCH_START_TIME = "12:00"
+DEFAULT_REST_REMINDER_LUNCH_END_TIME = "13:30"
 REST_REMINDER_INTERVAL_MIN = 15
 REST_REMINDER_INTERVAL_MAX = 180
 REST_REMINDER_POSTPONE_MIN = 5
@@ -44,6 +51,11 @@ class RestReminderConfig:
     interval_minutes: int = DEFAULT_REST_REMINDER_INTERVAL_MINUTES
     postpone_minutes: int = DEFAULT_REST_REMINDER_POSTPONE_MINUTES
     idle_reset_minutes: int = DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES
+    work_start_time: str = DEFAULT_REST_REMINDER_WORK_START_TIME
+    work_end_time: str = DEFAULT_REST_REMINDER_WORK_END_TIME
+    lunch_enabled: bool = DEFAULT_REST_REMINDER_LUNCH_ENABLED
+    lunch_start_time: str = DEFAULT_REST_REMINDER_LUNCH_START_TIME
+    lunch_end_time: str = DEFAULT_REST_REMINDER_LUNCH_END_TIME
 
     @classmethod
     def from_user_config(cls, user_config: object) -> "RestReminderConfig":
@@ -79,6 +91,29 @@ class RestReminderConfig:
                 REST_REMINDER_IDLE_RESET_MIN,
                 REST_REMINDER_IDLE_RESET_MAX,
             ),
+            work_start_time=_normalize_time_text(
+                getattr(user_config, "rest_reminder_work_start_time", None),
+                DEFAULT_REST_REMINDER_WORK_START_TIME,
+            ),
+            work_end_time=_normalize_time_text(
+                getattr(user_config, "rest_reminder_work_end_time", None),
+                DEFAULT_REST_REMINDER_WORK_END_TIME,
+            ),
+            lunch_enabled=bool(
+                getattr(
+                    user_config,
+                    "rest_reminder_lunch_enabled",
+                    DEFAULT_REST_REMINDER_LUNCH_ENABLED,
+                )
+            ),
+            lunch_start_time=_normalize_time_text(
+                getattr(user_config, "rest_reminder_lunch_start_time", None),
+                DEFAULT_REST_REMINDER_LUNCH_START_TIME,
+            ),
+            lunch_end_time=_normalize_time_text(
+                getattr(user_config, "rest_reminder_lunch_end_time", None),
+                DEFAULT_REST_REMINDER_LUNCH_END_TIME,
+            ),
         )
 
 
@@ -99,6 +134,22 @@ def _clamp_int(value: object, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         amount = int(default)
     return max(int(minimum), min(int(maximum), amount))
+
+
+def _normalize_time_text(value: object, default: str) -> str:
+    text = str(value or "").strip()
+    try:
+        hour, minute = (int(part) for part in text.split(":", 1))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def _minutes_from_time_text(value: str) -> int:
+    hour, minute = (int(part) for part in value.split(":", 1))
+    return hour * 60 + minute
 
 
 def system_idle_seconds(now: float | None = None) -> float | None:
@@ -136,18 +187,22 @@ class RestReminderScheduler:
         idle_seconds_provider: Callable[[], float | None] | None = None,
         message_picker: Callable[[], str] | None = None,
         clock: Callable[[], float] | None = None,
+        wall_clock: Callable[[], float] | None = None,
     ) -> None:
         self._idle_seconds = idle_seconds_provider or system_idle_seconds
         self._pick_message = message_picker or (
             lambda: random.choice(REST_REMINDER_MESSAGES)
         )
         self._clock = clock or time.monotonic
+        self._wall_clock = wall_clock or time.time
         self._config = RestReminderConfig()
         self._next_fire_at = 0.0
         self._postpone_used = False
         self._showing = False
         self._last_event: RestReminderEvent | None = None
         self._cycle_started_at = 0.0
+        self._schedule_waiting = False
+        self._idle_break_active = False
         self.configure(self._config, force_reset=True)
 
     @property
@@ -166,11 +221,47 @@ class RestReminderScheduler:
     def cycle_started_at(self) -> float:
         return self._cycle_started_at
 
+    @property
+    def state(self) -> str:
+        if not self._config.enabled:
+            return "disabled"
+        if self._idle_break_active:
+            return "away"
+        schedule_state, _ = self._schedule_state(float(self._wall_clock()))
+        return schedule_state
+
     def seconds_until_next(self, now: float | None = None) -> float | None:
         if not self._config.enabled:
             return None
         current = self._clock() if now is None else float(now)
         return max(0.0, self._next_fire_at - current)
+
+    def seconds_until_wake(self, now: float | None = None) -> float | None:
+        """Return the next timer or work-schedule boundary that needs a tick."""
+        if not self._config.enabled:
+            return None
+        current = self._clock() if now is None else float(now)
+        wall_now = float(self._wall_clock())
+        state, boundary = self._schedule_state(wall_now)
+        if state != "work" and boundary is not None:
+            return max(0.0, boundary - wall_now)
+        delay = max(0.0, self._next_fire_at - current)
+        if boundary is not None:
+            delay = min(delay, max(0.0, boundary - wall_now))
+        return delay
+
+    def set_cycle_started_at_wall(self, started_at_wall: float) -> None:
+        """Adjust the current round start from a wall-clock timestamp."""
+        if not self._config.enabled:
+            return
+        now_wall = float(self._wall_clock())
+        elapsed = max(0.0, now_wall - float(started_at_wall))
+        current = self._clock()
+        self._cycle_started_at = current - elapsed
+        self._next_fire_at = self._cycle_started_at + float(self._config.interval_minutes) * 60.0
+        self._showing = False
+        self._last_event = None
+        self._postpone_used = False
 
     def configure(
         self,
@@ -190,6 +281,8 @@ class RestReminderScheduler:
             self._next_fire_at = 0.0
             self._cycle_started_at = 0.0
             self._postpone_used = False
+            self._schedule_waiting = False
+            self._idle_break_active = False
             return
         timing_changed = (
             force_reset
@@ -197,6 +290,11 @@ class RestReminderScheduler:
             or previous.interval_minutes != next_config.interval_minutes
             or previous.postpone_minutes != next_config.postpone_minutes
             or previous.idle_reset_minutes != next_config.idle_reset_minutes
+            or previous.work_start_time != next_config.work_start_time
+            or previous.work_end_time != next_config.work_end_time
+            or previous.lunch_enabled != next_config.lunch_enabled
+            or previous.lunch_start_time != next_config.lunch_start_time
+            or previous.lunch_end_time != next_config.lunch_end_time
         )
         if timing_changed and not self._showing:
             self._arm_from_now()
@@ -206,13 +304,31 @@ class RestReminderScheduler:
         if not self._config.enabled or self._showing:
             return None
         current = self._clock() if now is None else float(now)
+        schedule_state, boundary = self._schedule_state(float(self._wall_clock()))
+        if schedule_state != "work":
+            self._schedule_waiting = True
+            self._idle_break_active = False
+            wall_now = float(self._wall_clock())
+            self._next_fire_at = current + max(0.0, (boundary or wall_now) - wall_now)
+            self._cycle_started_at = current
+            self._postpone_used = False
+            return None
+        if self._schedule_waiting:
+            self._schedule_waiting = False
+            self._arm_from(current)
+            return None
         idle_seconds = self._idle_seconds()
         idle_reset = float(self._config.idle_reset_minutes) * 60.0
         if idle_reset > 0 and idle_seconds is not None and idle_seconds >= idle_reset:
-            # Natural break: user already stepped away; slide schedule forward.
-            self._next_fire_at = current + float(self._config.interval_minutes) * 60.0
-            self._cycle_started_at = current
-            self._postpone_used = False
+            if not self._idle_break_active:
+                self._next_fire_at = current + float(self._config.interval_minutes) * 60.0
+                self._cycle_started_at = current
+                self._postpone_used = False
+            self._idle_break_active = True
+            return None
+        if self._idle_break_active:
+            self._idle_break_active = False
+            self._arm_from(current)
             return None
         if current < self._next_fire_at:
             return None
@@ -252,12 +368,44 @@ class RestReminderScheduler:
         self._last_event = None
 
     def _arm_from_now(self) -> None:
-        self._cycle_started_at = self._clock()
-        self._next_fire_at = self._cycle_started_at + float(self._config.interval_minutes) * 60.0
+        self._arm_from(self._clock())
+
+    def _arm_from(self, current: float) -> None:
+        self._cycle_started_at = current
+        self._next_fire_at = current + float(self._config.interval_minutes) * 60.0
+
+    def _schedule_state(self, wall_now: float) -> tuple[str, float | None]:
+        local = datetime.fromtimestamp(wall_now)
+        minute = local.hour * 60 + local.minute
+        work_start = _minutes_from_time_text(self._config.work_start_time)
+        work_end = _minutes_from_time_text(self._config.work_end_time)
+        lunch_start = _minutes_from_time_text(self._config.lunch_start_time)
+        lunch_end = _minutes_from_time_text(self._config.lunch_end_time)
+        if work_start >= work_end:
+            work_start, work_end = 0, 24 * 60
+        in_work = work_start <= minute < work_end
+        in_lunch = (
+            in_work
+            and self._config.lunch_enabled
+            and lunch_start < lunch_end
+            and lunch_start <= minute < lunch_end
+        )
+        state = "lunch" if in_lunch else "work" if in_work else "off"
+        boundaries = [work_start, work_end]
+        if self._config.lunch_enabled and lunch_start < lunch_end:
+            boundaries.extend([lunch_start, lunch_end])
+        next_minute = next((candidate for candidate in sorted(set(boundaries)) if candidate > minute), None)
+        if next_minute is None:
+            next_minute = min(boundaries) + 24 * 60
+        midnight = datetime(local.year, local.month, local.day)
+        boundary = midnight.timestamp() + next_minute * 60
+        if boundary <= wall_now:
+            boundary += 24 * 60 * 60
+        return state, boundary
 
 
 class RestReminderPresenter:
-    """Present rest reminders via PySide6 dialog, with renderer fallback payload."""
+    """Present rest reminders in renderer and send an independent system notification."""
 
     def __init__(
         self,
@@ -270,6 +418,12 @@ class RestReminderPresenter:
         self._pending_renderer_event: dict[str, object] | None = None
         self._dialog: object | None = None
         self._last_surface: str = ""  # "qt" | "renderer" | ""
+        self._notification: dict[str, object] = {
+            "status": "unknown",
+            "channel": "",
+            "error": "",
+            "lastSentAtMs": 0,
+        }
 
     def configure(self, user_config: object, *, force_reset: bool = False) -> None:
         was_enabled = self.scheduler.config.enabled
@@ -278,8 +432,7 @@ class RestReminderPresenter:
             self.close()
 
     def tick(self) -> dict[str, object] | None:
-        """Drive the scheduler. Returns a renderer fallback payload when needed."""
-        self._pump_qt_events()
+        """Drive the scheduler and return a renderer toast payload when due."""
         if self.scheduler.showing:
             if self._last_surface == "renderer" and self._pending_renderer_event:
                 return dict(self._pending_renderer_event)
@@ -289,14 +442,8 @@ class RestReminderPresenter:
             self._pending_renderer_event = None
             self._last_surface = ""
             return None
-        if self._try_show_qt_dialog(event):
-            self._pending_renderer_event = None
-            self._last_surface = "qt"
-            try:
-                _show_system_notification(event.message)
-            except Exception:
-                _LOGGER.debug("rest_reminder_system_notification_failed", exc_info=True)
-            return None
+        notification = _show_system_notification(event.message)
+        self._notification = notification
         payload = {
             "visible": True,
             "message": event.message,
@@ -304,13 +451,10 @@ class RestReminderPresenter:
             "intervalMinutes": event.interval_minutes,
             "postponeMinutes": event.postpone_minutes,
             "firedAt": event.fired_at,
+            "notification": dict(notification),
         }
         self._pending_renderer_event = payload
         self._last_surface = "renderer"
-        try:
-            _show_system_notification(event.message)
-        except Exception:
-            _LOGGER.debug("rest_reminder_system_notification_failed", exc_info=True)
         return payload
 
     def acknowledge(self) -> None:
@@ -329,6 +473,7 @@ class RestReminderPresenter:
 
     def renderer_payload(self) -> dict[str, object]:
         config = self.scheduler.config
+        state = self.scheduler.state
         if config.enabled and self.scheduler.next_fire_at > 0:
             now_wall_ms = float(self._wall_clock()) * 1000.0
             remaining = float(self.scheduler.seconds_until_next() or 0.0)
@@ -336,6 +481,7 @@ class RestReminderPresenter:
             elapsed = max(0.0, min(duration, duration - remaining))
             timing = {
                 "enabled": True,
+                "running": state == "work",
                 "timerStartedAtMs": int(now_wall_ms - (elapsed * 1000.0)),
                 "nextReminderAtMs": int(now_wall_ms + (remaining * 1000.0)),
                 "remainingSeconds": int(round(remaining)),
@@ -344,6 +490,7 @@ class RestReminderPresenter:
         else:
             timing = {
                 "enabled": False,
+                "running": False,
                 "timerStartedAtMs": 0,
                 "nextReminderAtMs": 0,
                 "remainingSeconds": 0,
@@ -352,8 +499,27 @@ class RestReminderPresenter:
         if self._pending_renderer_event:
             payload = dict(self._pending_renderer_event)
             payload.update(timing)
+            payload["notification"] = dict(self._notification)
+            payload["state"] = state
             return payload
-        return {"visible": False, **timing}
+        return {
+            "visible": False,
+            "notification": dict(self._notification),
+            "state": state,
+            **timing,
+        }
+
+    def adjust_cycle_started_at_ms(self, started_at_ms: object) -> bool:
+        try:
+            started = float(started_at_ms) / 1000.0
+        except (TypeError, ValueError):
+            return False
+        self.scheduler.set_cycle_started_at_wall(started)
+        return True
+
+    def test_notification(self) -> dict[str, object]:
+        self._notification = _show_system_notification("系统通知测试成功")
+        return dict(self._notification)
 
     def close(self) -> None:
         self._close_dialog()
@@ -415,35 +581,13 @@ class RestReminderPresenter:
             return
 
 
-def _show_system_notification(message: str) -> None:
-    """Best-effort desktop notification; never raises to caller."""
+def _show_system_notification(message: str) -> dict[str, object]:
+    """Send a desktop notification and expose the selected channel/result."""
     title = "休息提醒"
     body = str(message or "").strip() or "该休息一下了。"
+    sent_at = int(time.time() * 1000)
     if sys.platform == "win32":
         try:
-            from PySide6.QtGui import QIcon
-            from PySide6.QtWidgets import QApplication, QSystemTrayIcon
-
-            app = QApplication.instance()
-            if app is not None:
-                tray = QSystemTrayIcon(app)
-                icon = app.windowIcon()
-                if icon is None or icon.isNull():
-                    icon = QIcon()
-                tray.setIcon(icon)
-                tray.setVisible(True)
-                tray.showMessage(
-                    title,
-                    body,
-                    QSystemTrayIcon.MessageIcon.Information,
-                    8000,
-                )
-                return
-        except Exception:
-            pass
-        try:
-            import subprocess
-
             safe = body.replace("'", "''")[:180]
             script = (
                 "Add-Type -AssemblyName System.Windows.Forms; "
@@ -453,7 +597,7 @@ def _show_system_notification(message: str) -> None:
                 "$n.Visible = $true; "
                 f"$n.ShowBalloonTip(8000, '{title}', '{safe}', "
                 "[System.Windows.Forms.ToolTipIcon]::Info); "
-                "Start-Sleep -Seconds 1; $n.Dispose()"
+                "Start-Sleep -Seconds 8; $n.Dispose()"
             )
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             subprocess.Popen(
@@ -462,12 +606,17 @@ def _show_system_notification(message: str) -> None:
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
-            return
-        except Exception:
-            return
+            return {"status": "sent", "channel": "windows-notifyicon", "error": "", "lastSentAtMs": sent_at}
+        except Exception as exc:
+            return {"status": "failed", "channel": "windows-notifyicon", "error": str(exc), "lastSentAtMs": sent_at}
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(["osascript", "-e", f'display notification "{body.replace(chr(34), chr(39))}" with title "{title}"'], check=True, timeout=5)
+            return {"status": "sent", "channel": "osascript", "error": "", "lastSentAtMs": sent_at}
+        except Exception as exc:
+            return {"status": "failed", "channel": "osascript", "error": str(exc), "lastSentAtMs": sent_at}
     try:
-        from plyer import notification  # type: ignore
-
-        notification.notify(title=title, message=body, timeout=8)
-    except Exception:
-        return
+        subprocess.run(["notify-send", title, body], check=True, timeout=5)
+        return {"status": "sent", "channel": "notify-send", "error": "", "lastSentAtMs": sent_at}
+    except Exception as exc:
+        return {"status": "failed", "channel": "notify-send", "error": str(exc), "lastSentAtMs": sent_at}

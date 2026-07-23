@@ -37,6 +37,11 @@ DEFAULT_REST_REMINDER_ENABLED = False
 DEFAULT_REST_REMINDER_INTERVAL_MINUTES = 45
 DEFAULT_REST_REMINDER_POSTPONE_MINUTES = 10
 DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES = 5
+DEFAULT_REST_REMINDER_WORK_START_TIME = "09:00"
+DEFAULT_REST_REMINDER_WORK_END_TIME = "18:00"
+DEFAULT_REST_REMINDER_LUNCH_ENABLED = True
+DEFAULT_REST_REMINDER_LUNCH_START_TIME = "12:00"
+DEFAULT_REST_REMINDER_LUNCH_END_TIME = "13:30"
 REST_REMINDER_INTERVAL_MIN = 15
 REST_REMINDER_INTERVAL_MAX = 180
 REST_REMINDER_POSTPONE_MIN = 5
@@ -216,6 +221,11 @@ class UserConfig:
     rest_reminder_interval_minutes: int = DEFAULT_REST_REMINDER_INTERVAL_MINUTES
     rest_reminder_postpone_minutes: int = DEFAULT_REST_REMINDER_POSTPONE_MINUTES
     rest_reminder_idle_reset_minutes: int = DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES
+    rest_reminder_work_start_time: str = DEFAULT_REST_REMINDER_WORK_START_TIME
+    rest_reminder_work_end_time: str = DEFAULT_REST_REMINDER_WORK_END_TIME
+    rest_reminder_lunch_enabled: bool = DEFAULT_REST_REMINDER_LUNCH_ENABLED
+    rest_reminder_lunch_start_time: str = DEFAULT_REST_REMINDER_LUNCH_START_TIME
+    rest_reminder_lunch_end_time: str = DEFAULT_REST_REMINDER_LUNCH_END_TIME
     cleanup_backup_directory: str = ""
     cleanup_log_retention_hours: int = DEFAULT_CLEANUP_LOG_RETENTION_HOURS
     cleanup_background_retention_days: int = (
@@ -318,6 +328,27 @@ class UserConfig:
                 minimum=REST_REMINDER_IDLE_RESET_MIN,
                 maximum=REST_REMINDER_IDLE_RESET_MAX,
             ),
+            rest_reminder_work_start_time=normalize_time_text(
+                value.get("rest_reminder_work_start_time"),
+                defaults.rest_reminder_work_start_time,
+            ),
+            rest_reminder_work_end_time=normalize_time_text(
+                value.get("rest_reminder_work_end_time"),
+                defaults.rest_reminder_work_end_time,
+            ),
+            rest_reminder_lunch_enabled=(
+                _optional_bool(value.get("rest_reminder_lunch_enabled"))
+                if value.get("rest_reminder_lunch_enabled") is not None
+                else defaults.rest_reminder_lunch_enabled
+            ),
+            rest_reminder_lunch_start_time=normalize_time_text(
+                value.get("rest_reminder_lunch_start_time"),
+                defaults.rest_reminder_lunch_start_time,
+            ),
+            rest_reminder_lunch_end_time=normalize_time_text(
+                value.get("rest_reminder_lunch_end_time"),
+                defaults.rest_reminder_lunch_end_time,
+            ),
             cleanup_backup_directory=(
                 _optional_str(value.get("cleanup_backup_directory")) or ""
             ),
@@ -361,6 +392,11 @@ class UserConfig:
             "rest_reminder_idle_reset_minutes": int(
                 self.rest_reminder_idle_reset_minutes
             ),
+            "rest_reminder_work_start_time": self.rest_reminder_work_start_time,
+            "rest_reminder_work_end_time": self.rest_reminder_work_end_time,
+            "rest_reminder_lunch_enabled": bool(self.rest_reminder_lunch_enabled),
+            "rest_reminder_lunch_start_time": self.rest_reminder_lunch_start_time,
+            "rest_reminder_lunch_end_time": self.rest_reminder_lunch_end_time,
             "cleanup_backup_directory": self.cleanup_backup_directory,
             "cleanup_log_retention_hours": int(self.cleanup_log_retention_hours),
             "cleanup_background_retention_days": int(

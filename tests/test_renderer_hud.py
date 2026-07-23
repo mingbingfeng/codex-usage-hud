@@ -1730,6 +1730,16 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("距离下一次提醒", script)
         self.assertIn("data-rest-reminder-start", script)
         self.assertIn("setInterval(syncRestReminderCountdown, 1000)", script)
+        self.assertIn("离开多久算作休息", script)
+        self.assertIn("回来时开始新一轮", script)
+        self.assertIn("rest_reminder_work_start_time", script)
+        self.assertIn("rest_reminder_lunch_enabled", script)
+        self.assertIn("rest-reminder-test-notification", script)
+        self.assertLess(
+            script.index("codex-usage-hud-rest-reminder-card"),
+            script.index("codex-usage-hud-support-qr-grid"),
+        )
+        self.assertNotIn("离开后重新计时", script)
         self.assertNotIn("到点会优先弹出 PySide6", script)
 
     def test_payload_can_include_support_qr_images(self) -> None:

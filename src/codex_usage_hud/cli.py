@@ -8375,6 +8375,11 @@ def _partial_domains_for_changed_user_config(
         "rest_reminder_interval_minutes",
         "rest_reminder_postpone_minutes",
         "rest_reminder_idle_reset_minutes",
+        "rest_reminder_work_start_time",
+        "rest_reminder_work_end_time",
+        "rest_reminder_lunch_enabled",
+        "rest_reminder_lunch_start_time",
+        "rest_reminder_lunch_end_time",
     }
     pricing_keys = {"pricing_url", "model_prices"}
     budget_keys = {
@@ -8415,6 +8420,8 @@ def _partial_domains_for_settings_command(
         return {"settings"}
     if action == "openBackgroundUsageFromInsights":
         return {"backgroundUsage"}
+    if action in {"restReminderAck", "restReminderPostpone", "restReminderTestNotification"}:
+        return {"settings"}
     if action == "save":
         changed_keys = _changed_user_config_keys(previous_config, current_config)
         return _partial_domains_for_changed_user_config(changed_keys)
@@ -8988,12 +8995,21 @@ def _handle_renderer_settings_command(
                 event_id=event_id,
             )
         if action == "save":
+            settings_payload = command.get("settings")
             config = _config_from_settings_payload(
                 context.settings_store.load(),
-                command.get("settings"),
+                settings_payload,
             )
             _save_renderer_user_config(context, config)
             if str(command.get("section") or "") == "restReminder":
+                presenter = getattr(context, "rest_reminder", None)
+                started_at_ms = (
+                    settings_payload.get("rest_reminder_timer_started_at_ms")
+                    if isinstance(settings_payload, Mapping)
+                    else None
+                )
+                if presenter is not None and started_at_ms is not None:
+                    presenter.adjust_cycle_started_at_ms(started_at_ms)
                 return _renderer_settings_status("提醒设置已保存，新的专注计时已开始。")
             return _renderer_settings_status("设置已保存，相关显示会自动刷新。")
         if action == "restReminderAck":
@@ -9007,6 +9023,17 @@ def _handle_renderer_settings_command(
             return _renderer_settings_status(
                 "已安排稍后提醒。" if postponed else "这次提醒已经延后过了。",
                 kind="" if postponed else "error",
+            )
+        if action == "restReminderTestNotification":
+            presenter = getattr(context, "rest_reminder", None)
+            result = presenter.test_notification() if presenter is not None else {
+                "status": "failed",
+                "error": "提醒服务未启动",
+            }
+            sent = str(result.get("status") or "") == "sent"
+            return _renderer_settings_status(
+                "系统通知测试已发送。" if sent else f"系统通知发送失败：{result.get('error') or '未知错误'}",
+                kind="" if sent else "error",
             )
         if action == "applyDisplayMode":
             config = _config_from_settings_payload(
@@ -11015,7 +11042,11 @@ def run_renderer_hud_session(
                     if action in {"checkUpdate", "installUpdate", "updateAction"}:
                         request.request_domains("settings", force_fast=True)
                         return
-                    if action in {"restReminderAck", "restReminderPostpone"}:
+                    if action in {
+                        "restReminderAck",
+                        "restReminderPostpone",
+                        "restReminderTestNotification",
+                    }:
                         request.request_domains("settings", force_fast=True)
                         return
                     if action in {"installDesktopOverlay", "enableDesktopOverlay"}:
@@ -11951,6 +11982,18 @@ def run_renderer_hud_session(
                         force_fast=force_fast,
                     ):
                         delay_value = max(delay_value, RENDERER_EVENT_IDLE_WAIT_SECONDS)
+                    rest_reminder = getattr(context, "rest_reminder", None)
+                    if rest_reminder is not None:
+                        seconds_until_wake = getattr(
+                            getattr(rest_reminder, "scheduler", None),
+                            "seconds_until_wake",
+                            lambda: None,
+                        )()
+                        if seconds_until_wake is not None:
+                            delay_value = min(
+                                delay_value,
+                                max(0.05, float(seconds_until_wake)),
+                            )
                     next_keep_alive = getattr(
                         work_overlay,
                         "next_keep_alive_seconds",
