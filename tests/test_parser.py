@@ -448,6 +448,87 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(events[0].total_tokens, 45)
         self.assertEqual(events[0].cost_usd, 0.000206)
 
+    def test_usage_events_skip_dense_forked_history_cluster_after_boundary(self) -> None:
+        """Parent history is dumped at the boundary timestamp; only later live work counts."""
+        parser = JsonlSessionParser()
+        fork_ts = "2026-07-23T12:57:51.282Z"
+        live_ts = "2026-07-23T12:58:10.000Z"
+        records = [
+            record(
+                fork_ts,
+                "session_meta",
+                {
+                    "id": "child-thread",
+                    "session_id": "parent-thread",
+                    "forked_from_id": "parent-thread",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {"parent_thread_id": "parent-thread"}
+                        }
+                    },
+                },
+            ),
+            record(fork_ts, "turn_context", {"model": "gpt-5.6-terra"}),
+            token_count(fork_ts, 180269, 178432, 1045, 100, 181314, 181314),
+            record(
+                fork_ts,
+                "event_msg",
+                {"type": "thread_settings_applied"},
+            ),
+            record(fork_ts, "event_msg", {"type": "task_started"}),
+            # Parent-history deltas still appear after the structural boundary
+            # but share the fork dump timestamp.
+            token_count(fork_ts, 2076, 1024, 189, 20, 2265, 183579),
+            token_count(fork_ts, 292, 192, 387, 30, 679, 184258),
+            record(live_ts, "event_msg", {"type": "task_started"}),
+            token_count(live_ts, 28703, 27904, 636, 50, 29339, 213597),
+        ]
+        # cumulative totals on last two history + live events already set via helper;
+        # rewrite total_token_usage for mid/history/live deltas explicitly.
+        records[5]["payload"]["info"]["total_token_usage"] = {
+            "input_tokens": 182345,
+            "cached_input_tokens": 179456,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 1234,
+            "reasoning_output_tokens": 120,
+            "total_tokens": 183579,
+        }
+        records[6]["payload"]["info"]["total_token_usage"] = {
+            "input_tokens": 182637,
+            "cached_input_tokens": 179648,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 1621,
+            "reasoning_output_tokens": 150,
+            "total_tokens": 184258,
+        }
+        records[8]["payload"]["info"]["total_token_usage"] = {
+            "input_tokens": 211340,
+            "cached_input_tokens": 207552,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2257,
+            "reasoning_output_tokens": 200,
+            "total_tokens": 213597,
+        }
+        for index, item in enumerate(records, 1):
+            item["_line"] = index
+            item["_dt"] = parse_timestamp(item["timestamp"])
+
+        events = parser.usage_events(records)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].input_tokens, 28703)
+        self.assertEqual(events[0].cached_tokens, 27904)
+        self.assertEqual(events[0].output_tokens, 636)
+        self.assertEqual(events[0].total_tokens, 29339)
+        self.assertEqual(
+            parser._history_replay_boundary(records),
+            3,
+        )
+        self.assertGreater(
+            parser._history_replay_usage_start(records) or 0,
+            parser._history_replay_boundary(records) or 0,
+        )
+
     def test_token_rounds_since_latest_task_only_include_current_task(self) -> None:
         parser = JsonlSessionParser()
         records = [

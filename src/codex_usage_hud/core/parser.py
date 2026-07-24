@@ -18,6 +18,10 @@ from .activity_monitor import ReadingActivity
 
 DEFAULT_MODEL = "gpt-5.5"
 MAX_REQUEST_HISTORY = 500
+# Forked/subagent JSONL dumps parent history in a same-timestamp cluster right
+# after the structural boundary. Skip that cluster so only live child usage is
+# billed (matches cc-switch codex_session parsing).
+HISTORY_REPLAY_CLUSTER_SECONDS = 0.5
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -485,6 +489,10 @@ class ParsedSession:
     week_before_today_tokens: int = 0
     week_before_today_cost_usd: float = 0.0
     week_adjustment_usd: float = 0.0
+    # Lifetime usage for this session root plus forked subagents (local JSONL).
+    family_tokens: int = 0
+    family_cost_usd: float | None = None
+    family_member_count: int = 0
     daily_limit_usd: float = 100.0
     weekly_limit_usd: float = 400.0
     day_start: datetime | None = None
@@ -1112,7 +1120,7 @@ class JsonlSessionParser:
     def _history_replay_boundary(
         records: Sequence[Mapping[str, Any]],
     ) -> int | None:
-        """Return the first live-thread record after a forked history snapshot."""
+        """Return the structural marker that ends a forked history snapshot."""
         carries_history_snapshot = False
         for record in records:
             if record.get("type") != "session_meta":
@@ -1152,6 +1160,47 @@ class JsonlSessionParser:
                 return index
         return None
 
+    @classmethod
+    def _history_replay_usage_start(
+        cls,
+        records: Sequence[Mapping[str, Any]],
+        *,
+        cluster_seconds: float = HISTORY_REPLAY_CLUSTER_SECONDS,
+    ) -> int | None:
+        """Return the first record index that is live child usage, not forked history.
+
+        Codex writes parent-thread history into subagent JSONL as a dense
+        same-timestamp cluster immediately after the structural boundary. Live
+        child turns resume after a real time gap. Skip the dense cluster so
+        parent history is not billed again under the child session id.
+        """
+        boundary = cls._history_replay_boundary(records)
+        if boundary is None:
+            return None
+
+        cluster_limit = max(0.0, float(cluster_seconds))
+        cluster_start: datetime | None = None
+        last_in_cluster = boundary - 1
+        for index in range(boundary, len(records)):
+            record = records[index]
+            timestamp = record.get("_dt")
+            if not isinstance(timestamp, datetime):
+                timestamp = parse_timestamp(record.get("timestamp"))
+            if not isinstance(timestamp, datetime):
+                continue
+            if cluster_start is None:
+                cluster_start = timestamp
+                last_in_cluster = index
+                continue
+            gap = abs((timestamp - cluster_start).total_seconds())
+            if gap <= cluster_limit:
+                last_in_cluster = index
+                continue
+            break
+        if cluster_start is None:
+            return boundary
+        return last_in_cluster + 1
+
     def _usage_event_records(
         self,
         records: Sequence[Mapping[str, Any]],
@@ -1160,7 +1209,7 @@ class JsonlSessionParser:
         events: list[tuple[int, UsageEvent]] = []
         current_model = ""
         model_provider = self.session_model_provider(records)
-        replay_boundary = self._history_replay_boundary(records)
+        replay_start = self._history_replay_usage_start(records)
         previous_total: tuple[int, int, int, int, int] | None = None
 
         for index, record in enumerate(records):
@@ -1225,7 +1274,7 @@ class JsonlSessionParser:
             )
             if not (input_tokens or output_tokens):
                 continue
-            if replay_boundary is not None and index < replay_boundary:
+            if replay_start is not None and index < replay_start:
                 continue
 
             events.append(

@@ -15922,8 +15922,10 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
         return "新会话 等待首个会话事件"
     if _is_pending_session_snapshot(snapshot):
         return "本会话 加载精确会话映射"
-    total_tokens = int(snapshot.confirmed.cumulative_total or 0)
-    total_cost = _session_cost(snapshot) if session_cost is None else session_cost
+    family_tokens = int(getattr(snapshot, "family_tokens", 0) or 0)
+    family_cost = getattr(snapshot, "family_cost_usd", None)
+    thread_tokens = int(snapshot.confirmed.cumulative_total or 0)
+    thread_cost = _session_cost(snapshot) if session_cost is None else session_cost
     if snapshot.request.status == "running":
         (
             _input_tokens,
@@ -15935,7 +15937,18 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
             request_total_tokens,
             _total_estimated,
         ) = _display_tokens(snapshot)
-        total_tokens += int(request_total_tokens or 0)
+        thread_tokens += int(request_total_tokens or 0)
+    # Prefer family (root + live subagents) so the top bar matches usage top10.
+    if family_tokens > thread_tokens or (
+        family_cost is not None
+        and thread_cost is not None
+        and float(family_cost) > float(thread_cost)
+    ):
+        total_tokens = max(family_tokens, thread_tokens)
+        total_cost = family_cost if family_cost is not None else thread_cost
+    else:
+        total_tokens = thread_tokens
+        total_cost = thread_cost if thread_cost is not None else family_cost
     return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
 
 
@@ -16209,6 +16222,11 @@ def _task_total(snapshot: ParsedSession) -> tuple[int, int, int, int, int, float
 
 
 def _session_cost(snapshot: ParsedSession) -> float | None:
+    family_cost = getattr(snapshot, "family_cost_usd", None)
+    if family_cost is not None and float(family_cost) > 0:
+        thread_cost = snapshot.confirmed.cumulative_cost_usd
+        if thread_cost is None or float(family_cost) >= float(thread_cost):
+            return float(family_cost)
     if snapshot.confirmed.cumulative_cost_usd is not None:
         return snapshot.confirmed.cumulative_cost_usd
     return _COST_ESTIMATOR.calculate(
@@ -16219,6 +16237,12 @@ def _session_cost(snapshot: ParsedSession) -> float | None:
         snapshot.confirmed.cumulative_reasoning,
         cache_write_tokens=snapshot.confirmed.cumulative_cache_write,
     )
+
+
+def _session_tokens(snapshot: ParsedSession) -> int:
+    family_tokens = int(getattr(snapshot, "family_tokens", 0) or 0)
+    thread_tokens = int(snapshot.confirmed.cumulative_total or 0)
+    return max(family_tokens, thread_tokens)
 
 
 def _budget_status(snapshot: ParsedSession) -> str:
@@ -17295,7 +17319,7 @@ def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[st
             f"行 {snapshot.line_count} | 确认 {snapshot.token_events}"
         ),
         "sessionCost": _format_money(session_cost),
-        "sessionTokens": _short_num(confirmed.cumulative_total),
+        "sessionTokens": _short_num(_session_tokens(snapshot)),
         "sessionRounds": f"{snapshot.token_events} 轮确认",
         "cacheText": _top_cache_progress_label(snapshot),
         "warnings": _format_notice(snapshot),

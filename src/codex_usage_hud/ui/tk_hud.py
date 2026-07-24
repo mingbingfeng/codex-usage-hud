@@ -4561,7 +4561,9 @@ def _top_session_cache_hit_rate_label(snapshot: ParsedSession) -> str:
 
 
 def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | None = None) -> str:
-    total_tokens = int(snapshot.confirmed.cumulative_total or 0)
+    family_tokens = int(getattr(snapshot, "family_tokens", 0) or 0)
+    family_cost = getattr(snapshot, "family_cost_usd", None)
+    thread_tokens = int(snapshot.confirmed.cumulative_total or 0)
     total_cost = _session_cost(snapshot) if session_cost is None else session_cost
     if snapshot.request.status == "running":
         (
@@ -4574,10 +4576,19 @@ def _top_session_usage_summary(snapshot: ParsedSession, session_cost: float | No
             request_total_tokens,
             _total_estimated,
         ) = _display_tokens(snapshot)
-        total_tokens += int(request_total_tokens or 0)
+        thread_tokens += int(request_total_tokens or 0)
         request_cost, _request_cost_estimated = _request_cost(snapshot)
         if request_cost is not None:
             total_cost = float(total_cost or 0.0) + float(request_cost)
+    if family_tokens > thread_tokens or (
+        family_cost is not None
+        and total_cost is not None
+        and float(family_cost) > float(total_cost)
+    ):
+        total_tokens = max(family_tokens, thread_tokens)
+        total_cost = family_cost if family_cost is not None else total_cost
+    else:
+        total_tokens = thread_tokens
     return f"本会话 {_format_usage_money(total_tokens, total_cost)}/{_top_session_cache_hit_rate_label(snapshot)}"
 
 
@@ -4903,6 +4914,11 @@ def _task_total(snapshot: ParsedSession) -> tuple[int, int, int, int, int, float
 
 
 def _session_cost(snapshot: ParsedSession) -> float | None:
+    family_cost = getattr(snapshot, "family_cost_usd", None)
+    if family_cost is not None and float(family_cost) > 0:
+        thread_cost = snapshot.confirmed.cumulative_cost_usd
+        if thread_cost is None or float(family_cost) >= float(thread_cost):
+            return float(family_cost)
     if snapshot.confirmed.cumulative_cost_usd is not None:
         return snapshot.confirmed.cumulative_cost_usd
     return _COST_ESTIMATOR.calculate(

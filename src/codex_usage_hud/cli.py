@@ -4799,6 +4799,7 @@ class _UsageCacheEntry:
     summary_day: UsageSummary
     summary_week: UsageSummary
     summary_month: UsageSummary
+    summary_all: UsageSummary = field(default_factory=UsageSummary)
     session_id: str = ""
     parent_session_id: str = ""
     session_key: str = ""
@@ -5654,6 +5655,59 @@ class UsageSummaryCache:
             _merge_usage(week_total, entry.summary_week)
         return day_total, week_total
 
+    def family_lifetime_usage(
+        self,
+        session_id: str,
+        *,
+        included_providers: Iterable[str] | None = None,
+    ) -> UsageSummary:
+        """Sum lifetime usage for a root session and its subagent children."""
+        root_id = self._canonical_session_id(session_id)
+        total = UsageSummary()
+        if not root_id:
+            return total
+        providers = None
+        if included_providers is not None:
+            providers = {
+                str(provider or "").strip().lower()
+                for provider in included_providers
+                if str(provider or "").strip()
+            }
+        session_entries = {
+            entry.session_id: entry
+            for entry in list(self._entries.values()) + list(self._deleted_entries)
+            if entry.session_id
+        }
+
+        def root_of(entry: _UsageCacheEntry) -> str:
+            if not entry.session_id:
+                return ""
+            current = entry
+            chain = [entry.session_id]
+            while current.parent_session_id:
+                parent_id = current.parent_session_id
+                if parent_id in chain:
+                    return min(chain[chain.index(parent_id) :])
+                chain.append(parent_id)
+                parent = session_entries.get(parent_id)
+                if parent is None:
+                    return parent_id
+                current = parent
+            return current.session_id
+
+        for entry in list(self._entries.values()) + list(self._deleted_entries):
+            if providers is not None and entry.model_provider not in providers:
+                continue
+            member_id = entry.session_id or ""
+            if member_id != root_id and root_of(entry) != root_id:
+                continue
+            summary = entry.summary_all
+            if summary.tokens <= 0 and float(summary.cost_usd or 0.0) <= 0.0:
+                # Older cache entries or deleted ledger rows without lifetime.
+                summary = entry.summary_month
+            _merge_usage(total, summary)
+        return total
+
     def _path_under_scan_roots(self, path: Path, scan_roots: Sequence[Path]) -> bool:
         resolved = self._cache_path(path)
         for root in scan_roots:
@@ -5766,6 +5820,8 @@ class UsageSummaryCache:
         summary_week = self._parser.summarize_usage_events(events, week_start)
         month_start = day_start - timedelta(days=29)
         summary_month = self._parser.summarize_usage_events(events, month_start)
+        lifetime_start = day_start - timedelta(days=36500)
+        summary_all = self._parser.summarize_usage_events(events, lifetime_start)
         (
             models_day,
             day_priced_event_count,
@@ -5817,6 +5873,7 @@ class UsageSummaryCache:
             summary_day=summary_day,
             summary_week=summary_week,
             summary_month=summary_month,
+            summary_all=summary_all,
             session_id=session_id,
             parent_session_id=parent_session_id,
             session_key=path.stem,
@@ -7046,6 +7103,54 @@ def _refresh_usage_insights_payload(context: object) -> dict[str, object]:
         }
     setattr(context, "usage_insights_payload", payload)
     return payload
+
+
+def _apply_family_session_usage(
+    context: object,
+    snapshot: ParsedSession,
+    provider_scope: Iterable[str] | None,
+) -> None:
+    """Attach root+subagent lifetime usage so top bar matches insights top10."""
+    session_id = str(getattr(snapshot, "session_id", "") or "").strip()
+    parent_id = str(getattr(snapshot, "parent_thread_id", "") or "").strip()
+    root_id = parent_id if bool(getattr(snapshot, "is_subagent", False)) and parent_id else session_id
+    if not root_id or root_id in {"", "n/a"}:
+        snapshot.family_tokens = int(snapshot.confirmed.cumulative_total or 0)
+        snapshot.family_cost_usd = snapshot.confirmed.cumulative_cost_usd
+        snapshot.family_member_count = 1 if snapshot.family_tokens else 0
+        return
+    usage_cache = getattr(context, "usage_cache", None)
+    lookup = getattr(usage_cache, "family_lifetime_usage", None)
+    if not callable(lookup):
+        snapshot.family_tokens = int(snapshot.confirmed.cumulative_total or 0)
+        snapshot.family_cost_usd = snapshot.confirmed.cumulative_cost_usd
+        snapshot.family_member_count = 1 if snapshot.family_tokens else 0
+        return
+    try:
+        family = lookup(root_id, included_providers=provider_scope)
+    except Exception as exc:
+        _LOGGER.debug("family_session_usage_failed session=%s error=%s", root_id, exc)
+        family = None
+    if family is None or (
+        int(getattr(family, "tokens", 0) or 0) <= 0
+        and float(getattr(family, "cost_usd", 0.0) or 0.0) <= 0.0
+    ):
+        # Cache may still be warming; fall back to the currently parsed thread.
+        snapshot.family_tokens = int(snapshot.confirmed.cumulative_total or 0)
+        snapshot.family_cost_usd = snapshot.confirmed.cumulative_cost_usd
+        snapshot.family_member_count = 1 if snapshot.family_tokens else 0
+        return
+    snapshot.family_tokens = int(getattr(family, "tokens", 0) or 0)
+    snapshot.family_cost_usd = round(float(getattr(family, "cost_usd", 0.0) or 0.0), 6)
+    # Member count is approximate: root plus any live children under this root.
+    member_ids = {root_id}
+    for entry in list(getattr(usage_cache, "_entries", {}).values()):
+        sid = str(getattr(entry, "session_id", "") or "")
+        parent = str(getattr(entry, "parent_session_id", "") or "")
+        if sid == root_id or parent == root_id:
+            if sid:
+                member_ids.add(sid)
+    snapshot.family_member_count = len(member_ids)
 
 
 def _effective_notification_provider_scope(
@@ -9695,6 +9800,9 @@ def build_snapshot(
             "week_before_today_tokens",
             "week_before_today_cost_usd",
             "week_adjustment_usd",
+            "family_tokens",
+            "family_cost_usd",
+            "family_member_count",
             "daily_limit_usd",
             "weekly_limit_usd",
             "day_start",
@@ -9703,6 +9811,9 @@ def build_snapshot(
         ):
             setattr(snapshot, field_name, getattr(reuse_budget_from, field_name))
         snapshot.budget_warnings = list(reuse_budget_from.budget_warnings)
+        if int(getattr(snapshot, "family_tokens", 0) or 0) <= 0:
+            provider_scope = _effective_provider_scope(context, snapshot)
+            _apply_family_session_usage(context, snapshot, provider_scope)
     else:
         day_start, week_start = current_budget_windows(context.user_config)
         refresh_budget_paths = tuple(Path(path) for path in refresh_budget_paths)
@@ -9752,6 +9863,7 @@ def build_snapshot(
         )
         snapshot.budget_error = "" if context.sessions_root.exists() else snapshot.error
         _refresh_usage_insights_payload(context)
+        _apply_family_session_usage(context, snapshot, provider_scope)
     usage_summarized_at_ms = int(time.time() * 1000)
     if refresh_active_work_items:
         snapshot.active_work_items = active_work_items_for_snapshot(
