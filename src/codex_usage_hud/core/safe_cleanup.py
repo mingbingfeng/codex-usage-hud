@@ -24,6 +24,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Literal
 from urllib.parse import quote
@@ -32,7 +33,7 @@ from .codex_file_manager import CodexCleanupCandidate, path_is_locked
 
 
 CleanupTier = Literal["safe", "consent", "protected"]
-CacheMode = Literal["root", "expired_children"]
+CacheMode = Literal["root", "expired_children", "expired_descendants"]
 SQLiteKind = Literal["logs", "background"]
 ActionKind = Literal["delete_path", "sqlite"]
 PathKind = Literal["file", "directory", "unknown"]
@@ -51,6 +52,30 @@ DEFAULT_BACKUP_MIN_AGE_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_LOG_RETENTION_HOURS = 24.0
 DEFAULT_BACKGROUND_RETENTION_DAYS = 30.0
 DEFAULT_VACUUM_MIN_RECLAIM_BYTES = 16 * 1024 * 1024
+# BleachBit-style best-effort deletes: avoid multi-hour full-tree re-audits at
+# execute time for regenerable cache/temp trees already measured at plan time.
+DEFAULT_DELETE_ACTION_TIMEOUT_SECONDS = 90.0
+# A mixed Temp tree can contain many old leaf files. Keep the inventory bounded
+# instead of turning one scan into an unresponsive list of tens of thousands of
+# individual actions. Wholly-expired subtrees are coalesced before this limit is
+# applied, so the common cache-directory case remains one actionable item.
+MAX_EXPIRED_DESCENDANT_CANDIDATES = 2_048
+DELETE_LSTAT_ONLY_CATEGORIES = frozenset(
+    {
+        "user_temp",
+        "system_temp",
+        "browser_cache",
+        "developer_cache",
+        "app_cache",
+        "thumbnail_cache",
+        "shader_cache",
+        "package_cache",
+        "crash_dumps",
+        "cleanup_backups",
+        "hud_diagnostics",
+        "codex_temp",
+    }
+)
 WINDOWS_REPARSE_ATTRIBUTE = 0x400
 MAX_PLAN_BYTES = 2 * 1024 * 1024
 MAX_RESTART_ARGUMENTS = 64
@@ -156,6 +181,18 @@ class CleanupPlanError(SafeCleanupError):
     """A versioned maintenance plan is malformed, stale, or unsupported."""
 
 
+class _ScanCancelled(RuntimeError):
+    """Internal signal used to stop a read-only inventory promptly."""
+
+
+class _PartialDeleteError(SafeCleanupError):
+    """Best-effort deletion kept some data but reports what was released."""
+
+    def __init__(self, message: str, *, actual_bytes: int) -> None:
+        super().__init__(message)
+        self.actual_bytes = max(0, int(actual_bytes))
+
+
 @dataclass(frozen=True)
 class CacheDefinition:
     """One exact platform cache/diagnostic root or one expiring parent."""
@@ -175,7 +212,7 @@ class CacheDefinition:
             raise ValueError("cache definitions require a key, category, and label")
         if self.tier not in {"safe", "consent"}:
             raise ValueError("platform cleanup definitions must be safe or consent")
-        if self.mode not in {"root", "expired_children"}:
+        if self.mode not in {"root", "expired_children", "expired_descendants"}:
             raise ValueError("unsupported cache cleanup mode")
         if float(self.min_age_seconds) < 0:
             raise ValueError("cache retention must be nonnegative")
@@ -204,6 +241,22 @@ class _MeasuredPath:
     fingerprint: str
     contains_reparse: bool
     errors: int
+    latest_regular_file_mtime: float = 0.0
+
+
+@dataclass
+class _ExpiredDescendantScan:
+    """Age-based descendants found without making mixed Temp roots deletable."""
+
+    paths: list[Path] = field(default_factory=list)
+    expired_size: int = 0
+    expired_files: int = 0
+    recent_size: int = 0
+    recent_files: int = 0
+    latest_mtime: float = 0.0
+    contains_reparse: bool = False
+    errors: int = 0
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -241,6 +294,7 @@ class CleanupItem:
     _lstat: tuple[int, int, int, int, int] = field(
         default=(0, 0, 0, 0, 0), repr=False, compare=False
     )
+    _expiration_cutoff: int = field(default=0, repr=False, compare=False)
     _sqlite: _SQLiteAudit | None = field(default=None, repr=False, compare=False)
 
     def to_payload(self) -> dict[str, object]:
@@ -762,15 +816,35 @@ def _same_append_only_file(
     )
 
 
-def _measure_path(path: Path) -> _MeasuredPath:
+def _measure_path(
+    path: Path,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> _MeasuredPath:
+    """Measure one approved path without following reparse points.
+
+    Scans intentionally check cancellation between filesystem entries. A large
+    TEMP or cache tree must be stoppable without waiting for its full recursive
+    hash to finish; no partially measured tree is ever made executable.
+    """
+
+    def cancelled() -> bool:
+        try:
+            return bool(callable(should_cancel) and should_cancel())
+        except Exception:
+            return False
+
     digest = hashlib.sha256()
     total_size = 0
     files = 0
     latest_mtime = 0.0
+    latest_regular_file_mtime = 0.0
     contains_reparse = False
     errors = 0
     stack = [path]
     while stack:
+        if cancelled():
+            raise _ScanCancelled("cleanup scan cancelled")
         current = stack.pop()
         try:
             info = os.lstat(current)
@@ -794,6 +868,9 @@ def _measure_path(path: Path) -> _MeasuredPath:
         elif stat.S_ISREG(info.st_mode):
             total_size += max(0, int(info.st_size))
             files += 1
+            latest_regular_file_mtime = max(
+                latest_regular_file_mtime, float(info.st_mtime)
+            )
         else:
             errors += 1
     return _MeasuredPath(
@@ -803,7 +880,113 @@ def _measure_path(path: Path) -> _MeasuredPath:
         fingerprint=digest.hexdigest(),
         contains_reparse=contains_reparse,
         errors=errors,
+        latest_regular_file_mtime=latest_regular_file_mtime,
     )
+
+
+def _scan_expired_descendants(
+    root: Path,
+    *,
+    cutoff: float,
+    should_cancel: Callable[[], bool] | None = None,
+) -> _ExpiredDescendantScan:
+    """Find expired files beneath a mixed temporary root without following links.
+
+    Direct-child age checks are cheap but hide an old file whenever a parent was
+    touched recently. This walker only makes a whole directory actionable when
+    every regular file beneath it is expired and fully readable; otherwise it
+    returns the individually expired files. Fresh, unsafe, unreadable, and
+    reparse-point content remains protected and never joins an action path.
+    """
+
+    def cancelled() -> bool:
+        try:
+            return bool(callable(should_cancel) and should_cancel())
+        except Exception:
+            return False
+
+    def append_paths(
+        target: _ExpiredDescendantScan,
+        source: _ExpiredDescendantScan,
+    ) -> None:
+        available = max(0, MAX_EXPIRED_DESCENDANT_CANDIDATES - len(target.paths))
+        if source.paths:
+            target.paths.extend(source.paths[:available])
+        if len(source.paths) > available or source.truncated:
+            target.truncated = True
+
+    def merge(
+        target: _ExpiredDescendantScan,
+        source: _ExpiredDescendantScan,
+    ) -> None:
+        append_paths(target, source)
+        target.expired_size += source.expired_size
+        target.expired_files += source.expired_files
+        target.recent_size += source.recent_size
+        target.recent_files += source.recent_files
+        target.latest_mtime = max(target.latest_mtime, source.latest_mtime)
+        target.contains_reparse = target.contains_reparse or source.contains_reparse
+        target.errors += source.errors
+
+    def visit(path: Path, *, allow_collapse: bool) -> _ExpiredDescendantScan:
+        if cancelled():
+            raise _ScanCancelled("cleanup scan cancelled")
+        result = _ExpiredDescendantScan()
+        try:
+            info = os.lstat(path)
+        except OSError:
+            result.errors = 1
+            return result
+        result.latest_mtime = float(info.st_mtime)
+        if _is_reparse(info):
+            result.contains_reparse = True
+            return result
+        if stat.S_ISREG(info.st_mode):
+            size = max(0, int(info.st_size))
+            if float(info.st_mtime) <= cutoff:
+                result.paths.append(path)
+                result.expired_size = size
+                result.expired_files = 1
+            else:
+                result.recent_size = size
+                result.recent_files = 1
+            return result
+        if not stat.S_ISDIR(info.st_mode):
+            result.errors = 1
+            return result
+        try:
+            with os.scandir(path) as entries:
+                # Do not materialize/sort a huge temporary directory before the
+                # next cancellation check. The renderer groups and sorts the
+                # final small inventory, while streaming keeps scans responsive.
+                for entry in entries:
+                    if cancelled():
+                        raise _ScanCancelled("cleanup scan cancelled")
+                    try:
+                        child = visit(Path(entry.path), allow_collapse=True)
+                    except RecursionError:
+                        # An unexpectedly deep tree remains protected rather
+                        # than aborting the entire scan or risking deletion.
+                        child = _ExpiredDescendantScan(errors=1)
+                    merge(result, child)
+        except OSError:
+            result.errors += 1
+            return result
+        all_regular_files_expired = (
+            result.expired_files > 0
+            and result.recent_files == 0
+            and not result.contains_reparse
+            and result.errors == 0
+        )
+        if allow_collapse and all_regular_files_expired:
+            # The directory might have a fresh metadata mtime, but every file
+            # inside it was audited as expired. A later mutation is caught by
+            # the normal plan fingerprint revalidation before deletion.
+            result.paths = [path]
+            result.truncated = False
+        return result
+
+    return visit(root, allow_collapse=False)
 
 
 def _secure_existing_path(root: Path, path: Path) -> Path:
@@ -910,16 +1093,153 @@ def _neutral_backup_directory_labels(directory: Path) -> tuple[str, str]:
     return volume_label, directory_label
 
 
-def _remove_path(path: Path) -> None:
+def _remove_path(
+    path: Path,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+    expiration_cutoff: int | None = None,
+) -> int:
+    """Remove an approved path while allowing cancellation between entries.
+
+    Age-selected Temp descendants pass their scan cutoff here too. This closes
+    the final validation-to-delete gap: a regular file refreshed after plan
+    validation is left in place instead of being removed with its old parent.
+    """
+
+    def cancelled() -> bool:
+        try:
+            return bool(callable(should_cancel) and should_cancel())
+        except Exception:
+            return False
+
     info = os.lstat(path)
     if _is_reparse(info):
         raise SafeCleanupError("reparse paths are protected")
+    if (
+        expiration_cutoff is not None
+        and stat.S_ISREG(info.st_mode)
+        and float(info.st_mtime) > expiration_cutoff
+    ):
+        raise SafeCleanupError(
+            "cleanup file became newer than the retention threshold"
+        )
     if stat.S_ISDIR(info.st_mode):
-        shutil.rmtree(path)
+        # BleachBit-style best effort: busy/unreadable children are skipped while
+        # the rest of an approved tree can still be removed.
+        errors: list[BaseException] = []
+        removed_bytes = 0
+        pending: list[tuple[Path, bool]] = [(path, False)]
+        while pending:
+            if cancelled():
+                raise SafeCleanupError("cleanup cancelled by user")
+            current, visited = pending.pop()
+            if not visited:
+                try:
+                    current_info = os.lstat(current)
+                except OSError as exc:
+                    errors.append(exc)
+                    continue
+                if _is_reparse(current_info):
+                    raise SafeCleanupError("reparse paths are protected")
+                if not stat.S_ISDIR(current_info.st_mode):
+                    errors.append(
+                        OSError(f"unsupported filesystem object: {current}")
+                    )
+                    continue
+                try:
+                    entries = list(os.scandir(current))
+                except OSError as exc:
+                    errors.append(exc)
+                    continue
+                pending.append((current, True))
+                for entry in reversed(entries):
+                    child = Path(entry.path)
+                    try:
+                        child_info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        errors.append(exc)
+                        continue
+                    if _is_reparse(child_info):
+                        raise SafeCleanupError("reparse paths are protected")
+                    if stat.S_ISDIR(child_info.st_mode):
+                        pending.append((child, False))
+                        continue
+                    if not stat.S_ISREG(child_info.st_mode):
+                        errors.append(OSError(f"unsupported filesystem object: {child}"))
+                        continue
+                    if (
+                        expiration_cutoff is not None
+                        and float(child_info.st_mtime) > expiration_cutoff
+                    ):
+                        errors.append(
+                            SafeCleanupError(
+                                "cleanup file became newer than the retention threshold"
+                            )
+                        )
+                        continue
+                    try:
+                        child.unlink()
+                        removed_bytes += max(0, int(child_info.st_size))
+                    except OSError as exc:
+                        errors.append(exc)
+            else:
+                try:
+                    current_info = os.lstat(current)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    errors.append(exc)
+                    continue
+                if _is_reparse(current_info):
+                    raise SafeCleanupError("reparse paths are protected")
+                try:
+                    current.rmdir()
+                except OSError as exc:
+                    errors.append(exc)
+        if path.exists():
+            if errors:
+                raise _PartialDeleteError(
+                    f"directory partially remains after cleanup ({len(errors)} error(s))",
+                    actual_bytes=removed_bytes,
+                )
+            raise SafeCleanupError("cleanup item still exists after removal")
+        return removed_bytes
     elif stat.S_ISREG(info.st_mode):
+        removed_bytes = max(0, int(info.st_size))
         path.unlink()
+        return removed_bytes
     else:
         raise SafeCleanupError("unsupported filesystem object")
+
+
+def _is_bulk_regenerable_delete(action: MaintenanceAction) -> bool:
+    """Return whether an action is a bounded, regenerable cache/temp delete."""
+
+    if action.kind != "delete_path" or action.allows_growth:
+        return False
+    category = str(action.category or "").casefold()
+    return category in DELETE_LSTAT_ONLY_CATEGORIES or category.endswith(
+        ("_cache", "_temp")
+    )
+
+
+def _should_skip_execute_fingerprint(action: MaintenanceAction) -> bool:
+    """Return True when execute may trust plan-time fingerprints.
+
+    Full-tree re-hashing of TEMP/cache children is the dominant hang path for
+    bulk Windows cleanups (hundreds of targets, multi-GB trees). Plan creation
+    already revalidated fingerprints; execute only needs a cheap lstat TOCTOU
+    gate plus best-effort deletion.
+    """
+
+    if not _is_bulk_regenerable_delete(action):
+        return False
+    # Age-selected descendants must be fully revalidated at execute time.
+    # A nested file can be refreshed without changing the selected parent
+    # directory's lstat tuple, so the fast cache/temp path would be unsafe.
+    if action.cutoff > 0:
+        return False
+    return True
 
 
 def _normalize_process_name(value: object) -> str:
@@ -1270,26 +1590,28 @@ def _add_shared_package_manager_caches(
         hf_fallbacks.append(local / "huggingface")
     add(
         "huggingface",
-        "developer_cache",
+        "model_cache",
         _env_path(environment, "HF_HOME", *hf_fallbacks),
         "Hugging Face model cache",
         "Models and datasets may need to be downloaded again.",
         ("python", "huggingface-cli"),
+        tier="consent",
     )
     torch_fallbacks: list[Path] = [user_home / ".cache" / "torch"]
     if local is not None:
         torch_fallbacks.append(local / "torch")
     add(
         "torch",
-        "developer_cache",
+        "model_cache",
         _env_path(environment, "TORCH_HOME", *torch_fallbacks),
         "PyTorch hub cache",
         "Models may need to be downloaded again.",
         ("python",),
+        tier="consent",
     )
     add(
         "modelscope",
-        "developer_cache",
+        "model_cache",
         _env_path(
             environment,
             "MODELSCOPE_CACHE",
@@ -1298,17 +1620,19 @@ def _add_shared_package_manager_caches(
         "ModelScope model cache",
         "Models may need to be downloaded again.",
         ("python",),
+        tier="consent",
     )
     ollama_fallbacks: list[Path] = [user_home / ".ollama" / "models"]
     if local is not None:
         ollama_fallbacks.append(local / "Ollama" / "models")
     add(
         "ollama_models",
-        "developer_cache",
+        "model_cache",
         _env_path(environment, "OLLAMA_MODELS", *ollama_fallbacks),
         "Ollama model weights",
         "Local models may need to be downloaded again.",
         ("ollama",),
+        tier="consent",
     )
     playwright_fallbacks: list[Path] = []
     if local is not None:
@@ -1409,7 +1733,7 @@ def platform_cache_definitions(
     home: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> tuple[CacheDefinition, ...]:
-    """Return exact, user-scoped cache roots for Windows or macOS."""
+    """Return exact platform cache and diagnostic targets for Windows or macOS."""
 
     platform_name = (platform or sys.platform).casefold()
     environment = os.environ if env is None else env
@@ -1451,6 +1775,17 @@ def platform_cache_definitions(
     if platform_name.startswith("win"):
         local = Path(environment.get("LOCALAPPDATA") or user_home / "AppData" / "Local")
         roaming = Path(environment.get("APPDATA") or user_home / "AppData" / "Roaming")
+        windows_root = Path(
+            environment.get("SystemRoot")
+            or environment.get("WINDIR")
+            or environment.get("windir")
+            or "C:\\Windows"
+        )
+        program_data = Path(
+            environment.get("ProgramData")
+            or environment.get("PROGRAMDATA")
+            or windows_root.parent / "ProgramData"
+        )
         temp_root = Path(
             environment.get("TEMP") or environment.get("TMP") or local / "Temp"
         )
@@ -1460,7 +1795,20 @@ def platform_cache_definitions(
             temp_root,
             "Expired user temporary data",
             "Applications may recreate temporary files.",
-            mode="expired_children",
+            mode="expired_descendants",
+            min_age=DEFAULT_TEMP_MIN_AGE_SECONDS,
+        )
+        # WinUtil clears both %TEMP% and %SystemRoot%\\Temp. Keep the latter
+        # separate and explicitly opted-in: it can contain administrator-owned
+        # files, so access-denied/locked entries remain visible as skips.
+        add(
+            "windows_system_temp",
+            "system_temp",
+            windows_root / "Temp",
+            "Windows system temporary data",
+            "System temporary files older than 24 hours will be permanently removed; locked or access-denied entries are skipped.",
+            tier="consent",
+            mode="expired_descendants",
             min_age=DEFAULT_TEMP_MIN_AGE_SECONDS,
         )
         for key, path, label in (
@@ -1494,6 +1842,29 @@ def platform_cache_definitions(
                 "windows_error_queue",
                 local / "Microsoft" / "Windows" / "WER" / "ReportQueue",
                 "Old queued Windows error reports",
+            ),
+            (
+                "windows_system_crash_dumps",
+                windows_root / "Minidump",
+                "Old Windows system crash dumps",
+            ),
+            (
+                "windows_shared_error_archive",
+                program_data
+                / "Microsoft"
+                / "Windows"
+                / "WER"
+                / "ReportArchive",
+                "Old Windows shared error reports",
+            ),
+            (
+                "windows_shared_error_queue",
+                program_data
+                / "Microsoft"
+                / "Windows"
+                / "WER"
+                / "ReportQueue",
+                "Old queued Windows shared error reports",
             ),
         ):
             add(
@@ -1650,7 +2021,7 @@ def platform_cache_definitions(
                 Path(temp_value),
                 "Expired user temporary data",
                 "Applications may recreate temporary files.",
-                mode="expired_children",
+                mode="expired_descendants",
                 min_age=DEFAULT_TEMP_MIN_AGE_SECONDS,
             )
         add(
@@ -2117,8 +2488,24 @@ class SafeCleanupManager:
         # Soft revalidate skips retained from the most recent create_plan so
         # online execute can merge them into the final maintenance result.
         self._preplan_skips: dict[str, object] = {}
+        # Cooperative cancel flag for scan/execute loops (BleachBit-style stop).
+        self._cancel_requested = threading.Event()
         # Optional sink for mid-scan snapshots (set by the worker thread).
         self.progress_publisher: Callable[[Mapping[str, object]], None] | None = None
+
+    def clear_cancel(self) -> None:
+        """Clear a previously requested cooperative cancel."""
+
+        self._cancel_requested.clear()
+
+    def is_cancel_requested(self) -> bool:
+        """Return True when the user asked to stop the current cleanup work."""
+
+        return self._cancel_requested.is_set()
+
+    def _raise_if_scan_cancelled(self) -> None:
+        if self.is_cancel_requested():
+            raise _ScanCancelled("cleanup scan cancelled")
 
     def snapshot(self) -> dict[str, object]:
         if self._inventory is None:
@@ -2196,6 +2583,7 @@ class SafeCleanupManager:
         ``scanning:`` revision must never back reveal, preview, or execute.
         """
 
+        self._raise_if_scan_cancelled()
         publisher = self.progress_publisher
         if not callable(publisher):
             return
@@ -2230,17 +2618,55 @@ class SafeCleanupManager:
         publisher(self.snapshot())
 
     def cancel(self, *, request_id: str = "") -> dict[str, object]:
-        """Invalidate one-use confirmations without touching local data."""
+        """Request cooperative cancel and invalidate one-use confirmations.
 
+        Does not mutate local data.  Running execute loops observe
+        ``is_cancel_requested()`` between actions and skip the remainder.
+        """
+
+        self._cancel_requested.set()
         self._confirmations.clear()
-        self._operation = {
-            "id": str(request_id or self.token_factory()),
-            "requestId": str(request_id or ""),
-            "action": "cancel",
+        previous = dict(self._operation)
+        previous_action = str(previous.get("action") or "")
+        previous_state = str(previous.get("state") or "").casefold()
+        # Preserve execute context so the UI can show "cancelling cleanup" rather
+        # than looking like a blank/idle preview cancel while deletes finish.
+        keep_execute = previous_action in {
+            "execute",
+            "safeCleanupExecute",
+        } and previous_state in {"accepted", "running", "queued_exit"}
+        scan_cancel = previous_action in {"scan", "safeCleanupScan"} or previous_state == "scanning"
+        operation = {
+            "id": str(
+                previous.get("id")
+                if keep_execute and previous.get("id")
+                else (request_id or self.token_factory())
+            ),
+            "requestId": str(request_id or previous.get("requestId") or ""),
+            "action": "cancel" if not keep_execute else previous_action,
             "state": "cancelled",
-            "progress": 100,
-            "error": "",
+            "progress": max(0, min(100, int(previous.get("progress") or 100))),
+            "error": (
+                "扫描已取消：未修改本地数据。"
+                if scan_cancel
+                else "清理已取消：剩余项将跳过，已完成的删除不会回滚。"
+            ),
         }
+        if keep_execute:
+            for key in (
+                "selectedIds",
+                "estimatedBytes",
+                "actualBytes",
+                "phase",
+                "phaseLabel",
+                "phaseIndex",
+                "phaseCount",
+                "currentItemId",
+                "results",
+            ):
+                if key in previous:
+                    operation[key] = previous[key]
+        self._operation = operation
         return self.snapshot()
 
     def mark_operation(
@@ -2254,6 +2680,15 @@ class SafeCleanupManager:
         **values: object,
     ) -> dict[str, object]:
         """Publish orchestration state while preserving the current inventory."""
+
+        # Do not clobber a cooperative cancel with a later "running" progress tick.
+        if self._cancel_requested.is_set() and str(state or "").casefold() in {
+            "accepted",
+            "running",
+            "scanning",
+            "queued_exit",
+        }:
+            return self.snapshot()
 
         operation = {
             "id": str(values.pop("id", "") or request_id or self.token_factory()),
@@ -2341,6 +2776,7 @@ class SafeCleanupManager:
             state=result.state,
             progress=100,
             error=result.error,
+            selectedIds=[action.item_id for action in result.actions],
             results=rows,
             estimatedBytes=sum(action.estimated_bytes for action in result.actions),
             actualBytes=sum(action.actual_bytes for action in result.actions),
@@ -2363,6 +2799,31 @@ class SafeCleanupManager:
         )
 
     def scan(self, *, request_id: str = "") -> dict[str, object]:
+        """Scan safely, restoring the previous inventory if cancellation wins."""
+
+        previous_inventory = self._inventory
+        previous_items = dict(self._items)
+        try:
+            return self._scan_inventory(request_id=request_id)
+        except _ScanCancelled:
+            # A progress snapshot may have temporarily replaced the previous
+            # inventory. Never leave a partial scan as an executable surface.
+            self._inventory = previous_inventory
+            self._items = previous_items
+            self._confirmations.clear()
+            if str(self._operation.get("state") or "").casefold() != "cancelled":
+                self._operation = {
+                    "id": str(request_id or self.token_factory()),
+                    "requestId": str(request_id or ""),
+                    "action": "scan",
+                    "state": "cancelled",
+                    "progress": 100,
+                    "error": "扫描已取消：未修改本地数据。",
+                }
+            return self.snapshot()
+
+    def _scan_inventory(self, *, request_id: str = "") -> dict[str, object]:
+        self._raise_if_scan_cancelled()
         generated_at = float(self.clock())
         items: list[CleanupItem] = []
         request = str(request_id or "")
@@ -2445,6 +2906,7 @@ class SafeCleanupManager:
             items.append(self._scan_sqlite_target(target, generated_at))
         report("sqlite", 6)
 
+        self._raise_if_scan_cancelled()
         self._revision_counter += 1
         revision = f"{self._revision_counter}-{self.token_factory()}"
         self._inventory = CleanupInventory(
@@ -2639,7 +3101,11 @@ class SafeCleanupManager:
                     ),
                     related_processes=item.related_processes,
                     sqlite_kind=sqlite_audit.kind if sqlite_audit else "",
-                    cutoff=sqlite_audit.cutoff if sqlite_audit else 0,
+                    cutoff=(
+                        sqlite_audit.cutoff
+                        if sqlite_audit
+                        else item._expiration_cutoff
+                    ),
                     retention_seconds=(
                         sqlite_audit.retention_seconds if sqlite_audit else 0.0
                     ),
@@ -2814,6 +3280,13 @@ class SafeCleanupManager:
                 )
             if not allows_growth and measured.fingerprint != item._fingerprint:
                 raise SafeCleanupError("cleanup item changed after scan")
+            if (
+                item._expiration_cutoff > 0
+                and measured.latest_regular_file_mtime > item._expiration_cutoff
+            ):
+                raise SafeCleanupError(
+                    "cleanup path contains data newer than the retention threshold"
+                )
             if item.related_processes and not item.requires_offline:
                 try:
                     running = {
@@ -2847,6 +3320,7 @@ class SafeCleanupManager:
         related_processes: Sequence[str] = (),
         action: str = "",
         fingerprint: str | None = None,
+        expiration_cutoff: int = 0,
         sqlite_audit: _SQLiteAudit | None = None,
         size: int | None = None,
     ) -> CleanupItem:
@@ -2877,22 +3351,26 @@ class SafeCleanupManager:
             if fingerprint is not None
             else measured.fingerprint,
             _lstat=lstat_value,
+            _expiration_cutoff=max(0, int(expiration_cutoff)),
             _sqlite=sqlite_audit,
         )
 
     def _load_codex_candidates(self) -> tuple[CodexCleanupCandidate, ...]:
+        self._raise_if_scan_cancelled()
         if self.codex_candidate_provider is None:
             return ()
         try:
             candidates = tuple(self.codex_candidate_provider())
         except Exception as exc:
             raise SafeCleanupError("Codex temporary data could not be audited") from exc
+        self._raise_if_scan_cancelled()
         for candidate in candidates:
             if not isinstance(candidate, CodexCleanupCandidate):
                 raise SafeCleanupError("Codex candidate provider returned invalid data")
         return candidates
 
     def _scan_codex_candidates(self) -> list[CleanupItem]:
+        self._raise_if_scan_cancelled()
         if self.codex_candidate_provider is None:
             return []
         try:
@@ -2912,6 +3390,7 @@ class SafeCleanupManager:
             ]
         items: list[CleanupItem] = []
         for candidate in candidates:
+            self._raise_if_scan_cancelled()
             measured = _MeasuredPath(
                 size=max(0, int(candidate.size)),
                 files=max(0, int(candidate.file_count)),
@@ -2941,13 +3420,14 @@ class SafeCleanupManager:
         return items
 
     def _scan_hud_runtime(self, now: float) -> list[CleanupItem]:
+        self._raise_if_scan_cancelled()
         root = _absolute_path(self.hud_runtime_root)
         if not root.exists():
             return []
         try:
             root_info = os.lstat(root)
             if _is_reparse(root_info) or not stat.S_ISDIR(root_info.st_mode):
-                measured = _measure_path(root)
+                measured = _measure_path(root, should_cancel=self.is_cancel_requested)
                 return [
                     self._new_item(
                         category="hud_runtime",
@@ -2966,8 +3446,9 @@ class SafeCleanupManager:
             return []
         items: list[CleanupItem] = []
         for entry in children:
+            self._raise_if_scan_cancelled()
             path = Path(entry.path)
-            measured = _measure_path(path)
+            measured = _measure_path(path, should_cancel=self.is_cancel_requested)
             name = entry.name
             overlay_match = _OVERLAY_COMMAND_RE.fullmatch(name)
             if measured.contains_reparse or measured.errors:
@@ -3052,6 +3533,7 @@ class SafeCleanupManager:
         running: set[str],
         process_error: str,
     ) -> list[CleanupItem]:
+        self._raise_if_scan_cancelled()
         root = _absolute_path(definition.path)
         if not root.exists():
             return []
@@ -3060,6 +3542,148 @@ class SafeCleanupManager:
             running, definition.related_processes
         ):
             blocked_reason = "A related application is currently running."
+        if definition.mode == "expired_descendants":
+            try:
+                root_info = os.lstat(root)
+                if _is_reparse(root_info) or not stat.S_ISDIR(root_info.st_mode):
+                    raise OSError("unsafe temp root")
+                cutoff = now - max(0.0, definition.min_age_seconds)
+                discovery = _scan_expired_descendants(
+                    root,
+                    cutoff=cutoff,
+                    should_cancel=self.is_cancel_requested,
+                )
+            except _ScanCancelled:
+                raise
+            except OSError:
+                measured = _measure_path(root, should_cancel=self.is_cancel_requested)
+                return [
+                    self._new_item(
+                        category=definition.category,
+                        tier="protected",
+                        label=definition.label,
+                        measured=measured,
+                        impact=definition.impact,
+                        path=root,
+                        approved_root=root.parent,
+                        blocked_reason="Cache root could not be verified.",
+                        related_processes=definition.related_processes,
+                    )
+                ]
+            items: list[CleanupItem] = []
+            retention = (
+                _duration_label(definition.min_age_seconds)
+                if definition.min_age_seconds > 0
+                else "All items"
+            )
+            for path in discovery.paths:
+                self._raise_if_scan_cancelled()
+                measured = _measure_path(
+                    path, should_cancel=self.is_cancel_requested
+                )
+                unsafe = measured.contains_reparse or measured.errors
+                recent = measured.latest_regular_file_mtime > cutoff
+                reason = blocked_reason
+                if unsafe:
+                    reason = "Cleanup data contains a reparse point or unreadable entry."
+                elif recent:
+                    reason = "Cleanup data changed during scanning and remains protected."
+                tier: CleanupTier = "protected" if reason else definition.tier
+                items.append(
+                    self._new_item(
+                        category=definition.category,
+                        tier=tier,
+                        label=definition.label,
+                        measured=measured,
+                        impact=definition.impact,
+                        path=path,
+                        approved_root=root,
+                        retention=retention,
+                        blocked_reason=reason,
+                        related_processes=definition.related_processes,
+                        action="delete_path" if tier != "protected" else "",
+                        expiration_cutoff=(
+                            int(cutoff) if tier != "protected" else 0
+                        ),
+                    )
+                )
+            if discovery.recent_files:
+                active_label = (
+                    "Active Windows system temporary data"
+                    if definition.category == "system_temp"
+                    else "Active user temporary data"
+                )
+                items.append(
+                    self._new_item(
+                        category=definition.category,
+                        tier="protected",
+                        label=active_label,
+                        measured=_MeasuredPath(
+                            size=discovery.recent_size,
+                            files=discovery.recent_files,
+                            mtime=discovery.latest_mtime,
+                            fingerprint="",
+                            contains_reparse=False,
+                            errors=0,
+                        ),
+                        impact=(
+                            "Files newer than the retention threshold are retained "
+                            "because they may still be in use."
+                        ),
+                        path=None,
+                        approved_root=None,
+                        retention=retention,
+                        blocked_reason=(
+                            "Temporary data is newer than the retention threshold "
+                            "and remains untouched."
+                        ),
+                    )
+                )
+            if discovery.contains_reparse or discovery.errors:
+                items.append(
+                    self._new_item(
+                        category=definition.category,
+                        tier="protected",
+                        label="Unverified temporary data",
+                        measured=_MeasuredPath(
+                            size=0,
+                            files=0,
+                            mtime=discovery.latest_mtime,
+                            fingerprint="",
+                            contains_reparse=discovery.contains_reparse,
+                            errors=discovery.errors,
+                        ),
+                        impact="Unverified temporary data remains unchanged.",
+                        path=None,
+                        approved_root=None,
+                        retention=retention,
+                        blocked_reason=(
+                            "Some temporary data could not be fully verified and "
+                            "remains untouched."
+                        ),
+                    )
+                )
+            if discovery.truncated:
+                items.append(
+                    self._new_item(
+                        category=definition.category,
+                        tier="protected",
+                        label="Additional expired temporary data",
+                        measured=_MeasuredPath(0, 0, discovery.latest_mtime, "", False, 0),
+                        impact=(
+                            "Additional expired files remain untouched until a "
+                            "narrower cleanup can be reviewed."
+                        ),
+                        path=None,
+                        approved_root=None,
+                        retention=retention,
+                        blocked_reason=(
+                            "The temporary-data inventory reached its safe item "
+                            "limit; remaining entries were not selected."
+                        ),
+                    )
+                )
+            return items
         if definition.mode == "expired_children":
             try:
                 root_info = os.lstat(root)
@@ -3068,7 +3692,7 @@ class SafeCleanupManager:
                 with os.scandir(root) as entries:
                     paths = [Path(entry.path) for entry in entries]
             except OSError:
-                measured = _measure_path(root)
+                measured = _measure_path(root, should_cancel=self.is_cancel_requested)
                 return [
                     self._new_item(
                         category=definition.category,
@@ -3084,7 +3708,10 @@ class SafeCleanupManager:
                 ]
             items: list[CleanupItem] = []
             for path in sorted(paths, key=lambda value: value.name.casefold()):
-                measured = _measure_path(path)
+                self._raise_if_scan_cancelled()
+                measured = _measure_path(
+                    path, should_cancel=self.is_cancel_requested
+                )
                 recent = now - measured.mtime < max(0.0, definition.min_age_seconds)
                 unsafe = measured.contains_reparse or measured.errors
                 reason = blocked_reason
@@ -3113,7 +3740,7 @@ class SafeCleanupManager:
                     )
                 )
             return items
-        measured = _measure_path(root)
+        measured = _measure_path(root, should_cancel=self.is_cancel_requested)
         reason = blocked_reason
         if measured.contains_reparse or measured.errors:
             reason = "Cache data contains a reparse point or unreadable entry."
@@ -3136,6 +3763,7 @@ class SafeCleanupManager:
     def _scan_old_backups(self, now: float) -> list[CleanupItem]:
         items: list[CleanupItem] = []
         for root in self.backup_roots:
+            self._raise_if_scan_cancelled()
             if _path_key(root) == _path_key(_absolute_path(self.hud_runtime_root)):
                 continue
             try:
@@ -3151,7 +3779,10 @@ class SafeCleanupManager:
             except OSError:
                 continue
             for path in paths:
-                measured = _measure_path(path)
+                self._raise_if_scan_cancelled()
+                measured = _measure_path(
+                    path, should_cancel=self.is_cancel_requested
+                )
                 old = now - measured.mtime >= DEFAULT_BACKUP_MIN_AGE_SECONDS
                 safe = old and not measured.contains_reparse and not measured.errors
                 items.append(
@@ -3173,6 +3804,7 @@ class SafeCleanupManager:
         return items
 
     def _scan_sqlite_target(self, target: SQLiteTarget, now: float) -> CleanupItem:
+        self._raise_if_scan_cancelled()
         path = _absolute_path(target.path)
         try:
             audit = audit_sqlite_target(
@@ -3181,10 +3813,13 @@ class SafeCleanupManager:
                 default_log_retention_hours=self.log_retention_hours,
                 default_background_retention_days=self.background_retention_days,
             )
-            measured = _measure_path(path)
+            self._raise_if_scan_cancelled()
+            measured = _measure_path(path, should_cancel=self.is_cancel_requested)
+        except _ScanCancelled:
+            raise
         except Exception as exc:
             measured = (
-                _measure_path(path)
+                _measure_path(path, should_cancel=self.is_cancel_requested)
                 if path.exists()
                 else _MeasuredPath(0, 0, 0, "", False, 1)
             )
@@ -3257,6 +3892,7 @@ def _is_soft_revalidate_skip(error: BaseException) -> bool:
         "cleanup item changed after scan",
         "cleanup item metadata changed after scan",
         "cleanup path is no longer available",
+        "cleanup path contains data newer than the retention threshold",
     )
     return any(marker in message for marker in soft_markers)
 
@@ -3386,7 +4022,11 @@ def wait_for_plan_processes(
         sleep(min(0.1, max(0.0, deadline - float(monotonic()))))
 
 
-def _validate_plan_action(action: MaintenanceAction) -> Path:
+def _validate_plan_action(
+    action: MaintenanceAction,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> Path:
     path = _absolute_path(action.path)
     root = _absolute_path(action.approved_root)
     resolved = _secure_existing_path(root, path)
@@ -3404,14 +4044,21 @@ def _validate_plan_action(action: MaintenanceAction) -> Path:
             raise SafeCleanupError("maintenance plan has an unknown SQLite kind")
         if _sqlite_group_fingerprint(resolved) != action.fingerprint:
             raise SafeCleanupError("SQLite runtime group changed")
-    else:
-        measured = _measure_path(resolved)
+    elif not _should_skip_execute_fingerprint(action):
+        measured = _measure_path(resolved, should_cancel=should_cancel)
         if (
             measured.contains_reparse
             or measured.errors
             or (not action.allows_growth and measured.fingerprint != action.fingerprint)
         ):
             raise SafeCleanupError("maintenance path fingerprint changed")
+        if (
+            action.cutoff > 0
+            and measured.latest_regular_file_mtime > action.cutoff
+        ):
+            raise SafeCleanupError(
+                "maintenance path contains data newer than the retention threshold"
+            )
     return resolved
 
 
@@ -3553,6 +4200,7 @@ def _run_delete_action(
     lock_probe: Callable[[Path], bool],
     remove_path: Callable[[Path], None],
     running_process_names: Callable[[], Iterable[str]],
+    should_cancel: Callable[[], bool] | None = None,
 ) -> MaintenanceActionResult:
     try:
         if action.related_processes and not action.requires_offline:
@@ -3561,11 +4209,26 @@ def _run_delete_action(
                 action.related_processes,
                 active_error="a related application is currently running",
             )
-        path = _validate_plan_action(action)
+        path = _validate_plan_action(action, should_cancel=should_cancel)
         if lock_probe(path):
             raise SafeCleanupError("cleanup item is locked")
-        measured = _measure_path(path)
-        remove_path(path)
+        # Prefer plan-time size for bulk regenerable trees so execute does not
+        # spend minutes re-walking each TEMP child before deletion starts.
+        if _should_skip_execute_fingerprint(action):
+            actual_bytes = max(0, int(action.estimated_bytes))
+        else:
+            actual_bytes = max(
+                0,
+                int(_measure_path(path, should_cancel=should_cancel).size),
+            )
+        if remove_path is _remove_path:
+            actual_bytes = _remove_path(
+                path,
+                should_cancel=should_cancel,
+                expiration_cutoff=action.cutoff if action.cutoff > 0 else None,
+            )
+        else:
+            remove_path(path)
         if path.exists():
             raise SafeCleanupError("cleanup item still exists after removal")
         return MaintenanceActionResult(
@@ -3573,7 +4236,24 @@ def _run_delete_action(
             category=action.category,
             state="deleted",
             estimated_bytes=action.estimated_bytes,
-            actual_bytes=measured.size,
+            actual_bytes=actual_bytes,
+        )
+    except _ScanCancelled:
+        return MaintenanceActionResult(
+            item_id=action.item_id,
+            category=action.category,
+            state="skipped",
+            estimated_bytes=action.estimated_bytes,
+            error="cleanup cancelled by user",
+        )
+    except _PartialDeleteError as exc:
+        return MaintenanceActionResult(
+            item_id=action.item_id,
+            category=action.category,
+            state="skipped",
+            estimated_bytes=action.estimated_bytes,
+            actual_bytes=exc.actual_bytes,
+            error=_safe_error(exc),
         )
     except SafeCleanupError as exc:
         # Best-effort delete: occupancy / TOCTOU / reparse are skips, not job failure.
@@ -3713,11 +4393,19 @@ def run_maintenance_plan(
     running_process_names: Callable[[], Iterable[str]] = _system_running_process_names,
     sqlite_failure_hook: Callable[[str, Path], None] | None = None,
     progress_callback: Callable[[Mapping[str, object]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    action_timeout_seconds: float = DEFAULT_DELETE_ACTION_TIMEOUT_SECONDS,
 ) -> MaintenanceResult:
-    """Run a validated plan without killing processes or launching applications."""
+    """Run a validated plan without killing processes or launching applications.
+
+    ``should_cancel`` is checked between actions (cooperative). Per-action
+    wall-clock budgets stop the built-in, regenerable cache/temp deletion loop
+    without leaving a background deletion running after the result is shown.
+    """
 
     plan = MaintenancePlan.from_dict(plan.to_dict())
     started_at = float(clock())
+    timeout_budget = max(0.0, float(action_timeout_seconds))
     if started_at > plan.expires_at:
         skipped = tuple(
             MaintenanceActionResult(
@@ -3848,29 +4536,120 @@ def run_maintenance_plan(
             }
         )
 
-    for index, action in enumerate(plan.actions, start=1):
-        _emit_progress(index=index, action=action, stage="start")
+    def _cancelled() -> bool:
+        try:
+            return bool(callable(should_cancel) and should_cancel())
+        except Exception:
+            return False
+
+    def _run_one(
+        action: MaintenanceAction,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> MaintenanceActionResult:
         if action.kind == "delete_path":
-            result = _run_delete_action(
+            return _run_delete_action(
                 action,
                 lock_probe=lock_probe,
                 remove_path=remove_path,
                 running_process_names=running_process_names,
+                should_cancel=cancel_check,
             )
-        else:
-            if backup_directory is None:
-                raise CleanupPlanError("SQLite maintenance requires a backup directory")
-            result = _run_sqlite_action(
-                action,
-                plan_id=plan.id,
-                backup_directory=backup_directory,
-                lock_probe=lock_probe,
-                disk_usage=disk_usage,
-                running_process_names=running_process_names,
-                failure_hook=sqlite_failure_hook,
+        if backup_directory is None:
+            raise CleanupPlanError("SQLite maintenance requires a backup directory")
+        return _run_sqlite_action(
+            action,
+            plan_id=plan.id,
+            backup_directory=backup_directory,
+            lock_probe=lock_probe,
+            disk_usage=disk_usage,
+            running_process_names=running_process_names,
+            failure_hook=sqlite_failure_hook,
+        )
+
+    def _run_with_timeout(action: MaintenanceAction) -> MaintenanceActionResult:
+        # SQLite maintenance is transactional; do not hard-timeout mid-backup.
+        if action.kind != "delete_path" or timeout_budget <= 0:
+            return _run_one(action)
+        # Only apply wall-clock budgets to regenerable cache/temp trees. Protect
+        # named diagnostic files and non-bulk targets still run in-thread so a
+        # timeout cannot leave a concurrent delete racing the next action.
+        if not _is_bulk_regenerable_delete(action):
+            return _run_one(action)
+        # The built-in remover accepts a cooperative callback between entries.
+        # Do not time out an injected remover by detaching it: a late daemon
+        # delete would make the result lie about what was actually changed.
+        if remove_path is not _remove_path:
+            return _run_one(action)
+        deadline = float(monotonic()) + timeout_budget
+        timed_out = False
+
+        def action_cancelled() -> bool:
+            nonlocal timed_out
+            if _cancelled():
+                return True
+            if float(monotonic()) >= deadline:
+                timed_out = True
+                return True
+            return False
+
+        result = _run_one(action, cancel_check=action_cancelled)
+        if timed_out and result.state == "skipped":
+            return replace(
+                result,
+                error=(
+                    f"cleanup item timed out after "
+                    f"{int(timeout_budget)}s (best-effort skip)"
+                ),
             )
+        return result
+
+    cancelled = False
+    for index, action in enumerate(plan.actions, start=1):
+        if _cancelled():
+            cancelled = True
+            for remaining in plan.actions[index - 1 :]:
+                results.append(
+                    MaintenanceActionResult(
+                        item_id=remaining.item_id,
+                        category=remaining.category,
+                        state="skipped",
+                        estimated_bytes=remaining.estimated_bytes,
+                        error="cleanup cancelled by user",
+                    )
+                )
+            break
+        _emit_progress(index=index, action=action, stage="start")
+        result = _run_with_timeout(action)
         results.append(result)
         _emit_progress(index=index, action=action, stage="done", result=result)
+        if result.state == "skipped" and "timed out" in (result.error or ""):
+            # A deadline means this run is already outside its UX budget. Keep
+            # the remaining approved paths untouched for a later scan.
+            for remaining in plan.actions[index:]:
+                results.append(
+                    MaintenanceActionResult(
+                        item_id=remaining.item_id,
+                        category=remaining.category,
+                        state="skipped",
+                        estimated_bytes=remaining.estimated_bytes,
+                        error="cleanup skipped after a timed-out item",
+                    )
+                )
+            break
+        if _cancelled():
+            cancelled = True
+            for remaining in plan.actions[index:]:
+                results.append(
+                    MaintenanceActionResult(
+                        item_id=remaining.item_id,
+                        category=remaining.category,
+                        state="skipped",
+                        estimated_bytes=remaining.estimated_bytes,
+                        error="cleanup cancelled by user",
+                    )
+                )
+            break
     success = sum(1 for result in results if result.state in {"deleted", "completed"})
     skipped = sum(1 for result in results if result.state == "skipped")
     restored = sum(1 for result in results if result.state == "restored")
@@ -3881,16 +4660,16 @@ def run_maintenance_plan(
         state = "restored"
     elif success and not hard_failures:
         # Mature cleaners treat "deleted what we could + skipped busy items"
-        # as a successful pass, not a job that still needs user triage.
+        # (including user cancel of remaining items) as a successful pass.
         state = "completed"
     elif success or restored:
-        # Some work landed, but hard failures also occurred.
         state = "partial"
     else:
-        # Pure skips / no mutations — not a hard failure.
+        # Pure skips / cancel-before-any-mutation — not a hard failure.
         state = "partial"
+    cancel_note = "清理已取消：剩余项已跳过。" if cancelled else ""
     skip_note = (
-        f"{skipped} item(s) skipped (locked, busy, or changed)"
+        f"{skipped} item(s) skipped (locked, busy, changed, timed out, or cancelled)"
         if skipped and state == "completed"
         else ""
     )
@@ -3902,12 +4681,18 @@ def run_maintenance_plan(
         completed_at=float(clock()),
         actions=tuple(results),
         error=(
-            skip_note
-            if skip_note
+            # Prefer the cooperative-cancel note so the UI can keep showing the
+            # "正在取消 / 清理已取消" surface even when some items already deleted.
+            cancel_note
+            if cancel_note
             else (
-                f"{incomplete} cleanup action(s) did not complete"
-                if incomplete and state != "completed"
-                else ""
+                skip_note
+                if skip_note
+                else (
+                    f"{incomplete} cleanup action(s) did not complete"
+                    if incomplete and state != "completed"
+                    else ""
+                )
             )
         ),
     )

@@ -94,7 +94,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "35";
+  const version = "40";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -129,7 +129,7 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
   const supportImagesStorageKey = "codexUsageHudSupportImages:v1";
-const settingsModalId = "codex-usage-hud-settings-modal";
+const settingsModalId = `codex-usage-hud-settings-modal-${version}`;
 const settingsProviderName = "__codexUsageHudSettingsProvider";
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
@@ -194,6 +194,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   let cleanupActiveSection = "junk";
   let safeCleanupPreviewTimer = 0;
   let safeCleanupLiveTimer = 0;
+  let storageRefreshRaf = 0;
+  let storageRefreshTimer = 0;
+  let storageRefreshLastAt = 0;
   let restReminderCountdownTimer = 0;
   const sessionCleanupState = {
     data: null,
@@ -3686,6 +3689,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
         background: color-mix(in srgb, #2a2418 55%, transparent);
       }
+      #${rootId} .codex-usage-hud-cleanup-prerequisite-title {
+        color: var(--codex-usage-hud-warning, #f0c66b);
+        font-size: 11px;
+        font-weight: 700;
+      }
+      #${rootId} .codex-usage-hud-cleanup-controls[data-ready="true"] .codex-usage-hud-cleanup-prerequisite-title {
+        color: var(--codex-usage-hud-success, #8fe3a1);
+      }
+      #${rootId} .codex-usage-hud-cleanup-prerequisite-step {
+        display: grid;
+        gap: 4px;
+        min-width: 0;
+      }
       #${rootId} .codex-usage-hud-cleanup-control {
         min-width: 0;
         display: grid;
@@ -7105,6 +7121,51 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       || safeCleanupRawItems(data).some((item) => selected.has(String(item?.id || "")) && item?.requiresCodexClose === true);
   }
 
+  function safeCleanupPrerequisites(data = safeCleanupFromPayload()) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const requiresBackup = safeCleanupRequiresBackup(data);
+    const requiresCodexClose = safeCleanupRequiresCodexClose(data);
+    // The backend confirmation token carries the canonical SQLite backup
+    // directory. A renderer reinjection must not turn a valid preview into a
+    // local-only "missing backup" failure just because this JS state reset.
+    const previewBound = String(operation?.state || "") === "preview"
+      && !!String(operation?.confirmationToken || "")
+      && !safeCleanupState.previewHidden
+      && safeCleanupPreviewMatchesSelection(data);
+    const backupReady = !requiresBackup
+      || previewBound
+      || !!String(safeCleanupState.backupDirectory || "").trim();
+    const autoCloseReady = !requiresCodexClose || safeCleanupState.autoCloseConfirmed;
+    return {
+      requiresBackup,
+      requiresCodexClose,
+      backupReady,
+      autoCloseReady,
+      ready: backupReady && autoCloseReady,
+    };
+  }
+
+  function safeCleanupPrerequisiteMessage(prerequisites = safeCleanupPrerequisites()) {
+    const steps = [];
+    if (prerequisites.requiresBackup && !prerequisites.backupReady) {
+      steps.push("选择 SQLite 备份目录");
+    }
+    if (prerequisites.requiresCodexClose && !prerequisites.autoCloseReady) {
+      steps.push("确认允许自动关闭并恢复 Codex");
+    }
+    return steps.join("，然后");
+  }
+
+  function focusSafeCleanupPrerequisite(selector) {
+    requestAnimationFrame(() => {
+      const modal = document.getElementById(settingsModalId);
+      const target = modal?.querySelector?.(selector);
+      if (!(target instanceof HTMLElement) || target.matches?.(":disabled")) return;
+      target.scrollIntoView?.({ block: "center", behavior: "smooth" });
+      target.focus?.({ preventScroll: true });
+    });
+  }
+
   function safeCleanupTierLabel(tier) {
     return ({ safe: "可直接清理", consent: "确认后清理", protected: "始终保护" })[String(tier || "protected")] || "始终保护";
   }
@@ -7160,6 +7221,14 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       "Old Windows crash dumps": "Windows 旧崩溃转储",
       "Old Windows error reports": "Windows 旧错误报告",
       "Old queued Windows error reports": "Windows 待处理旧错误报告",
+      "Windows system temporary data": "Windows 系统临时文件",
+      "Active user temporary data": "正在使用的临时文件（保留）",
+      "Active Windows system temporary data": "正在使用的 Windows 系统临时文件（保留）",
+      "Unverified temporary data": "未完全验证的临时文件（保留）",
+      "Additional expired temporary data": "其余过期临时文件（未自动选择）",
+      "Old Windows system crash dumps": "Windows 系统旧崩溃转储",
+      "Old Windows shared error reports": "Windows 共享旧错误报告",
+      "Old queued Windows shared error reports": "Windows 共享待处理错误报告",
       "Old macOS diagnostic reports": "macOS 旧诊断报告",
       "Old macOS crash reports": "macOS 旧崩溃报告",
       "HUD diagnostics": "HUD 诊断日志",
@@ -7176,7 +7245,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     };
     const categoryLabels = {
       user_temp: "用户临时数据",
+      system_temp: "Windows 系统临时文件",
       developer_cache: "开发工具缓存",
+      model_cache: "模型与数据缓存",
       editor_cache: "编辑器缓存",
       system_cache: "系统可再生成缓存",
       browser_cache: "浏览器缓存",
@@ -7196,6 +7267,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const raw = String(group?.blockedReason || group?.impact || "").trim();
     const impacts = {
       "Applications may recreate temporary files.": "应用可能会按需重新生成临时文件。",
+      "System temporary files older than 24 hours will be permanently removed; locked or access-denied entries are skipped.": "将永久删除超过 24 小时的 Windows 系统临时文件；被占用或无权限的项目会跳过。",
+      "Files newer than the retention threshold are retained because they may still be in use.": "未超过保留期限的文件可能仍被程序使用，因此会保留。",
+      "Unverified temporary data remains unchanged.": "无法完整验证的临时文件会保持不变。",
+      "Additional expired files remain untouched until a narrower cleanup can be reviewed.": "为保持列表和操作流畅，其余过期文件不会自动选中，需在更精确的清理中复核。",
       "Packages may need to be downloaded again.": "后续使用时可能需要重新下载软件包。",
       "Modules may need to be downloaded again.": "后续使用时可能需要重新下载模块。",
       "Crates may need to be downloaded again.": "后续使用时可能需要重新下载 crate。",
@@ -7475,6 +7550,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function safeCleanupGroupsHtml(data, {
     selectedIds = [],
+    prerequisitesHtml = "",
   } = {}) {
     const groups = safeCleanupGroups(data);
     const selected = new Set((selectedIds || []).map((id) => String(id || "")).filter(Boolean));
@@ -7509,7 +7585,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const protectedNote = protectedGroups.length
       ? `<div class="codex-usage-hud-cleanup-protected-note"><button type="button" data-action="safe-cleanup-protected-toggle" aria-expanded="${protectedExpanded}"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 类 / ${protectedTargets} 个目标</span><span>查看路径 ${cleanupIconSvg("chevron")}</span></button></div>${protectedExpanded ? protectedGroups.map((group) => safeCleanupGroupRowHtml(group, { selectedIds, kind: "protected", interactive: false })).join("") : ""}`
       : "";
-    return `${safeRows}${deepRow}${expandedConsent}${protectedNote}`;
+    // Prerequisites deliberately sit directly under the deep-cleanup switch.
+    // They must remain visible while the detail rows are collapsed: otherwise a
+    // valid-looking footer action can only write an off-screen status error.
+    return `${safeRows}${deepRow}${deepRow && prerequisitesHtml ? prerequisitesHtml : ""}${expandedConsent}${protectedNote}`;
   }
 
   function safeCleanupResultGroupsHtml(data, selectedIds, results, { fallbackState = "selected" } = {}) {
@@ -7572,14 +7651,21 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       return true;
     }
     if (!isExecuteAction) return false;
-    return new Set(["accepted", "running", "queued_exit"]).has(state);
+    // accepted/running/queued_exit are the normal in-flight states.
+    if (new Set(["accepted", "running", "queued_exit"]).has(state)) return true;
+    // Cooperative cancel keeps action=execute and state=cancelled until the
+    // worker finishes the current item and publishes the final result. Treat
+    // that window as still executing so the "正在取消..." footer stays up and
+    // other tabs are not forced into a half-finished execute surface.
+    return state === "cancelled";
   }
 
   function isSafeCleanupBusy(data = safeCleanupFromPayload()) {
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const state = String(operation?.state || "").toLowerCase();
     return new Set(["scanning", "accepted", "running", "queued_exit"]).has(state)
-      || !!safeCleanupState.pendingRequestId;
+      || !!safeCleanupState.pendingRequestId
+      || isSafeCleanupExecuting(data);
   }
 
   function isSafeCleanupScanning(data = safeCleanupFromPayload()) {
@@ -7779,12 +7865,67 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const rows = safeCleanupResultGroupsHtml(live, selectedIds, results, {
       fallbackState: state === "accepted" ? "selected" : "running",
     });
+    const offline = safeCleanupRequiresOffline(live);
     const note = state === "queued_exit"
       ? "HUD 即将退出，离线清理会在退出后继续，完成后自动恢复。"
       : (state === "accepted"
-        ? "正在检查活动任务与进程占用，通过后开始删除。"
+        ? (offline
+          ? "已确认。HUD 将短暂退出并在后台清理，完成后会自动恢复并展示结果。"
+          : "正在检查活动任务与进程占用，通过后开始删除。")
         : "正在逐项删除；被占用或无法删除的项会自动跳过。");
     return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(note)}</div></div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows || `<div class="codex-usage-hud-cleanup-meta">等待清理项清单…</div>`}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div></section>`;
+  }
+
+  function isSafeCleanupTerminalResult(data = safeCleanupFromPayload()) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const action = String(operation?.action || "");
+    const state = String(operation?.state || "").toLowerCase();
+    return new Set(["execute", "safeCleanupExecute"]).has(action)
+      && new Set(["completed", "partial", "failed", "restored"]).has(state);
+  }
+
+  function safeCleanupMaintenanceResultRowsHtml(results) {
+    return (Array.isArray(results) ? results : []).map((result, index) => {
+      const estimated = Math.max(0, Number(result?.estimatedBytes || 0));
+      const actual = Math.max(0, Number(result?.actualBytes || 0));
+      return safeCleanupGroupRowHtml({
+        presentationId: `maintenance-result-${index}-${String(result?.id || "")}`,
+        category: String(result?.category || ""),
+        tier: "safe",
+        targetCount: 1,
+        files: 0,
+        retention: "",
+        bytes: estimated,
+        actualBytes: actual,
+        hasResults: true,
+        state: String(result?.state || "failed"),
+        impact: safeCleanupErrorText(result?.error) || "离线维护完成后返回的结果。",
+      }, {
+        selectedIds: [],
+        kind: "result-maintenance",
+        interactive: false,
+        showResults: true,
+      });
+    }).join("");
+  }
+
+  function safeCleanupMaintenanceResultPanelHtml(data) {
+    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+    const results = Array.isArray(operation?.results) ? operation.results : [];
+    const actual = Math.max(0, Number(operation?.actualBytes || 0));
+    const estimated = Math.max(0, Number(operation?.estimatedBytes || 0));
+    const rows = safeCleanupMaintenanceResultRowsHtml(results);
+    const summary = actual
+      ? `实际回收 ${storageFormatBytes(actual)}`
+      : (estimated ? `未回收数据（原预计 ${storageFormatBytes(estimated)}）` : "本次没有可回收的数据");
+    const backupSummary = safeCleanupResultBackupSummary(operation);
+    const error = safeCleanupErrorText(operation?.error);
+    const restartNote = operation?.restartRequested
+      ? (operation?.restartState === "failed"
+        ? "HUD 自动恢复失败，请从桌面快捷方式重新启动。"
+        : "HUD 已在离线清理后自动恢复。")
+      : "";
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}上次清理</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(actual)}</div></div><div class="codex-usage-hud-cleanup-summary-side">${escapeHtml(safeCleanupOperationLabel(operation))}<br>${escapeHtml(summary)}</div></div><div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(summary)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}${restartNote ? `<div class="codex-usage-hud-cleanup-meta" data-kind="${operation?.restartState === "failed" ? "error" : "note"}">${escapeHtml(restartNote)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(String(operation?.state || "completed"))}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows || `<div class="codex-usage-hud-cleanup-meta">没有可展示的逐项结果。</div>`}</div>${error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="${String(operation?.state || "") === "completed" ? "note" : "error"}">${escapeHtml(error)}</div>` : ""}</div><div class="codex-usage-hud-cleanup-empty-state" style="padding-top:14px"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true">${cleanupIconSvg("refresh")}重新扫描</button></div></section>`;
   }
 
   function safeCleanupPanelHtml() {
@@ -7794,6 +7935,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const scanned = !!String(data?.revision || "") && !isCleanupScanningRevision(data?.revision);
     const pending = !!safeCleanupState.pendingRequestId;
     const stable = hasStableSafeCleanupInventory(safeCleanupState.stableData) ? safeCleanupState.stableData : null;
+    if (!scanned && isSafeCleanupTerminalResult(data)) {
+      // A maintenance helper restarts the HUD with a fresh inventory. Preserve
+      // and present its terminal result instead of falling through to "尚未扫描".
+      return safeCleanupMaintenanceResultPanelHtml(data);
+    }
     if (scanning) {
       return safeCleanupScanningPanelHtml(data, {
         rescan: !!stable,
@@ -7805,9 +7951,13 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
     if (!data || !scanned) {
       const failed = String(data?.operation?.state || "") === "failed";
+      const cancelled = String(data?.operation?.state || "") === "cancelled";
       if (failed) {
         const errorText = String(data?.operation?.error || "扫描未能完成");
         return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" style="border-color:#754247;background:#2b191b;color:#ff858a">${cleanupIconSvg("alert", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">扫描未能完成</h2><p class="codex-usage-hud-cleanup-empty-meta">${escapeHtml(errorText)}</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large">${cleanupIconSvg("refresh")}重新扫描</button></div></section>`;
+      }
+      if (cancelled) {
+        return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" style="border-color:#6b5c38;background:#282218;color:#f0c66b">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">扫描已取消</h2><p class="codex-usage-hud-cleanup-empty-meta">未修改本地数据，可随时重新扫描。</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large">${cleanupIconSvg("refresh")}重新扫描</button></div></section>`;
       }
       return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">本机缓存、临时文件与 HUD 诊断数据</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large" ${pending ? "disabled" : ""}>${pending ? "正在扫描..." : `${cleanupIconSvg("scan")}扫描垃圾`}</button></div></section>`;
     }
@@ -7818,20 +7968,26 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const previewLocked = operationState === "preview"
       && !safeCleanupState.previewHidden
       && safeCleanupPreviewMatchesSelection(data);
-    const requiresBackup = safeCleanupRequiresBackup(data);
-    const requiresCodexClose = safeCleanupRequiresCodexClose(data);
+    const prerequisites = safeCleanupPrerequisites(data);
+    const requiresBackup = prerequisites.requiresBackup;
+    const requiresCodexClose = prerequisites.requiresCodexClose;
     const selectedIds = safeCleanupSelectedGroupIds(data);
     const selectedGroups = safeCleanupPresentationGroups(data, { itemIds: selectedIds });
     const reclaimable = previewLocked
       ? (operation?.netEstimatedBytes ?? operation?.estimatedBytes)
       : selectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    const backupControl = requiresBackup ? `<div class="codex-usage-hud-cleanup-backup"><input type="text" data-cleanup-backup-directory="true" value="${escapeHtml(safeCleanupState.backupDirectory)}" placeholder="选择备份目录" aria-label="SQLite 备份目录" ${previewLocked ? "disabled" : ""}><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-choose-backup" ${previewLocked ? "disabled" : ""}>选择目录</button></div>` : "";
-    const autoCloseControl = requiresCodexClose ? `<label class="codex-usage-hud-cleanup-control"><input type="checkbox" data-cleanup-auto-close="true" ${safeCleanupState.autoCloseConfirmed ? "checked" : ""}><span><strong>允许自动关闭并恢复 Codex App 与 HUD</strong><span class="codex-usage-hud-cleanup-meta">检测到独立 Codex CLI 或活动任务时仍会停止执行</span></span></label>` : "";
-    const deepExpanded = safeCleanupState.expandedGroupIds.has(safeCleanupDeepGroupId);
-    const controls = deepExpanded && (backupControl || autoCloseControl)
-      ? `<div class="codex-usage-hud-cleanup-controls">${backupControl}${autoCloseControl}</div>`
+    const backupLocation = safeCleanupBackupLocationLabel(operation);
+    const backupDirectory = String(safeCleanupState.backupDirectory || "").trim();
+    const backupControl = requiresBackup ? (previewLocked && !backupDirectory
+      ? `<div class="codex-usage-hud-cleanup-prerequisite-step"><strong>SQLite 备份目录</strong><span class="codex-usage-hud-cleanup-meta">当前预览已绑定${backupLocation ? ` ${escapeHtml(backupLocation)}` : "已验证的备份目录"}；无需重新选择。</span></div>`
+      : `<div class="codex-usage-hud-cleanup-prerequisite-step"><strong>SQLite 备份目录</strong><span class="codex-usage-hud-cleanup-meta">${previewLocked ? "当前预览已绑定此目录；如要更改，请重新选择清理项。" : "SQLite 历史会先备份到此目录；选择后会自动生成新预览。"}</span><div class="codex-usage-hud-cleanup-backup"><input type="text" data-cleanup-backup-directory="true" value="${escapeHtml(backupDirectory)}" placeholder="选择备份目录" aria-label="SQLite 备份目录" ${previewLocked ? "disabled" : ""}><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-choose-backup" ${previewLocked ? "disabled" : ""}>选择目录</button></div></div>`)
       : "";
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}当前选择</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(reclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已选 ${selectedGroups.length} 类 / ${selectedIds.length} 个目标<br>${escapeHtml(safeCleanupOperationLabel(operation))}</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(data, { selectedIds })}${controls}</div>${safeCleanupPreviewHtml(data)}</section>`;
+    const autoCloseControl = requiresCodexClose ? `<label class="codex-usage-hud-cleanup-control"><input type="checkbox" data-cleanup-auto-close="true" ${safeCleanupState.autoCloseConfirmed ? "checked" : ""}><span><strong>允许自动关闭并恢复 Codex App 与 HUD</strong><span class="codex-usage-hud-cleanup-meta">检测到独立 Codex CLI 或活动任务时仍会停止执行</span></span></label>` : "";
+    const prerequisiteMessage = safeCleanupPrerequisiteMessage(prerequisites);
+    const controls = (backupControl || autoCloseControl)
+      ? `<div class="codex-usage-hud-cleanup-controls" data-cleanup-prerequisites="true" data-ready="${prerequisites.ready}"><div class="codex-usage-hud-cleanup-prerequisite-title">${prerequisites.ready ? "深度清理前置步骤已完成" : `继续前请先${escapeHtml(prerequisiteMessage)}`}</div>${backupControl}${autoCloseControl}</div>`
+      : "";
+    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}当前选择</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(reclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已选 ${selectedGroups.length} 类 / ${selectedIds.length} 个目标<br>${escapeHtml(safeCleanupOperationLabel(operation))}</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(data, { selectedIds, prerequisitesHtml: controls })}</div>${safeCleanupPreviewHtml(data)}</section>`;
   }
 
   function storagePanelHtml() {
@@ -7879,6 +8035,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     } else if (junkScanning) {
       footerMeta = "仅统计可清理项 · 扫描时不删除";
       footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel">取消扫描</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled>${cleanupIconSvg("check")}确认清理</button></div>`;
+    } else if (isSafeCleanupTerminalResult(cleanupData)) {
+      const operation = cleanupData?.operation && typeof cleanupData.operation === "object" ? cleanupData.operation : {};
+      const actual = Math.max(0, Number(operation?.actualBytes || 0));
+      footerMeta = `${safeCleanupOperationLabel(operation)} · ${actual ? `实际回收 ${storageFormatBytes(actual)}` : "未回收数据"}`;
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true">${cleanupIconSvg("refresh")}重新扫描</button></div>`;
     } else if (!junkScanned) {
       footerMeta = `上次扫描：-- · ${cleanupIconSvg("shield")} 配置、凭据和会话默认受保护`;
       footerActions = "";
@@ -7887,18 +8048,28 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       const progress = Math.max(0, Math.min(100, Number(operation?.progress || 0)));
       const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
       const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 1));
-      footerMeta = `正在清理 ${phaseIndex}/${phaseCount} · ${progress || 1}% · 已用时 <span data-safe-cleanup-elapsed="execute">${escapeHtml(formatCleanupElapsed(safeCleanupState.executeStartedAt))}</span>`;
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" disabled>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>正在清理 ${progress || 1}%</button></div>`;
+      const cancelPending = String(operation?.state || "").toLowerCase() === "cancelled"
+        || String(operation?.error || "").includes("清理已取消");
+      footerMeta = cancelPending
+        ? `正在停止清理 ${phaseIndex}/${phaseCount} · 已用时 <span data-safe-cleanup-elapsed="execute">${escapeHtml(formatCleanupElapsed(safeCleanupState.executeStartedAt))}</span>`
+        : `正在清理 ${phaseIndex}/${phaseCount} · ${progress || 1}% · 已用时 <span data-safe-cleanup-elapsed="execute">${escapeHtml(formatCleanupElapsed(safeCleanupState.executeStartedAt))}</span>`;
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel" ${cancelPending ? "disabled" : ""}>${cancelPending ? "正在取消..." : "取消清理"}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>${cancelPending ? "正在停止" : `正在清理 ${progress || 1}%`}</button></div>`;
     } else {
       const offline = safeCleanupRequiresOffline(cleanupData);
-      const requiresBackup = safeCleanupRequiresBackup(cleanupData);
-      const requiresCodexClose = safeCleanupRequiresCodexClose(cleanupData);
-      footerMeta = `已选 ${selectedCleanupGroups.length} 类 / ${selectedCleanupIds.length} 个目标 · 执行前重验路径与指纹${requiresBackup ? " · 需 SQLite 备份" : (requiresCodexClose ? " · 需重启 Codex" : (offline ? " · HUD 将短暂重启" : ""))}`;
+      const prerequisites = safeCleanupPrerequisites(cleanupData);
+      const requiresBackup = prerequisites.requiresBackup;
+      const requiresCodexClose = prerequisites.requiresCodexClose;
+      const prerequisiteMessage = safeCleanupPrerequisiteMessage(prerequisites);
+      footerMeta = `已选 ${selectedCleanupGroups.length} 类 / ${selectedCleanupIds.length} 个目标 · 执行前重验路径与指纹${requiresBackup ? " · 需 SQLite 备份" : (requiresCodexClose ? " · 需重启 Codex" : (offline ? " · HUD 将短暂重启" : ""))}${!prerequisites.ready ? ` · 先${escapeHtml(prerequisiteMessage)}` : ""}`;
       const confirmLabel = junkBusy
         ? (String(cleanupData?.operation?.state || "") === "accepted"
           ? "准备清理..."
           : "正在清理...")
-        : `${cleanupIconSvg("check")}${junkReady ? `确认清理 ${storageFormatBytes(reclaimable)}` : "确认清理"}`;
+        : (!junkReady
+          ? `${cleanupIconSvg("check")}${requiresBackup && !prerequisites.backupReady ? "选择备份目录后生成预览" : "等待清理预览..."}`
+          : (!prerequisites.ready
+            ? `${cleanupIconSvg("check")}完成深度清理前置步骤`
+            : `${cleanupIconSvg("check")}确认清理 ${storageFormatBytes(reclaimable)}`));
       footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" ${junkBusy ? "disabled" : ""}>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" ${junkBusy || !junkReady ? "disabled" : ""}>${confirmLabel}</button></div>`;
     }
     return `<div class="codex-usage-hud-cleanup-workspace"><div class="codex-usage-hud-cleanup-page-head"><div class="codex-usage-hud-cleanup-segments" role="tablist" aria-label="空间清理分类"><button type="button" role="tab" aria-selected="${!isSessions}" data-action="cleanup-section" data-cleanup-section="junk" data-active="${!isSessions}">${cleanupIconSvg("scan")}垃圾清理</button><button type="button" role="tab" aria-selected="${isSessions}" data-action="cleanup-section" data-cleanup-section="sessions" data-active="${isSessions}">${cleanupIconSvg("trash")}会话管理</button></div><span class="codex-usage-hud-cleanup-head-meta">${headMeta}</span></div><div class="codex-usage-hud-cleanup-content">${body}</div><div class="codex-usage-hud-cleanup-footer"><span class="codex-usage-hud-cleanup-footer-meta">${footerMeta}</span>${footerActions}</div></div>`;
@@ -8085,6 +8256,32 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }
   }
 
+  function scheduleStoragePanelRefresh({ throttleMs = 0 } = {}) {
+    const modal = document.getElementById(settingsModalId);
+    if (!modal || modal.hidden || settingsActiveTab !== "storage") return false;
+    const now = performance.now();
+    const delay = Math.max(0, Number(throttleMs || 0) - (now - storageRefreshLastAt));
+    const queueFrame = () => {
+      if (storageRefreshRaf) return;
+      storageRefreshRaf = requestAnimationFrame(() => {
+        storageRefreshRaf = 0;
+        storageRefreshLastAt = performance.now();
+        refreshStoragePanelIfVisible();
+      });
+    };
+    if (delay > 0) {
+      if (!storageRefreshTimer) {
+        storageRefreshTimer = setTimeout(() => {
+          storageRefreshTimer = 0;
+          queueFrame();
+        }, delay);
+      }
+      return true;
+    }
+    queueFrame();
+    return true;
+  }
+
   function refreshStoragePanelIfVisible() {
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden || settingsActiveTab !== "storage") return false;
@@ -8140,16 +8337,26 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   }
 
   function requestSafeCleanupCancel() {
+    const data = safeCleanupFromPayload();
+    const executing = isSafeCleanupExecuting(data);
+    const scanning = isSafeCleanupScanning(data);
     const requestId = typedSettingsRequestId("safe-cleanup-cancel");
+    const statusText = executing
+      ? "正在取消清理；当前项结束后会跳过剩余项..."
+      : (scanning ? "正在取消扫描..." : "已请求取消清理操作。");
     const submitted = submitSettingsCommand(
       { action: "safeCleanupCancel", requestId },
-      "正在取消扫描...",
+      statusText,
       { preserveOverlay: true },
     );
     if (submitted) {
+      // Keep executeStartedAt while the worker finishes the current action so the
+      // elapsed ticker stays honest; clear scan pending immediately.
       safeCleanupState.pendingRequestId = "";
-      safeCleanupState.scanStartedAt = 0;
-      safeCleanupState.executeStartedAt = 0;
+      if (!executing) {
+        safeCleanupState.scanStartedAt = 0;
+        safeCleanupState.executeStartedAt = 0;
+      }
     }
     return submitted;
   }
@@ -8261,31 +8468,40 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       return;
     }
     const offline = safeCleanupRequiresOffline(data);
-    const requiresBackup = safeCleanupRequiresBackup(data);
-    const requiresCodexClose = safeCleanupRequiresCodexClose(data);
+    const prerequisites = safeCleanupPrerequisites(data);
+    const requiresBackup = prerequisites.requiresBackup;
+    const requiresCodexClose = prerequisites.requiresCodexClose;
     const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
     const itemById = new Map(safeCleanupRawItems(data).map((item) => [String(item?.id || ""), item]));
     const includesConsent = operation?.includesConsent === true
       || selectedIds.some((id) => String(itemById.get(String(id))?.tier || "") === "consent");
     const selectedGroupCount = safeCleanupPresentationGroups(data, { itemIds: selectedIds }).length;
-    const previewBackupDirectory = String(safeCleanupState.previewBackupDirectory || "").trim();
-    if (requiresBackup && !previewBackupDirectory) {
-      setSettingsStatus("预览绑定的 SQLite 备份目录不可用，请取消后重新生成预览。", "error");
+    if (requiresBackup && !prerequisites.backupReady) {
+      setSettingsStatus("请先选择 SQLite 备份目录，随后会自动生成新的清理预览。", "error");
+      focusSafeCleanupPrerequisite('[data-cleanup-backup-directory="true"]');
       return;
     }
-    if (requiresCodexClose && !safeCleanupState.autoCloseConfirmed) {
+    if (requiresCodexClose && !prerequisites.autoCloseReady) {
       setSettingsStatus("请先确认允许自动关闭并恢复 Codex App 与 HUD。", "error");
+      focusSafeCleanupPrerequisite('[data-cleanup-auto-close="true"]');
       return;
     }
+    // Do not use previewBackupDirectory as an execute gate. It is only a
+    // renderer convenience value and resets on CDP reinjection; the one-use
+    // backend confirmation token already binds and validates the real path.
+    const previewBackupDirectory = String(
+      safeCleanupState.previewBackupDirectory || safeCleanupState.backupDirectory || ""
+    ).trim();
+    const backupLocation = safeCleanupBackupLocationLabel(operation);
     closeSettingsConfirm();
     const layer = document.createElement("div");
     layer.className = "codex-usage-hud-settings-confirm-layer";
     layer.dataset.settingsConfirm = "true";
     const offlineNote = requiresBackup
-      ? `\nSQLite 将先备份到：${escapeHtml(previewBackupDirectory)}\n活动任务或独立 Codex CLI 会阻止执行。`
+      ? `\nSQLite 将先备份到${previewBackupDirectory ? `：${escapeHtml(previewBackupDirectory)}` : (backupLocation ? ` ${escapeHtml(backupLocation)}` : "预览已验证的目录")}\nHUD 会短暂退出并在清理后自动恢复；活动任务或独立 Codex CLI 会阻止执行。`
       : (requiresCodexClose ? "\nCodex App 与 HUD 会正常退出并在清理后自动恢复。活动任务或独立 Codex CLI 会阻止执行。" : (offline ? "\nHUD 会短暂退出并在清理自身日志后自动恢复。活动任务会阻止执行。" : ""));
     const spaceSummary = safeCleanupConfirmSpaceSummary(operation);
-    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认一键清理"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">清理 ${selectedGroupCount} 类、${selectedIds.length} 个本地目标？</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(spaceSummary)}。${includesConsent ? "已包含会失去历史或诊断信息的确认项。" : "仅包含可直接清理项。"}${offlineNote}</div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-execute" data-primary="true">确认清理</button></div></div>`;
+    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认一键清理"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">清理 ${selectedGroupCount} 类、${selectedIds.length} 个本地目标？</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(spaceSummary)}。${includesConsent ? "已包含会失去历史或诊断信息的确认项。" : "仅包含可直接清理项。"}${offlineNote}</div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-execute" data-primary="true">确认并开始清理</button></div></div>`;
     dialog.appendChild(layer);
     layer.querySelector('[data-action="safe-cleanup-confirm-cancel"]')?.focus?.();
   }
@@ -8333,20 +8549,30 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     closeSettingsConfirm();
     ensureSafeCleanupLiveTicker();
     rerenderUsageInsightsIfVisible();
-    const submitted = submitSettingsCommand({
-      action: "safeCleanupExecute",
-      requestId,
-      groupIds,
-      inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""),
-      confirmationToken: String(operation?.confirmationToken || ""),
-      autoCloseAndRestore: safeCleanupState.autoCloseConfirmed,
-    }, "清理已确认，正在检查安全门禁...", { preserveOverlay: true });
-    if (!submitted) {
-      safeCleanupState.pendingRequestId = "";
-      safeCleanupState.executeStartedAt = 0;
-      rerenderUsageInsightsIfVisible();
-    }
-    return submitted;
+    const offline = safeCleanupRequiresOffline(data);
+    const pendingMessage = offline
+      ? "已确认，HUD 将短暂退出并在后台清理；完成后会自动恢复并展示结果。"
+      : "清理已确认，正在检查安全门禁...";
+    setSettingsStatus(pendingMessage);
+    // Give the renderer one frame to paint the accepted/offline hand-off before
+    // the backend closes Codex for maintenance. This is a one-shot UX hand-off,
+    // not recurring polling.
+    window.setTimeout(() => {
+      const submitted = submitSettingsCommand({
+        action: "safeCleanupExecute",
+        requestId,
+        groupIds,
+        inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""),
+        confirmationToken: String(operation?.confirmationToken || ""),
+        autoCloseAndRestore: safeCleanupState.autoCloseConfirmed,
+      }, pendingMessage, { preserveOverlay: true });
+      if (!submitted) {
+        safeCleanupState.pendingRequestId = "";
+        safeCleanupState.executeStartedAt = 0;
+        rerenderUsageInsightsIfVisible();
+      }
+    }, 120);
+    return true;
   }
 
   function scheduleSafeCleanupPreview() {
@@ -10135,6 +10361,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       const autoClose = event.target?.closest?.('[data-cleanup-auto-close="true"]');
       if (autoClose && root.contains(autoClose)) {
         safeCleanupState.autoCloseConfirmed = !!autoClose.checked;
+        // The footer CTA changes from a guided prerequisite action to the
+        // actual confirmation action as soon as the user grants this consent.
+        rerenderUsageInsightsIfVisible();
         return;
       }
 
@@ -10491,18 +10720,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         event.preventDefault();
         event.stopPropagation();
         executeSafeCleanup();
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-cancel") {
-        event.preventDefault();
-        event.stopPropagation();
-        safeCleanupState.previewHidden = true;
-        safeCleanupState.previewBackupDirectory = "";
-        submitSettingsCommand(
-          { action: "safeCleanupCancel", requestId: typedSettingsRequestId("safe-cleanup-cancel") },
-          "已请求取消清理操作。",
-          { preserveOverlay: true },
-        );
         return;
       }
       if (action.dataset.action === "safe-cleanup-choose-backup") {
@@ -13350,10 +13567,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     }, 1000);
   }
 
-  function rerenderUsageInsightsIfVisible() {
+  function rerenderUsageInsightsIfVisible({ cleanupProgress = false } = {}) {
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden) return;
+    // Never force the storage tab from payload ticks — only rewrite the body
+    // when the user is already on 空间清理. Other tabs stay usable while cleanup runs.
     if (settingsActiveTab === "storage") {
+      if (cleanupProgress) {
+        // Progress may arrive once per cache definition. Coalesce it to a
+        // maximum of five body rebuilds per second so long scans keep their
+        // animation, scroll position, and input focus stable.
+        scheduleStoragePanelRefresh({ throttleMs: 200 });
+        return;
+      }
       refreshStoragePanelIfVisible();
       return;
     }
@@ -13441,7 +13667,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       return;
     }
     ensureSafeCleanupLiveTicker();
-    rerenderUsageInsightsIfVisible();
+    rerenderUsageInsightsIfVisible({
+      cleanupProgress: new Set(["scanning", "accepted", "running", "queued_exit"]).has(state),
+    });
   }
 
   function applySessionCleanupPayload(_root, payload) {
@@ -13611,6 +13839,14 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     clearInterval(window[runningTimerName] || 0);
     clearInterval(restReminderCountdownTimer);
     restReminderCountdownTimer = 0;
+    clearInterval(safeCleanupLiveTimer);
+    safeCleanupLiveTimer = 0;
+    clearTimeout(safeCleanupPreviewTimer);
+    safeCleanupPreviewTimer = 0;
+    cancelAnimationFrame(storageRefreshRaf);
+    storageRefreshRaf = 0;
+    clearTimeout(storageRefreshTimer);
+    storageRefreshTimer = 0;
     clearTimeout(window[staleTimerName] || 0);
     clearTimeout(window[composerSettleTimerName] || 0);
     clearBackgroundUsageRequestTimeout("query");

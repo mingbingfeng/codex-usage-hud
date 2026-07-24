@@ -5998,6 +5998,12 @@ class _SafeCleanupWorker:
             action = str(command.get("action") or "")
             request_id = str(command.get("requestId") or "")
             try:
+                # Clear only when this queued operation actually starts.  If a
+                # user cancels a long scan and immediately queues another one,
+                # clearing at enqueue time would let the old scan continue.
+                clear_cancel = getattr(self.manager, "clear_cancel", None)
+                if callable(clear_cancel):
+                    clear_cancel()
                 if action == "safeCleanupScan":
                     previous_publisher = getattr(
                         self.manager, "progress_publisher", None
@@ -6007,8 +6013,19 @@ class _SafeCleanupWorker:
                         snapshot = self.manager.scan(request_id=request_id)
                     finally:
                         self.manager.progress_publisher = previous_publisher
-                    default_ids = _cleanup_string_list(
-                        snapshot.get("defaultSelectedIds")
+                    operation = snapshot.get("operation")
+                    operation_values = (
+                        operation if isinstance(operation, Mapping) else {}
+                    )
+                    scan_completed = (
+                        str(operation_values.get("action") or "") == "scan"
+                        and str(operation_values.get("state") or "") == "completed"
+                        and str(operation_values.get("requestId") or "") == request_id
+                    )
+                    default_ids = (
+                        _cleanup_string_list(snapshot.get("defaultSelectedIds"))
+                        if scan_completed
+                        else []
                     )
                     revision = str(snapshot.get("revision") or "")
                     if (
@@ -7427,7 +7444,13 @@ def _execute_safe_cleanup_command(
             if callable(publish):
                 publish(manager.snapshot())
 
-        result = run_maintenance_plan(plan, progress_callback=_on_execute_progress)
+        result = run_maintenance_plan(
+            plan,
+            progress_callback=_on_execute_progress,
+            should_cancel=lambda: bool(
+                getattr(manager, "is_cancel_requested", lambda: False)()
+            ),
+        )
         preplan_skips = manager.consume_preplan_skips(plan.id)
         if not isinstance(preplan_skips, list):
             preplan_skips = []
@@ -8819,7 +8842,7 @@ def _handle_renderer_safe_cleanup_command(
         "safeCleanupScan": "安全清理扫描已开始。",
         "safeCleanupPreview": "正在生成可重验的清理预览。",
         "safeCleanupExecute": "清理请求已进入活动任务与进程安全门禁。",
-        "safeCleanupCancel": "已取消当前清理预览。",
+        "safeCleanupCancel": "已请求取消清理；剩余项将跳过。",
     }
     status = _renderer_settings_status(labels.get(action, "安全清理命令已提交。"))
     status["safeCleanupRequestId"] = accepted_request_id

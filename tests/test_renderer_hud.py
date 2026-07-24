@@ -1078,8 +1078,12 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("function usageInsightsPanelHtml", script)
         self.assertIn("function safeCleanupRequiresCodexClose", script)
         self.assertIn("item?.requiresCodexClose === true", script)
+        self.assertIn("function safeCleanupPrerequisites", script)
+        self.assertIn("function focusSafeCleanupPrerequisite", script)
+        self.assertIn('data-cleanup-prerequisites="true"', script)
+        self.assertIn('data-ready="${prerequisites.ready}"', script)
         self.assertIn(
-            "requiresCodexClose && !safeCleanupState.autoCloseConfirmed",
+            "const autoCloseReady = !requiresCodexClose || safeCleanupState.autoCloseConfirmed",
             script,
         )
         self.assertIn("SQLite 维护必须先选择备份目录。", script)
@@ -1095,15 +1099,26 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function safeCleanupDisplayLabel", script)
         self.assertIn("function safeCleanupDisplayImpact", script)
         self.assertIn('system_cache: "系统可再生成缓存"', script)
+        self.assertIn('system_temp: "Windows 系统临时文件"', script)
+        self.assertIn('model_cache: "模型与数据缓存"', script)
         self.assertIn('diagnostic_history: "系统诊断历史"', script)
         self.assertIn('"DirectX shader cache": "DirectX 着色器缓存"', script)
         self.assertIn('"Old macOS diagnostic reports": "macOS 旧诊断报告"', script)
+        self.assertIn('"Windows system temporary data": "Windows 系统临时文件"', script)
+        self.assertIn('"Active user temporary data": "正在使用的临时文件（保留）"', script)
+        self.assertIn(
+            '"Files newer than the retention threshold are retained because they may still be in use."',
+            script,
+        )
         self.assertIn(
             '"Old operating-system diagnostics will no longer be available."',
             script,
         )
         self.assertIn("function safeCleanupPresentationGroups", script)
         self.assertIn("function safeCleanupResultGroupsHtml", script)
+        self.assertIn("function isSafeCleanupTerminalResult", script)
+        self.assertIn("function safeCleanupMaintenanceResultPanelHtml", script)
+        self.assertIn("A maintenance helper restarts the HUD with a fresh inventory", script)
         self.assertIn("const safeRows = safeGroups.map", script)
         self.assertNotIn("safeGroups.slice(0, 8)", script)
         self.assertNotIn("orderedPreviewItems.slice(0, 16)", script)
@@ -1156,6 +1171,12 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("const focus = captureStorageFocus(body);", refresh_contract)
         self.assertIn("body.innerHTML = storagePanelHtml();", refresh_contract)
         self.assertIn("restoreStorageFocus(body, focus);", refresh_contract)
+        schedule_start = script.index("function scheduleStoragePanelRefresh")
+        schedule_end = script.index("function refreshStoragePanelIfVisible", schedule_start)
+        schedule_contract = script[schedule_start:schedule_end]
+        self.assertIn("requestAnimationFrame", schedule_contract)
+        self.assertIn("storageRefreshLastAt", schedule_contract)
+        self.assertIn("storageRefreshTimer", schedule_contract)
         focus_start = script.index("function captureStorageFocus")
         focus_end = script.index("function requestUsageInsightsRefresh", focus_start)
         self.assertIn('candidate.matches?.(":disabled")', script[focus_start:focus_end])
@@ -1165,11 +1186,44 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("updateSafeCleanupElapsedNodes();", ticker_contract)
         self.assertNotIn("rerenderUsageInsightsIfVisible();", ticker_contract)
         self.assertNotIn('renderSettingsModal("storage")', ticker_contract)
+        remove_contract = script[script.index("window.__codexUsageHudRemove"):]
+        self.assertIn("clearInterval(safeCleanupLiveTimer);", remove_contract)
+        self.assertIn("clearTimeout(safeCleanupPreviewTimer);", remove_contract)
+        self.assertIn("cancelAnimationFrame(storageRefreshRaf);", remove_contract)
+        self.assertIn("clearTimeout(storageRefreshTimer);", remove_contract)
         file_payload_start = script.index("function applyFileManagementPayload")
         file_payload_end = script.index("function updateSafeCleanupElapsedNodes", file_payload_start)
         file_payload_contract = script[file_payload_start:file_payload_end]
         self.assertIn("refreshStoragePanelIfVisible();", file_payload_contract)
         self.assertNotIn('renderSettingsModal("storage")', file_payload_contract)
+        # Opening settings always lands on the settings tab — never forced to storage
+        # while a long cleanup is running (focus-steal regression).
+        settings_open_start = script.index('if (action.dataset.action === "settings-open")')
+        settings_open_end = script.index("return;", settings_open_start)
+        settings_open_contract = script[settings_open_start:settings_open_end]
+        self.assertIn('renderSettingsModal("settings"', settings_open_contract)
+        self.assertNotIn('renderSettingsModal("storage"', settings_open_contract)
+        # Execute cancel UX: cooperative cancel keeps the execute footer alive.
+        exec_fn_start = script.index("function isSafeCleanupExecuting")
+        exec_fn_end = script.index("function isSafeCleanupBusy", exec_fn_start)
+        exec_fn = script[exec_fn_start:exec_fn_end]
+        self.assertIn('state === "cancelled"', exec_fn)
+        self.assertIn('new Set(["accepted", "running", "queued_exit"]).has(state)', exec_fn)
+        cancel_fn_start = script.index("function requestSafeCleanupCancel")
+        cancel_fn_end = script.index("function requestSessionCleanupCancel", cancel_fn_start)
+        cancel_fn = script[cancel_fn_start:cancel_fn_end]
+        self.assertIn("正在取消清理", cancel_fn)
+        self.assertIn("safeCleanupState.pendingRequestId = \"\"", cancel_fn)
+        self.assertIn("if (!executing)", cancel_fn)
+        self.assertIn("取消清理", script)
+        self.assertIn("正在取消...", script)
+        self.assertIn("正在停止", script)
+        self.assertIn("扫描已取消", script)
+        payload_start = script.index("function applySafeCleanupPayload")
+        payload_end = script.index("function applySessionCleanupPayload", payload_start)
+        payload_contract = script[payload_start:payload_end]
+        self.assertIn("cleanupProgress:", payload_contract)
+        self.assertIn('scheduleStoragePanelRefresh({ throttleMs: 200 });', script)
         self.assertIn('data-safe-cleanup-elapsed="scan"', script)
         self.assertIn('data-safe-cleanup-elapsed="execute"', script)
         confirm_start = script.index("function openSafeCleanupExecuteConfirm")
@@ -1178,11 +1232,15 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("operation?.includesConsent === true", confirm_contract)
         self.assertIn("safeCleanupState.previewBackupDirectory", confirm_contract)
         self.assertIn("safeCleanupConfirmSpaceSummary(operation)", confirm_contract)
+        self.assertIn("Do not use previewBackupDirectory as an execute gate", confirm_contract)
+        self.assertIn("focusSafeCleanupPrerequisite", confirm_contract)
         self.assertNotIn("safeCleanupState.includeConsent ?", confirm_contract)
         execute_end = script.index("function storageSelectedItemIds", execute_start)
         execute_contract = script[execute_start:execute_end]
         self.assertNotIn("consentConfirmed:", execute_contract)
         self.assertNotIn("backupDirectory:", execute_contract)
+        self.assertIn("HUD 将短暂退出并在后台清理", execute_contract)
+        self.assertIn("window.setTimeout", execute_contract)
         self.assertNotIn(
             'selectedIds.map((id) => ({ id, state: "selected" }))',
             script,
@@ -1649,7 +1707,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "35";', script)
+        self.assertIn('const version = "40";', script)
         self.assertIn("function applyCachedActiveSessionPayload", script)
         self.assertIn("function cacheActiveSessionPayload", script)
         self.assertIn("if (payload?.cachedPreview) return;", script)
