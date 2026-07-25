@@ -7973,8 +7973,13 @@ class RuntimeContext:
         if self.runtime_errors.event_bus is None:
             self.runtime_errors.event_bus = self.runtime_events
         if self.rest_reminder is None:
-            self.rest_reminder = RestReminderPresenter()
-            self.rest_reminder.configure(self.user_config, force_reset=True)
+            settings_path = getattr(self.settings_store, "path", None)
+            self.rest_reminder = RestReminderPresenter(state_path=settings_path)
+            self.rest_reminder.configure(
+                self.user_config,
+                force_reset=True,
+                restore_persisted=True,
+            )
         _ensure_runtime_error_diagnostics(self)
         if self.session_snapshot_cache is None:
             self.session_snapshot_cache = SessionSnapshotCache(
@@ -8547,6 +8552,7 @@ def _partial_domains_for_changed_user_config(
     rest_keys = {
         "rest_reminder_enabled",
         "rest_reminder_interval_minutes",
+        "rest_reminder_break_minutes",
         "rest_reminder_postpone_minutes",
         "rest_reminder_idle_reset_minutes",
         "rest_reminder_work_start_time",
@@ -9184,7 +9190,16 @@ def _handle_renderer_settings_command(
                 )
                 if presenter is not None and started_at_ms is not None:
                     presenter.adjust_cycle_started_at_ms(started_at_ms)
-                return _renderer_settings_status("提醒设置已保存，新的专注计时已开始。")
+                    status = _renderer_settings_status(
+                        "提醒设置已保存，已按指定时间校正本轮计时。"
+                    )
+                else:
+                    status = _renderer_settings_status(
+                        "提醒设置已保存；休息结束后会自动开始下一轮。"
+                    )
+                status["restReminderSaved"] = True
+                status["restReminderSaveRequestId"] = str(command.get("id") or "")
+                return status
             return _renderer_settings_status("设置已保存，相关显示会自动刷新。")
         if action == "restReminderAck":
             presenter = getattr(context, "rest_reminder", None)
@@ -9205,6 +9220,16 @@ def _handle_renderer_settings_command(
                 "error": "提醒服务未启动",
             }
             sent = str(result.get("status") or "") == "sent"
+            preview = bool(result.get("preview"))
+            if preview:
+                if sent:
+                    return _renderer_settings_status(
+                        "已发送系统通知，并弹出实际休息提醒预览。关闭预览不会改变当前计时。"
+                    )
+                return _renderer_settings_status(
+                    f"已弹出实际休息提醒预览；系统通知失败：{result.get('error') or '未知错误'}",
+                    kind="error",
+                )
             return _renderer_settings_status(
                 "系统通知测试已发送。" if sent else f"系统通知发送失败：{result.get('error') or '未知错误'}",
                 kind="" if sent else "error",

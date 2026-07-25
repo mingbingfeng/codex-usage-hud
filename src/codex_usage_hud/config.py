@@ -20,6 +20,7 @@ HUD_SETTINGS_FILENAME = "hud_settings.json"
 USER_CONFIG_KEY = "user"
 RUNTIME_STATE_KEY = "runtime"
 WARNING_DISMISSED_DATE_KEY = "warning_dismissed_date"
+REST_REMINDER_STATE_KEY = "rest_reminder"
 DEFAULT_DAILY_BUDGET_USD = 100.0
 DEFAULT_WEEKLY_BUDGET_USD = 400.0
 DEFAULT_BUDGET_THRESHOLDS = (0.5, 0.8, 0.9, 1.0)
@@ -35,6 +36,7 @@ DEFAULT_CLEANUP_LOG_RETENTION_HOURS = 24
 DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS = 30
 DEFAULT_REST_REMINDER_ENABLED = False
 DEFAULT_REST_REMINDER_INTERVAL_MINUTES = 45
+DEFAULT_REST_REMINDER_BREAK_MINUTES = 2
 DEFAULT_REST_REMINDER_POSTPONE_MINUTES = 10
 DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES = 5
 DEFAULT_REST_REMINDER_WORK_START_TIME = "09:00"
@@ -44,6 +46,8 @@ DEFAULT_REST_REMINDER_LUNCH_START_TIME = "12:00"
 DEFAULT_REST_REMINDER_LUNCH_END_TIME = "13:30"
 REST_REMINDER_INTERVAL_MIN = 15
 REST_REMINDER_INTERVAL_MAX = 180
+REST_REMINDER_BREAK_MIN = 1
+REST_REMINDER_BREAK_MAX = 10
 REST_REMINDER_POSTPONE_MIN = 5
 REST_REMINDER_POSTPONE_MAX = 30
 REST_REMINDER_IDLE_RESET_MIN = 0
@@ -219,6 +223,7 @@ class UserConfig:
     support_url: str = DEFAULT_SUPPORT_URL
     rest_reminder_enabled: bool = DEFAULT_REST_REMINDER_ENABLED
     rest_reminder_interval_minutes: int = DEFAULT_REST_REMINDER_INTERVAL_MINUTES
+    rest_reminder_break_minutes: int = DEFAULT_REST_REMINDER_BREAK_MINUTES
     rest_reminder_postpone_minutes: int = DEFAULT_REST_REMINDER_POSTPONE_MINUTES
     rest_reminder_idle_reset_minutes: int = DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES
     rest_reminder_work_start_time: str = DEFAULT_REST_REMINDER_WORK_START_TIME
@@ -316,6 +321,12 @@ class UserConfig:
                 minimum=REST_REMINDER_INTERVAL_MIN,
                 maximum=REST_REMINDER_INTERVAL_MAX,
             ),
+            rest_reminder_break_minutes=_bounded_int(
+                value.get("rest_reminder_break_minutes"),
+                defaults.rest_reminder_break_minutes,
+                minimum=REST_REMINDER_BREAK_MIN,
+                maximum=REST_REMINDER_BREAK_MAX,
+            ),
             rest_reminder_postpone_minutes=_bounded_int(
                 value.get("rest_reminder_postpone_minutes"),
                 defaults.rest_reminder_postpone_minutes,
@@ -388,6 +399,7 @@ class UserConfig:
             "support_url": self.support_url,
             "rest_reminder_enabled": bool(self.rest_reminder_enabled),
             "rest_reminder_interval_minutes": int(self.rest_reminder_interval_minutes),
+            "rest_reminder_break_minutes": int(self.rest_reminder_break_minutes),
             "rest_reminder_postpone_minutes": int(self.rest_reminder_postpone_minutes),
             "rest_reminder_idle_reset_minutes": int(
                 self.rest_reminder_idle_reset_minutes
@@ -640,6 +652,35 @@ def dismiss_warning_for_today(
     if not isinstance(runtime, dict):
         runtime = {}
     runtime[WARNING_DISMISSED_DATE_KEY] = local_date_key(now)
+    raw[RUNTIME_STATE_KEY] = runtime
+    write_json_object(settings_path, raw)
+
+
+def load_rest_reminder_state(path: Path | str | None = None) -> dict[str, Any]:
+    """Load process-restart timing for the focus rest reminder from runtime state."""
+    settings_path = Path(path) if path is not None else default_settings_path()
+    raw = read_json_object(settings_path)
+    runtime = raw.get(RUNTIME_STATE_KEY)
+    if not isinstance(runtime, Mapping):
+        return {}
+    state = runtime.get(REST_REMINDER_STATE_KEY)
+    return dict(state) if isinstance(state, Mapping) else {}
+
+
+def save_rest_reminder_state(
+    state: Mapping[str, Any] | None,
+    path: Path | str | None = None,
+) -> None:
+    """Persist rest-reminder cycle wall-clock timing under the runtime section."""
+    settings_path = Path(path) if path is not None else default_settings_path()
+    raw = read_json_object(settings_path)
+    runtime = raw.get(RUNTIME_STATE_KEY)
+    if not isinstance(runtime, dict):
+        runtime = {}
+    if state is None:
+        runtime.pop(REST_REMINDER_STATE_KEY, None)
+    else:
+        runtime[REST_REMINDER_STATE_KEY] = dict(state)
     raw[RUNTIME_STATE_KEY] = runtime
     write_json_object(settings_path, raw)
 
@@ -961,6 +1002,7 @@ __all__ = [
     "HUD_SETTINGS_FILENAME",
     "ModelPrice",
     "ProviderSettings",
+    "REST_REMINDER_STATE_KEY",
     "RUNTIME_STATE_KEY",
     "USER_CONFIG_KEY",
     "UserConfig",
@@ -972,11 +1014,13 @@ __all__ = [
     "effective_display_mode",
     "extract_model_prices",
     "fetch_model_prices",
+    "load_rest_reminder_state",
     "local_date_key",
     "normalize_display_mode",
     "normalize_model_prices",
     "normalize_provider_names",
     "normalize_provider_settings",
+    "save_rest_reminder_state",
     "normalize_work_overlay_max_items",
     "parse_thresholds",
     "read_json_object",

@@ -198,6 +198,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   let storageRefreshTimer = 0;
   let storageRefreshLastAt = 0;
   let restReminderCountdownTimer = 0;
+  let restReminderOverlayTimer = 0;
+  let restReminderSavedRequestId = "";
   const sessionCleanupState = {
     data: null,
     pendingRequestId: "",
@@ -650,6 +652,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-top-body,
       #${rootId} .codex-usage-hud-request-list,
       #${rootId} .codex-usage-hud-settings-modal,
+      #${rootId} .codex-usage-hud-rest-mask,
       #${rootId} .codex-usage-hud-rest-toast {
         pointer-events: auto;
       }
@@ -4156,121 +4159,429 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-rest-reminder-card {
         display: grid;
-        gap: 10px;
-        padding: 14px 0 16px;
+        gap: 7px;
+        padding: 8px 0 10px;
         border-top: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
         border-bottom: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
       }
+      #${rootId} .codex-usage-hud-rest-reminder-top {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 26px;
+      }
       #${rootId} .codex-usage-hud-rest-reminder-title {
         color: var(--codex-usage-hud-text, #dde7f2);
-        font-weight: 700;
-        font-size: 13px;
+        font-weight: 750;
+        font-size: 12px;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-rest-reminder-toggle {
-        display: flex;
-        gap: 8px;
+        display: inline-flex;
         align-items: center;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-toggle input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-track {
+        position: relative;
+        width: 28px;
+        height: 16px;
+        border-radius: 999px;
+        background: #3a4652;
+        transition: background .12s ease;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #f4f6f8;
+        transition: transform .12s ease;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-toggle input:checked + .codex-usage-hud-rest-reminder-track {
+        background: var(--codex-usage-hud-success, #8fe3a1);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-toggle input:checked + .codex-usage-hud-rest-reminder-track::after {
+        transform: translateX(12px);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
+        min-width: 0;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="lunch"] {
+        color: var(--codex-usage-hud-warning, #ffb86b);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="break"] {
+        color: var(--codex-usage-hud-success, #8fe3a1);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="off"],
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="disabled"] {
+        color: var(--codex-usage-hud-request-muted, #718095);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status b {
+        color: var(--codex-usage-hud-accent, #f3d27a);
         font-size: 12px;
+        font-weight: 750;
+        font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="lunch"] b,
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="break"] b,
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="off"] b,
+      #${rootId} .codex-usage-hud-rest-reminder-status[data-state="disabled"] b {
+        color: inherit;
+        font-weight: 650;
       }
       #${rootId} .codex-usage-hud-rest-reminder-grid {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 8px;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 5px 6px;
       }
-      #${rootId} .codex-usage-hud-rest-reminder-grid label {
+      #${rootId} .codex-usage-hud-rest-reminder-field {
         display: grid;
-        gap: 4px;
-        font-size: 11px;
-        color: var(--codex-usage-hud-request-muted, #a9bcd2);
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        min-height: 28px;
+        padding: 0 6px 0 7px;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, .015);
       }
-      #${rootId} .codex-usage-hud-rest-reminder-grid input {
+      #${rootId} .codex-usage-hud-rest-reminder-field > span {
+        color: var(--codex-usage-hud-request-muted, #718095);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-field input {
+        min-width: 0;
         width: 100%;
         box-sizing: border-box;
-        border-radius: 8px;
-        border: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
-        background: var(--codex-usage-hud-surface, #10161d);
+        min-height: 24px;
+        border: 0;
+        background: transparent;
         color: var(--codex-usage-hud-text, #dde7f2);
-        padding: 6px 8px;
-      }
-      #${rootId} .codex-usage-hud-rest-reminder-status {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 8px;
-        padding: 9px 10px;
-        border-radius: 9px;
-        background: var(--codex-usage-hud-surface, #10161d);
-      }
-      #${rootId} .codex-usage-hud-rest-reminder-status-item {
-        display: grid;
-        gap: 2px;
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-rest-reminder-status-label {
-        color: var(--codex-usage-hud-request-muted, #a9bcd2);
-        font-size: 10px;
-      }
-      #${rootId} .codex-usage-hud-rest-reminder-status-value {
-        color: var(--codex-usage-hud-text, #dde7f2);
-        font-size: 13px;
+        padding: 0;
+        text-align: right;
+        font-size: 12px;
+        font-weight: 650;
         font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-field input:focus {
+        outline: none;
+        box-shadow: none;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-field:focus-within {
+        border-color: color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 55%, var(--codex-usage-hud-panel-border, #2e3846));
+        box-shadow: 0 0 0 2px rgba(243, 210, 122, .08);
       }
       #${rootId} .codex-usage-hud-rest-reminder-schedule {
         display: grid;
-        grid-template-columns: 90px minmax(0, 1fr) auto;
-        gap: 8px;
-        align-items: center;
-        padding-top: 8px;
-        border-top: 1px solid color-mix(in srgb, var(--codex-usage-hud-panel-border, #2e3846) 65%, transparent);
-        color: var(--codex-usage-hud-request-muted, #a9bcd2);
-        font-size: 11px;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
       }
-      #${rootId} .codex-usage-hud-rest-reminder-schedule input {
-        width: 94px;
-        box-sizing: border-box;
+      #${rootId} .codex-usage-hud-rest-reminder-slot {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 5px;
+        min-height: 30px;
+        padding: 0 7px;
+        border: 1px solid var(--codex-usage-hud-divider, #273241);
         border-radius: 6px;
-        border: 1px solid var(--codex-usage-hud-panel-border, #2e3846);
-        background: var(--codex-usage-hud-surface, #10161d);
-        color: var(--codex-usage-hud-text, #dde7f2);
-        padding: 5px 6px;
+        background: rgba(255, 255, 255, .015);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-slot > span {
+        color: var(--codex-usage-hud-request-muted, #718095);
+        font-size: 10px;
+        white-space: nowrap;
       }
       #${rootId} .codex-usage-hud-rest-reminder-range {
         display: inline-flex;
         align-items: center;
+        justify-content: end;
+        gap: 3px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-slot input[type="time"] {
+        width: 62px;
+        box-sizing: border-box;
+        min-height: 22px;
+        border: 0;
+        background: transparent;
+        color: var(--codex-usage-hud-text, #dde7f2);
+        padding: 0;
+        text-align: center;
+        font-size: 11px;
+        font-weight: 650;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-slot input[type="time"]:focus {
+        outline: none;
+        box-shadow: none;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-slot:focus-within {
+        border-color: color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 55%, var(--codex-usage-hud-panel-border, #2e3846));
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-dash {
+        color: var(--codex-usage-hud-request-muted, #718095);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-check {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 2px;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-check input {
+        width: 13px;
+        height: 13px;
+        margin: 0;
+        accent-color: var(--codex-usage-hud-success, #8fe3a1);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-foot {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
         gap: 6px;
+        align-items: center;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-notify {
+        min-width: 0;
+        color: var(--codex-usage-hud-request-muted, #718095);
+        font-size: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-notify[data-kind="sent"] {
+        color: var(--codex-usage-hud-success, #8fe3a1);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-notify[data-kind="failed"] {
+        color: var(--codex-usage-hud-error, #ff6b6b);
+      }
+      #${rootId} .codex-usage-hud-rest-reminder-foot .codex-usage-hud-settings-action {
+        min-height: 26px;
+        min-width: 52px;
+        padding: 0 9px;
+        font-size: 11px;
+      }
+      #${rootId} .codex-usage-hud-rest-mask {
+        position: fixed;
+        inset: 0;
+        /* Above settings modal so the test preview can be seen while settings stay open. */
+        z-index: 2147483600;
+        display: none;
+        overflow: hidden;
+        /* Root is pointer-events:none; mask must capture clicks across Codex. */
+        pointer-events: auto;
+        cursor: default;
+        background:
+          radial-gradient(ellipse 70% 50% at 50% 38%, rgba(243, 210, 122, 0.10), transparent 58%),
+          radial-gradient(ellipse 55% 40% at 18% 78%, rgba(115, 213, 160, 0.07), transparent 55%),
+          radial-gradient(ellipse 50% 45% at 84% 18%, rgba(156, 203, 255, 0.06), transparent 50%),
+          linear-gradient(165deg, rgba(7, 11, 18, 0.78) 0%, rgba(10, 14, 22, 0.86) 48%, rgba(6, 9, 14, 0.92) 100%);
+        backdrop-filter: blur(8px) saturate(1.05);
+        -webkit-backdrop-filter: blur(8px) saturate(1.05);
+        opacity: 0;
+        transition: opacity 220ms ease;
+      }
+      #${rootId} .codex-usage-hud-rest-mask::before,
+      #${rootId} .codex-usage-hud-rest-mask::after {
+        content: "";
+        position: absolute;
+        border-radius: 50%;
+        pointer-events: none;
+        filter: blur(2px);
+      }
+      #${rootId} .codex-usage-hud-rest-mask::before {
+        width: min(42vw, 380px);
+        height: min(42vw, 380px);
+        left: 50%;
+        top: 34%;
+        transform: translate(-50%, -50%);
+        background: radial-gradient(circle, rgba(243, 210, 122, 0.16) 0%, rgba(243, 210, 122, 0.04) 42%, transparent 70%);
+        animation: codex-usage-hud-rest-glow 5.6s ease-in-out infinite;
+      }
+      #${rootId} .codex-usage-hud-rest-mask::after {
+        inset: 0;
+        border-radius: 0;
+        background:
+          linear-gradient(to bottom, rgba(255,255,255,0.035), transparent 18%, transparent 82%, rgba(0,0,0,0.18)),
+          radial-gradient(ellipse at center, transparent 42%, rgba(0, 0, 0, 0.28) 100%);
+      }
+      #${rootId} .codex-usage-hud-rest-mask[data-visible="true"] {
+        display: block;
+        opacity: 1;
+      }
+      @keyframes codex-usage-hud-rest-glow {
+        0%, 100% { opacity: 0.72; transform: translate(-50%, -50%) scale(1); }
+        50% { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
+      }
+      @keyframes codex-usage-hud-rest-card-in {
+        from {
+          opacity: 0;
+          transform: translate(-50%, calc(-50% + 14px)) scale(0.97);
+        }
+        to {
+          opacity: 1;
+          transform: translate(-50%, -50%) scale(1);
+        }
       }
       #${rootId} .codex-usage-hud-rest-toast {
         position: fixed;
         left: 50%;
-        top: 18%;
-        transform: translateX(-50%);
-        z-index: 2147483000;
-        width: min(420px, calc(100vw - 32px));
-        padding: 14px 16px;
-        border-radius: 14px;
-        border: 1px solid var(--codex-usage-hud-panel-border, #3a4a5c);
-        background: var(--codex-usage-hud-panel-surface, #141b24);
+        top: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 2147483610;
+        width: min(440px, calc(100vw - 36px));
+        padding: 0;
+        border-radius: 20px;
+        border: 1px solid rgba(243, 210, 122, 0.22);
+        background:
+          linear-gradient(160deg, rgba(36, 44, 56, 0.98) 0%, rgba(18, 24, 34, 0.98) 55%, rgba(14, 19, 28, 0.99) 100%);
         color: var(--codex-usage-hud-text, #dce7f2);
-        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 255, 0.03) inset,
+          0 1px 0 rgba(255, 255, 255, 0.06) inset,
+          0 28px 80px rgba(0, 0, 0, 0.55),
+          0 0 60px rgba(243, 210, 122, 0.08);
         display: none;
-        gap: 10px;
+        gap: 0;
+        overflow: hidden;
         /* Root is pointer-events:none; toast must re-enable hit testing. */
         pointer-events: auto;
       }
       #${rootId} .codex-usage-hud-rest-toast[data-visible="true"] {
         display: grid;
+        animation: codex-usage-hud-rest-card-in 280ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
       }
-      #${rootId} .codex-usage-hud-rest-toast button {
-        pointer-events: auto;
-        cursor: pointer;
+      #${rootId} .codex-usage-hud-rest-toast-accent {
+        height: 3px;
+        background: linear-gradient(90deg, transparent 0%, #f3d27a 22%, #b5dd92 55%, #9ccbff 78%, transparent 100%);
+        opacity: 0.95;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-body {
+        display: grid;
+        gap: 14px;
+        padding: 22px 22px 18px;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-head {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 14px;
+        align-items: start;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-icon {
+        display: grid;
+        place-items: center;
+        width: 48px;
+        height: 48px;
+        border-radius: 16px;
+        border: 1px solid rgba(243, 210, 122, 0.28);
+        background:
+          radial-gradient(circle at 30% 25%, rgba(255, 245, 210, 0.22), transparent 55%),
+          linear-gradient(145deg, rgba(243, 210, 122, 0.22), rgba(243, 210, 122, 0.06));
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+        font-size: 22px;
+        line-height: 1;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-kicker {
+        margin: 0 0 4px;
+        color: rgba(243, 210, 122, 0.86);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: uppercase;
       }
       #${rootId} .codex-usage-hud-rest-toast-title {
-        color: var(--codex-usage-hud-accent, #f3d27a);
-        font-weight: 700;
+        margin: 0;
+        color: #f6f0df;
+        font-size: 18px;
+        font-weight: 750;
+        line-height: 1.3;
+        letter-spacing: 0;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-message {
+        margin: 0;
+        color: rgba(220, 231, 242, 0.92);
+        font-size: 14px;
+        line-height: 1.65;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-hint {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(156, 203, 255, 0.12);
+        background: rgba(156, 203, 255, 0.06);
+        color: rgba(169, 188, 210, 0.95);
+        font-size: 12px;
+        line-height: 1.45;
+        min-height: 18px;
+        font-variant-numeric: tabular-nums;
+      }
+      #${rootId} .codex-usage-hud-rest-toast-hint-dot {
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #73d5a0;
+        box-shadow: 0 0 0 4px rgba(115, 213, 160, 0.14);
       }
       #${rootId} .codex-usage-hud-rest-toast-actions {
         display: flex;
         justify-content: flex-end;
-        gap: 8px;
+        flex-wrap: wrap;
+        gap: 10px;
+        padding: 0 22px 20px;
+      }
+      #${rootId} .codex-usage-hud-rest-toast button {
+        pointer-events: auto;
+        cursor: pointer;
+        min-height: 38px;
+        min-width: 108px;
+        padding: 0 16px;
+        border-radius: 11px;
+        font-size: 13px;
+        font-weight: 650;
+        transition: border-color 140ms ease, background 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+      }
+      #${rootId} .codex-usage-hud-rest-toast button:hover {
+        transform: translateY(-1px);
+      }
+      #${rootId} .codex-usage-hud-rest-toast button:active {
+        transform: translateY(0);
+      }
+      #${rootId} .codex-usage-hud-rest-toast button[data-primary="true"] {
+        border-color: transparent;
+        background: linear-gradient(180deg, #f8df95 0%, #f3d27a 100%);
+        color: #1a1408;
+        box-shadow: 0 8px 18px rgba(243, 210, 122, 0.22);
+      }
+      #${rootId} .codex-usage-hud-rest-toast button[data-primary="true"]:hover {
+        box-shadow: 0 10px 22px rgba(243, 210, 122, 0.3);
+      }
+      #${rootId} .codex-usage-hud-rest-toast button:not([data-primary="true"]) {
+        border-color: rgba(90, 106, 124, 0.85);
+        background: rgba(30, 40, 52, 0.92);
+        color: #dce7f2;
+      }
+      #${rootId} .codex-usage-hud-rest-toast button:not([data-primary="true"]):hover {
+        border-color: rgba(243, 210, 122, 0.45);
+        background: rgba(38, 50, 64, 0.96);
       }
       #${rootId} .codex-usage-hud-support a {
         color: var(--codex-usage-hud-info, #9ccbff);
@@ -4627,6 +4938,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-settings-compact-row {
           grid-template-columns: minmax(0, 1fr);
         }
+        #${rootId} .codex-usage-hud-rest-reminder-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-rest-reminder-schedule {
+          grid-template-columns: minmax(0, 1fr);
+        }
         #${rootId} .codex-usage-hud-provider-editor {
           grid-column: 1;
         }
@@ -4743,6 +5060,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         }
         #${rootId} .codex-usage-hud-settings-tab {
           flex: 0 0 auto;
+        }
+        #${rootId} .codex-usage-hud-rest-reminder-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         #${rootId} .codex-usage-hud-settings-actions {
           align-items: flex-start;
@@ -5026,9 +5346,23 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function restReminderToastMarkup() {
     return `
-      <div class="codex-usage-hud-rest-toast" data-rest-reminder-toast="true" data-visible="false" role="dialog" aria-live="polite">
-        <div class="codex-usage-hud-rest-toast-title">☕ 该休息一下了</div>
-        <div data-rest-reminder-message="true">站起来走走，让眼睛放松片刻。</div>
+      <div class="codex-usage-hud-rest-mask" data-rest-reminder-mask="true" data-visible="false" aria-hidden="true"></div>
+      <div class="codex-usage-hud-rest-toast" data-rest-reminder-toast="true" data-visible="false" role="dialog" aria-live="assertive" aria-modal="true" aria-labelledby="codex-usage-hud-rest-title">
+        <div class="codex-usage-hud-rest-toast-accent" aria-hidden="true"></div>
+        <div class="codex-usage-hud-rest-toast-body">
+          <div class="codex-usage-hud-rest-toast-head">
+            <div class="codex-usage-hud-rest-toast-icon" aria-hidden="true">☕</div>
+            <div>
+              <p class="codex-usage-hud-rest-toast-kicker">专注休息</p>
+              <h2 class="codex-usage-hud-rest-toast-title" id="codex-usage-hud-rest-title">该休息一下了</h2>
+            </div>
+          </div>
+          <p class="codex-usage-hud-rest-toast-message" data-rest-reminder-message="true">站起来走走，让眼睛放松片刻。</p>
+          <p class="codex-usage-hud-rest-toast-hint">
+            <span class="codex-usage-hud-rest-toast-hint-dot" aria-hidden="true"></span>
+            <span data-rest-reminder-break-countdown="true">休息结束后会自动开始下一轮</span>
+          </p>
+        </div>
         <div class="codex-usage-hud-rest-toast-actions">
           <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-postpone" hidden>稍后提醒</button>
           <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-ack" data-primary="true">我休息好了</button>
@@ -5283,6 +5617,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       support_url: "https://github.com/mingbingfeng/codex-usage-hud",
       rest_reminder_enabled: false,
       rest_reminder_interval_minutes: 45,
+      rest_reminder_break_minutes: 2,
       rest_reminder_postpone_minutes: 10,
       rest_reminder_idle_reset_minutes: 5,
       rest_reminder_work_start_time: "09:00",
@@ -9528,11 +9863,25 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     `;
   }
 
+  function restReminderStatusTitle(state, configEnabled) {
+    if (!configEnabled) return "未开启";
+    switch (String(state || "")) {
+      case "work": return "专注中";
+      case "break": return "休息中";
+      case "lunch": return "午休";
+      case "away": return "离开中";
+      case "off": return "非工作时段";
+      case "disabled": return "未开启";
+      default: return "专注中";
+    }
+  }
+
   function supportPanelHtml(settings, path) {
     const url = String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud");
     const images = Array.isArray(currentPayload()?.supportImages) ? currentPayload().supportImages : [];
     const enabled = !!settings.rest_reminder_enabled;
     const interval = Math.min(180, Math.max(15, Math.round(Number(settings.rest_reminder_interval_minutes) || 45)));
+    const breakMinutes = Math.min(10, Math.max(1, Math.round(Number(settings.rest_reminder_break_minutes) || 2)));
     const postpone = Math.min(30, Math.max(5, Math.round(Number(settings.rest_reminder_postpone_minutes) || 10)));
     const idleReset = Math.min(60, Math.max(0, Math.round(Number(settings.rest_reminder_idle_reset_minutes) || 5)));
     const workStart = String(settings.rest_reminder_work_start_time || "09:00");
@@ -9546,8 +9895,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const notification = reminder.notification && typeof reminder.notification === "object"
       ? reminder.notification : {};
     const notificationLabel = notification.status === "failed"
-      ? `系统通知不可用${notification.error ? `：${notification.error}` : ""}`
-      : notification.status === "sent" ? "系统通知已发送" : "系统通知待测试";
+      ? `通知不可用${notification.error ? `：${notification.error}` : ""}`
+      : notification.status === "sent" ? "通知 OK" : "待测试";
     const qrItems = images.map((item) => `
       <div class="codex-usage-hud-support-qr">
         <div class="codex-usage-hud-support-qr-title">
@@ -9560,55 +9909,66 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return `
       <div class="codex-usage-hud-support">
         <div class="codex-usage-hud-rest-reminder-card">
-          <div class="codex-usage-hud-rest-reminder-title">专注休息提醒</div>
-          <label class="codex-usage-hud-rest-reminder-toggle">
-            <input type="checkbox" data-setting-key="rest_reminder_enabled" ${enabled ? "checked" : ""}>
-            <span>开启休息提醒</span>
-          </label>
+          <div class="codex-usage-hud-rest-reminder-top">
+            <span class="codex-usage-hud-rest-reminder-title">休息提醒</span>
+            <label class="codex-usage-hud-rest-reminder-toggle" title="开启或关闭休息提醒">
+              <input type="checkbox" data-setting-key="rest_reminder_enabled" ${enabled ? "checked" : ""}>
+              <span class="codex-usage-hud-rest-reminder-track" aria-hidden="true"></span>
+            </label>
+            <div class="codex-usage-hud-rest-reminder-status" data-state="${escapeHtml(reminder.state || (enabled ? "work" : "disabled"))}" aria-live="polite">
+              <span data-rest-reminder-status-title="true">${escapeHtml(restReminderStatusTitle(reminder.state, enabled))}</span>
+              <b data-rest-reminder-remaining="true">--:--:--</b>
+            </div>
+          </div>
           <div class="codex-usage-hud-rest-reminder-grid">
-            <label>
-                <span>专注时长（分钟）</span>
-              <input data-setting-key="rest_reminder_interval_minutes" type="number" min="15" max="180" step="1" value="${escapeHtml(interval)}">
+            <label class="codex-usage-hud-rest-reminder-field" title="专注时长（分钟）">
+              <span>时长</span>
+              <input data-setting-key="rest_reminder_interval_minutes" type="number" min="15" max="180" step="1" value="${escapeHtml(interval)}" aria-label="专注时长（分钟）">
             </label>
-            <label>
-                <span>稍后提醒（分钟）</span>
-              <input data-setting-key="rest_reminder_postpone_minutes" type="number" min="5" max="30" step="1" value="${escapeHtml(postpone)}">
+            <label class="codex-usage-hud-rest-reminder-field" title="每次休息时长（分钟）；到时自动开始下一轮">
+              <span>休息</span>
+              <input data-setting-key="rest_reminder_break_minutes" type="number" min="1" max="10" step="1" value="${escapeHtml(breakMinutes)}" aria-label="休息时长（分钟）">
             </label>
-            <label>
-                <span>离开多久算作休息</span>
-              <input data-setting-key="rest_reminder_idle_reset_minutes" type="number" min="0" max="60" step="1" value="${escapeHtml(idleReset)}">
+            <label class="codex-usage-hud-rest-reminder-field" title="稍后提醒（分钟）">
+              <span>延后</span>
+              <input data-setting-key="rest_reminder_postpone_minutes" type="number" min="5" max="30" step="1" value="${escapeHtml(postpone)}" aria-label="稍后提醒（分钟）">
             </label>
-            <label>
-              <span>本轮开始时间</span>
-              <input data-rest-reminder-start-time="true" type="time" value="${escapeHtml(startTime)}">
+            <label class="codex-usage-hud-rest-reminder-field" title="离开多久算作休息（分钟）；回来开始新一轮">
+              <span>离开</span>
+              <input data-setting-key="rest_reminder_idle_reset_minutes" type="number" min="0" max="60" step="1" value="${escapeHtml(idleReset)}" aria-label="离开多久算作休息（分钟）">
+            </label>
+            <label class="codex-usage-hud-rest-reminder-field" title="本轮开始时间，可校正当前轮">
+              <span>本轮</span>
+              <input data-rest-reminder-start-time="true" type="time" value="${escapeHtml(startTime)}" aria-label="本轮开始时间">
             </label>
           </div>
-          <div class="codex-usage-hud-rest-reminder-status" aria-live="polite">
-            <div class="codex-usage-hud-rest-reminder-status-item">
-              <span class="codex-usage-hud-rest-reminder-status-label">本轮开始</span>
-              <strong class="codex-usage-hud-rest-reminder-status-value" data-rest-reminder-start="true">--:--:--</strong>
+          <div class="codex-usage-hud-rest-reminder-schedule">
+            <div class="codex-usage-hud-rest-reminder-slot" title="工作时间；时段外不运行提醒">
+              <span>工作</span>
+              <span class="codex-usage-hud-rest-reminder-range">
+                <input data-setting-key="rest_reminder_work_start_time" type="time" value="${escapeHtml(workStart)}" aria-label="上班时间">
+                <span class="codex-usage-hud-rest-reminder-dash">–</span>
+                <input data-setting-key="rest_reminder_work_end_time" type="time" value="${escapeHtml(workEnd)}" aria-label="下班时间">
+              </span>
+              <span></span>
             </div>
-            <div class="codex-usage-hud-rest-reminder-status-item">
-              <span class="codex-usage-hud-rest-reminder-status-label">距离下一次提醒</span>
-              <strong class="codex-usage-hud-rest-reminder-status-value" data-rest-reminder-remaining="true">--:--:--</strong>
+            <div class="codex-usage-hud-rest-reminder-slot" title="午休暂停区间">
+              <span>午休</span>
+              <span class="codex-usage-hud-rest-reminder-range">
+                <input data-setting-key="rest_reminder_lunch_start_time" type="time" value="${escapeHtml(lunchStart)}" aria-label="午休开始">
+                <span class="codex-usage-hud-rest-reminder-dash">–</span>
+                <input data-setting-key="rest_reminder_lunch_end_time" type="time" value="${escapeHtml(lunchEnd)}" aria-label="午休结束">
+              </span>
+              <label class="codex-usage-hud-rest-reminder-check" title="启用午休暂停">
+                <input data-setting-key="rest_reminder_lunch_enabled" type="checkbox" ${lunchEnabled ? "checked" : ""} aria-label="启用午休暂停">
+              </label>
             </div>
           </div>
-          <div class="codex-usage-hud-support-note">回来时开始新一轮；午休和非工作时段不会运行提醒。</div>
-          <div class="codex-usage-hud-rest-reminder-schedule">
-            <span>工作时间</span>
-            <span class="codex-usage-hud-rest-reminder-range"><input data-setting-key="rest_reminder_work_start_time" type="time" value="${escapeHtml(workStart)}"><span>至</span><input data-setting-key="rest_reminder_work_end_time" type="time" value="${escapeHtml(workEnd)}"></span>
-            <span>时段外暂停</span>
+          <div class="codex-usage-hud-rest-reminder-foot">
+            <div class="codex-usage-hud-rest-reminder-notify" data-kind="${escapeHtml(notification.status === "failed" ? "failed" : notification.status === "sent" ? "sent" : "pending")}" data-rest-reminder-notification="true" title="${escapeHtml(notificationLabel)}">${escapeHtml(notificationLabel)}</div>
+            <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-test-notification" title="发送系统通知并预览提醒">测试</button>
+            <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-save" title="保存提醒设置">保存</button>
           </div>
-          <div class="codex-usage-hud-rest-reminder-schedule">
-            <span>午休暂停</span>
-            <span class="codex-usage-hud-rest-reminder-range"><input data-setting-key="rest_reminder_lunch_start_time" type="time" value="${escapeHtml(lunchStart)}"><span>至</span><input data-setting-key="rest_reminder_lunch_end_time" type="time" value="${escapeHtml(lunchEnd)}"></span>
-            <label><input data-setting-key="rest_reminder_lunch_enabled" type="checkbox" ${lunchEnabled ? "checked" : ""}> 启用</label>
-          </div>
-          <div class="codex-usage-hud-rest-reminder-schedule">
-            <span>系统通知</span><span class="codex-usage-hud-support-note" data-rest-reminder-notification="true">${escapeHtml(notificationLabel)}</span>
-            <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-test-notification">发送测试通知</button>
-          </div>
-          <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-save">保存提醒设置</button>
         </div>
         <div class="codex-usage-hud-support-note">如果这个 HUD 帮你节省了排查 token 和费用的时间，可以扫码支持维护。</div>
         <div class="codex-usage-hud-support-qr-grid">
@@ -9659,8 +10019,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   }
 
   function formatRestReminderInputTime(milliseconds) {
-    if (!Number.isFinite(milliseconds) || milliseconds <= 0) return "09:00";
-    const value = new Date(milliseconds);
+    const value = Number.isFinite(milliseconds) && milliseconds > 0
+      ? new Date(milliseconds)
+      : new Date();
     return [value.getHours(), value.getMinutes()]
       .map((item) => String(item).padStart(2, "0"))
       .join(":");
@@ -9679,15 +10040,30 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden || settingsActiveTab !== "support") return;
     const timing = currentPayload()?.restReminder;
-    const enabled = !!timing?.enabled && timing?.running !== false;
-    const start = modal.querySelector('[data-rest-reminder-start="true"]');
+    const configEnabled = !!timing?.enabled;
+    const running = configEnabled && timing?.running !== false;
+    const state = String(timing?.state || (configEnabled ? "work" : "disabled"));
+    const statusBox = modal.querySelector('.codex-usage-hud-rest-reminder-status');
+    const statusTitle = modal.querySelector('[data-rest-reminder-status-title="true"]');
     const remaining = modal.querySelector('[data-rest-reminder-remaining="true"]');
-    if (start) start.textContent = enabled
-      ? formatRestReminderClock(Number(timing?.timerStartedAtMs))
-      : "开启后计时";
-    if (remaining) remaining.textContent = enabled
-      ? formatRestReminderRemaining((Number(timing?.nextReminderAtMs) - Date.now()) / 1000)
-      : "未开启";
+    const startInput = modal.querySelector('[data-rest-reminder-start-time="true"]');
+    if (statusBox) statusBox.dataset.state = state;
+    if (statusTitle) statusTitle.textContent = restReminderStatusTitle(state, configEnabled);
+    if (startInput && startInput.dataset.userEdited !== "true") {
+      const nextStart = formatRestReminderInputTime(Number(timing?.timerStartedAtMs));
+      if (startInput.value !== nextStart) startInput.value = nextStart;
+    }
+    if (remaining) {
+      if (state === "break") {
+        remaining.textContent = formatRestReminderRemaining(
+          (Number(timing?.breakEndsAtMs) - Date.now()) / 1000,
+        );
+      } else {
+        remaining.textContent = running
+          ? formatRestReminderRemaining((Number(timing?.nextReminderAtMs) - Date.now()) / 1000)
+          : "--:--:--";
+      }
+    }
   }
 
   function ensureRestReminderCountdownTicker() {
@@ -9803,6 +10179,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (status && typeof status === "object" && String(status.message || "")) {
       setSettingsStatus(status.message || "", status.kind || "");
       setSettingsRestartVisible(!!status.restartVisible);
+      const restSaveRequestId = String(status.restReminderSaveRequestId || "");
+      if (
+        status.restReminderSaved === true
+        && !String(status.kind || "")
+        && restSaveRequestId
+        && restSaveRequestId !== restReminderSavedRequestId
+      ) {
+        const startNode = modal.querySelector('[data-rest-reminder-start-time="true"]');
+        if (startNode) delete startNode.dataset.userEdited;
+        restReminderSavedRequestId = restSaveRequestId;
+      }
       return;
     }
     setSettingsStatus(state.message || state.title || "", state.error ? "error" : "");
@@ -9952,6 +10339,14 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         180,
       );
     }
+    if (settingNode("rest_reminder_break_minutes")) {
+      next.rest_reminder_break_minutes = integerValue(
+        "rest_reminder_break_minutes",
+        Number(settings.rest_reminder_break_minutes) || 2,
+        1,
+        10,
+      );
+    }
     if (settingNode("rest_reminder_postpone_minutes")) {
       next.rest_reminder_postpone_minutes = integerValue(
         "rest_reminder_postpone_minutes",
@@ -9980,7 +10375,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       next.rest_reminder_lunch_enabled = !!settingNode("rest_reminder_lunch_enabled").checked;
     }
     const startNode = modal?.querySelector('[data-rest-reminder-start-time="true"]');
-    if (startNode?.value) {
+    if (startNode?.value && startNode.dataset.userEdited === "true") {
       const [hour, minute] = String(startNode.value).split(":").map(Number);
       if (Number.isFinite(hour) && Number.isFinite(minute)) {
         const started = new Date();
@@ -10312,6 +10707,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       });
     }, { capture: true, passive: false });
     root.addEventListener("input", (event) => {
+      const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
+      if (restStartInput && root.contains(restStartInput)) {
+        restStartInput.dataset.userEdited = "true";
+        return;
+      }
       const backupInput = event.target?.closest?.('[data-cleanup-backup-directory="true"]');
       if (backupInput && root.contains(backupInput)) {
         safeCleanupState.backupDirectory = String(backupInput.value || "").trim();
@@ -10344,6 +10744,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       markSettingsProviderDirty();
     });
     root.addEventListener("change", (event) => {
+      const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
+      if (restStartInput && root.contains(restStartInput)) {
+        restStartInput.dataset.userEdited = "true";
+        return;
+      }
       const consent = event.target?.closest?.('[data-cleanup-consent="true"]');
       if (consent && root.contains(consent)) {
         safeCleanupState.includeConsent = !!consent.checked;
@@ -10859,6 +11264,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         submitSettingsCommand({ action: "restReminderAck" }, "正在开始新一轮专注计时...");
         const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
         if (toast) toast.dataset.visible = "false";
+        const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
+        if (mask) {
+          mask.dataset.visible = "false";
+          mask.setAttribute("aria-hidden", "true");
+        }
         return;
       }
       if (action.dataset.action === "rest-reminder-postpone") {
@@ -10867,12 +11277,20 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         submitSettingsCommand({ action: "restReminderPostpone" }, "正在安排稍后提醒...");
         const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
         if (toast) toast.dataset.visible = "false";
+        const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
+        if (mask) {
+          mask.dataset.visible = "false";
+          mask.setAttribute("aria-hidden", "true");
+        }
         return;
       }
       if (action.dataset.action === "rest-reminder-test-notification") {
         event.preventDefault();
         event.stopPropagation();
-        submitSettingsCommand({ action: "restReminderTestNotification" }, "正在发送系统通知测试...");
+        submitSettingsCommand(
+          { action: "restReminderTestNotification" },
+          "正在发送系统通知并打开实际提醒预览..."
+        );
         return;
       }
       if (action.dataset.action === "settings-exit") {
@@ -13363,30 +13781,98 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     refreshComposerBadgeState(root);
   }
 
+  function stopRestReminderOverlayTicker() {
+    if (!restReminderOverlayTimer) return;
+    clearInterval(restReminderOverlayTimer);
+    restReminderOverlayTimer = 0;
+  }
+
+  function syncRestReminderOverlayCountdown() {
+    const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
+    if (!toast || toast.dataset.visible !== "true") {
+      stopRestReminderOverlayTicker();
+      return;
+    }
+    const reminder = currentPayload()?.restReminder;
+    const countdown = toast.querySelector('[data-rest-reminder-break-countdown="true"]');
+    if (!countdown) return;
+    const seconds = (Number(reminder?.breakEndsAtMs) - Date.now()) / 1000;
+    const remaining = formatRestReminderRemaining(Math.max(0, seconds));
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      countdown.textContent = reminder?.preview ? "正在关闭预览..." : "正在开始下一轮...";
+      toast.dataset.visible = "false";
+      const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
+      if (mask) {
+        mask.dataset.visible = "false";
+        mask.setAttribute("aria-hidden", "true");
+      }
+      stopRestReminderOverlayTicker();
+      return;
+    }
+    countdown.textContent = reminder?.preview
+      ? `测试预览 · ${remaining} 后自动关闭，不改动当前计时`
+      : `休息还剩 ${remaining} · 到时自动开始下一轮`;
+  }
+
+  function ensureRestReminderOverlayTicker() {
+    syncRestReminderOverlayCountdown();
+    if (!restReminderOverlayTimer) {
+      restReminderOverlayTimer = setInterval(syncRestReminderOverlayCountdown, 1000);
+    }
+  }
+
   function renderRestReminderToast(root, payload) {
     const host = root || document.getElementById(rootId);
     if (!host) return;
     let toast = host.querySelector('[data-rest-reminder-toast="true"]');
-    if (!toast) {
+    let mask = host.querySelector('[data-rest-reminder-mask="true"]');
+    if (!toast || !mask) {
       host.insertAdjacentHTML("beforeend", restReminderToastMarkup());
       toast = host.querySelector('[data-rest-reminder-toast="true"]');
+      mask = host.querySelector('[data-rest-reminder-mask="true"]');
     }
     if (!toast) return;
     const reminder = payload?.restReminder && typeof payload.restReminder === "object"
       ? payload.restReminder
       : {};
-    const visible = !!reminder.visible;
+    const breakEndsAtMs = Number(reminder.breakEndsAtMs);
+    const visible = !!reminder.visible
+      && Number.isFinite(breakEndsAtMs)
+      && breakEndsAtMs > Date.now();
+    const wasVisible = toast.dataset.visible === "true";
     toast.dataset.visible = visible ? "true" : "false";
+    if (mask) {
+      mask.dataset.visible = visible ? "true" : "false";
+      mask.setAttribute("aria-hidden", visible ? "false" : "true");
+    }
     const messageNode = toast.querySelector('[data-rest-reminder-message="true"]');
     if (messageNode) {
       messageNode.textContent = String(reminder.message || "站起来走走，让眼睛放松片刻。");
+    }
+    const kicker = toast.querySelector(".codex-usage-hud-rest-toast-kicker");
+    if (kicker) {
+      kicker.textContent = reminder.preview ? "预览提醒" : "专注休息";
     }
     const postponeBtn = toast.querySelector('[data-action="rest-reminder-postpone"]');
     if (postponeBtn) {
       const canPostpone = !!reminder.canPostpone;
       postponeBtn.hidden = !canPostpone;
       const minutes = Math.max(1, Math.round(Number(reminder.postponeMinutes) || 10));
-      postponeBtn.textContent = `延后 ${minutes} 分钟`;
+      postponeBtn.textContent = reminder.preview ? "关闭预览" : `延后 ${minutes} 分钟`;
+    }
+    const ackBtn = toast.querySelector('[data-action="rest-reminder-ack"]');
+    if (ackBtn) {
+      ackBtn.textContent = reminder.preview ? "完成预览" : "提前结束休息";
+    }
+    if (visible) {
+      ensureRestReminderOverlayTicker();
+      if (!wasVisible && ackBtn) {
+        requestAnimationFrame(() => {
+          try { ackBtn.focus({ preventScroll: true }); } catch (_) { ackBtn.focus(); }
+        });
+      }
+    } else {
+      stopRestReminderOverlayTicker();
     }
   }
 
@@ -13839,6 +14325,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     clearInterval(window[runningTimerName] || 0);
     clearInterval(restReminderCountdownTimer);
     restReminderCountdownTimer = 0;
+    clearInterval(restReminderOverlayTimer);
+    restReminderOverlayTimer = 0;
     clearInterval(safeCleanupLiveTimer);
     safeCleanupLiveTimer = 0;
     clearTimeout(safeCleanupPreviewTimer);

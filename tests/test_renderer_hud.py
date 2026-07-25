@@ -1826,22 +1826,44 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_rest_reminder_settings_use_product_copy_and_live_countdown(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn("专注休息提醒", script)
-        self.assertIn("本轮开始", script)
-        self.assertIn("距离下一次提醒", script)
-        self.assertIn("data-rest-reminder-start", script)
+        self.assertIn("休息提醒", script)
+        self.assertIn("本轮", script)
+        self.assertIn("data-rest-reminder-start-time", script)
+        self.assertIn("data-rest-reminder-status-title", script)
+        self.assertIn("data-rest-reminder-remaining", script)
+        self.assertIn("restReminderStatusTitle", script)
         self.assertIn("setInterval(syncRestReminderCountdown, 1000)", script)
+        self.assertIn('startInput.dataset.userEdited !== "true"', script)
+        self.assertIn(
+            "formatRestReminderInputTime(Number(timing?.timerStartedAtMs))",
+            script,
+        )
+        self.assertIn('data-setting-key="rest_reminder_break_minutes"', script)
+        self.assertIn('case "break": return "休息中"', script)
         self.assertIn("离开多久算作休息", script)
-        self.assertIn("回来时开始新一轮", script)
         self.assertIn("rest_reminder_work_start_time", script)
         self.assertIn("rest_reminder_lunch_enabled", script)
         self.assertIn("rest-reminder-test-notification", script)
+        self.assertIn("打开实际提醒预览", script)
         self.assertLess(
             script.index("codex-usage-hud-rest-reminder-card"),
             script.index("codex-usage-hud-support-qr-grid"),
         )
         self.assertNotIn("离开后重新计时", script)
         self.assertNotIn("到点会优先弹出 PySide6", script)
+
+    def test_rest_reminder_start_time_only_applies_after_user_edit(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('restStartInput.dataset.userEdited = "true"', script)
+        self.assertIn(
+            'startNode?.value && startNode.dataset.userEdited === "true"',
+            script,
+        )
+        self.assertIn("rest_reminder_timer_started_at_ms = started.getTime()", script)
+        self.assertIn("status.restReminderSaved === true", script)
+        self.assertIn("restReminderSaveRequestId", script)
+        self.assertIn("delete startNode.dataset.userEdited", script)
 
     def test_rest_reminder_toast_receives_pointer_events(self) -> None:
         """HUD root is pointer-events:none; toast + buttons must re-enable hits."""
@@ -1852,12 +1874,31 @@ class RendererHudPayloadTests(unittest.TestCase):
         toast_css = script[toast_css_start:toast_css_end]
         self.assertIn("pointer-events: auto", toast_css)
 
+        mask_css_start = script.index(".codex-usage-hud-rest-mask {")
+        mask_css_end = script.index("}", mask_css_start)
+        mask_css = script[mask_css_start:mask_css_end]
+        self.assertIn("pointer-events: auto", mask_css)
+        self.assertIn("position: fixed", mask_css)
+        self.assertIn("inset: 0", mask_css)
+        self.assertIn("backdrop-filter", mask_css)
+
         # Interactive whitelist also includes the toast class so children inherit.
         whitelist_start = script.index(".codex-usage-hud-settings-modal,")
         whitelist_end = script.index("pointer-events: auto;", whitelist_start)
         whitelist = script[whitelist_start:whitelist_end]
         self.assertIn("codex-usage-hud-rest-toast", whitelist)
+        self.assertIn("codex-usage-hud-rest-mask", whitelist)
 
+        self.assertIn('data-rest-reminder-mask="true"', script)
+        self.assertIn("codex-usage-hud-rest-toast-icon", script)
+        self.assertIn("codex-usage-hud-rest-toast-hint", script)
+        self.assertIn('aria-live="assertive"', script)
+        self.assertIn('data-rest-reminder-break-countdown="true"', script)
+        self.assertIn("setInterval(syncRestReminderOverlayCountdown, 1000)", script)
+        self.assertIn("stopRestReminderOverlayTicker()", script)
+        self.assertIn('toast.dataset.visible = "false"', script)
+        self.assertIn("到时自动开始下一轮", script)
+        self.assertIn("专注休息", script)
         self.assertIn('data-action="rest-reminder-ack"', script)
         self.assertIn('data-action="rest-reminder-postpone"', script)
         self.assertIn('action: "restReminderAck"', script)

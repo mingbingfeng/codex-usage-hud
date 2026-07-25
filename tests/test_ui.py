@@ -12505,6 +12505,44 @@ class DaemonLifecycleTests(unittest.TestCase):
             self.assertEqual(status["cleanupBackupDirectory"], str(selected))
             self.assertEqual(status["safeCleanupRequestId"], "backup-picker-1")
 
+    def test_rest_reminder_save_echoes_success_request_for_dirty_reset(self) -> None:
+        current = UserConfig.from_dict(
+            {
+                "rest_reminder_enabled": True,
+                "rest_reminder_interval_minutes": 45,
+                "rest_reminder_break_minutes": 2,
+            }
+        )
+        settings_store = MagicMock()
+        settings_store.load.return_value = current
+        presenter = MagicMock()
+        context = SimpleNamespace(
+            settings_store=settings_store,
+            rest_reminder=presenter,
+        )
+        settings = current.to_dict()
+        settings["rest_reminder_timer_started_at_ms"] = 1_700_000_000_000
+
+        with patch("codex_usage_hud.cli._save_renderer_user_config") as save_config:
+            status = _handle_renderer_settings_command(
+                {
+                    "id": "rest-save-1",
+                    "action": "save",
+                    "section": "restReminder",
+                    "settings": settings,
+                },
+                context,
+                MagicMock(),
+                MagicMock(),
+            )
+
+        save_config.assert_called_once()
+        presenter.adjust_cycle_started_at_ms.assert_called_once_with(
+            1_700_000_000_000
+        )
+        self.assertTrue(status["restReminderSaved"])
+        self.assertEqual(status["restReminderSaveRequestId"], "rest-save-1")
+
     def test_safe_cleanup_reveal_resolves_opaque_item_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary).resolve()

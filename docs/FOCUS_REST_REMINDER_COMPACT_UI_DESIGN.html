@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>休息提醒 · 紧凑设置区 v2</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #0a0c0f;
+      --surface: #151a1f;
+      --surface-2: #11161b;
+      --surface-3: #1a2128;
+      --line: #2f3842;
+      --line-soft: #232b33;
+      --text: #e8eef4;
+      --muted: #9aabba;
+      --faint: #6f7f8d;
+      --accent: #f0c86a;
+      --accent-ink: #1a1408;
+      --green: #73d5a0;
+      --orange: #efa96a;
+      --danger: #ef8c8c;
+      --blue: #9ccbff;
+      --shadow: 0 22px 60px rgba(0, 0, 0, .42);
+      font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(ellipse 70% 40% at 50% -10%, rgba(240, 200, 106, .07), transparent 55%),
+        var(--page);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    button, input { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+
+    .page {
+      width: min(1180px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 20px 0 36px;
+    }
+
+    .hero {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      justify-content: space-between;
+      gap: 10px 16px;
+      margin-bottom: 14px;
+    }
+    .hero h1 {
+      margin: 0 0 3px;
+      font-size: 19px;
+      font-weight: 750;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      max-width: 62ch;
+    }
+    .hero-tools {
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .chip strong { color: var(--accent); }
+    .seg {
+      display: inline-flex;
+      padding: 2px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+    }
+    .seg button {
+      min-height: 26px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 10px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .seg button[data-active="true"] {
+      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .metric {
+      padding: 10px 12px;
+      border: 1px solid var(--line-soft);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+    .metric .k { color: var(--faint); font-size: 10px; margin-bottom: 2px; }
+    .metric .v { font-size: 15px; font-weight: 750; font-variant-numeric: tabular-nums; }
+    .metric .v em { color: var(--green); font-style: normal; }
+    .metric .s { margin-top: 2px; color: var(--muted); font-size: 11px; }
+
+    .stage {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+    .panel {
+      min-width: 0;
+      border: 1px solid #3a444c;
+      border-radius: 11px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #12171c;
+    }
+    .panel-head h2 { margin: 0; font-size: 12px; font-weight: 700; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      padding: 0 7px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
+    .badge.now {
+      color: #f3d9a0;
+      background: rgba(240, 200, 106, .12);
+      border: 1px solid rgba(240, 200, 106, .28);
+    }
+    .badge.next {
+      color: #a8efc8;
+      background: rgba(115, 213, 160, .1);
+      border: 1px solid rgba(115, 213, 160, .28);
+    }
+    .panel-body { padding: 12px; }
+
+    .fake-tabs {
+      display: flex;
+      gap: 3px;
+      margin-bottom: 10px;
+      padding-bottom: 7px;
+      border-bottom: 1px solid var(--line-soft);
+      overflow: auto;
+    }
+    .fake-tab {
+      flex: 0 0 auto;
+      padding: 3px 7px;
+      border-radius: 4px;
+      color: var(--faint);
+      font-size: 10px;
+    }
+    .fake-tab[data-active="true"] {
+      color: var(--accent);
+      background: rgba(240, 200, 106, .08);
+    }
+    .page-title {
+      margin: 0 0 10px;
+      font-size: 14px;
+      font-weight: 750;
+    }
+    .page-title span {
+      display: block;
+      margin-top: 1px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 400;
+    }
+
+    .field-input {
+      width: 100%;
+      min-height: 28px;
+      box-sizing: border-box;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--text);
+      padding: 0 7px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .field-input:focus {
+      outline: none;
+      border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+      box-shadow: 0 0 0 2px rgba(240, 200, 106, .1);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: var(--surface-3);
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .btn:hover { border-color: #556270; }
+    .btn-primary {
+      border-color: transparent;
+      background: linear-gradient(180deg, #f8df95, #f0c86a);
+      color: var(--accent-ink);
+    }
+    .btn-ghost {
+      color: var(--muted);
+      background: transparent;
+    }
+
+    /* ========== CURRENT ========== */
+    .current-card {
+      display: grid;
+      gap: 10px;
+      padding: 12px 0 14px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+    .current-title { font-size: 13px; font-weight: 700; }
+    .current-toggle {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .current-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .current-grid label {
+      display: grid;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .current-status {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 9px 10px;
+      border-radius: 9px;
+      background: var(--surface-2);
+    }
+    .current-status-item { display: grid; gap: 2px; }
+    .current-status-item span { color: var(--muted); font-size: 10px; }
+    .current-status-item strong {
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    .current-note { color: var(--muted); font-size: 11px; }
+    .current-schedule {
+      display: grid;
+      grid-template-columns: 90px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding-top: 8px;
+      border-top: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .current-range {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .current-range .field-input { width: 94px; }
+    .current-actions { display: grid; gap: 8px; }
+
+    .qr-placeholder {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      opacity: .5;
+    }
+    .qr-box {
+      aspect-ratio: 1.2;
+      border: 1px dashed var(--line);
+      border-radius: 7px;
+      background: var(--surface-2);
+      display: grid;
+      place-items: center;
+      color: var(--faint);
+      font-size: 10px;
+    }
+
+    /* ========== v2 DENSE ========== */
+    .dense-card {
+      display: grid;
+      gap: 7px;
+      padding: 8px 0 10px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .dense-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 26px;
+    }
+    .dense-title {
+      font-size: 12px;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+    }
+    .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+    .track {
+      position: relative;
+      width: 28px;
+      height: 16px;
+      border-radius: 999px;
+      background: #3a4652;
+      transition: background .12s ease;
+    }
+    .track::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #f4f6f8;
+      transition: transform .12s ease;
+    }
+    .toggle input:checked + .track { background: var(--green); }
+    .toggle input:checked + .track::after { transform: translateX(12px); }
+
+    .dense-status {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 6px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .dense-status[data-state="lunch"] { color: var(--orange); }
+    .dense-status[data-state="off"] { color: var(--faint); }
+    .dense-status b {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+    }
+    .dense-status[data-state="lunch"] b,
+    .dense-status[data-state="off"] b {
+      color: inherit;
+      font-weight: 650;
+    }
+
+    .dense-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 5px 6px;
+    }
+    .dense-field {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      min-height: 28px;
+      padding: 0 6px 0 7px;
+      border: 1px solid var(--line-soft);
+      border-radius: 6px;
+      background: rgba(255,255,255,.015);
+    }
+    .dense-field > span {
+      color: var(--faint);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .dense-field .field-input {
+      min-height: 24px;
+      border: 0;
+      background: transparent;
+      padding: 0;
+      text-align: right;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .dense-field .field-input:focus {
+      box-shadow: none;
+      outline: none;
+    }
+    .dense-field:focus-within {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+      box-shadow: 0 0 0 2px rgba(240, 200, 106, .08);
+    }
+
+    .dense-schedule {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    .dense-slot {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 5px;
+      min-height: 30px;
+      padding: 0 7px;
+      border: 1px solid var(--line-soft);
+      border-radius: 6px;
+      background: rgba(255,255,255,.015);
+    }
+    .dense-slot > span {
+      color: var(--faint);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .dense-slot .range {
+      display: inline-flex;
+      align-items: center;
+      justify-content: end;
+      gap: 3px;
+      min-width: 0;
+    }
+    .dense-slot .field-input {
+      width: 62px;
+      min-height: 22px;
+      border: 0;
+      background: transparent;
+      padding: 0;
+      text-align: center;
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .dense-slot .field-input:focus { box-shadow: none; }
+    .dense-slot:focus-within {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    }
+    .dense-slot .dash { color: var(--faint); font-size: 10px; }
+    .dense-slot .mini-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 0;
+      margin-left: 2px;
+    }
+    .dense-slot .mini-check input {
+      width: 13px;
+      height: 13px;
+      margin: 0;
+      accent-color: var(--green);
+    }
+
+    .dense-foot {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 6px;
+      align-items: center;
+    }
+    .dense-notify {
+      min-width: 0;
+      color: var(--faint);
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dense-notify[data-kind="sent"] { color: var(--green); }
+    .dense-notify[data-kind="failed"] { color: var(--danger); }
+    .dense-notify[data-kind="pending"] { color: var(--faint); }
+    .dense-foot .btn {
+      min-height: 26px;
+      min-width: 52px;
+      padding: 0 9px;
+      font-size: 11px;
+    }
+
+    .callouts {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 10px;
+    }
+    .callout {
+      padding: 12px 13px;
+      border: 1px solid var(--line-soft);
+      border-radius: 9px;
+      background: var(--surface);
+    }
+    .callout h3 { margin: 0 0 7px; font-size: 12px; }
+    .callout ul {
+      margin: 0;
+      padding-left: 15px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .callout li + li { margin-top: 3px; }
+    .callout code {
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      font-size: 10px;
+      color: var(--blue);
+    }
+    .wire {
+      margin: 0;
+      padding: 10px 12px;
+      border-radius: 7px;
+      background: #0d1115;
+      border: 1px solid var(--line-soft);
+      color: #c5d3df;
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre;
+      overflow: auto;
+    }
+
+    .height-ruler {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 7px;
+      color: var(--faint);
+      font-size: 10px;
+    }
+    .height-bar {
+      position: relative;
+      flex: 1;
+      height: 5px;
+      border-radius: 999px;
+      background: #1c242c;
+      overflow: hidden;
+    }
+    .height-bar > i {
+      position: absolute;
+      inset: 0 auto 0 0;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #5a6774, #8a96a2);
+    }
+    .height-bar > i.good {
+      background: linear-gradient(90deg, #4ea87a, #73d5a0);
+    }
+
+    .cut-list {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 12px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .cut-list li::before {
+      content: "– ";
+      color: var(--danger);
+    }
+
+    @media (max-width: 980px) {
+      .stage, .metrics, .callouts { grid-template-columns: 1fr; }
+      .current-grid, .dense-grid, .dense-schedule { grid-template-columns: 1fr 1fr; }
+      .current-schedule {
+        grid-template-columns: 72px minmax(0, 1fr);
+      }
+      .current-schedule > :last-child {
+        grid-column: 2;
+        padding-bottom: 4px;
+      }
+      .dense-foot { grid-template-columns: 1fr auto auto; }
+      .cut-list { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div>
+        <h1>休息提醒 · 设置区更紧凑 v2</h1>
+        <p>相对 v1 再砍装饰与解释文案：短 label、内联输入、时段并排、通知默认极短。字段与计时语义不变。</p>
+      </div>
+      <div class="hero-tools">
+        <span class="chip">设计稿 <strong>v2 denser</strong></span>
+        <div class="seg" role="group" aria-label="预览状态">
+          <button type="button" data-state="focus" data-active="true">专注中</button>
+          <button type="button" data-state="lunch">午休</button>
+          <button type="button" data-state="off">非工作</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="metrics" aria-label="压缩目标">
+      <div class="metric">
+        <div class="k">提醒区目标高度</div>
+        <div class="v">~160<span style="color:var(--muted);font-size:12px;font-weight:600"> px</span></div>
+        <div class="s">现状 ~330 · v1 ~210 · 本版再压</div>
+      </div>
+      <div class="metric">
+        <div class="k">可见层级</div>
+        <div class="v">4 行</div>
+        <div class="s">顶行 · 字段 · 时段 · 底行</div>
+      </div>
+      <div class="metric">
+        <div class="k">配置语义</div>
+        <div class="v"><em>零变更</em></div>
+        <div class="s">key / 范围 / 保存行为不变</div>
+      </div>
+    </section>
+
+    <section class="stage">
+      <!-- CURRENT -->
+      <article class="panel" aria-label="现状">
+        <div class="panel-head">
+          <h2>现状 · 纵向堆叠</h2>
+          <span class="badge now">Current</span>
+        </div>
+        <div class="panel-body">
+          <div class="fake-tabs">
+            <span class="fake-tab">设置</span>
+            <span class="fake-tab">空间清理</span>
+            <span class="fake-tab">用量总览</span>
+            <span class="fake-tab" data-active="true">请作者喝咖啡</span>
+            <span class="fake-tab">版本更新</span>
+          </div>
+          <h3 class="page-title">请作者喝咖啡<span>如果这个 HUD 对你有帮助，欢迎扫码支持维护。</span></h3>
+
+          <div class="current-card" id="current-card">
+            <div class="current-title">专注休息提醒</div>
+            <label class="current-toggle">
+              <input type="checkbox" checked>
+              <span>开启休息提醒</span>
+            </label>
+            <div class="current-grid">
+              <label><span>专注时长（分钟）</span><input class="field-input" type="number" value="45"></label>
+              <label><span>稍后提醒（分钟）</span><input class="field-input" type="number" value="10"></label>
+              <label><span>离开多久算作休息</span><input class="field-input" type="number" value="5"></label>
+              <label><span>本轮开始时间</span><input class="field-input" type="time" value="09:15"></label>
+            </div>
+            <div class="current-status">
+              <div class="current-status-item"><span>本轮开始</span><strong>09:15:00</strong></div>
+              <div class="current-status-item"><span>距离下一次提醒</span><strong class="js-remain">00:32:18</strong></div>
+            </div>
+            <div class="current-note">回来时开始新一轮；午休和非工作时段不会运行提醒。</div>
+            <div class="current-schedule">
+              <span>工作时间</span>
+              <span class="current-range"><input class="field-input" type="time" value="09:00"><span>至</span><input class="field-input" type="time" value="18:00"></span>
+              <span>时段外暂停</span>
+            </div>
+            <div class="current-schedule">
+              <span>午休暂停</span>
+              <span class="current-range"><input class="field-input" type="time" value="12:00"><span>至</span><input class="field-input" type="time" value="13:30"></span>
+              <label><input type="checkbox" checked> 启用</label>
+            </div>
+            <div class="current-schedule">
+              <span>系统通知</span>
+              <span class="current-note">系统通知已发送</span>
+              <button class="btn btn-ghost" type="button">发送测试通知并预览</button>
+            </div>
+            <div class="current-actions">
+              <button class="btn btn-primary" type="button">保存提醒设置</button>
+            </div>
+          </div>
+
+          <div class="height-ruler">
+            <span>实测高度</span>
+            <div class="height-bar"><i id="current-bar" style="width:100%"></i></div>
+            <strong id="current-h">—</strong>
+          </div>
+
+          <div class="qr-placeholder" aria-hidden="true">
+            <div class="qr-box">支付宝</div>
+            <div class="qr-box">微信</div>
+          </div>
+        </div>
+      </article>
+
+      <!-- DENSE v2 -->
+      <article class="panel" aria-label="紧凑方案 v2">
+        <div class="panel-head">
+          <h2>方案 · 四行 denser</h2>
+          <span class="badge next">v2 Proposed</span>
+        </div>
+        <div class="panel-body">
+          <div class="fake-tabs">
+            <span class="fake-tab">设置</span>
+            <span class="fake-tab">空间清理</span>
+            <span class="fake-tab">用量总览</span>
+            <span class="fake-tab" data-active="true">请作者喝咖啡</span>
+            <span class="fake-tab">版本更新</span>
+          </div>
+          <h3 class="page-title">请作者喝咖啡<span>如果这个 HUD 对你有帮助，欢迎扫码支持维护。</span></h3>
+
+          <div class="dense-card" id="dense-card">
+            <!-- row 1 -->
+            <div class="dense-top">
+              <span class="dense-title">休息提醒</span>
+              <label class="toggle" title="开启或关闭休息提醒">
+                <input id="enabled" type="checkbox" checked>
+                <span class="track" aria-hidden="true"></span>
+              </label>
+              <div class="dense-status" id="status" data-state="focus" aria-live="polite">
+                <span id="status-title">专注中</span>
+                <b class="js-remain">00:32:18</b>
+              </div>
+            </div>
+
+            <!-- row 2 -->
+            <div class="dense-grid">
+              <label class="dense-field" title="专注时长（分钟）">
+                <span>时长</span>
+                <input class="field-input" type="number" min="15" max="180" value="45" aria-label="专注时长（分钟）">
+              </label>
+              <label class="dense-field" title="稍后提醒（分钟）">
+                <span>延后</span>
+                <input class="field-input" type="number" min="5" max="30" value="10" aria-label="稍后提醒（分钟）">
+              </label>
+              <label class="dense-field" title="离开多久算作休息（分钟）；回来开始新一轮">
+                <span>离开</span>
+                <input class="field-input" type="number" min="0" max="60" value="5" aria-label="离开多久算作休息（分钟）">
+              </label>
+              <label class="dense-field" title="本轮开始时间，可校正当前轮">
+                <span>本轮</span>
+                <input class="field-input" id="start-time" type="time" value="09:15" aria-label="本轮开始时间">
+              </label>
+            </div>
+
+            <!-- row 3 -->
+            <div class="dense-schedule">
+              <div class="dense-slot" title="工作时间；时段外不运行">
+                <span>工作</span>
+                <span class="range">
+                  <input class="field-input" type="time" value="09:00" aria-label="上班时间">
+                  <span class="dash">–</span>
+                  <input class="field-input" type="time" value="18:00" aria-label="下班时间">
+                </span>
+                <span></span>
+              </div>
+              <div class="dense-slot" title="午休暂停区间">
+                <span>午休</span>
+                <span class="range">
+                  <input class="field-input" type="time" value="12:00" aria-label="午休开始">
+                  <span class="dash">–</span>
+                  <input class="field-input" type="time" value="13:30" aria-label="午休结束">
+                </span>
+                <label class="mini-check" title="启用午休暂停">
+                  <input id="lunch-enabled" type="checkbox" checked aria-label="启用午休暂停">
+                </label>
+              </div>
+            </div>
+
+            <!-- row 4 -->
+            <div class="dense-foot">
+              <div class="dense-notify" id="notify" data-kind="sent">通知 OK</div>
+              <button class="btn btn-ghost" id="test-btn" type="button" title="发送系统通知并预览提醒">测试</button>
+              <button class="btn btn-primary" id="save-btn" type="button" title="保存提醒设置">保存</button>
+            </div>
+          </div>
+
+          <div class="height-ruler">
+            <span>实测高度</span>
+            <div class="height-bar"><i class="good" id="dense-bar" style="width:50%"></i></div>
+            <strong id="dense-h">—</strong>
+          </div>
+
+          <div class="qr-placeholder" aria-hidden="true">
+            <div class="qr-box">支付宝</div>
+            <div class="qr-box">微信</div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="callouts">
+      <div class="callout">
+        <h3>v2 线框</h3>
+        <pre class="wire">休息提醒  [toggle]                 专注中  00:32:18
+┌时长 45┐┌延后 10┐┌离开  5┐┌本轮 09:15┐
+┌工作 09:00–18:00 ┐ ┌午休 12:00–13:30 ☑┐
+通知 OK                         [测试][保存]</pre>
+      </div>
+      <div class="callout">
+        <h3>相对 v1 再砍掉</h3>
+        <ul class="cut-list">
+          <li>字段下方 hint 行</li>
+          <li>「时段外暂停」尾注</li>
+          <li>状态胶囊边框装饰</li>
+          <li>「剩余」二字</li>
+          <li>开关旁「启用」文字</li>
+          <li>「（分钟）」重复单位</li>
+          <li>「系统通知可用」长文案</li>
+          <li>「发送测试通知并预览」长按钮</li>
+        </ul>
+      </div>
+      <div class="callout">
+        <h3>实现映射</h3>
+        <ul>
+          <li>仍在 <code>supportPanelHtml()</code> 的 rest-reminder card</li>
+          <li>保留全部 <code>data-setting-key</code> / <code>data-rest-reminder-*</code></li>
+          <li>完整名称放 <code>title</code> + <code>aria-label</code></li>
+          <li>通知：默认短状态；<code>failed</code> 时展开错误</li>
+          <li>二维码区位置与权重不变</li>
+        </ul>
+      </div>
+      <div class="callout">
+        <h3>无障碍</h3>
+        <ul>
+          <li>短 label 不替代语义，控件带完整 <code>aria-label</code></li>
+          <li>状态区 <code>aria-live="polite"</code> 保留</li>
+          <li>午休 checkbox 单独可聚焦</li>
+          <li>失败通知用颜色 + 文案，不只靠颜色</li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const stateButtons = [...document.querySelectorAll(".seg button")];
+    const enabled = document.getElementById("enabled");
+    const status = document.getElementById("status");
+    const statusTitle = document.getElementById("status-title");
+    const notify = document.getElementById("notify");
+    let previewState = "focus";
+
+    function applyState() {
+      const on = enabled.checked;
+      const state = on ? previewState : "off";
+      status.dataset.state = state;
+      if (!on) {
+        statusTitle.textContent = "已关";
+      } else if (state === "lunch") {
+        statusTitle.textContent = "午休";
+      } else if (state === "off") {
+        statusTitle.textContent = "下班";
+      } else {
+        statusTitle.textContent = "专注中";
+      }
+    }
+
+    stateButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        previewState = btn.dataset.state;
+        stateButtons.forEach((b) => { b.dataset.active = b === btn ? "true" : "false"; });
+        applyState();
+      });
+    });
+    enabled.addEventListener("change", applyState);
+
+    document.getElementById("test-btn").addEventListener("click", () => {
+      notify.dataset.kind = "sent";
+      notify.textContent = "通知 OK";
+    });
+    document.getElementById("save-btn").addEventListener("click", () => {
+      notify.dataset.kind = "sent";
+      notify.textContent = "已保存";
+      window.setTimeout(() => { notify.textContent = "通知 OK"; }, 1400);
+    });
+
+    let remain = 32 * 60 + 18;
+    function tick() {
+      remain = Math.max(0, remain - 1);
+      const h = String(Math.floor(remain / 3600)).padStart(2, "0");
+      const m = String(Math.floor((remain % 3600) / 60)).padStart(2, "0");
+      const s = String(remain % 60).padStart(2, "0");
+      const text = `${h}:${m}:${s}`;
+      document.querySelectorAll(".js-remain").forEach((el) => { el.textContent = text; });
+    }
+    setInterval(tick, 1000);
+
+    function measure() {
+      const current = document.getElementById("current-card");
+      const dense = document.getElementById("dense-card");
+      const ch = Math.round(current.getBoundingClientRect().height);
+      const dh = Math.round(dense.getBoundingClientRect().height);
+      document.getElementById("current-h").textContent = `${ch}px`;
+      document.getElementById("dense-h").textContent = `${dh}px`;
+      const max = Math.max(ch, dh, 1);
+      document.getElementById("current-bar").style.width = `${Math.round((ch / max) * 100)}%`;
+      document.getElementById("dense-bar").style.width = `${Math.round((dh / max) * 100)}%`;
+    }
+    window.addEventListener("resize", measure);
+    measure();
+    applyState();
+  </script>
+</body>
+</html>
