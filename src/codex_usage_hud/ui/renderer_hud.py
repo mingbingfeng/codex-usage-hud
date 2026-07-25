@@ -2103,7 +2103,33 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         font-size: 13px;
         font-weight: 700;
       }
-      #${rootId} .codex-usage-hud-settings-close,
+      #${rootId} .codex-usage-hud-settings-close {
+        box-sizing: border-box;
+        flex: 0 0 auto;
+        width: 32px;
+        height: 32px;
+        min-width: 32px;
+        min-height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 6px;
+        background: var(--codex-usage-hud-panel-border, #2e3846);
+        color: var(--codex-usage-hud-text, #dde7f2);
+        padding: 0;
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1;
+        cursor: pointer;
+        pointer-events: auto;
+        -webkit-app-region: no-drag;
+      }
+      #${rootId} .codex-usage-hud-settings-close:hover {
+        background: color-mix(in srgb, var(--codex-usage-hud-panel-border, #2e3846) 72%, #ffffff 28%);
+        color: #ffffff;
+      }
       #${rootId} .codex-usage-hud-settings-action {
         border: 0;
         border-radius: 5px;

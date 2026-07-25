@@ -1883,6 +1883,23 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("restReminderSaveRequestId", script)
         self.assertIn("delete startNode.dataset.userEdited", script)
 
+    def test_settings_close_button_has_large_hit_target(self) -> None:
+        """Settings modal X should stay easy to click, not glyph-sized."""
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        css_start = script.index(".codex-usage-hud-settings-close {")
+        css_end = script.index("}", css_start)
+        css = script[css_start:css_end]
+        self.assertIn("width: 32px", css)
+        self.assertIn("height: 32px", css)
+        self.assertIn("min-width: 32px", css)
+        self.assertIn("min-height: 32px", css)
+        self.assertIn("pointer-events: auto", css)
+        self.assertIn("-webkit-app-region: no-drag", css)
+        self.assertIn("inline-flex", css)
+        self.assertIn('data-action="settings-close"', script)
+        self.assertIn('aria-label="关闭"', script)
+
     def test_rest_reminder_toast_receives_pointer_events(self) -> None:
         """HUD root is pointer-events:none; toast + buttons must re-enable hits."""
         script = renderer_hud.RENDERER_HUD_SCRIPT
