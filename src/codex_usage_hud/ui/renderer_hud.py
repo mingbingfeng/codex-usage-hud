@@ -5927,6 +5927,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     "[role='button']",
   ].join(",");
 
+  function activeSessionNodeOwnedByHud(node) {
+    return !!node?.closest?.(`#${rootId}`);
+  }
+
+  function activeSessionFirstOutsideHud(selector) {
+    return Array.from(document.querySelectorAll(selector))
+      .find((node) => !activeSessionNodeOwnedByHud(node)) || null;
+  }
+
   function activeSessionLocationId() {
     const source = `${location.pathname}${location.search}${location.hash}`;
     const match = source.match(/(?:session|conversation|thread)(?:\/|=|:|-)([A-Za-z0-9_.-]+)/i)
@@ -6130,6 +6139,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const container = activeSessionContainer();
     const root = container || document;
     return Array.from(root.querySelectorAll(activeSessionRowSelector))
+      .filter((row) => !activeSessionNodeOwnedByHud(row))
       .filter((row) => activeSessionRowLooksThread(row))
       .filter((row) => {
         const ref = activeSessionRefFromRow(row);
@@ -6163,9 +6173,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   }
 
   function activeSessionContainer() {
-    const row = document.querySelector(activeSessionIdentitySelector)
-      || document.querySelector(activeSessionTitleSelector)?.closest?.(activeSessionRowSelector)
-      || document.querySelector(activeSessionRowSelector);
+    const titleNode = activeSessionFirstOutsideHud(activeSessionTitleSelector);
+    const row = activeSessionFirstOutsideHud(activeSessionIdentitySelector)
+      || titleNode?.closest?.(activeSessionRowSelector)
+      || activeSessionFirstOutsideHud(activeSessionRowSelector);
     return row?.closest?.("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
       || row?.parentElement
       || document.querySelector("aside, nav, [role='navigation'], [data-testid*='sidebar' i], [class*='sidebar' i]")
@@ -6522,6 +6533,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function ensureActiveSessionWatchers() {
     if (!window[activeSessionClickHandlerName]) {
       window[activeSessionClickHandlerName] = (event) => {
+        if (activeSessionNodeOwnedByHud(event.target)) return;
         const submitButton = event.target?.closest?.("button, [role='button']");
         if (
           !composerBadgeEnabled
@@ -7202,7 +7214,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       const tag = selectable || opensSession ? "button" : "div";
       const action = selectable || opensSession ? sessionAction : "";
       const actionAttrs = action
-        ? ` type="button" data-action="${escapeHtml(action)}" data-session-id="${escapeHtml(sessionId)}" data-selected="${String(sessionId === selectedSessionId)}" aria-label="${escapeHtml(selectable ? `查看会话 ${label}` : `打开会话 ${label}`)}"`
+        ? ` type="button" data-action="${escapeHtml(action)}" data-usage-session-id="${escapeHtml(sessionId)}" data-selected="${String(sessionId === selectedSessionId)}" aria-label="${escapeHtml(selectable ? `查看会话 ${label}` : `打开会话 ${label}`)}"`
         : "";
       const provider = String(item?.provider || "").trim();
       const workdir = String(item?.workdirName || "").trim();
@@ -9270,7 +9282,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           <h3>${escapeHtml(title)}</h3>
           <span class="codex-usage-hud-background-detail-sub">会话用量 · 本地聚合</span>
         </div>
-        ${actionable ? '<button type="button" class="codex-usage-hud-settings-action" data-action="usage-insights-session" data-session-id="' + escapeHtml(sessionId) + '" data-target-title="' + escapeHtml(title) + '" data-workdir="' + escapeHtml(workdir) + '">打开会话</button>' : '<span class="codex-usage-hud-background-status">仅统计</span>'}
+        ${actionable ? '<button type="button" class="codex-usage-hud-settings-action" data-action="usage-insights-session" data-usage-session-id="' + escapeHtml(sessionId) + '" data-target-title="' + escapeHtml(title) + '" data-workdir="' + escapeHtml(workdir) + '">打开会话</button>' : '<span class="codex-usage-hud-background-status">仅统计</span>'}
       </div>
       <div class="codex-usage-hud-background-detail-grid">
         <div><span>Provider</span><strong>${escapeHtml(String(session?.provider || "未知"))}</strong></div>
@@ -11022,7 +11034,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (action.dataset.action === "background-usage-session-select") {
         event.preventDefault();
         event.stopPropagation();
-        backgroundUsageState.selectedSessionId = String(action.dataset.sessionId || "").trim();
+        backgroundUsageState.selectedSessionId = String(action.dataset.usageSessionId || "").trim();
         syncBackgroundUsagePanel();
         return;
       }
@@ -11064,7 +11076,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (action.dataset.action === "usage-insights-session") {
         event.preventDefault();
         event.stopPropagation();
-        const sessionId = String(action.dataset.sessionId || "").trim();
+        const sessionId = String(action.dataset.usageSessionId || "").trim();
         if (!sessionId) return;
         const submitted = submitSettingsCommand(
           {

@@ -312,6 +312,22 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("a[href*='thread']", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("[role='button']", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('postActiveSession("click"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn(
+            "function activeSessionNodeOwnedByHud(node)",
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn(
+            "function activeSessionFirstOutsideHud(selector)",
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn(
+            "if (activeSessionNodeOwnedByHud(event.target)) return;",
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
+        self.assertIn(
+            ".filter((row) => !activeSessionNodeOwnedByHud(row))",
+            renderer_hud.RENDERER_HUD_SCRIPT,
+        )
         self.assertIn("activeSessionSelectionSeqName", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("activeSessionAppliedSeqName", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("previousActiveSessionSelectionSeq", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -804,6 +820,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('sessionAction: "background-usage-session-select"', script)
         self.assertIn('data-session-ranking-detail="true"', script)
         self.assertIn('"background-usage-session-select"', script)
+        self.assertIn('data-usage-session-id="${escapeHtml(sessionId)}"', script)
+        self.assertIn("action.dataset.usageSessionId", script)
         self.assertNotIn(
             '.codex-usage-hud-background-master-detail[data-session-ranking="true"] {\n'
             '        grid-template-columns: minmax(0, 1fr);',
@@ -1504,10 +1522,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
         self.assertIn(
-            "document.querySelector(activeSessionIdentitySelector)", script
+            "activeSessionFirstOutsideHud(activeSessionIdentitySelector)", script
         )
         self.assertIn(
-            "document.querySelector(activeSessionTitleSelector)?.closest?.(activeSessionRowSelector)",
+            "titleNode?.closest?.(activeSessionRowSelector)",
             script,
         )
 
