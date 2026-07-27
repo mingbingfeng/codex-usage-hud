@@ -2464,6 +2464,50 @@ class BudgetHelperTests(unittest.TestCase):
             retained = active_work_items_for_snapshot(context, snapshot, parent)
             self.assertEqual([item.id for item in retained], ["session-parent"])
 
+    def test_active_work_items_show_independent_desktop_delegation(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            parent = root / "parent.jsonl"
+            delegated = root / "delegated.jsonl"
+            parent_rows = [
+                {"timestamp": now.isoformat(), "type": "session_meta", "payload": {
+                    "id": "session-parent", "source": "vscode",
+                    "originator": "Codex Desktop"}},
+            ]
+            delegated_rows = [
+                {"timestamp": now.isoformat(), "type": "session_meta", "payload": {
+                    "id": "session-delegated", "source": "vscode",
+                    "originator": "Codex Desktop", "thread_source": "subagent"}},
+                {"timestamp": now.isoformat(), "type": "event_msg",
+                 "payload": {"type": "task_started"}},
+                {"timestamp": now.isoformat(), "type": "event_msg", "payload": {
+                    "type": "user_message", "message":
+                    "<codex_delegation>\n<source_thread_id>session-parent</source_thread_id>"
+                    "<input>continue independently</input>\n</codex_delegation>"}},
+                {"timestamp": now.isoformat(), "type": "event_msg",
+                 "payload": {"type": "agent_message", "message": "working"}},
+            ]
+            parent.write_text("\n".join(json.dumps(row) for row in parent_rows) + "\n", encoding="utf-8")
+            delegated.write_text("\n".join(json.dumps(row) for row in delegated_rows) + "\n", encoding="utf-8")
+            snapshot = parser.parse_file(parent)
+            context = SimpleNamespace(sessions_root=root, parser=parser, active_session_tracker=None)
+            items = active_work_items_for_snapshot(context, snapshot, parent)
+        delegated_item = next(item for item in items if item.id == "session-delegated")
+        self.assertIn(delegated_item.status, {"running", "active"})
+
+    def test_internal_desktop_subagent_with_parent_stays_hidden(self) -> None:
+        snapshot = ParsedSession(
+            session_id="session-child",
+            client_kind="app",
+            thread_source="subagent",
+            parent_thread_id="session-parent",
+            agent_nickname="Rawls",
+        )
+        self.assertTrue(is_subagent_session(snapshot))
+        self.assertFalse(is_independent_desktop_delegation(snapshot))
+
     def test_active_work_items_follow_session_creation_order_desc(self) -> None:
         parser = JsonlSessionParser()
         now = datetime.now().astimezone()

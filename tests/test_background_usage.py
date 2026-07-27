@@ -24,6 +24,7 @@ from codex_usage_hud.core.background_usage import (
     decode_request_context,
     decode_request_evidence,
     decode_submission_prompt,
+    resolve_request_token_split,
 )
 from codex_usage_hud.background_usage_runtime import BackgroundUsageRuntime
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
@@ -62,13 +63,18 @@ def _turn_body(
     thread_id: str,
     model: str,
     total_tokens: int,
-    estimated_tokens: int,
+    estimated_tokens: int | None,
 ) -> str:
+    estimated_fragment = (
+        f"estimated_token_count=Some({estimated_tokens}) "
+        if estimated_tokens is not None
+        else ""
+    )
     return (
         f"session_loop{{thread_id={thread_id}}}:turn{{model={model}}}: "
         "post sampling "
         f"turn_id=turn total_usage_tokens={total_tokens} "
-        f"estimated_token_count=Some({estimated_tokens}) "
+        f"{estimated_fragment}"
         "model_needs_follow_up=false"
     )
 
@@ -221,6 +227,30 @@ class BackgroundUsageDecoderTests(unittest.TestCase):
         self.assertEqual(request.model, "gpt-test")
         self.assertEqual(request.total_tokens, 120)
         self.assertEqual(request.estimated_input_tokens, 100)
+
+        missing_estimate = decode_request_evidence(
+            100,
+            124,
+            _turn_body(BACKGROUND_ID, "gpt-test", 33673, None),
+        )
+        self.assertIsNotNone(missing_estimate)
+        assert missing_estimate is not None
+        self.assertEqual(missing_estimate.total_tokens, 33673)
+        self.assertIsNone(missing_estimate.estimated_input_tokens)
+
+    def test_missing_estimate_split_uses_previous_total_as_input(self) -> None:
+        first = resolve_request_token_split(
+            total_tokens=33673,
+            estimated_input_tokens=None,
+        )
+        self.assertEqual(first, (33673, 0, 0))
+        second = resolve_request_token_split(
+            total_tokens=36220,
+            estimated_input_tokens=None,
+            previous_total_tokens=33673,
+            previous_input_tokens=33673,
+        )
+        self.assertEqual(second, (33673, 33673, 2547))
 
     def test_unknown_feature_is_retained(self) -> None:
         feature = classify_background_feature("New internal feature prompt")
@@ -698,6 +728,186 @@ class BackgroundUsageScannerTests(unittest.TestCase):
                 BACKGROUND_ID,
                 {item["eventId"] for item in restarted.pending_today()},
             )
+
+    def test_scan_estimates_missing_token_counts_without_output_overcharge(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            logs_path = root / "logs_2.sqlite"
+            state_path = root / "state_5.sqlite"
+            base_ts = 1_900_000_000
+            prompt = (
+                "## Memory Writing Agent: Phase 2 (Consolidation)\n"
+                "Consolidate raw memories for later reuse."
+            )
+            _create_logs(
+                logs_path,
+                [
+                    (
+                        1,
+                        base_ts,
+                        "codex_core::session::handlers",
+                        "codex_core::session::handlers",
+                        _submission_body(BACKGROUND_ID, prompt),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        2,
+                        base_ts + 1,
+                        "feedback_tags",
+                        "codex_feedback",
+                        _feedback_body(BACKGROUND_ID, "gpt-test", r"C:\memories"),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        3,
+                        base_ts + 2,
+                        "codex_core::session::turn",
+                        "codex_core::session::turn",
+                        _turn_body(BACKGROUND_ID, "gpt-test", 33673, None),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        4,
+                        base_ts + 3,
+                        "codex_core::session::turn",
+                        "codex_core::session::turn",
+                        _turn_body(BACKGROUND_ID, "gpt-test", 36220, None),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                ],
+            )
+            _create_state(state_path)
+            store = BackgroundUsageStore(root / "audit.sqlite3")
+            scanner = BackgroundUsageScanner(
+                logs_path=logs_path,
+                state_path=state_path,
+                store=store,
+                provider="custom",
+                price_table=_prices(),
+                grace_seconds=0,
+                now=lambda: float(base_ts + 30),
+            )
+
+            scanner.scan()
+            detail = store.detail(BACKGROUND_ID)
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertEqual(detail["featureKey"], "memory_consolidation")
+            self.assertEqual(detail["requests"][0]["estimatedInputTokens"], 33673)
+            self.assertEqual(detail["requests"][0]["estimatedOutputTokens"], 0)
+            self.assertEqual(detail["requests"][1]["estimatedInputTokens"], 33673)
+            self.assertEqual(detail["requests"][1]["estimatedCachedTokens"], 33673)
+            self.assertEqual(detail["requests"][1]["estimatedOutputTokens"], 2547)
+            # Pure-output overcharge would bill 33673+36220 at $4/MTok = $0.279572.
+            self.assertLess(float(detail["estimatedCostUsd"] or 0.0), 0.10)
+
+    def test_scan_repairs_legacy_zero_input_output_overcharge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            logs_path = root / "logs_2.sqlite"
+            state_path = root / "state_5.sqlite"
+            audit_path = root / "audit.sqlite3"
+            base_ts = 1_900_000_000
+            prompt = (
+                "## Memory Writing Agent: Phase 2 (Consolidation)\n"
+                "Repair previously overcharged request splits."
+            )
+            _create_logs(
+                logs_path,
+                [
+                    (
+                        1,
+                        base_ts,
+                        "codex_core::session::handlers",
+                        "codex_core::session::handlers",
+                        _submission_body(BACKGROUND_ID, prompt),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                ],
+            )
+            _create_state(state_path)
+            store = BackgroundUsageStore(audit_path)
+            with closing(sqlite3.connect(audit_path)) as connection, connection:
+                connection.execute(
+                    """
+                    INSERT INTO background_events(
+                        event_id, thread_id, process_uuid, feature_key, feature_label,
+                        prompt, provider, first_seen_at, last_seen_at,
+                        classification_state, app_attribution, request_count,
+                        total_tokens, estimated_cost_usd, cost_available
+                    ) VALUES(?, ?, ?, 'memory_consolidation', '记忆整理', ?,
+                             'custom', ?, ?, 'background', 'feature_signature',
+                             2, 69893, 0.279572, 1)
+                    """,
+                    (
+                        BACKGROUND_ID,
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                        prompt,
+                        base_ts,
+                        base_ts + 3,
+                    ),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO background_requests(
+                        request_id, event_id, source_log_id, occurred_at, model,
+                        endpoint, total_tokens, estimated_input_tokens,
+                        estimated_cached_tokens, estimated_output_tokens,
+                        estimated_cost_usd, price_snapshot_json
+                    ) VALUES(?, ?, ?, ?, 'gpt-test', '/responses', ?, 0, 0, ?, ?, '')
+                    """,
+                    [
+                        (
+                            "log:10",
+                            BACKGROUND_ID,
+                            10,
+                            base_ts + 2,
+                            33673,
+                            33673,
+                            0.134692,
+                        ),
+                        (
+                            "log:11",
+                            BACKGROUND_ID,
+                            11,
+                            base_ts + 3,
+                            36220,
+                            36220,
+                            0.14488,
+                        ),
+                    ],
+                )
+            scanner = BackgroundUsageScanner(
+                logs_path=logs_path,
+                state_path=state_path,
+                store=store,
+                provider="custom",
+                price_table=_prices(),
+                grace_seconds=0,
+                now=lambda: float(base_ts + 30),
+            )
+
+            first = scanner.scan()
+            detail = store.detail(BACKGROUND_ID)
+            self.assertIsNotNone(detail)
+            assert detail is not None
+            self.assertTrue(first.content_changed)
+            self.assertEqual(detail["requests"][0]["estimatedInputTokens"], 33673)
+            self.assertEqual(detail["requests"][0]["estimatedOutputTokens"], 0)
+            self.assertEqual(detail["requests"][1]["estimatedInputTokens"], 33673)
+            self.assertEqual(detail["requests"][1]["estimatedOutputTokens"], 2547)
+            self.assertLess(float(detail["estimatedCostUsd"] or 0.0), 0.10)
+
+            second = scanner.scan()
+            self.assertFalse(second.content_changed)
 
     def test_scan_waits_for_state_database_before_classifying(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

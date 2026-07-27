@@ -6506,6 +6506,26 @@ def is_subagent_session(snapshot: ParsedSession | object) -> bool:
     return bool(parent_thread_id)
 
 
+def is_independent_desktop_delegation(snapshot: ParsedSession | object) -> bool:
+    """True when Desktop promoted a subagent into its own visible thread."""
+    if not is_subagent_session(snapshot):
+        return False
+    if str(getattr(snapshot, "client_kind", "") or "").strip().lower() != "app":
+        return False
+    if str(getattr(snapshot, "parent_thread_id", "") or "").strip():
+        return False
+    if str(getattr(snapshot, "agent_nickname", "") or "").strip():
+        return False
+    # Internal collaboration agents carry a structural parent or agent identity.
+    # Desktop handoff threads currently retain only thread_source=subagent; their
+    # latest task prompt changes over time, so prompt text is not an identity key.
+    return True
+
+
+def _hide_from_work_overlay(snapshot: ParsedSession | object) -> bool:
+    return is_subagent_session(snapshot) and not is_independent_desktop_delegation(snapshot)
+
+
 def _work_status_from_snapshot(
     snapshot: ParsedSession,
     *,
@@ -6759,7 +6779,7 @@ def _refresh_visible_current_work_item(
     snapshot: ParsedSession,
 ) -> list[WorkStatusItem]:
     """Apply current-session state without waiting for the recent-work scan."""
-    if is_subagent_session(snapshot):
+    if _hide_from_work_overlay(snapshot):
         return list(items)
     session_id = str(snapshot.session_id or "").strip()
     if not session_id:
@@ -7198,9 +7218,9 @@ def active_work_items_for_snapshot(
     terminal_item_tasks = _work_overlay_terminal_item_tasks(context)
     terminal_item_ids: dict[str, str] = {}
     current_key = _session_path_key(session_path)
-    # Codex multi-agent v2 writes one jsonl per subagent. Desktop bubbles track the
-    # user-visible parent thread only; completed/running children must not surface.
-    if not is_subagent_session(snapshot):
+    # Internal collaboration agents stay folded into their parent. Desktop can
+    # promote a delegation to an independent visible thread; those do bubble.
+    if not _hide_from_work_overlay(snapshot):
         current_item = _work_item_from_snapshot(
             snapshot,
             current=True,
@@ -7226,7 +7246,7 @@ def active_work_items_for_snapshot(
             parsed = context.parser.parse_file(path)
         except Exception:
             continue
-        if is_subagent_session(parsed):
+        if _hide_from_work_overlay(parsed):
             continue
         title = ""
         if context.active_session_tracker is not None:
