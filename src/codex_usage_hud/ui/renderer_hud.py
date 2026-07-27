@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from .. import __version__
 from ..config import UserConfig, warning_dismissed_today
 from ..config import DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED
+from ..core.connection_health import ConnectionHealth, PROBE_TIMEOUT_SECONDS
 from ..core.parser import CostEstimator, ParsedSession, RequestRound, ToolCallTiming, seconds_between
 from ..core.runtime_errors import RuntimeErrorEvent
 from ..platforms.cdp_probe import (
@@ -701,6 +702,51 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         display: inline-flex;
         align-items: center;
         gap: 4px;
+        flex: 0 0 auto;
+      }
+      #${rootId} .${requestClass} .codex-usage-hud-panel-header .codex-usage-hud-left-controls {
+        /* Keep the handle + connection light from stealing the totals column. */
+        min-width: auto;
+      }
+      #${rootId} .${requestClass} .codex-usage-hud-panel-header .codex-usage-hud-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-connection-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex: 0 0 auto;
+        background: #3ecf8e;
+        box-shadow: 0 0 0 0 rgba(62, 207, 142, .55);
+        animation: codex-usage-hud-connection-breathe 1.4s ease-out infinite;
+      }
+      #${rootId} .codex-usage-hud-connection-dot[data-state="recovering"] {
+        background: #ffb86b;
+        box-shadow: 0 0 0 0 rgba(255, 184, 107, .55);
+        animation-name: codex-usage-hud-connection-breathe-warn;
+      }
+      #${rootId} .codex-usage-hud-connection-dot[data-state="failed"] {
+        background: #ff6b6b;
+        box-shadow: 0 0 0 0 rgba(255, 107, 107, .55);
+        animation-name: codex-usage-hud-connection-breathe-error;
+      }
+      @keyframes codex-usage-hud-connection-breathe {
+        0% { box-shadow: 0 0 0 0 rgba(62, 207, 142, .55); }
+        70% { box-shadow: 0 0 0 7px rgba(62, 207, 142, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(62, 207, 142, 0); }
+      }
+      @keyframes codex-usage-hud-connection-breathe-warn {
+        0% { box-shadow: 0 0 0 0 rgba(255, 184, 107, .55); }
+        70% { box-shadow: 0 0 0 7px rgba(255, 184, 107, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 184, 107, 0); }
+      }
+      @keyframes codex-usage-hud-connection-breathe-error {
+        0% { box-shadow: 0 0 0 0 rgba(255, 107, 107, .55); }
+        70% { box-shadow: 0 0 0 7px rgba(255, 107, 107, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0); }
       }
       #${rootId} .codex-usage-hud-collapsed[data-has-settings="false"] {
         grid-template-columns: minmax(0, 1fr);
@@ -709,10 +755,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         grid-template-columns: minmax(0, 1fr) auto;
       }
       #${rootId} .${requestClass} .codex-usage-hud-collapsed {
-        grid-template-columns: minmax(0, 1fr) 22px;
+        grid-template-columns: auto minmax(0, 1fr) 22px;
       }
       #${rootId} .${requestClass} .codex-usage-hud-collapsed[data-has-badge="true"] {
-        grid-template-columns: minmax(0, 1fr) auto 22px;
+        grid-template-columns: auto minmax(0, 1fr) auto 22px;
       }
       #${rootId} .codex-usage-hud-token-badge {
         position: relative;
@@ -5412,7 +5458,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       : "";
     const leftControlsMarkup = name === "top"
       ? `<div class="codex-usage-hud-left-controls">${updateButtonMarkup}</div>`
-      : "";
+      : (name === "request"
+        ? `<span class="codex-usage-hud-connection-dot" data-field="connectionDot" data-state="ok" title="CDP 连接正常" aria-label="CDP 连接正常" role="img"></span>`
+        : "");
     const backgroundNotificationMarkup = name === "request"
       ? backgroundUsageNotificationMarkup()
       : "";
@@ -5559,7 +5607,10 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         <div class="codex-usage-hud-request-subhead"><span>轮次流水</span><span>最新在上</span></div>
         <div class="codex-usage-hud-request-list" data-field="requestRows"></div>
         <div class="codex-usage-hud-panel-header" data-action="toggle">
-          <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
+          <div class="codex-usage-hud-left-controls">
+            <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>
+            <span class="codex-usage-hud-connection-dot" data-field="connectionDot" data-state="ok" title="CDP 连接正常" aria-label="CDP 连接正常" role="img"></span>
+          </div>
           <div class="codex-usage-hud-title codex-usage-hud-line" data-action="toggle" data-field="requestLineExpanded"></div>
           ${backgroundUsageNotificationMarkup()}
         </div>
@@ -6037,30 +6088,43 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (!visible(header)) return "";
     const candidates = Array.from(header.querySelectorAll([
       "[data-thread-title]",
+      "[data-testid*='thread-title' i]",
+      "[data-testid*='conversation-title' i]",
       "h1",
       "h2",
       ".truncate",
       "[class*='truncate']",
+      "button",
+      "[role='button']",
+      "span",
+      "div",
     ].join(","))).filter((node) => (
       visible(node)
       && !node.closest?.(`#${rootId}`)
-      && !node.closest?.("button, [role='button'], a")
     ));
     for (const node of candidates) {
+      // Prefer leaf-ish text; skip pure icon/menu chrome.
+      if (node.querySelector?.("svg") && !(node.textContent || "").trim()) continue;
       const text = cleanActiveSessionTitle(node.textContent || "").slice(0, 160);
-      if (!activeSessionHeaderTitleIgnored(text)) return text;
+      if (!text || text.length < 2) continue;
+      if (activeSessionHeaderTitleIgnored(text)) continue;
+      // Ignore giant blobs that include the whole chrome.
+      if (text.length > 120 && /\s/.test(text) && text.split(/\s+/).length > 12) continue;
+      return text;
     }
     const clone = header.cloneNode(true);
     clone.querySelectorAll([
-      "button",
-      "[role='button']",
-      "a",
       "svg",
       `#${rootId}`,
       ".codex-usage-hud-panel",
     ].join(",")).forEach((node) => node.remove());
     const fallback = cleanActiveSessionTitle(clone.textContent || "").slice(0, 160);
-    return activeSessionHeaderTitleIgnored(fallback) ? "" : fallback;
+    if (!fallback || activeSessionHeaderTitleIgnored(fallback)) return "";
+    // If clone still contains menu words, strip leading chrome tokens.
+    const stripped = fallback
+      .replace(/^(File\s*Edit\s*View\s*Window\s*Help|文件\s*编辑\s*视图\s*帮助)\s*/i, "")
+      .trim();
+    return activeSessionHeaderTitleIgnored(stripped) ? "" : stripped;
   }
 
   function activeSessionComposerVisible() {
@@ -6098,10 +6162,24 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function activeSessionHeaderLooksNewSession(rows) {
     const header = activeSessionHeaderElement();
     if (!visible(header)) return false;
-    if (activeSessionHeaderTitleText()) return false;
+    const headerTitle = activeSessionHeaderTitleText();
+    // A real header title means this is not a blank new-chat page.
+    if (headerTitle && !activeSessionTitleIsNewSession(headerTitle)) return false;
     if (activeSessionLocationId()) return false;
     const activeRows = Array.isArray(rows) ? rows : activeSessionRows();
     if (activeRows.some(activeSessionRowSelected)) return false;
+    // Any sidebar row with a real thread id that looks active/current also
+    // disqualifies the blank new-session latch.
+    if (activeRows.some((row) => {
+      const ref = activeSessionRefFromRow(row);
+      return !!(ref.sessionId || ref.rawSessionId) && !ref.pendingSession && !activeSessionTitleIsNewSession(ref.title);
+    }) && activeRows.some(activeSessionRowSelected)) {
+      return false;
+    }
+    if (headerTitle && activeSessionTitleIsNewSession(headerTitle)) {
+      return activeSessionComposerVisible();
+    }
+    if (headerTitle) return false;
     return activeSessionComposerVisible();
   }
 
@@ -6141,6 +6219,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (row?.getAttribute?.("aria-selected") === "true") return true;
     if (row?.getAttribute?.("data-active") === "true" || row?.getAttribute?.("data-selected") === "true") return true;
     if (row?.matches?.("[data-state='active'], [data-state='selected'], .active, .selected")) return true;
+    // Soft visual/ARIA fallbacks used by some Codex builds.
+    if (row?.getAttribute?.("data-highlighted") === "true") return true;
+    if (row?.classList?.contains?.("bg-token-sidebar-item-active")) return true;
+    try {
+      const style = getComputedStyle(row);
+      if (style && Number(style.fontWeight || 0) >= 600) {
+        const bg = style.backgroundColor || "";
+        if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") return true;
+      }
+    } catch (_) {}
     return false;
   }
 
@@ -6175,6 +6263,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function readActiveSessionRef() {
     const rows = activeSessionRows();
+    const headerTitle = activeSessionHeaderTitleText();
     if (activeSessionHeaderLooksNewSession(rows)) {
       return {
         sessionId: "",
@@ -6184,17 +6273,34 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         matchedBy: "header-empty",
       };
     }
-    const row = rows.find(activeSessionRowSelected) || rows.find(activeSessionRowMatchesLocation) || null;
+    let row = rows.find(activeSessionRowSelected) || rows.find(activeSessionRowMatchesLocation) || null;
+    // If header already shows a real title, prefer the sidebar row with the same title.
+    if (!row && headerTitle && !activeSessionTitleIsNewSession(headerTitle)) {
+      row = rows.find((candidate) => {
+        const ref = activeSessionRefFromRow(candidate);
+        const title = cleanActiveSessionTitle(ref.title || "");
+        return title && (title === headerTitle || headerTitle.startsWith(title) || title.startsWith(headerTitle));
+      }) || null;
+    }
     const ref = row ? activeSessionRefFromRow(row) : { sessionId: activeSessionLocationId(), title: "" };
     const pendingSession = !!ref.pendingSession;
-    const newSession = !pendingSession && !ref.sessionId && activeSessionTitleIsNewSession(ref.title);
+    let title = ref.title || "";
+    if (!title && headerTitle && !activeSessionTitleIsNewSession(headerTitle)) {
+      title = headerTitle;
+    }
+    const newSession = !pendingSession && !ref.sessionId && activeSessionTitleIsNewSession(title);
+    // Never claim new-session when the chrome already shows a real conversation title.
+    if (!pendingSession && !ref.sessionId && !newSession && !title && headerTitle && !activeSessionTitleIsNewSession(headerTitle)) {
+      title = headerTitle;
+    }
     return {
       sessionId: (newSession || pendingSession) ? "" : (ref.sessionId || ""),
       rendererSessionId: ref.rendererSessionId || ref.rawSessionId || "",
-      title: newSession ? "" : (ref.title || ""),
+      title: newSession ? "" : (title || ""),
       url: location.href,
       newSession,
       pendingSession,
+      matchedBy: row ? "sidebar-row" : (title ? "header-title" : ""),
     };
   }
 
@@ -6409,14 +6515,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (expected && current !== expected) return;
       postActiveSession(reason, ref);
       refreshActiveSessionObserver();
+      // Keep reconciling while still on a blank/new latch so late title/id
+      // assignment (beyond the initial 1.6s burst) can clear sticky state.
+      if (ref.newSession || ref.pendingSession || (!ref.sessionId && !ref.title)) {
+        return true;
+      }
+      return false;
     };
-    window[activeSessionSendFollowupTimersName] = [
-      setTimeout(report, 32),
-      setTimeout(report, 120),
-      setTimeout(report, 320),
-      setTimeout(report, 800),
-      setTimeout(report, 1600),
-    ];
+    const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000];
+    window[activeSessionSendFollowupTimersName] = delays.map((ms) => setTimeout(() => {
+      try {
+        report();
+      } catch (_) {}
+    }, ms));
   }
 
   function activeSessionComposerSubmitButton(button) {
@@ -13777,7 +13888,25 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     renderTopDetails(root, payload || {});
     renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!(payload?.newSession || payload?.pendingSession));
     renderBackgroundUsageNotification(root, payload || {});
+    applyConnectionHealth(root, payload || {});
     applyActiveSessionSequence(payload);
+  }
+
+  function applyConnectionHealth(root, payload) {
+    const health = payload?.connectionHealth;
+    if (!health || typeof health !== "object") return;
+    const rawState = String(health.state || "ok");
+    const state = rawState === "recovering" || rawState === "failed" ? rawState : "ok";
+    const detail = normalize(health.detail) || (
+      state === "failed"
+        ? "CDP 连接异常"
+        : (state === "recovering" ? "连接异常，正在恢复" : "CDP 连接正常")
+    );
+    root.querySelectorAll('[data-field="connectionDot"]').forEach((node) => {
+      node.dataset.state = state;
+      node.setAttribute("title", detail);
+      node.setAttribute("aria-label", detail);
+    });
   }
 
   function applyActiveSessionSequence(payload) {
@@ -13808,6 +13937,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       node.classList.toggle(errorClass, payload?.requestStatus === "error");
     });
     renderBackgroundUsageNotification(root, payload || {});
+    applyConnectionHealth(root, payload || {});
     applyActiveSessionSequence(payload);
   }
 
@@ -14242,7 +14372,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       applyBackgroundUsagePayload(root, { ...(payload || {}), ...(domains.backgroundUsage || {}) });
     }
     if ("diagnostics" in domains) {
-      renderRuntimeErrors(root, { ...(payload || {}), ...(domains.diagnostics || {}) });
+      const diagnosticsPayload = { ...(payload || {}), ...(domains.diagnostics || {}) };
+      renderRuntimeErrors(root, diagnosticsPayload);
+      applyConnectionHealth(root, diagnosticsPayload);
     }
     if ("fileManagement" in domains) {
       applyFileManagementPayload(root, { ...(payload || {}), ...(domains.fileManagement || {}) });
@@ -14648,6 +14780,7 @@ class RendererHudPayload:
     activity_reading_file: str = ""
     debug: bool = False
     runtime_errors: list[dict[str, object]] = field(default_factory=list)
+    connection_health: dict[str, object] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -14706,6 +14839,7 @@ class RendererHudPayload:
             "activityReadingFile": self.activity_reading_file,
             "debug": bool(self.debug),
             "runtimeErrors": [dict(item) for item in self.runtime_errors],
+            "connectionHealth": dict(self.connection_health),
         }
         payload["payloadDomains"] = _payload_domains(payload)
         return payload
@@ -14763,6 +14897,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "followElapsedMs",
         "followTiming",
         "backgroundUsageNotification",
+        "connectionHealth",
     )
     current_session_keys = (
         "topLine",
@@ -14798,6 +14933,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "activityWarning",
         "activityReadingFile",
         "backgroundUsageNotification",
+        "connectionHealth",
     )
     budget_keys = ("topProgress",)
     settings_keys = (
@@ -14819,7 +14955,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "backgroundUsageNotification",
         "settingsCommandStatus",
     )
-    diagnostics_keys = ("debug", "runtimeErrors")
+    diagnostics_keys = ("debug", "runtimeErrors", "connectionHealth")
     file_management = payload.get("fileManagement")
     usage_insights = payload.get("usageInsights")
     safe_cleanup = payload.get("safeCleanup")
@@ -15447,6 +15583,7 @@ class RendererHudClient:
         usage_insights: dict[str, object] | None = None,
         safe_cleanup: dict[str, object] | None = None,
         session_cleanup: dict[str, object] | None = None,
+        connection_health: dict[str, object] | ConnectionHealth | None = None,
     ) -> bool:
         started = time.perf_counter()
         support_images = [] if self._support_images_sent else support_qr_payload()
@@ -15480,6 +15617,7 @@ class RendererHudClient:
             usage_insights=usage_insights,
             safe_cleanup=safe_cleanup,
             session_cleanup=session_cleanup,
+            connection_health=connection_health,
         ).to_json()
         update_ok = self.update_payload(payload)
         metrics = dict(self.last_update_metrics)
@@ -15576,6 +15714,152 @@ class RendererHudClient:
         self.last_status = "ok"
         self.last_error = ""
         return True
+
+    def probe_connection(self, *, timeout_seconds: float | None = None) -> bool:
+        """Cheap CDP liveness check used by conditional heartbeat.
+
+        Prefers the already-open active-session binding socket so healthy idle
+        ticks avoid a fresh WebSocket handshake. Falls back to one ephemeral
+        Runtime.evaluate against the current page target.
+        """
+        if not self.enabled:
+            self.last_status = "disabled"
+            return False
+        timeout = max(
+            0.05,
+            float(
+                PROBE_TIMEOUT_SECONDS
+                if timeout_seconds is None
+                else timeout_seconds
+            ),
+        )
+        expression = (
+            "typeof window.__codexUsageHudReportActiveSession === 'function' "
+            "|| typeof window.__codexUsageHudUpdate === 'function'"
+        )
+        try:
+            target = self._page_target()
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            target_id = str(target.get("id") or websocket_url)
+            if not websocket_url:
+                raise RuntimeError("CDP target has no websocket URL")
+            send_persistent = getattr(self._active_session_binding, "send_command", None)
+            if callable(send_persistent):
+                try:
+                    if self._active_session_binding is not None:
+                        self._active_session_binding.ensure(websocket_url, target_id)
+                    result = send_persistent(
+                        websocket_url,
+                        "Runtime.evaluate",
+                        _runtime_expression_params(expression),
+                        timeout,
+                    )
+                except Exception:
+                    result = send_cdp_command(
+                        websocket_url,
+                        "Runtime.evaluate",
+                        _runtime_expression_params(expression),
+                        timeout,
+                    )
+            else:
+                result = send_cdp_command(
+                    websocket_url,
+                    "Runtime.evaluate",
+                    _runtime_expression_params(expression),
+                    timeout,
+                )
+            value = result.get("result", {}).get("result", {}).get("value", False)
+            ok = bool(value)
+            self.last_status = "ok" if ok else "failed"
+            self.last_error = "" if ok else "renderer probe expression returned false"
+            return ok
+        except Exception as exc:
+            self.last_status = "failed"
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+
+    def report_active_session(self, reason: str = "self-heal") -> bool:
+        """Force the injected controller to re-read and publish the active session.
+
+        Used by session-follow self-heal after sticky new-session or binding loss.
+        """
+        if not self.enabled:
+            self.last_status = "disabled"
+            return False
+        report_reason = str(reason or "self-heal").replace("\\", "\\\\").replace("'", "\\'")
+        expression = (
+            "typeof window.__codexUsageHudReportActiveSession === 'function' && "
+            f"window.__codexUsageHudReportActiveSession('{report_reason}')"
+        )
+        try:
+            target = self._page_target()
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            target_id = str(target.get("id") or websocket_url)
+            if not websocket_url:
+                raise RuntimeError("CDP target has no websocket URL")
+            if self._active_session_binding is not None:
+                self._active_session_binding.ensure(websocket_url, target_id)
+            send_persistent = getattr(self._active_session_binding, "send_command", None)
+            if callable(send_persistent):
+                try:
+                    result = send_persistent(
+                        websocket_url,
+                        "Runtime.evaluate",
+                        _runtime_expression_params(expression),
+                        self.timeout_seconds,
+                    )
+                except Exception:
+                    result = send_cdp_command(
+                        websocket_url,
+                        "Runtime.evaluate",
+                        _runtime_expression_params(expression),
+                        self.timeout_seconds,
+                    )
+            else:
+                result = send_cdp_command(
+                    websocket_url,
+                    "Runtime.evaluate",
+                    _runtime_expression_params(expression),
+                    self.timeout_seconds,
+                )
+            value = result.get("result", {}).get("result", {}).get("value", False)
+            if isinstance(value, dict):
+                self._deliver_bootstrap_active_session(value)
+                self.last_status = "ok"
+                self.last_error = ""
+                return True
+            ok = bool(value)
+            self.last_status = "ok" if ok else "failed"
+            self.last_error = "" if ok else "active session report was not acknowledged"
+            return ok
+        except Exception as exc:
+            self.last_status = "failed"
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+
+    def rebind_active_session_channel(self) -> bool:
+        """Restart the active-session CDP binding for the current page target."""
+        if not self.enabled or self._active_session_binding is None:
+            return False
+        try:
+            target = self._page_target(force=True)
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            target_id = str(target.get("id") or websocket_url)
+            if not websocket_url:
+                raise RuntimeError("CDP target has no websocket URL")
+            # Force a fresh listener even for the same target id.
+            self._active_session_binding.close(join_timeout=0.2)
+            self._active_session_binding.ensure(websocket_url, target_id)
+            wait_ready = getattr(self._active_session_binding, "wait_ready", None)
+            if callable(wait_ready) and not wait_ready(self.timeout_seconds):
+                raise RuntimeError("active-session binding was not ready after rebind")
+            self.last_status = "ok"
+            self.last_error = ""
+            return True
+        except Exception as exc:
+            self.last_status = "failed"
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
 
     def close(self) -> None:
         if self._active_session_binding is not None:
@@ -15862,6 +16146,7 @@ def payload_from_snapshot(
     usage_insights: dict[str, object] | None = None,
     safe_cleanup: dict[str, object] | None = None,
     session_cleanup: dict[str, object] | None = None,
+    connection_health: dict[str, object] | ConnectionHealth | None = None,
 ) -> RendererHudPayload:
     new_session = _is_new_session_snapshot(snapshot)
     pending_session = _is_pending_session_snapshot(snapshot)
@@ -15976,6 +16261,7 @@ def payload_from_snapshot(
         activity_reading_file=activity_reading_file,
         debug=bool(debug),
         runtime_errors=_runtime_errors_payload(runtime_errors or []),
+        connection_health=_connection_health_payload(connection_health),
     )
 
 
@@ -15984,6 +16270,7 @@ def session_switch_payload_from_snapshot(
     *,
     settings_path: Path | str | None = None,
     background_usage_notification: dict[str, object] | None = None,
+    connection_health: dict[str, object] | ConnectionHealth | None = None,
 ) -> dict[str, object]:
     session_cost = _session_cost(snapshot)
     warnings_dismissed = (
@@ -16031,6 +16318,7 @@ def session_switch_payload_from_snapshot(
         "followElapsedMs": _follow_elapsed_ms(snapshot),
         "followTiming": dict(snapshot.follow_timing or {}),
         "backgroundUsageNotification": dict(background_usage_notification or {}),
+        "connectionHealth": _connection_health_payload(connection_health),
     }
     payload = dict(domain)
     payload["payloadDomains"] = {"sessionSwitch": dict(domain)}
@@ -16047,6 +16335,18 @@ def _runtime_errors_payload(
         elif isinstance(error, dict):
             payload.append(dict(error))
     return payload
+
+
+def _connection_health_payload(
+    value: dict[str, object] | ConnectionHealth | None,
+) -> dict[str, object]:
+    if value is None:
+        return {}
+    if isinstance(value, ConnectionHealth):
+        return value.to_payload()
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
 
 
 def _observed_models(snapshot: ParsedSession) -> list[str]:

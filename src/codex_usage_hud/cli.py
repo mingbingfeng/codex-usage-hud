@@ -67,6 +67,7 @@ from .core import (
     extract_session_thread_identity,
     message_text,
 )
+from .core.connection_health import ConnectionHealth
 from .core.rest_reminder import RestReminderPresenter
 from .core.runtime_events import RuntimeEvent, RuntimeEventBus
 from .core.background_usage import BACKGROUND_USAGE_KIND, background_feature_label
@@ -9798,10 +9799,14 @@ def build_snapshot(
         )
         snapshot.follow_state = str(getattr(tracker, "follow_state", "") or "")
         snapshot.follow_reason = str(getattr(tracker, "follow_reason", "") or "")
+        stuck_since = int(getattr(tracker, "follow_stuck_since_ms", 0) or 0)
+        stuck_elapsed = int(getattr(tracker, "follow_stuck_elapsed_ms", 0) or 0)
         snapshot.follow_timing = {
             "observedAt": int(getattr(tracker, "selection_observed_at_ms", 0) or 0),
             "receivedAt": int(getattr(tracker, "selection_received_at_ms", 0) or 0),
             "resolvedAt": int(getattr(tracker, "selection_resolved_at_ms", 0) or 0),
+            "stuckSince": stuck_since,
+            "stuckElapsedMs": stuck_elapsed,
         }
         if session_path is not None:
             snapshot.session_title = tracker.title_for_session(
@@ -10512,6 +10517,25 @@ def run_renderer_hud_session(
                     return
                 request_active_session_refresh()
 
+            # Shared with the renderer loop; created early so CDP binding callbacks
+            # can update the connection light before the first tick runs.
+            connection_health = ConnectionHealth()
+            connection_health.note_success("ok")
+            # Filled once the loop defines push_connection_health_light.
+            connection_health_pushers: dict[str, Callable[[], bool] | None] = {
+                "push": None
+            }
+
+            def request_connection_health_light() -> None:
+                pusher = connection_health_pushers.get("push")
+                if callable(pusher):
+                    try:
+                        pusher()
+                        return
+                    except Exception:
+                        pass
+                command_refresh_requested.set()
+
             def publish_settings_command_received(command: dict[str, object]) -> None:
                 if callable(runtime_event_publish):
                     runtime_event_publish(
@@ -10574,6 +10598,10 @@ def run_renderer_hud_session(
                     marker = getattr(tracker, "mark_renderer_channel_unavailable", None)
                     if callable(marker):
                         marker(str(payload.get("reason") or ""))
+                    connection_health.note_channel_unavailable(
+                        str(payload.get("reason") or "channel-unavailable")
+                    )
+                    request_connection_health_light()
                     return
                 observer = getattr(tracker, "observe_conversation_ref", None)
                 if not callable(observer):
@@ -10609,6 +10637,10 @@ def run_renderer_hud_session(
                 ):
                     observer_kwargs["pending_session"] = True
                 changed = observer(**observer_kwargs)
+                if not bool(payload.get("newSession") or payload.get("new_session")):
+                    if not connection_health.channel_available:
+                        connection_health.note_channel_restored()
+                        request_connection_health_light()
                 if _renderer_active_session_observation_should_refresh(
                     changed=bool(changed),
                     selection_seq=selection_seq,
@@ -11168,6 +11200,8 @@ def run_renderer_hud_session(
                     active_work_refresh_not_before: float = 0.0
                     background_usage_response_retry_attempts: int = 0
                     background_usage_response_retry_not_before: float = 0.0
+                    soft_reinstall_pending: bool = False
+                    activity_wake_pending: str = ""
 
                 loop_state = _RendererLoopState()
 
@@ -11569,6 +11603,21 @@ def run_renderer_hud_session(
                     session_map_changed = "session-map" in reasons
                     if session_map_changed:
                         _invalidate_active_session_mapping_cache(context)
+                        rematerialize = getattr(
+                            getattr(context, "active_session_tracker", None),
+                            "rematerialize_renderer_mapping",
+                            None,
+                        )
+                        if callable(rematerialize):
+                            try:
+                                if rematerialize(force=True):
+                                    loop_state.activity_wake_pending = ""
+                                    command_refresh_requested.set()
+                            except Exception as exc:
+                                _LOGGER.debug(
+                                    "renderer_mapping_rematerialize_failed error=%s",
+                                    exc,
+                                )
                     pending_command = take_renderer_bridge_command()
                     active_work_refresh_due = _renderer_deferred_active_work_refresh_due(
                         pending=loop_state.active_work_refresh_pending,
@@ -11604,6 +11653,9 @@ def run_renderer_hud_session(
                                 },
                             )
                         )
+                        # Pure new-session has no UUID yet; force a DOM re-report
+                        # so a just-persisted sidebar identity can clear the latch.
+                        loop_state.activity_wake_pending = "session-map"
                     if (
                         reasons.intersection({"session", "sessions-root"})
                         and "session_file_changed" not in event_types
@@ -11624,6 +11676,10 @@ def run_renderer_hud_session(
                                 },
                             )
                         )
+                        # Session JSONL activity while follow is stuck should force
+                        # a DOM re-report (wake only — never path fallback).
+                        if not loop_state.activity_wake_pending:
+                            loop_state.activity_wake_pending = "session-file"
                     if "settings" in reasons and "settings_changed" not in event_types:
                         local_events.append(
                             make_internal_runtime_event(
@@ -11748,6 +11804,10 @@ def run_renderer_hud_session(
                             session_items,
                         )
                     )
+                    # Background usage activity is a useful wake signal when the
+                    # current follow latch is stuck without a UUID yet.
+                    if not loop_state.activity_wake_pending:
+                        loop_state.activity_wake_pending = "background-usage"
 
                 def apply_partial_settings_file_change(
                     inputs: _RendererTickInputs,
@@ -11956,6 +12016,7 @@ def run_renderer_hud_session(
                                             fresh.session_id,
                                         )
                                     ),
+                                    connection_health=connection_health,
                                 )
                             )
                         )
@@ -12003,6 +12064,7 @@ def run_renderer_hud_session(
                             session_cleanup=dict(
                                 getattr(context, "session_cleanup_payload", {}) or {}
                             ),
+                            connection_health=connection_health,
                         )
                     update_ms = (time.perf_counter() - update_started) * 1000.0
                     if not lightweight_active_session_refresh:
@@ -12050,6 +12112,8 @@ def run_renderer_hud_session(
                             fresh.selection_source,
                         )
                     if update_ok:
+                        connection_health.note_success("update-ok")
+                        sync_connection_follow(fresh)
                         if lightweight_active_session_refresh:
                             loop_state.active_work_refresh_pending = True
                             loop_state.active_work_refresh_not_before = (
@@ -12066,6 +12130,7 @@ def run_renderer_hud_session(
                         _resolve_cdp_update_failure(context)
                     else:
                         loop_state.failures += 1
+                        connection_health.note_failure("update-failed")
                         schedule_background_usage_response_retry()
                         _record_cdp_update_failure(
                             context,
@@ -12128,6 +12193,7 @@ def run_renderer_hud_session(
                         session_cleanup=dict(
                             getattr(context, "session_cleanup_payload", {}) or {}
                         ),
+                        connection_health=connection_health,
                     ).to_domain_json(*sorted(inputs.event_refresh_request.domains))
                     if not payload:
                         return True
@@ -12149,9 +12215,12 @@ def run_renderer_hud_session(
                             reset_background_usage_response_retry()
                             loop_state.settings_command_status = {}
                         loop_state.failures = 0
+                        connection_health.note_success("update-ok")
+                        sync_connection_follow(snapshot)
                         _resolve_cdp_update_failure(context)
                         return True
                     loop_state.failures += 1
+                    connection_health.note_failure("update-failed")
                     schedule_background_usage_response_retry()
                     _record_cdp_update_failure(
                         context,
@@ -12165,6 +12234,373 @@ def run_renderer_hud_session(
                         getattr(client, "last_error", ""),
                         sorted(inputs.event_refresh_request.domains),
                     )
+                    return False
+
+                def _snapshot_follow_elapsed_ms(snapshot: ParsedSession | None) -> int:
+                    tracker = getattr(context, "active_session_tracker", None)
+                    stuck = getattr(tracker, "follow_stuck_elapsed_ms", None)
+                    if stuck is not None:
+                        try:
+                            value = int(stuck)
+                        except (TypeError, ValueError):
+                            value = 0
+                        if value > 0:
+                            return value
+                    observed_at_ms = int(
+                        getattr(snapshot, "selection_observed_at_ms", 0) or 0
+                    )
+                    if observed_at_ms <= 0:
+                        return 0
+                    return max(0, int(time.time() * 1000) - observed_at_ms)
+
+                def sync_connection_follow(snapshot: ParsedSession | None) -> None:
+                    tracker = getattr(context, "active_session_tracker", None)
+                    follow_state = str(
+                        getattr(snapshot, "follow_state", None)
+                        or getattr(tracker, "follow_state", "")
+                        or ""
+                    )
+                    follow_reason = str(
+                        getattr(snapshot, "follow_reason", None)
+                        or getattr(tracker, "follow_reason", "")
+                        or ""
+                    )
+                    connection_health.observe_follow(
+                        follow_state=follow_state,
+                        follow_reason=follow_reason,
+                        follow_stuck_elapsed_ms=_snapshot_follow_elapsed_ms(snapshot),
+                    )
+
+                def push_connection_health_light() -> bool:
+                    """Push only the connection light without rebuilding session data.
+
+                    Probe/heal can change health between full refreshes. A tiny
+                    diagnostics-domain update keeps the bottom light honest without
+                    paying for another full snapshot.
+                    """
+                    health_payload = connection_health.to_payload()
+                    domain = {
+                        "connectionHealth": health_payload,
+                        "debug": _runtime_debug_enabled(),
+                        "runtimeErrors": _runtime_errors_payload_for_context(context),
+                    }
+                    payload = {
+                        "connectionHealth": health_payload,
+                        "debug": domain["debug"],
+                        "runtimeErrors": domain["runtimeErrors"],
+                        "payloadDomains": {"diagnostics": dict(domain)},
+                    }
+                    update_payload = getattr(client, "update_payload", None)
+                    if not callable(update_payload):
+                        return False
+                    try:
+                        return bool(update_payload(payload))
+                    except Exception as exc:
+                        _LOGGER.debug(
+                            "connection_health_light_push_failed error=%s",
+                            exc,
+                        )
+                        return False
+
+                connection_health_pushers["push"] = push_connection_health_light
+
+                def maybe_probe_connection(snapshot: ParsedSession | None) -> None:
+                    """Conditional CDP liveness probe — skip when recent traffic succeeded."""
+                    sync_connection_follow(snapshot)
+                    follow_state = str(getattr(snapshot, "follow_state", "") or "")
+                    follow_elapsed_ms = _snapshot_follow_elapsed_ms(snapshot)
+                    if not connection_health.should_probe(
+                        follow_state=follow_state,
+                        follow_elapsed_ms=follow_elapsed_ms,
+                        update_failures=loop_state.failures,
+                    ):
+                        return
+                    before = (
+                        connection_health.state,
+                        connection_health.reason,
+                        connection_health.channel_available,
+                    )
+                    probe = getattr(client, "probe_connection", None)
+                    ok = bool(callable(probe) and probe())
+                    if ok:
+                        connection_health.note_success("probe-ok")
+                        sync_connection_follow(snapshot)
+                        _LOGGER.debug("connection_heartbeat ok")
+                    else:
+                        connection_health.note_failure("probe-failed")
+                        _LOGGER.info(
+                            "connection_heartbeat failed status=%s error=%s",
+                            getattr(client, "last_status", ""),
+                            getattr(client, "last_error", ""),
+                        )
+                    after = (
+                        connection_health.state,
+                        connection_health.reason,
+                        connection_health.channel_available,
+                    )
+                    if after != before:
+                        push_connection_health_light()
+
+                def maybe_heal_session_follow(snapshot: ParsedSession | None) -> bool:
+                    """Session-follow self-heal ladder (no Codex restart / fresh port).
+
+                    L1 re-report active session from DOM.
+                    L2 rebind active-session CDP channel then re-report.
+                    L3 soft-clear target/script cache so the next update reinstalls.
+
+                    Success requires follow identity to advance — a report that still
+                    returns new-session is heal-no-progress, not success.
+                    """
+                    sync_connection_follow(snapshot)
+                    tracker = getattr(context, "active_session_tracker", None)
+                    follow_state = str(
+                        getattr(snapshot, "follow_state", None)
+                        or getattr(tracker, "follow_state", "")
+                        or ""
+                    )
+                    follow_reason = str(
+                        getattr(snapshot, "follow_reason", None)
+                        or getattr(tracker, "follow_reason", "")
+                        or ""
+                    )
+                    follow_elapsed_ms = _snapshot_follow_elapsed_ms(snapshot)
+                    should, heal_reason = connection_health.should_heal(
+                        follow_state=follow_state,
+                        follow_reason=follow_reason,
+                        follow_elapsed_ms=follow_elapsed_ms,
+                    )
+                    if not should:
+                        return False
+                    before = (
+                        tracker.follow_snapshot()
+                        if tracker is not None and hasattr(tracker, "follow_snapshot")
+                        else {
+                            "followState": follow_state,
+                            "followReason": follow_reason,
+                            "newSession": follow_state == "new-session",
+                        }
+                    )
+                    connection_health.note_healing(heal_reason)
+                    push_connection_health_light()
+                    _LOGGER.info(
+                        "session_follow_heal start reason=%s follow_state=%s follow_reason=%s elapsed_ms=%s",
+                        heal_reason,
+                        follow_state,
+                        follow_reason,
+                        follow_elapsed_ms,
+                    )
+                    report = getattr(client, "report_active_session", None)
+                    rebind = getattr(client, "rebind_active_session_channel", None)
+                    rematerialize = getattr(tracker, "rematerialize_renderer_mapping", None)
+                    progressed = getattr(
+                        type(tracker) if tracker is not None else object,
+                        "follow_progressed",
+                        None,
+                    )
+
+                    def _follow_advanced() -> bool:
+                        after = (
+                            tracker.follow_snapshot()
+                            if tracker is not None and hasattr(tracker, "follow_snapshot")
+                            else {}
+                        )
+                        if callable(progressed):
+                            return bool(progressed(before, after))
+                        if tracker is not None:
+                            return not bool(getattr(tracker, "renderer_new_session", False))
+                        return False
+
+                    # L0 — mapping rematerialize for pending-map (known id OR title-only).
+                    # DOM re-report cannot invent a state-db row; re-query mapping first.
+                    if (
+                        heal_reason == "stuck-pending"
+                        or follow_reason
+                        in {
+                            "awaiting-exact-mapping",
+                            "awaiting-persistence",
+                            "awaiting-canonical-id",
+                        }
+                    ) and callable(rematerialize):
+                        try:
+                            if rematerialize(force=True) and _follow_advanced():
+                                connection_health.note_heal_success()
+                                push_connection_health_light()
+                                command_refresh_requested.set()
+                                _LOGGER.info(
+                                    "session_follow_heal l0_rematerialize ok reason=%s",
+                                    heal_reason,
+                                )
+                                return True
+                        except Exception as exc:
+                            _LOGGER.info(
+                                "session_follow_heal l0_rematerialize_failed reason=%s error=%s",
+                                heal_reason,
+                                exc,
+                            )
+
+                    # L1
+                    if callable(report) and report(f"self-heal:{heal_reason}"):
+                        if _follow_advanced():
+                            connection_health.note_heal_success()
+                            push_connection_health_light()
+                            command_refresh_requested.set()
+                            _LOGGER.info(
+                                "session_follow_heal l1_report ok reason=%s",
+                                heal_reason,
+                            )
+                            return True
+                        connection_health.note_heal_no_progress("heal-no-progress")
+                        push_connection_health_light()
+                        _LOGGER.info(
+                            "session_follow_heal l1_no_progress reason=%s before=%s after=%s",
+                            heal_reason,
+                            before,
+                            tracker.follow_snapshot()
+                            if tracker is not None and hasattr(tracker, "follow_snapshot")
+                            else {},
+                        )
+                    # L2
+                    if callable(rebind) and rebind():
+                        if callable(report) and report(
+                            f"self-heal-rebind:{heal_reason}"
+                        ):
+                            if _follow_advanced():
+                                connection_health.note_heal_success()
+                                push_connection_health_light()
+                                command_refresh_requested.set()
+                                _LOGGER.info(
+                                    "session_follow_heal l2_rebind ok reason=%s",
+                                    heal_reason,
+                                )
+                                return True
+                            connection_health.note_heal_no_progress("heal-no-progress")
+                            push_connection_health_light()
+                            _LOGGER.info(
+                                "session_follow_heal l2_no_progress reason=%s",
+                                heal_reason,
+                            )
+                    # L3
+                    clear_cache = getattr(client, "_clear_target_cache", None)
+                    if callable(clear_cache):
+                        try:
+                            clear_cache(clear_script=True)
+                            loop_state.soft_reinstall_pending = True
+                            connection_health.note_failure("heal-failed")
+                            push_connection_health_light()
+                            command_refresh_requested.set()
+                            _LOGGER.info(
+                                "session_follow_heal l3_soft_reinstall scheduled reason=%s",
+                                heal_reason,
+                            )
+                            return True
+                        except Exception as exc:
+                            _LOGGER.info(
+                                "session_follow_heal l3_failed reason=%s error=%s",
+                                heal_reason,
+                                exc,
+                            )
+                    connection_health.note_failure("heal-failed")
+                    push_connection_health_light()
+                    return False
+
+                def maybe_activity_wake_session_follow(
+                    snapshot: ParsedSession | None,
+                    *,
+                    reason: str,
+                ) -> bool:
+                    """Force a DOM re-report / mapping rematerialize while follow is stuck."""
+                    tracker = getattr(context, "active_session_tracker", None)
+                    follow_state = str(
+                        getattr(snapshot, "follow_state", None)
+                        or getattr(tracker, "follow_state", "")
+                        or ""
+                    )
+                    follow_reason = str(
+                        getattr(snapshot, "follow_reason", None)
+                        or getattr(tracker, "follow_reason", "")
+                        or ""
+                    )
+                    if follow_state not in {"new-session", "pending"}:
+                        return False
+                    before = (
+                        tracker.follow_snapshot()
+                        if tracker is not None and hasattr(tracker, "follow_snapshot")
+                        else {"followState": follow_state}
+                    )
+                    progressed = getattr(
+                        type(tracker) if tracker is not None else object,
+                        "follow_progressed",
+                        None,
+                    )
+
+                    def _advanced(after: dict[str, object]) -> bool:
+                        if callable(progressed):
+                            return bool(progressed(before, after))
+                        return False
+
+                    # Known canonical id waiting on mapping: rematerialize first.
+                    if follow_reason in {
+                        "awaiting-exact-mapping",
+                        "awaiting-persistence",
+                        "awaiting-canonical-id",
+                    } or str(reason).startswith("session-map"):
+                        rematerialize = getattr(
+                            tracker, "rematerialize_renderer_mapping", None
+                        )
+                        if callable(rematerialize):
+                            try:
+                                if rematerialize(force=True):
+                                    after = (
+                                        tracker.follow_snapshot()
+                                        if tracker is not None
+                                        and hasattr(tracker, "follow_snapshot")
+                                        else {}
+                                    )
+                                    if _advanced(after) or str(
+                                        after.get("followState") or ""
+                                    ) == "confirmed":
+                                        connection_health.note_heal_success()
+                                        push_connection_health_light()
+                                        command_refresh_requested.set()
+                                        _LOGGER.info(
+                                            "session_follow_activity_wake rematerialize ok reason=%s",
+                                            reason,
+                                        )
+                                        return True
+                            except Exception as exc:
+                                _LOGGER.debug(
+                                    "session_follow_activity_wake rematerialize_failed reason=%s error=%s",
+                                    reason,
+                                    exc,
+                                )
+
+                    report = getattr(client, "report_active_session", None)
+                    if not callable(report):
+                        return False
+                    ok = bool(report(f"activity-wake:{reason}"))
+                    after = (
+                        tracker.follow_snapshot()
+                        if tracker is not None and hasattr(tracker, "follow_snapshot")
+                        else {}
+                    )
+                    advanced = _advanced(after)
+                    _LOGGER.info(
+                        "session_follow_activity_wake reason=%s ok=%s advanced=%s follow_state=%s",
+                        reason,
+                        ok,
+                        advanced,
+                        getattr(tracker, "follow_state", follow_state)
+                        if tracker is not None
+                        else follow_state,
+                    )
+                    if advanced:
+                        connection_health.note_heal_success()
+                        push_connection_health_light()
+                        command_refresh_requested.set()
+                        return True
+                    sync_connection_follow(snapshot)
+                    if connection_health.state != "ok":
+                        push_connection_health_light()
                     return False
 
                 def compute_wait_delay(
@@ -12239,6 +12675,12 @@ def run_renderer_hud_session(
                                 - time.monotonic(),
                             ),
                         )
+                    probe_in = connection_health.seconds_until_probe()
+                    if probe_in is not None:
+                        delay_value = min(delay_value, max(0.05, float(probe_in)))
+                    heal_in = connection_health.seconds_until_heal()
+                    if heal_in is not None and heal_in > 0:
+                        delay_value = min(delay_value, max(0.05, float(heal_in)))
                     return delay_value
 
                 while True:
@@ -12288,15 +12730,29 @@ def run_renderer_hud_session(
                     snapshot_requested = (
                         tick.event_refresh_request.snapshot
                         or loop_state.latest_snapshot is None
+                        or loop_state.soft_reinstall_pending
                     )
                     if snapshot_requested:
                         snapshot = apply_refresh(tick, force_fast=force_fast)
+                        if loop_state.soft_reinstall_pending and loop_state.failures == 0:
+                            # L3 soft reinstall completed once a full update path ran
+                            # against a cleared target/script cache.
+                            loop_state.soft_reinstall_pending = False
                     else:
                         snapshot = loop_state.latest_snapshot
                         apply_domain_update(tick)
                         keep_alive = getattr(work_overlay, "keep_alive", None)
                         if callable(keep_alive):
                             keep_alive()
+                    wake_reason = str(loop_state.activity_wake_pending or "")
+                    if wake_reason:
+                        loop_state.activity_wake_pending = ""
+                        maybe_activity_wake_session_follow(
+                            snapshot,
+                            reason=wake_reason,
+                        )
+                    maybe_heal_session_follow(snapshot)
+                    maybe_probe_connection(snapshot)
                     delay = compute_wait_delay(snapshot, tick, force_fast=force_fast)
                     command_refresh_requested.wait(delay)
             except KeyboardInterrupt:

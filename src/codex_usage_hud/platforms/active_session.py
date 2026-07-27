@@ -363,6 +363,10 @@ class ActiveSessionTracker:
         self._selection_observed_at_ms = 0
         self._selection_received_at_ms = 0
         self._selection_resolved_at_ms = 0
+        # Wall-clock ms when we first entered a sticky follow state
+        # (new-session / pending / channel-unavailable). Repeated identical
+        # new-session observes must not refresh this, or self-heal never fires.
+        self._follow_stuck_since_ms = 0
         self._follow_state = "waiting"
         self._follow_reason = "renderer-waiting"
         self._change_callback: Callable[[], None] | None = None
@@ -388,6 +392,21 @@ class ActiveSessionTracker:
             return self._selection_resolved_at_ms
 
     @property
+    def follow_stuck_since_ms(self) -> int:
+        """When the current sticky follow state first started (0 if not stuck)."""
+        with self._lock:
+            return int(self._follow_stuck_since_ms or 0)
+
+    @property
+    def follow_stuck_elapsed_ms(self) -> int:
+        """Milliseconds spent in the current sticky follow state."""
+        with self._lock:
+            started = int(self._follow_stuck_since_ms or 0)
+        if started <= 0:
+            return 0
+        return max(0, int(time.time() * 1000) - started)
+
+    @property
     def follow_state(self) -> str:
         with self._lock:
             return self._follow_state
@@ -403,12 +422,70 @@ class ActiveSessionTracker:
         with self._lock:
             return self._renderer_raw_session_id
 
+    @property
+    def renderer_new_session(self) -> bool:
+        with self._lock:
+            return bool(self._renderer_new_session)
+
+    def follow_snapshot(self) -> dict[str, object]:
+        """Compact follow diagnostics for heal progress checks."""
+        with self._lock:
+            return {
+                "followState": self._follow_state,
+                "followReason": self._follow_reason,
+                "newSession": bool(self._renderer_new_session),
+                "pendingSession": bool(self._renderer_pending_session),
+                "sessionId": self._renderer_session_id,
+                "rendererSessionId": self._renderer_raw_session_id,
+                "title": self._renderer_title,
+                "path": str(self._renderer_path) if self._renderer_path is not None else "",
+                "stuckSinceMs": int(self._follow_stuck_since_ms or 0),
+                "stuckElapsedMs": (
+                    max(0, int(time.time() * 1000) - int(self._follow_stuck_since_ms or 0))
+                    if int(self._follow_stuck_since_ms or 0) > 0
+                    else 0
+                ),
+            }
+
+    @staticmethod
+    def follow_progressed(
+        before: dict[str, object] | None,
+        after: dict[str, object] | None,
+    ) -> bool:
+        """Whether a self-heal report actually advanced session follow state."""
+        prev = dict(before or {})
+        nxt = dict(after or {})
+        if bool(prev.get("newSession")) and not bool(nxt.get("newSession")):
+            return True
+        if str(prev.get("followState") or "") == "new-session" and str(
+            nxt.get("followState") or ""
+        ) not in {"", "new-session"}:
+            return True
+        prev_id = str(prev.get("sessionId") or prev.get("rendererSessionId") or "")
+        next_id = str(nxt.get("sessionId") or nxt.get("rendererSessionId") or "")
+        if next_id and next_id != prev_id:
+            return True
+        prev_path = str(prev.get("path") or "")
+        next_path = str(nxt.get("path") or "")
+        if next_path and next_path != prev_path:
+            return True
+        if str(nxt.get("followState") or "") == "confirmed" and str(
+            prev.get("followState") or ""
+        ) != "confirmed":
+            return True
+        if str(prev.get("followReason") or "") == "renderer-channel-unavailable" and str(
+            nxt.get("followReason") or ""
+        ) not in {"", "renderer-channel-unavailable"}:
+            return True
+        return False
+
     def set_change_callback(self, callback: Callable[[], None] | None) -> None:
         """Notify the renderer loop when the background active-session watcher moves."""
         self._change_callback = callback
 
     def mark_renderer_channel_unavailable(self, reason: str = "") -> bool:
         """Keep the current selection while exposing a renderer transport failure."""
+        now_ms = int(time.time() * 1000)
         with self._lock:
             changed = (
                 self._follow_state != "pending"
@@ -417,6 +494,8 @@ class ActiveSessionTracker:
             self._follow_state = "pending"
             self._follow_reason = "renderer-channel-unavailable"
             self.latest_event_source = str(reason or "renderer-binding-disconnected")
+            if self._follow_stuck_since_ms <= 0:
+                self._follow_stuck_since_ms = now_ms
         if changed:
             self._notify_change()
         return changed
@@ -671,7 +750,42 @@ class ActiveSessionTracker:
         # its exact state-db record; title matching and recursive file searches
         # can select a different conversation after a sidebar change.
         path = self.path_from_renderer_thread_id(session_id) if session_id else None
+        # Title-only refs (common when DOM exposes the chrome title but no
+        # thread id yet) still need an exact title map or they stick forever on
+        # awaiting-exact-mapping with an empty sessionId.
+        if path is None and not session_id and title and not new_session and not pending_session:
+            path = self.path_for_title(title)
+            if path is not None and self.state_db.exists():
+                try:
+                    con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+                    try:
+                        raw_path = str(path)
+                        prefixed = (
+                            raw_path
+                            if raw_path.startswith("\\\\?\\")
+                            else f"\\\\?\\{raw_path}"
+                        )
+                        row = con.execute(
+                            """
+                            select id
+                            from threads
+                            where rollout_path in (?, ?)
+                            order by archived asc, updated_at_ms desc, updated_at desc
+                            limit 1
+                            """,
+                            (raw_path, prefixed),
+                        ).fetchone()
+                    finally:
+                        con.close()
+                except sqlite3.Error:
+                    row = None
+                if row is not None:
+                    session_id = str(row[0] or "").strip() or session_id
+                    if session_id and not renderer_session_id:
+                        renderer_session_id = session_id
         if session_id and path is None and not pending_session:
+            follow_reason = "awaiting-exact-mapping"
+        elif path is None and title and not new_session and not pending_session:
             follow_reason = "awaiting-exact-mapping"
         elif path is not None:
             follow_reason = "confirmed"
@@ -714,6 +828,83 @@ class ActiveSessionTracker:
             previous_selection_seq = self._selection_seq
             previous_follow_state = self._follow_state
             previous_follow_reason = self._follow_reason
+            previous_stuck_since = int(self._follow_stuck_since_ms or 0)
+            next_follow_state = (
+                "confirmed"
+                if path is not None
+                else ("new-session" if new_session else "pending")
+            )
+            sticky_same_new_session = bool(
+                new_session
+                and previous_renderer_new_session
+                and next_follow_state == "new-session"
+            )
+            sticky_same_pending = bool(
+                pending_session
+                and previous_renderer_pending_session
+                and not new_session
+                and next_follow_state == "pending"
+                and renderer_session_id == self._renderer_raw_session_id
+                and display_title == previous_renderer_title
+                and path is None
+            )
+            # Canonical id OR title-only waiting on mapping (awaiting-exact-mapping).
+            # This is NOT provisional pending_session, so the branch above missed it
+            # and every re-observe reset the stuck clock / blocked heal.
+            # Live logs showed title-only pending-map with empty sessionId still
+            # labeled awaiting-exact-mapping by current_path().
+            sticky_same_pending_map = bool(
+                not new_session
+                and not pending_session
+                and next_follow_state == "pending"
+                and path is None
+                and previous_follow_state == "pending"
+                and previous_renderer_path is None
+                and (
+                    (
+                        bool(session_id)
+                        and session_id == previous_renderer_session_id
+                    )
+                    or (
+                        not session_id
+                        and not previous_renderer_session_id
+                        and bool(display_title)
+                        and display_title == previous_renderer_title
+                    )
+                )
+            )
+            # Keep the first latch timestamp while we remain stuck. Refreshing
+            # observed_at on every MutationObserver new-session pulse zeroed
+            # follow_elapsed and blocked self-heal forever.
+            if sticky_same_new_session or sticky_same_pending or sticky_same_pending_map:
+                observed_at_to_store = (
+                    previous_stuck_since
+                    if previous_stuck_since > 0
+                    else (
+                        incoming_observed_at_ms
+                        if incoming_observed_at_ms > 0
+                        else incoming_received_at_ms
+                    )
+                )
+                stuck_since_to_store = (
+                    previous_stuck_since
+                    if previous_stuck_since > 0
+                    else observed_at_to_store
+                )
+            elif next_follow_state in {"new-session", "pending"} and path is None:
+                observed_at_to_store = (
+                    incoming_observed_at_ms
+                    if incoming_observed_at_ms > 0
+                    else incoming_received_at_ms
+                )
+                stuck_since_to_store = observed_at_to_store
+            else:
+                observed_at_to_store = (
+                    incoming_observed_at_ms
+                    if incoming_observed_at_ms > 0
+                    else incoming_received_at_ms
+                )
+                stuck_since_to_store = 0
             self._renderer_session_id = session_id
             self._renderer_raw_session_id = renderer_session_id
             self._renderer_title = display_title
@@ -721,14 +912,11 @@ class ActiveSessionTracker:
             self._renderer_new_session = new_session
             self._renderer_pending_session = pending_session
             self._selection_seq = incoming_seq
-            self._selection_observed_at_ms = incoming_observed_at_ms
+            self._selection_observed_at_ms = observed_at_to_store
             self._selection_received_at_ms = incoming_received_at_ms
             self._selection_resolved_at_ms = incoming_resolved_at_ms
-            self._follow_state = (
-                "confirmed"
-                if path is not None
-                else ("new-session" if new_session else "pending")
-            )
+            self._follow_stuck_since_ms = stuck_since_to_store
+            self._follow_state = next_follow_state
             self._follow_reason = follow_reason
             self.latest_session_id = session_id
             self.latest_title = display_title
@@ -754,7 +942,7 @@ class ActiveSessionTracker:
         )
         if changed:
             _LOGGER.info(
-                "ACTIVE_SESSION_SWITCH source=%s matched=%s response_ms=%.1f title=%r",
+                "ACTIVE_SESSION_SWITCH source=%s matched=%s response_ms=%.1f title=%r stuck_ms=%s",
                 source,
                 path is not None and not new_session,
                 response_ms,
@@ -765,6 +953,7 @@ class ActiveSessionTracker:
                     if pending_session
                     else compact_text(display_title or session_id, 80)
                 ),
+                self.follow_stuck_elapsed_ms,
             )
             self._notify_change()
         return changed
@@ -952,13 +1141,19 @@ class ActiveSessionTracker:
         candidate_id, path = next(iter(candidates.items()))
         return candidate_id, path, "confirmed"
 
-    def path_from_renderer_thread_id(self, thread_id: str) -> Path | None:
+    def path_from_renderer_thread_id(
+        self,
+        thread_id: str,
+        *,
+        allow_filesystem_fallback: bool = False,
+    ) -> Path | None:
         """Resolve a canonical renderer id through its exact state-db row.
 
-        This is intentionally narrower than :meth:`path_from_thread_id`.
-        Renderer selection must never fall through to a title or recursive
-        filename heuristic: on a fast sidebar switch either the exact mapping
-        is available, or the HUD remains in an explicit pending state.
+        By default this is intentionally narrower than :meth:`path_from_thread_id`
+        and never uses title matching. When ``allow_filesystem_fallback`` is set
+        (self-heal / rematerialize after the mapping has been stuck), a last-resort
+        exact-id filesystem lookup is allowed so a missing/lagging state-db row
+        does not pin the HUD on “加载精确会话映射” forever.
         """
         thread_id = str(thread_id or "").strip()
         if not thread_id or is_provisional_renderer_session_id(thread_id):
@@ -973,7 +1168,7 @@ class ActiveSessionTracker:
                 "conversation",
             }:
                 thread_id = suffix.strip()
-        if not thread_id or not self.state_db.exists():
+        if not thread_id:
             return None
 
         cache_key = f"renderer:{thread_id}"
@@ -986,22 +1181,149 @@ class ActiveSessionTracker:
             if (
                 cached_path is None
                 and now - cached_at <= _THREAD_PATH_NEGATIVE_CACHE_SECONDS
+                and not allow_filesystem_fallback
             ):
                 return None
-        try:
-            con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+
+        path = None
+        if self.state_db.exists():
             try:
-                row = con.execute(
-                    "select rollout_path from threads where id = ? limit 1",
-                    (thread_id,),
-                ).fetchone()
-            finally:
-                con.close()
-        except sqlite3.Error:
-            row = None
-        path = self._normalize_rollout_path(str(row[0] or "")) if row else None
+                con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+                try:
+                    row = con.execute(
+                        "select rollout_path from threads where id = ? limit 1",
+                        (thread_id,),
+                    ).fetchone()
+                finally:
+                    con.close()
+            except sqlite3.Error:
+                row = None
+            path = self._normalize_rollout_path(str(row[0] or "")) if row else None
+        if path is None and allow_filesystem_fallback:
+            # Exact id in the filename only — still not a title heuristic.
+            path = find_session_file(thread_id, self.sessions_root)
+            if path is not None:
+                _LOGGER.info(
+                    "RENDERER_MAPPING_FILESYSTEM_FALLBACK thread_id=%s path=%s",
+                    compact_text(thread_id, 64),
+                    path,
+                )
         self._thread_path_cache[cache_key] = (path, now)
         return path
+
+    def rematerialize_renderer_mapping(self, *, force: bool = True) -> bool:
+        """Re-resolve the latched renderer session id/title against state-db / files.
+
+        Used when follow is stuck on awaiting-exact-mapping. DOM re-report alone
+        cannot help when the page only exposes a title, or a known id whose
+        state-db row lags. Returns True when the mapping advanced to a real path.
+        """
+        if not self.enabled:
+            return False
+        with self._lock:
+            if self._renderer_new_session:
+                return False
+            session_id = str(self._renderer_session_id or "").strip()
+            raw_id = str(self._renderer_raw_session_id or session_id).strip()
+            title = str(self._renderer_title or self.latest_title or "").strip()
+            selection_seq = int(self._selection_seq or 0)
+            observed_at_ms = int(self._selection_observed_at_ms or 0)
+            already_mapped = (
+                self._renderer_path is not None and self._renderer_path.exists()
+            )
+        if already_mapped:
+            return False
+        if not session_id and not raw_id and not title:
+            return False
+        if force:
+            self.invalidate_mapping_cache()
+
+        path: Path | None = None
+        resolved_id = session_id
+        if session_id:
+            path = self.path_from_renderer_thread_id(
+                session_id,
+                allow_filesystem_fallback=True,
+            )
+        if path is None and raw_id and raw_id != session_id:
+            path = self.path_from_renderer_thread_id(
+                raw_id,
+                allow_filesystem_fallback=True,
+            )
+            if path is not None and not resolved_id:
+                resolved_id = raw_id
+        # Title-only pending-map (live bug): page exposed a real conversation
+        # title but no thread id. Exact title → state-db / session_index is still
+        # renderer-authority-safe because it does not pick "latest activity".
+        if path is None and title:
+            path = self.path_for_title(title)
+            if path is not None:
+                mapped_id = ""
+                if self.state_db.exists():
+                    try:
+                        con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+                        try:
+                            raw_path = str(path)
+                            prefixed = (
+                                raw_path
+                                if raw_path.startswith("\\\\?\\")
+                                else f"\\\\?\\{raw_path}"
+                            )
+                            row = con.execute(
+                                """
+                                select id
+                                from threads
+                                where rollout_path in (?, ?)
+                                order by archived asc, updated_at_ms desc, updated_at desc
+                                limit 1
+                                """,
+                                (raw_path, prefixed),
+                            ).fetchone()
+                        finally:
+                            con.close()
+                    except sqlite3.Error:
+                        row = None
+                    if row is not None:
+                        mapped_id = str(row[0] or "").strip()
+                if mapped_id:
+                    resolved_id = mapped_id
+                _LOGGER.info(
+                    "RENDERER_MAPPING_TITLE_FALLBACK title=%r path=%s id=%s",
+                    compact_text(title, 80),
+                    path,
+                    compact_text(resolved_id, 64),
+                )
+
+        if path is None:
+            _LOGGER.info(
+                "RENDERER_MAPPING_STILL_PENDING session_id=%s raw_id=%s title=%r stuck_ms=%s",
+                compact_text(session_id, 64),
+                compact_text(raw_id, 64),
+                compact_text(title, 80),
+                self.follow_stuck_elapsed_ms,
+            )
+            return False
+
+        changed = self.observe_conversation_ref(
+            resolved_id or session_id or raw_id,
+            title,
+            source="renderer",
+            renderer_session_id=raw_id or resolved_id or session_id,
+            selection_seq=selection_seq,
+            observed_at_ms=observed_at_ms,
+        )
+        with self._lock:
+            confirmed = (
+                self._renderer_path is not None and self._follow_state == "confirmed"
+            )
+        _LOGGER.info(
+            "RENDERER_MAPPING_REMATERIALIZED session_id=%s path=%s changed=%s confirmed=%s",
+            compact_text(resolved_id or session_id or raw_id, 64),
+            path,
+            changed,
+            confirmed,
+        )
+        return confirmed or changed
 
     def path_from_thread_id(self, thread_id: str) -> Path | None:
         """Resolve a known thread id to a local rollout JSONL path."""
@@ -1164,14 +1486,26 @@ class ActiveSessionTracker:
     def _current_renderer_selection(self) -> tuple[bool, Path | None]:
         with self._lock:
             if self._renderer_new_session:
+                # Keep transport-down diagnostics visible. Overwriting the follow
+                # reason with "new-session" hid CDP binding failures behind the
+                # sticky blank-chat latch and made the top bar look healthy-but-stale.
+                channel_down = self._follow_reason == "renderer-channel-unavailable"
                 self.latest_session_id = ""
                 self.latest_title = ""
                 self.latest_path = None
                 self._mapped_title = ""
                 self.latest_source = "renderer-new-session"
                 self.latest_event_source = "renderer"
-                self._follow_state = "new-session"
-                self._follow_reason = "new-session"
+                if channel_down:
+                    self._follow_state = "pending"
+                else:
+                    self._follow_state = "new-session"
+                    self._follow_reason = "new-session"
+                if self._follow_stuck_since_ms <= 0:
+                    self._follow_stuck_since_ms = (
+                        int(self._selection_observed_at_ms or 0)
+                        or int(time.time() * 1000)
+                    )
                 return True, None
             if self._renderer_pending_session:
                 raw_session_id = self._renderer_raw_session_id
@@ -1206,6 +1540,11 @@ class ActiveSessionTracker:
                 self.latest_event_source = "renderer"
                 self._follow_state = "pending"
                 self._follow_reason = reason
+                if self._follow_stuck_since_ms <= 0:
+                    self._follow_stuck_since_ms = (
+                        int(self._selection_observed_at_ms or 0)
+                        or int(time.time() * 1000)
+                    )
             return True, None
         with self._lock:
             if self._renderer_pending_session:
@@ -1216,12 +1555,20 @@ class ActiveSessionTracker:
                 self.latest_event_source = "renderer"
                 self._follow_state = "pending"
                 self._follow_reason = "awaiting-canonical-id"
+                if self._follow_stuck_since_ms <= 0:
+                    self._follow_stuck_since_ms = (
+                        int(self._selection_observed_at_ms or 0)
+                        or int(time.time() * 1000)
+                    )
                 return True, None
             if not self._renderer_session_id and not self._renderer_title:
                 return False, None
             title = self._renderer_title
             session_id = self._renderer_session_id
             path = self._renderer_path
+            selection_seq = self._selection_seq
+            observed_at_ms = self._selection_observed_at_ms
+            raw_id = self._renderer_raw_session_id
         if path is not None and path.exists():
             with self._lock:
                 self.latest_session_id = session_id
@@ -1232,6 +1579,7 @@ class ActiveSessionTracker:
                 self.latest_event_source = "renderer"
                 self._follow_state = "confirmed"
                 self._follow_reason = "confirmed"
+                self._follow_stuck_since_ms = 0
             return True, path
         if session_id:
             path = self.path_from_renderer_thread_id(session_id)
@@ -1239,6 +1587,49 @@ class ActiveSessionTracker:
                 title = self.title_from_session_index_id(
                     session_id
                 ) or self.title_from_thread_id(session_id)
+        elif title:
+            # Title-only selection (no thread id from DOM yet). Exact title map is
+            # still safer than activity fallback and unblocks live pending-map.
+            path = self.path_for_title(title)
+            if path is not None:
+                mapped_id = ""
+                if self.state_db.exists():
+                    try:
+                        con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+                        try:
+                            raw_path = str(path)
+                            prefixed = (
+                                raw_path
+                                if raw_path.startswith("\\\\?\\")
+                                else f"\\\\?\\{raw_path}"
+                            )
+                            row = con.execute(
+                                """
+                                select id
+                                from threads
+                                where rollout_path in (?, ?)
+                                order by archived asc, updated_at_ms desc, updated_at desc
+                                limit 1
+                                """,
+                                (raw_path, prefixed),
+                            ).fetchone()
+                        finally:
+                            con.close()
+                    except sqlite3.Error:
+                        row = None
+                    if row is not None:
+                        mapped_id = str(row[0] or "").strip()
+                if mapped_id:
+                    self.observe_conversation_ref(
+                        mapped_id,
+                        title,
+                        source="renderer",
+                        renderer_session_id=raw_id or mapped_id,
+                        selection_seq=selection_seq,
+                        observed_at_ms=observed_at_ms,
+                    )
+                    return True, path
+                session_id = ""
         with self._lock:
             self._renderer_session_id = session_id
             self._renderer_title = title
@@ -1259,6 +1650,13 @@ class ActiveSessionTracker:
             self._follow_reason = (
                 "confirmed" if path is not None else "awaiting-exact-mapping"
             )
+            if path is not None:
+                self._follow_stuck_since_ms = 0
+            elif self._follow_stuck_since_ms <= 0:
+                self._follow_stuck_since_ms = (
+                    int(self._selection_observed_at_ms or 0)
+                    or int(time.time() * 1000)
+                )
         return True, path
 
     def _normalize_rollout_path(self, path_text: str) -> Path | None:

@@ -919,8 +919,8 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            ".codex-usage-hud-collapsed[data-has-badge=\"true\"] {\n"
-            "        grid-template-columns: minmax(0, 1fr) auto 22px;",
+            ".${requestClass} .codex-usage-hud-collapsed[data-has-badge=\"true\"] {\n"
+            "        grid-template-columns: auto minmax(0, 1fr) auto 22px;",
             script,
         )
         submit_start = script.index("function submitBackgroundUsageCommand")
@@ -1357,7 +1357,10 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         partial = payload.to_domain_json("diagnostics")
 
-        self.assertEqual(set(partial), {"debug", "runtimeErrors", "payloadDomains"})
+        self.assertEqual(
+            set(partial),
+            {"debug", "runtimeErrors", "connectionHealth", "payloadDomains"},
+        )
         self.assertEqual(set(partial["payloadDomains"]), {"diagnostics"})
         self.assertTrue(partial["debug"])
         self.assertEqual(partial["runtimeErrors"][0]["code"], "renderer.anchor_missing")
@@ -1504,7 +1507,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('document.addEventListener("keydown", keydown, true)', script)
         self.assertIn('document.removeEventListener("submit", composerHandler.submit, true)', script)
         self.assertIn('document.removeEventListener("keydown", composerHandler.keydown, true)', script)
-        self.assertIn("setTimeout(report, 1600)", script)
+        self.assertIn("const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000]", script)
 
     def test_renderer_active_session_filters_out_folder_rows(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -1536,9 +1539,8 @@ class RendererHudPayloadTests(unittest.TestCase):
             "function scheduleActiveSessionSendFollowup(reason = \"composer-send\", expectedSessionId = \"\")",
             script,
         )
-        self.assertIn("setTimeout(report, 32)", script)
-        self.assertIn("setTimeout(report, 120)", script)
-        self.assertIn("setTimeout(report, 320)", script)
+        self.assertIn("const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000]", script)
+        self.assertIn("delays.map((ms) => setTimeout(", script)
         self.assertIn(
             "function activeSessionComposerSubmitButton(button)",
             script,
