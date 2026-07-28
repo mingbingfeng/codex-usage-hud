@@ -151,6 +151,175 @@ def _item_is_system_action(item: Mapping[str, object]) -> bool:
     return bool(item.get("systemAction")) and bool(str(item.get("action") or "").strip())
 
 
+def _normalized_rest_reminder(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping) or not bool(value.get("bubbleVisible")):
+        return None
+    phase = str(value.get("phase") or "").strip().lower()
+    if phase not in {"prompt", "postponed", "resting", "completed", "preview"}:
+        return None
+    return {
+        "bubbleVisible": True,
+        "phase": phase,
+        "message": str(value.get("message") or "").strip(),
+        "canPostpone": bool(value.get("canPostpone")),
+        "intervalMinutes": max(1, int(value.get("intervalMinutes") or 45)),
+        "breakMinutes": max(1, int(value.get("breakMinutes") or 2)),
+        "postponeMinutes": max(1, int(value.get("postponeMinutes") or 10)),
+        "promptEndsAtMs": max(0, int(value.get("promptEndsAtMs") or 0)),
+        "postponeEndsAtMs": max(0, int(value.get("postponeEndsAtMs") or 0)),
+        "restStartedAtMs": max(0, int(value.get("restStartedAtMs") or 0)),
+        "restEndsAtMs": max(0, int(value.get("restEndsAtMs") or 0)),
+        "todayRestedSeconds": max(0, int(value.get("todayRestedSeconds") or 0)),
+        "completedTodaySeconds": max(
+            0, int(value.get("completedTodaySeconds") or 0)
+        ),
+        "lastRestDurationSeconds": max(
+            0, int(value.get("lastRestDurationSeconds") or 0)
+        ),
+        "completionEndsAtMs": max(0, int(value.get("completionEndsAtMs") or 0)),
+    }
+
+
+def _item_is_rest_reminder(item: Mapping[str, object]) -> bool:
+    return str(item.get("kind") or "").strip() == "rest_reminder"
+
+
+def _format_rest_duration(value: object) -> str:
+    try:
+        total = max(0, int(round(float(value))))
+    except (TypeError, ValueError, OverflowError):
+        total = 0
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _rest_reminder_card_copy(
+    item: Mapping[str, object],
+    *,
+    now_ms: int | None = None,
+) -> dict[str, object]:
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    phase = str(item.get("phase") or "").strip().lower()
+    completed_today = max(0, int(item.get("completedTodaySeconds") or 0))
+    message = str(item.get("message") or "").strip() or "该休息一下了。"
+    title = "☕ 休息提醒"
+    detail = message
+    status = ""
+    color_status = "waiting_user"
+    actions: list[dict[str, object]] = []
+    if phase == "prompt":
+        remaining = max(0.0, (int(item.get("promptEndsAtMs") or 0) - current_ms) / 1000.0)
+        title = "☕ 该休息一下了"
+        status = (
+            f"等待选择 {_format_rest_duration(remaining)} · 超时自动跳过 · "
+            f"今日已休息 {_format_rest_duration(completed_today)}"
+        )
+        if bool(item.get("canPostpone")):
+            minutes = max(1, int(item.get("postponeMinutes") or 10))
+            actions.append(
+                {
+                    "action": "restReminderPostpone",
+                    "label": f"延迟 {minutes} 分钟",
+                    "primary": False,
+                }
+            )
+        actions.append(
+            {"action": "restReminderStart", "label": "开始休息", "primary": True}
+        )
+    elif phase == "postponed":
+        remaining = max(
+            0.0, (int(item.get("postponeEndsAtMs") or 0) - current_ms) / 1000.0
+        )
+        title = "☕ 休息已延迟"
+        detail = f"{_format_rest_duration(remaining)} 后再次提醒"
+        status = (
+            "延迟不计入休息 · "
+            f"今日已休息 {_format_rest_duration(completed_today)}"
+        )
+        color_status = "tool"
+        actions.append(
+            {"action": "restReminderStart", "label": "开始休息", "primary": True}
+        )
+    elif phase == "resting":
+        started_ms = int(item.get("restStartedAtMs") or 0)
+        ends_ms = int(item.get("restEndsAtMs") or 0)
+        elapsed = max(0.0, (min(current_ms, ends_ms or current_ms) - started_ms) / 1000.0)
+        today = max(
+            completed_today + elapsed,
+            int(item.get("todayRestedSeconds") or 0),
+        )
+        target = max(1, int(item.get("breakMinutes") or 2)) * 60
+        title = "☕ 正在休息"
+        detail = f"本次已休息 {_format_rest_duration(elapsed)}"
+        status = (
+            f"目标 {_format_rest_duration(target)} · "
+            f"今日累计 {_format_rest_duration(today)}"
+        )
+        color_status = "running"
+        actions.append(
+            {"action": "restReminderFinish", "label": "提前结束", "primary": True}
+        )
+    elif phase == "completed":
+        duration = max(0, int(item.get("lastRestDurationSeconds") or 0))
+        title = "✓ 休息完成"
+        detail = (
+            f"本次 {_format_rest_duration(duration)} · "
+            f"今日累计 {_format_rest_duration(completed_today)}"
+        )
+        status = "新一轮专注已开始"
+        color_status = "rest_completed"
+    elif phase == "preview":
+        title = "测试预览"
+        detail = message
+        status = "不会改变当前计时，也不会计入今日休息"
+        color_status = "tool"
+        actions.append(
+            {"action": "restReminderAck", "label": "关闭预览", "primary": True}
+        )
+    return {
+        "title": title,
+        "detail": detail,
+        "statusText": status,
+        "status": color_status,
+        "actions": actions,
+    }
+
+
+def _rest_reminder_overlay_item(reminder: Mapping[str, object]) -> dict[str, object]:
+    normalized = _normalized_rest_reminder(reminder)
+    if normalized is None:
+        return {}
+    copy = _rest_reminder_card_copy(normalized)
+    return {
+        "id": "rest-reminder",
+        "kind": "rest_reminder",
+        "phase": normalized["phase"],
+        "message": normalized["message"],
+        "canPostpone": normalized["canPostpone"],
+        "intervalMinutes": normalized["intervalMinutes"],
+        "breakMinutes": normalized["breakMinutes"],
+        "postponeMinutes": normalized["postponeMinutes"],
+        "promptEndsAtMs": normalized["promptEndsAtMs"],
+        "postponeEndsAtMs": normalized["postponeEndsAtMs"],
+        "restStartedAtMs": normalized["restStartedAtMs"],
+        "restEndsAtMs": normalized["restEndsAtMs"],
+        "todayRestedSeconds": normalized["todayRestedSeconds"],
+        "completedTodaySeconds": normalized["completedTodaySeconds"],
+        "lastRestDurationSeconds": normalized["lastRestDurationSeconds"],
+        "completionEndsAtMs": normalized["completionEndsAtMs"],
+        "title": copy["title"],
+        "status": copy["status"],
+        "statusLabel": copy["statusText"],
+        "statusText": copy["statusText"],
+        "lastText": copy["detail"],
+        "elapsedText": "",
+        "restActions": copy["actions"],
+    }
+
+
 def _workdir_parts(value: object) -> list[str]:
     text = str(value or "").strip().rstrip("\\/")
     if not text:
@@ -1365,6 +1534,14 @@ def _color_for(
             _theme_mix(theme["surface"], accent, 0.11, fallback=base_card),
             _theme_mix(base_card, accent, 0.16, fallback=base_card),
             _theme_mix(base_border, accent, 0.55, fallback=base_border),
+        )
+    if status == "rest_completed":
+        accent = theme["success"]
+        return (
+            accent,
+            _theme_mix(theme["surface"], accent, 0.10, fallback=base_card),
+            _theme_mix(base_card, accent, 0.12, fallback=base_card),
+            _theme_mix(base_border, accent, 0.45, fallback=base_border),
         )
     accent = theme["accent"]
     return (
@@ -3040,13 +3217,16 @@ def run_work_overlay_helper_qt(
             self._workdir_windows: list[WorkdirLinkWindow] = []
             self._completed_check_windows: list[ClickHotspotWindow] = []
             self._system_action_windows: list[ClickHotspotWindow] = []
+            self._rest_action_windows: list[ClickHotspotWindow] = []
             self._close_anchors: list[tuple[QWidget, Mapping[str, object], str, str, str]] = []
             self._workdir_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._completed_check_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._system_action_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
+            self._rest_action_anchors: list[tuple[QWidget, Mapping[str, object]]] = []
             self._card_hover_anchors: list[QWidget] = []
             self._completed_hover_anchors: list[QWidget] = []
             self._system_action: dict[str, object] | None = None
+            self._rest_reminder: dict[str, object] | None = None
             self._ready_system_action_ids: set[str] = set()
             self._requested_system_action_ids: set[str] = set()
             self._item_widgets: list[dict[str, Any]] = []
@@ -3079,6 +3259,9 @@ def run_work_overlay_helper_qt(
             self._transition_watchdog.timeout.connect(self._handle_transition_timeout)
             self._switch_pending_timer = QTimer(self)
             self._switch_pending_timer.timeout.connect(self._tick_switch_pending)
+            self._rest_countdown_timer = QTimer(self)
+            self._rest_countdown_timer.setInterval(1000)
+            self._rest_countdown_timer.timeout.connect(self._tick_rest_reminder)
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -3317,6 +3500,39 @@ def run_work_overlay_helper_qt(
             for window in self._system_action_windows:
                 window.hide()
 
+        def trigger_rest_action(self, item: Mapping[str, object]) -> None:
+            if not _item_is_rest_reminder(item):
+                return
+            action = str(item.get("action") or "").strip()
+            if action not in {
+                "restReminderAck",
+                "restReminderPostpone",
+                "restReminderStart",
+                "restReminderFinish",
+            }:
+                return
+            if not self._append_command(
+                {
+                    "action": action,
+                    "phase": str(item.get("phase") or "").strip(),
+                    "requestedAt": time.time(),
+                }
+            ):
+                return
+            for window in self._rest_action_windows:
+                window.hide()
+
+        def _tick_rest_reminder(self) -> None:
+            if self._rest_reminder is None:
+                self._rest_countdown_timer.stop()
+                return
+            self._last_payload_signature = ""
+            self.render_items(
+                self._raw_items,
+                system_action=self._system_action or {},
+                rest_reminder=self._rest_reminder,
+            )
+
         def _append_command(self, payload: Mapping[str, object]) -> bool:
             try:
                 self._command_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3386,6 +3602,8 @@ def run_work_overlay_helper_qt(
                 check_window.hide()
             for action_window in self._system_action_windows:
                 action_window.hide()
+            for action_window in self._rest_action_windows:
+                action_window.hide()
 
         def shutdown(self) -> None:
             self.hide_overlay()
@@ -3401,6 +3619,9 @@ def run_work_overlay_helper_qt(
             for action_window in self._system_action_windows:
                 action_window.close()
             self._system_action_windows.clear()
+            for action_window in self._rest_action_windows:
+                action_window.close()
+            self._rest_action_windows.clear()
             self.close()
             app.quit()
 
@@ -3427,6 +3648,7 @@ def run_work_overlay_helper_qt(
             self._state_read_failed_at = 0.0
             should_close = bool(state.get("close"))
             system_action = _normalized_system_action(state.get("systemAction"))
+            rest_reminder = _normalized_rest_reminder(state.get("restReminder"))
             updated_at = float(state.get("updatedAt") or 0.0)
             file_stale = updated_at > 0 and (time.time() - updated_at) > stale_seconds
             if owner_pid is not None and not process_exists(owner_pid):
@@ -3458,7 +3680,11 @@ def run_work_overlay_helper_qt(
                 item_limit,
                 max_items=work_overlay_max_items_for_screen_height(screen_height),
             )
-            self.render_items(items, system_action=system_action or {})
+            self.render_items(
+                items,
+                system_action=system_action or {},
+                rest_reminder=rest_reminder or {},
+            )
             if system_action is not None:
                 self.emit_system_action_ready(system_action)
             return True
@@ -3498,6 +3724,8 @@ def run_work_overlay_helper_qt(
                 check_window.set_overlay_opacity(target)
             for action_window in self._system_action_windows:
                 action_window.set_overlay_opacity(target)
+            for action_window in self._rest_action_windows:
+                action_window.set_overlay_opacity(target)
 
         @staticmethod
         def _item_identity(item: Mapping[str, object], index: int) -> str:
@@ -3525,6 +3753,7 @@ def run_work_overlay_helper_qt(
             self._workdir_anchors.clear()
             self._completed_check_anchors.clear()
             self._system_action_anchors.clear()
+            self._rest_action_anchors.clear()
             self._card_hover_anchors.clear()
             self._completed_hover_anchors.clear()
             self._item_widgets.clear()
@@ -3673,6 +3902,24 @@ def run_work_overlay_helper_qt(
             status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
             footer_layout.addWidget(status_label, 1)
 
+            secondary_action_label = QLabel("", footer_container)
+            secondary_action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            secondary_action_label.setTextFormat(text_format.PlainText)
+            secondary_action_label.setAlignment(alignment.AlignCenter)
+            secondary_action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
+            secondary_action_label.setFixedHeight(24)
+            secondary_action_label.setVisible(False)
+            footer_layout.addWidget(secondary_action_label, 0)
+
+            primary_action_label = QLabel("", footer_container)
+            primary_action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            primary_action_label.setTextFormat(text_format.PlainText)
+            primary_action_label.setAlignment(alignment.AlignCenter)
+            primary_action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
+            primary_action_label.setFixedHeight(24)
+            primary_action_label.setVisible(False)
+            footer_layout.addWidget(primary_action_label, 0)
+
             round_badge = QLabel("", footer_container)
             round_badge.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             round_badge.setTextFormat(text_format.PlainText)
@@ -3712,6 +3959,8 @@ def run_work_overlay_helper_qt(
                 "detail": detail,
                 "footer_container": footer_container,
                 "status_label": status_label,
+                "secondary_action_label": secondary_action_label,
+                "primary_action_label": primary_action_label,
                 "round_badge": round_badge,
                 "workdir_label": workdir_label,
                 "switch_overlay": switch_overlay,
@@ -3731,6 +3980,7 @@ def run_work_overlay_helper_qt(
             status = str(item.get("status") or "")
             system_action = _item_is_system_action(item)
             background_usage = _item_is_background_usage(item)
+            rest_reminder = _item_is_rest_reminder(item)
             accent, pill_bg, card_bg, border_color = _color_for(
                 status,
                 self._theme_tokens,
@@ -3738,17 +3988,21 @@ def run_work_overlay_helper_qt(
             theme = self._theme_tokens
             elapsed_text = (
                 ""
-                if system_action or background_usage
+                if system_action or background_usage or rest_reminder
                 else str(item.get("elapsedText") or "").strip() or "已处理 --"
             )
             header_text = (
-                str(item.get("statusLabel") or "Codex App 后台任务：未知后台任务")
-                if background_usage
-                else _work_overlay_header_text(
+                str(item.get("title") or "休息提醒")
+                if rest_reminder
+                else (
+                    str(item.get("statusLabel") or "Codex App 后台任务：未知后台任务")
+                    if background_usage
+                    else _work_overlay_header_text(
                     str(item.get("startedAt") or ""),
                     elapsed_text,
                     str(item.get("title") or "Codex 工作"),
                     title_limit=header_title_limit,
+                )
                 )
             )
 
@@ -3773,7 +4027,7 @@ def run_work_overlay_helper_qt(
 
             round_badge = record["round_badge"]
             round_index = max(0, int(item.get("roundIndex") or 0))
-            badge_visible = status != "recent" and round_index > 0
+            badge_visible = not rest_reminder and status != "recent" and round_index > 0
             if badge_visible:
                 round_badge_theme = _round_badge_palette(status, theme)
                 round_badge.setText(str(round_index))
@@ -3861,13 +4115,52 @@ def run_work_overlay_helper_qt(
                 status_label.setText(footer_status_text)
                 status_label.setBaseColor(status_text_color)
                 status_label.setShimmerEnabled(
-                    status not in {"recent", "background_usage"}
+                    not rest_reminder and status not in {"recent", "background_usage"}
                 )
                 status_label.setVisible(True)
             else:
                 status_label.setText("")
                 status_label.setShimmerEnabled(False)
                 status_label.setVisible(False)
+
+            rest_actions = (
+                [dict(action) for action in item.get("restActions", []) if isinstance(action, Mapping)]
+                if rest_reminder
+                else []
+            )
+            secondary_action = next(
+                (action for action in rest_actions if not bool(action.get("primary"))),
+                None,
+            )
+            primary_action = next(
+                (action for action in rest_actions if bool(action.get("primary"))),
+                None,
+            )
+            for key, action, primary in (
+                ("secondary_action_label", secondary_action, False),
+                ("primary_action_label", primary_action, True),
+            ):
+                label = record[key]
+                if action is None:
+                    label.setText("")
+                    label.setVisible(False)
+                    continue
+                label.setText(str(action.get("label") or ""))
+                label.setMinimumWidth(72)
+                label.setMaximumWidth(118)
+                label.setStyleSheet(
+                    "QLabel {"
+                    f"color: {theme['surface'] if primary else theme['text']};"
+                    f"background-color: {accent if primary else pill_bg};"
+                    f"border: 1px solid {accent if primary else border_color};"
+                    "border-radius: 7px;"
+                    "padding: 0 8px;"
+                    "}"
+                )
+                label.adjustSize()
+                label.setFixedHeight(24)
+                label.setFixedWidth(max(72, min(118, label.sizeHint().width() + 12)))
+                label.setVisible(True)
 
             workdir_label = record["workdir_label"]
             if workdir_text:
@@ -3890,6 +4183,17 @@ def run_work_overlay_helper_qt(
                 self._card_hover_anchors.append(card)
                 if system_action:
                     self._system_action_anchors.append((status_label, dict(item)))
+                elif rest_reminder:
+                    for key, action in (
+                        ("secondary_action_label", secondary_action),
+                        ("primary_action_label", primary_action),
+                    ):
+                        if action is None:
+                            continue
+                        action_item = dict(item)
+                        action_item["action"] = str(action.get("action") or "")
+                        action_item["actionLabel"] = str(action.get("label") or "")
+                        self._rest_action_anchors.append((record[key], action_item))
                 else:
                     self._close_anchors.append(
                         (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
@@ -5066,9 +5370,17 @@ def run_work_overlay_helper_qt(
             items: Sequence[Mapping[str, object]],
             *,
             system_action: Mapping[str, object] | None = None,
+            rest_reminder: Mapping[str, object] | None = None,
         ) -> None:
             if system_action is not None:
                 self._system_action = _normalized_system_action(system_action)
+            if rest_reminder is not None:
+                self._rest_reminder = _normalized_rest_reminder(rest_reminder)
+            if self._rest_reminder is not None:
+                if not self._rest_countdown_timer.isActive():
+                    self._rest_countdown_timer.start()
+            else:
+                self._rest_countdown_timer.stop()
             if self._transition_in_progress:
                 self._raw_items = list(items)
                 return
@@ -5088,6 +5400,13 @@ def run_work_overlay_helper_qt(
                         if not _item_is_system_action(item)
                     ],
                 ]
+            if self._rest_reminder is not None:
+                rest_item = _rest_reminder_overlay_item(self._rest_reminder)
+                if rest_item:
+                    visible_items = [
+                        rest_item,
+                        *[item for item in visible_items if not _item_is_rest_reminder(item)],
+                    ]
             self._sync_switch_pending(visible_items)
             if not visible_items:
                 if self.isVisible():
@@ -5170,6 +5489,7 @@ def run_work_overlay_helper_qt(
             self._workdir_anchors.clear()
             self._completed_check_anchors.clear()
             self._system_action_anchors.clear()
+            self._rest_action_anchors.clear()
             self._card_hover_anchors.clear()
             self._completed_hover_anchors.clear()
             if rebuild:
@@ -5317,6 +5637,40 @@ def run_work_overlay_helper_qt(
                     opacity=current_opacity,
                     tooltip=str(item.get("statusText") or "重启 Codex"),
                     hover_color=action_color,
+                )
+                action_window.setGeometry(
+                    anchor_top_left.x(),
+                    anchor_top_left.y(),
+                    max(1, anchor.width()),
+                    max(1, anchor.height()),
+                )
+                action_window.show()
+                action_window.raise_()
+
+            rest_action_color = _color_for("waiting_user", self._theme_tokens)[0]
+            while len(self._rest_action_windows) < len(self._rest_action_anchors):
+                self._rest_action_windows.append(
+                    ClickHotspotWindow(
+                        self.trigger_rest_action,
+                        circle=False,
+                        hover_color=rest_action_color,
+                    )
+                )
+            while len(self._rest_action_windows) > len(self._rest_action_anchors):
+                orphan = self._rest_action_windows.pop()
+                orphan.close()
+
+            for index, action_window in enumerate(self._rest_action_windows):
+                anchor, item = self._rest_action_anchors[index]
+                if not anchor.isVisible():
+                    action_window.hide()
+                    continue
+                anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
+                action_window.configure(
+                    item,
+                    opacity=current_opacity,
+                    tooltip=str(item.get("actionLabel") or "休息提醒操作"),
+                    hover_color=rest_action_color,
                 )
                 action_window.setGeometry(
                     anchor_top_left.x(),

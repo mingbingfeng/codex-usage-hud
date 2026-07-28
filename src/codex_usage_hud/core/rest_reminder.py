@@ -38,6 +38,7 @@ REST_REMINDER_POSTPONE_MAX = 30
 REST_REMINDER_IDLE_RESET_MIN = 0
 REST_REMINDER_IDLE_RESET_MAX = 60
 REST_REMINDER_IDLE_RETURN_POLL_SECONDS = 30.0
+REST_REMINDER_COMPLETION_FEEDBACK_SECONDS = 1.5
 
 _LOGGER = logging.getLogger("codex_usage_hud.rest_reminder")
 _LOGGER.addHandler(logging.NullHandler())
@@ -199,7 +200,7 @@ def system_idle_seconds(now: float | None = None) -> float | None:
 
 
 class RestReminderScheduler:
-    """Process-local rest reminder timer with one postpone and idle reset."""
+    """Process-local focus, prompt, postpone, and explicit-rest state machine."""
 
     def __init__(
         self,
@@ -216,15 +217,27 @@ class RestReminderScheduler:
         self._clock = clock or time.monotonic
         self._wall_clock = wall_clock or time.time
         self._config = RestReminderConfig()
-        self._next_fire_at = 0.0
-        self._postpone_used = False
-        self._showing = False
-        self._showing_until = 0.0
-        self._showing_reschedules = False
-        self._last_event: RestReminderEvent | None = None
+        self._phase = "focus"
         self._cycle_started_at = 0.0
+        self._cycle_started_wall = 0.0
+        self._next_fire_at = 0.0
+        self._next_fire_wall = 0.0
+        self._prompt_until = 0.0
+        self._prompt_until_wall = 0.0
+        self._postpone_until_wall = 0.0
+        self._rest_started_at = 0.0
+        self._rest_started_wall = 0.0
+        self._rest_until = 0.0
+        self._rest_until_wall = 0.0
+        self._postpone_used = False
+        self._last_event: RestReminderEvent | None = None
+        self._active_message = ""
         self._schedule_waiting = False
         self._idle_break_active = False
+        self._daily_date = ""
+        self._daily_rested_seconds = 0.0
+        self._last_rest_duration_seconds = 0.0
+        self._pending_transition: dict[str, object] | None = None
         self.configure(self._config, force_reset=True)
 
     @property
@@ -232,16 +245,28 @@ class RestReminderScheduler:
         return self._config
 
     @property
+    def phase(self) -> str:
+        return self._phase
+
+    @property
     def showing(self) -> bool:
-        return self._showing
+        return self._phase == "prompt"
 
     @property
     def showing_until(self) -> float:
-        return self._showing_until
+        return self._prompt_until if self.showing else 0.0
+
+    @property
+    def resting(self) -> bool:
+        return self._phase == "resting"
 
     @property
     def active_event(self) -> RestReminderEvent | None:
         return self._last_event
+
+    @property
+    def active_message(self) -> str:
+        return self._active_message
 
     @property
     def postpone_used(self) -> bool:
@@ -256,17 +281,59 @@ class RestReminderScheduler:
         return self._cycle_started_at
 
     @property
+    def prompt_ends_at_wall(self) -> float:
+        return self._prompt_until_wall if self.showing else 0.0
+
+    @property
+    def postpone_ends_at_wall(self) -> float:
+        return self._postpone_until_wall if self._phase == "postponed" else 0.0
+
+    @property
+    def rest_started_at_wall(self) -> float:
+        return self._rest_started_wall if self.resting else 0.0
+
+    @property
+    def rest_ends_at_wall(self) -> float:
+        return self._rest_until_wall if self.resting else 0.0
+
+    @property
+    def completed_today_seconds(self) -> float:
+        self._refresh_daily_date(float(self._wall_clock()))
+        return max(0.0, self._daily_rested_seconds)
+
+    @property
+    def today_rested_seconds(self) -> float:
+        wall_now = float(self._wall_clock())
+        self._refresh_daily_date(wall_now)
+        active = 0.0
+        if self.resting:
+            day_start = self._day_start_timestamp(wall_now)
+            active = max(
+                0.0,
+                min(wall_now, self._rest_until_wall)
+                - max(self._rest_started_wall, day_start),
+            )
+        return max(0.0, self._daily_rested_seconds + active)
+
+    @property
+    def last_rest_duration_seconds(self) -> float:
+        return max(0.0, self._last_rest_duration_seconds)
+
+    @property
     def state(self) -> str:
         if not self._config.enabled:
             return "disabled"
         schedule_state, _ = self._schedule_state(float(self._wall_clock()))
         if schedule_state != "work":
             return schedule_state
-        if self._showing:
-            return "break"
+        if self._phase != "focus":
+            return self._phase
         if self._idle_break_active:
             return "away"
         return "work"
+
+    def monotonic_now(self) -> float:
+        return float(self._clock())
 
     def seconds_until_next(self, now: float | None = None) -> float | None:
         if not self._config.enabled:
@@ -274,68 +341,84 @@ class RestReminderScheduler:
         current = self._clock() if now is None else float(now)
         return max(0.0, self._next_fire_at - current)
 
-    def seconds_until_break_end(self, now: float | None = None) -> float | None:
-        if not self._showing:
+    def seconds_until_prompt_end(self, now: float | None = None) -> float | None:
+        if not self.showing:
             return None
         current = self._clock() if now is None else float(now)
-        return max(0.0, self._showing_until - current)
+        return max(0.0, self._prompt_until - current)
+
+    def seconds_until_break_end(self, now: float | None = None) -> float | None:
+        if not self.resting:
+            return None
+        current = self._clock() if now is None else float(now)
+        return max(0.0, self._rest_until - current)
+
+    def current_rest_elapsed_seconds(self, now: float | None = None) -> float:
+        if not self.resting:
+            return 0.0
+        current = self._clock() if now is None else float(now)
+        return max(0.0, min(current, self._rest_until) - self._rest_started_at)
 
     def seconds_until_wake(self, now: float | None = None) -> float | None:
-        """Return the next timer or work-schedule boundary that needs a tick."""
+        """Return the next phase or work-schedule boundary that needs a tick."""
         current = self._clock() if now is None else float(now)
         if not self._config.enabled:
-            if self._showing:
-                return max(0.0, self._showing_until - current)
             return None
         wall_now = float(self._wall_clock())
         state, boundary = self._schedule_state(wall_now)
+        if self.showing:
+            delay = max(0.0, self._prompt_until - current)
+        elif self.resting:
+            delay = max(0.0, self._rest_until - current)
+        else:
+            delay = max(0.0, self._next_fire_at - current)
         if state != "work" and boundary is not None:
             return max(0.0, boundary - wall_now)
-        if self._showing:
-            delay = max(0.0, self._showing_until - current)
-            if boundary is not None:
-                delay = min(delay, max(0.0, boundary - wall_now))
-            return delay
-        delay = max(0.0, self._next_fire_at - current)
         if boundary is not None:
             delay = min(delay, max(0.0, boundary - wall_now))
-        idle_reset = float(self._config.idle_reset_minutes) * 60.0
-        if idle_reset > 0:
-            if self._idle_break_active:
-                delay = min(delay, REST_REMINDER_IDLE_RETURN_POLL_SECONDS)
-            else:
-                idle_seconds = self._idle_seconds()
-                if idle_seconds is not None:
-                    delay = min(delay, max(0.0, idle_reset - idle_seconds))
+        if self._phase in {"focus", "postponed"}:
+            idle_reset = float(self._config.idle_reset_minutes) * 60.0
+            if idle_reset > 0:
+                if self._idle_break_active:
+                    delay = min(delay, REST_REMINDER_IDLE_RETURN_POLL_SECONDS)
+                else:
+                    idle_seconds = self._idle_seconds()
+                    if idle_seconds is not None:
+                        delay = min(delay, max(0.0, idle_reset - idle_seconds))
         return delay
 
     def set_cycle_started_at_wall(self, started_at_wall: float) -> None:
-        """Adjust the current round start from a wall-clock timestamp."""
+        """Adjust the current focus round start from a wall-clock timestamp."""
         if not self._config.enabled:
             return
         now_wall = float(self._wall_clock())
-        elapsed = max(0.0, now_wall - float(started_at_wall))
-        current = self._clock()
+        current = float(self._clock())
+        started_wall = float(started_at_wall)
+        elapsed = max(0.0, now_wall - started_wall)
+        self._phase = "focus"
         self._cycle_started_at = current - elapsed
-        self._next_fire_at = self._cycle_started_at + float(self._config.interval_minutes) * 60.0
-        self._clear_showing()
+        self._cycle_started_wall = started_wall
+        duration = float(self._config.interval_minutes) * 60.0
+        self._next_fire_at = self._cycle_started_at + duration
+        self._next_fire_wall = started_wall + duration
+        self._clear_prompt()
+        self._clear_rest()
+        self._postpone_until_wall = 0.0
         self._postpone_used = False
         self._idle_break_active = False
         self._schedule_waiting = False
 
     def export_wall_state(self) -> dict[str, Any] | None:
-        """Return wall-clock timing that can be restored after a process restart."""
-        if not self._config.enabled or self._next_fire_at <= 0:
+        """Return wall-clock phase timing and today's completed rest total."""
+        if not self._config.enabled:
             return None
-        remaining = float(self.seconds_until_next() or 0.0)
-        duration = max(0.0, self._next_fire_at - self._cycle_started_at)
-        elapsed = max(0.0, min(duration, duration - remaining))
-        now_wall = float(self._wall_clock())
+        wall_now = float(self._wall_clock())
+        self._refresh_daily_date(wall_now)
         snapshot: dict[str, Any] = {
             "enabled": True,
-            "phase": "break" if self._showing else "focus",
-            "cycleStartedAtMs": int(round((now_wall - elapsed) * 1000.0)),
-            "nextFireAtMs": int(round((now_wall + remaining) * 1000.0)),
+            "phase": self._phase,
+            "cycleStartedAtMs": int(round(self._cycle_started_wall * 1000.0)),
+            "nextFireAtMs": int(round(self._next_fire_wall * 1000.0)),
             "postponeUsed": bool(self._postpone_used),
             "intervalMinutes": int(self._config.interval_minutes),
             "breakMinutes": int(self._config.break_minutes),
@@ -346,58 +429,37 @@ class RestReminderScheduler:
             "lunchEnabled": bool(self._config.lunch_enabled),
             "lunchStartTime": self._config.lunch_start_time,
             "lunchEndTime": self._config.lunch_end_time,
+            "dailyDate": self._daily_date,
+            "dailyRestedSeconds": int(round(self._daily_rested_seconds)),
+            "reminderMessage": self._active_message,
         }
-        if self._showing:
-            current = self._clock()
-            event = self._last_event
-            snapshot.update(
-                {
-                    "reminderEndsAtMs": int(
-                        round(
-                            (
-                                now_wall
-                                + max(0.0, self._showing_until - current)
-                            )
-                            * 1000.0
-                        )
-                    ),
-                    "reminderMessage": event.message if event is not None else "",
-                    "reminderCanPostpone": bool(
-                        event.can_postpone if event is not None else not self._postpone_used
-                    ),
-                    "reminderAutoReschedule": bool(self._showing_reschedules),
-                }
-            )
+        if self.showing:
+            snapshot["promptEndsAtMs"] = int(round(self._prompt_until_wall * 1000.0))
+            snapshot["reminderCanPostpone"] = not self._postpone_used
+        elif self._phase == "postponed":
+            snapshot["postponeEndsAtMs"] = int(round(self._postpone_until_wall * 1000.0))
+        elif self.resting:
+            snapshot["restStartedAtMs"] = int(round(self._rest_started_wall * 1000.0))
+            snapshot["restEndsAtMs"] = int(round(self._rest_until_wall * 1000.0))
         return snapshot
 
     def restore_wall_state(self, state: Mapping[str, Any] | None) -> bool:
-        """Restore timing from a wall-clock snapshot. Returns True on success."""
+        """Restore future prompt/postpone/rest timing from one wall snapshot."""
         if not self._config.enabled or not isinstance(state, Mapping):
             return False
         try:
-            started_ms = float(state.get("cycleStartedAtMs"))
-            next_ms = float(state.get("nextFireAtMs"))
-        except (TypeError, ValueError):
-            return False
-        if started_ms <= 0 or next_ms <= 0:
-            return False
-        # Ignore snapshots that no longer match the active focus schedule.
-        try:
             saved_interval = int(state.get("intervalMinutes"))
-            saved_break = int(
-                state.get("breakMinutes", self._config.break_minutes)
-            )
+            saved_break = int(state.get("breakMinutes", self._config.break_minutes))
             saved_postpone = int(state.get("postponeMinutes"))
             saved_idle_reset = int(state.get("idleResetMinutes"))
         except (TypeError, ValueError):
             return False
-        if saved_interval != int(self._config.interval_minutes):
-            return False
-        if saved_break != int(self._config.break_minutes):
-            return False
-        if saved_postpone != int(self._config.postpone_minutes):
-            return False
-        if saved_idle_reset != int(self._config.idle_reset_minutes):
+        if (
+            saved_interval != int(self._config.interval_minutes)
+            or saved_break != int(self._config.break_minutes)
+            or saved_postpone != int(self._config.postpone_minutes)
+            or saved_idle_reset != int(self._config.idle_reset_minutes)
+        ):
             return False
         for key, expected in (
             ("workStartTime", self._config.work_start_time),
@@ -412,30 +474,100 @@ class RestReminderScheduler:
         ):
             return False
 
-        now_wall = float(self._wall_clock())
-        current = self._clock()
-        started_wall = started_ms / 1000.0
-        next_wall = next_ms / 1000.0
-        if next_wall < started_wall:
-            return False
-        phase = str(state.get("phase") or "focus").strip().lower()
-        if phase == "break" or next_wall <= now_wall:
-            # A process restart, sleep, or renderer loss counts as a natural
-            # break. Never replay a stale overlay or catch up an expired alert.
-            self._clear_showing()
-            self._postpone_used = False
-            self._idle_break_active = False
-            self._schedule_waiting = False
-            self._arm_from(current)
-            return True
-        elapsed = max(0.0, now_wall - started_wall)
-        remaining = max(0.0, next_wall - now_wall)
-        self._cycle_started_at = current - elapsed
-        self._next_fire_at = current + remaining
+        wall_now = float(self._wall_clock())
+        current = float(self._clock())
+        self._daily_date = str(state.get("dailyDate") or "")
+        try:
+            self._daily_rested_seconds = max(
+                0.0, float(state.get("dailyRestedSeconds") or 0.0)
+            )
+        except (TypeError, ValueError):
+            self._daily_rested_seconds = 0.0
+        self._refresh_daily_date(wall_now)
         self._postpone_used = bool(state.get("postponeUsed"))
-        self._clear_showing()
+        self._active_message = str(state.get("reminderMessage") or "")
         self._idle_break_active = False
         self._schedule_waiting = False
+        self._pending_transition = None
+
+        try:
+            started_wall = float(state.get("cycleStartedAtMs") or 0.0) / 1000.0
+            next_wall = float(state.get("nextFireAtMs") or 0.0) / 1000.0
+        except (TypeError, ValueError):
+            return False
+        if started_wall <= 0 or next_wall <= 0 or next_wall < started_wall:
+            return False
+        self._restore_focus_times(current, wall_now, started_wall, next_wall)
+        phase = str(state.get("phase") or "focus").strip().lower()
+
+        if phase in {"break", "resting"}:
+            try:
+                rest_started_wall = float(state.get("restStartedAtMs") or 0.0) / 1000.0
+                rest_ends_wall = float(state.get("restEndsAtMs") or 0.0) / 1000.0
+            except (TypeError, ValueError):
+                rest_started_wall = 0.0
+                rest_ends_wall = 0.0
+            if rest_started_wall > 0 and rest_ends_wall > wall_now:
+                self._phase = "resting"
+                self._rest_started_wall = rest_started_wall
+                self._rest_until_wall = rest_ends_wall
+                self._rest_started_at = current - max(0.0, wall_now - rest_started_wall)
+                self._rest_until = current + max(0.0, rest_ends_wall - wall_now)
+                self._clear_prompt()
+                return True
+            if rest_started_wall > 0 and rest_ends_wall > rest_started_wall:
+                self._credit_rest_wall_interval(rest_started_wall, rest_ends_wall)
+            self._phase = "focus"
+            self._postpone_used = False
+            self._arm_from(current, wall_now)
+            return True
+
+        if phase == "prompt":
+            try:
+                prompt_ends_wall = float(state.get("promptEndsAtMs") or 0.0) / 1000.0
+            except (TypeError, ValueError):
+                prompt_ends_wall = 0.0
+            if prompt_ends_wall > wall_now:
+                self._phase = "prompt"
+                self._prompt_until_wall = prompt_ends_wall
+                self._prompt_until = current + (prompt_ends_wall - wall_now)
+                self._last_event = RestReminderEvent(
+                    message=self._active_message or REST_REMINDER_MESSAGES[0],
+                    can_postpone=not self._postpone_used,
+                    interval_minutes=self._config.interval_minutes,
+                    break_minutes=self._config.break_minutes,
+                    postpone_minutes=self._config.postpone_minutes,
+                    fired_at=current,
+                    ends_at=self._prompt_until,
+                )
+                return True
+            self._phase = "focus"
+            self._postpone_used = False
+            self._arm_from(current, wall_now)
+            return True
+
+        if phase == "postponed":
+            try:
+                postpone_wall = float(state.get("postponeEndsAtMs") or 0.0) / 1000.0
+            except (TypeError, ValueError):
+                postpone_wall = 0.0
+            if postpone_wall > wall_now:
+                self._phase = "postponed"
+                self._postpone_until_wall = postpone_wall
+                self._next_fire_wall = postpone_wall
+                self._next_fire_at = current + (postpone_wall - wall_now)
+                self._cycle_started_wall = wall_now
+                self._cycle_started_at = current
+                return True
+            self._phase = "focus"
+            self._postpone_used = False
+            self._arm_from(current, wall_now)
+            return True
+
+        self._phase = "focus"
+        if next_wall <= wall_now:
+            self._postpone_used = False
+            self._arm_from(current, wall_now)
         return True
 
     def configure(
@@ -444,19 +576,20 @@ class RestReminderScheduler:
         *,
         force_reset: bool = False,
     ) -> None:
-        if isinstance(config, RestReminderConfig):
-            next_config = config
-        else:
-            next_config = RestReminderConfig.from_user_config(config)
+        next_config = (
+            config
+            if isinstance(config, RestReminderConfig)
+            else RestReminderConfig.from_user_config(config)
+        )
         previous = self._config
+        if previous.enabled and not next_config.enabled and self.resting:
+            self._credit_rest_wall_interval(
+                self._rest_started_wall,
+                min(float(self._wall_clock()), self._rest_until_wall),
+            )
         self._config = next_config
         if not next_config.enabled:
-            self._clear_showing()
-            self._next_fire_at = 0.0
-            self._cycle_started_at = 0.0
-            self._postpone_used = False
-            self._schedule_waiting = False
-            self._idle_break_active = False
+            self._reset_runtime_state()
             return
         timing_changed = (
             force_reset
@@ -471,93 +604,121 @@ class RestReminderScheduler:
             or previous.lunch_start_time != next_config.lunch_start_time
             or previous.lunch_end_time != next_config.lunch_end_time
         )
-        if timing_changed and not self._showing:
+        if timing_changed and self._phase == "focus":
             self._arm_from_now()
             self._postpone_used = False
 
     def tick(self, now: float | None = None) -> RestReminderEvent | None:
         current = self._clock() if now is None else float(now)
         if not self._config.enabled:
-            if self._showing and current >= self._showing_until:
-                self._clear_showing()
             return None
         wall_now = float(self._wall_clock())
+        self._refresh_daily_date(wall_now)
         schedule_state, boundary = self._schedule_state(wall_now)
         if schedule_state != "work":
-            self._clear_showing()
+            if self.resting:
+                self._finalize_rest(current, wall_now, "schedule_ended", arm=False)
+            elif self.showing:
+                self._clear_prompt()
+            self._phase = "focus"
+            self._postpone_until_wall = 0.0
             self._schedule_waiting = True
             self._idle_break_active = False
-            self._next_fire_at = current + max(0.0, (boundary or wall_now) - wall_now)
             self._cycle_started_at = current
+            self._cycle_started_wall = wall_now
+            wait = max(0.0, (boundary or wall_now) - wall_now)
+            self._next_fire_at = current + wait
+            self._next_fire_wall = wall_now + wait
             self._postpone_used = False
             return None
         if self._schedule_waiting:
             self._schedule_waiting = False
-            self._arm_from(current)
+            self._arm_from(current, wall_now)
             return None
-        if self._showing:
-            if current < self._showing_until:
+        if self.showing:
+            if current < self._prompt_until:
                 return None
-            should_reschedule = self._showing_reschedules
-            self._clear_showing()
-            if should_reschedule:
-                self._postpone_used = False
-                self._arm_from(current)
+            self._clear_prompt()
+            self._phase = "focus"
+            self._postpone_used = False
+            self._record_transition("auto_skipped", 0.0)
+            self._arm_from(current, wall_now)
             return None
+        if self.resting:
+            if current < self._rest_until:
+                return None
+            self._finalize_rest(current, wall_now, "auto_completed")
+            return None
+
         idle_seconds = self._idle_seconds()
         idle_reset = float(self._config.idle_reset_minutes) * 60.0
         if idle_reset > 0 and idle_seconds is not None and idle_seconds >= idle_reset:
             if not self._idle_break_active:
-                self._next_fire_at = current + float(self._config.interval_minutes) * 60.0
-                self._cycle_started_at = current
+                self._phase = "focus"
+                self._postpone_until_wall = 0.0
+                self._arm_from(current, wall_now)
                 self._postpone_used = False
             self._idle_break_active = True
             return None
         if self._idle_break_active:
             self._idle_break_active = False
-            self._arm_from(current)
+            self._phase = "focus"
+            self._postpone_until_wall = 0.0
+            self._arm_from(current, wall_now)
             return None
         if current < self._next_fire_at:
             return None
-        break_seconds = float(self._config.break_minutes) * 60.0
-        event = RestReminderEvent(
-            message=str(self._pick_message() or REST_REMINDER_MESSAGES[0]),
-            can_postpone=not self._postpone_used,
-            interval_minutes=self._config.interval_minutes,
-            break_minutes=self._config.break_minutes,
-            postpone_minutes=self._config.postpone_minutes,
-            fired_at=current,
-            ends_at=current + break_seconds,
-        )
-        self._showing = True
-        self._showing_until = event.ends_at
-        self._showing_reschedules = True
-        self._last_event = event
-        return event
+        return self._begin_prompt(current, wall_now)
 
-    def acknowledge(self, now: float | None = None) -> None:
-        current = self._clock() if now is None else float(now)
-        self._clear_showing()
-        self._postpone_used = False
-        if self._config.enabled:
-            self._arm_from(current)
-        else:
-            self._next_fire_at = 0.0
-            self._cycle_started_at = 0.0
-
-    def postpone(self, now: float | None = None) -> bool:
-        if not self._showing or self._postpone_used:
+    def start_rest(self, now: float | None = None) -> bool:
+        if self._phase not in {"prompt", "postponed"}:
             return False
         current = self._clock() if now is None else float(now)
-        self._clear_showing()
+        wall_now = float(self._wall_clock())
+        duration = float(self._config.break_minutes) * 60.0
+        self._clear_prompt()
+        self._phase = "resting"
+        self._postpone_until_wall = 0.0
+        self._rest_started_at = current
+        self._rest_started_wall = wall_now
+        self._rest_until = current + duration
+        self._rest_until_wall = wall_now + duration
+        self._pending_transition = None
+        return True
+
+    def finish_rest(self, now: float | None = None) -> bool:
+        if not self.resting:
+            return False
+        current = self._clock() if now is None else float(now)
+        self._finalize_rest(current, float(self._wall_clock()), "finished_early")
+        return True
+
+    def acknowledge(self, now: float | None = None) -> None:
+        if self.resting:
+            self.finish_rest(now)
+        else:
+            self.start_rest(now)
+
+    def postpone(self, now: float | None = None) -> bool:
+        if not self.showing or self._postpone_used:
+            return False
+        current = self._clock() if now is None else float(now)
+        wall_now = float(self._wall_clock())
+        duration = float(self._config.postpone_minutes) * 60.0
+        self._clear_prompt()
+        self._phase = "postponed"
         self._postpone_used = True
-        self._next_fire_at = current + float(self._config.postpone_minutes) * 60.0
         self._cycle_started_at = current
+        self._cycle_started_wall = wall_now
+        self._next_fire_at = current + duration
+        self._next_fire_wall = wall_now + duration
+        self._postpone_until_wall = self._next_fire_wall
         return True
 
     def dismiss_without_reschedule(self) -> None:
-        """Clear showing state without changing the next fire time."""
-        self._clear_showing()
+        self._clear_prompt()
+        self._clear_rest()
+        self._phase = "focus"
 
     def begin_preview(
         self,
@@ -565,39 +726,145 @@ class RestReminderScheduler:
         *,
         now: float | None = None,
     ) -> RestReminderEvent:
-        """Show a rest event without moving the next fire time (test/preview)."""
         current = self._clock() if now is None else float(now)
         text = str(message or "").strip() or str(
             self._pick_message() or REST_REMINDER_MESSAGES[0]
         )
         break_seconds = float(self._config.break_minutes) * 60.0
-        event = RestReminderEvent(
+        return RestReminderEvent(
             message=text,
-            can_postpone=not self._postpone_used,
+            can_postpone=False,
             interval_minutes=int(self._config.interval_minutes),
             break_minutes=int(self._config.break_minutes),
             postpone_minutes=int(self._config.postpone_minutes),
             fired_at=current,
             ends_at=current + break_seconds,
         )
-        self._showing = True
-        self._showing_until = event.ends_at
-        self._showing_reschedules = False
+
+    def take_transition(self) -> dict[str, object] | None:
+        transition = self._pending_transition
+        self._pending_transition = None
+        return dict(transition) if transition is not None else None
+
+    def _begin_prompt(self, current: float, wall_now: float) -> RestReminderEvent:
+        wait_seconds = float(self._config.break_minutes) * 60.0
+        message = str(self._pick_message() or REST_REMINDER_MESSAGES[0])
+        event = RestReminderEvent(
+            message=message,
+            can_postpone=not self._postpone_used,
+            interval_minutes=self._config.interval_minutes,
+            break_minutes=self._config.break_minutes,
+            postpone_minutes=self._config.postpone_minutes,
+            fired_at=current,
+            ends_at=current + wait_seconds,
+        )
+        self._phase = "prompt"
+        self._active_message = message
+        self._prompt_until = event.ends_at
+        self._prompt_until_wall = wall_now + wait_seconds
+        self._postpone_until_wall = 0.0
         self._last_event = event
         return event
 
-    def _clear_showing(self) -> None:
-        self._showing = False
-        self._showing_until = 0.0
-        self._showing_reschedules = False
+    def _finalize_rest(
+        self,
+        current: float,
+        wall_now: float,
+        reason: str,
+        *,
+        arm: bool = True,
+    ) -> None:
+        if not self.resting:
+            return
+        end_mono = min(float(current), self._rest_until)
+        end_wall = min(float(wall_now), self._rest_until_wall)
+        duration = max(0.0, end_mono - self._rest_started_at)
+        self._credit_rest_wall_interval(self._rest_started_wall, end_wall)
+        self._last_rest_duration_seconds = duration
+        self._clear_rest()
+        self._phase = "focus"
+        self._postpone_used = False
+        self._record_transition(reason, duration)
+        if arm and self._config.enabled:
+            self._arm_from(float(current), float(wall_now))
+
+    def _record_transition(self, kind: str, duration: float) -> None:
+        self._pending_transition = {
+            "kind": str(kind),
+            "restDurationSeconds": int(round(max(0.0, duration))),
+            "todayRestedSeconds": int(round(self.today_rested_seconds)),
+        }
+
+    def _clear_prompt(self) -> None:
+        self._prompt_until = 0.0
+        self._prompt_until_wall = 0.0
         self._last_event = None
 
-    def _arm_from_now(self) -> None:
-        self._arm_from(self._clock())
+    def _clear_rest(self) -> None:
+        self._rest_started_at = 0.0
+        self._rest_started_wall = 0.0
+        self._rest_until = 0.0
+        self._rest_until_wall = 0.0
 
-    def _arm_from(self, current: float) -> None:
+    def _reset_runtime_state(self) -> None:
+        self._phase = "focus"
+        self._cycle_started_at = 0.0
+        self._cycle_started_wall = 0.0
+        self._next_fire_at = 0.0
+        self._next_fire_wall = 0.0
+        self._postpone_until_wall = 0.0
+        self._postpone_used = False
+        self._schedule_waiting = False
+        self._idle_break_active = False
+        self._active_message = ""
+        self._pending_transition = None
+        self._clear_prompt()
+        self._clear_rest()
+
+    def _arm_from_now(self) -> None:
+        self._arm_from(float(self._clock()), float(self._wall_clock()))
+
+    def _arm_from(self, current: float, wall_now: float | None = None) -> None:
+        wall_value = float(self._wall_clock()) if wall_now is None else float(wall_now)
+        duration = float(self._config.interval_minutes) * 60.0
+        self._phase = "focus"
         self._cycle_started_at = current
-        self._next_fire_at = current + float(self._config.interval_minutes) * 60.0
+        self._cycle_started_wall = wall_value
+        self._next_fire_at = current + duration
+        self._next_fire_wall = wall_value + duration
+        self._postpone_until_wall = 0.0
+
+    def _restore_focus_times(
+        self,
+        current: float,
+        wall_now: float,
+        started_wall: float,
+        next_wall: float,
+    ) -> None:
+        self._cycle_started_wall = started_wall
+        self._next_fire_wall = next_wall
+        self._cycle_started_at = current - max(0.0, wall_now - started_wall)
+        self._next_fire_at = current + max(0.0, next_wall - wall_now)
+
+    def _refresh_daily_date(self, wall_now: float) -> None:
+        date_key = datetime.fromtimestamp(wall_now).date().isoformat()
+        if self._daily_date != date_key:
+            self._daily_date = date_key
+            self._daily_rested_seconds = 0.0
+
+    def _day_start_timestamp(self, wall_now: float) -> float:
+        local = datetime.fromtimestamp(wall_now)
+        return datetime(local.year, local.month, local.day).timestamp()
+
+    def _credit_rest_wall_interval(self, started_wall: float, ended_wall: float) -> None:
+        if started_wall <= 0 or ended_wall <= started_wall:
+            return
+        self._refresh_daily_date(ended_wall)
+        end_date = datetime.fromtimestamp(ended_wall).date().isoformat()
+        if self._daily_date != end_date:
+            return
+        day_start = self._day_start_timestamp(ended_wall)
+        self._daily_rested_seconds += max(0.0, ended_wall - max(started_wall, day_start))
 
     def _schedule_state(self, wall_now: float) -> tuple[str, float | None]:
         local = datetime.fromtimestamp(wall_now)
@@ -630,7 +897,7 @@ class RestReminderScheduler:
 
 
 class RestReminderPresenter:
-    """Present rest reminders in renderer and send an independent system notification."""
+    """Expose one authoritative reminder state to renderer and desktop bubbles."""
 
     def __init__(
         self,
@@ -645,12 +912,12 @@ class RestReminderPresenter:
         self._state_path = Path(state_path) if state_path is not None else None
         self._persist_enabled = bool(persist_enabled)
         self._last_persisted_snapshot: dict[str, Any] | None = None
-        self._last_persist_mono: tuple[float, float, float, bool, bool] | None = None
-        self._qt_available: bool | None = None
-        self._pending_renderer_event: dict[str, object] | None = None
-        self._dialog: object | None = None
-        self._last_surface: str = ""  # "qt" | "renderer" | ""
-        self._preview_mode: bool = False
+        self._preview_event: RestReminderEvent | None = None
+        self._preview_until = 0.0
+        self._preview_until_wall = 0.0
+        self._completion: dict[str, object] | None = None
+        self._completion_until = 0.0
+        self._completion_until_wall = 0.0
         self._notification: dict[str, object] = {
             "status": "unknown",
             "channel": "",
@@ -678,83 +945,119 @@ class RestReminderPresenter:
         self._persist_state()
 
     def tick(self) -> dict[str, object] | None:
-        """Drive the scheduler and return a renderer toast payload when due."""
-        was_showing = self.scheduler.showing
-        was_preview = self._preview_mode
+        """Drive phase deadlines and return a payload only when state changes."""
         timing_before = self._scheduler_timing_signature()
+        current = self.scheduler.monotonic_now()
+        if self._preview_event is not None and current >= self._preview_until:
+            self._clear_preview()
+            payload = self.renderer_payload()
+            payload.update({"stateChanged": True, "autoCompleted": True, "preview": True})
+            return payload
+        if self._completion is not None and current >= self._completion_until:
+            self._clear_completion()
+            payload = self.renderer_payload()
+            payload["stateChanged"] = True
+            return payload
         event = self.scheduler.tick()
-        if event is None:
-            if was_showing and not self.scheduler.showing:
-                self._pending_renderer_event = None
-                self._last_surface = ""
-                self._preview_mode = False
-                self._close_dialog()
-                self._persist_state()
-                return {
-                    "visible": False,
-                    "autoCompleted": True,
-                    "preview": bool(was_preview),
-                }
-            if self.scheduler.showing:
-                return None
-            self._pending_renderer_event = None
-            self._last_surface = ""
-            # Persist while running so idle/schedule shifts survive restarts.
+        transition = self.scheduler.take_transition()
+        if event is not None:
+            self._clear_completion()
+            self._notification = _show_system_notification(event.message)
             self._persist_state()
-            if self._scheduler_timing_signature() != timing_before:
-                payload = self.renderer_payload()
-                payload["stateChanged"] = True
-                return payload
-            return None
-        notification = _show_system_notification(event.message)
-        self._notification = notification
-        payload = self._renderer_event_payload(event, preview=False)
-        self._pending_renderer_event = payload
-        self._last_surface = "renderer"
+            payload = self.renderer_payload()
+            payload["due"] = True
+            return payload
+        if transition is not None:
+            kind = str(transition.get("kind") or "")
+            if kind in {"auto_completed", "finished_early", "schedule_ended"}:
+                self._show_completion(transition)
+            self._persist_state()
+            payload = self.renderer_payload()
+            payload["stateChanged"] = True
+            if kind == "auto_skipped":
+                payload["autoSkipped"] = True
+            elif kind == "auto_completed":
+                payload["autoCompleted"] = True
+            elif kind == "finished_early":
+                payload["finishedEarly"] = True
+            return payload
         self._persist_state()
-        return payload
+        if self._scheduler_timing_signature() != timing_before:
+            payload = self.renderer_payload()
+            payload["stateChanged"] = True
+            return payload
+        return None
 
-    def _scheduler_timing_signature(self) -> tuple[str, float, float, float]:
+    def _scheduler_timing_signature(self) -> tuple[object, ...]:
         """Track deadline/state transitions that require a renderer refresh."""
         return (
             str(self.scheduler.state),
             float(self.scheduler.cycle_started_at),
             float(self.scheduler.next_fire_at),
             float(self.scheduler.showing_until),
+            float(self.scheduler.rest_started_at_wall),
+            float(self.scheduler.rest_ends_at_wall),
+            float(self._preview_until),
+            float(self._completion_until),
         )
 
     def acknowledge(self) -> None:
-        if self._preview_mode:
-            self.scheduler.dismiss_without_reschedule()
-            self._preview_mode = False
-            self._pending_renderer_event = None
-            self._last_surface = ""
-            self._close_dialog()
+        if self._preview_event is not None:
+            self._clear_preview()
             return
-        self.scheduler.acknowledge()
-        self._preview_mode = False
-        self._pending_renderer_event = None
-        self._last_surface = ""
-        self._close_dialog()
-        self._persist_state()
+        if self.scheduler.resting:
+            self.finish_rest()
+        else:
+            self.start_rest()
 
     def postpone(self) -> bool:
-        if self._preview_mode:
-            # Preview postpone only dismisses UI; real cycle timing is unchanged.
-            self.scheduler.dismiss_without_reschedule()
-            self._preview_mode = False
-            self._pending_renderer_event = None
-            self._last_surface = ""
-            self._close_dialog()
+        if self._preview_event is not None:
+            self._clear_preview()
             return True
         ok = self.scheduler.postpone()
         if ok:
-            self._preview_mode = False
-            self._pending_renderer_event = None
-            self._last_surface = ""
-            self._close_dialog()
+            self._clear_completion()
             self._persist_state()
         return ok
+
+    def start_rest(self) -> bool:
+        if self._preview_event is not None:
+            self._clear_preview()
+            return True
+        ok = self.scheduler.start_rest()
+        if ok:
+            self._clear_completion()
+            self._persist_state()
+        return ok
+
+    def finish_rest(self) -> bool:
+        if self._preview_event is not None:
+            self._clear_preview()
+            return True
+        ok = self.scheduler.finish_rest()
+        if not ok:
+            return False
+        transition = self.scheduler.take_transition()
+        if transition is not None:
+            self._show_completion(transition)
+        self._persist_state()
+        return True
+
+    def seconds_until_wake(self) -> float | None:
+        delays = [
+            value
+            for value in (
+                self.scheduler.seconds_until_wake(),
+                max(0.0, self._preview_until - self.scheduler.monotonic_now())
+                if self._preview_event is not None
+                else None,
+                max(0.0, self._completion_until - self.scheduler.monotonic_now())
+                if self._completion is not None
+                else None,
+            )
+            if value is not None
+        ]
+        return min(delays) if delays else None
 
     def renderer_payload(self) -> dict[str, object]:
         config = self.scheduler.config
@@ -781,7 +1084,16 @@ class RestReminderPresenter:
                 "remainingSeconds": 0,
                 "durationSeconds": int(config.interval_minutes * 60),
             }
+        prompt_remaining = self.scheduler.seconds_until_prompt_end()
         break_remaining = self.scheduler.seconds_until_break_end()
+        phase = self.scheduler.phase
+        message = self.scheduler.active_message
+        preview = self._preview_event is not None
+        if preview:
+            phase = "preview"
+            message = self._preview_event.message if self._preview_event is not None else ""
+        elif self._completion is not None:
+            phase = "completed"
         break_timing = {
             "breakDurationSeconds": int(config.break_minutes * 60),
             "breakRemainingSeconds": int(round(break_remaining or 0.0)),
@@ -790,23 +1102,72 @@ class RestReminderPresenter:
             )
             if break_remaining is not None
             else 0,
+            "promptRemainingSeconds": int(round(prompt_remaining or 0.0)),
+            "promptEndsAtMs": int(round(self.scheduler.prompt_ends_at_wall * 1000.0)),
+            "postponeEndsAtMs": int(round(self.scheduler.postpone_ends_at_wall * 1000.0)),
+            "restStartedAtMs": int(round(self.scheduler.rest_started_at_wall * 1000.0)),
+            "restEndsAtMs": int(round(self.scheduler.rest_ends_at_wall * 1000.0)),
         }
-        if self._pending_renderer_event:
-            payload = dict(self._pending_renderer_event)
-            payload.update(timing)
-            payload.update(break_timing)
-            payload["notification"] = dict(self._notification)
-            payload["state"] = state
-            payload["preview"] = bool(self._preview_mode)
-            return payload
-        return {
-            "visible": False,
-            "preview": False,
+        if preview:
+            break_timing["promptEndsAtMs"] = int(round(self._preview_until_wall * 1000.0))
+            break_timing["breakEndsAtMs"] = int(round(self._preview_until_wall * 1000.0))
+        completion = dict(self._completion or {})
+        payload = {
+            "visible": phase in {"prompt", "preview"},
+            "bubbleVisible": phase in {"prompt", "postponed", "resting", "completed", "preview"},
+            "preview": preview,
             "notification": dict(self._notification),
             "state": state,
+            "phase": phase,
+            "message": message,
+            "canPostpone": bool(
+                phase == "prompt" and not self.scheduler.postpone_used
+            ),
+            "intervalMinutes": int(config.interval_minutes),
+            "breakMinutes": int(config.break_minutes),
+            "postponeMinutes": int(config.postpone_minutes),
+            "todayRestedSeconds": int(round(self.scheduler.today_rested_seconds)),
+            "completedTodaySeconds": int(round(self.scheduler.completed_today_seconds)),
+            "currentRestElapsedSeconds": int(
+                round(self.scheduler.current_rest_elapsed_seconds())
+            ),
+            "lastRestDurationSeconds": int(
+                completion.get(
+                    "restDurationSeconds", self.scheduler.last_rest_duration_seconds
+                )
+                or 0
+            ),
+            "completionEndsAtMs": int(round(self._completion_until_wall * 1000.0))
+            if self._completion is not None
+            else 0,
             **timing,
             **break_timing,
         }
+        if completion:
+            payload.update(completion)
+        return payload
+
+    def desktop_bubble_payload(self) -> dict[str, object]:
+        payload = self.renderer_payload()
+        stable_keys = (
+            "bubbleVisible",
+            "preview",
+            "phase",
+            "message",
+            "canPostpone",
+            "intervalMinutes",
+            "breakMinutes",
+            "postponeMinutes",
+            "promptEndsAtMs",
+            "postponeEndsAtMs",
+            "restStartedAtMs",
+            "restEndsAtMs",
+            "todayRestedSeconds",
+            "completedTodaySeconds",
+            "lastRestDurationSeconds",
+            "completionEndsAtMs",
+        )
+        return {key: payload.get(key) for key in stable_keys}
 
     def adjust_cycle_started_at_ms(self, started_at_ms: object) -> bool:
         try:
@@ -823,47 +1184,20 @@ class RestReminderPresenter:
         event = self.scheduler.begin_preview(message)
         notification = _show_system_notification(event.message)
         self._notification = notification
-        payload = self._renderer_event_payload(event, preview=True)
-        self._pending_renderer_event = payload
-        self._last_surface = "renderer"
-        self._preview_mode = True
+        remaining = max(0.0, event.ends_at - self.scheduler.monotonic_now())
+        self._preview_event = event
+        self._preview_until = event.ends_at
+        self._preview_until_wall = float(self._wall_clock()) + remaining
+        self._clear_completion()
         result = dict(notification)
         result["preview"] = True
         result["message"] = event.message
         return result
 
-    def _renderer_event_payload(
-        self,
-        event: RestReminderEvent,
-        *,
-        preview: bool,
-    ) -> dict[str, object]:
-        remaining = self.scheduler.seconds_until_break_end()
-        if remaining is None:
-            remaining = float(event.break_minutes) * 60.0
-        return {
-            "visible": True,
-            "preview": bool(preview),
-            "message": event.message,
-            "canPostpone": event.can_postpone,
-            "intervalMinutes": event.interval_minutes,
-            "breakMinutes": event.break_minutes,
-            "postponeMinutes": event.postpone_minutes,
-            "firedAt": event.fired_at,
-            "breakDurationSeconds": int(event.break_minutes * 60),
-            "breakRemainingSeconds": int(round(remaining)),
-            "breakEndsAtMs": int(
-                round((float(self._wall_clock()) + remaining) * 1000.0)
-            ),
-            "notification": dict(self._notification),
-        }
-
     def close(self) -> None:
-        self._close_dialog()
+        self._clear_preview()
+        self._clear_completion()
         self.scheduler.dismiss_without_reschedule()
-        self._pending_renderer_event = None
-        self._last_surface = ""
-        self._preview_mode = False
 
     def _persist_state(self, *, clear: bool = False) -> None:
         if not self._persist_enabled:
@@ -872,20 +1206,10 @@ class RestReminderPresenter:
             from ..config import save_rest_reminder_state
 
             if clear or not self.scheduler.config.enabled:
-                if self._last_persisted_snapshot is None and self._last_persist_mono is None:
+                if self._last_persisted_snapshot is None:
                     return
                 save_rest_reminder_state(None, self._state_path)
                 self._last_persisted_snapshot = None
-                self._last_persist_mono = None
-                return
-            mono_key = (
-                float(self.scheduler.cycle_started_at),
-                float(self.scheduler.next_fire_at),
-                float(self.scheduler.showing_until),
-                bool(self.scheduler.postpone_used),
-                bool(self.scheduler.config.enabled),
-            )
-            if self._last_persist_mono == mono_key:
                 return
             snapshot = self.scheduler.export_wall_state()
             if snapshot is None:
@@ -893,11 +1217,11 @@ class RestReminderPresenter:
                     return
                 save_rest_reminder_state(None, self._state_path)
                 self._last_persisted_snapshot = None
-                self._last_persist_mono = None
+                return
+            if self._last_persisted_snapshot == snapshot:
                 return
             save_rest_reminder_state(snapshot, self._state_path)
             self._last_persisted_snapshot = dict(snapshot)
-            self._last_persist_mono = mono_key
         except Exception:
             _LOGGER.debug("rest_reminder_persist_failed", exc_info=True)
 
@@ -917,70 +1241,29 @@ class RestReminderPresenter:
                 if restored_state != dict(state):
                     save_rest_reminder_state(restored_state or None, self._state_path)
                 self._last_persisted_snapshot = restored_state or None
-                self._last_persist_mono = (
-                    float(self.scheduler.cycle_started_at),
-                    float(self.scheduler.next_fire_at),
-                    float(self.scheduler.showing_until),
-                    bool(self.scheduler.postpone_used),
-                    bool(self.scheduler.config.enabled),
-                )
             return restored
         except Exception:
             _LOGGER.debug("rest_reminder_restore_failed", exc_info=True)
             return False
 
-    def _try_show_qt_dialog(self, event: RestReminderEvent) -> bool:
-        if self._qt_available is False:
-            return False
-        try:
-            from ..ui.rest_reminder_qt import show_rest_reminder_dialog
+    def _show_completion(self, transition: Mapping[str, object]) -> None:
+        self._completion = dict(transition)
+        self._completion_until = (
+            self.scheduler.monotonic_now() + REST_REMINDER_COMPLETION_FEEDBACK_SECONDS
+        )
+        self._completion_until_wall = (
+            float(self._wall_clock()) + REST_REMINDER_COMPLETION_FEEDBACK_SECONDS
+        )
 
-            dialog = show_rest_reminder_dialog(
-                message=event.message,
-                can_postpone=event.can_postpone,
-                postpone_minutes=event.postpone_minutes,
-                on_ack=self.acknowledge,
-                on_postpone=lambda: self.postpone(),
-            )
-            self._dialog = dialog
-            self._qt_available = True
-            self._pump_qt_events()
-            return True
-        except Exception:
-            self._qt_available = False
-            self._dialog = None
-            _LOGGER.info("rest_reminder_qt_unavailable; falling back to renderer toast")
-            return False
+    def _clear_completion(self) -> None:
+        self._completion = None
+        self._completion_until = 0.0
+        self._completion_until_wall = 0.0
 
-    def _pump_qt_events(self) -> None:
-        if self._last_surface != "qt" and self._dialog is None:
-            return
-        try:
-            from PySide6.QtWidgets import QApplication
-
-            app = QApplication.instance()
-            if app is None:
-                return
-            app.processEvents()
-            dialog = self._dialog
-            if dialog is not None and hasattr(dialog, "isVisible"):
-                if not bool(dialog.isVisible()) and self.scheduler.showing:
-                    # Dialog closed without callback (e.g. OS force-close).
-                    self.acknowledge()
-        except Exception:
-            return
-
-    def _close_dialog(self) -> None:
-        dialog = self._dialog
-        self._dialog = None
-        if dialog is None:
-            return
-        try:
-            close = getattr(dialog, "close", None)
-            if callable(close):
-                close()
-        except Exception:
-            return
+    def _clear_preview(self) -> None:
+        self._preview_event = None
+        self._preview_until = 0.0
+        self._preview_until_wall = 0.0
 
 
 def _show_system_notification(message: str) -> dict[str, object]:

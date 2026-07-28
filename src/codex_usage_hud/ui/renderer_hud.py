@@ -95,7 +95,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "40";
+  const version = "45";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -654,7 +654,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-request-list,
       #${rootId} .codex-usage-hud-settings-modal,
       #${rootId} .codex-usage-hud-rest-mask,
-      #${rootId} .codex-usage-hud-rest-toast {
+      #${rootId} .codex-usage-hud-rest-toast,
+      #${rootId} .codex-usage-hud-rest-bubble {
         pointer-events: auto;
       }
       #${rootId} .${topClass} {
@@ -1185,7 +1186,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         font-size: 11px;
       }
       #${rootId} .codex-usage-hud-progress-track-text {
-        z-index: 3;
+        /* Keep labels above the overflow sub-rail and its anchor. */
+        z-index: 6;
         color: #ffffff;
         mix-blend-mode: difference;
         pointer-events: none;
@@ -1227,16 +1229,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-track-text,
       #${rootId} .codex-usage-hud-progress-rail[data-badge="true"] .codex-usage-hud-progress-size-probe {
-        padding-right: 108px;
+        padding-right: var(--codex-usage-hud-progress-badge-pad, 96px);
       }
       #${rootId} .codex-usage-hud-progress-overflow {
         position: absolute;
-        top: 5px;
-        right: 6px;
-        height: 8px;
-        border-radius: 999px;
+        right: 0;
+        bottom: 0;
+        height: 4px;
+        border-radius: 4px 0 0 0;
         background: linear-gradient(90deg, #ffcfaa, #ff875a 60%, #ff5b64);
-        box-shadow: 0 10px 22px rgba(255,91,100,.18);
+        box-shadow: 0 6px 14px rgba(255,91,100,.14);
         z-index: 3;
         pointer-events: none;
       }
@@ -1250,63 +1252,67 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-progress-overflow-anchor {
         position: absolute;
-        top: 3px;
-        right: 5px;
-        width: 12px;
-        height: 12px;
+        right: max(0px, calc(var(--codex-usage-hud-progress-overflow-width, 0%) - 3px));
+        bottom: 0;
+        width: 7px;
+        height: 7px;
         border-radius: 50%;
         background: radial-gradient(circle at 35% 35%, #fff4d9 0%, #ff8e61 58%, #ff5b64 100%);
-        box-shadow: 0 0 0 2px rgba(255,107,99,.12), 0 0 14px rgba(255,107,99,.32);
+        box-shadow: 0 0 0 1px rgba(255,107,99,.12), 0 0 8px rgba(255,107,99,.28);
         z-index: 4;
         pointer-events: none;
       }
       #${rootId} .codex-usage-hud-progress-badge {
         position: absolute;
-        top: 50%;
-        right: 10px;
-        transform: translateY(-50%);
+        top: 2px;
+        right: 6px;
         display: inline-flex;
         align-items: center;
-        gap: 6px;
-        min-height: 22px;
-        padding: 0 10px;
+        justify-content: center;
+        min-height: 16px;
+        max-width: min(58%, 148px);
+        padding: 0 7px;
         border-radius: 999px;
         border: 1px solid rgba(255,132,88,.24);
         background: rgba(255,95,92,.12);
         color: #ffd7ca;
-        font-size: 10.5px;
+        font-size: 9.5px;
         font-weight: 800;
-        box-shadow: 0 8px 18px rgba(255,91,100,.12);
+        letter-spacing: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        box-shadow: 0 4px 10px rgba(255,91,100,.1);
         backdrop-filter: blur(10px);
         z-index: 5;
         pointer-events: none;
       }
-      #${rootId} .codex-usage-hud-progress-badge::before {
-        content: "";
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: linear-gradient(180deg, #ffcfaa, #ff5b64);
-        box-shadow: 0 0 10px rgba(255,91,100,.32);
-      }
       #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-badge {
-        display: none;
+        top: 2px;
+        right: 5px;
+        min-height: 15px;
+        max-width: min(54%, 128px);
+        padding: 0 6px;
+        font-size: 9px;
       }
       #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-overflow {
-        top: 7px;
-        right: 8px;
-        height: 12px;
+        right: 0;
+        bottom: 0;
+        height: 4px;
       }
       #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-overflow-anchor {
-        top: 6px;
-        right: 7px;
-        width: 16px;
-        height: 16px;
+        right: max(0px, calc(var(--codex-usage-hud-progress-overflow-width, 0%) - 3px));
+        bottom: 0;
+        width: 7px;
+        height: 7px;
       }
       #${rootId} .codex-usage-hud-budget-rails .codex-usage-hud-progress-badge {
-        min-height: 24px;
-        padding: 0 11px;
-        font-size: 11px;
+        top: 3px;
+        right: 7px;
+        min-height: 17px;
+        max-width: min(52%, 156px);
+        padding: 0 8px;
+        font-size: 10px;
       }
       #${rootId} .codex-usage-hud-progress-rail[data-tone="cache"] .codex-usage-hud-progress-fill {
         background: linear-gradient(90deg, #9ccbff, #5ea7ff);
@@ -4655,6 +4661,71 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         border-color: rgba(243, 210, 122, 0.45);
         background: rgba(38, 50, 64, 0.96);
       }
+      #${rootId} .codex-usage-hud-rest-bubble {
+        position: fixed;
+        z-index: 2147483550;
+        display: none;
+        box-sizing: border-box;
+        width: min(430px, calc(100vw - 16px));
+        padding: 12px 14px;
+        border: 1px solid rgba(243, 210, 122, 0.28);
+        border-radius: 12px;
+        background: linear-gradient(155deg, rgba(28, 36, 47, 0.98), rgba(14, 20, 29, 0.99));
+        color: var(--codex-usage-hud-text, #dce7f2);
+        box-shadow: 0 16px 42px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        pointer-events: auto;
+        -webkit-app-region: no-drag;
+      }
+      #${rootId} .codex-usage-hud-rest-bubble[data-visible="true"][data-positioned="true"] {
+        display: grid;
+        gap: 8px;
+      }
+      #${rootId} .codex-usage-hud-rest-bubble-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        font-size: 13px;
+        font-weight: 750;
+      }
+      #${rootId} .codex-usage-hud-rest-bubble-detail {
+        color: var(--codex-usage-hud-request-text, #b8c6d8);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      #${rootId} .codex-usage-hud-rest-bubble-foot {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+      #${rootId} .codex-usage-hud-rest-bubble-status {
+        flex: 1 1 auto;
+        min-width: 0;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #${rootId} .codex-usage-hud-rest-bubble button {
+        flex: 0 0 auto;
+        min-height: 28px;
+        padding: 0 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(243, 210, 122, 0.34);
+        background: rgba(243, 210, 122, 0.10);
+        color: var(--codex-usage-hud-text, #dce7f2);
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 650;
+      }
+      #${rootId} .codex-usage-hud-rest-bubble button[data-primary="true"] {
+        border-color: transparent;
+        background: var(--codex-usage-hud-warning, #ffb86b);
+        color: #1a1408;
+      }
       #${rootId} .codex-usage-hud-support a {
         color: var(--codex-usage-hud-info, #9ccbff);
       }
@@ -4768,15 +4839,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       #${rootId} .codex-usage-hud-progress-overflow-anchor {
         background: radial-gradient(circle at 35% 35%, var(--codex-usage-hud-progress-overflow-highlight) 0%, var(--codex-usage-hud-progress-overflow) 58%, var(--codex-usage-hud-error) 100%);
-        box-shadow: 0 0 0 2px rgba(255,255,255,.06), 0 0 14px rgba(0,0,0,.18);
+        box-shadow: 0 0 0 1px rgba(255,255,255,.06), 0 0 8px rgba(0,0,0,.18);
       }
       #${rootId} .codex-usage-hud-progress-badge {
         border-color: var(--codex-usage-hud-progress-overflow-badge-edge);
         background: var(--codex-usage-hud-progress-overflow-badge);
         color: var(--codex-usage-hud-progress-overflow-badge-text);
-      }
-      #${rootId} .codex-usage-hud-progress-badge::before {
-        background: linear-gradient(180deg, var(--codex-usage-hud-progress-overflow-highlight), var(--codex-usage-hud-error));
       }
       #${rootId} .codex-usage-hud-panel-header,
       #${rootId} .codex-usage-hud-settings-tab.is-active,
@@ -5437,7 +5505,19 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         </div>
         <div class="codex-usage-hud-rest-toast-actions">
           <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-postpone" hidden>稍后提醒</button>
-          <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-ack" data-primary="true">我休息好了</button>
+          <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-start" data-primary="true">开始休息</button>
+        </div>
+      </div>
+      <div class="codex-usage-hud-rest-bubble" data-rest-reminder-bubble="true" data-visible="false" data-positioned="false" role="status" aria-live="polite">
+        <div class="codex-usage-hud-rest-bubble-head">
+          <span aria-hidden="true">☕</span>
+          <span data-rest-reminder-bubble-title="true">休息提醒</span>
+        </div>
+        <div class="codex-usage-hud-rest-bubble-detail" data-rest-reminder-bubble-detail="true"></div>
+        <div class="codex-usage-hud-rest-bubble-foot">
+          <span class="codex-usage-hud-rest-bubble-status" data-rest-reminder-bubble-status="true"></span>
+          <button type="button" data-action="rest-reminder-postpone" data-rest-reminder-bubble-secondary="true" hidden></button>
+          <button type="button" data-action="rest-reminder-start" data-rest-reminder-bubble-primary="true" data-primary="true" hidden></button>
         </div>
       </div>
     `;
@@ -10016,6 +10096,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (!configEnabled) return "未开启";
     switch (String(state || "")) {
       case "work": return "专注中";
+      case "prompt": return "等待选择";
+      case "postponed": return "已延迟";
+      case "resting":
       case "break": return "休息中";
       case "lunch": return "午休";
       case "away": return "离开中";
@@ -10203,9 +10286,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (startInput.value !== nextStart) startInput.value = nextStart;
     }
     if (remaining) {
-      if (state === "break") {
+      if (state === "resting" || state === "break") {
         remaining.textContent = formatRestReminderRemaining(
-          (Number(timing?.breakEndsAtMs) - Date.now()) / 1000,
+          (Number(timing?.restEndsAtMs || timing?.breakEndsAtMs) - Date.now()) / 1000,
+        );
+      } else if (state === "prompt") {
+        remaining.textContent = formatRestReminderRemaining(
+          (Number(timing?.promptEndsAtMs) - Date.now()) / 1000,
+        );
+      } else if (state === "postponed") {
+        remaining.textContent = formatRestReminderRemaining(
+          (Number(timing?.postponeEndsAtMs) - Date.now()) / 1000,
         );
       } else {
         remaining.textContent = running
@@ -11410,7 +11501,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (action.dataset.action === "rest-reminder-ack") {
         event.preventDefault();
         event.stopPropagation();
-        submitSettingsCommand({ action: "restReminderAck" }, "正在开始新一轮专注计时...");
+        submitSettingsCommand({ action: "restReminderAck" }, "正在关闭提醒预览...");
         const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
         if (toast) toast.dataset.visible = "false";
         const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
@@ -11418,6 +11509,25 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           mask.dataset.visible = "false";
           mask.setAttribute("aria-hidden", "true");
         }
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-start") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSettingsCommand({ action: "restReminderStart" }, "正在开始休息计时...");
+        const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
+        if (toast) toast.dataset.visible = "false";
+        const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
+        if (mask) {
+          mask.dataset.visible = "false";
+          mask.setAttribute("aria-hidden", "true");
+        }
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-finish") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSettingsCommand({ action: "restReminderFinish" }, "正在结束本次休息...");
         return;
       }
       if (action.dataset.action === "rest-reminder-postpone") {
@@ -12771,6 +12881,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const root = document.getElementById(rootId);
     if (!root) return;
     positionStartupBubble(root);
+    positionRestReminderBubble(root);
     applyPanelStates(root);
     const panelNames = Array.isArray(names) ? names.filter((name) => PANEL[name]) : Object.keys(PANEL);
     for (const name of panelNames) {
@@ -13041,6 +13152,70 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     return Math.max(0, Math.ceil(measured + 2));
   }
 
+  function progressBadgeCandidates(rail) {
+    const full = String(rail?.dataset?.overflowBadge || "").trim();
+    const compact = String(rail?.dataset?.overflowBadgeCompact || "").trim();
+    const candidates = [];
+    if (full) candidates.push(full);
+    if (compact && compact !== full) candidates.push(compact);
+    return candidates;
+  }
+
+  function setProgressBadgeText(rail, text) {
+    const badge = rail?.querySelector?.(":scope > .codex-usage-hud-progress-badge");
+    if (!badge) return;
+    badge.textContent = String(text || "");
+  }
+
+  function applyProgressBadgePad(rail) {
+    if (!rail) return;
+    const badge = rail.querySelector(":scope > .codex-usage-hud-progress-badge");
+    if (!badge) {
+      rail.style.removeProperty("--codex-usage-hud-progress-badge-pad");
+      return;
+    }
+    const styles = getComputedStyle(badge);
+    const right = Number.parseFloat(styles.right || "0") || 0;
+    const width = Math.ceil(Math.max(
+      badge.scrollWidth || 0,
+      badge.getBoundingClientRect?.().width || 0,
+    ));
+    // Keep a small gap between fixed left usage text and the shrinkable badge.
+    const pad = Math.max(52, width + right + 10);
+    rail.style.setProperty("--codex-usage-hud-progress-badge-pad", `${pad}px`);
+  }
+
+  function refreshProgressRailBadge(rail) {
+    if (!rail) return;
+    const candidates = progressBadgeCandidates(rail);
+    if (!candidates.length) {
+      rail.style.removeProperty("--codex-usage-hud-progress-badge-pad");
+      return;
+    }
+    const badge = rail.querySelector(":scope > .codex-usage-hud-progress-badge");
+    if (!badge) return;
+
+    // Prefer full badge copy; fall back to cost-only when the rail is too tight.
+    let selected = candidates[0];
+    for (const candidate of candidates) {
+      setProgressBadgeText(rail, candidate);
+      applyProgressBadgePad(rail);
+      const maxWidth = badge.clientWidth || badge.getBoundingClientRect?.().width || 0;
+      if (maxWidth <= 0 || badge.scrollWidth <= maxWidth + 0.5) {
+        selected = candidate;
+        break;
+      }
+      selected = candidate;
+    }
+    setProgressBadgeText(rail, selected);
+    applyProgressBadgePad(rail);
+  }
+
+  function refreshProgressRailLabel(rail) {
+    // Left usage/amount stays fixed; only the overflow badge shrinks under pressure.
+    refreshProgressRailBadge(rail);
+  }
+
   function clearCollapsedProgressStrip(node) {
     if (!node) return;
     delete node.dataset.overflow;
@@ -13129,8 +13304,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function refreshAllMarquees(root = document.getElementById(rootId)) {
     if (!root) return;
+    root.querySelectorAll(".codex-usage-hud-progress-rail").forEach(refreshProgressRailLabel);
     root.querySelectorAll(".codex-usage-hud-line").forEach(refreshMarquee);
     root.querySelectorAll(".codex-usage-hud-progress-strip").forEach(refreshCollapsedProgressStrip);
+    // 强制立即刷新一次，避免 HUD 打开很久才生效
+    setTimeout(() => root.querySelectorAll(".codex-usage-hud-progress-rail").forEach(refreshProgressRailLabel), 0);
   }
 
   function applyLineText(node, value, { refresh = true } = {}) {
@@ -13440,6 +13618,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const label = String(metric?.label || "");
     const rightText = String(metric?.rightText || "");
     const overflowBadge = String(metric?.overflowBadge || "");
+    const overflowBadgeCompact = String(metric?.overflowBadgeCompact || "");
     const ratio = normalizeProgressRatio(metric?.ratio);
     const overflowRatio = normalizeProgressRatio(metric?.overflowRatio);
     const hasOverflow = overflowRatio > 0;
@@ -13447,6 +13626,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     else delete rail.dataset.overflow;
     if (overflowBadge) rail.dataset.badge = "true";
     else delete rail.dataset.badge;
+    if (rightText) rail.dataset.rightText = rightText;
+    else delete rail.dataset.rightText;
+    if (overflowBadge) rail.dataset.overflowBadge = overflowBadge;
+    else delete rail.dataset.overflowBadge;
+    if (overflowBadgeCompact) rail.dataset.overflowBadgeCompact = overflowBadgeCompact;
+    else delete rail.dataset.overflowBadgeCompact;
     const fullText = rightText ? `${label} / ${rightText}` : label;
     const tooltip = overflowBadge ? `${fullText || label} | ${overflowBadge}` : fullText;
     rail.title = tooltip;
@@ -13459,6 +13644,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (rightText && textClass === "codex-usage-hud-progress-text") {
         const leftNode = document.createElement("span");
         leftNode.className = textClass;
+        leftNode.dataset.progressLabel = "true";
         leftNode.textContent = label;
         leftNode.title = tooltip;
         const rightNode = document.createElement("span");
@@ -13470,6 +13656,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       }
       const textNode = document.createElement("span");
       textNode.className = textClass;
+      textNode.dataset.progressLabel = "true";
       textNode.textContent = fullText;
       textNode.title = tooltip;
       layer.appendChild(textNode);
@@ -13486,7 +13673,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (hasOverflow) {
       const overflow = document.createElement("span");
       overflow.className = "codex-usage-hud-progress-overflow";
-      overflow.style.width = `${Math.round(overflowRatio * 1000) / 10}%`;
+      const overflowWidth = `${Math.round(overflowRatio * 1000) / 10}%`;
+      overflow.style.width = overflowWidth;
+      rail.style.setProperty("--codex-usage-hud-progress-overflow-width", overflowWidth);
       rail.appendChild(overflow);
 
       const anchor = document.createElement("span");
@@ -13509,6 +13698,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (items.length > 0) container.dataset.count = String(items.length);
     else delete container.dataset.count;
     for (const item of items) container.appendChild(progressRail(item));
+    requestAnimationFrame(() => {
+      container.querySelectorAll(":scope > .codex-usage-hud-progress-rail").forEach(refreshProgressRailLabel);
+      if (container.classList.contains("codex-usage-hud-progress-strip")) {
+        refreshCollapsedProgressStrip(container);
+      }
+    });
     return items.length > 0;
   }
 
@@ -13955,31 +14150,148 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     restReminderOverlayTimer = 0;
   }
 
+  function formatRestReminderBubbleDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const remainder = total % 60;
+    const parts = [minutes, remainder].map((value) => String(value).padStart(2, "0"));
+    if (hours > 0) parts.unshift(String(hours).padStart(2, "0"));
+    return parts.join(":");
+  }
+
+  function restReminderBubbleCopy(reminder, now = Date.now()) {
+    const phase = String(reminder?.phase || "");
+    const completedToday = Math.max(0, Number(reminder?.completedTodaySeconds) || 0);
+    const message = String(reminder?.message || "该休息一下了。");
+    const actions = [];
+    let title = "休息提醒";
+    let detail = message;
+    let status = "";
+    if (phase === "prompt") {
+      const remaining = Math.max(0, (Number(reminder?.promptEndsAtMs) - now) / 1000);
+      title = "该休息一下了";
+      status = `等待选择 ${formatRestReminderBubbleDuration(remaining)} · 超时自动跳过 · 今日已休息 ${formatRestReminderBubbleDuration(completedToday)}`;
+      if (reminder?.canPostpone) {
+        const minutes = Math.max(1, Math.round(Number(reminder?.postponeMinutes) || 10));
+        actions.push({ action: "rest-reminder-postpone", label: `延迟 ${minutes} 分钟`, primary: false });
+      }
+      actions.push({ action: "rest-reminder-start", label: "开始休息", primary: true });
+    } else if (phase === "postponed") {
+      const remaining = Math.max(0, (Number(reminder?.postponeEndsAtMs) - now) / 1000);
+      title = "休息已延迟";
+      detail = `${formatRestReminderBubbleDuration(remaining)} 后再次提醒`;
+      status = `延迟不计入休息 · 今日已休息 ${formatRestReminderBubbleDuration(completedToday)}`;
+      actions.push({ action: "rest-reminder-start", label: "开始休息", primary: true });
+    } else if (phase === "resting") {
+      const startedAt = Number(reminder?.restStartedAtMs) || now;
+      const endsAt = Number(reminder?.restEndsAtMs) || now;
+      const elapsed = Math.max(0, (Math.min(now, endsAt) - startedAt) / 1000);
+      const target = Math.max(1, Math.round(Number(reminder?.breakMinutes) || 2)) * 60;
+      title = "正在休息";
+      detail = `本次已休息 ${formatRestReminderBubbleDuration(elapsed)}`;
+      const today = Math.max(completedToday + elapsed, Number(reminder?.todayRestedSeconds) || 0);
+      status = `目标 ${formatRestReminderBubbleDuration(target)} · 今日累计 ${formatRestReminderBubbleDuration(today)}`;
+      actions.push({ action: "rest-reminder-finish", label: "提前结束", primary: true });
+    } else if (phase === "completed") {
+      const duration = Math.max(0, Number(reminder?.lastRestDurationSeconds) || 0);
+      title = "休息完成";
+      detail = `本次 ${formatRestReminderBubbleDuration(duration)} · 今日累计 ${formatRestReminderBubbleDuration(completedToday)}`;
+      status = "新一轮专注已开始";
+    } else if (phase === "preview") {
+      title = "测试预览";
+      status = "不会改变当前计时，也不会计入今日休息";
+      actions.push({ action: "rest-reminder-ack", label: "关闭预览", primary: true });
+    }
+    return { title, detail, status, actions };
+  }
+
+  function applyRestReminderBubbleContent(bubble, reminder) {
+    if (!bubble) return;
+    const copy = restReminderBubbleCopy(reminder);
+    const title = bubble.querySelector('[data-rest-reminder-bubble-title="true"]');
+    const detail = bubble.querySelector('[data-rest-reminder-bubble-detail="true"]');
+    const status = bubble.querySelector('[data-rest-reminder-bubble-status="true"]');
+    if (title) title.textContent = copy.title;
+    if (detail) detail.textContent = copy.detail;
+    if (status) status.textContent = copy.status;
+    const secondary = bubble.querySelector('[data-rest-reminder-bubble-secondary="true"]');
+    const primary = bubble.querySelector('[data-rest-reminder-bubble-primary="true"]');
+    const secondaryAction = copy.actions.find((item) => !item.primary);
+    const primaryAction = copy.actions.find((item) => item.primary);
+    for (const [button, item] of [[secondary, secondaryAction], [primary, primaryAction]]) {
+      if (!button) continue;
+      button.hidden = !item;
+      if (!item) continue;
+      button.textContent = item.label;
+      button.dataset.action = item.action;
+    }
+  }
+
+  function positionRestReminderBubble(root = document.getElementById(rootId)) {
+    const bubble = root?.querySelector?.('[data-rest-reminder-bubble="true"]');
+    if (!bubble || bubble.dataset.visible !== "true") return;
+    const composer = composerRect();
+    if (!composer) {
+      bubble.dataset.positioned = "false";
+      return;
+    }
+    const width = Math.min(430, Math.max(300, Math.min(composer.width, innerWidth - 16)));
+    bubble.style.width = `${Math.round(width)}px`;
+    bubble.dataset.positioned = "true";
+    const height = Math.max(1, bubble.getBoundingClientRect().height || 110);
+    const left = clamp(composer.right - width, 8, Math.max(8, innerWidth - width - 8));
+    const top = clamp(composer.top - height - 8, 8, Math.max(8, innerHeight - height - 8));
+    bubble.style.left = `${Math.round(left)}px`;
+    bubble.style.top = `${Math.round(top)}px`;
+  }
+
+  function renderRestReminderBubble(root, reminder) {
+    const bubble = root?.querySelector?.('[data-rest-reminder-bubble="true"]');
+    if (!bubble) return false;
+    const fallback = desktopOverlayDependency().installed === false;
+    const visible = fallback && reminder?.bubbleVisible === true;
+    bubble.dataset.visible = visible ? "true" : "false";
+    if (!visible) {
+      bubble.dataset.positioned = "false";
+      return false;
+    }
+    applyRestReminderBubbleContent(bubble, reminder);
+    requestAnimationFrame(() => positionRestReminderBubble(root));
+    return true;
+  }
+
   function syncRestReminderOverlayCountdown() {
     const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
-    if (!toast || toast.dataset.visible !== "true") {
+    const bubble = document.querySelector(`#${rootId} [data-rest-reminder-bubble="true"]`);
+    const toastVisible = !!toast && toast.dataset.visible === "true";
+    const bubbleVisible = !!bubble && bubble.dataset.visible === "true";
+    if (!toastVisible && !bubbleVisible) {
       stopRestReminderOverlayTicker();
       return;
     }
     const reminder = currentPayload()?.restReminder;
-    const countdown = toast.querySelector('[data-rest-reminder-break-countdown="true"]');
-    if (!countdown) return;
-    const seconds = (Number(reminder?.breakEndsAtMs) - Date.now()) / 1000;
-    const remaining = formatRestReminderRemaining(Math.max(0, seconds));
-    if (!Number.isFinite(seconds) || seconds <= 0) {
-      countdown.textContent = reminder?.preview ? "正在关闭预览..." : "正在开始下一轮...";
-      toast.dataset.visible = "false";
-      const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
-      if (mask) {
-        mask.dataset.visible = "false";
-        mask.setAttribute("aria-hidden", "true");
+    if (bubbleVisible) applyRestReminderBubbleContent(bubble, reminder);
+    if (toastVisible) {
+      const countdown = toast.querySelector('[data-rest-reminder-break-countdown="true"]');
+      const seconds = (Number(reminder?.promptEndsAtMs) - Date.now()) / 1000;
+      const remaining = formatRestReminderRemaining(Math.max(0, seconds));
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        if (countdown) {
+          countdown.textContent = reminder?.preview ? "正在关闭预览..." : "正在跳过本次休息...";
+        }
+        toast.dataset.visible = "false";
+        const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
+        if (mask) {
+          mask.dataset.visible = "false";
+          mask.setAttribute("aria-hidden", "true");
+        }
+      } else if (countdown) {
+        countdown.textContent = reminder?.preview
+          ? `测试预览 · ${remaining} 后自动关闭，不改动当前计时`
+          : `等待选择 ${remaining} · 超时自动跳过本次休息`;
       }
-      stopRestReminderOverlayTicker();
-      return;
     }
-    countdown.textContent = reminder?.preview
-      ? `测试预览 · ${remaining} 后自动关闭，不改动当前计时`
-      : `休息还剩 ${remaining} · 到时自动开始下一轮`;
   }
 
   function ensureRestReminderOverlayTicker() {
@@ -13999,14 +14311,22 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       toast = host.querySelector('[data-rest-reminder-toast="true"]');
       mask = host.querySelector('[data-rest-reminder-mask="true"]');
     }
+    if (!host.querySelector('[data-rest-reminder-bubble="true"]')) {
+      const wrapper = document.createElement("div");
+      wrapper.innerHTML = restReminderToastMarkup();
+      const bubble = wrapper.querySelector('[data-rest-reminder-bubble="true"]');
+      if (bubble) host.appendChild(bubble);
+    }
     if (!toast) return;
     const reminder = payload?.restReminder && typeof payload.restReminder === "object"
       ? payload.restReminder
       : {};
-    const breakEndsAtMs = Number(reminder.breakEndsAtMs);
+    const promptEndsAtMs = Number(reminder.promptEndsAtMs);
+    const phase = String(reminder.phase || "");
     const visible = !!reminder.visible
-      && Number.isFinite(breakEndsAtMs)
-      && breakEndsAtMs > Date.now();
+      && (phase === "prompt" || phase === "preview")
+      && Number.isFinite(promptEndsAtMs)
+      && promptEndsAtMs > Date.now();
     const wasVisible = toast.dataset.visible === "true";
     toast.dataset.visible = visible ? "true" : "false";
     if (mask) {
@@ -14026,13 +14346,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       const canPostpone = !!reminder.canPostpone;
       postponeBtn.hidden = !canPostpone;
       const minutes = Math.max(1, Math.round(Number(reminder.postponeMinutes) || 10));
-      postponeBtn.textContent = reminder.preview ? "关闭预览" : `延后 ${minutes} 分钟`;
+      postponeBtn.textContent = `延迟 ${minutes} 分钟`;
     }
-    const ackBtn = toast.querySelector('[data-action="rest-reminder-ack"]');
+    const ackBtn = toast.querySelector('[data-action="rest-reminder-ack"], [data-action="rest-reminder-start"]');
     if (ackBtn) {
-      ackBtn.textContent = reminder.preview ? "完成预览" : "提前结束休息";
+      ackBtn.dataset.action = reminder.preview ? "rest-reminder-ack" : "rest-reminder-start";
+      ackBtn.textContent = reminder.preview ? "关闭预览" : "开始休息";
     }
-    if (visible) {
+    const bubbleVisible = renderRestReminderBubble(host, reminder);
+    if (visible || bubbleVisible) {
       ensureRestReminderOverlayTicker();
       if (!wasVisible && ackBtn) {
         requestAnimationFrame(() => {
@@ -16809,15 +17131,31 @@ def _budget_progress_overflow_ratio(cost: float | None, limit: float | None) -> 
     return max(0.0, min(1.0, total_ratio - 1.0))
 
 
-def _budget_progress_overflow_badge(cost: float | None, limit: float | None) -> str:
+def _budget_progress_overflow_parts(
+    cost: float | None,
+    limit: float | None,
+) -> tuple[str, str]:
     total_ratio = _budget_progress_total_ratio(cost, limit)
     if total_ratio <= 1.0:
-        return ""
+        return "", ""
     amount = max(0.0, float(cost or 0.0))
     budget = max(0.0, float(limit or 0.0))
     overflow_ratio = max(0.0, total_ratio - 1.0)
     overflow_cost = max(0.0, amount - budget)
-    return f"+{overflow_ratio:.0%} / +{_format_money(overflow_cost)}"
+    # "超" reads clearer than bare "+" for budget overage.
+    percent = f"超{overflow_ratio:.0%}"
+    money = f"超{_format_money(overflow_cost)}"
+    return f"{percent} / {money}", money
+
+
+def _budget_progress_overflow_badge(cost: float | None, limit: float | None) -> str:
+    full, _compact = _budget_progress_overflow_parts(cost, limit)
+    return full
+
+
+def _budget_progress_overflow_badge_compact(cost: float | None, limit: float | None) -> str:
+    _full, compact = _budget_progress_overflow_parts(cost, limit)
+    return compact
 
 
 def _budget_limit_text(limit: float | None) -> str:
@@ -16832,6 +17170,7 @@ def _top_progress_metric(
     right_text: str = "",
     overflow_ratio: float | None = None,
     overflow_badge: str = "",
+    overflow_badge_compact: str = "",
 ) -> dict[str, object]:
     metric: dict[str, object] = {
         "label": label,
@@ -16844,6 +17183,8 @@ def _top_progress_metric(
         metric["overflowRatio"] = max(0.0, min(1.0, float(overflow_ratio)))
     if overflow_badge:
         metric["overflowBadge"] = overflow_badge
+    if overflow_badge_compact:
+        metric["overflowBadgeCompact"] = overflow_badge_compact
     return metric
 
 
@@ -16854,6 +17195,14 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         snapshot.daily_limit_usd,
     )
     week_overflow = _budget_progress_overflow_ratio(
+        snapshot.week_cost_usd,
+        snapshot.weekly_limit_usd,
+    )
+    day_badge, day_badge_compact = _budget_progress_overflow_parts(
+        snapshot.today_cost_usd,
+        snapshot.daily_limit_usd,
+    )
+    week_badge, week_badge_compact = _budget_progress_overflow_parts(
         snapshot.week_cost_usd,
         snapshot.weekly_limit_usd,
     )
@@ -16871,23 +17220,20 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
-        right_text=(
-            _budget_progress_total_text(snapshot.today_cost_usd, snapshot.daily_limit_usd)
-            if day_overflow > 0.0
-            else _budget_limit_text(snapshot.daily_limit_usd)
-        ),
+        # Keep full usage/amount on the left; only the badge shrinks under pressure.
+        right_text="" if day_overflow > 0.0 else _budget_limit_text(snapshot.daily_limit_usd),
         overflow_ratio=day_overflow,
+        overflow_badge=day_badge,
+        overflow_badge_compact=day_badge_compact,
     )
     week = _top_progress_metric(
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
-        right_text=(
-            _budget_progress_total_text(snapshot.week_cost_usd, snapshot.weekly_limit_usd)
-            if week_overflow > 0.0
-            else _budget_limit_text(snapshot.weekly_limit_usd)
-        ),
+        right_text="" if week_overflow > 0.0 else _budget_limit_text(snapshot.weekly_limit_usd),
         overflow_ratio=week_overflow,
+        overflow_badge=week_badge,
+        overflow_badge_compact=week_badge_compact,
     )
     budget_day = _top_progress_metric(
         f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
@@ -16895,10 +17241,8 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         "day",
         right_text="" if day_overflow > 0.0 else _budget_limit_text(snapshot.daily_limit_usd),
         overflow_ratio=day_overflow,
-        overflow_badge=_budget_progress_overflow_badge(
-            snapshot.today_cost_usd,
-            snapshot.daily_limit_usd,
-        ),
+        overflow_badge=day_badge,
+        overflow_badge_compact=day_badge_compact,
     )
     budget_week = _top_progress_metric(
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
@@ -16906,10 +17250,8 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         "week",
         right_text="" if week_overflow > 0.0 else _budget_limit_text(snapshot.weekly_limit_usd),
         overflow_ratio=week_overflow,
-        overflow_badge=_budget_progress_overflow_badge(
-            snapshot.week_cost_usd,
-            snapshot.weekly_limit_usd,
-        ),
+        overflow_badge=week_badge,
+        overflow_badge_compact=week_badge_compact,
     )
     return {
         "collapsed": [session, day, week],

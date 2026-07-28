@@ -1,0 +1,25 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]
+  - main [ref=e3]:
+    - textbox "消息" [ref=e4]
+  - generic:
+    - status:
+      - generic:
+        - button "↓" [ref=e7] [cursor=pointer]
+        - button "展开顶部 HUD" [ref=e8] [cursor=pointer]:
+          - generic [ref=e10]:
+            - generic "本会话 0/$0.0000/-" [ref=e11]
+            - generic "今日 139.6M/$116.76 / 259%" [ref=e12]:
+              - generic "今日 139.6M/$116.76 / 259%":
+                - generic "今日 139.6M/$116.76 / 259%": 今日 $116.76
+                - generic "今日 139.6M/$116.76 / 259%": 259%
+            - generic "本周 284.2M/$184.00 / 总 $400.00" [ref=e13]:
+              - generic "本周 284.2M/$184.00 / 总 $400.00":
+                - generic "本周 284.2M/$184.00 / 总 $400.00": 本周 284.2M/$184.00
+                - generic "本周 284.2M/$184.00 / 总 $400.00": 总 $400.00
+        - button "设置" [ref=e14] [cursor=pointer]: ⚙
+    - status:
+      - generic:
+        - img "CDP 连接正常"
+        - button "展开请求 HUD" [ref=e17] [cursor=pointer]:
+          - generic "~$0.000 ↑~0 ◎- ↓~0 ◇~0 ↻~0 ∑0" [ref=e18]

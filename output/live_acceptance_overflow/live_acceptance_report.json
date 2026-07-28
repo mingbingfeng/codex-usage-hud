@@ -1,0 +1,42 @@
+{
+  "schema": "codex-usage-hud.live-acceptance.v1",
+  "generated_at": "2026-07-28T06:01:38.512586Z",
+  "project_root": "E:\\Project\\codex-usage-hud",
+  "output_dir": "output\\live_acceptance_overflow",
+  "prepare_mode": "normal",
+  "runtime_paths": {
+    "settings": "C:\\Users\\zjxqm\\AppData\\Local\\codex-usage-hud\\hud_settings.json",
+    "daemon_log": "C:\\Users\\zjxqm\\AppData\\Local\\codex-usage-hud\\daemon.log",
+    "renderer_diagnostic": "C:\\Users\\zjxqm\\AppData\\Local\\codex-usage-hud\\renderer_fallback.log"
+  },
+  "automated_checks": [
+    {
+      "name": "stop_hud",
+      "status": "PASS",
+      "exit_code": 0,
+      "command": "C:\\Users\\zjxqm\\AppData\\Local\\Programs\\Python\\Python314\\python.exe -m codex_usage_hud --stop",
+      "log_path": "output\\live_acceptance_overflow\\stop_hud.log",
+      "output_tail": "Stopped codex-usage-hud PID 25652."
+    }
+  ],
+  "hud_prepare": {
+    "name": "start_hud",
+    "status": "PASS",
+    "prepare_mode": "normal",
+    "pid": 9032,
+    "command": "C:\\Users\\zjxqm\\AppData\\Local\\Programs\\Python\\Python314\\python.exe -m codex_usage_hud --daemon",
+    "log_path": "output\\live_acceptance_overflow\\start_hud.log"
+  },
+  "manual_checks": [
+    {
+      "id": "normal_mode_diagnostics",
+      "title": "Normal-Mode Diagnostics",
+      "status": "pending",
+      "instructions": [
+        "Reproduce one known runtime error if practical.",
+        "Inspect `renderer_fallback.log`.",
+        "Confirm a new JSON line includes source, severity, code, message, context, firstSeenAt, and lastSeenAt."
+      ]
+    }
+  ]
+}

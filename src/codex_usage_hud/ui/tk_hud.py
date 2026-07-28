@@ -4631,7 +4631,7 @@ def _budget_progress_overflow_badge(cost: float | None, limit: float | None) -> 
     budget = max(0.0, float(limit or 0.0))
     overflow_ratio = max(0.0, total_ratio - 1.0)
     overflow_cost = max(0.0, amount - budget)
-    return f"+{overflow_ratio:.0%} / +{_format_money(overflow_cost)}"
+    return f"超{overflow_ratio:.0%} / 超{_format_money(overflow_cost)}"
 
 
 def _budget_limit_text(limit: float | None) -> str:

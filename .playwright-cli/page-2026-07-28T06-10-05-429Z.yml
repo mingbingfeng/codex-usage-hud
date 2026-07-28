@@ -1,0 +1,100 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]
+  - main [ref=e3]:
+    - textbox "消息" [ref=e4]
+  - generic:
+    - status:
+      - generic:
+        - generic [ref=e20] [cursor=pointer]:
+          - generic [ref=e21]:
+            - button "移动" [ref=e22]: ⋮⋮
+            - button "↓" [ref=e23]
+          - generic "Codex 会话 / 预算" [ref=e24]
+          - generic "会话 erflow-smoke | 行 0 | 确认 0" [ref=e25]
+          - generic "缓存命中 -" [ref=e27]
+          - button "设置" [ref=e28]: ⚙
+        - generic [ref=e30]:
+          - generic [ref=e31]:
+            - generic [ref=e32]:
+              - generic [ref=e33]:
+                - generic [ref=e34]: 本会话用量
+                - generic "0 轮确认" [ref=e36]
+              - generic [ref=e37]:
+                - generic [ref=e38]:
+                  - generic "$0.0000" [ref=e39]
+                  - generic [ref=e40]: 会话金额
+                - generic [ref=e41]:
+                  - generic "0" [ref=e42]
+                  - generic [ref=e43]: 累计 tokens
+              - generic [ref=e44]:
+                - generic [ref=e45]: 会话构成
+                - generic "缓存命中 -" [ref=e46]
+                - generic "均值 n/a" [ref=e47]
+              - generic "暂无可分析的 token 构成" [ref=e48]
+              - generic:
+                - generic: 输入0
+                - generic: 缓存0
+                - generic: 输出0
+                - generic: 推理0
+            - generic [ref=e49]:
+              - generic [ref=e50]: 额度进度
+              - generic [ref=e52]:
+                - generic "今日 139.6M/$116.76 | +159% / +$71.76" [ref=e53]:
+                  - generic "今日 139.6M/$116.76 | +159% / +$71.76":
+                    - generic "今日 139.6M/$116.76 | +159% / +$71.76": 今日 139.6M/$116.76
+                  - generic: +159% / +$71.76
+                - generic "本周 284.2M/$184.00 / 总 $400.00" [ref=e54]:
+                  - generic "本周 284.2M/$184.00 / 总 $400.00":
+                    - generic "本周 284.2M/$184.00 / 总 $400.00": 本周 284.2M/$184.00
+                    - generic "本周 284.2M/$184.00 / 总 $400.00": 总 $400.00
+            - generic [ref=e55]:
+              - generic [ref=e56]:
+                - generic [ref=e57]: 高消耗轮次
+                - generic "Top 3" [ref=e58]
+              - generic [ref=e59]:
+                - generic [ref=e60]:
+                  - generic [ref=e61]: 暂无会话高消耗轮次
+                  - generic [ref=e62]: 会话出现 token 确认后展示 Top 3
+                - generic [ref=e63]:
+                  - generic [ref=e64]: 等待统计
+                  - generic [ref=e65]: 不会因新需求开始而清空
+                - generic [ref=e66]:
+                  - generic [ref=e67]: 保持占位
+                  - generic [ref=e68]: 新轮次超过历史 Top 3 后刷新
+          - generic [ref=e70]:
+            - generic [ref=e71]:
+              - generic [ref=e72]: 当前活动
+              - generic "等待" [ref=e74]
+            - generic [ref=e75]:
+              - generic "当前需求" [ref=e76]
+              - generic "点击复制当前需求 会话 erflow-smoke" [ref=e77] [cursor=pointer]: 会话 erflow-smoke
+            - generic [ref=e78]:
+              - generic "正在执行" [ref=e79]
+              - generic "点击复制正在执行 空闲：等待" [ref=e80] [cursor=pointer]: 空闲：等待
+            - generic [ref=e81]:
+              - generic [ref=e82]:
+                - generic "已运行" [ref=e83]
+                - generic "--:--:--" [ref=e84]
+              - generic [ref=e85]:
+                - generic "当前等待" [ref=e86]
+                - generic "任务已结束" [ref=e87]
+              - generic [ref=e88]:
+                - generic "需求轮次" [ref=e89]
+                - generic "本次需求已产生 0 轮" [ref=e90]: 0轮
+            - generic [ref=e91]:
+              - generic [ref=e92]:
+                - generic [ref=e93]: 活动轨迹
+                - generic [ref=e94]:
+                  - generic [ref=e95]: 最慢工具:--
+                  - generic [ref=e96]: 最长等待:--
+              - generic "14:08:23 刷新 14:08:23 刷新 等待会话产生新活动" [ref=e98]:
+                - generic [ref=e99]: 14:08:23
+                - generic [ref=e101]:
+                  - generic "14:08:23 刷新 14:08:23 刷新 等待会话产生新活动" [ref=e102]: 刷新
+                  - generic "点击复制轨迹详情 14:08:23 刷新 14:08:23 刷新 等待会话产生新活动" [ref=e103]: 等待会话产生新活动
+              - button "查看更多" [disabled] [ref=e104]
+    - status:
+      - generic:
+        - img "CDP 连接正常"
+        - button "展开请求 HUD" [ref=e17] [cursor=pointer]:
+          - generic "~$0.000 ↑~0 ◎- ↓~0 ◇~0 ↻~0 ∑0" [ref=e18]

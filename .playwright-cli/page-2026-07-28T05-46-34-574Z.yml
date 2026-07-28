@@ -1,0 +1,67 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]: Detail adjustment only
+    - heading "保留原进度条，上下分层消除粘连" [level=1] [ref=e5]
+    - paragraph [ref=e6]: HUD 外形和蓝色主轨不变。文字与缩短后的超额胶囊位于上层，红色超额子轨缩成 4px 并贴合整个底边；正文仍只在即将覆盖时缩短 token 段。
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e9]:
+        - strong [ref=e10]: 非展开态
+        - generic [ref=e11]: 原高度 36px
+      - generic [ref=e12]:
+        - generic [ref=e13]:
+          - text: Codex
+          - generic [ref=e14]: 当前对话
+        - generic [ref=e15]: 空间足够，正文保持完整
+        - generic [ref=e17]:
+          - generic [ref=e21]: +18% / +$1.22
+          - generic [ref=e22]: 今日 8.4M/$8.12
+        - generic [ref=e24]: 只在发生覆盖风险时降级，不是固定省略 token。
+        - generic [ref=e25]: 当前长数据触发降级
+        - generic [ref=e27]:
+          - generic [ref=e31]: +159% / +$71.76
+          - generic [ref=e32]: 今日 $116.76
+        - generic [ref=e34]:
+          - strong [ref=e35]: 上下结构：
+          - text: 右侧胶囊降低为 19px；红色子轨缩成 4px 并直接贴住底边，两层之间保留清晰空隙。
+    - generic [ref=e36]:
+      - generic [ref=e37]:
+        - strong [ref=e38]: 展开态
+        - generic [ref=e39]: 原额度进度结构
+      - generic [ref=e41]:
+        - generic [ref=e42]:
+          - generic [ref=e43]: ⋮⋮
+          - generic [ref=e44]: 当前会话 · Renderer HUD
+          - generic [ref=e45]: 32 轮
+          - generic [ref=e46]: 缓存 93%
+        - generic [ref=e47]:
+          - generic [ref=e48]:
+            - generic [ref=e49]: 额度进度
+            - generic [ref=e50]:
+              - generic [ref=e52]:
+                - generic [ref=e56]: +159% / +$71.76
+                - generic [ref=e57]: 今日 $116.76
+              - generic [ref=e62]:
+                - generic [ref=e63]: 本周 284.2M/$184.00
+                - generic [ref=e64]: 46%
+          - generic [ref=e65]:
+            - generic [ref=e66]: 当前活动
+            - generic [ref=e67]: 正在执行
+            - generic [ref=e68]: shell_command
+            - generic [ref=e69]:
+              - generic [ref=e70]:
+                - text: 已运行
+                - generic [ref=e71]: 12.4s
+              - generic [ref=e72]:
+                - text: 等待确认
+                - generic [ref=e73]: 24.6s
+  - generic [ref=e74]:
+    - generic [ref=e75]:
+      - strong [ref=e76]: 结构不变
+      - generic [ref=e77]: 收起态仍是一条 36px 进度轨；展开态仍是原额度进度列表。
+    - generic [ref=e78]:
+      - strong [ref=e79]: 样式延续
+      - generic [ref=e80]: 主轨、超额渐变、锚点和数值胶囊仍沿用原视觉，只压缩高度。
+    - generic [ref=e81]:
+      - strong [ref=e82]: 上下分层
+      - generic [ref=e83]: 正文与胶囊在上，4px 超额子轨贴底，解决覆盖和粘连。

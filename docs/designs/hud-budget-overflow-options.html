@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HUD 超额进度微调方案</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      --page: #101216;
+      --board: #171a20;
+      --surface: #151515;
+      --panel: #202020;
+      --card: #171717;
+      --line: #343b45;
+      --text: #f0f0f0;
+      --muted: #8993a1;
+      --day: #339cff;
+      --day-end: #5d8bff;
+      --week: #6ea8ff;
+      --week-end: #8db7ff;
+      --overflow: #fa423e;
+      --overflow-hi: #ffb5b2;
+      --overflow-badge: #5e2424;
+      --overflow-edge: #fa423e;
+      --overflow-text: #ffe0de;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--page); color: var(--text); }
+    body { padding: 28px; }
+
+    .board {
+      width: 1120px;
+      min-height: 690px;
+      margin: 0 auto;
+      padding: 34px 38px;
+      border: 1px solid #2a313b;
+      border-radius: 12px;
+      background: var(--board);
+      box-shadow: 0 28px 70px rgba(0,0,0,.4);
+    }
+
+    header { padding-bottom: 22px; border-bottom: 1px solid #2b313a; }
+    .eyebrow { color: #79b6ff; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    h1 { margin: 7px 0 0; font-size: 25px; letter-spacing: 0; }
+    header p { max-width: 800px; margin: 9px 0 0; color: #a2acb9; font-size: 13px; line-height: 1.65; }
+
+    .states { display: grid; grid-template-columns: 420px 1fr; gap: 34px; padding-top: 27px; }
+    .state-label { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+    .state-label strong { font-size: 13px; }
+    .state-label span { color: var(--muted); font: 10px Consolas, monospace; }
+    .stage { border: 1px solid #2b323c; border-radius: 9px; background: #111318; }
+
+    .collapsed-stage { min-height: 414px; padding: 20px; }
+    .appbar { height: 42px; margin: -20px -20px 28px; padding: 0 14px; display: flex; align-items: center; background: var(--panel); border-bottom: 1px solid #32363c; color: #d8dde5; font-size: 10px; font-weight: 700; }
+    .appbar span { margin-left: auto; color: #747d8a; font-weight: 400; }
+    .sample-label { width: 287px; margin: 0 auto 8px; color: #85909e; font-size: 10px; }
+
+    .rail {
+      position: relative;
+      display: block;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 999px;
+      background: linear-gradient(180deg,rgba(255,255,255,.032),rgba(255,255,255,0)),#111822;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.04),inset 0 -8px 16px rgba(0,0,0,.16);
+    }
+
+    .fill { position: absolute; inset: 0 auto 0 0; width: 100%; border-radius: inherit; overflow: hidden; background: linear-gradient(90deg,var(--day),var(--day-end)); z-index: 2; }
+    .fill::before { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg,rgba(255,255,255,.26),rgba(255,255,255,.07) 28%,rgba(255,255,255,0) 52%); }
+    .week-fill { width: 46%; background: linear-gradient(90deg,var(--week),var(--week-end)); }
+
+    .track-text { position: absolute; inset: 0; z-index: 6; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 0 10px; overflow: hidden; color: #fff; mix-blend-mode: difference; font: 800 11px Consolas, monospace; }
+    .left-text { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .right-text { flex: 0 0 auto; white-space: nowrap; }
+
+    .overflow-sub {
+      position: absolute;
+      left: 39%;
+      right: 0;
+      bottom: 0;
+      height: 4px;
+      border-radius: 4px 0 0 0;
+      background: linear-gradient(90deg,var(--overflow-hi),var(--overflow) 60%,#ff5b64);
+      box-shadow: 0 8px 18px rgba(255,91,100,.18);
+      z-index: 3;
+    }
+    .overflow-sub::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(180deg,rgba(255,255,255,.28),rgba(255,255,255,0) 70%); }
+    .overflow-anchor { position: absolute; left: calc(39% - 2px); bottom: 0; width: 7px; height: 7px; border-radius: 50%; background: radial-gradient(circle at 35% 35%,var(--overflow-hi) 0%,var(--overflow) 58%,#ff5b64 100%); box-shadow: 0 0 0 1px rgba(255,107,99,.12),0 0 8px rgba(255,107,99,.28); z-index: 4; }
+    .badge { position: absolute; top: 4px; right: 7px; z-index: 5; min-height: 19px; padding: 0 8px; display: inline-flex; align-items: center; border: 1px solid var(--overflow-edge); border-radius: 999px; background: var(--overflow-badge); color: var(--overflow-text); font: 800 9.5px Consolas, monospace; box-shadow: 0 6px 14px rgba(255,91,100,.1); }
+
+    .collapsed-hud { width: 287px; height: 36px; margin: 0 auto 25px; }
+    .collapsed-hud .track-text { padding-right: 105px; }
+    .fallback .token { display: none; }
+    .fallback .left-text::after { content: "$116.76"; }
+
+    .rule-note { width: 287px; margin: -12px auto 22px; color: #939eac; font-size: 10px; line-height: 1.55; }
+    .rule-note b { color: #dce4ed; }
+    .detail-note { width: 287px; margin: 4px auto 0; padding-top: 14px; border-top: 1px solid #2b323c; color: #929daa; font-size: 10px; line-height: 1.6; }
+    .detail-note strong { color: #ffaaa4; }
+
+    .expanded-stage { min-height: 414px; padding: 28px; }
+    .expanded-hud { width: 520px; height: 322px; border: 1px solid #363e49; border-radius: 8px; overflow: hidden; background: var(--surface); box-shadow: 0 20px 45px rgba(0,0,0,.42); }
+    .hud-head { height: 38px; padding: 0 11px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #333941; background: var(--panel); font-size: 10px; }
+    .hud-title { font-weight: 800; }
+    .hud-head .meta { margin-left: auto; color: #838e9c; font-family: Consolas, monospace; }
+    .cache { padding: 3px 8px; border-radius: 999px; background: #283c62; color: #9ec4ff; font-weight: 800; }
+    .hud-body { display: grid; grid-template-columns: 230px 1fr; gap: 10px; padding: 10px; }
+    .card { border: 1px solid #323a45; border-radius: 7px; background: var(--card); padding: 10px; }
+    .card-title { margin-bottom: 10px; font-size: 11px; font-weight: 800; }
+    .budget-rails { display: grid; gap: 7px; }
+    .budget-rail { height: 34px; }
+    .budget-rail .track-text { padding: 0 13px; padding-right: 116px; font-size: 12px; }
+    .budget-rail .overflow-sub { left: 42%; right: 0; bottom: 0; height: 4px; }
+    .budget-rail .overflow-anchor { left: calc(42% - 2px); right: auto; bottom: 0; width: 7px; height: 7px; }
+    .budget-rail .badge { top: 4px; right: 8px; min-height: 20px; padding: 0 9px; font-size: 9.5px; }
+    .other-card { height: 218px; }
+    .other-head { color: #8d98a6; font-size: 9px; }
+    .command { margin-top: 7px; color: #9fc4ff; font: 800 11px Consolas, monospace; }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 14px; }
+    .metric { padding: 9px; border: 1px solid #303946; border-radius: 6px; }
+    .metric span { color: #7f8b9a; font-size: 8px; }
+    .metric b { display: block; margin-top: 5px; color: #f3d27a; font: 800 12px Consolas, monospace; }
+
+    .callouts { display: grid; grid-template-columns: repeat(3,1fr); gap: 20px; margin-top: 26px; padding-top: 20px; border-top: 1px solid #2b313a; }
+    .callout { padding-left: 12px; border-left: 2px solid #446487; }
+    .callout strong { display: block; font-size: 10.5px; }
+    .callout span { display: block; margin-top: 5px; color: #909ba9; font-size: 10px; line-height: 1.55; }
+  </style>
+</head>
+<body>
+  <main class="board" id="design-board">
+    <header>
+      <div class="eyebrow">Detail adjustment only</div>
+      <h1>保留原进度条，上下分层消除粘连</h1>
+      <p>HUD 外形和蓝色主轨不变。文字与缩短后的超额胶囊位于上层，红色超额子轨缩成 4px 并贴合整个底边；正文仍只在即将覆盖时缩短 token 段。</p>
+    </header>
+
+    <div class="states">
+      <section>
+        <div class="state-label"><strong>非展开态</strong><span>原高度 36px</span></div>
+        <div class="stage collapsed-stage">
+          <div class="appbar">Codex <span>当前对话</span></div>
+
+          <div class="sample-label">空间足够，正文保持完整</div>
+          <div class="collapsed-hud">
+            <div class="rail">
+              <span class="fill"></span>
+              <span class="overflow-sub"></span>
+              <span class="overflow-anchor"></span>
+              <span class="badge">+18% / +$1.22</span>
+              <span class="track-text"><span class="left-text">今日 8.4M/$8.12</span></span>
+            </div>
+          </div>
+
+          <div class="rule-note"><b>只在发生覆盖风险时降级</b>，不是固定省略 token。</div>
+
+          <div class="sample-label">当前长数据触发降级</div>
+          <div class="collapsed-hud fallback">
+            <div class="rail">
+              <span class="fill"></span>
+              <span class="overflow-sub"></span>
+              <span class="overflow-anchor"></span>
+              <span class="badge">+159% / +$71.76</span>
+              <span class="track-text"><span class="left-text">今日 <span class="token">139.6M/</span></span></span>
+            </div>
+          </div>
+
+          <div class="detail-note"><strong>上下结构：</strong>右侧胶囊降低为 19px；红色子轨缩成 4px 并直接贴住底边，两层之间保留清晰空隙。</div>
+        </div>
+      </section>
+
+      <section>
+        <div class="state-label"><strong>展开态</strong><span>原额度进度结构</span></div>
+        <div class="stage expanded-stage">
+          <div class="expanded-hud">
+            <div class="hud-head"><span>⋮⋮</span><span class="hud-title">当前会话 · Renderer HUD</span><span class="meta">32 轮</span><span class="cache">缓存 93%</span></div>
+            <div class="hud-body">
+              <section class="card">
+                <div class="card-title">额度进度</div>
+                <div class="budget-rails">
+                  <div class="budget-rail">
+                    <div class="rail">
+                      <span class="fill"></span>
+                      <span class="overflow-sub"></span>
+                      <span class="overflow-anchor"></span>
+                      <span class="badge">+159% / +$71.76</span>
+                      <span class="track-text"><span class="left-text">今日 $116.76</span></span>
+                    </div>
+                  </div>
+                  <div class="budget-rail">
+                    <div class="rail">
+                      <span class="fill week-fill"></span>
+                      <span class="track-text"><span class="left-text">本周 284.2M/$184.00</span><span class="right-text">46%</span></span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="card other-card">
+                <div class="card-title">当前活动</div>
+                <div class="other-head">正在执行</div>
+                <div class="command">shell_command</div>
+                <div class="metrics"><div class="metric"><span>已运行</span><b>12.4s</b></div><div class="metric"><span>等待确认</span><b>24.6s</b></div></div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <footer class="callouts">
+      <div class="callout"><strong>结构不变</strong><span>收起态仍是一条 36px 进度轨；展开态仍是原额度进度列表。</span></div>
+      <div class="callout"><strong>样式延续</strong><span>主轨、超额渐变、锚点和数值胶囊仍沿用原视觉，只压缩高度。</span></div>
+      <div class="callout"><strong>上下分层</strong><span>正文与胶囊在上，4px 超额子轨贴底，解决覆盖和粘连。</span></div>
+    </footer>
+  </main>
+</body>
+</html>

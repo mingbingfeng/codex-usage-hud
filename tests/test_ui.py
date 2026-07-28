@@ -53,6 +53,7 @@ from codex_usage_hud.cli import (
     _build_session_switch_controller,
     _enable_crash_diagnostics,
     active_work_items_for_snapshot,
+    is_independent_desktop_delegation,
     is_subagent_session,
     _prepare_codex_window_for_renderer,
     _prepare_codex_window_for_tk,
@@ -206,9 +207,12 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _ordered_overlay_items,
     _overlay_items_required_height,
     _overlay_window_top_y,
+    _normalized_rest_reminder,
     _pending_workdir_window_rect,
     _point_in_inscribed_circle,
     _round_badge_palette,
+    _rest_reminder_card_copy,
+    _rest_reminder_overlay_item,
     _remembered_card_rect_for_layout,
     _transition_palette,
     _transition_clearance_offset,
@@ -2494,8 +2498,15 @@ class BudgetHelperTests(unittest.TestCase):
             snapshot = parser.parse_file(parent)
             context = SimpleNamespace(sessions_root=root, parser=parser, active_session_tracker=None)
             items = active_work_items_for_snapshot(context, snapshot, parent)
-        delegated_item = next(item for item in items if item.id == "session-delegated")
-        self.assertIn(delegated_item.status, {"running", "active"})
+            delegated_item = next(item for item in items if item.id == "session-delegated")
+            self.assertIn(delegated_item.status, {"running", "active"})
+            self.assertFalse(delegated_item.is_subagent)
+
+            # A transient candidate-scan miss must not evict the promoted session.
+            delegated.unlink()
+            retained = active_work_items_for_snapshot(context, snapshot, parent)
+            retained_item = next(item for item in retained if item.id == "session-delegated")
+            self.assertFalse(retained_item.is_subagent)
 
     def test_internal_desktop_subagent_with_parent_stays_hidden(self) -> None:
         snapshot = ParsedSession(
@@ -3151,6 +3162,59 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(items[0].model_name, "gpt-5.5")
         self.assertEqual(items[0].status_text, "gpt-5.5 正在思考")
 
+    def test_rest_reminder_card_copy_covers_prompt_postpone_and_resting_actions(self) -> None:
+        base = {
+            "bubbleVisible": True,
+            "message": "起来活动一下",
+            "canPostpone": True,
+            "breakMinutes": 2,
+            "postponeMinutes": 10,
+            "completedTodaySeconds": 65,
+            "todayRestedSeconds": 95,
+        }
+        prompt = _rest_reminder_overlay_item(
+            {
+                **base,
+                "phase": "prompt",
+                "promptEndsAtMs": 160_000,
+            }
+        )
+        prompt_copy = _rest_reminder_card_copy(prompt, now_ms=100_000)
+        self.assertIn("等待选择 01:00", prompt_copy["statusText"])
+        self.assertIn("超时自动跳过", prompt_copy["statusText"])
+        self.assertEqual(
+            [action["action"] for action in prompt_copy["actions"]],
+            ["restReminderPostpone", "restReminderStart"],
+        )
+
+        postponed = _rest_reminder_overlay_item(
+            {
+                **base,
+                "phase": "postponed",
+                "postponeEndsAtMs": 700_000,
+            }
+        )
+        postponed_copy = _rest_reminder_card_copy(postponed, now_ms=100_000)
+        self.assertEqual(postponed_copy["detail"], "10:00 后再次提醒")
+        self.assertEqual(postponed_copy["actions"][0]["action"], "restReminderStart")
+
+        resting = _rest_reminder_overlay_item(
+            {
+                **base,
+                "phase": "resting",
+                "restStartedAtMs": 100_000,
+                "restEndsAtMs": 220_000,
+            }
+        )
+        resting_copy = _rest_reminder_card_copy(resting, now_ms=130_000)
+        self.assertEqual(resting_copy["detail"], "本次已休息 00:30")
+        self.assertIn("今日累计 01:35", resting_copy["statusText"])
+        self.assertEqual(resting_copy["actions"][0]["action"], "restReminderFinish")
+
+    def test_rest_reminder_normalization_rejects_hidden_or_unknown_phase(self) -> None:
+        self.assertIsNone(_normalized_rest_reminder({"bubbleVisible": False, "phase": "prompt"}))
+        self.assertIsNone(_normalized_rest_reminder({"bubbleVisible": True, "phase": "unknown"}))
+
     def test_desktop_work_overlay_reads_new_click_commands_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3325,6 +3389,37 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertTrue(events[1].context["windowRefocused"])
         self.assertEqual(events[1].context["windowStatus"], "visible")
         self.assertEqual(events[1].context["windowHwnd"], 123)
+
+    def test_rest_reminder_commands_bypass_session_switching(self) -> None:
+        overlay = SimpleNamespace(
+            take_commands=MagicMock(
+                return_value=[
+                    {"action": "restReminderPostpone", "phase": "prompt"},
+                    {"action": "restReminderStart", "phase": "postponed"},
+                    {"action": "restReminderFinish", "phase": "resting"},
+                ]
+            )
+        )
+        session_controller = MagicMock()
+        callback = MagicMock(return_value=True)
+        runtime_events = RuntimeEventBus(clock=lambda: 123.0)
+
+        handled = cli_module._handle_work_overlay_commands(
+            overlay,
+            session_controller,
+            runtime_events=runtime_events,
+            rest_reminder_command_callback=callback,
+        )
+
+        self.assertEqual(handled, 3)
+        self.assertEqual(callback.call_count, 3)
+        session_controller.activate_session.assert_not_called()
+        events = runtime_events.drain()
+        self.assertEqual(
+            [event.context["action"] for event in events],
+            ["restReminderPostpone", "restReminderStart", "restReminderFinish"],
+        )
+        self.assertTrue(all(event.context["restReminder"] for event in events))
 
     def test_work_overlay_helper_runtime_error_writes_normal_mode_diagnostic(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3666,8 +3761,71 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["commandPath"], str(overlay._command_path))
             self.assertEqual(payload_arg["items"], [{"id": "thread-1"}])
             self.assertEqual(payload_arg["systemAction"], {})
+            self.assertEqual(payload_arg["restReminder"], {})
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
+
+    def test_desktop_rest_reminder_bypasses_zero_session_item_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=0)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
+            fake_process = SimpleNamespace(poll=MagicMock(return_value=None))
+
+            def start_helper() -> None:
+                overlay._process = fake_process
+
+            reminder = {
+                "bubbleVisible": True,
+                "phase": "prompt",
+                "message": "起来活动一下",
+                "canPostpone": True,
+                "intervalMinutes": 45,
+                "breakMinutes": 2,
+                "postponeMinutes": 10,
+                "promptEndsAtMs": 1_700_000_120_000,
+            }
+            with (
+                patch.object(overlay, "_runtime_available", return_value=True),
+                patch.object(overlay, "_theme_payload", return_value={}),
+                patch.object(overlay, "_start", side_effect=start_helper),
+                patch("codex_usage_hud.cli.write_json_object") as write_json,
+            ):
+                shown = overlay.update_rest_reminder(reminder)
+
+            self.assertTrue(shown)
+            payload = write_json.call_args.args[1]
+            self.assertEqual(payload["itemLimit"], 0)
+            self.assertEqual(payload["items"], [])
+            self.assertEqual(payload["restReminder"]["phase"], "prompt")
+            self.assertTrue(payload["restReminder"]["bubbleVisible"])
+
+    def test_desktop_rest_reminder_restarts_exited_helper_for_unchanged_payload(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=0)
+        reminder = {
+            "bubbleVisible": True,
+            "phase": "postponed",
+            "postponeEndsAtMs": 1_700_000_600_000,
+        }
+        overlay._rest_reminder = dict(reminder)
+        overlay._process = SimpleNamespace(
+            poll=MagicMock(return_value=1),
+            returncode=1,
+        )
+        restarted = SimpleNamespace(poll=MagicMock(return_value=None))
+
+        def start_helper() -> None:
+            overlay._process = restarted
+
+        with (
+            patch.object(overlay, "_runtime_available", return_value=True),
+            patch.object(overlay, "_start", side_effect=start_helper) as start,
+        ):
+            shown = overlay.update_rest_reminder(reminder)
+
+        self.assertTrue(shown)
+        start.assert_called_once_with()
 
     def test_desktop_work_overlay_restart_action_bypasses_zero_item_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6144,10 +6302,10 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(budget[0].right_text, "")
         self.assertAlmostEqual(budget[0].overflow_ratio, 0.12, places=3)
-        self.assertEqual(budget[0].overflow_badge, "+12% / +$12.00")
+        self.assertEqual(budget[0].overflow_badge, "超12% / 超$12.00")
         self.assertEqual(budget[1].right_text, "")
         self.assertAlmostEqual(budget[1].overflow_ratio, 0.28, places=3)
-        self.assertEqual(budget[1].overflow_badge, "+28% / +$28.00")
+        self.assertEqual(budget[1].overflow_badge, "超28% / 超$28.00")
 
     def test_hud_instance_lock_prevents_duplicate_instances(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -12586,6 +12744,30 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(status["restReminderSaved"])
         self.assertEqual(status["restReminderSaveRequestId"], "rest-save-1")
+
+    def test_renderer_rest_reminder_start_and_finish_commands_use_explicit_actions(self) -> None:
+        presenter = MagicMock()
+        presenter.start_rest.return_value = True
+        presenter.finish_rest.return_value = True
+        context = SimpleNamespace(rest_reminder=presenter)
+
+        started = _handle_renderer_settings_command(
+            {"id": "rest-start-1", "action": "restReminderStart"},
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+        finished = _handle_renderer_settings_command(
+            {"id": "rest-finish-1", "action": "restReminderFinish"},
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        presenter.start_rest.assert_called_once_with()
+        presenter.finish_rest.assert_called_once_with()
+        self.assertIn("已开始休息计时", started["message"])
+        self.assertIn("新一轮专注计时已开始", finished["message"])
 
     def test_safe_cleanup_reveal_resolves_opaque_item_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

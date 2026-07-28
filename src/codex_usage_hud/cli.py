@@ -1286,6 +1286,7 @@ class DesktopWorkOverlay:
         self._last_payload_items: list[dict[str, object]] | None = None
         self._last_theme_payload: dict[str, object] = {}
         self._system_action: dict[str, object] | None = None
+        self._rest_reminder: dict[str, object] = {}
         self._system_action_unavailable_reason = ""
         self._last_state_signature: str | None = None
         self._last_state_write_at = 0.0
@@ -1315,13 +1316,18 @@ class DesktopWorkOverlay:
         if item_limit is not None:
             self.item_limit = normalize_work_overlay_max_items(item_limit)
         self.enabled = next_enabled and self.item_limit > 0
-        if not self.enabled and self._system_action is None and not self._closed:
+        if (
+            not self.enabled
+            and self._system_action is None
+            and not self._rest_reminder
+            and not self._closed
+        ):
             self._stop_runtime(permanent=False)
 
     def update(self, items: Sequence[WorkStatusItem]) -> None:
         if self._closed:
             return
-        if not self.enabled and self._system_action is None:
+        if not self.enabled and self._system_action is None and not self._rest_reminder:
             self._stop_runtime(permanent=False)
             return
         if not self.enabled:
@@ -1366,6 +1372,48 @@ class DesktopWorkOverlay:
         self._last_theme_payload = dict(theme_payload)
         if self._process is None and time.monotonic() >= self._restart_blocked_until:
             self._start()
+
+    def update_rest_reminder(self, payload: Mapping[str, object] | None) -> bool:
+        """Publish one non-session rest bubble, independently of session limits."""
+        if self._closed:
+            return False
+        next_payload = (
+            dict(payload)
+            if isinstance(payload, Mapping) and bool(payload.get("bubbleVisible"))
+            else {}
+        )
+        if next_payload == self._rest_reminder:
+            if not next_payload:
+                return False
+            if not self._runtime_available():
+                self._report_unavailable_once(self._unavailable_reason)
+                return False
+            process = self._process
+            if process is not None and process.poll() is not None:
+                self._last_helper_exit_code = int(process.returncode or 0)
+                self._process = None
+            if self._process is None and time.monotonic() >= self._restart_blocked_until:
+                self._start()
+            return self._process is not None
+        self._rest_reminder = next_payload
+        if not self._rest_reminder and not self.enabled and self._system_action is None:
+            self._stop_runtime(permanent=False)
+            return False
+        if not self._runtime_available():
+            self._report_unavailable_once(self._unavailable_reason)
+            return False
+        payload_items = list(self._last_payload_items or [])
+        theme_payload = self._last_theme_payload or self._theme_payload()
+        self._write_state(payload_items, theme=theme_payload, close=False)
+        self._last_payload_items = [dict(item) for item in payload_items]
+        self._last_theme_payload = dict(theme_payload)
+        process = self._process
+        if process is not None and process.poll() is not None:
+            self._last_helper_exit_code = int(process.returncode or 0)
+            self._process = None
+        if self._process is None and time.monotonic() >= self._restart_blocked_until:
+            self._start()
+        return self._process is not None
 
     def offer_codex_restart(self, *, title: str, message: str) -> bool:
         """Show a persistent system action independently of session-bubble settings."""
@@ -1507,9 +1555,9 @@ class DesktopWorkOverlay:
 
     def keep_alive(self) -> None:
         """Refresh the helper state file while renderer snapshots are unchanged."""
-        if self._closed or not self.enabled:
+        if self._closed or (not self.enabled and not self._rest_reminder):
             return
-        if not self._last_payload_items:
+        if not self._last_payload_items and not self._rest_reminder:
             return
         now = time.monotonic()
         if now - self._last_state_write_at < WORK_OVERLAY_KEEPALIVE_SECONDS:
@@ -1594,7 +1642,11 @@ class DesktopWorkOverlay:
 
     def next_keep_alive_seconds(self) -> float | None:
         """Return when the helper state file needs its next refresh."""
-        if self._closed or not self.enabled or not self._last_payload_items:
+        if (
+            self._closed
+            or (not self.enabled and not self._rest_reminder)
+            or (not self._last_payload_items and not self._rest_reminder)
+        ):
             return None
         elapsed = time.monotonic() - self._last_state_write_at
         return max(0.1, WORK_OVERLAY_KEEPALIVE_SECONDS - max(0.0, elapsed))
@@ -1672,6 +1724,7 @@ class DesktopWorkOverlay:
         self._last_payload_items = None
         self._last_theme_payload = {}
         self._system_action = None
+        self._rest_reminder = {}
         self._last_state_signature = None
         self._last_state_write_at = 0.0
         self._switch_completed_command = None
@@ -1820,6 +1873,9 @@ class DesktopWorkOverlay:
                     "systemAction": (
                         dict(self._system_action or {}) if not close else {}
                     ),
+                    "restReminder": (
+                        dict(self._rest_reminder or {}) if not close else {}
+                    ),
                     "theme": dict(theme or {}),
                     "updatedAt": time.time(),
                     "close": bool(close),
@@ -1845,6 +1901,9 @@ class DesktopWorkOverlay:
                 "items": list(items),
                 "systemAction": (
                     dict(self._system_action or {}) if not close else {}
+                ),
+                "restReminder": (
+                    dict(self._rest_reminder or {}) if not close else {}
                 ),
                 "theme": dict(theme or {}),
                 "close": bool(close),
@@ -1918,6 +1977,7 @@ class _WorkOverlayCommandPump:
         runtime_events: RuntimeEventBus | None = None,
         runtime_errors: RuntimeErrorRegistry | None = None,
         background_command_callback: Callable[[dict[str, object]], bool] | None = None,
+        rest_reminder_command_callback: Callable[[dict[str, object]], bool] | None = None,
     ) -> None:
         self._work_overlay = work_overlay
         self._session_controller = session_controller
@@ -1926,6 +1986,7 @@ class _WorkOverlayCommandPump:
         self._runtime_events = runtime_events
         self._runtime_errors = runtime_errors
         self._background_command_callback = background_command_callback
+        self._rest_reminder_command_callback = rest_reminder_command_callback
         self._stop_event = Event()
         self._lock = threading.Lock()
         self._watcher: FileChangeWatcher | None = None
@@ -1990,6 +2051,7 @@ class _WorkOverlayCommandPump:
             runtime_events=self._runtime_events,
             runtime_errors=self._runtime_errors,
             background_command_callback=self._background_command_callback,
+            rest_reminder_command_callback=self._rest_reminder_command_callback,
         )
         if handled and self._command_event is not None:
             self._command_event.set()
@@ -4161,6 +4223,7 @@ def _handle_work_overlay_commands(
     runtime_events: RuntimeEventBus | None = None,
     runtime_errors: RuntimeErrorRegistry | None = None,
     background_command_callback: Callable[[dict[str, object]], bool] | None = None,
+    rest_reminder_command_callback: Callable[[dict[str, object]], bool] | None = None,
 ) -> int:
     take_commands = getattr(work_overlay, "take_commands", None)
     if not callable(take_commands):
@@ -4175,6 +4238,28 @@ def _handle_work_overlay_commands(
             handled += 1
             continue
         action = str(command.get("action") or "").strip()
+        if action in {
+            "restReminderAck",
+            "restReminderPostpone",
+            "restReminderStart",
+            "restReminderFinish",
+        }:
+            callback_handled = rest_reminder_command_callback is not None
+            callback_ok = False
+            if rest_reminder_command_callback is not None:
+                callback_ok = bool(rest_reminder_command_callback(dict(command)))
+            _publish_work_overlay_command_event(
+                runtime_events,
+                command,
+                None,
+                activation_context={
+                    "handled": callback_handled,
+                    "ok": callback_ok,
+                    "restReminder": True,
+                },
+            )
+            handled += 1
+            continue
         if action in {"dismissBackgroundUsage", "openBackgroundUsage"}:
             callback_handled = background_command_callback is not None
             callback_ok = False
@@ -6645,7 +6730,10 @@ def _work_item_from_snapshot(
         workdir_name=_compact_work_text(_workdir_leaf(snapshot.cwd), 32),
         model_provider=snapshot.model_provider,
         client_kind=snapshot.client_kind,
-        is_subagent=is_subagent_session(snapshot),
+        # The overlay treats a promoted Desktop delegation as a normal visible
+        # session. Keep the internal-subagent marker only for folded agents so
+        # both visible-item caches can retain promoted work across refreshes.
+        is_subagent=_hide_from_work_overlay(snapshot),
         agent_nickname=str(getattr(snapshot, "agent_nickname", "") or "").strip(),
         parent_thread_id=str(getattr(snapshot, "parent_thread_id", "") or "").strip(),
         session_started_at=snapshot.session_started_at,
@@ -8621,7 +8709,13 @@ def _partial_domains_for_settings_command(
         return {"settings"}
     if action == "openBackgroundUsageFromInsights":
         return {"backgroundUsage"}
-    if action in {"restReminderAck", "restReminderPostpone", "restReminderTestNotification"}:
+    if action in {
+        "restReminderAck",
+        "restReminderPostpone",
+        "restReminderStart",
+        "restReminderFinish",
+        "restReminderTestNotification",
+    }:
         return {"settings"}
     if action == "save":
         changed_keys = _changed_user_config_keys(previous_config, current_config)
@@ -9226,7 +9320,23 @@ def _handle_renderer_settings_command(
             presenter = getattr(context, "rest_reminder", None)
             if presenter is not None:
                 presenter.acknowledge()
-            return _renderer_settings_status("休息完成，新一轮专注计时已开始。")
+            return _renderer_settings_status("休息提醒状态已更新。")
+        if action == "restReminderStart":
+            presenter = getattr(context, "rest_reminder", None)
+            started = bool(presenter.start_rest()) if presenter is not None else False
+            return _renderer_settings_status(
+                "已开始休息计时。" if started else "当前状态不能开始休息。",
+                kind="" if started else "error",
+            )
+        if action == "restReminderFinish":
+            presenter = getattr(context, "rest_reminder", None)
+            finished = bool(presenter.finish_rest()) if presenter is not None else False
+            return _renderer_settings_status(
+                "本次休息已结束，新一轮专注计时已开始。"
+                if finished
+                else "当前没有正在进行的休息。",
+                kind="" if finished else "error",
+            )
         if action == "restReminderPostpone":
             presenter = getattr(context, "rest_reminder", None)
             postponed = bool(presenter.postpone()) if presenter is not None else False
@@ -11122,6 +11232,30 @@ def run_renderer_hud_session(
                     getattr(context, "platform", get_current_platform()),
                     prefer_native_search=False,
                 )
+
+                def handle_rest_reminder_overlay_command(
+                    command: dict[str, object],
+                ) -> bool:
+                    presenter = getattr(context, "rest_reminder", None)
+                    if presenter is None:
+                        return False
+                    action = str(command.get("action") or "").strip()
+                    if action == "restReminderAck":
+                        presenter.acknowledge()
+                        ok = True
+                    elif action == "restReminderPostpone":
+                        ok = bool(presenter.postpone())
+                    elif action == "restReminderStart":
+                        ok = bool(presenter.start_rest())
+                    elif action == "restReminderFinish":
+                        ok = bool(presenter.finish_rest())
+                    else:
+                        return False
+                    work_overlay.update_rest_reminder(
+                        presenter.desktop_bubble_payload()
+                    )
+                    return ok
+
                 command_pump = _WorkOverlayCommandPump(
                     work_overlay,
                     session_controller,
@@ -11130,6 +11264,9 @@ def run_renderer_hud_session(
                     runtime_errors=getattr(context, "runtime_errors", None),
                     background_command_callback=(
                         handle_background_usage_overlay_command
+                    ),
+                    rest_reminder_command_callback=(
+                        handle_rest_reminder_overlay_command
                     ),
                 )
                 file_events = _RendererFileEventSource(
@@ -11305,6 +11442,8 @@ def run_renderer_hud_session(
                     if action in {
                         "restReminderAck",
                         "restReminderPostpone",
+                        "restReminderStart",
+                        "restReminderFinish",
                         "restReminderTestNotification",
                     }:
                         request.request_domains("settings", force_fast=True)
@@ -11363,6 +11502,14 @@ def run_renderer_hud_session(
                         "openBackgroundUsage",
                     }:
                         request.request_background_usage()
+                        return
+                    if action in {
+                        "restReminderAck",
+                        "restReminderPostpone",
+                        "restReminderStart",
+                        "restReminderFinish",
+                    }:
+                        request.request_domains("settings", force_fast=True)
                         return
                     request.request_snapshot(force_fast=True)
 
@@ -11567,6 +11714,15 @@ def run_renderer_hud_session(
                         except Exception:
                             _LOGGER.debug("rest_reminder_tick_failed", exc_info=True)
                             rest_reminder_payload = None
+                        try:
+                            work_overlay.update_rest_reminder(
+                                rest_reminder.desktop_bubble_payload()
+                            )
+                        except Exception:
+                            _LOGGER.debug(
+                                "rest_reminder_desktop_bubble_update_failed",
+                                exc_info=True,
+                            )
                     if rest_reminder_payload is not None:
                         # Renderer fallback toast needs a settings-domain push.
                         if callable(runtime_event_publish):
@@ -12647,7 +12803,7 @@ def run_renderer_hud_session(
                     rest_reminder = getattr(context, "rest_reminder", None)
                     if rest_reminder is not None:
                         seconds_until_wake = getattr(
-                            getattr(rest_reminder, "scheduler", None),
+                            rest_reminder,
                             "seconds_until_wake",
                             lambda: None,
                         )()

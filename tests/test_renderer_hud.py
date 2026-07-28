@@ -220,6 +220,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-resize-corner-bottom-right", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-overflow", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-progress-badge", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertRegex(
+            renderer_hud.RENDERER_HUD_SCRIPT,
+            r"\.codex-usage-hud-progress-track-text \{[^}]*z-index: 6;",
+        )
         self.assertIn("function normalizePayloadDomains", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("applyPayloadDomains(root, nextPayload, renderedDomains)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('if ("currentSession" in domains)', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -1708,26 +1712,61 @@ class RendererHudPayloadTests(unittest.TestCase):
         collapsed = top_progress["collapsed"]
         day = collapsed[1]
         week = collapsed[2]
-        self.assertEqual(day["rightText"], "112%")
+        self.assertEqual(day["label"], "今日 6.6M/$112.00")
+        self.assertNotIn("compactLabel", day)
+        self.assertNotIn("rightText", day)
         self.assertEqual(day["ratio"], 1.0)
         self.assertAlmostEqual(day["overflowRatio"], 0.12, places=3)
-        self.assertEqual(week["rightText"], "128%")
+        self.assertEqual(day["overflowBadge"], "超12% / 超$12.00")
+        self.assertEqual(day["overflowBadgeCompact"], "超$12.00")
+        self.assertEqual(week["label"], "本周 124.7M/$128.00")
+        self.assertNotIn("compactLabel", week)
+        self.assertNotIn("rightText", week)
         self.assertEqual(week["ratio"], 1.0)
         self.assertAlmostEqual(week["overflowRatio"], 0.28, places=3)
+        self.assertEqual(week["overflowBadge"], "超28% / 超$28.00")
+        self.assertEqual(week["overflowBadgeCompact"], "超$28.00")
 
         budget_day = top_progress["budget"][0]
         budget_week = top_progress["budget"][1]
+        self.assertEqual(budget_day["label"], "今日 6.6M/$112.00")
+        self.assertNotIn("compactLabel", budget_day)
         self.assertNotIn("rightText", budget_day)
         self.assertAlmostEqual(budget_day["overflowRatio"], 0.12, places=3)
-        self.assertEqual(budget_day["overflowBadge"], "+12% / +$12.00")
+        self.assertEqual(budget_day["overflowBadge"], "超12% / 超$12.00")
+        self.assertEqual(budget_day["overflowBadgeCompact"], "超$12.00")
         self.assertNotIn("rightText", budget_week)
         self.assertAlmostEqual(budget_week["overflowRatio"], 0.28, places=3)
-        self.assertEqual(budget_week["overflowBadge"], "+28% / +$28.00")
+        self.assertEqual(budget_week["overflowBadge"], "超28% / 超$28.00")
+        self.assertEqual(budget_week["overflowBadgeCompact"], "超$28.00")
 
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "40";', script)
+        self.assertIn('const version = "45";', script)
+        self.assertIn("function refreshProgressRailBadge", script)
+        self.assertIn("function progressBadgeCandidates", script)
+        self.assertIn(
+            'rail.style.setProperty("--codex-usage-hud-progress-overflow-width", overflowWidth)',
+            script,
+        )
+        self.assertIn(
+            'rail.style.setProperty("--codex-usage-hud-progress-badge-pad"',
+            script,
+        )
+        self.assertRegex(
+            script,
+            r"\.codex-usage-hud-progress-overflow \{[^}]*right: 0;[^}]*bottom: 0;[^}]*height: 4px;",
+        )
+        self.assertRegex(
+            script,
+            r"\.codex-usage-hud-progress-overflow-anchor \{[^}]*bottom: 0;[^}]*width: 7px;[^}]*height: 7px;",
+        )
+        self.assertRegex(
+            script,
+            r"\.codex-usage-hud-progress-badge \{[^}]*top: 2px;[^}]*min-height: 16px;",
+        )
+        self.assertNotIn(".codex-usage-hud-progress-badge::before", script)
         self.assertIn("function applyCachedActiveSessionPayload", script)
         self.assertIn("function cacheActiveSessionPayload", script)
         self.assertIn("if (payload?.cachedPreview) return;", script)
@@ -1925,6 +1964,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         whitelist = script[whitelist_start:whitelist_end]
         self.assertIn("codex-usage-hud-rest-toast", whitelist)
         self.assertIn("codex-usage-hud-rest-mask", whitelist)
+        self.assertIn("codex-usage-hud-rest-bubble", whitelist)
 
         self.assertIn('data-rest-reminder-mask="true"', script)
         self.assertIn("codex-usage-hud-rest-toast-icon", script)
@@ -1934,12 +1974,32 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("setInterval(syncRestReminderOverlayCountdown, 1000)", script)
         self.assertIn("stopRestReminderOverlayTicker()", script)
         self.assertIn('toast.dataset.visible = "false"', script)
-        self.assertIn("到时自动开始下一轮", script)
+        self.assertIn("等待选择 ${remaining} · 超时自动跳过本次休息", script)
         self.assertIn("专注休息", script)
         self.assertIn('data-action="rest-reminder-ack"', script)
+        self.assertIn('data-action="rest-reminder-start"', script)
+        self.assertIn('action: "rest-reminder-finish"', script)
         self.assertIn('data-action="rest-reminder-postpone"', script)
         self.assertIn('action: "restReminderAck"', script)
+        self.assertIn('action: "restReminderStart"', script)
+        self.assertIn('action: "restReminderFinish"', script)
         self.assertIn('action: "restReminderPostpone"', script)
+
+    def test_rest_reminder_renderer_bubble_is_pyside_missing_composer_fallback(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn('data-rest-reminder-bubble="true"', script)
+        self.assertIn("desktopOverlayDependency().installed === false", script)
+        self.assertIn("reminder?.bubbleVisible === true", script)
+        self.assertIn("function positionRestReminderBubble", script)
+        self.assertIn("const composer = composerRect()", script)
+        self.assertIn("positionRestReminderBubble(root)", script)
+        self.assertIn("requestAnimationFrame(() => positionRestReminderBubble(root))", script)
+        self.assertIn("休息已延迟", script)
+        self.assertIn("本次已休息", script)
+        self.assertIn("今日累计", script)
+        self.assertIn("提前结束", script)
+        self.assertNotIn("setInterval(positionRestReminderBubble", script)
 
     def test_payload_can_include_support_qr_images(self) -> None:
         snapshot = ParsedSession(status="waiting")

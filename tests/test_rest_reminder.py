@@ -132,15 +132,16 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertEqual(payload["remainingSeconds"], 48)
         self.assertEqual(payload["timerStartedAtMs"], 1_700_000_000_000)
 
-    def test_fires_after_interval_and_ack_reschedules(self) -> None:
+    def test_prompt_start_and_early_finish_reschedules(self) -> None:
         clock = {"now": 1000.0}
+        wall = {"now": self.WORK_WALL}
         idle = {"seconds": 0.0}
         messages = iter(["msg-a", "msg-b"])
         scheduler = RestReminderScheduler(
             idle_seconds_provider=lambda: idle["seconds"],
             message_picker=lambda: next(messages),
             clock=lambda: clock["now"],
-            wall_clock=lambda: self.WORK_WALL,
+            wall_clock=lambda: wall["now"],
         )
         scheduler.configure(
             RestReminderConfig(
@@ -162,14 +163,23 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertIsNone(scheduler.tick())
         scheduler.acknowledge()
         self.assertFalse(scheduler.showing)
-        self.assertIsNone(scheduler.tick())
+        self.assertTrue(scheduler.resting)
+        clock["now"] += 30.0
+        wall["now"] += 30.0
+        self.assertTrue(scheduler.finish_rest())
+        transition = scheduler.take_transition()
+        assert transition is not None
+        self.assertEqual(transition["kind"], "finished_early")
+        self.assertEqual(transition["restDurationSeconds"], 30)
+        self.assertEqual(transition["todayRestedSeconds"], 30)
         clock["now"] = scheduler.next_fire_at + 0.1
+        wall["now"] += 60.1
         event2 = scheduler.tick()
         self.assertIsNotNone(event2)
         assert event2 is not None
         self.assertEqual(event2.message, "msg-b")
 
-    def test_reminder_auto_completes_and_repeats_without_action(self) -> None:
+    def test_prompt_timeout_auto_skips_and_repeats_without_rest_credit(self) -> None:
         clock = {"now": 0.0}
         messages = iter(["first", "second"])
         scheduler = RestReminderScheduler(
@@ -193,7 +203,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
         first = scheduler.tick()
         self.assertIsNotNone(first)
         self.assertTrue(scheduler.showing)
-        self.assertEqual(scheduler.state, "break")
+        self.assertEqual(scheduler.state, "prompt")
         self.assertAlmostEqual(scheduler.seconds_until_wake() or 0.0, 60.0)
 
         clock["now"] = 120.9
@@ -202,6 +212,10 @@ class RestReminderSchedulerTests(unittest.TestCase):
         clock["now"] = 121.0
         self.assertIsNone(scheduler.tick())
         self.assertFalse(scheduler.showing)
+        transition = scheduler.take_transition()
+        assert transition is not None
+        self.assertEqual(transition["kind"], "auto_skipped")
+        self.assertEqual(transition["todayRestedSeconds"], 0)
         self.assertEqual(scheduler.cycle_started_at, 121.0)
         self.assertEqual(scheduler.next_fire_at, 181.0)
 
@@ -211,7 +225,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
         assert second is not None
         self.assertEqual(second.message, "second")
 
-    def test_presenter_emits_due_once_then_auto_hide_transition(self) -> None:
+    def test_presenter_emits_due_once_then_auto_skip_transition(self) -> None:
         clock = {"now": 0.0}
         scheduler = RestReminderScheduler(
             idle_seconds_provider=lambda: 0.0,
@@ -252,10 +266,12 @@ class RestReminderSchedulerTests(unittest.TestCase):
 
         clock["now"] = 121.0
         completed = presenter.tick()
-        self.assertEqual(
-            completed,
-            {"visible": False, "autoCompleted": True, "preview": False},
-        )
+        assert completed is not None
+        self.assertFalse(completed["visible"])
+        self.assertFalse(completed["bubbleVisible"])
+        self.assertTrue(completed["autoSkipped"])
+        self.assertFalse(completed["preview"])
+        self.assertEqual(completed["todayRestedSeconds"], 0)
         self.assertFalse(presenter.renderer_payload()["visible"])
 
     def test_postpone_once_only(self) -> None:
@@ -287,6 +303,138 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertFalse(event2.can_postpone)
         self.assertFalse(scheduler.postpone())
         scheduler.acknowledge()
+
+    def test_postponed_bubble_can_start_rest_at_any_time(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        presenter = RestReminderPresenter(
+            scheduler,
+            wall_clock=lambda: wall["now"],
+            persist_enabled=False,
+        )
+        presenter.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                break_minutes=1,
+                postpone_minutes=2,
+                idle_reset_minutes=0,
+            ),
+            force_reset=True,
+        )
+
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        with patch.object(
+            rest_reminder_module,
+            "_show_system_notification",
+            return_value={"status": "sent", "channel": "test", "error": "", "lastSentAtMs": 1},
+        ):
+            self.assertIsNotNone(presenter.tick())
+        self.assertTrue(presenter.postpone())
+        postponed = presenter.desktop_bubble_payload()
+        self.assertEqual(postponed["phase"], "postponed")
+        self.assertGreater(postponed["postponeEndsAtMs"], int(wall["now"] * 1000))
+        self.assertFalse(postponed["canPostpone"])
+
+        clock["now"] += 30.0
+        wall["now"] += 30.0
+        self.assertTrue(presenter.start_rest())
+        resting = presenter.desktop_bubble_payload()
+        self.assertEqual(resting["phase"], "resting")
+        self.assertGreater(resting["restEndsAtMs"], resting["restStartedAtMs"])
+
+    def test_rest_auto_completes_credits_today_and_starts_next_focus_round(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        presenter = RestReminderPresenter(
+            scheduler,
+            wall_clock=lambda: wall["now"],
+            persist_enabled=False,
+        )
+        presenter.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                break_minutes=1,
+                idle_reset_minutes=0,
+            ),
+            force_reset=True,
+        )
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        with patch.object(
+            rest_reminder_module,
+            "_show_system_notification",
+            return_value={"status": "sent", "channel": "test", "error": "", "lastSentAtMs": 1},
+        ):
+            presenter.tick()
+        self.assertTrue(presenter.start_rest())
+        clock["now"] += 60.0
+        wall["now"] += 60.0
+
+        completed = presenter.tick()
+        assert completed is not None
+        self.assertTrue(completed["autoCompleted"])
+        self.assertEqual(completed["phase"], "completed")
+        self.assertEqual(completed["completedTodaySeconds"], 60)
+        self.assertEqual(completed["lastRestDurationSeconds"], 60)
+        self.assertEqual(scheduler.phase, "focus")
+        self.assertEqual(scheduler.next_fire_at, clock["now"] + 60.0)
+
+        clock["now"] += 1.5
+        wall["now"] += 1.5
+        cleared = presenter.tick()
+        assert cleared is not None
+        self.assertFalse(cleared["bubbleVisible"])
+
+    def test_rest_crossing_midnight_counts_only_current_day(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": datetime(2024, 1, 2, 23, 57, 49).timestamp()}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        scheduler.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                break_minutes=2,
+                idle_reset_minutes=0,
+                work_start_time="00:00",
+                work_end_time="23:59",
+                lunch_enabled=False,
+            ),
+            force_reset=True,
+        )
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        self.assertIsNotNone(scheduler.tick())
+        self.assertTrue(scheduler.start_rest())
+
+        clock["now"] += 80.0
+        wall["now"] += 80.0
+        self.assertEqual(datetime.fromtimestamp(wall["now"]).date().isoformat(), "2024-01-03")
+        self.assertAlmostEqual(scheduler.today_rested_seconds, 10.0, places=1)
+        self.assertTrue(scheduler.finish_rest())
+        transition = scheduler.take_transition()
+        assert transition is not None
+        self.assertEqual(transition["todayRestedSeconds"], 10)
+        self.assertEqual(scheduler.completed_today_seconds, 10)
 
     def test_idle_reset_skips_fire(self) -> None:
         clock = {"now": 0.0}
@@ -608,10 +756,11 @@ class RestReminderSchedulerTests(unittest.TestCase):
 
         clock["now"] += 60.0
         completed = presenter.tick()
-        self.assertEqual(
-            completed,
-            {"visible": False, "autoCompleted": True, "preview": True},
-        )
+        assert completed is not None
+        self.assertFalse(completed["visible"])
+        self.assertFalse(completed["bubbleVisible"])
+        self.assertTrue(completed["autoCompleted"])
+        self.assertTrue(completed["preview"])
         self.assertEqual(scheduler.next_fire_at, next_before)
         self.assertEqual(scheduler.cycle_started_at, start_before)
 
@@ -655,13 +804,14 @@ class RestReminderSchedulerTests(unittest.TestCase):
         ):
             presenter.test_notification()
 
-        self.assertEqual(scheduler.seconds_until_wake(), 120.0)
+        self.assertEqual(presenter.seconds_until_wake(), 120.0)
         clock["now"] = 120.0
         completed = presenter.tick()
-        self.assertEqual(
-            completed,
-            {"visible": False, "autoCompleted": True, "preview": True},
-        )
+        assert completed is not None
+        self.assertFalse(completed["visible"])
+        self.assertFalse(completed["bubbleVisible"])
+        self.assertTrue(completed["autoCompleted"])
+        self.assertTrue(completed["preview"])
         self.assertFalse(scheduler.showing)
 
     def test_export_and_restore_wall_state_survives_restart(self) -> None:
@@ -709,7 +859,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertAlmostEqual(restarted.seconds_until_next() or 0.0, 45 * 60 - 600.0, places=3)
         self.assertAlmostEqual(restarted.cycle_started_at, -600.0, places=3)
 
-    def test_active_break_snapshot_starts_fresh_round_after_restart(self) -> None:
+    def test_active_rest_snapshot_restores_remaining_rest_after_restart(self) -> None:
         clock = {"now": 0.0}
         wall = {"now": self.WORK_WALL}
         scheduler = RestReminderScheduler(
@@ -730,9 +880,10 @@ class RestReminderSchedulerTests(unittest.TestCase):
         clock["now"] = 61.0
         wall["now"] += 61.0
         self.assertIsNotNone(scheduler.tick())
+        self.assertTrue(scheduler.start_rest())
         snapshot = scheduler.export_wall_state()
         assert snapshot is not None
-        self.assertEqual(snapshot["phase"], "break")
+        self.assertEqual(snapshot["phase"], "resting")
 
         wall["now"] += 20.0
         restarted_clock = {"now": 10.0}
@@ -753,9 +904,44 @@ class RestReminderSchedulerTests(unittest.TestCase):
 
         self.assertTrue(restarted.restore_wall_state(snapshot))
         self.assertFalse(restarted.showing)
-        self.assertEqual(restarted.cycle_started_at, 10.0)
-        self.assertEqual(restarted.next_fire_at, 70.0)
+        self.assertTrue(restarted.resting)
+        self.assertAlmostEqual(restarted.seconds_until_break_end() or 0.0, 40.0)
         self.assertIsNone(restarted.tick())
+
+    def test_active_prompt_snapshot_restores_waiting_choice_deadline(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        config = RestReminderConfig(
+            enabled=True,
+            interval_minutes=1,
+            break_minutes=1,
+            idle_reset_minutes=0,
+        )
+        scheduler.configure(config, force_reset=True)
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        self.assertIsNotNone(scheduler.tick())
+        snapshot = scheduler.export_wall_state()
+        assert snapshot is not None
+        self.assertEqual(snapshot["phase"], "prompt")
+
+        wall["now"] += 20.0
+        restarted = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            clock=lambda: 10.0,
+            wall_clock=lambda: wall["now"],
+        )
+        restarted.configure(config, force_reset=True)
+        self.assertTrue(restarted.restore_wall_state(snapshot))
+        self.assertTrue(restarted.showing)
+        self.assertEqual(restarted.phase, "prompt")
+        self.assertAlmostEqual(restarted.seconds_until_prompt_end() or 0.0, 40.0)
 
     def test_expired_focus_snapshot_starts_fresh_round_after_restart(self) -> None:
         clock = {"now": 0.0}
