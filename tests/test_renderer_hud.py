@@ -1717,15 +1717,17 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("rightText", day)
         self.assertEqual(day["ratio"], 1.0)
         self.assertAlmostEqual(day["overflowRatio"], 0.12, places=3)
-        self.assertEqual(day["overflowBadge"], "超12% / 超$12.00")
-        self.assertEqual(day["overflowBadgeCompact"], "超$12.00")
+        self.assertEqual(day["overflowBadge"], "+12% / +$12.00")
+        self.assertEqual(day["overflowBadgeCompact"], "+$12.00")
+        self.assertEqual(day["overflowBadgeIcon"], "🚨")
         self.assertEqual(week["label"], "本周 124.7M/$128.00")
         self.assertNotIn("compactLabel", week)
         self.assertNotIn("rightText", week)
         self.assertEqual(week["ratio"], 1.0)
         self.assertAlmostEqual(week["overflowRatio"], 0.28, places=3)
-        self.assertEqual(week["overflowBadge"], "超28% / 超$28.00")
-        self.assertEqual(week["overflowBadgeCompact"], "超$28.00")
+        self.assertEqual(week["overflowBadge"], "+28% / +$28.00")
+        self.assertEqual(week["overflowBadgeCompact"], "+$28.00")
+        self.assertNotIn("overflowBadgeIcon", week)
 
         budget_day = top_progress["budget"][0]
         budget_week = top_progress["budget"][1]
@@ -1733,19 +1735,26 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("compactLabel", budget_day)
         self.assertNotIn("rightText", budget_day)
         self.assertAlmostEqual(budget_day["overflowRatio"], 0.12, places=3)
-        self.assertEqual(budget_day["overflowBadge"], "超12% / 超$12.00")
-        self.assertEqual(budget_day["overflowBadgeCompact"], "超$12.00")
+        self.assertEqual(budget_day["overflowBadge"], "+12% / +$12.00")
+        self.assertEqual(budget_day["overflowBadgeCompact"], "+$12.00")
+        self.assertEqual(budget_day["overflowBadgeIcon"], "🚨")
         self.assertNotIn("rightText", budget_week)
         self.assertAlmostEqual(budget_week["overflowRatio"], 0.28, places=3)
-        self.assertEqual(budget_week["overflowBadge"], "超28% / 超$28.00")
-        self.assertEqual(budget_week["overflowBadgeCompact"], "超$28.00")
+        self.assertEqual(budget_week["overflowBadge"], "+28% / +$28.00")
+        self.assertEqual(budget_week["overflowBadgeCompact"], "+$28.00")
+        self.assertNotIn("overflowBadgeIcon", budget_week)
 
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "45";', script)
+        self.assertIn('const version = "47";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
+        self.assertIn("function progressRailLeftLabelFits", script)
+        self.assertIn("if (progressRailLeftLabelFits(rail))", script)
+        self.assertNotIn("max-width: min(52%, 156px)", script)
+        self.assertIn("codex-usage-hud-progress-badge-icon", script)
+        self.assertIn("codex-usage-hud-progress-badge-copy", script)
         self.assertIn(
             'rail.style.setProperty("--codex-usage-hud-progress-overflow-width", overflowWidth)',
             script,
@@ -1896,6 +1905,18 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn(
             "formatRestReminderInputTime(Number(timing?.timerStartedAtMs))",
             script,
+        )
+        self.assertIn(
+            'data-setting-key="rest_reminder_interval_minutes" type="number" min="1" max="180"',
+            script,
+        )
+        self.assertIn(
+            "Math.max(1, Math.round(Number(settings.rest_reminder_interval_minutes)",
+            script,
+        )
+        self.assertRegex(
+            script,
+            r'"rest_reminder_interval_minutes",\s*Number\(settings\.rest_reminder_interval_minutes\) \|\| 45,\s*1,\s*180,',
         )
         self.assertIn('data-setting-key="rest_reminder_break_minutes"', script)
         self.assertIn('case "break": return "休息中"', script)

@@ -73,3 +73,5 @@ artifacts/
 .trellis/spec/backend/logging-guidelines.md
 .trellis/spec/backend/quality-guidelines.md
 .trellis/tasks/00-bootstrap-guidelines/
+output/
+.playwright-cli/

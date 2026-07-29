@@ -3180,8 +3180,8 @@ class BudgetHelperTests(unittest.TestCase):
             }
         )
         prompt_copy = _rest_reminder_card_copy(prompt, now_ms=100_000)
-        self.assertIn("等待选择 01:00", prompt_copy["statusText"])
-        self.assertIn("超时自动跳过", prompt_copy["statusText"])
+        self.assertEqual(prompt_copy["headerMeta"], "今日已休息 01:05")
+        self.assertEqual(prompt_copy["statusText"], "等待选择 01:00 · 超时跳过")
         self.assertEqual(
             [action["action"] for action in prompt_copy["actions"]],
             ["restReminderPostpone", "restReminderStart"],
@@ -3195,7 +3195,9 @@ class BudgetHelperTests(unittest.TestCase):
             }
         )
         postponed_copy = _rest_reminder_card_copy(postponed, now_ms=100_000)
+        self.assertEqual(postponed_copy["headerMeta"], "今日已休息 01:05")
         self.assertEqual(postponed_copy["detail"], "10:00 后再次提醒")
+        self.assertEqual(postponed_copy["statusText"], "延迟不计入休息")
         self.assertEqual(postponed_copy["actions"][0]["action"], "restReminderStart")
 
         resting = _rest_reminder_overlay_item(
@@ -3207,13 +3209,22 @@ class BudgetHelperTests(unittest.TestCase):
             }
         )
         resting_copy = _rest_reminder_card_copy(resting, now_ms=130_000)
+        self.assertEqual(resting_copy["headerMeta"], "今日已休息 01:35")
         self.assertEqual(resting_copy["detail"], "本次已休息 00:30")
-        self.assertIn("今日累计 01:35", resting_copy["statusText"])
+        self.assertEqual(resting_copy["statusText"], "目标 02:00")
         self.assertEqual(resting_copy["actions"][0]["action"], "restReminderFinish")
 
     def test_rest_reminder_normalization_rejects_hidden_or_unknown_phase(self) -> None:
         self.assertIsNone(_normalized_rest_reminder({"bubbleVisible": False, "phase": "prompt"}))
         self.assertIsNone(_normalized_rest_reminder({"bubbleVisible": True, "phase": "unknown"}))
+
+    def test_rest_reminder_card_does_not_reserve_close_button_space(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "codex_usage_hud" / "ui" / "work_overlay_qt.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('close_anchor = record["close_anchor"]', source)
+        self.assertIn("close_anchor.setVisible(not rest_reminder)", source)
 
     def test_desktop_work_overlay_reads_new_click_commands_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -12744,6 +12755,45 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(status["restReminderSaved"])
         self.assertEqual(status["restReminderSaveRequestId"], "rest-save-1")
+
+    def test_rest_reminder_save_persists_each_supported_focus_interval(self) -> None:
+        for interval_minutes in (1, 10, 37, 180):
+            with self.subTest(interval_minutes=interval_minutes):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+                    store.save(
+                        UserConfig.from_dict(
+                            {
+                                "rest_reminder_enabled": True,
+                                "rest_reminder_interval_minutes": 45,
+                            }
+                        )
+                    )
+                    context = SimpleNamespace(
+                        settings_store=store,
+                        settings_mtime=store.mtime(),
+                        reload_user_config=MagicMock(),
+                        rest_reminder=MagicMock(),
+                    )
+
+                    _handle_renderer_settings_command(
+                        {
+                            "id": f"rest-save-{interval_minutes}",
+                            "action": "save",
+                            "section": "restReminder",
+                            "settings": {
+                                "rest_reminder_interval_minutes": interval_minutes,
+                            },
+                        },
+                        context,
+                        MagicMock(),
+                        MagicMock(),
+                    )
+
+                    self.assertEqual(
+                        store.load().rest_reminder_interval_minutes,
+                        interval_minutes,
+                    )
 
     def test_renderer_rest_reminder_start_and_finish_commands_use_explicit_actions(self) -> None:
         presenter = MagicMock()

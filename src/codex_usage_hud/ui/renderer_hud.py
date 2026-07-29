@@ -95,7 +95,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "45";
+  const version = "47";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -1269,8 +1269,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        gap: 3px;
         min-height: 16px;
-        max-width: min(58%, 148px);
         padding: 0 7px;
         border-radius: 999px;
         border: 1px solid rgba(255,132,88,.24);
@@ -1287,11 +1287,20 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         z-index: 5;
         pointer-events: none;
       }
+      #${rootId} .codex-usage-hud-progress-badge-icon {
+        flex: 0 0 auto;
+        font-size: .9em;
+        line-height: 1;
+      }
+      #${rootId} .codex-usage-hud-progress-badge-copy {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
       #${rootId} .codex-usage-hud-progress-strip .codex-usage-hud-progress-badge {
         top: 2px;
         right: 5px;
         min-height: 15px;
-        max-width: min(54%, 128px);
         padding: 0 6px;
         font-size: 9px;
       }
@@ -1310,7 +1319,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         top: 3px;
         right: 7px;
         min-height: 17px;
-        max-width: min(52%, 156px);
         padding: 0 8px;
         font-size: 10px;
       }
@@ -10112,7 +10120,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const url = String(settings.support_url || "https://github.com/mingbingfeng/codex-usage-hud");
     const images = Array.isArray(currentPayload()?.supportImages) ? currentPayload().supportImages : [];
     const enabled = !!settings.rest_reminder_enabled;
-    const interval = Math.min(180, Math.max(15, Math.round(Number(settings.rest_reminder_interval_minutes) || 45)));
+    const interval = Math.min(180, Math.max(1, Math.round(Number(settings.rest_reminder_interval_minutes) || 45)));
     const breakMinutes = Math.min(10, Math.max(1, Math.round(Number(settings.rest_reminder_break_minutes) || 2)));
     const postpone = Math.min(30, Math.max(5, Math.round(Number(settings.rest_reminder_postpone_minutes) || 10)));
     const idleReset = Math.min(60, Math.max(0, Math.round(Number(settings.rest_reminder_idle_reset_minutes) || 5)));
@@ -10155,7 +10163,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
           <div class="codex-usage-hud-rest-reminder-grid">
             <label class="codex-usage-hud-rest-reminder-field" title="专注时长（分钟）">
               <span>时长</span>
-              <input data-setting-key="rest_reminder_interval_minutes" type="number" min="15" max="180" step="1" value="${escapeHtml(interval)}" aria-label="专注时长（分钟）">
+              <input data-setting-key="rest_reminder_interval_minutes" type="number" min="1" max="180" step="1" value="${escapeHtml(interval)}" aria-label="专注时长（分钟）">
             </label>
             <label class="codex-usage-hud-rest-reminder-field" title="每次休息时长（分钟）；到时自动开始下一轮">
               <span>休息</span>
@@ -10575,7 +10583,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       next.rest_reminder_interval_minutes = integerValue(
         "rest_reminder_interval_minutes",
         Number(settings.rest_reminder_interval_minutes) || 45,
-        15,
+        1,
         180,
       );
     }
@@ -13164,7 +13172,18 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   function setProgressBadgeText(rail, text) {
     const badge = rail?.querySelector?.(":scope > .codex-usage-hud-progress-badge");
     if (!badge) return;
-    badge.textContent = String(text || "");
+    const copy = badge.querySelector(":scope > .codex-usage-hud-progress-badge-copy");
+    if (copy) copy.textContent = String(text || "");
+  }
+
+  function progressRailLeftLabelFits(rail) {
+    const label = rail?.querySelector?.(
+      ":scope > .codex-usage-hud-progress-track-text .codex-usage-hud-progress-text",
+    );
+    if (!label) return true;
+    const available = label.clientWidth || label.getBoundingClientRect?.().width || 0;
+    if (available <= 0) return true;
+    return label.scrollWidth <= available + 0.5;
   }
 
   function applyProgressBadgePad(rail) {
@@ -13195,13 +13214,13 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const badge = rail.querySelector(":scope > .codex-usage-hud-progress-badge");
     if (!badge) return;
 
-    // Prefer full badge copy; fall back to cost-only when the rail is too tight.
+    // Prefer full badge copy. Fall back to cost-only only when the full badge
+    // squeezes the fixed left usage/amount label.
     let selected = candidates[0];
     for (const candidate of candidates) {
       setProgressBadgeText(rail, candidate);
       applyProgressBadgePad(rail);
-      const maxWidth = badge.clientWidth || badge.getBoundingClientRect?.().width || 0;
-      if (maxWidth <= 0 || badge.scrollWidth <= maxWidth + 0.5) {
+      if (progressRailLeftLabelFits(rail)) {
         selected = candidate;
         break;
       }
@@ -13619,6 +13638,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const rightText = String(metric?.rightText || "");
     const overflowBadge = String(metric?.overflowBadge || "");
     const overflowBadgeCompact = String(metric?.overflowBadgeCompact || "");
+    const overflowBadgeIcon = String(metric?.overflowBadgeIcon || "");
     const ratio = normalizeProgressRatio(metric?.ratio);
     const overflowRatio = normalizeProgressRatio(metric?.overflowRatio);
     const hasOverflow = overflowRatio > 0;
@@ -13633,7 +13653,8 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (overflowBadgeCompact) rail.dataset.overflowBadgeCompact = overflowBadgeCompact;
     else delete rail.dataset.overflowBadgeCompact;
     const fullText = rightText ? `${label} / ${rightText}` : label;
-    const tooltip = overflowBadge ? `${fullText || label} | ${overflowBadge}` : fullText;
+    const badgeTooltip = [overflowBadgeIcon, overflowBadge].filter(Boolean).join(" ");
+    const tooltip = overflowBadge ? `${fullText || label} | ${badgeTooltip}` : fullText;
     rail.title = tooltip;
     rail.setAttribute("aria-label", tooltip);
 
@@ -13685,7 +13706,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     if (overflowBadge) {
       const badge = document.createElement("span");
       badge.className = "codex-usage-hud-progress-badge";
-      badge.textContent = overflowBadge;
+      if (overflowBadgeIcon) {
+        const icon = document.createElement("span");
+        icon.className = "codex-usage-hud-progress-badge-icon";
+        icon.textContent = overflowBadgeIcon;
+        icon.setAttribute("aria-hidden", "true");
+        badge.appendChild(icon);
+      }
+      const copy = document.createElement("span");
+      copy.className = "codex-usage-hud-progress-badge-copy";
+      copy.textContent = overflowBadge;
+      badge.appendChild(copy);
       rail.appendChild(badge);
     }
     return rail;
@@ -17142,9 +17173,8 @@ def _budget_progress_overflow_parts(
     budget = max(0.0, float(limit or 0.0))
     overflow_ratio = max(0.0, total_ratio - 1.0)
     overflow_cost = max(0.0, amount - budget)
-    # "超" reads clearer than bare "+" for budget overage.
-    percent = f"超{overflow_ratio:.0%}"
-    money = f"超{_format_money(overflow_cost)}"
+    percent = f"+{overflow_ratio:.0%}"
+    money = f"+{_format_money(overflow_cost)}"
     return f"{percent} / {money}", money
 
 
@@ -17171,6 +17201,7 @@ def _top_progress_metric(
     overflow_ratio: float | None = None,
     overflow_badge: str = "",
     overflow_badge_compact: str = "",
+    overflow_badge_icon: str = "",
 ) -> dict[str, object]:
     metric: dict[str, object] = {
         "label": label,
@@ -17185,6 +17216,8 @@ def _top_progress_metric(
         metric["overflowBadge"] = overflow_badge
     if overflow_badge_compact:
         metric["overflowBadgeCompact"] = overflow_badge_compact
+    if overflow_badge_icon:
+        metric["overflowBadgeIcon"] = overflow_badge_icon
     return metric
 
 
@@ -17225,6 +17258,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         overflow_ratio=day_overflow,
         overflow_badge=day_badge,
         overflow_badge_compact=day_badge_compact,
+        overflow_badge_icon="🚨" if day_badge else "",
     )
     week = _top_progress_metric(
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
@@ -17243,6 +17277,7 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         overflow_ratio=day_overflow,
         overflow_badge=day_badge,
         overflow_badge_compact=day_badge_compact,
+        overflow_badge_icon="🚨" if day_badge else "",
     )
     budget_week = _top_progress_metric(
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",

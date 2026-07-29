@@ -41,7 +41,7 @@ class RestReminderConfigTests(unittest.TestCase):
         config = UserConfig.from_dict(
             {
                 "rest_reminder_enabled": True,
-                "rest_reminder_interval_minutes": 5,
+                "rest_reminder_interval_minutes": 0,
                 "rest_reminder_break_minutes": 100,
                 "rest_reminder_postpone_minutes": 100,
                     "rest_reminder_idle_reset_minutes": -3,
@@ -53,7 +53,7 @@ class RestReminderConfigTests(unittest.TestCase):
             }
         )
         self.assertTrue(config.rest_reminder_enabled)
-        self.assertEqual(config.rest_reminder_interval_minutes, 15)
+        self.assertEqual(config.rest_reminder_interval_minutes, 1)
         self.assertEqual(config.rest_reminder_break_minutes, 10)
         self.assertEqual(config.rest_reminder_postpone_minutes, 30)
         self.assertEqual(config.rest_reminder_idle_reset_minutes, 0)
@@ -62,7 +62,26 @@ class RestReminderConfigTests(unittest.TestCase):
         self.assertFalse(config.rest_reminder_lunch_enabled)
         payload = config.to_dict()
         self.assertTrue(payload["rest_reminder_enabled"])
-        self.assertEqual(payload["rest_reminder_interval_minutes"], 15)
+        self.assertEqual(payload["rest_reminder_interval_minutes"], 1)
+
+    def test_supported_focus_intervals_round_trip(self) -> None:
+        for interval_minutes in (1, 10, 37, 180):
+            with self.subTest(interval_minutes=interval_minutes):
+                config = UserConfig.from_dict(
+                    {
+                        "rest_reminder_enabled": True,
+                        "rest_reminder_interval_minutes": interval_minutes,
+                    }
+                )
+
+                self.assertEqual(
+                    config.rest_reminder_interval_minutes,
+                    interval_minutes,
+                )
+                self.assertEqual(
+                    config.to_dict()["rest_reminder_interval_minutes"],
+                    interval_minutes,
+                )
 
     def test_store_preserves_rest_reminder_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,7 +90,7 @@ class RestReminderConfigTests(unittest.TestCase):
             config = UserConfig.from_dict(
                 {
                     "rest_reminder_enabled": True,
-                    "rest_reminder_interval_minutes": 60,
+                    "rest_reminder_interval_minutes": 10,
                     "rest_reminder_break_minutes": 3,
                     "rest_reminder_postpone_minutes": 15,
                     "rest_reminder_idle_reset_minutes": 8,
@@ -85,7 +104,7 @@ class RestReminderConfigTests(unittest.TestCase):
             store.save(config)
             loaded = store.load()
             self.assertTrue(loaded.rest_reminder_enabled)
-            self.assertEqual(loaded.rest_reminder_interval_minutes, 60)
+            self.assertEqual(loaded.rest_reminder_interval_minutes, 10)
             self.assertEqual(loaded.rest_reminder_break_minutes, 3)
             self.assertEqual(loaded.rest_reminder_postpone_minutes, 15)
             self.assertEqual(loaded.rest_reminder_idle_reset_minutes, 8)
@@ -95,6 +114,37 @@ class RestReminderConfigTests(unittest.TestCase):
 
 class RestReminderSchedulerTests(unittest.TestCase):
     WORK_WALL = datetime(2024, 1, 2, 10, 0).timestamp()
+
+    def test_focus_interval_changes_restart_current_round(self) -> None:
+        for old_minutes, new_minutes in ((15, 10), (10, 37), (37, 1), (1, 180)):
+            with self.subTest(old_minutes=old_minutes, new_minutes=new_minutes):
+                clock = {"now": 1000.0}
+                wall = {"now": self.WORK_WALL}
+                scheduler = RestReminderScheduler(
+                    idle_seconds_provider=lambda: 0.0,
+                    clock=lambda: clock["now"],
+                    wall_clock=lambda: wall["now"],
+                )
+                scheduler.configure(
+                    RestReminderConfig(enabled=True, interval_minutes=old_minutes),
+                    force_reset=True,
+                )
+
+                clock["now"] += 120.0
+                wall["now"] += 120.0
+                scheduler.configure(
+                    RestReminderConfig(enabled=True, interval_minutes=new_minutes)
+                )
+
+                self.assertEqual(scheduler.cycle_started_at, 1120.0)
+                self.assertEqual(
+                    scheduler.next_fire_at,
+                    1120.0 + new_minutes * 60.0,
+                )
+                self.assertEqual(
+                    scheduler.seconds_until_next(),
+                    new_minutes * 60.0,
+                )
 
     def test_presenter_payload_exposes_timer_start_and_remaining(self) -> None:
         clock = {"now": 1000.0}

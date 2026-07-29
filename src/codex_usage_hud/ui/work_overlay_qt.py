@@ -208,15 +208,14 @@ def _rest_reminder_card_copy(
     title = "☕ 休息提醒"
     detail = message
     status = ""
+    header_meta = ""
     color_status = "waiting_user"
     actions: list[dict[str, object]] = []
     if phase == "prompt":
         remaining = max(0.0, (int(item.get("promptEndsAtMs") or 0) - current_ms) / 1000.0)
         title = "☕ 该休息一下了"
-        status = (
-            f"等待选择 {_format_rest_duration(remaining)} · 超时自动跳过 · "
-            f"今日已休息 {_format_rest_duration(completed_today)}"
-        )
+        header_meta = f"今日已休息 {_format_rest_duration(completed_today)}"
+        status = f"等待选择 {_format_rest_duration(remaining)} · 超时跳过"
         if bool(item.get("canPostpone")):
             minutes = max(1, int(item.get("postponeMinutes") or 10))
             actions.append(
@@ -234,11 +233,9 @@ def _rest_reminder_card_copy(
             0.0, (int(item.get("postponeEndsAtMs") or 0) - current_ms) / 1000.0
         )
         title = "☕ 休息已延迟"
+        header_meta = f"今日已休息 {_format_rest_duration(completed_today)}"
         detail = f"{_format_rest_duration(remaining)} 后再次提醒"
-        status = (
-            "延迟不计入休息 · "
-            f"今日已休息 {_format_rest_duration(completed_today)}"
-        )
+        status = "延迟不计入休息"
         color_status = "tool"
         actions.append(
             {"action": "restReminderStart", "label": "开始休息", "primary": True}
@@ -253,11 +250,9 @@ def _rest_reminder_card_copy(
         )
         target = max(1, int(item.get("breakMinutes") or 2)) * 60
         title = "☕ 正在休息"
+        header_meta = f"今日已休息 {_format_rest_duration(today)}"
         detail = f"本次已休息 {_format_rest_duration(elapsed)}"
-        status = (
-            f"目标 {_format_rest_duration(target)} · "
-            f"今日累计 {_format_rest_duration(today)}"
-        )
+        status = f"目标 {_format_rest_duration(target)}"
         color_status = "running"
         actions.append(
             {"action": "restReminderFinish", "label": "提前结束", "primary": True}
@@ -265,10 +260,8 @@ def _rest_reminder_card_copy(
     elif phase == "completed":
         duration = max(0, int(item.get("lastRestDurationSeconds") or 0))
         title = "✓ 休息完成"
-        detail = (
-            f"本次 {_format_rest_duration(duration)} · "
-            f"今日累计 {_format_rest_duration(completed_today)}"
-        )
+        header_meta = f"今日已休息 {_format_rest_duration(completed_today)}"
+        detail = f"本次休息 {_format_rest_duration(duration)}"
         status = "新一轮专注已开始"
         color_status = "rest_completed"
     elif phase == "preview":
@@ -281,6 +274,7 @@ def _rest_reminder_card_copy(
         )
     return {
         "title": title,
+        "headerMeta": header_meta,
         "detail": detail,
         "statusText": status,
         "status": color_status,
@@ -311,6 +305,7 @@ def _rest_reminder_overlay_item(reminder: Mapping[str, object]) -> dict[str, obj
         "lastRestDurationSeconds": normalized["lastRestDurationSeconds"],
         "completionEndsAtMs": normalized["completionEndsAtMs"],
         "title": copy["title"],
+        "headerMeta": copy["headerMeta"],
         "status": copy["status"],
         "statusLabel": copy["statusText"],
         "statusText": copy["statusText"],
@@ -3872,6 +3867,16 @@ def run_work_overlay_helper_qt(
             header.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold))
             head_layout.addWidget(header, 1)
 
+            header_meta = QLabel("", card)
+            header_meta.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            header_meta.setWordWrap(False)
+            header_meta.setTextFormat(text_format.PlainText)
+            header_meta.setAlignment(alignment.AlignVCenter | alignment.AlignRight)
+            header_meta.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            header_meta.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.DemiBold))
+            header_meta.setVisible(False)
+            head_layout.addWidget(header_meta, 0)
+
             close_anchor = QWidget(card)
             close_anchor.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             close_anchor.setFixedSize(WORK_OVERLAY_CLOSE_SIZE, WORK_OVERLAY_CLOSE_SIZE)
@@ -3956,6 +3961,7 @@ def run_work_overlay_helper_qt(
                 "item_id": _item_id(item),
                 "card": card,
                 "header": header,
+                "header_meta": header_meta,
                 "detail": detail,
                 "footer_container": footer_container,
                 "status_label": status_label,
@@ -4024,6 +4030,30 @@ def run_work_overlay_helper_qt(
                 "background: transparent;"
                 "}"
             )
+
+            close_anchor = record["close_anchor"]
+            close_anchor.setVisible(not rest_reminder)
+
+            header_meta = record["header_meta"]
+            header_meta_text = (
+                str(item.get("headerMeta") or "").strip() if rest_reminder else ""
+            )
+            if header_meta_text:
+                header_meta.setText(header_meta_text)
+                header_meta.setStyleSheet(
+                    "QLabel {"
+                    f"color: {theme['muted']};"
+                    "border: none;"
+                    "background: transparent;"
+                    "padding: 0;"
+                    "}"
+                )
+                header_meta.adjustSize()
+                header_meta.setFixedWidth(header_meta.sizeHint().width())
+                header_meta.setVisible(True)
+            else:
+                header_meta.setText("")
+                header_meta.setVisible(False)
 
             round_badge = record["round_badge"]
             round_index = max(0, int(item.get("roundIndex") or 0))
