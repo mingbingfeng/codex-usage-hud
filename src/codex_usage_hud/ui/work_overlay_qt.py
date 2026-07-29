@@ -50,6 +50,9 @@ WORK_OVERLAY_TRANSITION_SHRINK_MS = 220
 WORK_OVERLAY_TRANSITION_PAUSE_MS = 140
 WORK_OVERLAY_TRANSITION_MOVE_MS = 280
 WORK_OVERLAY_TRANSITION_SHIFT_MS = 240
+# PySide is a legacy rendering surface. Its transition paths repeatedly exhaust
+# Windows USER objects on real desktops, so state changes must render directly.
+WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED = False
 WORK_OVERLAY_RESTORE_FADE_OUT_MS = 200
 WORK_OVERLAY_RESTORE_SHIFT_MS = 300
 WORK_OVERLAY_RESTORE_FADE_IN_MS = 150
@@ -73,6 +76,7 @@ WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS = 0.85
 WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
 WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS = 1.2
 WORK_OVERLAY_STATE_READ_RETRY_MS = 80
+WORK_OVERLAY_HELPER_HEARTBEAT_MS = 5_000
 DEFAULT_WORK_OVERLAY_THEME: dict[str, str] = {
     "surface": "#10161D",
     "panelSurface": "#141B24",
@@ -1711,6 +1715,10 @@ def _work_overlay_command_path(state_path: Path) -> Path:
     return state_path.with_name(f"{state_path.stem}-commands.jsonl")
 
 
+def _work_overlay_heartbeat_path(state_path: Path) -> Path:
+    return state_path.with_name(f"{state_path.stem}-heartbeat")
+
+
 def run_work_overlay_helper_qt(
     state_file: str | Path,
     *,
@@ -1778,6 +1786,7 @@ def run_work_overlay_helper_qt(
     app = QApplication.instance() or QApplication([Path(sys.argv[0]).name or "codex-hud-overlay"])
     app.setQuitOnLastWindowClosed(False)
     owner_pid = owner_pid_from_path(path)
+    heartbeat_path = _work_overlay_heartbeat_path(path)
 
     widget_attrs = Qt.WidgetAttribute
     focus_policy = Qt.FocusPolicy
@@ -1809,6 +1818,10 @@ def run_work_overlay_helper_qt(
             self._timer_ms = max(10, int(timer_ms))
             self._phase_x = -self._band_width_px
             self._shimmer_enabled = True
+            self._cached_text_path: QPainterPath | None = None
+            self._cached_text_path_key: tuple[int, str, str] | None = None
+            self._cached_text_width = 0.0
+            self._cached_text_width_key: tuple[int, str, str] | None = None
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._advance_shimmer)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -1824,6 +1837,7 @@ def run_work_overlay_helper_qt(
             if next_text == self._text:
                 return
             self._text = next_text
+            self._invalidate_text_cache()
             self._phase_x = -self._band_width_px
             self.updateGeometry()
             self.update()
@@ -1871,6 +1885,10 @@ def run_work_overlay_helper_qt(
             self._timer.stop()
             super().hideEvent(event)
 
+        def resizeEvent(self, event: object) -> None:
+            self._invalidate_text_cache()
+            super().resizeEvent(event)
+
         def paintEvent(self, event: object) -> None:
             del event
             path = self._text_path(max(1, self.width()))
@@ -1915,10 +1933,16 @@ def run_work_overlay_helper_qt(
             self.update()
 
         def _text_width(self) -> float:
-            width = 0.0
-            for _, _, _, _, line_width in self._layout_lines(max(1, self.width())):
-                width = max(width, line_width)
-            return width
+            layout_width = max(1, self.width())
+            key = self._text_cache_key(layout_width)
+            if key == self._cached_text_width_key:
+                return self._cached_text_width
+            text_width = 0.0
+            for _, _, _, _, line_width in self._layout_lines(layout_width):
+                text_width = max(text_width, line_width)
+            self._cached_text_width_key = key
+            self._cached_text_width = text_width
+            return self._cached_text_width
 
         def _layout_height(self, width: int) -> int:
             lines = self._layout_lines(width)
@@ -1963,16 +1987,32 @@ def run_work_overlay_helper_qt(
             return lines
 
         def _text_path(self, width: int) -> QPainterPath:
+            key = self._text_cache_key(width)
+            if key == self._cached_text_path_key and self._cached_text_path is not None:
+                return self._cached_text_path
             path = QPainterPath()
             text = self._text
             if not text:
+                self._cached_text_path_key = key
+                self._cached_text_path = path
                 return path
             for y, segment, line_ascent, _, _ in self._layout_lines(width):
                 if not segment:
                     continue
                 baseline = y + line_ascent
                 path.addText(QPointF(0.0, baseline), self.font(), segment)
+            self._cached_text_path_key = key
+            self._cached_text_path = path
             return path
+
+        def _text_cache_key(self, width: int) -> tuple[int, str, str]:
+            return (max(1, int(width)), self.font().key(), self._text)
+
+        def _invalidate_text_cache(self) -> None:
+            self._cached_text_path = None
+            self._cached_text_path_key = None
+            self._cached_text_width = 0.0
+            self._cached_text_width_key = None
 
     class CloseButtonWindow(QWidget):
         def __init__(self, dismiss_callback: Callable[[Mapping[str, object]], None]) -> None:
@@ -3288,7 +3328,8 @@ def run_work_overlay_helper_qt(
                 self.render_items(self._raw_items)
                 return
             if (
-                item_id
+                WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED
+                and item_id
                 and _item_is_completed(item)
                 and not self._transition_in_progress
                 and self._record_widget_for_kind(item_id, "completed") is not None
@@ -3550,6 +3591,12 @@ def run_work_overlay_helper_qt(
             ):
                 self._ready_system_action_ids.add(action_id)
 
+        def emit_helper_heartbeat(self) -> None:
+            try:
+                heartbeat_path.write_text(f"{time.time():.6f}", encoding="utf-8")
+            except OSError:
+                return
+
         def emit_runtime_error(
             self,
             *,
@@ -3602,23 +3649,30 @@ def run_work_overlay_helper_qt(
 
         def shutdown(self) -> None:
             self.hide_overlay()
-            for close_window in self._close_windows:
-                close_window.close()
-            self._close_windows.clear()
-            for workdir_window in self._workdir_windows:
-                workdir_window.close()
-            self._workdir_windows.clear()
-            for check_window in self._completed_check_windows:
-                check_window.close()
-            self._completed_check_windows.clear()
-            for action_window in self._system_action_windows:
-                action_window.close()
-            self._system_action_windows.clear()
-            for action_window in self._rest_action_windows:
-                action_window.close()
-            self._rest_action_windows.clear()
+            self._dispose_interactive_windows()
+            try:
+                heartbeat_path.unlink()
+            except OSError:
+                pass
             self.close()
             app.quit()
+
+        def _dispose_interactive_windows(self) -> None:
+            for windows in (
+                self._close_windows,
+                self._workdir_windows,
+                self._completed_check_windows,
+                self._system_action_windows,
+                self._rest_action_windows,
+            ):
+                while windows:
+                    window = windows.pop()
+                    try:
+                        window.hide()
+                        window.close()
+                        window.deleteLater()
+                    except RuntimeError:
+                        continue
 
         def poll_state(self) -> bool:
             state = read_state()
@@ -5473,7 +5527,11 @@ def run_work_overlay_helper_qt(
             )
             if payload_signature == self._last_payload_signature:
                 return
-            transition = _detect_transition(self._previous_visible_items, visible_items)
+            transition = (
+                _detect_transition(self._previous_visible_items, visible_items)
+                if WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED
+                else None
+            )
             if transition is not None:
                 item_id = _detect_transition_item_id(self._previous_visible_items, visible_items)
                 if item_id:
@@ -5542,11 +5600,11 @@ def run_work_overlay_helper_qt(
             self._sync_item_widget_geometries(visible_items)
 
         def reposition_interactive_windows(self) -> None:
+            # These are top-level native windows.  Keep the bounded pools alive and
+            # hide unused entries; QWidget.close() only hides a top-level window
+            # and caused USER-handle exhaustion when anchors repeatedly changed.
             while len(self._close_windows) < len(self._close_anchors):
                 self._close_windows.append(CloseButtonWindow(self.dismiss_item))
-            while len(self._close_windows) > len(self._close_anchors):
-                orphan = self._close_windows.pop()
-                orphan.close()
 
             current_opacity = self.windowOpacity()
             for index, close_window in enumerate(self._close_windows):
@@ -5569,9 +5627,6 @@ def run_work_overlay_helper_qt(
 
             while len(self._workdir_windows) < len(self._workdir_anchors):
                 self._workdir_windows.append(WorkdirLinkWindow(self.switch_item))
-            while len(self._workdir_windows) > len(self._workdir_anchors):
-                orphan = self._workdir_windows.pop()
-                orphan.close()
 
             for index, workdir_window in enumerate(self._workdir_windows):
                 anchor, item = self._workdir_anchors[index]
@@ -5614,9 +5669,6 @@ def run_work_overlay_helper_qt(
                         hover_color=completed_palette["ring"],
                     )
                 )
-            while len(self._completed_check_windows) > len(self._completed_check_anchors):
-                orphan = self._completed_check_windows.pop()
-                orphan.close()
 
             for index, check_window in enumerate(self._completed_check_windows):
                 anchor, item = self._completed_check_anchors[index]
@@ -5648,9 +5700,6 @@ def run_work_overlay_helper_qt(
                         hover_color=action_color,
                     )
                 )
-            while len(self._system_action_windows) > len(self._system_action_anchors):
-                orphan = self._system_action_windows.pop()
-                orphan.close()
 
             for index, action_window in enumerate(self._system_action_windows):
                 anchor, item = self._system_action_anchors[index]
@@ -5686,9 +5735,6 @@ def run_work_overlay_helper_qt(
                         hover_color=rest_action_color,
                     )
                 )
-            while len(self._rest_action_windows) > len(self._rest_action_anchors):
-                orphan = self._rest_action_windows.pop()
-                orphan.close()
 
             for index, action_window in enumerate(self._rest_action_windows):
                 anchor, item = self._rest_action_anchors[index]
@@ -5717,6 +5763,8 @@ def run_work_overlay_helper_qt(
     state_stale_timer.setSingleShot(True)
     state_read_retry_timer = QTimer()
     state_read_retry_timer.setSingleShot(True)
+    helper_heartbeat_timer = QTimer()
+    helper_heartbeat_timer.timeout.connect(overlay.emit_helper_heartbeat)
 
     def watch_state_path() -> None:
         parent = str(path.parent)
@@ -5749,6 +5797,9 @@ def run_work_overlay_helper_qt(
                 state_read_retry_timer.start(WORK_OVERLAY_STATE_READ_RETRY_MS)
             return
         state_read_retry_timer.stop()
+        if not helper_heartbeat_timer.isActive():
+            overlay.emit_helper_heartbeat()
+            helper_heartbeat_timer.start(WORK_OVERLAY_HELPER_HEARTBEAT_MS)
         schedule_stale_check()
 
     state_watcher.fileChanged.connect(refresh_state_from_watcher)
@@ -5765,6 +5816,7 @@ def run_work_overlay_helper_qt(
     overlay.sync_pointer_state()
     app.exec()
     pointer_timer.stop()
+    helper_heartbeat_timer.stop()
     state_read_retry_timer.stop()
     state_stale_timer.stop()
     watched_files = state_watcher.files()

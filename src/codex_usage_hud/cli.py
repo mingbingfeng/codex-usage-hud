@@ -238,6 +238,8 @@ WORK_OVERLAY_ALPHA = 0.88
 WORK_OVERLAY_HOVER_ALPHA = 0.22
 WORK_OVERLAY_HEADER_TITLE_LIMIT = 28
 WORK_OVERLAY_RESTART_BACKOFF_SECONDS = 60.0
+WORK_OVERLAY_HELPER_HEARTBEAT_TIMEOUT_SECONDS = 35.0
+WORK_OVERLAY_HELPER_MAX_USER_OBJECTS = 2_000
 WORK_OVERLAY_TOP_OFFSET = 56
 WORK_OVERLAY_MARGIN = 16
 WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT = 160
@@ -1033,6 +1035,29 @@ def _work_overlay_command_path(state_path: Path) -> Path:
     return state_path.with_name(f"{state_path.stem}-commands.jsonl")
 
 
+def _work_overlay_heartbeat_path(state_path: Path) -> Path:
+    return state_path.with_name(f"{state_path.stem}-heartbeat")
+
+
+def _windows_user_object_count(process: subprocess.Popen[Any]) -> int | None:
+    """Return native USER object usage for a Windows child process when available."""
+    if os.name != "nt":
+        return None
+    handle = getattr(process, "_handle", None)
+    if not handle:
+        return None
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        get_gui_resources = user32.GetGuiResources
+        get_gui_resources.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+        get_gui_resources.restype = ctypes.c_uint
+        return int(get_gui_resources(ctypes.c_void_p(handle), 1))
+    except Exception:
+        return None
+
+
 def _work_overlay_transition_audit_path() -> Path:
     return hud_runtime_dir() / "work-overlay-transitions.jsonl"
 
@@ -1283,6 +1308,8 @@ class DesktopWorkOverlay:
         self._unavailable_reported = False
         self._restart_blocked_until = 0.0
         self._last_helper_exit_code: int | None = None
+        self._helper_started_at = 0.0
+        self._last_helper_heartbeat_at = 0.0
         self._last_payload_items: list[dict[str, object]] | None = None
         self._last_theme_payload: dict[str, object] = {}
         self._system_action: dict[str, object] | None = None
@@ -1336,6 +1363,7 @@ class DesktopWorkOverlay:
             self._stop_runtime(permanent=False)
             self._report_unavailable_once(self._unavailable_reason)
             return
+        self._ensure_helper_healthy(time.monotonic())
         if self._suppress_initial_items:
             self._suppress_initial_items = False
             payload_items = [
@@ -1349,18 +1377,6 @@ class DesktopWorkOverlay:
         if not payload_items and self._process is None:
             return
         theme_payload = self._theme_payload()
-        if self._process is not None and self._process.poll() is not None:
-            self._last_helper_exit_code = int(self._process.returncode or 0)
-            self._process = None
-            self._restart_blocked_until = (
-                0.0
-                if self._last_helper_exit_code == 0
-                else time.monotonic() + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
-            )
-            if self._last_helper_exit_code != 0:
-                self._report_unavailable_once(
-                    f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
-                )
         next_signature = self._state_signature(
             payload_items,
             theme=theme_payload,
@@ -1388,6 +1404,9 @@ class DesktopWorkOverlay:
             if not self._runtime_available():
                 self._report_unavailable_once(self._unavailable_reason)
                 return False
+            self._ensure_helper_healthy(time.monotonic())
+            if self._process is None:
+                self._restart_blocked_until = 0.0
             process = self._process
             if process is not None and process.poll() is not None:
                 self._last_helper_exit_code = int(process.returncode or 0)
@@ -1402,6 +1421,9 @@ class DesktopWorkOverlay:
         if not self._runtime_available():
             self._report_unavailable_once(self._unavailable_reason)
             return False
+        self._ensure_helper_healthy(time.monotonic())
+        if self._process is None:
+            self._restart_blocked_until = 0.0
         payload_items = list(self._last_payload_items or [])
         theme_payload = self._last_theme_payload or self._theme_payload()
         self._write_state(payload_items, theme=theme_payload, close=False)
@@ -1433,6 +1455,7 @@ class DesktopWorkOverlay:
             self._report_unavailable_once(self._unavailable_reason)
             self._system_action = None
             return False
+        self._ensure_helper_healthy(time.monotonic())
         payload_items = list(self._last_payload_items or [])
         theme_payload = self._theme_payload()
         self._write_state(payload_items, theme=theme_payload, close=False)
@@ -1560,21 +1583,9 @@ class DesktopWorkOverlay:
         if not self._last_payload_items and not self._rest_reminder:
             return
         now = time.monotonic()
+        self._ensure_helper_healthy(now)
         if now - self._last_state_write_at < WORK_OVERLAY_KEEPALIVE_SECONDS:
             return
-        process = self._process
-        if process is not None and process.poll() is not None:
-            self._last_helper_exit_code = int(process.returncode or 0)
-            self._process = None
-            self._restart_blocked_until = (
-                0.0
-                if self._last_helper_exit_code == 0
-                else now + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
-            )
-            if self._last_helper_exit_code != 0:
-                self._report_unavailable_once(
-                    f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
-                )
         self._write_state(
             self._last_payload_items,
             theme=self._last_theme_payload,
@@ -1719,6 +1730,10 @@ class DesktopWorkOverlay:
             self._command_path.unlink()
         except OSError:
             pass
+        try:
+            _work_overlay_heartbeat_path(self._state_path).unlink()
+        except OSError:
+            pass
         self._command_offset = 0
         self._deferred_commands.clear()
         self._last_payload_items = None
@@ -1729,6 +1744,8 @@ class DesktopWorkOverlay:
         self._last_state_write_at = 0.0
         self._switch_completed_command = None
         self._switch_completed_until = 0.0
+        self._helper_started_at = 0.0
+        self._last_helper_heartbeat_at = 0.0
 
     def _start(self) -> None:
         try:
@@ -1738,12 +1755,93 @@ class DesktopWorkOverlay:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            started_at = time.time()
+            self._helper_started_at = started_at
+            self._last_helper_heartbeat_at = started_at
         except Exception:
             self._process = None
             self._restart_blocked_until = (
                 time.monotonic() + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
             )
             self._report_unavailable_once("unable to start PySide6 desktop overlay helper")
+
+    def _ensure_helper_healthy(self, now: float) -> None:
+        """Restart a live-but-stuck helper before it can retain stale bubbles."""
+        process = self._process
+        if process is None:
+            return
+        if process.poll() is not None:
+            self._last_helper_exit_code = int(process.returncode or 0)
+            self._process = None
+            self._restart_blocked_until = (
+                0.0
+                if self._last_helper_exit_code == 0
+                else now + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
+            )
+            if self._last_helper_exit_code != 0:
+                self._report_unavailable_once(
+                    f"PySide6 desktop overlay helper exited with code {self._last_helper_exit_code}"
+                )
+            return
+        user_objects = _windows_user_object_count(process)
+        if (
+            user_objects is not None
+            and user_objects >= WORK_OVERLAY_HELPER_MAX_USER_OBJECTS
+        ):
+            self._restart_unresponsive_helper(
+                process,
+                now,
+                reason=f"user_objects={user_objects}",
+            )
+            return
+        self._refresh_helper_heartbeat()
+        heartbeat_at = max(self._helper_started_at, self._last_helper_heartbeat_at)
+        if heartbeat_at <= 0.0:
+            return
+        heartbeat_now = time.time()
+        if heartbeat_now - heartbeat_at < WORK_OVERLAY_HELPER_HEARTBEAT_TIMEOUT_SECONDS:
+            return
+        _LOGGER.warning(
+            "work_overlay_helper_unresponsive age_seconds=%.1f",
+            heartbeat_now - heartbeat_at,
+        )
+        self._restart_unresponsive_helper(
+            process,
+            now,
+            reason=f"heartbeat_age_seconds={heartbeat_now - heartbeat_at:.1f}",
+        )
+
+    def _restart_unresponsive_helper(
+        self,
+        process: subprocess.Popen[str],
+        now: float,
+        *,
+        reason: str,
+    ) -> None:
+        _LOGGER.warning("work_overlay_helper_restart reason=%s", reason)
+        try:
+            process.terminate()
+            process.wait(timeout=1.0)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        self._process = None
+        self._helper_started_at = 0.0
+        self._last_helper_heartbeat_at = 0.0
+        self._restart_blocked_until = now
+        self._start()
+
+    def _refresh_helper_heartbeat(self) -> None:
+        try:
+            heartbeat_at = _work_overlay_heartbeat_path(self._state_path).stat().st_mtime
+        except OSError:
+            return
+        self._last_helper_heartbeat_at = max(
+            self._last_helper_heartbeat_at,
+            float(heartbeat_at),
+        )
 
     def reset_runtime_availability(self) -> bool:
         self._available = None

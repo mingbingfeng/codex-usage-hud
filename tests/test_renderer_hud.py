@@ -1015,6 +1015,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('>空间清理</button>', script)
         self.assertIn('data-cleanup-section="junk"', script)
         self.assertIn('data-cleanup-section="sessions"', script)
+        self.assertLess(
+            script.index('data-cleanup-section="sessions"'),
+            script.index('data-cleanup-section="junk"'),
+        )
         self.assertIn('data-action="session-cleanup-status"', script)
         self.assertIn('data-action="session-cleanup-time"', script)
         self.assertIn('codex-usage-hud-session-filter', script)

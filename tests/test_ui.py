@@ -172,6 +172,7 @@ from codex_usage_hud.ui.tk_hud import (
     _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
+    WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED,
     WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS,
     WORK_OVERLAY_STATE_READ_RETRY_MS,
     WORK_OVERLAY_TEXT_WRAP_WIDTH,
@@ -2988,6 +2989,9 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(circle_rect, (410.0, 424.0, 110.0, 110.0))
 
+    def test_legacy_qt_transition_animations_stay_disabled(self) -> None:
+        self.assertFalse(WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED)
+
     def test_work_overlay_card_yield_clears_circle_path(self) -> None:
         card_rect = (90.0, 306.0, 430.0, 110.0)
         circle_rect = (352.0, 0.0, 168.0, 180.0)
@@ -4512,6 +4516,67 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertIs(overlay._process, fake_process)
             self.assertTrue(overlay._state_path.exists())
             overlay.close()
+
+    def test_desktop_work_overlay_reads_helper_heartbeat_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overlay = DesktopWorkOverlay(item_limit=2)
+            overlay._state_path = root / "work-overlay-123-1.json"
+            heartbeat_path = cli_module._work_overlay_heartbeat_path(overlay._state_path)
+            heartbeat_path.write_text("ready", encoding="utf-8")
+            overlay._refresh_helper_heartbeat()
+
+        self.assertGreater(overlay._last_helper_heartbeat_at, 0.0)
+
+    def test_desktop_work_overlay_restarts_a_live_but_unresponsive_helper(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=2)
+        process = SimpleNamespace(
+            poll=MagicMock(return_value=None),
+            terminate=MagicMock(),
+            wait=MagicMock(),
+            kill=MagicMock(),
+        )
+        overlay._process = process
+        overlay._helper_started_at = 100.0
+        overlay._last_helper_heartbeat_at = 100.0
+
+        with (
+            patch.object(overlay, "take_commands", return_value=[]),
+            patch.object(overlay, "_start") as start,
+        ):
+            overlay._ensure_helper_healthy(
+                100.0 + cli_module.WORK_OVERLAY_HELPER_HEARTBEAT_TIMEOUT_SECONDS
+            )
+
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=1.0)
+        process.kill.assert_not_called()
+        start.assert_called_once()
+        self.assertIsNone(overlay._process)
+
+    def test_desktop_work_overlay_restarts_before_windows_user_handle_exhaustion(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=2)
+        process = SimpleNamespace(poll=MagicMock(return_value=None))
+        overlay._process = process
+        overlay._helper_started_at = time.time()
+        overlay._last_helper_heartbeat_at = overlay._helper_started_at
+
+        with (
+            patch(
+                "codex_usage_hud.cli._windows_user_object_count",
+                return_value=cli_module.WORK_OVERLAY_HELPER_MAX_USER_OBJECTS,
+            ),
+            patch.object(overlay, "_restart_unresponsive_helper") as restart,
+        ):
+            overlay._ensure_helper_healthy(time.monotonic())
+
+        restart.assert_called_once_with(
+            process,
+            unittest.mock.ANY,
+            reason=(
+                f"user_objects={cli_module.WORK_OVERLAY_HELPER_MAX_USER_OBJECTS}"
+            ),
+        )
 
     def test_desktop_work_overlay_suppresses_first_snapshot_items(self) -> None:
         item = WorkStatusItem(
