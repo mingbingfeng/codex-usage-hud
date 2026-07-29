@@ -728,11 +728,12 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
   const rowMatch = (rows) => {
     const refs = rows.map((row) => ({ row, ref: refFromRow(row) }));
     if (targetSessionId) {
-      return refs.find((item) => item.ref.sessionId === targetSessionId)
+      const idMatch = refs.find((item) => item.ref.sessionId === targetSessionId)
         || refs.find((item) => targetRawSessionId && item.ref.rawSessionId === targetRawSessionId)
         || refs.find((item) => item.ref.rawSessionId.endsWith(`:${targetSessionId}`))
         || refs.find((item) => rowHref(item.row).includes(targetSessionId))
         || null;
+      if (idMatch) return idMatch;
     }
     return refs.find((item) => targetTitle && item.ref.title === targetTitle)
       || refs.find((item) => targetTitle && titleMatches(item.ref.title, targetTitle))
@@ -792,11 +793,14 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
   };
   const activeMatchesTarget = (active) => (
     (targetSessionId && active.sessionId === targetSessionId)
-    || (!targetSessionId && targetTitle && titleMatches(active.title, targetTitle))
+    || (targetTitle && titleMatches(active.title, targetTitle))
   );
   const activateTarget = async () => {
     const current = activeRef();
     if (activeMatchesTarget(current)) {
+      const matchedBy = targetSessionId && current.sessionId === targetSessionId
+        ? "active-session-id"
+        : "active-title-fallback";
       return {
         ok: true,
         status: "already-active",
@@ -804,7 +808,7 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
         requestedTitle: targetTitle,
         activeSessionId: current.sessionId || "",
         activeTitle: current.title || "",
-        matchedBy: targetSessionId ? "active-session-id" : "active-title",
+        matchedBy,
         availableCount: queryRows().length,
       };
     }
@@ -838,15 +842,13 @@ SESSION_SWITCH_SCRIPT_TEMPLATE = r"""
         availableCount: rows.length,
       };
     }
-    const matchedBy = targetSessionId
-      ? (
-          match.ref.sessionId === targetSessionId
-            ? "session-id"
-            : (match.ref.rawSessionId === targetRawSessionId || match.ref.rawSessionId.endsWith(`:${targetSessionId}`))
-              ? "session-id-prefixed"
-              : "href"
-        )
-      : (match.ref.title === targetTitle ? "title" : "title-prefix");
+    const matchedBy = targetSessionId && match.ref.sessionId === targetSessionId
+      ? "session-id"
+      : (targetSessionId && (match.ref.rawSessionId === targetRawSessionId || match.ref.rawSessionId.endsWith(`:${targetSessionId}`)))
+        ? "session-id-prefixed"
+        : (targetSessionId && rowHref(match.row).includes(targetSessionId))
+          ? "href"
+          : (match.ref.title === targetTitle ? "title-fallback" : "title-prefix-fallback");
     const row = match.row;
     row.scrollIntoView?.({ block: "center", inline: "nearest" });
     const titleNode = row.querySelector("[data-thread-title], .truncate.select-none, .truncate.text-base");

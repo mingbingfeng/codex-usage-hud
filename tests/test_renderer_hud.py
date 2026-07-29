@@ -1019,14 +1019,27 @@ class RendererHudPayloadTests(unittest.TestCase):
             script.index('data-cleanup-section="sessions"'),
             script.index('data-cleanup-section="junk"'),
         )
-        self.assertIn('data-action="session-cleanup-status"', script)
-        self.assertIn('data-action="session-cleanup-time"', script)
-        self.assertIn('codex-usage-hud-session-filter', script)
+        self.assertIn('data-action="session-cleanup-date-toggle"', script)
+        self.assertIn('data-action="session-cleanup-date-confirm"', script)
+        self.assertIn('data-session-cleanup-filter="${key}"', script)
+        self.assertIn('<label><span>${label}</span><select', script)
+        self.assertIn('control("archive", "归档状态"', script)
+        self.assertIn('control("availability", "删除状态"', script)
+        self.assertIn('control("clientKind", "客户端"', script)
+        self.assertIn('control("modelProvider", "模型提供方"', script)
+        self.assertIn('control("sort", "排序"', script)
+        self.assertNotIn('control("workdir", "工作目录"', script)
+        self.assertIn('codex-usage-hud-session-date-popover', script)
+        self.assertIn('codex-usage-hud-session-filter-controls', script)
+        self.assertNotIn('data-action="session-cleanup-status"', script)
+        self.assertNotIn('data-action="session-cleanup-time"', script)
         self.assertIn('data-session-cleanup-select-all="true"', script)
         self.assertIn('data-danger="true"', script)
         # Visual structure contracts against docs/designs/space-cleanup-session-delete-v1.html
         self.assertIn("codex-usage-hud-cleanup-page-head", script)
         self.assertIn("codex-usage-hud-cleanup-segments", script)
+        self.assertIn('let cleanupActiveSection = "sessions";', script)
+        self.assertIn('if (tab === "storage") cleanupActiveSection = "sessions";', script)
         self.assertIn("grid-template-columns: repeat(2, minmax(96px, 1fr))", script)
         self.assertIn("min-height: 31px", script)
         self.assertIn("codex-usage-hud-cleanup-footer", script)
@@ -1073,7 +1086,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("check title title status size", script)
         self.assertIn("background: #3b8eea", script)
         self.assertIn("background: #c43e45", script)
-        self.assertIn('session-filter[data-active="true"]', script)
+        self.assertIn('grid-template-columns: repeat(5, minmax(0, 1fr))', script)
+        self.assertIn('session-filter-control label > span', script)
+        self.assertIn('session-search {\n          flex: 0 0 auto;', script)
+        self.assertIn('session-date-popover {\n          left: 0;', script)
+        self.assertIn('sessionCleanupDateRangeError', script)
+        self.assertIn('sessionCleanupDatePresetValues', script)
+        self.assertIn('sessionCleanupFilterSummary', script)
         self.assertIn("codex-usage-hud-settings-confirm-summary", script)
         self.assertIn("codex-usage-hud-settings-confirm-note", script)
         self.assertIn("function cleanupIconSvg", script)
@@ -1083,19 +1102,25 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            'sessionCleanupState.status = String(action.dataset.sessionCleanupStatus || "all");\n'
-            "        sessionCleanupState.selectedIds.clear();",
+            'sessionCleanupState[key] = String(sessionFilter.value || "all");\n'
+            '        if (key !== "sort") sessionCleanupState.selectedIds.clear();',
             script,
         )
         self.assertIn(
-            'sessionCleanupState.time = String(action.dataset.sessionCleanupTime || "all");\n'
-            "        sessionCleanupState.selectedIds.clear();",
+            "sessionCleanupState.dateStart = sessionCleanupState.dateDraftStart;\n"
+            "        sessionCleanupState.dateEnd = sessionCleanupState.dateDraftEnd;",
             script,
         )
         self.assertIn("function sessionCleanupReasonLabel", script)
         self.assertIn('action: "sessionCleanupPreview"', script)
         self.assertIn('action: "sessionCleanupExecute"', script)
         self.assertIn('action: "sessionCleanupCancel"', script)
+        self.assertIn('const sessionExecuting = new Set(["execute", "sessionCleanupExecute"]).has(sessionOperationAction)', script)
+        self.assertIn('const sessionScanInProgress = new Set(["scan", "sessionCleanupScan"]).has(sessionOperationAction)', script)
+        self.assertIn('正在永久删除…', script)
+        self.assertIn('const scanInProgress = new Set(["scan", "sessionCleanupScan"]).has(operationAction)', script)
+        self.assertIn('const showResultDetails = results.length > 0 && state !== "completed";', script)
+        self.assertIn('完成后将直接刷新当前列表', script)
         self.assertIn("Codex App 的归档入口无法恢复这些会话", script)
         self.assertIn(
             "const body = isSessions ? sessionCleanupPanelHtml() : safeCleanupPanelHtml();",
@@ -1344,6 +1369,21 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("restoreSessionCleanupConfirm(token);", script)
         self.assertNotIn(
             'closeSettingsConfirm();\n        sessionCleanupState.previewTokenShown = "";',
+            script,
+        )
+
+    def test_session_cleanup_delete_keeps_loading_layer_until_matching_terminal_payload(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn("function openSessionCleanupDeleteLoading(requestId)", script)
+        self.assertIn('mode: "session-cleanup-delete"', script)
+        self.assertIn('layer.dataset.sessionCleanupDeleteLoading = "true";', script)
+        self.assertIn('layer.dataset.sessionCleanupDeleteRequestId = String(requestId || "");', script)
+        self.assertIn("openSessionCleanupDeleteLoading(requestId);", script)
+        self.assertIn("completedExecute && loadingRequestId && responseRequestId === loadingRequestId", script)
+        self.assertIn('data-session-cleanup-delete-loading="true"', script)
+        self.assertIn(
+            '.codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action[data-danger="true"]',
             script,
         )
 

@@ -1346,6 +1346,27 @@ class CodexWindowTrackerSelectionTests(unittest.TestCase):
 
         self.assertTrue(tracker.is_active(123, {456}))
 
+    def test_is_active_rejects_minimized_same_process_foreground(self) -> None:
+        tracker = CodexWindowTracker(enable_uia=False)
+        tracker.enabled = True
+        pid_map = {123: 41001, 999: 41001}
+
+        def get_pid(hwnd: int, pid_ptr: object) -> int:
+            hwnd_value = int(getattr(hwnd, "value", hwnd) or 0)
+            pid_ptr._obj.value = pid_map.get(hwnd_value, 0)  # type: ignore[attr-defined]
+            return 1
+
+        tracker.user32 = SimpleNamespace(
+            IsIconic=lambda hwnd: int(getattr(hwnd, "value", hwnd) or 0) == 999,
+            IsWindowVisible=lambda hwnd: True,
+            GetForegroundWindow=lambda: 999,
+            GetWindowThreadProcessId=get_pid,
+        )
+        tracker._is_cloaked = lambda hwnd: False  # type: ignore[method-assign]
+        tracker._process_name = lambda pid: "Codex.exe"  # type: ignore[method-assign]
+
+        self.assertFalse(tracker.is_active(123, {456}))
+
     def test_is_active_goes_inactive_for_other_process_foreground(self) -> None:
         tracker = CodexWindowTracker(enable_uia=False)
         tracker.enabled = True

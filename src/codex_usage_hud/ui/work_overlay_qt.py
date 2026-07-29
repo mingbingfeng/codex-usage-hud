@@ -50,9 +50,7 @@ WORK_OVERLAY_TRANSITION_SHRINK_MS = 220
 WORK_OVERLAY_TRANSITION_PAUSE_MS = 140
 WORK_OVERLAY_TRANSITION_MOVE_MS = 280
 WORK_OVERLAY_TRANSITION_SHIFT_MS = 240
-# PySide is a legacy rendering surface. Its transition paths repeatedly exhaust
-# Windows USER objects on real desktops, so state changes must render directly.
-WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED = False
+WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED = True
 WORK_OVERLAY_RESTORE_FADE_OUT_MS = 200
 WORK_OVERLAY_RESTORE_SHIFT_MS = 300
 WORK_OVERLAY_RESTORE_FADE_IN_MS = 150
@@ -458,9 +456,37 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _interactive_hotspot_opacity(base_opacity: float, hovered: bool) -> float:
+def _allow_foreground_process(
+    process_id: int | None,
+    *,
+    user32: object | None = None,
+) -> bool:
+    if not sys.platform.startswith("win") or not process_id or int(process_id) <= 0:
+        return False
+    try:
+        if user32 is None:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+        return bool(user32.AllowSetForegroundWindow(int(process_id)))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _interactive_hotspot_opacity(
+    base_opacity: float,
+    hovered: bool,
+    *,
+    invisible_hit_surface: bool = False,
+) -> float:
     if hovered:
         return WORK_OVERLAY_HOTSPOT_HOVER_ALPHA
+    if invisible_hit_surface:
+        # Windows performs per-pixel hit testing for these layered top-level
+        # windows. Keep their global opacity at 1 so the intentionally faint
+        # painted pixels never round down to fully transparent while the parent
+        # bubble fades under the pointer.
+        return 1.0
     return _clamp01(base_opacity)
 
 
@@ -923,6 +949,7 @@ def _workdir_link_opacity_for_item(
     return _interactive_hotspot_opacity(
         base_opacity,
         hovered and _workdir_link_hover_visible_for_item(item),
+        invisible_hit_surface=True,
     )
 
 
@@ -1775,7 +1802,6 @@ def run_work_overlay_helper_qt(
         raise RuntimeError("PySide6 is required for the desktop work overlay helper.") from exc
 
     path = Path(str(state_file)).expanduser()
-
     def read_state() -> dict[str, object] | None:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -2542,13 +2568,21 @@ def run_work_overlay_helper_qt(
             self._base_opacity = _clamp01(opacity)
             if not self._hover:
                 self.setWindowOpacity(
-                    _interactive_hotspot_opacity(self._base_opacity, False)
+                    _interactive_hotspot_opacity(
+                        self._base_opacity,
+                        False,
+                        invisible_hit_surface=True,
+                    )
                 )
 
         def enterEvent(self, event: object) -> None:
             self._hover = True
             self.setWindowOpacity(
-                _interactive_hotspot_opacity(self._base_opacity, True)
+                _interactive_hotspot_opacity(
+                    self._base_opacity,
+                    True,
+                    invisible_hit_surface=True,
+                )
             )
             self.update()
             super().enterEvent(event)
@@ -2556,7 +2590,11 @@ def run_work_overlay_helper_qt(
         def leaveEvent(self, event: object) -> None:
             self._hover = False
             self.setWindowOpacity(
-                _interactive_hotspot_opacity(self._base_opacity, False)
+                _interactive_hotspot_opacity(
+                    self._base_opacity,
+                    False,
+                    invisible_hit_surface=True,
+                )
             )
             self.update()
             super().leaveEvent(event)
@@ -3515,6 +3553,10 @@ def run_work_overlay_helper_qt(
                 "requestedAt": time.time(),
                 "current": bool(item.get("current")),
             }
+            # This helper receives the user's click, while the daemon performs
+            # the actual window activation. Transfer Windows foreground rights
+            # before the command-file watcher wakes the daemon.
+            _allow_foreground_process(owner_pid)
             if not self._append_command(payload):
                 return
             self._set_switch_pending(item)
@@ -4088,11 +4130,11 @@ def run_work_overlay_helper_qt(
             close_anchor = record["close_anchor"]
             close_anchor.setVisible(not rest_reminder)
 
-            header_meta = record["header_meta"]
+            header_meta = record.get("header_meta")
             header_meta_text = (
                 str(item.get("headerMeta") or "").strip() if rest_reminder else ""
             )
-            if header_meta_text:
+            if isinstance(header_meta, QLabel) and header_meta_text:
                 header_meta.setText(header_meta_text)
                 header_meta.setStyleSheet(
                     "QLabel {"
@@ -4105,7 +4147,7 @@ def run_work_overlay_helper_qt(
                 header_meta.adjustSize()
                 header_meta.setFixedWidth(header_meta.sizeHint().width())
                 header_meta.setVisible(True)
-            else:
+            elif isinstance(header_meta, QLabel):
                 header_meta.setText("")
                 header_meta.setVisible(False)
 
@@ -4224,7 +4266,9 @@ def run_work_overlay_helper_qt(
                 ("secondary_action_label", secondary_action, False),
                 ("primary_action_label", primary_action, True),
             ):
-                label = record[key]
+                label = record.get(key)
+                if not isinstance(label, QLabel):
+                    continue
                 if action is None:
                     label.setText("")
                     label.setVisible(False)
@@ -5261,7 +5305,6 @@ def run_work_overlay_helper_qt(
                 effect = transition_badge.graphicsEffect()
                 if isinstance(effect, QGraphicsOpacityEffect):
                     effect.setOpacity(1.0)
-
                 duration_ms = WORK_OVERLAY_TRANSITION_MOVE_MS + WORK_OVERLAY_TRANSITION_SHIFT_MS
                 self._touch_transition_watchdog(duration_ms)
                 group = QParallelAnimationGroup(self)
@@ -5419,6 +5462,11 @@ def run_work_overlay_helper_qt(
             self._last_structure_signature = ""
             self.render_items(self._raw_items)
 
+        def _reposition_interactive_windows_if_settled(self) -> None:
+            if self._transition_in_progress:
+                return
+            self.reposition_interactive_windows()
+
         def _sync_overlay_geometry(self) -> None:
             layout_width = max(WORK_OVERLAY_WIDTH, int(self._layout_width))
             content_height = max(
@@ -5447,7 +5495,11 @@ def run_work_overlay_helper_qt(
             if not self.isVisible():
                 self.show()
             self.raise_()
-            QTimer.singleShot(0, self.reposition_interactive_windows)
+            QTimer.singleShot(0, self._reposition_interactive_windows_if_settled)
+            # QWidget visibility and geometry can lag one event turn behind the
+            # rebuilt shell on Windows. Retry once after the layout reaches the
+            # native window system so current anchors always get their HWNDs.
+            QTimer.singleShot(48, self._reposition_interactive_windows_if_settled)
 
         def render_items(
             self,
@@ -5535,25 +5587,29 @@ def run_work_overlay_helper_qt(
             if transition is not None:
                 item_id = _detect_transition_item_id(self._previous_visible_items, visible_items)
                 if item_id:
+                    previous_items = list(self._previous_visible_items)
                     transition_items = _defer_other_transition_items(
-                        self._previous_visible_items,
+                        previous_items,
                         visible_items,
                         item_id,
                     )
                     self._layout_width = _transition_layout_width(
-                        self._previous_visible_items,
+                        previous_items,
                         transition_items,
                     )
-                    self._layout_items = list(self._previous_visible_items)
+                    self._layout_items = list(previous_items)
                     self._sync_overlay_geometry()
-                    self._sync_item_widget_geometries(self._previous_visible_items)
+                    self._sync_item_widget_geometries(previous_items)
+                    # A transition may fail synchronously while constructing its
+                    # temporary card. Commit the next visual state first so its
+                    # cleanup render cannot re-enter the same transition.
+                    self._previous_visible_items = list(transition_items)
                     self._start_transition(
                         transition,
                         item_id,
-                        self._previous_visible_items,
+                        previous_items,
                         transition_items,
                     )
-                    self._previous_visible_items = list(transition_items)
                     return
             self._previous_visible_items = list(visible_items)
             self._last_payload_signature = payload_signature
@@ -5607,8 +5663,10 @@ def run_work_overlay_helper_qt(
                 self._close_windows.append(CloseButtonWindow(self.dismiss_item))
 
             current_opacity = self.windowOpacity()
-            for index, close_window in enumerate(self._close_windows):
-                anchor, item, card_bg, pill_bg, accent = self._close_anchors[index]
+            for index, (anchor, item, card_bg, pill_bg, accent) in enumerate(
+                self._close_anchors
+            ):
+                close_window = self._close_windows[index]
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
                 close_window.configure(
                     item,
@@ -5628,11 +5686,8 @@ def run_work_overlay_helper_qt(
             while len(self._workdir_windows) < len(self._workdir_anchors):
                 self._workdir_windows.append(WorkdirLinkWindow(self.switch_item))
 
-            for index, workdir_window in enumerate(self._workdir_windows):
-                anchor, item = self._workdir_anchors[index]
-                if not anchor.isVisible():
-                    workdir_window.hide()
-                    continue
+            for index, (anchor, item) in enumerate(self._workdir_anchors):
+                workdir_window = self._workdir_windows[index]
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
                 pending = self._switch_pending_active_for_item(item)
                 hotspot_pending = _workdir_link_pending_for_item(item, pending)
@@ -5670,11 +5725,8 @@ def run_work_overlay_helper_qt(
                     )
                 )
 
-            for index, check_window in enumerate(self._completed_check_windows):
-                anchor, item = self._completed_check_anchors[index]
-                if not anchor.isVisible():
-                    check_window.hide()
-                    continue
+            for index, (anchor, item) in enumerate(self._completed_check_anchors):
+                check_window = self._completed_check_windows[index]
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
                 check_window.configure(
                     item,
@@ -5691,6 +5743,11 @@ def run_work_overlay_helper_qt(
                 check_window.show()
                 check_window.raise_()
 
+            for check_window in self._completed_check_windows[
+                len(self._completed_check_anchors) :
+            ]:
+                check_window.hide()
+
             action_color = _color_for("warning", self._theme_tokens)[0]
             while len(self._system_action_windows) < len(self._system_action_anchors):
                 self._system_action_windows.append(
@@ -5701,13 +5758,10 @@ def run_work_overlay_helper_qt(
                     )
                 )
 
-            for index, action_window in enumerate(self._system_action_windows):
-                anchor, item = self._system_action_anchors[index]
+            for index, (anchor, item) in enumerate(self._system_action_anchors):
+                action_window = self._system_action_windows[index]
                 action_id = str(item.get("id") or "").strip()
-                if (
-                    not anchor.isVisible()
-                    or action_id in self._requested_system_action_ids
-                ):
+                if action_id in self._requested_system_action_ids:
                     action_window.hide()
                     continue
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
@@ -5726,6 +5780,11 @@ def run_work_overlay_helper_qt(
                 action_window.show()
                 action_window.raise_()
 
+            for action_window in self._system_action_windows[
+                len(self._system_action_anchors) :
+            ]:
+                action_window.hide()
+
             rest_action_color = _color_for("waiting_user", self._theme_tokens)[0]
             while len(self._rest_action_windows) < len(self._rest_action_anchors):
                 self._rest_action_windows.append(
@@ -5736,11 +5795,8 @@ def run_work_overlay_helper_qt(
                     )
                 )
 
-            for index, action_window in enumerate(self._rest_action_windows):
-                anchor, item = self._rest_action_anchors[index]
-                if not anchor.isVisible():
-                    action_window.hide()
-                    continue
+            for index, (anchor, item) in enumerate(self._rest_action_anchors):
+                action_window = self._rest_action_windows[index]
                 anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
                 action_window.configure(
                     item,
@@ -5756,6 +5812,11 @@ def run_work_overlay_helper_qt(
                 )
                 action_window.show()
                 action_window.raise_()
+
+            for action_window in self._rest_action_windows[
+                len(self._rest_action_anchors) :
+            ]:
+                action_window.hide()
 
     overlay = OverlayWindow()
     state_watcher = QFileSystemWatcher()

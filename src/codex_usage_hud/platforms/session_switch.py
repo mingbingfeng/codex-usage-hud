@@ -101,8 +101,11 @@ def _title_matches(candidate: str, requested: str) -> bool:
 class CdpSessionSwitchBackend:
     name = "cdp"
 
-    def __init__(self, *, timeout_seconds: float) -> None:
-        self._controller = CodexCdpSessionController(timeout_seconds=timeout_seconds)
+    def __init__(self, *, timeout_seconds: float, port: int | None = None) -> None:
+        self._controller = CodexCdpSessionController(
+            port=port,
+            timeout_seconds=timeout_seconds,
+        )
 
     def activate(self, request: SessionSwitchRequest) -> SessionSwitchResult:
         result = self._controller.activate_thread(

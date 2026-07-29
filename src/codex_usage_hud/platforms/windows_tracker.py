@@ -3312,6 +3312,15 @@ class CodexWindowTracker:
             if self.user32.IsIconic(wintypes.HWND(hwnd)) or self._is_cloaked(hwnd):
                 return False
             foreground = int(self.user32.GetForegroundWindow() or 0)
+            if not foreground:
+                return False
+            foreground_handle = wintypes.HWND(foreground)
+            if (
+                self.user32.IsIconic(foreground_handle)
+                or not self.user32.IsWindowVisible(foreground_handle)
+                or self._is_cloaked(foreground)
+            ):
+                return False
             if foreground == hwnd or foreground in allowed_hwnds:
                 return True
             hwnd_pid = wintypes.DWORD()

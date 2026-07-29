@@ -1,4 +1,4 @@
-"""Compact usage ledger for sessions removed through the official Codex CLI."""
+"""Compact usage ledger for sessions removed through local session cleanup."""
 
 from __future__ import annotations
 

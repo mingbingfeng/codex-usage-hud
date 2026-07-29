@@ -192,7 +192,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     lastBackupPickerRequestId: "",
     scanStartedAt: 0,
   };
-  let cleanupActiveSection = "junk";
+  let cleanupActiveSection = "sessions";
   let safeCleanupPreviewTimer = 0;
   let safeCleanupLiveTimer = 0;
   let storageRefreshRaf = 0;
@@ -201,16 +201,24 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   let restReminderCountdownTimer = 0;
   let restReminderOverlayTimer = 0;
   let restReminderSavedRequestId = "";
-  const sessionCleanupState = {
-    data: null,
-    pendingRequestId: "",
-    selectedIds: new Set(),
-    search: "",
-    status: "all",
-    time: "all",
-    previewTokenShown: "",
-    scanStartedAt: 0,
-  };
+const sessionCleanupState = {
+data: null,
+pendingRequestId: "",
+selectedIds: new Set(),
+search: "",
+dateStart: "",
+dateEnd: "",
+dateDraftStart: "",
+dateDraftEnd: "",
+datePickerOpen: false,
+archive: "all",
+availability: "all",
+clientKind: "all",
+modelProvider: "all",
+sort: "recommended",
+previewTokenShown: "",
+scanStartedAt: 0,
+};
   let backgroundUsageFetchSeq = 0;
   let backgroundUsageDetailSeq = 0;
   const backgroundUsageRequestTimeoutMs = 5000;
@@ -3874,13 +3882,18 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-session-tools {
         min-width: 0;
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 9px;
-        align-items: center;
+        gap: 8px;
         padding: 10px 13px;
         border-bottom: 1px solid var(--codex-usage-hud-divider, #393b40);
       }
+      #${rootId} .codex-usage-hud-session-tools-primary {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
       #${rootId} .codex-usage-hud-session-search {
+        flex: 1 1 260px;
         min-width: 0;
         min-height: 32px;
         display: flex;
@@ -3903,33 +3916,175 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         font-size: 11px;
         padding: 0;
       }
-      #${rootId} .codex-usage-hud-session-filters {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
+      #${rootId} .codex-usage-hud-session-date-filter {
+        position: relative;
+        flex: 0 1 286px;
         min-width: 0;
-        flex-wrap: wrap;
       }
-      #${rootId} .codex-usage-hud-session-filter {
+      #${rootId} .codex-usage-hud-session-date-trigger,
+      #${rootId} .codex-usage-hud-session-filter-control select {
         min-width: 0;
         min-height: 32px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
         border: 1px solid #44464c;
         border-radius: 5px;
-        background: #24262a;
+        background: #17191c;
         color: var(--codex-usage-hud-muted, #9da1a8);
-        padding: 0 9px;
         font: inherit;
         font-size: 10px;
-        white-space: nowrap;
         cursor: pointer;
       }
-      #${rootId} .codex-usage-hud-session-filter[data-active="true"] {
+      #${rootId} .codex-usage-hud-session-date-trigger {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 0 9px;
+        text-align: left;
+      }
+      #${rootId} .codex-usage-hud-session-date-trigger > span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-session-date-trigger .codex-usage-hud-cleanup-icon:last-child {
+        margin-left: auto;
+        transform: rotate(90deg);
+      }
+      #${rootId} .codex-usage-hud-session-date-filter[data-open="true"] .codex-usage-hud-session-date-trigger {
         border-color: #4c78a9;
+        color: #c7e0ff;
+        background: #192631;
+      }
+      #${rootId} .codex-usage-hud-session-date-popover {
+        position: absolute;
+        top: calc(100% + 7px);
+        right: 0;
+        z-index: 4;
+        width: min(470px, calc(100vw - 44px));
+        display: grid;
+        gap: 10px;
+        padding: 11px;
+        border: 1px solid #46586d;
+        border-radius: 6px;
+        background: #171b20;
+        box-shadow: 0 14px 28px rgba(0, 0, 0, .32);
+      }
+      #${rootId} .codex-usage-hud-session-date-fields {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        gap: 7px;
+        align-items: end;
+      }
+      #${rootId} .codex-usage-hud-session-date-fields label {
+        min-width: 0;
+        display: grid;
+        gap: 5px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-session-date-fields input {
+        min-width: 0;
+        height: 31px;
+        box-sizing: border-box;
+        border: 1px solid #44464c;
+        border-radius: 5px;
+        background: #111214;
+        color: var(--codex-usage-hud-text, #e8eef7);
+        padding: 3px 6px;
+        font: 10px Consolas, "Cascadia Mono", ui-monospace, monospace;
+      }
+      #${rootId} .codex-usage-hud-session-date-separator {
+        padding-bottom: 8px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+      }
+      #${rootId} .codex-usage-hud-session-date-presets {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+      #${rootId} .codex-usage-hud-session-date-presets button,
+      #${rootId} .codex-usage-hud-session-filter-summary-clear {
+        min-height: 28px;
+        border: 0;
+        border-radius: 5px;
+        background: #272a2e;
+        color: #9ccbff;
+        padding: 4px 8px;
+        font: inherit;
+        font-size: 10px;
+        cursor: pointer;
+      }
+      #${rootId} .codex-usage-hud-session-date-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 7px;
+      }
+      #${rootId} .codex-usage-hud-session-date-error {
+        color: var(--codex-usage-hud-warning, #ffb86b);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-session-filter-controls {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 6px;
+      }
+      #${rootId} .codex-usage-hud-session-filter-control {
+        min-width: 0;
+        display: grid;
+        gap: 3px;
+      }
+      #${rootId} .codex-usage-hud-session-filter-control label {
+        min-width: 0;
+        display: grid;
+        gap: 3px;
+      }
+      #${rootId} .codex-usage-hud-session-filter-control label > span {
+        overflow: hidden;
+        color: var(--codex-usage-hud-muted, #8492a6);
+        font-size: 9px;
+        font-weight: 650;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-session-filter-control select {
+        width: 100%;
+        padding: 4px 7px;
+      }
+      #${rootId} .codex-usage-hud-session-filter-summary {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
+        font-size: 10px;
+      }
+      #${rootId} .codex-usage-hud-session-filter-summary-tags {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        overflow: auto hidden;
+        scrollbar-width: none;
+      }
+      #${rootId} .codex-usage-hud-session-filter-summary-tags::-webkit-scrollbar { display: none; }
+      #${rootId} .codex-usage-hud-session-filter-summary-tag {
+        flex: 0 0 auto;
+        max-width: 220px;
+        overflow: hidden;
+        border: 1px solid #405267;
+        border-radius: 999px;
         color: #a9d1ff;
-        background: #1b2632;
+        padding: 3px 7px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-session-filter-summary-clear {
+        flex: 0 0 auto;
+        min-height: 23px;
+        padding: 2px 7px;
+        color: var(--codex-usage-hud-muted, #9da1a8);
       }
       #${rootId} .codex-usage-hud-session-table {
         min-width: 0;
@@ -4034,6 +4189,13 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         color: var(--codex-usage-hud-muted, #9da1a8);
         font-size: 9px;
         white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-session-status-cell {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
       }
       #${rootId} .codex-usage-hud-session-badge[data-state="current"],
       #${rootId} .codex-usage-hud-session-badge[data-state="running"] {
@@ -4192,6 +4354,17 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       #${rootId} .codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action {
         min-height: 34px;
         padding-inline: 12px;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action[data-danger="true"] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        white-space: nowrap;
+      }
+      #${rootId} .codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action[data-danger="true"] svg {
+        display: block;
+        flex: 0 0 auto;
       }
       #${rootId} .codex-usage-hud-settings-loading-track {
         position: relative;
@@ -5310,10 +5483,34 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-session-tools {
           grid-template-columns: minmax(0, 1fr);
         }
-        #${rootId} .codex-usage-hud-session-filters {
+        #${rootId} .codex-usage-hud-session-tools-primary {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        #${rootId} .codex-usage-hud-session-search {
+          flex: 0 0 auto;
+          width: 100%;
+        }
+        #${rootId} .codex-usage-hud-session-date-filter {
+          flex-basis: auto;
+        }
+        #${rootId} .codex-usage-hud-session-date-popover {
+          left: 0;
+          right: auto;
+          width: 100%;
+          box-sizing: border-box;
+        }
+        #${rootId} .codex-usage-hud-session-filter-controls {
           width: 100%;
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #${rootId} .codex-usage-hud-session-filter-summary {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        #${rootId} .codex-usage-hud-session-filter-summary-tags {
+          width: 100%;
         }
         #${rootId} .codex-usage-hud-session-head { display: none; }
         #${rootId} .codex-usage-hud-session-row {
@@ -5332,7 +5529,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         #${rootId} .codex-usage-hud-session-title span[data-secondary="true"] {
           display: block;
         }
-        #${rootId} .codex-usage-hud-session-badge {
+        #${rootId} .codex-usage-hud-session-status-cell {
           justify-self: start;
         }
         #${rootId} .codex-usage-hud-session-results > div {
@@ -7489,6 +7686,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       refresh: '<path d="M20 11a8 8 0 0 0-14.9-4M4 4v6h6M4 13a8 8 0 0 0 14.9 4M20 20v-6h-6"/>',
       shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/>',
       search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+      calendar: '<rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
       check: '<path d="m5 12 4 4L19 6"/>',
       alert: '<path d="m21 19-9-16-9 16h18Z"/><path d="M12 9v4M12 17h.01"/>',
       chevron: '<path d="m9 18 6-6-6-6"/>',
@@ -8567,10 +8765,22 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const sessionData = sessionCleanupFromPayload();
     const cleanupData = safeCleanupFromPayload();
     const sessionCount = Number(sessionData?.totals?.sessions || (Array.isArray(sessionData?.sessions) ? sessionData.sessions.length : 0));
+    const sessionOperation = sessionData?.operation && typeof sessionData.operation === "object"
+      ? sessionData.operation
+      : {};
+    const sessionOperationAction = String(sessionOperation?.action || "");
+    const sessionOperationState = String(sessionOperation?.state || "");
+    const sessionScanInProgress = new Set(["scan", "sessionCleanupScan"]).has(sessionOperationAction)
+      && new Set(["scanning", "accepted"]).has(sessionOperationState);
+    const sessionExecuting = new Set(["execute", "sessionCleanupExecute"]).has(sessionOperationAction)
+      && new Set(["accepted", "running"]).has(sessionOperationState);
     const headMeta = isSessions
-      ? (new Set(["scanning", "accepted"]).has(String(sessionData?.operation?.state || "").toLowerCase()) || !!sessionCleanupState.pendingRequestId
+      ? (sessionScanInProgress
         ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>正在扫描会话…`
+        : (sessionExecuting
+          ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>正在永久删除…`
         : (sessionCount ? `${sessionCount.toLocaleString()} 个本地会话` : "按需扫描 · 无后台轮询"))
+        )
       : (isSafeCleanupScanning(cleanupData)
         ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>${escapeHtml(safeCleanupPhaseLabel(cleanupData?.operation || {}) || "正在扫描…")}`
         : (isSafeCleanupExecuting(cleanupData)
@@ -8583,7 +8793,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const junkScanned = !!String(cleanupData?.revision || "") && !isCleanupScanningRevision(cleanupData?.revision) && !junkScanning;
     const junkBusy = isSafeCleanupBusy(cleanupData);
     const sessionScanned = !!String(sessionData?.revision || "");
-    const sessionBusy = new Set(["scanning", "accepted", "running"]).has(String(sessionData?.operation?.state || "")) || !!sessionCleanupState.pendingRequestId;
+    const sessionBusy = new Set(["scanning", "accepted", "running"]).has(sessionOperationState) || !!sessionCleanupState.pendingRequestId;
     const selectedCleanupIds = safeCleanupSelectedGroupIds(cleanupData);
     const selectedCleanupGroups = safeCleanupPresentationGroups(cleanupData, { itemIds: selectedCleanupIds });
     const junkReady = String(cleanupData?.operation?.state || "") === "preview"
@@ -8600,10 +8810,12 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       const selectedRows = sessionCleanupRows(sessionData).filter((item) => sessionCleanupState.selectedIds.has(String(item?.id || "")));
       const descendants = selectedRows.reduce((sum, item) => sum + Math.max(0, Number(item?.descendantCount || 0)), 0);
       const bytes = selectedRows.reduce((sum, item) => sum + Math.max(0, Number(item?.bytes || 0)), 0);
-      footerMeta = selectedCount
-        ? `已选 ${selectedCount} 个会话 · 含 ${descendants} 个关联子任务 · ${storageFormatBytes(bytes)}`
-        : (sessionScanned ? "当前/运行中会话不可选；子任务随主会话汇总" : "上次扫描：--");
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" ${sessionBusy ? "disabled" : ""}>${sessionBusy ? "正在扫描..." : (sessionScanned ? "重新扫描" : "扫描会话")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-preview" data-danger="true" data-size="large" ${sessionBusy || !selectedCount || sessionData?.capability?.available !== true ? "disabled" : ""}>${cleanupIconSvg("trash")}永久删除</button></div>`;
+      footerMeta = sessionExecuting
+        ? "正在永久删除所选会话，完成后将直接刷新当前列表"
+        : (selectedCount
+          ? `已选 ${selectedCount} 个会话 · 含 ${descendants} 个关联子任务 · ${storageFormatBytes(bytes)}`
+          : (sessionScanned ? "当前/运行中会话不可选；子任务随主会话汇总" : "上次扫描：--"));
+      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" ${sessionBusy ? "disabled" : ""}>${sessionBusy ? (sessionExecuting ? "正在删除..." : "正在扫描...") : (sessionScanned ? "重新扫描" : "扫描会话")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-preview" data-danger="true" data-size="large" ${sessionBusy || !selectedCount || sessionData?.capability?.available !== true ? "disabled" : ""}>${cleanupIconSvg("trash")}永久删除</button></div>`;
     } else if (junkScanning) {
       footerMeta = "仅统计可清理项 · 扫描时不删除";
       footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel">取消扫描</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled>${cleanupIconSvg("check")}确认清理</button></div>`;
@@ -8649,24 +8861,146 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
 
   function sessionCleanupRows(data = sessionCleanupFromPayload()) {
     const search = String(sessionCleanupState.search || "").trim().toLowerCase();
-    const status = String(sessionCleanupState.status || "all");
-    const timeFilter = String(sessionCleanupState.time || "all");
-    const now = Date.now();
-    return (Array.isArray(data?.sessions) ? data.sessions : []).filter((item) => {
-      if (status === "archived" && item?.archived !== true) return false;
-      if (status === "active" && !new Set(["current", "running"]).has(String(item?.status || ""))) return false;
-      if (status === "selectable" && item?.selectable !== true) return false;
-      if (timeFilter !== "all") {
-        const updatedAt = Date.parse(String(item?.updatedAt || ""));
-        if (!Number.isFinite(updatedAt)) return false;
-        const age = Math.max(0, now - updatedAt);
-        if (timeFilter === "7d" && age > 7 * 86400000) return false;
-        if (timeFilter === "30d" && age > 30 * 86400000) return false;
-        if (timeFilter === "older" && age <= 30 * 86400000) return false;
-      }
+    const archive = String(sessionCleanupState.archive || "all");
+    const availability = String(sessionCleanupState.availability || "all");
+    const clientKind = String(sessionCleanupState.clientKind || "all");
+    const modelProvider = String(sessionCleanupState.modelProvider || "all");
+    const startAt = sessionCleanupDateValue(sessionCleanupState.dateStart);
+    const endAt = sessionCleanupDateValue(sessionCleanupState.dateEnd);
+    const rows = (Array.isArray(data?.sessions) ? data.sessions : []).filter((item) => {
+      const archived = item?.archived === true;
+      const status = String(item?.status || "idle");
+      const selectable = item?.selectable === true;
+      const updatedAt = sessionCleanupDateValue(item?.updatedAt);
+      if (archive === "archived" && !archived) return false;
+      if (archive === "unarchived" && archived) return false;
+      if (availability === "selectable" && !selectable) return false;
+      if (availability === "protected" && selectable) return false;
+      if (["current", "running", "unresolved", "unavailable"].includes(availability) && status !== availability) return false;
+      if (clientKind !== "all" && String(item?.clientKind || "unknown") !== clientKind) return false;
+      if (modelProvider !== "all" && String(item?.modelProvider || "unknown") !== modelProvider) return false;
+      if (startAt !== null && (updatedAt === null || updatedAt < startAt)) return false;
+      if (endAt !== null && (updatedAt === null || updatedAt > endAt)) return false;
       if (!search) return true;
-      return `${item?.title || ""} ${item?.workdirName || ""}`.toLowerCase().includes(search);
+      return `${item?.title || ""} ${item?.workdirName || ""} ${item?.modelProvider || ""} ${item?.clientKind || ""}`.toLowerCase().includes(search);
     });
+    const sort = String(sessionCleanupState.sort || "recommended");
+    return rows.sort((left, right) => {
+      const leftUpdated = sessionCleanupDateValue(left?.updatedAt) || 0;
+      const rightUpdated = sessionCleanupDateValue(right?.updatedAt) || 0;
+      const leftBytes = Math.max(0, Number(left?.bytes || 0));
+      const rightBytes = Math.max(0, Number(right?.bytes || 0));
+      if (sort === "oldest") return leftUpdated - rightUpdated || rightBytes - leftBytes;
+      if (sort === "largest") return rightBytes - leftBytes || leftUpdated - rightUpdated;
+      if (sort === "recent") return rightUpdated - leftUpdated || rightBytes - leftBytes;
+      const leftProtection = left?.selectable === true ? 0 : 1;
+      const rightProtection = right?.selectable === true ? 0 : 1;
+      if (leftProtection !== rightProtection) return leftProtection - rightProtection;
+      const leftArchive = left?.archived === true ? 0 : 1;
+      const rightArchive = right?.archived === true ? 0 : 1;
+      if (leftArchive !== rightArchive) return leftArchive - rightArchive;
+      return leftUpdated - rightUpdated || rightBytes - leftBytes;
+    });
+  }
+
+  function sessionCleanupDateValue(value) {
+    const parsed = Date.parse(String(value || ""));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function sessionCleanupDateTimeInputValue(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-")
+      + `T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+
+  function sessionCleanupDateLabel(value) {
+    const timestamp = sessionCleanupDateValue(value);
+    if (timestamp === null) return "";
+    return new Date(timestamp).toLocaleString("zh-CN", {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+  }
+
+  function sessionCleanupDateRangeLabel(start = sessionCleanupState.dateStart, end = sessionCleanupState.dateEnd) {
+    const startLabel = sessionCleanupDateLabel(start);
+    const endLabel = sessionCleanupDateLabel(end);
+    if (startLabel && endLabel) return `${startLabel} 至 ${endLabel}`;
+    if (startLabel) return `${startLabel} 起`;
+    if (endLabel) return `截至 ${endLabel}`;
+    return "全部时间";
+  }
+
+  function sessionCleanupDateRangeError(start, end) {
+    const startAt = sessionCleanupDateValue(start);
+    const endAt = sessionCleanupDateValue(end);
+    return startAt !== null && endAt !== null && startAt > endAt
+      ? "开始时间不能晚于结束时间"
+      : "";
+  }
+
+  function sessionCleanupDatePresetValues(preset) {
+    const now = new Date();
+    const start = new Date(now);
+    const end = new Date(now);
+    if (preset === "today") {
+      start.setHours(0, 0, 0, 0);
+    } else if (preset === "7d") {
+      start.setDate(start.getDate() - 6);
+      start.setHours(0, 0, 0, 0);
+    } else if (preset === "week") {
+      start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+      start.setHours(0, 0, 0, 0);
+    } else if (preset === "30d") {
+      start.setDate(start.getDate() - 29);
+      start.setHours(0, 0, 0, 0);
+    } else if (preset === "month") {
+      start.setDate(1);
+      start.setHours(0, 0, 0, 0);
+    } else if (preset === "older") {
+      end.setTime(end.getTime() - 30 * 86400000);
+      return { start: "", end: sessionCleanupDateTimeInputValue(end) };
+    }
+    return {
+      start: sessionCleanupDateTimeInputValue(start),
+      end: sessionCleanupDateTimeInputValue(end),
+    };
+  }
+
+  function sessionCleanupClientLabel(value) {
+    return ({ app: "Codex App", cli: "CLI", unknown: "来源未知" })[String(value || "unknown")] || "来源未知";
+  }
+
+  function sessionCleanupAvailabilityLabel(value) {
+    return ({
+      all: "全部删除状态",
+      selectable: "可永久删除",
+      protected: "受保护",
+      current: "当前会话",
+      running: "运行中",
+      unresolved: "映射无法确认",
+      unavailable: "暂不可删除",
+    })[String(value || "all")] || "全部删除状态";
+  }
+
+  function sessionCleanupFilterOptionHtml(options, selectedValue) {
+    return options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${String(value) === String(selectedValue) ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+  }
+
+  function sessionCleanupFilterSummary(data, rows) {
+    const labels = [];
+    const dateRange = sessionCleanupDateRangeLabel();
+    if (dateRange !== "全部时间") labels.push(`最后活动：${dateRange}`);
+    if (sessionCleanupState.archive === "archived") labels.push("已在 Codex 中归档");
+    if (sessionCleanupState.archive === "unarchived") labels.push("未归档");
+    if (sessionCleanupState.availability !== "all") labels.push(sessionCleanupAvailabilityLabel(sessionCleanupState.availability));
+    if (sessionCleanupState.clientKind !== "all") labels.push(sessionCleanupClientLabel(sessionCleanupState.clientKind));
+    if (sessionCleanupState.modelProvider !== "all") labels.push(`提供方：${sessionCleanupState.modelProvider}`);
+    if (String(sessionCleanupState.search || "").trim()) labels.push("搜索");
+    const total = Array.isArray(data?.sessions) ? data.sessions.length : 0;
+    const tags = labels.map((label) => `<span class="codex-usage-hud-session-filter-summary-tag" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`).join("");
+    return `<div class="codex-usage-hud-session-filter-summary"><span>${rows.length} / ${total} 个会话</span><div class="codex-usage-hud-session-filter-summary-tags">${tags || '<span>未设置筛选</span>'}</div>${labels.length ? '<button type="button" class="codex-usage-hud-session-filter-summary-clear" data-action="session-cleanup-filters-clear">清除</button>' : ""}</div>`;
   }
 
   function sessionCleanupStatusLabel(item) {
@@ -8678,17 +9012,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const reason = String(value || "").trim();
     const exact = {
       "Not scanned yet.": "尚未扫描。",
-      "Codex CLI command is unavailable.": "未找到可用的 Codex CLI。",
-      "This Codex CLI cannot delete sessions.": "当前 Codex CLI 不支持永久删除会话。",
-      "This Codex CLI does not expose non-interactive permanent deletion.": "当前 Codex CLI 不支持非交互永久删除。",
+      "Codex local session store is unavailable.": "本机会话存储不可用。",
+      "Codex local session store schema is not recognized.": "本机会话存储结构无法识别。",
       "The current session cannot be permanently deleted.": "当前会话不可永久删除。",
       "This session tree still has active work.": "该会话或关联子任务仍在运行。",
       "The session spawn relation could not be verified.": "无法完整验证主会话与子任务关系。",
       "The session rollout mapping could not be verified.": "无法完整验证会话本地记录映射。",
     };
     if (exact[reason]) return exact[reason];
-    if (reason.startsWith("Codex delete capability could not be verified")) {
-      return "无法验证 Codex 永久删除能力。";
+    if (reason.startsWith("Codex local session store could not be opened")) {
+      return "无法以写入方式打开本机会话存储。";
     }
     return reason;
   }
@@ -8698,8 +9031,11 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     const scanned = !!String(data?.revision || "");
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const state = String(operation?.state || "idle");
+    const operationAction = String(operation?.action || "");
     const busy = new Set(["scanning", "accepted", "running"]).has(state) || !!sessionCleanupState.pendingRequestId;
-    if (busy && (!scanned || new Set(["scanning", "accepted"]).has(state))) {
+    const scanInProgress = new Set(["scan", "sessionCleanupScan"]).has(operationAction)
+      && new Set(["scanning", "accepted"]).has(state);
+    if (scanInProgress) {
       const phaseLabel = safeCleanupPhaseLabel(operation);
       const progress = Math.max(0, Math.min(99, Number(operation?.progress || 0)));
       const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
@@ -8711,6 +9047,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话整理本地记录，关联子任务会随主会话一起永久删除。</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" data-primary="true" data-size="large" ${busy ? "disabled" : ""}>${busy ? "正在扫描..." : `${cleanupIconSvg("search")}扫描会话`}</button></div></section>`;
     }
     const capability = data?.capability && typeof data.capability === "object" ? data.capability : {};
+    const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
     const rows = sessionCleanupRows(data);
     const visibleSelectable = rows.filter((item) => item?.selectable === true && String(item?.id || ""));
     const allVisibleSelected = visibleSelectable.length > 0
@@ -8721,35 +9058,40 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       const checked = selectable && sessionCleanupState.selectedIds.has(id);
       const descendants = Math.max(0, Number(item?.descendantCount || 0));
       const updatedAt = item?.updatedAt ? backgroundUsageTime(item.updatedAt, { compact: true }) : "--";
+      const client = sessionCleanupClientLabel(item?.clientKind);
+      const provider = String(item?.modelProvider || "unknown");
       const secondary = [
         String(item?.workdirName || ""),
         updatedAt,
+        `${client} · ${provider}`,
         descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务",
       ].filter(Boolean).join(" · ");
-      const related = descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务";
-      return `<label class="codex-usage-hud-session-row" data-selectable="${selectable}" data-selected="${checked}"><input type="checkbox" data-session-cleanup-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}><div class="codex-usage-hud-session-title"><strong title="${escapeHtml(item?.title || "未命名会话")}">${escapeHtml(item?.title || "未命名会话")}</strong><span>${escapeHtml(related)}</span><span data-secondary="true">${escapeHtml(secondary)}</span>${item?.blockedReason ? `<span data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(item.blockedReason))}</span>` : ""}</div><span class="codex-usage-hud-session-workdir" title="${escapeHtml(item?.workdirName || "")}">${escapeHtml(item?.workdirName || "--")}</span><span class="codex-usage-hud-session-cell">${escapeHtml(updatedAt)}</span><span class="codex-usage-hud-session-badge" data-state="${escapeHtml(item?.status || "idle")}">${escapeHtml(sessionCleanupStatusLabel(item))}</span><span class="codex-usage-hud-session-size">${storageFormatBytes(item?.bytes)}</span></label>`;
+      const related = [client, provider, descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务"].join(" · ");
+      const status = String(item?.status || "idle");
+      const archivedBadge = item?.archived === true && status !== "archived"
+        ? `<span class="codex-usage-hud-session-badge" data-state="archived">已归档</span>`
+        : "";
+      return `<label class="codex-usage-hud-session-row" data-selectable="${selectable}" data-selected="${checked}"><input type="checkbox" data-session-cleanup-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}><div class="codex-usage-hud-session-title"><strong title="${escapeHtml(item?.title || "未命名会话")}">${escapeHtml(item?.title || "未命名会话")}</strong><span>${escapeHtml(related)}</span><span data-secondary="true">${escapeHtml(secondary)}</span>${item?.blockedReason ? `<span data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(item.blockedReason))}</span>` : ""}</div><span class="codex-usage-hud-session-workdir" title="${escapeHtml(item?.workdirName || "")}">${escapeHtml(item?.workdirName || "--")}</span><span class="codex-usage-hud-session-cell">${escapeHtml(updatedAt)}</span><span class="codex-usage-hud-session-status-cell"><span class="codex-usage-hud-session-badge" data-state="${escapeHtml(status)}">${escapeHtml(sessionCleanupStatusLabel(item))}</span>${archivedBadge}</span><span class="codex-usage-hud-session-size">${storageFormatBytes(item?.bytes)}</span></label>`;
     }).join("");
     const results = Array.isArray(operation?.results) ? operation.results : [];
-    const resultHtml = results.length ? `<div class="codex-usage-hud-session-results"><strong>${state === "completed" ? "删除完成" : state === "partial" ? "部分完成" : "删除失败"}</strong>${results.map((item) => `<div><span>${escapeHtml(item?.title || "会话")}</span><span data-kind="${item?.state === "deleted" ? "success" : "error"}">${escapeHtml(item?.state === "deleted" ? "已永久删除" : item?.error || "删除失败")}</span></div>`).join("")}</div>` : "";
-    const unavailable = capability?.available === false ? `<div class="codex-usage-hud-session-capability" data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(capability?.reason) || "当前 Codex CLI 不支持永久删除，会话清单保持只读。")}</div>` : "";
+    const showResultDetails = results.length > 0 && state !== "completed";
+    const resultHtml = showResultDetails ? `<div class="codex-usage-hud-session-results"><strong>${state === "partial" ? "部分完成" : "删除失败"}</strong>${results.map((item) => `<div><span>${escapeHtml(item?.title || "会话")}</span><span data-kind="${item?.state === "deleted" ? "success" : "error"}">${escapeHtml(item?.state === "deleted" ? "已永久删除" : item?.error || "删除失败")}</span></div>`).join("")}</div>` : "";
+    const unavailable = capability?.available === false ? `<div class="codex-usage-hud-session-capability" data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(capability?.reason) || "本机会话存储不可用，会话清单保持只读。")}</div>` : "";
     const clipped = rows.length > 180
       ? `<div class="codex-usage-hud-cleanup-meta" style="padding:8px 13px">当前筛选共 ${rows.length} 项，仅显示前 180 项。</div>`
       : "";
-    const statusFilter = String(sessionCleanupState.status || "all");
-    const timeFilterChip = String(sessionCleanupState.time || "all");
-    const statusChips = [
-      ["all", "全部"],
-      ["archived", "已归档"],
-      ["active", "当前/运行中"],
-      ["selectable", "可删除"],
-    ].map(([value, label]) => `<button type="button" class="codex-usage-hud-session-filter" data-action="session-cleanup-status" data-session-cleanup-status="${value}" data-active="${statusFilter === value}" aria-pressed="${statusFilter === value}">${label}</button>`).join("");
-    const timeChips = [
-      ["all", "全部时间"],
-      ["30d", "30 天未用"],
-      ["older", "更早"],
-      ["7d", "近 7 天"],
-    ].map(([value, label]) => `<button type="button" class="codex-usage-hud-session-filter" data-action="session-cleanup-time" data-session-cleanup-time="${value}" data-active="${timeFilterChip === value}" aria-pressed="${timeFilterChip === value}">${label}</button>`).join("");
-    return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理">${unavailable}<div class="codex-usage-hud-session-tools"><div class="codex-usage-hud-session-search">${cleanupIconSvg("search")}<input type="search" data-session-cleanup-search="true" value="${escapeHtml(sessionCleanupState.search)}" placeholder="搜索标题或工作目录" aria-label="搜索会话"></div><div class="codex-usage-hud-session-filters" role="group" aria-label="会话筛选">${statusChips}${timeChips}</div></div><div class="codex-usage-hud-session-table"><div class="codex-usage-hud-session-head"><span><input type="checkbox" data-session-cleanup-select-all="true" ${allVisibleSelected ? "checked" : ""} ${visibleSelectable.length ? "" : "disabled"} aria-label="全选当前筛选"></span><span>会话</span><span>工作目录</span><span>最后活动</span><span>状态</span><span>占用</span></div>${rowHtml || '<div class="codex-usage-hud-cleanup-empty">当前筛选没有会话。</div>'}</div>${clipped}${resultHtml}</section>`;
+    const providers = Array.from(new Set(sessions.map((item) => String(item?.modelProvider || "unknown")))).sort();
+    const control = (key, label, options) => `<div class="codex-usage-hud-session-filter-control"><label><span>${label}</span><select data-session-cleanup-filter="${key}" aria-label="${label}">${sessionCleanupFilterOptionHtml(options, sessionCleanupState[key])}</select></label></div>`;
+    const dateError = sessionCleanupDateRangeError(sessionCleanupState.dateDraftStart, sessionCleanupState.dateDraftEnd);
+    const datePopover = sessionCleanupState.datePickerOpen ? `<div class="codex-usage-hud-session-date-popover" role="dialog" aria-label="最后活动时间"><div class="codex-usage-hud-session-date-fields"><label>开始时间<input type="datetime-local" data-session-cleanup-date-start="true" value="${escapeHtml(sessionCleanupState.dateDraftStart)}"></label><span class="codex-usage-hud-session-date-separator">至</span><label>结束时间<input type="datetime-local" data-session-cleanup-date-end="true" value="${escapeHtml(sessionCleanupState.dateDraftEnd)}"></label></div><div class="codex-usage-hud-session-date-presets">${[["today", "今天"], ["7d", "近 7 天"], ["week", "本周"], ["30d", "近 30 天"], ["month", "本月"], ["older", "30 天前"]].map(([value, label]) => `<button type="button" data-action="session-cleanup-date-preset" data-session-cleanup-date-preset="${value}">${label}</button>`).join("")}</div>${dateError ? `<div class="codex-usage-hud-session-date-error">${dateError}</div>` : ""}<div class="codex-usage-hud-session-date-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-date-reset">清除</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-date-confirm" data-primary="true" ${dateError ? "disabled" : ""}>确认</button></div></div>` : "";
+    const controls = [
+      control("archive", "归档状态", [["all", "全部"], ["archived", "已归档"], ["unarchived", "未归档"]]),
+      control("availability", "删除状态", [["all", "全部"], ["selectable", "可永久删除"], ["protected", "受保护"], ["current", "当前会话"], ["running", "运行中"], ["unresolved", "映射无法确认"], ["unavailable", "暂不可删除"]]),
+      control("clientKind", "客户端", [["all", "全部"], ["app", "Codex App"], ["cli", "CLI"], ["unknown", "来源未知"]]),
+      control("modelProvider", "模型提供方", [["all", "全部"], ...providers.map((value) => [value, value])]),
+      control("sort", "排序", [["recommended", "推荐清理"], ["oldest", "最后活动最早"], ["recent", "最后活动最近"], ["largest", "占用最大"]]),
+    ].join("");
+    return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理">${unavailable}<div class="codex-usage-hud-session-tools"><div class="codex-usage-hud-session-tools-primary"><div class="codex-usage-hud-session-search">${cleanupIconSvg("search")}<input type="search" data-session-cleanup-search="true" value="${escapeHtml(sessionCleanupState.search)}" placeholder="搜索标题、工作目录或提供方" aria-label="搜索会话"></div><div class="codex-usage-hud-session-date-filter" data-open="${sessionCleanupState.datePickerOpen}"><button type="button" class="codex-usage-hud-session-date-trigger" data-action="session-cleanup-date-toggle" aria-expanded="${sessionCleanupState.datePickerOpen}" aria-haspopup="dialog">${cleanupIconSvg("calendar")}<span>最后活动：${escapeHtml(sessionCleanupDateRangeLabel())}</span>${cleanupIconSvg("chevron")}</button>${datePopover}</div></div><div class="codex-usage-hud-session-filter-controls">${controls}</div>${sessionCleanupFilterSummary(data, rows)}</div><div class="codex-usage-hud-session-table"><div class="codex-usage-hud-session-head"><span><input type="checkbox" data-session-cleanup-select-all="true" ${allVisibleSelected ? "checked" : ""} ${visibleSelectable.length ? "" : "disabled"} aria-label="全选当前筛选"></span><span>会话</span><span>工作目录</span><span>最后活动</span><span>状态</span><span>占用</span></div>${rowHtml || '<div class="codex-usage-hud-cleanup-empty">当前筛选没有会话。</div>'}</div>${clipped}${resultHtml}</section>`;
   }
 
   function captureStorageUiState() {
@@ -9221,7 +9563,7 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     layer.dataset.sessionCleanupConfirmToken = token;
     const descendants = Math.max(0, Number(operation?.descendantCount || 0));
     const estimatedBytes = storageFormatBytes(operation?.estimatedBytes);
-    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" data-tone="danger" role="alertdialog" aria-modal="true" aria-label="确认永久删除会话"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-danger-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-settings-confirm-title">永久删除 ${selectedIds.length} 个会话？</h2><p class="codex-usage-hud-settings-confirm-body">会话内容、索引和关联子任务将从本机移除。此操作不会进入回收站，也无法恢复。Codex App 的归档入口无法恢复这些会话。</p><div class="codex-usage-hud-settings-confirm-summary"><div><span>主会话</span><strong>${selectedIds.length}</strong></div><div><span>关联子任务</span><strong>${descendants}</strong></div><div><span>本地数据</span><strong>${escapeHtml(estimatedBytes)}</strong></div></div><div class="codex-usage-hud-settings-confirm-note">${cleanupIconSvg("alert")}<span>执行前会再次核验会话身份与运行状态；任何活动项都会被跳过并单独报告。</span></div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-execute" data-danger="true">${cleanupIconSvg("trash")}永久删除</button></div></div>`;
+    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" data-tone="danger" role="alertdialog" aria-modal="true" aria-label="确认永久删除会话"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-danger-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-settings-confirm-title">永久删除 ${selectedIds.length} 个会话？</h2><p class="codex-usage-hud-settings-confirm-body">会话内容、索引和关联子任务将从本机移除。此操作不会进入回收站，也无法恢复。Codex App 的归档入口无法恢复这些会话。</p><div class="codex-usage-hud-settings-confirm-summary"><div><span>主会话</span><strong>${selectedIds.length}</strong></div><div><span>关联子任务</span><strong>${descendants}</strong></div><div><span>本地数据</span><strong>${escapeHtml(estimatedBytes)}</strong></div></div><div class="codex-usage-hud-settings-confirm-note">${cleanupIconSvg("alert")}<span>执行前会再次核验会话身份与运行状态；任一异常都会取消整批删除。</span></div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-execute" data-danger="true">${cleanupIconSvg("trash")}永久删除</button></div></div>`;
     dialog.appendChild(layer);
     layer.querySelector('[data-action="session-cleanup-confirm-cancel"]')?.focus?.();
   }
@@ -9248,21 +9590,38 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     });
   }
 
+  function openSessionCleanupDeleteLoading(requestId) {
+    openSettingsLoading({
+      kicker: "正在删除",
+      title: "正在永久删除会话",
+      body: "正在更新本机索引和会话列表，请勿关闭此窗口。",
+      mode: "session-cleanup-delete",
+    });
+    const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
+    if (!layer) return;
+    layer.dataset.sessionCleanupDeleteLoading = "true";
+    layer.dataset.sessionCleanupDeleteRequestId = String(requestId || "");
+  }
+
   function executeSessionCleanup() {
     const data = sessionCleanupFromPayload();
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const itemIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
     const requestId = typedSettingsRequestId("session-cleanup-execute");
     sessionCleanupState.pendingRequestId = requestId;
-    closeSettingsConfirm();
+    openSessionCleanupDeleteLoading(requestId);
     const submitted = submitSettingsCommand({
       action: "sessionCleanupExecute",
       requestId,
       itemIds,
       inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""),
       confirmationToken: String(operation?.confirmationToken || ""),
-    }, "正在逐项调用 Codex 官方永久删除...", { preserveOverlay: true });
-    if (!submitted) sessionCleanupState.pendingRequestId = "";
+    }, "正在以本地事务永久删除会话...", { preserveOverlay: true });
+    if (!submitted) {
+      sessionCleanupState.pendingRequestId = "";
+      closeSettingsConfirm();
+      restoreSessionCleanupConfirm(String(operation?.confirmationToken || ""));
+    }
     return submitted;
   }
 
@@ -10966,6 +11325,16 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         safeCleanupState.backupDirectoryDirty = true;
         return;
       }
+      const sessionDateStart = event.target?.closest?.('[data-session-cleanup-date-start="true"]');
+      if (sessionDateStart && root.contains(sessionDateStart)) {
+        sessionCleanupState.dateDraftStart = String(sessionDateStart.value || "");
+        return;
+      }
+      const sessionDateEnd = event.target?.closest?.('[data-session-cleanup-date-end="true"]');
+      if (sessionDateEnd && root.contains(sessionDateEnd)) {
+        sessionCleanupState.dateDraftEnd = String(sessionDateEnd.value || "");
+        return;
+      }
       const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
       if (sessionSearch && root.contains(sessionSearch)) {
         const selection = Number(sessionSearch.selectionStart || 0);
@@ -11017,6 +11386,15 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         // The footer CTA changes from a guided prerequisite action to the
         // actual confirmation action as soon as the user grants this consent.
         rerenderUsageInsightsIfVisible();
+        return;
+      }
+      const sessionFilter = event.target?.closest?.("[data-session-cleanup-filter]");
+      if (sessionFilter && root.contains(sessionFilter)) {
+        const key = String(sessionFilter.dataset.sessionCleanupFilter || "");
+        if (!new Set(["archive", "availability", "clientKind", "modelProvider", "sort"]).has(key)) return;
+        sessionCleanupState[key] = String(sessionFilter.value || "all");
+        if (key !== "sort") sessionCleanupState.selectedIds.clear();
+        renderSettingsModal("storage");
         return;
       }
 
@@ -11166,7 +11544,9 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
       if (action.dataset.action === "settings-tab") {
         event.preventDefault();
         event.stopPropagation();
-        renderSettingsModal(action.dataset.tab || "settings");
+        const tab = action.dataset.tab || "settings";
+        if (tab === "storage") cleanupActiveSection = "sessions";
+        renderSettingsModal(tab);
         return;
       }
       if (action.dataset.action === "cleanup-section") {
@@ -11176,18 +11556,66 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
         renderSettingsModal("storage");
         return;
       }
-      if (action.dataset.action === "session-cleanup-status") {
+      if (action.dataset.action === "session-cleanup-date-toggle") {
         event.preventDefault();
         event.stopPropagation();
-        sessionCleanupState.status = String(action.dataset.sessionCleanupStatus || "all");
+        const opening = !sessionCleanupState.datePickerOpen;
+        sessionCleanupState.datePickerOpen = opening;
+        if (opening) {
+          sessionCleanupState.dateDraftStart = sessionCleanupState.dateStart;
+          sessionCleanupState.dateDraftEnd = sessionCleanupState.dateEnd;
+        }
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-date-preset") {
+        event.preventDefault();
+        event.stopPropagation();
+        const range = sessionCleanupDatePresetValues(action.dataset.sessionCleanupDatePreset);
+        sessionCleanupState.dateDraftStart = range.start;
+        sessionCleanupState.dateDraftEnd = range.end;
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-date-reset") {
+        event.preventDefault();
+        event.stopPropagation();
+        sessionCleanupState.dateStart = "";
+        sessionCleanupState.dateEnd = "";
+        sessionCleanupState.dateDraftStart = "";
+        sessionCleanupState.dateDraftEnd = "";
+        sessionCleanupState.datePickerOpen = false;
         sessionCleanupState.selectedIds.clear();
         renderSettingsModal("storage");
         return;
       }
-      if (action.dataset.action === "session-cleanup-time") {
+      if (action.dataset.action === "session-cleanup-date-confirm") {
         event.preventDefault();
         event.stopPropagation();
-        sessionCleanupState.time = String(action.dataset.sessionCleanupTime || "all");
+        if (sessionCleanupDateRangeError(sessionCleanupState.dateDraftStart, sessionCleanupState.dateDraftEnd)) {
+          renderSettingsModal("storage");
+          return;
+        }
+        sessionCleanupState.dateStart = sessionCleanupState.dateDraftStart;
+        sessionCleanupState.dateEnd = sessionCleanupState.dateDraftEnd;
+        sessionCleanupState.datePickerOpen = false;
+        sessionCleanupState.selectedIds.clear();
+        renderSettingsModal("storage");
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-filters-clear") {
+        event.preventDefault();
+        event.stopPropagation();
+        sessionCleanupState.search = "";
+        sessionCleanupState.dateStart = "";
+        sessionCleanupState.dateEnd = "";
+        sessionCleanupState.dateDraftStart = "";
+        sessionCleanupState.dateDraftEnd = "";
+        sessionCleanupState.datePickerOpen = false;
+        sessionCleanupState.archive = "all";
+        sessionCleanupState.availability = "all";
+        sessionCleanupState.clientKind = "all";
+        sessionCleanupState.modelProvider = "all";
         sessionCleanupState.selectedIds.clear();
         renderSettingsModal("storage");
         return;
@@ -14688,16 +15116,35 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     sessionCleanupState.selectedIds = new Set(
       Array.from(sessionCleanupState.selectedIds).filter((id) => validIds.has(id)),
     );
+    const providers = new Set(sessions.map((item) => String(item?.modelProvider || "unknown")));
+    if (sessionCleanupState.modelProvider !== "all" && !providers.has(sessionCleanupState.modelProvider)) {
+      sessionCleanupState.modelProvider = "all";
+    }
     const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
     const state = String(operation?.state || "").toLowerCase();
     const responseRequestId = String(operation?.requestId || "");
+    const pendingRequestId = String(sessionCleanupState.pendingRequestId || "");
     if (
       !new Set(["scanning", "accepted", "running"]).has(state)
-      && (!sessionCleanupState.pendingRequestId || responseRequestId === sessionCleanupState.pendingRequestId)
+      && (!pendingRequestId || responseRequestId === pendingRequestId)
     ) {
       sessionCleanupState.pendingRequestId = "";
     }
     rerenderUsageInsightsIfVisible();
+    const loadingLayer = document.querySelector(
+      `#${settingsModalId} [data-session-cleanup-delete-loading="true"]`,
+    );
+    const loadingRequestId = String(
+      loadingLayer?.dataset.sessionCleanupDeleteRequestId || "",
+    );
+    const completedExecute = new Set(["completed", "partial", "failed"]).has(state)
+      && new Set(["execute", "sessioncleanupexecute"]).has(
+        String(operation?.action || "").toLowerCase(),
+      );
+    if (completedExecute && loadingRequestId && responseRequestId === loadingRequestId) {
+      sessionCleanupState.previewTokenShown = "";
+      closeSettingsConfirm();
+    }
     const token = String(operation?.confirmationToken || "");
     if (state === "preview" && token && token !== sessionCleanupState.previewTokenShown) {
       sessionCleanupState.previewTokenShown = token;

@@ -1,4 +1,4 @@
-"""Safe inventory and official-command orchestration for permanent session deletion."""
+"""Safe local-store orchestration for permanent session deletion."""
 
 from __future__ import annotations
 
@@ -13,14 +13,13 @@ from pathlib import Path, PureWindowsPath
 import secrets
 import shutil
 import sqlite3
-import subprocess
 import time
-from typing import Any
 import uuid
+
+from .parser import classify_session_client
 
 
 DEFAULT_CONFIRMATION_TTL_SECONDS = 300.0
-DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
 _ACTIVE_EDGE_STATES = {"active", "in_progress", "pending", "running", "starting"}
 
 
@@ -36,7 +35,7 @@ class SessionDeleteCapability:
     def to_payload(self) -> dict[str, object]:
         return {
             "available": bool(self.available),
-            "command": "codex delete --force <UUID>" if self.available else "",
+            "command": "local SQLite transaction" if self.available else "",
             "reason": str(self.reason or ""),
         }
 
@@ -52,6 +51,12 @@ class _ThreadRecord:
 
 
 @dataclass(frozen=True)
+class _SessionMetadata:
+    model_provider: str = "unknown"
+    client_kind: str = "unknown"
+
+
+@dataclass(frozen=True)
 class SessionCleanupItem:
     id: str
     title: str
@@ -63,6 +68,8 @@ class SessionCleanupItem:
     descendant_count: int
     selectable: bool
     blocked_reason: str
+    model_provider: str = "unknown"
+    client_kind: str = "unknown"
     _session_id: str = field(default="", repr=False, compare=False)
     _descendant_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
     _rollout_paths: tuple[Path, ...] = field(default=(), repr=False, compare=False)
@@ -79,6 +86,8 @@ class SessionCleanupItem:
             "descendantCount": max(0, int(self.descendant_count)),
             "selectable": bool(self.selectable),
             "blockedReason": self.blocked_reason,
+            "modelProvider": self.model_provider,
+            "clientKind": self.client_kind,
         }
 
 
@@ -89,35 +98,9 @@ class _Confirmation:
     expires_at: float
 
 
-CommandRunner = Callable[[Sequence[str], Mapping[str, str]], Any]
 UsageSnapshotPrepare = Callable[[SessionCleanupItem], object]
 UsageSnapshotCommit = Callable[[object], None]
 UsageSnapshotDiscard = Callable[[object], None]
-
-
-def _default_command_runner(
-    command: Sequence[str],
-    environment: Mapping[str, str],
-) -> subprocess.CompletedProcess[str]:
-    resolved_command = list(command)
-    if resolved_command:
-        executable = shutil.which(
-            resolved_command[0],
-            path=environment.get("PATH"),
-        )
-        if executable:
-            resolved_command[0] = executable
-    return subprocess.run(
-        resolved_command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=DEFAULT_COMMAND_TIMEOUT_SECONDS,
-        check=False,
-        env=dict(environment),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
 
 
 def _canonical_uuid(value: object) -> str:
@@ -132,6 +115,13 @@ def _canonical_uuid(value: object) -> str:
 def _read_only_connection(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _read_write_connection(path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(f"file:{path.as_posix()}?mode=rw", uri=True, timeout=5.0)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 5000")
     return connection
 
 
@@ -181,13 +171,39 @@ def _updated_at_iso(value: int) -> str:
         return ""
 
 
-def _result_text(result: object, name: str) -> str:
-    value = getattr(result, name, "")
-    return str(value or "").strip()
+def _session_metadata(path: Path | None) -> _SessionMetadata:
+    """Read only the session metadata record needed for inventory filters."""
+    if path is None:
+        return _SessionMetadata()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, Mapping) or record.get("type") != "session_meta":
+                    continue
+                payload = record.get("payload")
+                if not isinstance(payload, Mapping):
+                    return _SessionMetadata()
+                return _SessionMetadata(
+                    model_provider=(
+                        str(payload.get("model_provider") or "").strip().lower()
+                        or "unknown"
+                    ),
+                    client_kind=classify_session_client(
+                        payload.get("originator"),
+                        payload.get("source"),
+                    ),
+                )
+    except (OSError, UnicodeError):
+        pass
+    return _SessionMetadata()
 
 
 class SessionCleanupManager:
-    """Build a root-session inventory and delete only through the Codex CLI."""
+    """Build a root-session inventory and delete verified local session trees."""
 
     def __init__(
         self,
@@ -197,12 +213,9 @@ class SessionCleanupManager:
         session_index_path: Path,
         current_session_ids: Callable[[], Iterable[str]] | None = None,
         active_session_ids: Callable[[], Iterable[str]] | None = None,
-        codex_command: Sequence[str] = ("codex",),
-        command_runner: CommandRunner = _default_command_runner,
         usage_snapshot_prepare: UsageSnapshotPrepare | None = None,
         usage_snapshot_commit: UsageSnapshotCommit | None = None,
         usage_snapshot_discard: UsageSnapshotDiscard | None = None,
-        environment: Mapping[str, str] | None = None,
         clock: Callable[[], float] = time.time,
         token_factory: Callable[[], str] | None = None,
         confirmation_ttl_seconds: float = DEFAULT_CONFIRMATION_TTL_SECONDS,
@@ -212,12 +225,9 @@ class SessionCleanupManager:
         self.session_index_path = Path(session_index_path)
         self.current_session_ids = current_session_ids or (lambda: ())
         self.active_session_ids = active_session_ids or (lambda: ())
-        self.codex_command = tuple(str(part) for part in codex_command if str(part))
-        self.command_runner = command_runner
         self.usage_snapshot_prepare = usage_snapshot_prepare
         self.usage_snapshot_commit = usage_snapshot_commit
         self.usage_snapshot_discard = usage_snapshot_discard
-        self.environment = dict(os.environ if environment is None else environment)
         self.clock = clock
         self.token_factory = token_factory or (lambda: secrets.token_urlsafe(24))
         self.confirmation_ttl_seconds = max(1.0, float(confirmation_ttl_seconds))
@@ -296,25 +306,32 @@ class SessionCleanupManager:
         )
 
     def probe_capability(self) -> SessionDeleteCapability:
-        if not self.codex_command:
-            return SessionDeleteCapability(False, "Codex CLI command is unavailable.")
+        if not self.state_db_path.is_file():
+            return SessionDeleteCapability(
+                False,
+                "Codex local session store is unavailable.",
+            )
         try:
-            result = self.command_runner(
-                (*self.codex_command, "delete", "--help"),
-                self.environment,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
+            with closing(_read_write_connection(self.state_db_path)) as connection:
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(threads)")
+                }
+        except (OSError, sqlite3.Error) as exc:
             return SessionDeleteCapability(
                 False,
-                f"Codex delete capability could not be verified ({type(exc).__name__}).",
+                f"Codex local session store could not be opened ({type(exc).__name__}).",
             )
-        if int(getattr(result, "returncode", 1) or 0) != 0:
-            return SessionDeleteCapability(False, "This Codex CLI cannot delete sessions.")
-        output = f"{_result_text(result, 'stdout')}\n{_result_text(result, 'stderr')}"
-        if "--force" not in output:
+        if "threads" not in tables or not {"id", "rollout_path"}.issubset(columns):
             return SessionDeleteCapability(
                 False,
-                "This Codex CLI does not expose non-interactive permanent deletion.",
+                "Codex local session store schema is not recognized.",
             )
         return SessionDeleteCapability(True)
 
@@ -388,6 +405,7 @@ class SessionCleanupManager:
                 blocked_reason = "The session rollout mapping could not be verified."
                 status = "unresolved"
             root = records[root_id]
+            metadata = _session_metadata(root.rollout_path)
             size = 0
             for path in rollout_paths:
                 try:
@@ -399,13 +417,17 @@ class SessionCleanupManager:
                     id=f"session-{self.token_factory()}",
                     title=(root.title or titles.get(root_id) or "Untitled session").strip(),
                     workdir_name=_workdir_leaf(root.cwd),
-                    updated_at=_updated_at_iso(root.updated_at_ms),
+                    updated_at=_updated_at_iso(
+                        max(record.updated_at_ms for record in family_records)
+                    ),
                     status=status,
                     archived=root.archived,
                     size=size,
                     descendant_count=len(descendants),
                     selectable=not blocked_reason,
                     blocked_reason=blocked_reason,
+                    model_provider=metadata.model_provider,
+                    client_kind=metadata.client_kind,
                     _session_id=root_id,
                     _descendant_ids=tuple(descendants),
                     _rollout_paths=rollout_paths,
@@ -465,55 +487,78 @@ class SessionCleanupManager:
         request_id: str = "",
     ) -> dict[str, object]:
         items = self._consume_confirmation(item_ids, revision, confirmation_token)
-        results: list[dict[str, object]] = []
-        for item in items:
-            result_row = {
-                "id": item.id,
-                "title": item.title,
-                "state": "failed",
-                "descendantCount": item.descendant_count,
-                "actualBytes": 0,
-                "error": "",
-            }
-            usage_receipt: object | None = None
-            delete_accepted = False
-            try:
-                self._revalidate(item)
+        capability = self.probe_capability()
+        self._capability = capability
+        usage_receipts: list[object] = []
+        deleted = False
+        try:
+            self._revalidate_batch(items, capability=capability)
+            for item in items:
                 if self.usage_snapshot_prepare is not None:
-                    usage_receipt = self.usage_snapshot_prepare(item)
-                command = (*self.codex_command, "delete", "--force", item._session_id)
-                completed = self.command_runner(command, self.environment)
-                if int(getattr(completed, "returncode", 1) or 0) != 0:
-                    detail = _result_text(completed, "stderr") or _result_text(
-                        completed, "stdout"
-                    )
-                    raise SessionCleanupError(
-                        detail[:240] or "Codex CLI rejected permanent deletion."
-                    )
-                delete_accepted = True
-                self._verify_deleted(item)
-                if usage_receipt and self.usage_snapshot_commit is not None:
-                    self.usage_snapshot_commit(usage_receipt)
-            except Exception as exc:
-                if (
-                    usage_receipt
-                    and not delete_accepted
-                    and self.usage_snapshot_discard is not None
-                ):
+                    receipt = self.usage_snapshot_prepare(item)
+                    if receipt:
+                        usage_receipts.append(receipt)
+            self._revalidate_pending_activity(items)
+            self._delete_local_batch(items)
+            deleted = True
+            self._verify_deleted_batch(items)
+            if self.usage_snapshot_commit is not None:
+                for receipt in usage_receipts:
+                    self.usage_snapshot_commit(receipt)
+        except SessionCleanupError as exc:
+            if not deleted and self.usage_snapshot_discard is not None:
+                for receipt in usage_receipts:
                     try:
-                        self.usage_snapshot_discard(usage_receipt)
+                        self.usage_snapshot_discard(receipt)
                     except Exception:
                         pass
-                result_row["error"] = (
-                    str(exc)[:240]
-                    if isinstance(exc, SessionCleanupError)
-                    else type(exc).__name__
-                )
-            else:
-                result_row["state"] = "deleted"
-                result_row["actualBytes"] = item.size
-            results.append(result_row)
-        deleted = sum(row["state"] == "deleted" for row in results)
+            results = [self._failed_result(item, str(exc)) for item in items]
+        except Exception as exc:
+            if not deleted and self.usage_snapshot_discard is not None:
+                for receipt in usage_receipts:
+                    try:
+                        self.usage_snapshot_discard(receipt)
+                    except Exception:
+                        pass
+            results = [self._failed_result(item, type(exc).__name__) for item in items]
+        else:
+            results = [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "state": "deleted",
+                    "descendantCount": item.descendant_count,
+                    "actualBytes": item.size,
+                    "error": "",
+                }
+                for item in items
+            ]
+        return self._finish_execute(
+            items,
+            results,
+            request_id=request_id,
+        )
+
+    @staticmethod
+    def _failed_result(item: SessionCleanupItem, error: str = "") -> dict[str, object]:
+        return {
+            "id": item.id,
+            "title": item.title,
+            "state": "failed",
+            "descendantCount": item.descendant_count,
+            "actualBytes": 0,
+            "error": error,
+        }
+
+    def _finish_execute(
+        self,
+        items: Sequence[SessionCleanupItem],
+        results: Sequence[Mapping[str, object]],
+        *,
+        request_id: str,
+        interrupted: bool = False,
+    ) -> dict[str, object]:
+        deleted = sum(row.get("state") == "deleted" for row in results)
         state = "completed" if deleted == len(results) else (
             "partial" if deleted else "failed"
         )
@@ -530,6 +575,7 @@ class SessionCleanupManager:
             deletedCount=deleted,
             failedCount=len(results) - deleted,
             actualBytes=sum(int(row["actualBytes"]) for row in results),
+            interrupted=interrupted,
         )
 
     def _selected_items(
@@ -801,48 +847,214 @@ class SessionCleanupManager:
     def _session_index_ids(self, *, strict: bool = False) -> set[str]:
         return self._session_index_metadata(strict=strict)[1]
 
-    def _revalidate(self, item: SessionCleanupItem) -> None:
-        if not self.probe_capability().available:
-            raise SessionCleanupError("Codex permanent-delete capability is unavailable.")
+    def _delete_local_batch(self, items: Sequence[SessionCleanupItem]) -> None:
+        session_ids = tuple(
+            dict.fromkeys(
+                session_id
+                for item in items
+                for session_id in (item._session_id, *item._descendant_ids)
+            )
+        )
+        rollout_paths = tuple(
+            dict.fromkeys(path for item in items for path in item._rollout_paths)
+        )
+        if not session_ids or not rollout_paths:
+            raise SessionCleanupError("Session deletion target is incomplete.")
+        retained_index_lines: list[str] | None = None
+        if self.session_index_path.is_file():
+            try:
+                retained_index_lines = []
+                with self.session_index_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            retained_index_lines.append(line)
+                            continue
+                        payload = json.loads(line)
+                        if not isinstance(payload, Mapping):
+                            raise SessionCleanupError(
+                                "Codex session index could not be verified."
+                            )
+                        if _canonical_uuid(payload.get("id")) not in session_ids:
+                            retained_index_lines.append(line)
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise SessionCleanupError(
+                    "Codex session index could not be verified."
+                ) from exc
+        staging_parent = self.sessions_root.parent / ".hud-session-delete-staging"
+        staging = staging_parent / secrets.token_hex(12)
+        moved: list[tuple[Path, Path]] = []
+        staged_index: Path | None = None
+        database_committed = False
+        try:
+            staging.mkdir(parents=True, exist_ok=False)
+            for index, path in enumerate(rollout_paths, start=1):
+                staged_path = staging / f"{index:04d}-{path.name}"
+                os.replace(path, staged_path)
+                moved.append((path, staged_path))
+            if retained_index_lines is not None:
+                staged_index = staging / "session_index.jsonl"
+                os.replace(self.session_index_path, staged_index)
+                self.session_index_path.write_text(
+                    "".join(retained_index_lines),
+                    encoding="utf-8",
+                )
+            with closing(_read_write_connection(self.state_db_path)) as connection:
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                columns = {
+                    table: {
+                        str(row[1])
+                        for row in connection.execute(
+                            f'PRAGMA table_info("{table.replace(chr(34), chr(34) * 2)}")'
+                        )
+                    }
+                    for table in tables
+                }
+                placeholders = ",".join("?" for _ in session_ids)
+                with connection:
+                    for table, column in (
+                        ("thread_dynamic_tools", "thread_id"),
+                        ("thread_goals", "thread_id"),
+                        ("stage1_outputs", "thread_id"),
+                    ):
+                        if table in tables and column in columns[table]:
+                            connection.execute(
+                                f"DELETE FROM {table} WHERE {column} IN ({placeholders})",
+                                session_ids,
+                            )
+                    if (
+                        "thread_spawn_edges" in tables
+                        and {"parent_thread_id", "child_thread_id"}
+                        <= columns["thread_spawn_edges"]
+                    ):
+                        connection.execute(
+                            "DELETE FROM thread_spawn_edges "
+                            f"WHERE parent_thread_id IN ({placeholders}) "
+                            f"OR child_thread_id IN ({placeholders})",
+                            (*session_ids, *session_ids),
+                        )
+                    if (
+                        "agent_job_items" in tables
+                        and "assigned_thread_id" in columns["agent_job_items"]
+                    ):
+                        connection.execute(
+                            "UPDATE agent_job_items SET assigned_thread_id = NULL "
+                            f"WHERE assigned_thread_id IN ({placeholders})",
+                            session_ids,
+                        )
+                    connection.execute(
+                        f"DELETE FROM threads WHERE id IN ({placeholders})",
+                        session_ids,
+                    )
+            database_committed = True
+            shutil.rmtree(staging)
+            try:
+                staging_parent.rmdir()
+            except OSError:
+                pass
+        except (OSError, sqlite3.Error) as exc:
+            if not database_committed:
+                if staged_index is not None:
+                    try:
+                        self.session_index_path.unlink(missing_ok=True)
+                        if staged_index.exists():
+                            os.replace(staged_index, self.session_index_path)
+                    except OSError:
+                        pass
+                for original_path, staged_path in reversed(moved):
+                    try:
+                        if staged_path.exists() and not original_path.exists():
+                            os.replace(staged_path, original_path)
+                    except OSError:
+                        pass
+                try:
+                    staging.rmdir()
+                    staging_parent.rmdir()
+                except OSError:
+                    pass
+            detail = (
+                "Local session database was deleted but staged rollout cleanup failed."
+                if database_committed
+                else "Local session deletion transaction failed."
+            )
+            raise SessionCleanupError(detail) from exc
+
+    def _revalidate_batch(
+        self,
+        items: Sequence[SessionCleanupItem],
+        *,
+        capability: SessionDeleteCapability,
+    ) -> None:
+        if not capability.available:
+            raise SessionCleanupError(
+                capability.reason or "Codex local session store is unavailable."
+            )
         records, parents, edge_states, unsafe_ids, _unresolved = self._load_state()
         current_ids = self._protected_ids(self.current_session_ids)
         active_ids = self._protected_ids(self.active_session_ids)
-        family = (item._session_id, *item._descendant_ids)
-        if any(session_id not in records for session_id in family):
-            raise SessionCleanupError("Session state changed after scanning.")
-        if set(family) & current_ids:
-            raise SessionCleanupError("The current session cannot be deleted.")
-        if set(family) & active_ids or any(
-            edge_states.get(session_id, "").casefold() in _ACTIVE_EDGE_STATES
-            for session_id in item._descendant_ids
-        ):
-            raise SessionCleanupError("The session tree still has active work.")
         roots, unsafe_roots, _graph_unresolved = self._root_ids(
             records,
             parents,
             unsafe_ids,
         )
-        if item._session_id not in roots or item._session_id in unsafe_roots:
-            raise SessionCleanupError("The session spawn relation changed after scanning.")
-        current_descendants = tuple(self._descendants(item._session_id, records, parents))
-        if current_descendants != item._descendant_ids:
-            raise SessionCleanupError("Session spawn tree changed after scanning.")
-        current_paths = tuple(
-            records[session_id].rollout_path
-            for session_id in family
-            if records[session_id].rollout_path is not None
-        )
-        if current_paths != item._rollout_paths:
-            raise SessionCleanupError("Session rollout mapping changed after scanning.")
         allowed_roots = self._allowed_rollout_roots()
-        if any(
-            not _path_under(path, allowed_roots) or not path.is_file()
-            for path in current_paths
-        ):
-            raise SessionCleanupError("Session rollout mapping is no longer valid.")
+        for item in items:
+            family = (item._session_id, *item._descendant_ids)
+            if any(session_id not in records for session_id in family):
+                raise SessionCleanupError("Session state changed after scanning.")
+            if set(family) & current_ids:
+                raise SessionCleanupError("The current session cannot be deleted.")
+            if set(family) & active_ids or any(
+                edge_states.get(session_id, "").casefold() in _ACTIVE_EDGE_STATES
+                for session_id in item._descendant_ids
+            ):
+                raise SessionCleanupError("The session tree still has active work.")
+            if item._session_id not in roots or item._session_id in unsafe_roots:
+                raise SessionCleanupError(
+                    "The session spawn relation changed after scanning."
+                )
+            current_descendants = tuple(self._descendants(item._session_id, records, parents))
+            if current_descendants != item._descendant_ids:
+                raise SessionCleanupError("Session spawn tree changed after scanning.")
+            current_paths = tuple(
+                records[session_id].rollout_path
+                for session_id in family
+                if records[session_id].rollout_path is not None
+            )
+            if current_paths != item._rollout_paths:
+                raise SessionCleanupError(
+                    "Session rollout mapping changed after scanning."
+                )
+            if any(
+                not _path_under(path, allowed_roots) or not path.is_file()
+                for path in current_paths
+            ):
+                raise SessionCleanupError("Session rollout mapping is no longer valid.")
 
-    def _verify_deleted(self, item: SessionCleanupItem) -> None:
-        family = {item._session_id, *item._descendant_ids}
+    def _revalidate_pending_activity(
+        self,
+        items: Sequence[SessionCleanupItem],
+    ) -> None:
+        current_ids = self._protected_ids(self.current_session_ids)
+        active_ids = self._protected_ids(self.active_session_ids)
+        for item in items:
+            family = {item._session_id, *item._descendant_ids}
+            if family & current_ids:
+                raise SessionCleanupError("The current session cannot be deleted.")
+            if family & active_ids:
+                raise SessionCleanupError("The session tree still has active work.")
+
+    def _verify_deleted_batch(self, items: Sequence[SessionCleanupItem]) -> None:
+        family = {
+            session_id
+            for item in items
+            for session_id in (item._session_id, *item._descendant_ids)
+        }
+        rollout_paths = [path for item in items for path in item._rollout_paths]
         try:
             records, _parents, _states, _unsafe_ids, _unresolved = self._load_state()
         except SessionCleanupError as exc:
@@ -853,7 +1065,7 @@ class SessionCleanupManager:
             raise
         if family & set(records):
             raise SessionCleanupError("Codex state still contains the deleted session.")
-        if any(path.exists() for path in item._rollout_paths):
+        if any(path.exists() for path in rollout_paths):
             raise SessionCleanupError("A deleted session rollout still exists.")
         remaining_index_ids = self._session_index_ids(strict=True)
         if family & remaining_index_ids:

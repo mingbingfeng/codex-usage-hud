@@ -151,7 +151,7 @@ from .updater import (
 
 DEFAULT_POLL_MS = 500
 WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS = 5.0
-WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS = 0.7
+WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS = 3.0
 WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS = 0.8
 WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS = 0.8
 WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS = 0.08
@@ -4181,8 +4181,12 @@ def _build_session_switch_controller(
     platform: BasePlatform,
     *,
     prefer_native_search: bool,
+    cdp_port: int | None = None,
 ) -> SessionSwitchController:
-    cdp = CdpSessionSwitchBackend(timeout_seconds=WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS)
+    cdp = CdpSessionSwitchBackend(
+        timeout_seconds=WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS,
+        port=cdp_port,
+    )
     native_setting = os.environ.get(NATIVE_SEARCH_SESSION_SWITCH_ENV, "").strip().lower()
     native_enabled = native_setting not in {"0", "false", "no", "off"}
     backends: list[object] = [cdp]
@@ -8122,7 +8126,6 @@ def _build_session_cleanup_manager(context: object) -> SessionCleanupManager:
         usage_snapshot_discard=lambda receipt: _discard_session_cleanup_usage(
             context, receipt
         ),
-        environment=os.environ,
     )
 
 
@@ -9196,7 +9199,7 @@ def _handle_renderer_session_cleanup_command(
     labels = {
         "sessionCleanupScan": "会话清单扫描已开始。",
         "sessionCleanupPreview": "正在生成永久删除确认。",
-        "sessionCleanupExecute": "永久删除请求已进入官方 Codex 命令门禁。",
+        "sessionCleanupExecute": "永久删除请求已进入本地事务门禁。",
         "sessionCleanupCancel": "已取消会话删除确认。",
     }
     status = _renderer_settings_status(labels.get(action, "会话清理命令已提交。"))
@@ -11329,6 +11332,7 @@ def run_renderer_hud_session(
                 session_controller = _build_session_switch_controller(
                     getattr(context, "platform", get_current_platform()),
                     prefer_native_search=False,
+                    cdp_port=getattr(client, "port", None),
                 )
 
                 def handle_rest_reminder_overlay_command(

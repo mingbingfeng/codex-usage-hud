@@ -285,6 +285,13 @@ class CdpProbeTests(unittest.TestCase):
         self.assertIn("data-app-action-sidebar-project-collapsed", script)
         self.assertIn("展开显示", script)
         self.assertIn("attempt < 12", script)
+        self.assertIn("if (idMatch) return idMatch;", script)
+        self.assertIn(
+            "|| (targetTitle && titleMatches(active.title, targetTitle))",
+            script,
+        )
+        self.assertIn('"active-title-fallback"', script)
+        self.assertIn('"title-fallback"', script)
         self.assertIn('status: activeMatchesTarget(active) ? "switched"', script)
         self.assertIn("return activateTarget();", script)
         self.assertIn('status: sidebarRevealRequested', script)

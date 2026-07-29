@@ -196,6 +196,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _energy_ring_rect_for_completed_rect,
     _find_item_rect,
     _find_item_position,
+    _allow_foreground_process,
     _interactive_hotspot_opacity,
     _item_is_background_usage,
     _item_is_completed,
@@ -2989,8 +2990,8 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertEqual(circle_rect, (410.0, 424.0, 110.0, 110.0))
 
-    def test_legacy_qt_transition_animations_stay_disabled(self) -> None:
-        self.assertFalse(WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED)
+    def test_legacy_qt_transition_animations_stay_enabled(self) -> None:
+        self.assertTrue(WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED)
 
     def test_work_overlay_card_yield_clears_circle_path(self) -> None:
         card_rect = (90.0, 306.0, 430.0, 110.0)
@@ -3087,7 +3088,25 @@ class BudgetHelperTests(unittest.TestCase):
 
     def test_clickable_hotspot_overrides_low_bubble_hover_opacity(self) -> None:
         self.assertEqual(_interactive_hotspot_opacity(0.22, False), 0.22)
+        self.assertEqual(
+            _interactive_hotspot_opacity(
+                0.22,
+                False,
+                invisible_hit_surface=True,
+            ),
+            1.0,
+        )
         self.assertEqual(_interactive_hotspot_opacity(0.22, True), 0.96)
+
+    def test_work_overlay_click_can_grant_daemon_foreground_permission(self) -> None:
+        allow = MagicMock(return_value=1)
+        user32 = SimpleNamespace(AllowSetForegroundWindow=allow)
+
+        with patch("codex_usage_hud.ui.work_overlay_qt.sys.platform", "win32"):
+            granted = _allow_foreground_process(2468, user32=user32)
+
+        self.assertTrue(granted)
+        allow.assert_called_once_with(2468)
 
     def test_completed_app_workdir_creates_an_invisible_click_hotspot(self) -> None:
         completed_item = {
@@ -3104,7 +3123,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertFalse(_workdir_external_link_for_item(cli_item))
         self.assertEqual(
             _workdir_link_opacity_for_item(completed_item, 0.22, True),
-            0.22,
+            1.0,
         )
         self.assertEqual(
             _workdir_link_opacity_for_item(active_item, 0.22, True),
@@ -4332,6 +4351,147 @@ class BudgetHelperTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    def test_work_overlay_completed_check_hotspot_dismisses_after_transition(self) -> None:
+        try:
+            import PySide6  # noqa: F401
+        except Exception as exc:
+            self.skipTest(f"PySide6 unavailable: {exc}")
+
+        script = r'''
+import json
+import os
+import tempfile
+import time
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import QPoint, QTimer, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+from codex_usage_hud.ui.work_overlay_qt import run_work_overlay_helper_qt
+
+with tempfile.TemporaryDirectory() as temp_dir:
+    root = Path(temp_dir)
+    state_path = root / f"work-overlay-{os.getpid()}-completed.json"
+    state = {
+        "ownerPid": os.getpid(),
+        "itemLimit": 2,
+        "items": [{
+            "id": "completed-thread",
+            "sessionId": "completed-thread",
+            "title": "Completed thread",
+            "status": "running",
+            "statusText": "正在执行",
+            "workdir": str(root),
+            "workdirName": root.name,
+            "clientKind": "app",
+            "updatedAt": datetime.now().astimezone().isoformat(),
+        }, {
+            "id": "other-thread",
+            "sessionId": "other-thread",
+            "title": "Other running thread",
+            "status": "running",
+            "statusText": "正在执行",
+            "workdir": str(root),
+            "workdirName": root.name,
+            "clientKind": "app",
+            "updatedAt": datetime.now().astimezone().isoformat(),
+        }],
+        "updatedAt": time.time(),
+        "close": False,
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    app = QApplication(["overlay-completed-dismiss-test"])
+    observed = {
+        "hotspot": False,
+        "dismissed": False,
+        "workdirsBefore": 0,
+        "workdirsAfter": 0,
+    }
+
+    def inspect_active_workdirs():
+        observed["workdirsBefore"] = sum(
+            type(widget).__name__ == "WorkdirLinkWindow" and widget.isVisible()
+            for widget in app.topLevelWidgets()
+        )
+
+    def complete_item():
+        state["items"][0]["status"] = "recent"
+        state["items"][0]["statusText"] = "已完成"
+        state["updatedAt"] = time.time()
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    def click_completed_check():
+        hotspot = next((
+            widget for widget in app.topLevelWidgets()
+            if type(widget).__name__ == "ClickHotspotWindow"
+            and widget.isVisible()
+            and widget.toolTip() == "关闭气泡"
+        ), None)
+        if hotspot is None:
+            return
+        observed["hotspot"] = True
+        QTest.mouseClick(
+            hotspot,
+            Qt.MouseButton.LeftButton,
+            pos=QPoint(max(1, hotspot.width() // 2), max(1, hotspot.height() // 2)),
+        )
+
+    def inspect_dismissal():
+        observed["dismissed"] = not any(
+            type(widget).__name__ == "ClickHotspotWindow"
+            and widget.isVisible()
+            and widget.toolTip() == "关闭气泡"
+            for widget in app.topLevelWidgets()
+        )
+        observed["workdirsAfter"] = sum(
+            type(widget).__name__ == "WorkdirLinkWindow" and widget.isVisible()
+            for widget in app.topLevelWidgets()
+        )
+        state["close"] = True
+        state["updatedAt"] = time.time()
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    QTimer.singleShot(150, inspect_active_workdirs)
+    QTimer.singleShot(250, complete_item)
+    QTimer.singleShot(1450, click_completed_check)
+    QTimer.singleShot(2900, inspect_dismissal)
+    QTimer.singleShot(3600, app.quit)
+    exit_code = run_work_overlay_helper_qt(
+        state_path,
+        process_exists=lambda pid: pid == os.getpid(),
+        owner_pid_from_path=lambda _path: os.getpid(),
+        item_limit=2,
+        stale_seconds=20.0,
+        overlay_alpha=0.88,
+        hover_alpha=0.22,
+        header_title_limit=28,
+    )
+    if (
+        exit_code != 0
+        or not observed["hotspot"]
+        or not observed["dismissed"]
+        or observed["workdirsBefore"] != 2
+        or observed["workdirsAfter"] != 1
+    ):
+        raise SystemExit(json.dumps({"exitCode": exit_code, **observed}))
+'''
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            filter(None, (str(SRC_ROOT), environment.get("PYTHONPATH", "")))
+        )
+        environment["QT_QPA_PLATFORM"] = "offscreen"
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_desktop_work_overlay_appends_transition_audit_log(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4882,8 +5042,9 @@ class BudgetHelperTests(unittest.TestCase):
         class FakeCdpBackend:
             name = "cdp"
 
-            def __init__(self, *, timeout_seconds: float) -> None:
+            def __init__(self, *, timeout_seconds: float, port: int | None = None) -> None:
                 self.timeout_seconds = timeout_seconds
+                self.port = port
 
         class FakeNativeBackend:
             name = "windows-search"
@@ -4898,11 +5059,13 @@ class BudgetHelperTests(unittest.TestCase):
             controller = _build_session_switch_controller(
                 SimpleNamespace(),
                 prefer_native_search=False,
+                cdp_port=59727,
             )
             self.assertEqual(
                 [backend.name for backend in controller._backends],
                 ["cdp", "windows-search"],
             )
+            self.assertEqual(controller._backends[0].port, 59727)
 
             native_first = _build_session_switch_controller(
                 SimpleNamespace(),
@@ -13148,6 +13311,19 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(status["sessionCleanupRequestId"], "session-cleanup-1")
         self.assertIn("扫描", status["message"])
         worker.enqueue.assert_called_once_with(command)
+
+    def test_session_cleanup_manager_uses_local_store_without_cli_lookup(self) -> None:
+        context = SimpleNamespace(
+            state_db_path=Path("state_5.sqlite"),
+            sessions_root=Path("sessions"),
+            session_index_path=Path("session_index.jsonl"),
+            cleanup_current_session_id="",
+            cleanup_active_session_ids=set(),
+        )
+        manager = cli_module._build_session_cleanup_manager(context)
+
+        self.assertEqual(manager.state_db_path, Path("state_5.sqlite"))
+        self.assertEqual(manager.sessions_root, Path("sessions"))
 
     def test_renderer_settings_command_merges_partial_save_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
