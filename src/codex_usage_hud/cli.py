@@ -229,6 +229,7 @@ LOADING_FEEDBACK_STALE_SECONDS = 20.0
 ACTIVE_WORK_ITEM_LIMIT = DEFAULT_WORK_OVERLAY_MAX_ITEMS
 ACTIVE_WORK_CANDIDATE_LIMIT = 16
 ACTIVE_WORK_STALE_SECONDS = 4 * 60 * 60
+ACTIVE_WORK_MODEL_STARTUP_STALE_SECONDS = 90.0
 FINAL_ANSWER_COMPLETION_GRACE_SECONDS = 1.0
 VISIBLE_APP_ERROR_HOLD_SECONDS = 60.0
 WORK_OVERLAY_STALE_SECONDS = 20.0
@@ -3687,10 +3688,14 @@ def _renderer_should_refresh_active_work_items(
 ) -> bool:
     if latest_snapshot is None or active_work_refresh_pending:
         return True
-    if "session" in file_change_reasons or (
-        "sessions-root" in file_change_reasons
-        and _paths_only_current_session(file_change_paths, latest_snapshot.session_path)
+    if "session" in file_change_reasons:
+        return True
+    if "sessions-root" in file_change_reasons and any(
+        path.suffix.lower() == ".jsonl" for path in file_change_paths
     ):
+        # A background CLI session is only covered by the recursive tree watch.
+        # Its terminal event must rebuild the bubble list, not wait for another
+        # renderer/session event to make the completion badge visible.
         return True
     return (
         now_monotonic - latest_active_work_refresh_at
@@ -6744,6 +6749,34 @@ def _work_status_from_snapshot(
     return None
 
 
+def _work_item_model_startup_timed_out(
+    snapshot: ParsedSession,
+    *,
+    now: datetime,
+) -> bool:
+    """Whether a CLI task never progressed past its initial user message."""
+    if (
+        snapshot.task_completed_at is not None
+        or snapshot.task_aborted_at is not None
+        or snapshot.final_answer_at is not None
+        or snapshot.request.status != "running"
+        or snapshot.activity.kind != "user"
+        or snapshot.last_output.kind != "idle"
+    ):
+        return False
+    updated_at = (
+        snapshot.request.updated_at
+        or snapshot.activity.timestamp
+        or snapshot.last_event_time
+        or snapshot.refreshed_at
+    )
+    return bool(
+        updated_at is not None
+        and _datetime_age_seconds(updated_at, now)
+        > ACTIVE_WORK_MODEL_STARTUP_STALE_SECONDS
+    )
+
+
 def _work_item_from_snapshot(
     snapshot: ParsedSession,
     *,
@@ -6757,6 +6790,11 @@ def _work_item_from_snapshot(
     if status is None:
         return None
     status_value, status_label, pending_accounting = status
+    if _work_item_model_startup_timed_out(snapshot, now=current_time):
+        # A task_started/user_message pair can be left behind when a CLI resume
+        # exits before model work begins. It has no terminal event, but must not
+        # keep an active bubble (and its live elapsed clock) for four hours.
+        return None
 
     updated_at = (
         snapshot.request.updated_at
@@ -7407,6 +7445,7 @@ def active_work_items_for_snapshot(
     visible_item_cache = _work_overlay_visible_item_cache(context)
     terminal_item_tasks = _work_overlay_terminal_item_tasks(context)
     terminal_item_ids: dict[str, str] = {}
+    expired_startup_item_ids: set[str] = set()
     current_key = _session_path_key(session_path)
     # Internal collaboration agents stay folded into their parent. Desktop can
     # promote a delegation to an independent visible thread; those do bubble.
@@ -7424,6 +7463,8 @@ def active_work_items_for_snapshot(
             terminal_item_ids[str(snapshot.session_id)] = _iso_or_empty(
                 snapshot.task_started_at
             )
+        elif _work_item_model_startup_timed_out(snapshot, now=now) and snapshot.session_id:
+            expired_startup_item_ids.add(str(snapshot.session_id))
 
     for path in _recent_session_files(
         context.sessions_root,
@@ -7457,12 +7498,17 @@ def active_work_items_for_snapshot(
             terminal_item_ids[str(parsed.session_id)] = _iso_or_empty(
                 parsed.task_started_at
             )
+        elif _work_item_model_startup_timed_out(parsed, now=now) and parsed.session_id:
+            expired_startup_item_ids.add(str(parsed.session_id))
 
     terminal_item_tasks.update(terminal_item_ids)
     for item_id in terminal_item_ids:
         visible_item_cache.pop(item_id, None)
     for item_id, cached_item in list(visible_item_cache.items()):
         if item_id in items:
+            continue
+        if item_id in expired_startup_item_ids:
+            visible_item_cache.pop(item_id, None)
             continue
         if bool(getattr(cached_item, "is_subagent", False)):
             visible_item_cache.pop(item_id, None)
@@ -7633,7 +7679,7 @@ def _execute_safe_cleanup_command(
 
     # Publish a prepare phase before the potentially slow activity gate so the UI
     # never sits on a blank "正在更新" state after the user confirms cleanup.
-    manager.mark_operation(
+    running_snapshot = manager.mark_operation(
         request_id=request_id,
         action="execute",
         state="running",
@@ -7657,7 +7703,7 @@ def _execute_safe_cleanup_command(
     )
     publish = getattr(getattr(context, "safe_cleanup_worker", None), "_publish", None)
     if callable(publish):
-        publish(manager.snapshot())
+        publish(running_snapshot)
 
     # Active tasks only block offline / Codex-close cleanup. Default safe path
     # deletes (regenerable caches) must still run while Codex is working.
@@ -7698,71 +7744,8 @@ def _execute_safe_cleanup_command(
         restart_command=list(restart_command),
     )
     if not requires_offline:
-        selected_ids = list(item_ids)
-        estimated_bytes = sum(action.estimated_bytes for action in plan.actions)
-        manager.mark_operation(
-            id=plan.id,
-            request_id=request_id,
-            action="execute",
-            state="running",
-            progress=10,
-            selectedIds=selected_ids,
-            estimatedBytes=estimated_bytes,
-            phase="prepare",
-            phaseLabel="prepare",
-            phaseIndex=1,
-            phaseCount=max(1, len(plan.actions)),
-            results=[
-                {
-                    "id": action.item_id,
-                    "category": action.category,
-                    "state": "selected",
-                    "estimatedBytes": int(action.estimated_bytes),
-                    "actualBytes": 0,
-                    "deletedRows": 0,
-                    "error": "",
-                }
-                for action in plan.actions
-            ],
-        )
-        # Surface the accepted/running state before the first heavy action.
-        publish = getattr(getattr(context, "safe_cleanup_worker", None), "_publish", None)
-        if callable(publish):
-            publish(manager.snapshot())
-
-        def _on_execute_progress(event: Mapping[str, object]) -> None:
-            rows = event.get("results")
-            index = int(event.get("index") or 0)
-            total = max(1, int(event.get("total") or 1))
-            item_id = str(event.get("itemId") or "")
-            stage = str(event.get("stage") or "")
-            phase_label = (
-                f"execute: item {index}/{total}"
-                if stage == "start"
-                else f"execute: done {index}/{total}"
-            )
-            manager.mark_operation(
-                id=plan.id,
-                request_id=request_id,
-                action="execute",
-                state="running",
-                progress=int(event.get("progress") or 25),
-                selectedIds=selected_ids,
-                estimatedBytes=int(event.get("estimatedBytes") or estimated_bytes),
-                actualBytes=int(event.get("actualBytes") or 0),
-                phase="execute",
-                phaseLabel=phase_label,
-                phaseIndex=max(1, index),
-                phaseCount=total,
-                currentItemId=item_id,
-                results=list(rows) if isinstance(rows, list) else [],
-            )
-            if callable(publish):
-                publish(manager.snapshot())
-
         result = run_maintenance_plan(
             plan,
-            progress_callback=_on_execute_progress,
             should_cancel=lambda: bool(
                 getattr(manager, "is_cancel_requested", lambda: False)()
             ),

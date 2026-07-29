@@ -75,6 +75,7 @@ WORK_OVERLAY_EMPTY_GRACE_SECONDS = 0.8
 WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS = 1.2
 WORK_OVERLAY_STATE_READ_RETRY_MS = 80
 WORK_OVERLAY_HELPER_HEARTBEAT_MS = 5_000
+WORK_OVERLAY_ELAPSED_TEXT_TIMER_MS = 1_000
 DEFAULT_WORK_OVERLAY_THEME: dict[str, str] = {
     "surface": "#10161D",
     "panelSurface": "#141B24",
@@ -1305,6 +1306,44 @@ def _work_overlay_header_text(
     title_text = _compact_work_text(title, title_limit)
     parts = [part for part in (start_text, elapsed_text.strip(), title_text) if part]
     return " | ".join(parts) if parts else "Codex 工作"
+
+
+def _work_overlay_live_elapsed_text(
+    item: Mapping[str, object],
+    *,
+    now: datetime | None = None,
+) -> str | None:
+    """Return local elapsed copy for an active session card, never terminal items."""
+    status = str(item.get("status") or "").strip().lower()
+    if (
+        status not in {"running", "active", "tool"}
+        or _item_is_completed(item)
+        or _item_is_background_usage(item)
+        or _item_is_rest_reminder(item)
+        or _item_is_system_action(item)
+    ):
+        return None
+    started_at = parse_timestamp(
+        str(item.get("taskStartedAt") or item.get("startedAt") or "").strip()
+    )
+    if started_at is None:
+        return None
+    current = now or datetime.now().astimezone()
+    if started_at.tzinfo is None:
+        current = current.replace(tzinfo=None)
+    else:
+        current = current.astimezone(started_at.tzinfo)
+    seconds = max(0, int((current - started_at).total_seconds()))
+    if seconds < 60:
+        elapsed = f"{seconds}s"
+    else:
+        minutes, seconds = divmod(seconds, 60)
+        if minutes < 60:
+            elapsed = f"{minutes}m{seconds:02d}s"
+        else:
+            hours, minutes = divmod(minutes, 60)
+            elapsed = f"{hours}h{minutes:02d}m{seconds:02d}s"
+    return f"已处理 {elapsed}"
 
 
 def _item_dismiss_key(item: Mapping[str, object]) -> str:
@@ -3335,6 +3374,9 @@ def run_work_overlay_helper_qt(
             self._rest_countdown_timer = QTimer(self)
             self._rest_countdown_timer.setInterval(1000)
             self._rest_countdown_timer.timeout.connect(self._tick_rest_reminder)
+            self._elapsed_text_timer = QTimer(self)
+            self._elapsed_text_timer.setInterval(WORK_OVERLAY_ELAPSED_TEXT_TIMER_MS)
+            self._elapsed_text_timer.timeout.connect(self._refresh_live_elapsed_text)
             self.setAttribute(widget_attrs.WA_TranslucentBackground, True)
             self.setAttribute(widget_attrs.WA_ShowWithoutActivating, True)
             self.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -3853,6 +3895,38 @@ def run_work_overlay_helper_qt(
             for child in list(self._shell.findChildren(QWidget)):
                 if child.parent() is self._shell:
                     child.deleteLater()
+
+        def _sync_live_elapsed_timer(
+            self,
+            items: Sequence[Mapping[str, object]],
+        ) -> None:
+            if any(_work_overlay_live_elapsed_text(item) is not None for item in items):
+                if not self._elapsed_text_timer.isActive():
+                    self._elapsed_text_timer.start()
+                return
+            self._elapsed_text_timer.stop()
+
+        def _refresh_live_elapsed_text(self) -> None:
+            for record in self._item_widgets:
+                if record.get("kind") != "card":
+                    continue
+                item = record.get("item")
+                if not isinstance(item, Mapping):
+                    continue
+                elapsed_text = _work_overlay_live_elapsed_text(item)
+                if elapsed_text is None or elapsed_text == str(item.get("elapsedText") or ""):
+                    continue
+                record["item"] = {**item, "elapsedText": elapsed_text}
+                header = record.get("header")
+                if isinstance(header, QLabel):
+                    header.setText(
+                        _work_overlay_header_text(
+                            str(item.get("startedAt") or ""),
+                            elapsed_text,
+                            str(item.get("title") or "Codex 工作"),
+                            title_limit=header_title_limit,
+                        )
+                    )
 
         def _build_item_widget(self, item: Mapping[str, object]) -> None:
             self._build_item_card(item)
@@ -5519,6 +5593,7 @@ def run_work_overlay_helper_qt(
                 self._rest_countdown_timer.stop()
             if self._transition_in_progress:
                 self._raw_items = list(items)
+                self._sync_live_elapsed_timer(self._raw_items)
                 return
             self._raw_items = list(items)
             ordered_items = _ordered_overlay_items(self._raw_items)
@@ -5544,6 +5619,7 @@ def run_work_overlay_helper_qt(
                         *[item for item in visible_items if not _item_is_rest_reminder(item)],
                     ]
             self._sync_switch_pending(visible_items)
+            self._sync_live_elapsed_timer(visible_items)
             if not visible_items:
                 if self.isVisible():
                     now = time.time()

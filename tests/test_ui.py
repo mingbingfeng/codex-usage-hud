@@ -231,6 +231,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _workdir_clickable_for_item,
     _workdir_link_pending_for_item,
     _work_overlay_header_text,
+    _work_overlay_live_elapsed_text,
     _workdir_display_name,
     run_work_overlay_helper_qt,
 )
@@ -5314,6 +5315,22 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         self.assertTrue(refresh)
 
+    def test_renderer_refreshes_active_work_items_for_background_cli_file_change(self) -> None:
+        current_path = Path("session-current.jsonl")
+        background_cli_path = Path("session-cli-background.jsonl")
+        snapshot = ParsedSession(session_path=current_path)
+
+        refresh = _renderer_should_refresh_active_work_items(
+            latest_snapshot=snapshot,
+            latest_active_work_refresh_at=100.0,
+            now_monotonic=101.0,
+            active_work_refresh_pending=False,
+            file_change_reasons={"sessions-root"},
+            file_change_paths={background_cli_path},
+        )
+
+        self.assertTrue(refresh)
+
     def test_renderer_rejects_snapshot_from_stale_selection_sequence(self) -> None:
         snapshot = ParsedSession(selection_seq=4)
 
@@ -5591,6 +5608,104 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self.assertEqual(items[0].status_text, "已完成")
         self.assertTrue(items[0].pending_accounting)
         self.assertTrue(work_item_to_overlay_dict(items[0])["pendingAccounting"])
+
+    def test_work_overlay_drops_unstarted_cli_task_after_model_start_timeout(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def row(offset: int, row_type: str, payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "timestamp": (now + timedelta(seconds=offset)).isoformat(),
+                "type": row_type,
+                "payload": payload,
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-unstarted.jsonl"
+            rows = [
+                row(-94, "session_meta", {"id": "session-unstarted"}),
+                row(-93, "event_msg", {"type": "task_started"}),
+                row(
+                    -92,
+                    "event_msg",
+                    {"type": "user_message", "message": "未开始的任务"},
+                ),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in rows),
+                encoding="utf-8",
+            )
+            snapshot = parser.parse_file(path)
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+
+            items = active_work_items_for_snapshot(context, snapshot, path)
+
+        self.assertEqual(items, [])
+
+    def test_work_overlay_evicts_cached_unstarted_cli_task_after_timeout(self) -> None:
+        parser = JsonlSessionParser()
+        now = datetime.now().astimezone()
+
+        def row(offset: int, row_type: str, payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "timestamp": (now + timedelta(seconds=offset)).isoformat(),
+                "type": row_type,
+                "payload": payload,
+            }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "session-unstarted.jsonl"
+            context = SimpleNamespace(
+                sessions_root=root,
+                parser=parser,
+                active_session_tracker=None,
+            )
+            recent_rows = [
+                row(-4, "session_meta", {"id": "session-unstarted"}),
+                row(-3, "event_msg", {"type": "task_started"}),
+                row(
+                    -2,
+                    "event_msg",
+                    {"type": "user_message", "message": "刚发出的任务"},
+                ),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in recent_rows),
+                encoding="utf-8",
+            )
+            recent_items = active_work_items_for_snapshot(
+                context,
+                parser.parse_file(path),
+                path,
+            )
+
+            stale_rows = [
+                row(-94, "session_meta", {"id": "session-unstarted"}),
+                row(-93, "event_msg", {"type": "task_started"}),
+                row(
+                    -92,
+                    "event_msg",
+                    {"type": "user_message", "message": "未开始的任务"},
+                ),
+            ]
+            path.write_text(
+                "\n".join(json.dumps(item, ensure_ascii=False) for item in stale_rows),
+                encoding="utf-8",
+            )
+            stale_items = active_work_items_for_snapshot(
+                context,
+                parser.parse_file(path),
+                path,
+            )
+
+        self.assertEqual(len(recent_items), 1)
+        self.assertEqual(stale_items, [])
 
     def test_work_overlay_user_steer_reopens_final_answer_without_task_started(self) -> None:
         parser = JsonlSessionParser()
@@ -6430,6 +6545,40 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         self.assertTrue(text.startswith("09:08:07 | 已处理 42s | "))
         self.assertIn("...", text)
+
+    def test_work_overlay_live_elapsed_text_ticks_only_while_active(self) -> None:
+        started_at = datetime(2026, 6, 15, 9, 8, 7).astimezone()
+        active_item = {
+            "status": "running",
+            "taskStartedAt": started_at.isoformat(),
+        }
+
+        self.assertEqual(
+            _work_overlay_live_elapsed_text(
+                active_item,
+                now=started_at + timedelta(minutes=1, seconds=2),
+            ),
+            "已处理 1m02s",
+        )
+        self.assertEqual(
+            _work_overlay_live_elapsed_text(
+                active_item,
+                now=started_at + timedelta(hours=1, minutes=25, seconds=14),
+            ),
+            "已处理 1h25m14s",
+        )
+        self.assertIsNone(
+            _work_overlay_live_elapsed_text(
+                {**active_item, "status": "recent"},
+                now=started_at + timedelta(minutes=1, seconds=3),
+            )
+        )
+        self.assertIsNone(
+            _work_overlay_live_elapsed_text(
+                {**active_item, "status": "waiting_user"},
+                now=started_at + timedelta(minutes=1, seconds=3),
+            )
+        )
 
     def test_work_overlay_multiline_elided_text_limits_body_to_three_lines(self) -> None:
         try:
@@ -12881,8 +13030,15 @@ class DaemonLifecycleTests(unittest.TestCase):
             "revision": "revision-1",
             "operation": {"state": "completed", "action": "execute"},
         }
-        manager.snapshot.return_value = {"revision": "revision-1", "operation": {}}
-        context = SimpleNamespace(safe_cleanup_worker=SimpleNamespace(_publish=MagicMock()))
+        running_snapshot = {
+            "revision": "revision-1",
+            "operation": {"state": "running", "action": "execute"},
+        }
+        manager.mark_operation.return_value = running_snapshot
+        publisher = MagicMock()
+        context = SimpleNamespace(
+            safe_cleanup_worker=SimpleNamespace(_publish=publisher)
+        )
         command = {
             "requestId": "cleanup-online-safe",
             "groupIds": ["cache-item"],
@@ -12907,6 +13063,9 @@ class DaemonLifecycleTests(unittest.TestCase):
         active_tasks.assert_not_called()
         manager.create_plan.assert_called_once()
         run_plan.assert_called_once()
+        self.assertNotIn("progress_callback", run_plan.call_args.kwargs)
+        manager.snapshot.assert_not_called()
+        publisher.assert_called_once_with(running_snapshot)
         manager.apply_maintenance_result.assert_called_once_with(
             result, request_id="cleanup-online-safe"
         )

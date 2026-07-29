@@ -478,10 +478,12 @@ class SafeCleanupInventoryTests(unittest.TestCase):
                 if group["category"] == "user_temp"
             ]
             actionable = [group for group in groups if group["tier"] == "safe"]
+            self.assertEqual(len(actionable), 1)
+            self.assertEqual(Path(str(actionable[0]["path"])), temp_root.resolve())
             self.assertEqual(
-                {Path(str(group["path"])) for group in actionable},
-                {old_file.resolve(), (temp_root / "old-tree").resolve()},
+                actionable[0]["bytes"], len(b"old-file") + len(b"old-subtree")
             )
+            self.assertEqual(actionable[0]["files"], 2)
             active = next(
                 group
                 for group in groups
@@ -499,16 +501,51 @@ class SafeCleanupInventoryTests(unittest.TestCase):
                 inventory["revision"],
                 preview["operation"]["confirmationToken"],
             )
+            self.assertEqual(len(plan.actions), 1)
+            self.assertTrue(plan.actions[0].contents_only)
             result = run_maintenance_plan(
                 plan,
                 clock=lambda: NOW,
                 pid_active=lambda _pid: False,
                 lock_probe=lambda _path: False,
             )
-            self.assertEqual([action.state for action in result.actions], ["deleted"] * 2)
+            self.assertEqual([action.state for action in result.actions], ["deleted"])
+            self.assertTrue(temp_root.exists())
             self.assertFalse(old_file.exists())
             self.assertFalse((temp_root / "old-tree").exists())
             self.assertTrue(fresh_file.exists())
+
+    def test_expired_descendant_scan_does_not_remeasure_discovered_candidates(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            temp_root = root / "temp"
+            old_tree = temp_root / "old-tree"
+            old_tree.mkdir(parents=True)
+            payload = old_tree / "payload.bin"
+            payload.write_bytes(b"old")
+            _set_mtime(payload, NOW - (2 * DAY))
+            manager = self.make_manager(
+                root / "missing-runtime",
+                cache_definitions=(
+                    CacheDefinition(
+                        key="temp",
+                        category="user_temp",
+                        path=temp_root,
+                        label="Expired user temporary data",
+                        impact="Applications may recreate temporary files.",
+                        mode="expired_descendants",
+                        min_age_seconds=DAY,
+                    ),
+                ),
+            )
+
+            with patch.object(safe_cleanup_module, "_measure_path") as measure:
+                inventory = manager.scan()
+
+            measure.assert_not_called()
+            self.assertEqual(len(inventory["defaultSelectedIds"]), 1)
 
     def test_expired_descendant_action_keeps_file_refreshed_after_planning(
         self,
@@ -519,8 +556,11 @@ class SafeCleanupInventoryTests(unittest.TestCase):
             old_tree = temp_root / "old-tree" / "nested"
             old_tree.mkdir(parents=True)
             payload = old_tree / "payload.bin"
+            old_sibling = old_tree / "old-sibling.bin"
             payload.write_bytes(b"old")
+            old_sibling.write_bytes(b"old-sibling")
             _set_mtime(payload, NOW - (2 * DAY))
+            _set_mtime(old_sibling, NOW - (2 * DAY))
             manager = self.make_manager(
                 root / "missing-runtime",
                 cache_definitions=(
@@ -545,23 +585,102 @@ class SafeCleanupInventoryTests(unittest.TestCase):
                 preview["operation"]["confirmationToken"],
             )
             self.assertGreater(plan.actions[0].cutoff, 0)
-            self.assertFalse(_should_skip_execute_fingerprint(plan.actions[0]))
+            self.assertTrue(_should_skip_execute_fingerprint(plan.actions[0]))
 
-            # The selected directory's own lstat can remain stable when a deep
-            # child changes. Execute must still re-audit the full tree and keep
-            # the refreshed file rather than using the cache lstat fast path.
+            # The final remover checks each file against the original cutoff.
+            # A refreshed child survives while old siblings are still reclaimed.
             payload.write_bytes(b"fresh")
             _set_mtime(payload, NOW)
+            fresh_after_plan = temp_root / "fresh-after-plan.bin"
+            fresh_after_plan.write_bytes(b"new")
+            _set_mtime(fresh_after_plan, NOW)
             result = run_maintenance_plan(
                 plan,
                 clock=lambda: NOW,
                 pid_active=lambda _pid: False,
                 lock_probe=lambda _path: False,
             )
-            self.assertEqual(result.actions[0].state, "skipped")
-            self.assertIn("fingerprint", result.actions[0].error or "")
+            self.assertEqual(result.actions[0].state, "deleted")
+            self.assertEqual(result.actions[0].actual_bytes, len(b"old-sibling"))
             self.assertTrue(payload.exists())
             self.assertEqual(payload.read_bytes(), b"fresh")
+            self.assertFalse(old_sibling.exists())
+            self.assertTrue(temp_root.exists())
+            self.assertTrue(fresh_after_plan.exists())
+
+    def test_regenerable_cache_plan_reuses_scan_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            cache.mkdir()
+            (cache / "entry").write_bytes(b"cache")
+            manager = self.make_manager(
+                root / "missing-runtime",
+                cache_definitions=(
+                    CacheDefinition(
+                        key="cache",
+                        category="developer_cache",
+                        path=cache,
+                        label="Developer cache",
+                        impact="Rebuilt later.",
+                    ),
+                ),
+            )
+            inventory = manager.scan()
+            item_id = inventory["defaultSelectedIds"][0]
+            preview = manager.preview([item_id], inventory["revision"])
+
+            with patch.object(safe_cleanup_module, "_measure_path") as measure:
+                plan = manager.create_plan(
+                    [item_id],
+                    inventory["revision"],
+                    preview["operation"]["confirmationToken"],
+                )
+
+            measure.assert_not_called()
+            self.assertEqual(len(plan.actions), 1)
+
+    def test_related_cache_plan_reads_process_inventory_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            caches = (root / "first", root / "second")
+            for cache in caches:
+                cache.mkdir()
+                (cache / "entry").write_bytes(b"cache")
+            calls = 0
+
+            def running_process_names() -> set[str]:
+                nonlocal calls
+                calls += 1
+                return set()
+
+            manager = self.make_manager(
+                root / "missing-runtime",
+                cache_definitions=tuple(
+                    CacheDefinition(
+                        key=f"cache-{index}",
+                        category="developer_cache",
+                        path=cache,
+                        label="Developer cache",
+                        impact="Rebuilt later.",
+                        related_processes=("code",),
+                    )
+                    for index, cache in enumerate(caches)
+                ),
+                running_process_names=running_process_names,
+            )
+            inventory = manager.scan()
+            selected = list(inventory["defaultSelectedIds"])
+            preview = manager.preview(selected, inventory["revision"])
+            calls = 0
+
+            manager.create_plan(
+                selected,
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+
+            self.assertEqual(calls, 1)
 
     def test_expired_descendant_remover_keeps_file_refreshed_during_execute(
         self,
@@ -616,11 +735,12 @@ class SafeCleanupInventoryTests(unittest.TestCase):
                 lock_probe=refresh_after_validation,
             )
             self.assertTrue(refreshed)
-            self.assertEqual(result.actions[0].state, "skipped")
+            self.assertEqual(result.actions[0].state, "deleted")
             self.assertEqual(result.actions[0].actual_bytes, len(b"old-sibling"))
             self.assertTrue(payload.exists())
             self.assertEqual(payload.read_bytes(), b"fresh")
             self.assertFalse(old_sibling.exists())
+            self.assertTrue(temp_root.exists())
 
     def test_old_platform_diagnostics_require_consent_but_not_sqlite_backup(
         self,
@@ -1077,6 +1197,9 @@ class SafeCleanupInventoryTests(unittest.TestCase):
             self.assertTrue(any(event.get("stage") == "start" for event in events))
             self.assertTrue(any(event.get("stage") == "done" for event in events))
             self.assertEqual(max(int(event.get("total") or 0) for event in events), 2)
+            self.assertTrue(
+                all(len(event.get("results") or []) == 1 for event in events)
+            )
 
 
 class SafeCleanupConfirmationTests(unittest.TestCase):
@@ -1194,7 +1317,7 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
 
             self.assertTrue(cache.is_dir())
 
-    def test_bulk_plan_soft_skips_changed_items_and_keeps_stable_targets(
+    def test_bulk_plan_accepts_nested_regenerable_cache_changes(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1241,12 +1364,12 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
                 preview["operation"]["confirmationToken"],
             )
 
-            self.assertEqual(len(plan.actions), 1)
-            self.assertEqual(Path(plan.actions[0].path), stable)
+            self.assertEqual(len(plan.actions), 2)
+            self.assertEqual(
+                {Path(action.path) for action in plan.actions}, {stable, volatile}
+            )
             preplan = manager.consume_preplan_skips(plan.id)
-            self.assertEqual(len(preplan), 1)
-            self.assertEqual(preplan[0].state, "skipped")
-            self.assertIn("changed after scan", preplan[0].error)
+            self.assertEqual(preplan, [])
 
             result = run_maintenance_plan(
                 plan,
@@ -1254,23 +1377,10 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
                 pid_active=lambda _pid: False,
                 lock_probe=lambda _path: False,
             )
-            self.assertEqual(result.actions[0].state, "deleted")
+            self.assertTrue(all(action.state == "deleted" for action in result.actions))
             self.assertEqual(result.state, "completed")
             self.assertFalse(stable.exists())
-            self.assertTrue(volatile.exists())
-
-            # Soft skips + successful deletes present as a completed cleaner pass.
-            merged = tuple(preplan) + tuple(result.actions)
-            success = sum(1 for row in merged if row.state in {"deleted", "completed"})
-            skipped = sum(1 for row in merged if row.state == "skipped")
-            hard = sum(1 for row in merged if row.state == "failed")
-            self.assertGreater(success, 0)
-            self.assertGreater(skipped, 0)
-            self.assertEqual(hard, 0)
-            self.assertEqual(
-                "completed" if success and not hard else "partial",
-                "completed",
-            )
+            self.assertFalse(volatile.exists())
 
     def test_helper_success_with_skips_is_completed_not_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1328,7 +1438,7 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
             self.assertFalse(keep.exists())
             self.assertTrue(drop.exists())
 
-    def test_single_changed_item_still_fails_plan_creation(self) -> None:
+    def test_single_nested_cache_change_does_not_force_full_reaudit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             temp_root = root / "Temp"
@@ -1362,13 +1472,20 @@ class SafeCleanupConfirmationTests(unittest.TestCase):
             item_id = inventory["defaultSelectedIds"][0]
             preview = manager.preview([item_id], inventory["revision"])
             (only / "blob").write_bytes(b"after-scan")
-            with self.assertRaisesRegex(SafeCleanupError, "no targets remain"):
-                manager.create_plan(
-                    [item_id],
-                    inventory["revision"],
-                    preview["operation"]["confirmationToken"],
-                )
-            self.assertTrue(only.exists())
+            plan = manager.create_plan(
+                [item_id],
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+
+            self.assertEqual(result.actions[0].state, "deleted")
+            self.assertFalse(only.exists())
 
     def test_revalidate_soft_skip_classifier_keeps_filesystem_gates_hard(self) -> None:
         soft_errors = (
@@ -2087,6 +2204,304 @@ class SafeCleanupMaintenanceTests(unittest.TestCase):
             self.assertEqual(result.actions[0].state, "skipped")
             self.assertEqual(result.state, "partial")
             self.assertTrue(cache.is_dir())
+
+    def test_related_delete_actions_share_one_process_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            caches = (root / "first-cache", root / "second-cache")
+            for cache in caches:
+                cache.mkdir()
+                (cache / "entry").write_bytes(b"cache")
+            manager = SafeCleanupManager(
+                platform="win32",
+                hud_runtime_root=root / "missing-runtime",
+                cache_definitions=tuple(
+                    CacheDefinition(
+                        key=f"cache-{index}",
+                        category="browser_cache",
+                        path=cache,
+                        label="Browser cache",
+                        impact="Rebuilt later.",
+                        related_processes=("chrome",),
+                    )
+                    for index, cache in enumerate(caches)
+                ),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: set(),
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            inventory = manager.scan()
+            selected = list(inventory["defaultSelectedIds"])
+            preview = manager.preview(selected, inventory["revision"])
+            plan = manager.create_plan(
+                selected,
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+            calls = 0
+
+            def running_process_names() -> set[str]:
+                nonlocal calls
+                calls += 1
+                return set()
+
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+                running_process_names=running_process_names,
+            )
+
+            self.assertEqual(calls, 1)
+            self.assertEqual([row.state for row in result.actions], ["deleted", "deleted"])
+
+    def test_independent_regenerable_deletes_run_in_parallel_and_keep_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            caches = tuple(root / f"cache-{index}" for index in range(3))
+            for cache in caches:
+                cache.mkdir()
+                (cache / "entry").write_bytes(b"cache")
+            manager = SafeCleanupManager(
+                platform="win32",
+                hud_runtime_root=root / "missing-runtime",
+                cache_definitions=tuple(
+                    CacheDefinition(
+                        key=f"cache-{index}",
+                        category="developer_cache",
+                        path=cache,
+                        label=f"Cache {index}",
+                        impact="Rebuilt later.",
+                    )
+                    for index, cache in enumerate(caches)
+                ),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: set(),
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            inventory = manager.scan()
+            selected = list(inventory["defaultSelectedIds"])
+            preview = manager.preview(selected, inventory["revision"])
+            plan = manager.create_plan(
+                selected,
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+            active = 0
+            maximum = 0
+            active_lock = threading.Lock()
+            concurrent = threading.Event()
+
+            def lock_probe(_path: Path) -> bool:
+                nonlocal active, maximum
+                with active_lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                    if active >= 2:
+                        concurrent.set()
+                concurrent.wait(1.0)
+                with active_lock:
+                    active -= 1
+                return False
+
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lock_probe,
+                running_process_names=lambda: set(),
+            )
+
+            self.assertGreater(maximum, 1)
+            self.assertEqual(
+                [row.item_id for row in result.actions],
+                [action.item_id for action in plan.actions],
+            )
+            self.assertTrue(all(row.state == "deleted" for row in result.actions))
+            self.assertFalse(
+                any(
+                    thread.name.startswith("safe-cleanup-delete")
+                    for thread in threading.enumerate()
+                )
+            )
+
+    def test_parallel_cancel_finishes_workers_without_late_deletes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            caches = tuple(root / f"cache-{index}" for index in range(12))
+            for cache in caches:
+                cache.mkdir()
+                (cache / "entry").write_bytes(b"cache")
+            manager = SafeCleanupManager(
+                platform="win32",
+                hud_runtime_root=root / "missing-runtime",
+                cache_definitions=tuple(
+                    CacheDefinition(
+                        key=f"cache-{index}",
+                        category="developer_cache",
+                        path=cache,
+                        label=f"Cache {index}",
+                        impact="Rebuilt later.",
+                    )
+                    for index, cache in enumerate(caches)
+                ),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: set(),
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            inventory = manager.scan()
+            selected = list(inventory["defaultSelectedIds"])
+            preview = manager.preview(selected, inventory["revision"])
+            plan = manager.create_plan(
+                selected,
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+            cancel_flag = threading.Event()
+
+            def lock_probe(_path: Path) -> bool:
+                cancel_flag.set()
+                return False
+
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lock_probe,
+                running_process_names=lambda: set(),
+                should_cancel=cancel_flag.is_set,
+            )
+
+            self.assertEqual(len(result.actions), len(plan.actions))
+            self.assertTrue(all(row.state == "skipped" for row in result.actions))
+            self.assertTrue(all(cache.exists() for cache in caches))
+            self.assertFalse(
+                any(
+                    thread.name.startswith("safe-cleanup-delete")
+                    for thread in threading.enumerate()
+                )
+            )
+
+    def test_bulk_delete_rejects_deep_reparse_added_after_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            nested = cache / "nested"
+            outside = root / "outside"
+            nested.mkdir(parents=True)
+            outside.mkdir()
+            (nested / "old-entry").write_bytes(b"cache")
+            sentinel = outside / "sentinel"
+            sentinel.write_bytes(b"keep")
+            manager = SafeCleanupManager(
+                platform="win32",
+                hud_runtime_root=root / "missing-runtime",
+                cache_definitions=(
+                    CacheDefinition(
+                        key="cache",
+                        category="developer_cache",
+                        path=cache,
+                        label="Developer cache",
+                        impact="Rebuilt later.",
+                    ),
+                ),
+                clock=lambda: NOW,
+                token_factory=_Tokens(),
+                running_process_names=lambda: set(),
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+            )
+            inventory = manager.scan()
+            item_id = inventory["defaultSelectedIds"][0]
+            preview = manager.preview([item_id], inventory["revision"])
+            plan = manager.create_plan(
+                [item_id],
+                inventory["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+            link = nested / "outside-link"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest("symlinks are unavailable")
+
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lambda _path: False,
+                running_process_names=lambda: set(),
+            )
+
+            self.assertEqual(result.actions[0].state, "skipped")
+            self.assertIn("reparse", result.actions[0].error)
+            self.assertTrue(sentinel.exists())
+
+    def test_overlapping_regenerable_paths_fall_back_to_serial(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            child = parent / "child"
+            child.mkdir(parents=True)
+            (child / "entry").write_bytes(b"cache")
+
+            def action(item_id: str, path: Path) -> MaintenanceAction:
+                measured = safe_cleanup_module._measure_path(path)
+                return MaintenanceAction(
+                    item_id=item_id,
+                    kind="delete_path",
+                    category="developer_cache",
+                    tier="safe",
+                    path=str(path),
+                    approved_root=str(root),
+                    fingerprint=measured.fingerprint,
+                    lstat=safe_cleanup_module._lstat_tuple(os.lstat(path)),
+                    estimated_bytes=measured.size,
+                )
+
+            plan = MaintenancePlan(
+                id="overlap-plan",
+                created_at=NOW - 1,
+                expires_at=NOW + 60,
+                parent_pid=0,
+                wait_pids=(),
+                wait_timeout_seconds=0,
+                backup_directory="",
+                actions=(action("parent", parent), action("child", child)),
+            )
+            active = 0
+            maximum = 0
+            active_lock = threading.Lock()
+
+            def lock_probe(_path: Path) -> bool:
+                nonlocal active, maximum
+                with active_lock:
+                    active += 1
+                    maximum = max(maximum, active)
+                threading.Event().wait(0.02)
+                with active_lock:
+                    active -= 1
+                return False
+
+            result = run_maintenance_plan(
+                plan,
+                clock=lambda: NOW,
+                pid_active=lambda _pid: False,
+                lock_probe=lock_probe,
+                running_process_names=lambda: set(),
+            )
+
+            self.assertEqual(maximum, 1)
+            self.assertEqual(
+                [row.item_id for row in result.actions], ["parent", "child"]
+            )
 
     def test_helper_rejects_plan_path_outside_approved_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
