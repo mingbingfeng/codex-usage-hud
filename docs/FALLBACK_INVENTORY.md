@@ -31,7 +31,7 @@ into explicit diagnostics or opt-in legacy/debug behavior.
 | Desktop overlay | PySide helper reads state file every 160 ms | Idle periodic IO/CPU | Delete | Done: helper uses `QFileSystemWatcher` on the state file/directory plus a one-shot stale watchdog |
 | Desktop overlay command | Helper command file is polled every 60 ms | Idle periodic IO/CPU | Delete | Done: main process uses `FileChangeWatcher` to drain commands on file events, with startup drain for already-written commands |
 | Desktop overlay keepalive | Main process periodically rewrites overlay state | Needed for explicit helper liveness | Temporary fallback | Narrowed: unchanged payloads no longer rewrite state; `keep_alive()` is the only steady-state refresh while items remain visible |
-| Legacy HUD | Tk/Qt entry points remain as compatibility stubs | Product confusion if revived | Diagnostic only | Done: public Tk/Qt session functions return renderer-unavailable directly and do not acquire HUD locks or start runtimes |
+| Legacy HUD | Tk/Qt implementation modules have been removed; entry points remain compatibility stubs | Product confusion if revived | Diagnostic only | Done: public Tk/Qt session functions return renderer-unavailable directly and do not acquire HUD locks or start runtimes |
 
 ## Phase Order
 

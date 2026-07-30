@@ -63,14 +63,14 @@ The canonical fast test command is:
 python -m pytest
 ```
 
-Real Tk/Qt widget lifecycle regressions are marked `ui` and skipped by default.
-Run them explicitly when touching HUD widget behavior:
+Real PySide6 widget lifecycle regressions are marked `ui` and skipped by default.
+Run them explicitly when touching desktop-helper widget behavior:
 
 ```powershell
 python -m pytest -m ui
 ```
 
-默认命令会跳过真实 Tk/Qt 窗口生命周期回归；修改 HUD widget 行为时再显式运行 `python -m pytest -m ui`。
+默认命令会跳过真实 PySide6 桌面 helper 生命周期回归；修改桌面气泡行为时再显式运行 `python -m pytest -m ui`。
 
 ## 4. Static syntax check / 静态语法检查
 

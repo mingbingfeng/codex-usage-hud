@@ -8,12 +8,11 @@ not as a product vision or optional strategy.
 - Renderer mode is the only product HUD surface.
 - The HUD must stay inside the Codex App renderer/CDP surface.
 - Windows and macOS are first-class compatibility targets.
-- Qt/Tk standalone HUD modes are deprecated legacy surfaces.
-- Do not add product behavior to Qt/Tk.
-- Do not use Qt/Tk fallback to solve renderer availability, correctness, or
-  performance problems.
-- Qt/Tk code may be touched only for removal, migration, critical maintenance,
-  or tests required while legacy code remains in the tree.
+- Qt/Tk standalone HUD implementations have been removed.
+- Do not restore Qt/Tk as a product surface or fallback for renderer
+  availability, correctness, or performance problems.
+- PySide6 remains an optional desktop-helper runtime for work bubbles and other
+  detached helpers; it is not a standalone main HUD.
 
 ## Active Session Authority
 
@@ -91,7 +90,7 @@ and a degraded diagnostic. It must not become the primary architecture.
 ## Legacy Boundary
 
 - CLI/config legacy display-mode aliases normalize to `renderer`.
-- Public legacy session functions may remain only as compatibility stubs that
+- Public legacy session functions remain only as compatibility stubs that
   return renderer-unavailable without starting Qt/Tk runtimes.
 - Hidden legacy diagnostic flags must not enable renderer-mode active-session
   fallback paths.

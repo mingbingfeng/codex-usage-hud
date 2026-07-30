@@ -139,6 +139,5 @@ found 60 presets across 28 families.
 
 - `src/codex_usage_hud/platforms/codex_theme.py`
 - `src/codex_usage_hud/ui/renderer_hud.py`
-- `src/codex_usage_hud/ui/tk_hud.py`
 - `src/codex_usage_hud/ui/work_overlay_qt.py`
 - `tools/export_codex_themes.py`

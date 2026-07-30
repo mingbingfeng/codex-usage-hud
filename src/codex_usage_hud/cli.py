@@ -2076,9 +2076,6 @@ class _WorkOverlayCommandPump:
             _LOGGER.debug("work_overlay_command_pump_failed error=%s", exc)
 
 
-_TkWorkOverlayCommandPump = _WorkOverlayCommandPump
-
-
 def run_work_overlay_helper(state_file: str | Path) -> int:
     state_arg = str(state_file or "").strip()
     if not state_arg:
@@ -3997,20 +3994,6 @@ def _prepare_codex_window_for_standalone(
     )
 
 
-def _prepare_codex_window_for_tk(
-    *,
-    timeout_seconds: float,
-    poll_seconds: float = 0.25,
-    launch_if_missing: bool = False,
-) -> tuple[bool, str, str, int]:
-    """Deprecated compatibility alias for renderer window preparation."""
-    return _prepare_codex_window_for_standalone(
-        timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds,
-        launch_if_missing=launch_if_missing,
-    )
-
-
 def _build_session_switch_controller(
     platform: BasePlatform,
     *,
@@ -4039,7 +4022,7 @@ def _prepare_codex_window_for_work_overlay_switch() -> tuple[bool, str, str, int
             "" if activated else "macOS open failed",
             0,
         )
-    return _prepare_codex_window_for_tk(
+    return _prepare_codex_window_for_standalone(
         timeout_seconds=WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
         poll_seconds=0.08,
         launch_if_missing=True,
@@ -4056,7 +4039,7 @@ def _refocus_codex_window_after_work_overlay_switch() -> tuple[bool, str, str, i
             "" if activated else "macOS open failed",
             0,
         )
-    return _prepare_codex_window_for_tk(
+    return _prepare_codex_window_for_standalone(
         timeout_seconds=WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS,
         poll_seconds=0.08,
         launch_if_missing=True,
@@ -7567,22 +7550,6 @@ def _stop_active_session_tracker(context: "RuntimeContext") -> None:
         context.active_session_tracker = None
 
 
-def _prepare_runtime_for_display_mode_switch(
-    context: "RuntimeContext",
-    snapshot_pump: "_TkSnapshotPump | None" = None,
-) -> bool:
-    snapshot_pump_closed = False
-    if snapshot_pump is not None:
-        try:
-            snapshot_pump.close()
-            snapshot_pump_closed = True
-        except Exception:
-            pass
-    _suspend_native_active_title(context)
-    _stop_active_session_tracker(context)
-    return snapshot_pump_closed
-
-
 def _snapshot_session_key(snapshot: ParsedSession | None) -> str:
     if snapshot is None:
         return ""
@@ -7770,61 +7737,6 @@ def _active_session_switch_pending(context: "RuntimeContext", snapshot: ParsedSe
     del selection_source
     current_key = _session_path_key(session_path) or str(getattr(resolver, "session_id", "") or "")
     return bool(current_key and current_key != _snapshot_session_key(snapshot))
-
-
-class _TkSnapshotPump:
-    """Keep Tk responsive by building snapshots off the Tk main thread."""
-
-    def __init__(self, context: RuntimeContext) -> None:
-        self._context = context
-        self._lock = threading.Lock()
-        self._stop_event = Event()
-        self._worker: threading.Thread | None = None
-        self._latest_snapshot: ParsedSession | None = None
-
-    def request_refresh(self) -> bool:
-        with self._lock:
-            if self._stop_event.is_set():
-                return False
-            if self._worker is not None and self._worker.is_alive():
-                return False
-            worker = threading.Thread(
-                target=self._refresh_worker,
-                name="codex-usage-hud-tk-refresh",
-                daemon=True,
-            )
-            self._worker = worker
-            worker.start()
-            return True
-
-    def take_latest(self) -> ParsedSession | None:
-        with self._lock:
-            snapshot = self._latest_snapshot
-            self._latest_snapshot = None
-            return snapshot
-
-    def is_refreshing(self) -> bool:
-        with self._lock:
-            return self._worker is not None and self._worker.is_alive()
-
-    def close(self, timeout_seconds: float = 2.0) -> None:
-        self._stop_event.set()
-        with self._lock:
-            worker = self._worker
-        if worker is not None and worker.is_alive():
-            worker.join(timeout=max(0.0, float(timeout_seconds)))
-
-    def _refresh_worker(self) -> None:
-        try:
-            self._context.reload_user_config()
-            snapshot = build_snapshot(self._context)
-        except Exception as exc:
-            snapshot = ParsedSession(status="error", error=str(exc))
-        with self._lock:
-            self._worker = None
-            if self._stop_event.is_set():
-                return
-            self._latest_snapshot = snapshot
 
 
 def _candidate_data_dirs(platform: BasePlatform | None = None) -> list[Path]:

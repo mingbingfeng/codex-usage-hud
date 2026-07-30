@@ -156,7 +156,7 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 python -m pip install -e ".[desktop-overlay]"  # 可选：启用 PySide6 桌面会话气泡
 python -m compileall -q src tools tests
 python -m pytest
-python -m pytest -m ui        # 可选：旧 Tk/Qt 模块的真实窗口回归
+python -m pytest -m ui        # 可选：PySide6 桌面 helper 的真实窗口回归
 python tools/build_exe.py
 python tools/build_installer.py
 ```
@@ -174,8 +174,6 @@ src/codex_usage_hud/
   daemon.py              Windows/macOS Codex Desktop 进程监听
   ui/renderer_hud.py     Codex renderer 注入 HUD
   ui/work_overlay_qt.py  可选 PySide6 桌面会话气泡 helper
-  ui/qt_hud.py           旧 Qt 独立窗口模块（默认不加载）
-  ui/tk_hud.py           旧 Tk 独立窗口模块（默认不加载）
   updater.py             GitHub Release 更新检测与安装器启动
 tools/
   build_exe.py           PyInstaller 单文件 exe 构建

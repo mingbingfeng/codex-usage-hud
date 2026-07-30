@@ -18,7 +18,7 @@ behind fallback behavior.
 ## Product Rules
 
 - Renderer mode remains the canonical product surface.
-- Qt/Tk standalone HUD paths remain deprecated and must not become product fallback.
+- Qt/Tk standalone HUD implementations are removed and must not be restored as product fallback.
 - In renderer mode, active session selection must have one authority at a time.
 - Fallback behavior must be opt-in diagnostic behavior, not default product logic.
 - DEBUG mode should expose runtime errors in an error HUD.
@@ -52,8 +52,7 @@ Current renderer mode is already partially event-driven:
 
 The remaining issues are architectural:
 
-- Some legacy Qt/Tk modules remain in the tree for compatibility tests and
-  removal staging.
+- Legacy Qt/Tk entry points remain only as compatibility stubs.
 - Some full-budget rebuild paths remain correct but expensive.
 - File watcher polling fallback remains as a degraded diagnostic path when native
   events are unavailable.

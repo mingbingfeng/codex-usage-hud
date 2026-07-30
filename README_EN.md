@@ -146,7 +146,7 @@ No. The project reads local logs and databases only. It does not send telemetry,
 python -m pip install -e ".[desktop-overlay]"  # optional: PySide6 desktop work bubbles
 python -m compileall -q src tools tests
 python -m pytest
-python -m pytest -m ui        # optional: legacy Tk/Qt module window regressions
+python -m pytest -m ui        # optional: real PySide6 desktop-helper regressions
 python tools/build_exe.py
 python tools/build_installer.py
 ```
@@ -164,8 +164,6 @@ src/codex_usage_hud/
   daemon.py              Windows/macOS Codex Desktop process listener
   ui/renderer_hud.py     Codex renderer-injected HUD
   ui/work_overlay_qt.py  Optional PySide6 desktop work-bubble helper
-  ui/qt_hud.py           Legacy Qt standalone module, not loaded by default
-  ui/tk_hud.py           Legacy Tk standalone module, not loaded by default
   updater.py             GitHub Release update check and installer launch
 tools/
   build_exe.py           PyInstaller single-file exe build

@@ -9,8 +9,8 @@ reports, or screenshots.
 
 ## Before you open a PR
 
-- Run `python -m pytest` for the default fast suite; real Tk/Qt UI lifecycle tests are marked `ui` and skipped by default.
-- Run `python -m pytest -m ui` when your change touches real HUD widget behavior.
+- Run `python -m pytest` for the default fast suite; real PySide6 UI lifecycle tests are marked `ui` and skipped by default.
+- Run `python -m pytest -m ui` when your change touches desktop-helper widget behavior.
 - Run `python -m compileall -q src tests tools` for a quiet syntax check.
 - Keep the diff small and reviewable.
 - Update docs and tests together when behavior changes.

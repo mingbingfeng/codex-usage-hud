@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 import re
 import sys
 import json
@@ -11,8 +12,6 @@ import tempfile
 import subprocess
 import threading
 import time
-import tkinter as tk
-from tkinter import ttk
 import unittest
 
 import pytest
@@ -29,8 +28,6 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 import codex_usage_hud.cli as cli_module
-import codex_usage_hud.ui.qt_hud as qt_hud_module
-import codex_usage_hud.ui.tk_hud as tk_hud_module
 from codex_usage_hud.cli import (
     ACTIVE_WORK_STALE_SECONDS,
     DAEMON_STARTUP_RENDERER,
@@ -45,8 +42,7 @@ from codex_usage_hud.cli import (
     SessionSnapshotCache,
     UsageSummaryCache,
     _VisibleAppErrorCache,
-    _TkSnapshotPump,
-    _TkWorkOverlayCommandPump,
+    _WorkOverlayCommandPump,
     _active_session_switch_pending,
     _apply_visible_app_error,
     background_usage_to_work_item,
@@ -56,7 +52,6 @@ from codex_usage_hud.cli import (
     is_independent_desktop_delegation,
     is_subagent_session,
     _prepare_codex_window_for_renderer,
-    _prepare_codex_window_for_tk,
     _renderer_refresh_delay_seconds,
     _renderer_should_refresh_active_work_items,
     _renderer_snapshot_selection_is_stale,
@@ -96,8 +91,6 @@ from codex_usage_hud.core.deleted_usage import DeletedUsageLedger
 from codex_usage_hud.core.session_cleanup import SessionCleanupItem
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.platforms.codex_theme import CodexThemeExport, CodexThemeSnapshot, HudThemeTokens
-from codex_usage_hud.ui import QtHudWindow
-from codex_usage_hud.ui.qt_hud import _qt_contrast, _qt_stylesheet
 from codex_usage_hud.ui.renderer_hud import payload_from_snapshot
 from codex_usage_hud.core.parser import (
     Activity,
@@ -110,66 +103,6 @@ from codex_usage_hud.core.parser import (
     ToolCallTiming,
     UsageSummary,
     WorkStatusItem,
-)
-from codex_usage_hud.ui.tk_hud import (
-    REQUEST_DOCK_BOTTOM,
-    REQUEST_DOCK_EXPANDED_HEIGHT,
-    REQUEST_DOCK_HEIGHT,
-    REQUEST_DOCK_LEFT,
-    REQUEST_DOCK_RIGHT,
-    REQUEST_DOCK_WIDTH,
-    HUD_CDP_DOM_ENV,
-    SETTINGS_DIALOG_HEIGHT,
-    SETTINGS_DIALOG_WIDTH,
-    TOP_ACTIVITY_TRAIL_VIEWPORT_HEIGHT,
-    TOP_DOCK_EXPANDED_HEIGHT,
-    TOP_DOCK_HEIGHT,
-    TOP_DOCK_LEFT,
-    TOP_DOCK_RIGHT,
-    TOP_DOCK_TOP,
-    AttachedHudGeometry,
-    DockGeometry,
-    HudSettings,
-    HudSettingsStore,
-    HudAnchor,
-    HudScrollbar,
-    AutoScrollLabel,
-    ShimmerTextLabel,
-    HUD_BG,
-    HUD_HEADER_BG,
-    HUD_PANEL_BORDER,
-    HUD_PROGRESS_DAY,
-    HUD_PROGRESS_DAY_END,
-    HUD_PROGRESS_RADIUS,
-    HUD_PROGRESS_TRACK,
-    HUD_SHELL_RADIUS,
-    HUD_TEXT,
-    HUD_WINDOW_OUTSIDE,
-    HUD_WINDOW_TRANSPARENT,
-    RoundedHudShell,
-    TopHudProgressMetric,
-    TopHudProgressStrip,
-    TokenHudWindow,
-    WindowPlacement,
-    WindowRect,
-    _WindowsCodexLocator,
-    _can_animate_numeric_text,
-    _copyable_gap_detail,
-    _copyable_tool_command,
-    _budget_warning_summary,
-    _fixed_token_total,
-    _interpolate_numeric_text,
-    _progress_fill_surface_rows,
-    _progress_fill_surface_transparency_rows,
-    _request_total_line,
-    _round_entry,
-    _round_entry_widths,
-    _rounded_shell_surface_rows,
-    _collapsed_progress_strip_should_scroll,
-    _top_budget_progress_metrics,
-    _top_collapsed_progress_metrics,
-    _visual_anchor_geometry,
-    _win32_region_api,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED,
@@ -282,7 +215,7 @@ class _RecordingGeometryWindow:
         self.calls.append(value)
 
 
-class _FakeAnchorLocator:
+class _RemovedLegacyAnchorLocator:
     def __init__(
         self,
         anchors: dict[str, HudAnchor],
@@ -346,7 +279,7 @@ class _FakeAnchorLocator:
         self.header_roi_change_callback = callback
 
 
-def _attached_geometry_after_stable(
+def _removed_legacy_attached_geometry_after_stable(
     window: TokenHudWindow,
     target: str,
     rect: WindowRect,
@@ -527,27 +460,27 @@ def _write_usage_insight_session(
     )
 
 
-def _walk_widgets(widget: tk.Misc) -> list[tk.Misc]:
+def _removed_legacy_walk_widgets(widget):
     widgets = [widget]
     for child in widget.winfo_children():
         widgets.extend(_walk_widgets(child))
     return widgets
 
 
-def _flush_tk(window: TokenHudWindow, iterations: int = 3) -> None:
+def _removed_legacy_flush_tk(window, iterations: int = 3) -> None:
     for _ in range(iterations):
         window.root.update_idletasks()
         window.root.update()
 
 
-def _settle_top_animation(window: TokenHudWindow) -> None:
+def _removed_legacy_settle_top_animation(window) -> None:
     end = getattr(window, "_top_animation_end", None)
     if end is not None:
         window._settle_top_animation(end)
     _flush_tk(window)
 
 
-def _stop_background_jobs(window: TokenHudWindow) -> None:
+def _removed_legacy_stop_background_jobs(window) -> None:
     for attr in ("_follow_job", "_settings_prewarm_job"):
         job = getattr(window, attr, None)
         if not job:
@@ -567,6 +500,7 @@ def _parse_tk_geometry(value: str) -> tuple[int, int, int, int]:
     return int(width), int(height), int(x), int(y)
 
 
+@unittest.skip("legacy standalone HUD removed")
 class AttachedHudGeometryTests(unittest.TestCase):
     def test_calculate_places_hud_inside_top_right_corner(self) -> None:
         rect = WindowRect(left=100, top=50, right=1100, bottom=850)
@@ -597,6 +531,7 @@ class AttachedHudGeometryTests(unittest.TestCase):
         self.assertEqual(height, 200)
 
 
+@unittest.skip("legacy standalone HUD removed")
 class OriginalDockGeometryTests(unittest.TestCase):
     def test_top_dock_uses_original_offsets(self) -> None:
         rect = WindowRect(left=100, top=50, right=1300, bottom=850)
@@ -635,6 +570,7 @@ class OriginalDockGeometryTests(unittest.TestCase):
         self.assertEqual(expanded, (620, 642, 358, 180))
 
 
+@unittest.skip("legacy standalone HUD removed")
 class VisualAnchorGeometryTests(unittest.TestCase):
     def test_top_anchor_tracks_title_bar_content_region(self) -> None:
         rect = WindowRect(left=240, top=0, right=1230, bottom=740)
@@ -659,6 +595,13 @@ def _last_renderer_diagnostic_record(text: str) -> dict[str, object]:
 
 
 class BudgetHelperTests(unittest.TestCase):
+    def test_legacy_standalone_hud_modules_are_removed(self) -> None:
+        self.assertIsNone(importlib.util.find_spec("codex_usage_hud.ui.qt_hud"))
+        self.assertIsNone(importlib.util.find_spec("codex_usage_hud.ui.tk_hud"))
+
+    def test_pyside_desktop_bubble_module_remains_available(self) -> None:
+        self.assertIsNotNone(importlib.util.find_spec("codex_usage_hud.ui.work_overlay_qt"))
+
     def test_parse_thresholds_accepts_percent_or_fraction(self) -> None:
         self.assertEqual(parse_thresholds("50,0.8,90"), [0.5, 0.8, 0.9])
 
@@ -677,6 +620,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertIn("周额度已用 210.00/400 USD", warnings[1])
         self.assertIn("超过 50% 阈值", warnings[1])
 
+    @unittest.skip("legacy standalone HUD removed")
     def test_tk_budget_warning_summary_only_mentions_ratio_and_threshold(self) -> None:
         snapshot = ParsedSession()
         snapshot.today_cost_usd = 59.12
@@ -3533,10 +3477,10 @@ class BudgetHelperTests(unittest.TestCase):
                 )
             )
         )
-        pump = _TkWorkOverlayCommandPump(overlay, session_controller)
+        pump = _WorkOverlayCommandPump(overlay, session_controller)
 
         with patch(
-            "codex_usage_hud.cli._prepare_codex_window_for_tk",
+            "codex_usage_hud.cli._prepare_codex_window_for_standalone",
             return_value=(True, "visible", "", 321),
         ) as prepare_window:
             handled = pump.drain_once()
@@ -3744,7 +3688,7 @@ class BudgetHelperTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                "codex_usage_hud.cli._prepare_codex_window_for_standalone",
                 return_value=(True, "visible", "", 321),
             ) as prepare_window,
             patch(
@@ -6525,6 +6469,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self.assertFalse(snapshot.slow.current_gap_active)
         self.assertEqual(items, [])
 
+    @unittest.skip("legacy standalone HUD removed")
     def test_windows_rounded_shell_rows_do_not_paint_black_corner_base(self) -> None:
         if not sys.platform.startswith("win"):
             self.skipTest("Windows-specific rounded shell behavior")
@@ -6540,6 +6485,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self.assertIn(HUD_WINDOW_TRANSPARENT.lower(), rows[0].lower())
         self.assertNotIn(HUD_WINDOW_OUTSIDE.lower(), rows[0].lower())
 
+    @unittest.skip("legacy standalone HUD removed")
     def test_square_shell_rows_render_full_rectangular_border(self) -> None:
         rows = _rounded_shell_surface_rows(
             width=6,
@@ -6711,6 +6657,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self.assertIn("today $20.226427", text)
         self.assertIn("This Week Manual Adjustment: $12.500000", text)
 
+    @unittest.skip("legacy standalone HUD removed")
     def test_budget_progress_metrics_split_overflow_from_main_fill(self) -> None:
         snapshot = ParsedSession(
             today_tokens=6600000,
@@ -7301,6 +7248,7 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         self.assertRectAlmostEqual(second, (0.0, 306.0, 430.0, 110.0))
 
 
+@unittest.skip("legacy standalone HUD removed")
 class AutoScrollHelpersTests(unittest.TestCase):
     def test_numeric_text_can_animate_when_template_matches(self) -> None:
         self.assertTrue(
@@ -7514,6 +7462,7 @@ class AutoScrollHelpersTests(unittest.TestCase):
         self.assertTrue(second.endswith("↻0 ∑ 1.2M"))
 
 
+@unittest.skip("legacy standalone HUD removed")
 class HudSettingsStoreTests(unittest.TestCase):
     def test_settings_round_trip_persists_only_pinned_position_and_size(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7628,6 +7577,7 @@ class HudSettingsStoreTests(unittest.TestCase):
 
 @pytest.mark.ui
 @pytest.mark.qt_ui
+@unittest.skip("legacy standalone HUD removed")
 class QtHudWindowLifecycleTests(unittest.TestCase):
     def test_qt_manual_input_priority_temporarily_defers_refresh_work(self) -> None:
         if getattr(qt_hud_module, "QApplication", None) is None:
@@ -9935,8 +9885,7 @@ class QtHudWindowLifecycleTests(unittest.TestCase):
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
 
-@pytest.mark.ui
-@pytest.mark.tk_ui
+@unittest.skip("legacy standalone HUD removed")
 class TokenHudWindowLifecycleTests(unittest.TestCase):
     def test_top_toggle_reuses_prebuilt_frames_and_keeps_request_window(self) -> None:
         window = TokenHudWindow()
@@ -12604,6 +12553,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
             window._close()
 
 
+@unittest.skip("legacy standalone HUD removed")
 class TkSnapshotPumpTests(unittest.TestCase):
     def test_snapshot_pump_is_single_flight_while_worker_is_busy(self) -> None:
         context = SimpleNamespace(reload_user_config=MagicMock())
@@ -13818,6 +13768,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         tk_session.assert_not_called()
         qt_session.assert_not_called()
 
+    @unittest.skip("legacy standalone HUD removed")
     def test_tk_close_destroys_windows_without_forced_gc(self) -> None:
         window = object.__new__(tk_hud_module.TokenHudWindow)
         window._exit_reason = ""
@@ -18677,7 +18628,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             patch("codex_usage_hud.cli._activate_running_codex_app", return_value=True) as activate_app,
             patch("codex_usage_hud.cli.time.sleep", return_value=None),
         ):
-            ready, status, reason, hwnd = _prepare_codex_window_for_tk(
+            ready, status, reason, hwnd = cli_module._prepare_codex_window_for_standalone(
                 timeout_seconds=1.0,
                 poll_seconds=0.0,
                 launch_if_missing=True,
@@ -18720,7 +18671,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
             patch("codex_usage_hud.cli.time.sleep", return_value=None),
         ):
-            ready, status, reason, hwnd = _prepare_codex_window_for_tk(
+            ready, status, reason, hwnd = cli_module._prepare_codex_window_for_standalone(
                 timeout_seconds=1.0,
                 poll_seconds=0.0,
                 launch_if_missing=False,
@@ -18760,7 +18711,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch_app,
             patch("codex_usage_hud.cli.time.sleep", return_value=None),
         ):
-            ready, status, reason, hwnd = _prepare_codex_window_for_tk(
+            ready, status, reason, hwnd = cli_module._prepare_codex_window_for_standalone(
                 timeout_seconds=1.0,
                 poll_seconds=0.0,
                 launch_if_missing=True,
@@ -19050,7 +19001,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             ) as prepare_window,
             patch("codex_usage_hud.cli._primary_screen_height", return_value=1080),
             patch(
-                "codex_usage_hud.cli._prepare_codex_window_for_tk",
+                "codex_usage_hud.cli._prepare_codex_window_for_standalone",
                 return_value=(True, "visible", "", 321),
             ) as prepare_overlay_window,
             patch(
@@ -19106,7 +19057,7 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch("codex_usage_hud.cli.build_runtime_context") as build_context,
-            patch("codex_usage_hud.cli._prepare_codex_window_for_tk") as prepare_window,
+            patch("codex_usage_hud.cli._prepare_codex_window_for_standalone") as prepare_window,
         ):
             exit_code = run_tk_hud_session(
                 SimpleNamespace(compact=False),

@@ -7,6 +7,12 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the legacy standalone Qt and Tk HUD implementations and their
+  dedicated visual-capture tool. Renderer remains the only main HUD surface;
+  the optional PySide6 desktop work-bubble helper is unchanged.
+
 ## [1.0.5] - 2026-06-28
 
 Renderer Session Follow Hotfix.
