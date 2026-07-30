@@ -95,7 +95,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "47";
+  const version = "48";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -132,6 +132,8 @@ _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
   const supportImagesStorageKey = "codexUsageHudSupportImages:v1";
 const settingsModalId = `codex-usage-hud-settings-modal-${version}`;
 const settingsProviderName = "__codexUsageHudSettingsProvider";
+  const settingsUiStateName = "__codexUsageHudSettingsUiState";
+  const settingsUiStorageKey = "codexUsageHudSettingsUiState:v1";
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
   const activeSessionTimerName = "__codexUsageHudActiveSessionTimer";
@@ -164,9 +166,27 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
   const modelPickerSelectionName = "__codexUsageHudModelPickerSelection";
   let topSlotCache = null;
   let pendingSyncPanels = null;
-  let settingsActiveTab = "settings";
-  let storageFilter = "all";
-  let storagePreviewHidden = false;
+  function readSettingsUiState() {
+    const runtimeState = window[settingsUiStateName];
+    if (runtimeState && typeof runtimeState === "object") return runtimeState;
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(settingsUiStorageKey) || "null");
+      if (stored && typeof stored === "object") return stored;
+    } catch (_) {}
+    return { open: false, tab: "settings" };
+  }
+
+  function writeSettingsUiState(open, tab) {
+    const state = { open: open === true, tab: String(tab || "settings") };
+    window[settingsUiStateName] = state;
+    try {
+      sessionStorage.setItem(settingsUiStorageKey, JSON.stringify(state));
+    } catch (_) {}
+    return state;
+  }
+
+  window[settingsUiStateName] = readSettingsUiState();
+  let settingsActiveTab = String(window[settingsUiStateName]?.tab || "settings");
   let storageBodyScrollTop = 0;
   let cleanupContentScrollTop = 0;
   let sessionTableScrollTop = 0;
@@ -175,26 +195,6 @@ const settingsProviderName = "__codexUsageHudSettingsProvider";
     refreshRequestId: "",
     error: "",
   };
-  const safeCleanupState = {
-    data: null,
-    stableData: null,
-    inventoryRevision: "",
-    selectedIds: new Set(),
-    expandedGroupIds: new Set(),
-    pendingRequestId: "",
-    executeStartedAt: 0,
-    includeConsent: false,
-    backupDirectory: "",
-    backupDirectoryDirty: false,
-    previewBackupDirectory: "",
-    autoCloseConfirmed: false,
-    previewHidden: false,
-    lastBackupPickerRequestId: "",
-    scanStartedAt: 0,
-  };
-  let cleanupActiveSection = "sessions";
-  let safeCleanupPreviewTimer = 0;
-  let safeCleanupLiveTimer = 0;
   let storageRefreshRaf = 0;
   let storageRefreshTimer = 0;
   let storageRefreshLastAt = 0;
@@ -2963,210 +2963,6 @@ scanStartedAt: 0,
       #${rootId} .codex-usage-hud-settings-status[data-kind="error"] {
         color: var(--codex-usage-hud-warning, #ffb86b);
       }
-      #${rootId} .codex-usage-hud-storage {
-        display: grid;
-        gap: 12px;
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-storage-pathbar,
-      #${rootId} .codex-usage-hud-storage-summary,
-      #${rootId} .codex-usage-hud-storage-preview-head,
-      #${rootId} .codex-usage-hud-storage-preview-foot {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-storage-path,
-      #${rootId} .codex-usage-hud-storage-item-path {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font: 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
-      }
-      #${rootId} .codex-usage-hud-storage-muted {
-        color: var(--codex-usage-hud-muted, #8492a6);
-      }
-      #${rootId} .codex-usage-hud-storage-status,
-      #${rootId} .codex-usage-hud-storage-policy {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        flex: 0 0 auto;
-        border: 1px solid var(--codex-usage-hud-divider, #273241);
-        border-radius: 4px;
-        padding: 3px 6px;
-        white-space: nowrap;
-      }
-      #${rootId} .codex-usage-hud-storage-status[data-state="running"],
-      #${rootId} .codex-usage-hud-storage-status[data-state="queued_exit"] {
-        color: var(--codex-usage-hud-warning, #ffb86b);
-        border-color: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 55%, transparent);
-      }
-      #${rootId} .codex-usage-hud-storage-status[data-state="completed"],
-      #${rootId} .codex-usage-hud-storage-policy[data-policy="candidate"] {
-        color: var(--codex-usage-hud-success, #8fe3a1);
-        border-color: color-mix(in srgb, var(--codex-usage-hud-success, #8fe3a1) 55%, transparent);
-      }
-      #${rootId} .codex-usage-hud-storage-policy[data-policy="managed"] {
-        color: var(--codex-usage-hud-info, #9ccbff);
-        border-color: color-mix(in srgb, var(--codex-usage-hud-info, #9ccbff) 55%, transparent);
-      }
-      #${rootId} .codex-usage-hud-storage-policy[data-policy="blocked"],
-      #${rootId} .codex-usage-hud-storage-policy[data-policy="unknown"] {
-        color: var(--codex-usage-hud-warning, #ffb86b);
-        border-color: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 55%, transparent);
-      }
-      #${rootId} .codex-usage-hud-storage-summary {
-        display: grid;
-        grid-template-columns: minmax(0, 1.3fr) repeat(2, minmax(90px, .7fr));
-        align-items: stretch;
-        gap: 8px;
-        padding: 10px 0;
-        border-top: 1px solid var(--codex-usage-hud-divider, #273241);
-        border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
-      }
-      #${rootId} .codex-usage-hud-storage-summary-value,
-      #${rootId} .codex-usage-hud-storage-summary-label {
-        margin: 0;
-      }
-      #${rootId} .codex-usage-hud-storage-summary-value {
-        font-weight: 700;
-      }
-      #${rootId} .codex-usage-hud-storage-summary-main .codex-usage-hud-storage-summary-value {
-        color: var(--codex-usage-hud-accent, #f3d27a);
-      }
-      #${rootId} .codex-usage-hud-storage-summary-label {
-        margin-top: 3px;
-        color: var(--codex-usage-hud-muted, #8492a6);
-        font-size: 10px;
-      }
-      #${rootId} .codex-usage-hud-storage-filters {
-        display: flex;
-        gap: 6px;
-        overflow-x: auto;
-        padding-bottom: 2px;
-        scrollbar-width: thin;
-      }
-      #${rootId} .codex-usage-hud-storage-filter {
-        flex: 0 0 auto;
-        border: 0;
-        border-radius: 5px;
-        background: transparent;
-        color: var(--codex-usage-hud-muted, #8492a6);
-        padding: 5px 8px;
-        cursor: pointer;
-      }
-      #${rootId} .codex-usage-hud-storage-filter[data-active="true"] {
-        background: var(--codex-usage-hud-header-surface, #202833);
-        color: var(--codex-usage-hud-accent, #f3d27a);
-      }
-      #${rootId} .codex-usage-hud-storage-categories,
-      #${rootId} .codex-usage-hud-storage-items {
-        display: grid;
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-storage-category,
-      #${rootId} .codex-usage-hud-storage-item {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto auto;
-        align-items: center;
-        gap: 8px;
-        min-width: 0;
-        padding: 8px 0;
-        border-top: 1px solid var(--codex-usage-hud-divider, #273241);
-      }
-      #${rootId} .codex-usage-hud-storage-item {
-        grid-template-columns: auto minmax(0, 1fr) auto auto auto;
-      }
-      #${rootId} .codex-usage-hud-storage-category-main,
-      #${rootId} .codex-usage-hud-storage-item-main {
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-storage-category-title {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        font-weight: 700;
-      }
-      #${rootId} .codex-usage-hud-storage-marker {
-        width: 7px;
-        height: 7px;
-        flex: 0 0 7px;
-        border-radius: 50%;
-        background: var(--codex-usage-hud-warning, #ffb86b);
-      }
-      #${rootId} .codex-usage-hud-storage-marker[data-policy="candidate"] { background: var(--codex-usage-hud-success, #8fe3a1); }
-      #${rootId} .codex-usage-hud-storage-marker[data-policy="managed"] { background: var(--codex-usage-hud-info, #9ccbff); }
-      #${rootId} .codex-usage-hud-storage-marker[data-policy="blocked"] { background: var(--codex-usage-hud-error, #ff6b6b); }
-      #${rootId} .codex-usage-hud-storage-meta {
-        margin-top: 3px;
-        color: var(--codex-usage-hud-muted, #8492a6);
-        font-size: 10px;
-        overflow-wrap: anywhere;
-      }
-      #${rootId} .codex-usage-hud-storage-size {
-        color: var(--codex-usage-hud-text, #e8eef7);
-        white-space: nowrap;
-        font: 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
-      }
-      #${rootId} .codex-usage-hud-storage-item input[type="checkbox"] {
-        width: 15px;
-        height: 15px;
-        accent-color: var(--codex-usage-hud-accent, #f3d27a);
-      }
-      #${rootId} .codex-usage-hud-storage-item-action {
-        min-height: 26px;
-        border: 0;
-        border-radius: 4px;
-        background: var(--codex-usage-hud-panel-border, #2e3846);
-        color: var(--codex-usage-hud-text, #e8eef7);
-        padding: 4px 7px;
-        cursor: pointer;
-        white-space: nowrap;
-      }
-      #${rootId} .codex-usage-hud-storage-item-action:disabled { opacity: .55; cursor: not-allowed; }
-      #${rootId} .codex-usage-hud-storage-item-actions {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: flex-end;
-        gap: 5px;
-        grid-column: 4;
-      }
-      #${rootId} .codex-usage-hud-storage-preview {
-        display: grid;
-        gap: 8px;
-        padding: 10px;
-        border: 1px solid color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 45%, transparent);
-        border-radius: 6px;
-        background: color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 7%, var(--codex-usage-hud-panel-surface, #141b24));
-      }
-      #${rootId} .codex-usage-hud-storage-preview-list {
-        display: grid;
-        gap: 5px;
-        max-height: 150px;
-        overflow: auto;
-      }
-      #${rootId} .codex-usage-hud-storage-preview-row {
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
-        min-width: 0;
-        padding-top: 5px;
-        border-top: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 72%, transparent);
-      }
-      #${rootId} .codex-usage-hud-storage-note {
-        margin: 0;
-        color: var(--codex-usage-hud-muted, #8492a6);
-        line-height: 1.5;
-      }
-      #${rootId} .codex-usage-hud-storage-empty {
-        padding: 14px 0;
-        color: var(--codex-usage-hud-muted, #8492a6);
-        text-align: center;
-      }
       #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="storage"] {
         width: min(980px, calc(100vw - 48px));
         height: min(572px, calc(100vh - 48px));
@@ -3190,7 +2986,7 @@ scanStartedAt: 0,
         height: 100%;
         flex: 1 1 auto;
         display: grid;
-        grid-template-rows: auto minmax(0, 1fr) auto;
+        grid-template-rows: minmax(0, 1fr) auto;
         overflow: hidden;
       }
       #${rootId} .codex-usage-hud-cleanup-page-head {
@@ -3307,18 +3103,6 @@ scanStartedAt: 0,
       #${rootId} .codex-usage-hud-cleanup-icon-lg {
         width: 30px;
         height: 30px;
-      }
-      #${rootId} .codex-usage-hud-cleanup-icon-button {
-        width: 30px;
-        height: 30px;
-        display: inline-grid;
-        place-items: center;
-        border: 1px solid transparent;
-        border-radius: 5px;
-        background: transparent;
-        color: var(--codex-usage-hud-muted, #9da1a8);
-        cursor: pointer;
-        padding: 0;
       }
       #${rootId} .codex-usage-hud-cleanup-empty-state {
         min-width: 0;
@@ -3438,84 +3222,6 @@ scanStartedAt: 0,
         animation: codex-usage-hud-cleanup-spin .75s linear infinite;
         flex: 0 0 auto;
       }
-      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] {
-        background: linear-gradient(180deg, #1a2430, #16202a);
-        border-bottom-color: #2d3d50;
-      }
-      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] .codex-usage-hud-cleanup-summary-label {
-        color: #7db9f7;
-      }
-      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] .codex-usage-hud-cleanup-summary-value {
-        color: #d7ebff;
-      }
-      #${rootId} .codex-usage-hud-cleanup-summary-band[data-scanning="true"] .codex-usage-hud-cleanup-summary-side {
-        color: #8eb6de;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row[data-scan-state="pending"] { opacity: .72; }
-      #${rootId} .codex-usage-hud-cleanup-row[data-scan-state="current"] {
-        background: rgba(59, 142, 234, .06);
-      }
-      #${rootId} .codex-usage-hud-cleanup-row[data-scan-state="found"] {
-        background: linear-gradient(90deg, rgba(59, 142, 234, .14), transparent 72%);
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-status {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        color: #7db9f7;
-        font-size: 10px;
-        font-weight: 600;
-      }
-      #${rootId} .codex-usage-hud-cleanup-check[data-skeleton="true"] {
-        border-style: dashed;
-        border-color: #3a3d43;
-        background: #1a1b1e;
-      }
-      #${rootId} .codex-usage-hud-cleanup-rescan-shell {
-        position: relative;
-        min-height: 0;
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-      }
-      #${rootId} .codex-usage-hud-cleanup-rescan-dim {
-        filter: saturate(.85) brightness(.88);
-        pointer-events: none;
-      }
-      #${rootId} .codex-usage-hud-cleanup-rescan-chip {
-        position: absolute;
-        top: 14px;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 2;
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        min-height: 34px;
-        padding: 0 14px;
-        border: 1px solid #3f5f82;
-        border-radius: 999px;
-        background: rgba(23, 32, 42, .96);
-        color: #cfe4ff;
-        font-size: 12px;
-        font-weight: 650;
-        box-shadow: 0 10px 28px rgba(0, 0, 0, .35);
-        pointer-events: none;
-      }
-      #${rootId} .codex-usage-hud-cleanup-head-meta[data-live="true"] { color: #7db9f7; }
-      #${rootId} .codex-usage-hud-cleanup-pulse-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: #3b8eea;
-        box-shadow: 0 0 0 0 rgba(59, 142, 234, .55);
-        animation: codex-usage-hud-cleanup-pulse 1.4s ease-out infinite;
-      }
-      @keyframes codex-usage-hud-cleanup-pulse {
-        0% { box-shadow: 0 0 0 0 rgba(59, 142, 234, .55); }
-        70% { box-shadow: 0 0 0 8px rgba(59, 142, 234, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(59, 142, 234, 0); }
-      }
       #${rootId} .codex-usage-hud-cleanup {
         display: flex;
         flex-direction: column;
@@ -3527,347 +3233,6 @@ scanStartedAt: 0,
         padding: 0 17px;
         font-size: 13px;
       }
-      #${rootId} .codex-usage-hud-cleanup {
-        display: grid;
-        min-width: 0;
-        min-height: 100%;
-        height: 100%;
-        align-content: start;
-      }
-      #${rootId} .codex-usage-hud-cleanup:has(.codex-usage-hud-cleanup-empty-state) {
-        grid-template-rows: minmax(0, 1fr);
-      }
-      #${rootId} .codex-usage-hud-cleanup-summary-band {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 18px;
-        align-items: center;
-        padding: 13px 15px;
-        border-bottom: 1px solid var(--codex-usage-hud-divider, #393b40);
-        background: #16261a;
-      }
-      #${rootId} .codex-usage-hud-cleanup-summary-label {
-        display: flex;
-        align-items: center;
-        gap: 9px;
-        color: #9be5ad;
-        font-size: 12px;
-      }
-      #${rootId} .codex-usage-hud-cleanup-summary-value {
-        margin-top: 3px;
-        color: #c9f4d2;
-        font-size: 24px;
-        line-height: 1;
-        font-weight: 750;
-      }
-      #${rootId} .codex-usage-hud-cleanup-summary-side {
-        color: #9be5ad;
-        font-size: 11px;
-        text-align: right;
-        line-height: 1.45;
-      }
-      #${rootId} .codex-usage-hud-cleanup-list {
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row {
-        min-width: 0;
-        min-height: 54px;
-        display: grid;
-        grid-template-columns: 24px minmax(0, 1fr) minmax(150px, .7fr) 76px 20px;
-        gap: 9px;
-        align-items: center;
-        padding: 7px 14px;
-        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
-      }
-      #${rootId} .codex-usage-hud-cleanup-row[data-tier="consent"],
-      #${rootId} .codex-usage-hud-cleanup-row[data-kind="deep"] {
-        background: #2a2418;
-        border-top: 1px solid #554525;
-        border-bottom-color: #554525;
-      }
-      #${rootId} .codex-usage-hud-cleanup-check {
-        width: 16px;
-        height: 16px;
-        min-width: 16px;
-        padding: 0;
-        border: 1px solid #5a5d63;
-        border-radius: 3px;
-        background: #111214;
-        display: grid;
-        place-items: center;
-        color: #fff;
-        flex: 0 0 auto;
-        cursor: pointer;
-      }
-      #${rootId} .codex-usage-hud-cleanup-check[data-checked="true"] {
-        background: #3b8eea;
-        border-color: #3b8eea;
-      }
-      #${rootId} .codex-usage-hud-cleanup-check[data-checked="true"]::after {
-        content: "";
-        width: 7px;
-        height: 4px;
-        border-left: 2px solid currentColor;
-        border-bottom: 2px solid currentColor;
-        transform: translateY(-1px) rotate(-45deg);
-      }
-      #${rootId} .codex-usage-hud-cleanup-check[data-partial="true"]::after {
-        content: "";
-        width: 7px;
-        height: 2px;
-        background: currentColor;
-      }
-      #${rootId} .codex-usage-hud-cleanup-check[data-disabled="true"] {
-        border-color: #3b3d42;
-        background: #202124;
-        cursor: default;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-main { min-width: 0; }
-      #${rootId} .codex-usage-hud-cleanup-row-title {
-        font-size: 12px;
-        font-weight: 650;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-meta {
-        margin-top: 3px;
-        color: var(--codex-usage-hud-muted, #9da1a8);
-        font-size: 10px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-impact {
-        color: var(--codex-usage-hud-muted, #9da1a8);
-        font-size: 10px;
-        overflow-wrap: anywhere;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-size {
-        text-align: right;
-        font-size: 12px;
-        font-weight: 700;
-        font-variant-numeric: tabular-nums;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-chevron {
-        width: 24px;
-        height: 24px;
-        padding: 0;
-        border: 0;
-        border-radius: 4px;
-        background: transparent;
-        color: #73777f;
-        display: inline-grid;
-        place-items: center;
-        cursor: pointer;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-chevron:hover {
-        background: rgba(255, 255, 255, .06);
-        color: var(--codex-usage-hud-text, #e8eef7);
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-chevron .codex-usage-hud-cleanup-icon {
-        transition: transform .16s ease;
-      }
-      #${rootId} .codex-usage-hud-cleanup-row-chevron[aria-expanded="true"] .codex-usage-hud-cleanup-icon {
-        transform: rotate(90deg);
-      }
-      #${rootId} .codex-usage-hud-cleanup-result-mark {
-        width: 16px;
-        height: 16px;
-        display: inline-grid;
-        place-items: center;
-        color: #8fcfa0;
-        font-size: 11px;
-        font-weight: 750;
-      }
-      #${rootId} .codex-usage-hud-cleanup-result-mark[data-state="failed"],
-      #${rootId} .codex-usage-hud-cleanup-result-mark[data-state="partial"] {
-        color: #f0b66a;
-      }
-      #${rootId} .codex-usage-hud-cleanup-details {
-        min-width: 0;
-        display: grid;
-        margin-left: 38px;
-        padding: 0 14px 8px 0;
-        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
-        background: rgba(255, 255, 255, .012);
-      }
-      #${rootId} .codex-usage-hud-cleanup-target {
-        min-width: 0;
-        display: grid;
-        gap: 4px;
-        padding: 9px 0;
-        border-top: 1px solid rgba(255, 255, 255, .045);
-      }
-      #${rootId} .codex-usage-hud-cleanup-target:first-child { border-top: 0; }
-      #${rootId} .codex-usage-hud-cleanup-target-head {
-        min-width: 0;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: start;
-        gap: 8px;
-      }
-      #${rootId} .codex-usage-hud-cleanup-target-path {
-        min-width: 0;
-        color: #d5d9df;
-        font: 10.5px/1.45 Consolas, "Cascadia Mono", ui-monospace, monospace;
-        letter-spacing: 0;
-        white-space: normal;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-        user-select: text;
-        -webkit-user-select: text;
-      }
-      #${rootId} .codex-usage-hud-cleanup-target-actions {
-        display: inline-flex;
-        gap: 3px;
-      }
-      #${rootId} .codex-usage-hud-cleanup-target-action {
-        width: 26px;
-        height: 26px;
-        padding: 0;
-        border: 1px solid transparent;
-        border-radius: 4px;
-        background: transparent;
-        color: #8c929b;
-        display: inline-grid;
-        place-items: center;
-        cursor: pointer;
-      }
-      #${rootId} .codex-usage-hud-cleanup-target-action:hover {
-        border-color: #474b52;
-        background: rgba(255, 255, 255, .055);
-        color: #e3e6eb;
-      }
-      #${rootId} .codex-usage-hud-cleanup-target-meta,
-      #${rootId} .codex-usage-hud-cleanup-target-note {
-        min-width: 0;
-        color: var(--codex-usage-hud-muted, #9da1a8);
-        font-size: 9.5px;
-        line-height: 1.45;
-        overflow-wrap: anywhere;
-      }
-      #${rootId} .codex-usage-hud-cleanup-protected-note {
-        min-height: 39px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 7px 14px;
-        color: var(--codex-usage-hud-muted, #9da1a8);
-        font-size: 10px;
-        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
-      }
-      #${rootId} .codex-usage-hud-cleanup-protected-note > button {
-        width: 100%;
-        min-width: 0;
-        padding: 0;
-        border: 0;
-        background: transparent;
-        color: inherit;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        font: inherit;
-        text-align: left;
-        cursor: pointer;
-      }
-      #${rootId} .codex-usage-hud-cleanup-protected-note span {
-        display: inline-flex;
-        align-items: center;
-        gap: 7px;
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-cleanup-controls {
-        display: grid;
-        gap: 8px;
-        padding: 10px 14px 12px;
-        border-bottom: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 80%, transparent);
-        background: color-mix(in srgb, #2a2418 55%, transparent);
-      }
-      #${rootId} .codex-usage-hud-cleanup-prerequisite-title {
-        color: var(--codex-usage-hud-warning, #f0c66b);
-        font-size: 11px;
-        font-weight: 700;
-      }
-      #${rootId} .codex-usage-hud-cleanup-controls[data-ready="true"] .codex-usage-hud-cleanup-prerequisite-title {
-        color: var(--codex-usage-hud-success, #8fe3a1);
-      }
-      #${rootId} .codex-usage-hud-cleanup-prerequisite-step {
-        display: grid;
-        gap: 4px;
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-cleanup-control {
-        min-width: 0;
-        display: grid;
-        grid-template-columns: 18px minmax(0, 1fr);
-        gap: 7px;
-        align-items: start;
-      }
-      #${rootId} .codex-usage-hud-cleanup-control input[type="checkbox"] {
-        width: 15px;
-        height: 15px;
-        margin-top: 1px;
-        accent-color: #3b8eea;
-      }
-      #${rootId} .codex-usage-hud-cleanup-backup {
-        min-width: 0;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 6px;
-      }
-      #${rootId} .codex-usage-hud-cleanup-backup input {
-        min-width: 0;
-        border: 1px solid #44464c;
-        border-radius: 4px;
-        background: #111214;
-        color: var(--codex-usage-hud-text, #e8eef7);
-        padding: 6px 7px;
-        font: 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
-      }
-      #${rootId} .codex-usage-hud-cleanup-meta {
-        min-width: 0;
-        color: var(--codex-usage-hud-muted, #8492a6);
-        font-size: 10px;
-        overflow-wrap: anywhere;
-      }
-      #${rootId} .codex-usage-hud-cleanup-preview {
-        display: grid;
-        gap: 8px;
-        padding: 10px 14px 12px;
-        border-top: 1px solid var(--codex-usage-hud-divider, #273241);
-      }
-      #${rootId} .codex-usage-hud-cleanup-preview-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        min-width: 0;
-      }
-      #${rootId} .codex-usage-hud-cleanup-results {
-        max-height: 130px;
-        overflow: auto;
-      }
-      #${rootId} .codex-usage-hud-cleanup-result {
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
-        min-width: 0;
-        padding: 5px 0;
-        border-top: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 72%, transparent);
-      }
-      #${rootId} .codex-usage-hud-cleanup-result span:first-child { min-width: 0; overflow-wrap: anywhere; }
-      #${rootId} .codex-usage-hud-cleanup-empty {
-        min-height: 96px;
-        display: grid;
-        place-items: center;
-        padding: 18px;
-        color: var(--codex-usage-hud-muted, #8492a6);
-        text-align: center;
-      }
-      #${rootId} .codex-usage-hud-cleanup-empty[data-kind="error"] { color: var(--codex-usage-hud-warning, #ffb86b); }
       #${rootId} .codex-usage-hud-session-cleanup {
         min-width: 0;
         min-height: 100%;
@@ -4505,7 +3870,7 @@ scanStartedAt: 0,
       }
       #${rootId} .codex-usage-hud-rest-reminder-grid {
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 5px 6px;
       }
       #${rootId} .codex-usage-hud-rest-reminder-field {
@@ -4615,19 +3980,13 @@ scanStartedAt: 0,
         gap: 6px;
         align-items: center;
       }
-      #${rootId} .codex-usage-hud-rest-reminder-notify {
+      #${rootId} .codex-usage-hud-rest-reminder-summary {
         min-width: 0;
         color: var(--codex-usage-hud-request-muted, #718095);
         font-size: 10px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-      }
-      #${rootId} .codex-usage-hud-rest-reminder-notify[data-kind="sent"] {
-        color: var(--codex-usage-hud-success, #8fe3a1);
-      }
-      #${rootId} .codex-usage-hud-rest-reminder-notify[data-kind="failed"] {
-        color: var(--codex-usage-hud-error, #ff6b6b);
       }
       #${rootId} .codex-usage-hud-rest-reminder-foot .codex-usage-hud-settings-action {
         min-height: 26px;
@@ -5290,12 +4649,6 @@ scanStartedAt: 0,
         #${rootId} .codex-usage-hud-support-qr-grid {
           grid-template-columns: minmax(0, 1fr);
         }
-        #${rootId} .codex-usage-hud-storage-summary {
-          grid-template-columns: 1fr 1fr;
-        }
-        #${rootId} .codex-usage-hud-storage-summary-main {
-          grid-column: 1 / -1;
-        }
         #${rootId} .codex-usage-hud-settings-dialog[data-active-tab="storage"] {
           width: min(980px, calc(100vw - 48px));
           height: min(572px, calc(100vh - 48px));
@@ -5411,43 +4764,6 @@ scanStartedAt: 0,
         #${rootId} .codex-usage-hud-provider-meta {
           max-width: none;
           text-align: left;
-        }
-        #${rootId} .codex-usage-hud-storage-pathbar,
-        #${rootId} .codex-usage-hud-storage-preview-head,
-        #${rootId} .codex-usage-hud-storage-preview-foot {
-          align-items: flex-start;
-          flex-direction: column;
-        }
-        #${rootId} .codex-usage-hud-storage-category {
-          grid-template-columns: minmax(0, 1fr) auto;
-        }
-        #${rootId} .codex-usage-hud-storage-category .codex-usage-hud-storage-policy {
-          grid-column: 1;
-          justify-self: start;
-          margin-left: 14px;
-        }
-        #${rootId} .codex-usage-hud-storage-category .codex-usage-hud-storage-size {
-          grid-column: 2;
-          grid-row: 1 / span 2;
-        }
-        #${rootId} .codex-usage-hud-storage-item {
-          grid-template-columns: auto minmax(0, 1fr) auto;
-        }
-        #${rootId} .codex-usage-hud-storage-item .codex-usage-hud-storage-policy {
-          grid-column: 2;
-          justify-self: start;
-        }
-        #${rootId} .codex-usage-hud-storage-item .codex-usage-hud-storage-size {
-          grid-column: 3;
-          grid-row: 1 / span 2;
-        }
-        #${rootId} .codex-usage-hud-storage-item-action {
-          grid-column: 2;
-          justify-self: start;
-        }
-        #${rootId} .codex-usage-hud-storage-item-actions {
-          grid-column: 2;
-          justify-self: start;
         }
         #${rootId} .codex-usage-hud-insights-toolbar,
         #${rootId} .codex-usage-hud-insights-background,
@@ -5981,7 +5297,7 @@ scanStartedAt: 0,
       rest_reminder_interval_minutes: 45,
       rest_reminder_break_minutes: 2,
       rest_reminder_postpone_minutes: 10,
-      rest_reminder_idle_reset_minutes: 5,
+      rest_reminder_idle_reset_minutes: 0,
       rest_reminder_work_start_time: "09:00",
       rest_reminder_work_end_time: "18:00",
       rest_reminder_lunch_enabled: true,
@@ -7455,60 +6771,12 @@ scanStartedAt: 0,
     renderSettingsProviderEditor({ focusTab });
   }
 
-  function fileManagementFromPayload() {
-    const value = currentPayload()?.fileManagement;
-    return value && typeof value === "object" ? value : {
-      rootLabel: "CODEX_HOME", generatedAt: "", revision: "",
-      totals: { bytes: 0, files: 0, items: 0 }, categories: [], items: [],
-      operation: { state: "idle", progress: 0, error: "" },
-    };
-  }
-
   function storageFormatBytes(value) {
     let bytes = Math.max(0, Number(value) || 0);
     const units = ["B", "KB", "MB", "GB", "TB"];
     let index = 0;
     while (bytes >= 1024 && index < units.length - 1) { bytes /= 1024; index += 1; }
     return `${bytes >= 10 || index === 0 ? bytes.toFixed(0) : bytes.toFixed(1)} ${units[index]}`;
-  }
-
-  function storagePolicyLabel(policy) {
-    return ({ candidate: "可候选", managed: "官方动作", blocked: "禁止直接删", unknown: "未知保护" })[policy] || "保护";
-  }
-
-  function storageOperationLabel(operation) {
-    return ({ idle: "尚未生成清理计划", running: "正在处理存储操作", accepted: "存储操作已排队", cancelling: "正在取消存储操作", preview: "清理预览已生成", queued_exit: "已加入退出后队列", completed: "存储操作已完成", partial: "存储操作部分完成", cancelled: "存储操作已取消", failed: "存储操作失败" })[String(operation?.state || "idle")] || "存储状态待更新";
-  }
-
-  function legacyStoragePanelHtml(data) {
-    const totals = data?.totals && typeof data.totals === "object" ? data.totals : {};
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const allItems = Array.isArray(data?.items) ? data.items : [];
-    const items = storageFilter === "all" ? allItems : allItems.filter((item) => String(item?.policy || "unknown") === storageFilter);
-    const categories = Array.isArray(data?.categories) ? data.categories : [];
-    const previewItems = Array.isArray(operation?.items) ? operation.items : [];
-    const managedAction = String(operation?.managedAction || "");
-    const operationState = String(operation?.state || "idle");
-    const visibleItems = items.slice(0, 160);
-    const policyCounts = { candidate: 0, managed: 0, blocked: 0, unknown: 0 };
-    allItems.forEach((item) => { const policy = String(item?.policy || "unknown"); if (policy in policyCounts) policyCounts[policy] += 1; });
-    const categoryHtml = categories
-      .filter((category) => storageFilter === "all" || String(category?.policy || "unknown") === storageFilter)
-      .map((category) => {
-        const policy = String(category?.policy || "unknown");
-        return `<div class="codex-usage-hud-storage-category" data-policy="${escapeHtml(policy)}"><div class="codex-usage-hud-storage-category-main"><div class="codex-usage-hud-storage-category-title"><span class="codex-usage-hud-storage-marker" data-policy="${escapeHtml(policy)}"></span>${escapeHtml(category?.category || "未知")}</div><div class="codex-usage-hud-storage-meta">${escapeHtml(category?.reason || "受保护")}</div></div><span class="codex-usage-hud-storage-policy" data-policy="${escapeHtml(policy)}">${escapeHtml(storagePolicyLabel(policy))}</span><span class="codex-usage-hud-storage-size">${storageFormatBytes(category?.size)}</span></div>`;
-      }).join("");
-    const itemHtml = visibleItems.map((item) => {
-      const policy = String(item?.policy || "unknown");
-      const id = String(item?.id || "");
-      const actions = Array.isArray(item?.allowedActions) ? item.allowedActions : [];
-      const selector = policy === "candidate" ? `<input type="checkbox" data-storage-item-id="${escapeHtml(id)}" aria-label="选择 ${escapeHtml(item?.relativePath || "候选项")}">` : "<span aria-hidden=\"true\"></span>";
-      const managedButtons = policy === "managed" && actions.length ? `<span class="codex-usage-hud-storage-item-actions">${actions.map((managedAction) => `<button type="button" class="codex-usage-hud-storage-item-action" data-action="storage-managed-preview" data-storage-managed-action="${escapeHtml(managedAction)}" data-storage-item-id="${escapeHtml(id)}">${escapeHtml(managedAction === "logout" ? "官方退出" : managedAction === "remove_plugin" ? "官方移除" : managedAction === "archive_session" ? "官方归档" : "官方删除")}</button>`).join("")}</span>` : `<button type="button" class="codex-usage-hud-storage-item-action" disabled>${escapeHtml(storagePolicyLabel(policy))}</button>`;
-      return `<div class="codex-usage-hud-storage-item" data-policy="${escapeHtml(policy)}">${selector}<div class="codex-usage-hud-storage-item-main"><div class="codex-usage-hud-storage-item-path" title="${escapeHtml(item?.relativePath || "")}">${escapeHtml(item?.relativePath || "未知路径")}</div><div class="codex-usage-hud-storage-meta">${escapeHtml(item?.reason || "")}</div></div><span class="codex-usage-hud-storage-policy" data-policy="${escapeHtml(policy)}">${escapeHtml(storagePolicyLabel(policy))}</span><span class="codex-usage-hud-storage-size">${storageFormatBytes(item?.size)}</span>${managedButtons}</div>`;
-    }).join("");
-    const previewHtml = operationState === "preview" && !storagePreviewHidden ? `<section class="codex-usage-hud-storage-preview" aria-live="polite"><div class="codex-usage-hud-storage-preview-head"><div><strong>清理预览</strong><div class="codex-usage-hud-storage-muted">${previewItems.length} 个项，预计释放 ${storageFormatBytes(operation?.bytes)}</div></div><span class="codex-usage-hud-storage-status" data-state="completed">Dry run</span></div><div class="codex-usage-hud-storage-preview-list">${previewItems.map((item) => `<div class="codex-usage-hud-storage-preview-row"><span class="codex-usage-hud-storage-item-path">${escapeHtml(item?.relativePath || "")}</span><span class="codex-usage-hud-storage-muted">${storageFormatBytes(item?.size)}</span></div>`).join("")}</div><p class="codex-usage-hud-storage-note">Codex 运行期间不会直接修改原始文件；执行前会再次检查 revision、锁定状态和路径指纹。</p><div class="codex-usage-hud-storage-preview-foot"><button type="button" class="codex-usage-hud-settings-link" data-action="storage-clear-preview">取消预览</button><button type="button" class="codex-usage-hud-settings-action" data-action="storage-confirm-preview" data-primary="true">${escapeHtml(managedAction ? "确认官方动作" : "加入退出后队列")}</button></div></section>` : "";
-    const operationNote = operation?.error ? `：${operation.error}` : operationState === "queued_exit" ? "；Codex 完全退出后才会执行" : "";
-    return `<div class="codex-usage-hud-storage"><div class="codex-usage-hud-storage-pathbar"><div class="codex-usage-hud-storage-path">${escapeHtml(data?.rootLabel || "CODEX_HOME")}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(operationState)}">${escapeHtml(storageOperationLabel(operation) + operationNote)}</span></div><div class="codex-usage-hud-storage-summary"><div class="codex-usage-hud-storage-summary-main"><p class="codex-usage-hud-storage-summary-value">${storageFormatBytes(totals?.bytes)}</p><p class="codex-usage-hud-storage-summary-label">已发现的 Codex 数据</p></div><div><p class="codex-usage-hud-storage-summary-value">${Number(totals?.files || 0).toLocaleString()}</p><p class="codex-usage-hud-storage-summary-label">文件</p></div><div><p class="codex-usage-hud-storage-summary-value">${Number(totals?.items || 0).toLocaleString()}</p><p class="codex-usage-hud-storage-summary-label">管理项</p></div></div><div class="codex-usage-hud-storage-filters" role="tablist" aria-label="文件风险筛选">${[["all", "总览"], ["candidate", "可候选"], ["managed", "官方动作"], ["blocked", "受保护"], ["unknown", "未知"]].map(([key, label]) => `<button type="button" class="codex-usage-hud-storage-filter" data-action="storage-filter" data-storage-filter="${key}" data-active="${storageFilter === key}">${label} ${key === "all" ? "" : `(${policyCounts[key]})`}</button>`).join("")}</div><div class="codex-usage-hud-storage-categories" aria-live="polite">${categoryHtml || '<div class="codex-usage-hud-storage-empty">尚未扫描，点击“重新扫描”查看本地元数据。</div>'}</div><div class="codex-usage-hud-storage-items">${itemHtml || '<div class="codex-usage-hud-storage-empty">当前筛选没有可展示的管理项。</div>'}</div>${visibleItems.length < items.length ? `<div class="codex-usage-hud-storage-muted">仅显示前 ${visibleItems.length} 项；扫描不会自动重复。</div>` : ""}${previewHtml}<p class="codex-usage-hud-storage-note">只显示相对路径和元数据；未知项、凭据、配置、SQLite、会话原始文件、活动插件运行时和 reparse point 不提供直接删除。</p></div>`;
   }
 
   function typedSettingsRequestId(prefix) {
@@ -7520,14 +6788,6 @@ scanStartedAt: 0,
       return usageInsightsState.data;
     }
     const value = currentPayload()?.usageInsights;
-    return value && typeof value === "object" && Object.keys(value).length ? value : null;
-  }
-
-  function safeCleanupFromPayload() {
-    if (safeCleanupState.data && typeof safeCleanupState.data === "object") {
-      return safeCleanupState.data;
-    }
-    const value = currentPayload()?.safeCleanup;
     return value && typeof value === "object" && Object.keys(value).length ? value : null;
   }
 
@@ -7698,1165 +6958,36 @@ scanStartedAt: 0,
     return `<svg class="${klass}" viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
   }
 
-  const safeCleanupDeepGroupId = "__safe_cleanup_deep__";
-  const safeCleanupProtectedGroupId = "__safe_cleanup_protected__";
-
-  function safeCleanupRawItems(data = safeCleanupFromPayload()) {
-    return Array.isArray(data?.groups) ? data.groups : [];
-  }
-
-  function safeCleanupItemIsExecutable(item) {
-    const tier = String(item?.tier || "protected");
-    return !!String(item?.id || "")
-      && !String(item?.blockedReason || "")
-      && (tier === "safe" || tier === "consent");
-  }
-
-  function safeCleanupPresentationKey(item) {
-    const relatedProcesses = Array.isArray(item?.relatedProcesses)
-      ? item.relatedProcesses.map((value) => String(value || "")).sort()
-      : [];
-    return JSON.stringify([
-      String(item?.category || ""),
-      String(item?.tier || "protected"),
-      String(item?.label || ""),
-      String(item?.retention || ""),
-      String(item?.impact || ""),
-      String(item?.blockedReason || ""),
-      item?.requiresOffline === true,
-      item?.requiresBackup === true,
-      item?.requiresCodexClose === true,
-      relatedProcesses,
-    ]);
-  }
-
-  function safeCleanupAggregateResultState(entries) {
-    const states = entries.map((entry) => String(entry?.state || "").toLowerCase()).filter(Boolean);
-    if (!states.length) return "";
-    const unique = new Set(states);
-    if (unique.has("failed")) return unique.size === 1 ? "failed" : "partial";
-    if (unique.has("skipped")) return unique.size === 1 ? "skipped" : "partial";
-    if (unique.has("running")) return "running";
-    if (unique.has("selected")) return "selected";
-    if (unique.has("restored")) return unique.size === 1 ? "restored" : "partial";
-    if ([...unique].every((state) => state === "completed" || state === "deleted")) return "completed";
-    return states[0];
-  }
-
-  function safeCleanupPresentationGroups(data = safeCleanupFromPayload(), {
-    itemIds = null,
-    results = [],
-  } = {}) {
-    const selected = Array.isArray(itemIds)
-      ? new Set(itemIds.map((id) => String(id || "")).filter(Boolean))
-      : null;
-    const resultById = new Map((Array.isArray(results) ? results : [])
-      .map((result) => [String(result?.id || ""), result])
-      .filter(([id]) => !!id));
-    const grouped = new Map();
-    safeCleanupRawItems(data).forEach((item, sourceIndex) => {
-      const itemId = String(item?.id || "");
-      if (!itemId || (selected && !selected.has(itemId))) return;
-      const key = safeCleanupPresentationKey(item);
-      let group = grouped.get(key);
-      if (!group) {
-        group = {
-          id: key,
-          presentationId: key,
-          sourceIndex,
-          category: String(item?.category || ""),
-          tier: String(item?.tier || "protected"),
-          label: String(item?.label || ""),
-          retention: String(item?.retention || ""),
-          impact: String(item?.impact || ""),
-          blockedReason: String(item?.blockedReason || ""),
-          requiresOffline: item?.requiresOffline === true,
-          requiresBackup: item?.requiresBackup === true,
-          requiresCodexClose: item?.requiresCodexClose === true,
-          relatedProcesses: Array.isArray(item?.relatedProcesses) ? [...item.relatedProcesses] : [],
-          entries: [],
-          itemIds: [],
-          executableIds: [],
-          bytes: 0,
-          files: 0,
-          items: 0,
-          targetCount: 0,
-          actualBytes: 0,
-          deletedRows: 0,
-          hasResults: false,
-          oldestModifiedAt: "",
-          newestModifiedAt: "",
-          state: "",
-        };
-        grouped.set(key, group);
-      }
-      const result = resultById.get(itemId);
-      const entry = result ? { ...item, ...result, id: itemId } : { ...item, id: itemId };
-      group.entries.push(entry);
-      group.itemIds.push(itemId);
-      if (safeCleanupItemIsExecutable(item)) group.executableIds.push(itemId);
-      group.bytes += Math.max(0, Number(item?.bytes || 0));
-      group.files += Math.max(0, Number(item?.files || 0));
-      group.targetCount += 1;
-      group.items = group.targetCount;
-      if (result) {
-        group.hasResults = true;
-        group.actualBytes += Math.max(0, Number(result?.actualBytes || 0));
-        group.deletedRows += Math.max(0, Number(result?.deletedRows || 0));
-      }
-    });
-    const tierOrder = { consent: 0, safe: 1, protected: 2 };
-    return [...grouped.values()].map((group) => {
-      group.entries.sort((left, right) => String(left?.path || "").localeCompare(String(right?.path || "")));
-      const modified = group.entries
-        .map((entry) => ({ raw: String(entry?.modifiedAt || ""), value: Date.parse(String(entry?.modifiedAt || "")) }))
-        .filter((entry) => entry.raw && Number.isFinite(entry.value))
-        .sort((left, right) => left.value - right.value);
-      group.oldestModifiedAt = modified[0]?.raw || "";
-      group.newestModifiedAt = modified[modified.length - 1]?.raw || "";
-      group.state = safeCleanupAggregateResultState(group.entries);
-      return group;
-    }).sort((left, right) => (
-      (tierOrder[String(left?.tier || "protected")] ?? 3)
-      - (tierOrder[String(right?.tier || "protected")] ?? 3)
-      || Number(left?.sourceIndex || 0) - Number(right?.sourceIndex || 0)
-    ));
-  }
-
-  function safeCleanupGroups(data = safeCleanupFromPayload()) {
-    return safeCleanupPresentationGroups(data);
-  }
-
-  function syncSafeCleanupSelection(data = safeCleanupFromPayload()) {
-    const revision = String(data?.revision || "");
-    if (!revision || isCleanupScanningRevision(revision)) return;
-    const validIds = new Set(safeCleanupRawItems(data)
-      .filter(safeCleanupItemIsExecutable)
-      .map((item) => String(item.id)));
-    if (safeCleanupState.inventoryRevision !== revision) {
-      safeCleanupState.inventoryRevision = revision;
-      safeCleanupState.selectedIds = new Set((Array.isArray(data?.defaultSelectedIds) ? data.defaultSelectedIds : [])
-        .map((id) => String(id || ""))
-        .filter((id) => validIds.has(id)));
-      safeCleanupState.expandedGroupIds.clear();
-    } else {
-      safeCleanupState.selectedIds = new Set(
-        [...safeCleanupState.selectedIds].filter((id) => validIds.has(id)),
-      );
-    }
-    const itemById = new Map(safeCleanupRawItems(data).map((item) => [String(item?.id || ""), item]));
-    safeCleanupState.includeConsent = [...safeCleanupState.selectedIds]
-      .some((id) => String(itemById.get(id)?.tier || "") === "consent");
-  }
-
-  function safeCleanupSelectedGroupIds(data = safeCleanupFromPayload()) {
-    const validIds = new Set(safeCleanupRawItems(data)
-      .filter(safeCleanupItemIsExecutable)
-      .map((item) => String(item.id)));
-    return [...safeCleanupState.selectedIds].filter((id) => validIds.has(id));
-  }
-
-  function safeCleanupPreviewMatchesSelection(data = safeCleanupFromPayload()) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const previewIds = Array.isArray(operation?.selectedIds)
-      ? operation.selectedIds.map((id) => String(id || "")).filter(Boolean)
-      : [];
-    const selectedIds = safeCleanupSelectedGroupIds(data);
-    if (previewIds.length !== selectedIds.length) return false;
-    const previewSet = new Set(previewIds);
-    return selectedIds.every((id) => previewSet.has(id));
-  }
-
-  function safeCleanupRequiresOffline(data = safeCleanupFromPayload()) {
-    const selected = new Set(safeCleanupSelectedGroupIds(data));
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const operationBound = !safeCleanupState.previewHidden && safeCleanupPreviewMatchesSelection(data);
-    return (operationBound && operation?.requiresOffline === true)
-      || safeCleanupRawItems(data).some((item) => selected.has(String(item?.id || "")) && item?.requiresOffline === true);
-  }
-
-  function safeCleanupRequiresBackup(data = safeCleanupFromPayload()) {
-    const selected = new Set(safeCleanupSelectedGroupIds(data));
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const operationBound = !safeCleanupState.previewHidden && safeCleanupPreviewMatchesSelection(data);
-    return (operationBound && operation?.requiresBackup === true)
-      || safeCleanupRawItems(data).some((item) => selected.has(String(item?.id || "")) && item?.requiresBackup === true);
-  }
-
-  function safeCleanupRequiresCodexClose(data = safeCleanupFromPayload()) {
-    const selected = new Set(safeCleanupSelectedGroupIds(data));
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const operationBound = !safeCleanupState.previewHidden && safeCleanupPreviewMatchesSelection(data);
-    return (operationBound && operation?.requiresCodexClose === true)
-      || safeCleanupRawItems(data).some((item) => selected.has(String(item?.id || "")) && item?.requiresCodexClose === true);
-  }
-
-  function safeCleanupPrerequisites(data = safeCleanupFromPayload()) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const requiresBackup = safeCleanupRequiresBackup(data);
-    const requiresCodexClose = safeCleanupRequiresCodexClose(data);
-    // The backend confirmation token carries the canonical SQLite backup
-    // directory. A renderer reinjection must not turn a valid preview into a
-    // local-only "missing backup" failure just because this JS state reset.
-    const previewBound = String(operation?.state || "") === "preview"
-      && !!String(operation?.confirmationToken || "")
-      && !safeCleanupState.previewHidden
-      && safeCleanupPreviewMatchesSelection(data);
-    const backupReady = !requiresBackup
-      || previewBound
-      || !!String(safeCleanupState.backupDirectory || "").trim();
-    const autoCloseReady = !requiresCodexClose || safeCleanupState.autoCloseConfirmed;
-    return {
-      requiresBackup,
-      requiresCodexClose,
-      backupReady,
-      autoCloseReady,
-      ready: backupReady && autoCloseReady,
-    };
-  }
-
-  function safeCleanupPrerequisiteMessage(prerequisites = safeCleanupPrerequisites()) {
-    const steps = [];
-    if (prerequisites.requiresBackup && !prerequisites.backupReady) {
-      steps.push("选择 SQLite 备份目录");
-    }
-    if (prerequisites.requiresCodexClose && !prerequisites.autoCloseReady) {
-      steps.push("确认允许自动关闭并恢复 Codex");
-    }
-    return steps.join("，然后");
-  }
-
-  function focusSafeCleanupPrerequisite(selector) {
-    requestAnimationFrame(() => {
-      const modal = document.getElementById(settingsModalId);
-      const target = modal?.querySelector?.(selector);
-      if (!(target instanceof HTMLElement) || target.matches?.(":disabled")) return;
-      target.scrollIntoView?.({ block: "center", behavior: "smooth" });
-      target.focus?.({ preventScroll: true });
-    });
-  }
-
-  function safeCleanupTierLabel(tier) {
-    return ({ safe: "可直接清理", consent: "确认后清理", protected: "始终保护" })[String(tier || "protected")] || "始终保护";
-  }
-
-  function safeCleanupDisplayLabel(group) {
-    const raw = String(group?.label || "").trim();
-    const category = String(group?.category || "").trim();
-    const labels = {
-      "Expired user temporary data": "过期用户临时数据",
-      "NuGet package cache": "NuGet 包缓存",
-      "npm download cache": "npm 下载缓存",
-      "pip download cache": "pip 下载缓存",
-      "Yarn download cache": "Yarn 下载缓存",
-      "pnpm store cache": "pnpm 存储缓存",
-      "Bun install cache": "Bun 安装缓存",
-      "Go module cache": "Go 模块缓存",
-      "Cargo registry cache": "Cargo 注册表缓存",
-      "Cargo git checkout cache": "Cargo Git 检出缓存",
-      "Gradle dependency cache": "Gradle 依赖缓存",
-      "Maven local repository": "Maven 本地仓库",
-      "uv download cache": "uv 下载缓存",
-      "Poetry cache": "Poetry 缓存",
-      "Composer package cache": "Composer 包缓存",
-      "Hugging Face model cache": "Hugging Face 模型缓存",
-      "PyTorch hub cache": "PyTorch 模型缓存",
-      "ModelScope model cache": "ModelScope 模型缓存",
-      "Ollama model weights": "Ollama 模型权重",
-      "Playwright browser cache": "Playwright 浏览器缓存",
-      "Cypress binary cache": "Cypress 二进制缓存",
-      "Electron download cache": "Electron 下载缓存",
-      "ccache compiler cache": "ccache 编译缓存",
-      "sccache compiler cache": "sccache 编译缓存",
-      "Android SDK cache": "Android SDK 缓存",
-      "Android SDK temporary cache": "Android SDK 临时缓存",
-      "Scoop package cache": "Scoop 包缓存",
-      "Homebrew download cache": "Homebrew 下载缓存",
-      "Visual Studio Code cache": "Visual Studio Code 缓存",
-      "Visual Studio cache": "Visual Studio 缓存",
-      "JetBrains IDE cache": "JetBrains IDE 缓存",
-      "Cursor cache": "Cursor 缓存",
-      "Discord cache": "Discord 缓存",
-      "Slack cache": "Slack 缓存",
-      "Xcode derived data": "Xcode 派生数据",
-      "DirectX shader cache": "DirectX 着色器缓存",
-      "GPU shader cache": "GPU 着色器缓存",
-      "Windows thumbnail cache": "Windows 缩略图缓存",
-      "Recycle Bin items": "回收站项目",
-      "Trash items": "废纸篓项目",
-      "Chrome cache": "Chrome 缓存",
-      "Edge cache": "Edge 缓存",
-      "Brave cache": "Brave 缓存",
-      "Firefox cache": "Firefox 缓存",
-      "Old Windows crash dumps": "Windows 旧崩溃转储",
-      "Old Windows error reports": "Windows 旧错误报告",
-      "Old queued Windows error reports": "Windows 待处理旧错误报告",
-      "Windows system temporary data": "Windows 系统临时文件",
-      "Active user temporary data": "正在使用的临时文件（保留）",
-      "Active Windows system temporary data": "正在使用的 Windows 系统临时文件（保留）",
-      "Unverified temporary data": "未完全验证的临时文件（保留）",
-      "Additional expired temporary data": "其余过期临时文件（未自动选择）",
-      "Old Windows system crash dumps": "Windows 系统旧崩溃转储",
-      "Old Windows shared error reports": "Windows 共享旧错误报告",
-      "Old queued Windows shared error reports": "Windows 共享待处理错误报告",
-      "Old macOS diagnostic reports": "macOS 旧诊断报告",
-      "Old macOS crash reports": "macOS 旧崩溃报告",
-      "HUD diagnostics": "HUD 诊断日志",
-      "HUD overlay history": "HUD 气泡历史",
-      "Old cleanup backup": "旧清理备份",
-      "Protected HUD data": "受保护的 HUD 数据",
-      "HUD runtime data": "HUD 运行数据",
-      "Expired Codex temporary data": "过期 Codex 临时数据",
-      "Protected Codex temporary data": "受保护的 Codex 临时数据",
-      "Old Codex diagnostics": "Codex 旧诊断历史",
-      "Old background usage history": "旧后台用量历史",
-      "Retained local history": "保留中的本地历史",
-      "Protected SQLite history": "受保护的 SQLite 历史",
-    };
-    const categoryLabels = {
-      user_temp: "用户临时数据",
-      system_temp: "Windows 系统临时文件",
-      developer_cache: "开发工具缓存",
-      model_cache: "模型与数据缓存",
-      editor_cache: "编辑器缓存",
-      system_cache: "系统可再生成缓存",
-      browser_cache: "浏览器缓存",
-      diagnostic_history: "系统诊断历史",
-      codex_temp: "Codex 临时数据",
-      hud_diagnostics: "HUD 诊断日志",
-      hud_overlay_history: "HUD 气泡历史",
-      cleanup_backups: "旧清理备份",
-      codex_logs_history: "Codex 旧诊断历史",
-      background_usage_history: "旧后台用量历史",
-      sqlite_history: "SQLite 历史",
-    };
-    return labels[raw] || categoryLabels[category] || raw || category || "清理项";
-  }
-
-  function safeCleanupDisplayImpact(group) {
-    const raw = String(group?.blockedReason || group?.impact || "").trim();
-    const impacts = {
-      "Applications may recreate temporary files.": "应用可能会按需重新生成临时文件。",
-      "System temporary files older than 24 hours will be permanently removed; locked or access-denied entries are skipped.": "将永久删除超过 24 小时的 Windows 系统临时文件；被占用或无权限的项目会跳过。",
-      "Files newer than the retention threshold are retained because they may still be in use.": "未超过保留期限的文件可能仍被程序使用，因此会保留。",
-      "Unverified temporary data remains unchanged.": "无法完整验证的临时文件会保持不变。",
-      "Additional expired files remain untouched until a narrower cleanup can be reviewed.": "为保持列表和操作流畅，其余过期文件不会自动选中，需在更精确的清理中复核。",
-      "Packages may need to be downloaded again.": "后续使用时可能需要重新下载软件包。",
-      "Modules may need to be downloaded again.": "后续使用时可能需要重新下载模块。",
-      "Crates may need to be downloaded again.": "后续使用时可能需要重新下载 crate。",
-      "Git dependencies may need to be fetched again.": "后续使用时可能需要重新获取 Git 依赖。",
-      "Dependencies may need to be downloaded again.": "后续使用时可能需要重新下载依赖。",
-      "Artifacts may need to be downloaded again.": "后续使用时可能需要重新下载构件。",
-      "Models and datasets may need to be downloaded again.": "后续使用时可能需要重新下载模型和数据集。",
-      "Models may need to be downloaded again.": "后续使用时可能需要重新下载模型。",
-      "Local models may need to be downloaded again.": "后续使用时可能需要重新下载本地模型。",
-      "Browser binaries may need to be downloaded again.": "后续使用时可能需要重新下载浏览器二进制文件。",
-      "Electron binaries may need to be downloaded again.": "后续使用时可能需要重新下载 Electron 二进制文件。",
-      "Compilations may take longer until the cache is rebuilt.": "在缓存重建前，编译可能会变慢。",
-      "Android tooling may rebuild cache data.": "Android 工具链可能会重建缓存数据。",
-      "Android tooling may recreate temporary downloads.": "Android 工具链可能会重新创建临时下载。",
-      "Graphics applications may rebuild shader data on next use.": "图形应用下次使用时会重新生成着色器缓存。",
-      "The editor may rebuild cached UI and code data.": "编辑器下次使用时会重建界面和代码缓存。",
-      "The IDE may rebuild indexes and local caches.": "IDE 下次使用时会重建索引和本地缓存。",
-      "The application may rebuild cached UI data.": "应用下次使用时会重建界面缓存。",
-      "Explorer may rebuild thumbnails on next browse.": "资源管理器下次浏览时会重建缩略图。",
-      "Deleted files in the Recycle Bin will be permanently removed.": "回收站中的已删除文件将被永久移除。",
-      "Deleted files in Trash will be permanently removed.": "废纸篓中的已删除文件将被永久移除。",
-      "Visual Studio may rebuild component and image caches.": "Visual Studio 下次使用时会重建组件和图像缓存。",
-      "Visual Studio may rebuild cached data.": "Visual Studio 下次使用时会重建缓存。",
-      "Xcode may rebuild indexes and build products.": "Xcode 下次使用时会重建索引和构建产物。",
-      "Pages and shaders may be cached again on next use.": "浏览器下次使用时会重新生成页面和着色器缓存。",
-      "Pages may be cached again on next use.": "浏览器下次使用时会重新生成页面缓存。",
-      "Old operating-system diagnostics will no longer be available.": "清理后将无法再用这些旧系统报告排查问题。",
-      "Old HUD diagnostics will no longer be available.": "清理后将无法查看这些旧 HUD 诊断日志。",
-      "Protected HUD data remains unchanged.": "HUD 配置、状态和受保护数据保持不变。",
-      "Codex may recreate temporary staging data when needed.": "Codex 可能会在需要时重新生成临时暂存数据。",
-      "Codex temporary data remains unchanged.": "Codex 临时数据保持不变。",
-      "A previous local cleanup backup will be removed.": "将删除一份超过保留期的旧清理备份。",
-      "History older than the retention period will be permanently removed.": "保留期之前的历史将永久删除。",
-      "No history is older than the configured retention period.": "当前没有超过保留期的历史。",
-      "The database remains unchanged.": "数据库保持不变。",
-      "A related application is currently running.": "相关应用正在运行，当前保持不变。",
-      "Cleanup data contains files newer than the retention threshold.": "包含未超过保留期的项目，当前保持不变。",
-      "Cleanup data contains a reparse point or unreadable entry.": "包含重解析点或无法读取的项目，当前保持不变。",
-      "Cache data contains a reparse point or unreadable entry.": "缓存包含重解析点或无法读取的项目，当前保持不变。",
-      "Cache root could not be verified.": "无法完整验证缓存目录，当前保持不变。",
-    };
-    return impacts[raw] || raw || safeCleanupTierLabel(group?.tier);
-  }
-
-  function safeCleanupOperationLabel(operation) {
-    const state = String(operation?.state || "idle");
-    const error = String(operation?.error || "");
-    if (state === "completed" && operation?.action === "scan") return "扫描完成";
-    if (state === "completed") {
-      // Success with optional soft skips still reads as a finished cleaner pass.
-      if (/skipped|跳过|locked|busy|changed/i.test(error)) {
-        return "清理完成（部分项已跳过）";
-      }
-      return "清理完成";
-    }
-    if (state === "failed") {
-      if (error.includes("清理已取消") || error.includes("未修改任何数据") || error.includes("未执行")) {
-        return "已取消";
-      }
-      // Prefer a terminal failure label over a dead-end "needs action" state.
-      return "清理失败";
-    }
-    if (state === "partial") {
-      if (!Number(operation?.actualBytes || 0)) {
-        return "本次未删除（目标已跳过）";
-      }
-      return "部分完成（部分项已跳过）";
-    }
-    return ({ idle: "等待扫描", scanning: "正在扫描", accepted: "请求已提交", preview: "清理预览", running: "正在清理", queued_exit: "等待退出", cancelled: "已取消", restored: "已从备份恢复" })[state] || "状态更新中";
-  }
-
-  function safeCleanupResultStateLabel(state) {
-    return ({ selected: "等待清理", running: "清理中", completed: "已完成", deleted: "已删除", skipped: "已跳过", failed: "未完成", partial: "部分完成", restored: "已恢复" })[String(state || "")] || String(state || "状态未知");
-  }
-
-  function safeCleanupErrorText(error) {
-    const raw = String(error || "").trim();
-    if (!raw) return "";
-    const map = [
-      [/(\d+)\s*item\(s\)\s*skipped \(locked, busy, or changed\)/i, "$1 项已跳过（占用中、忙碌或扫描后已变化）"],
-      [/(\d+)\s*cleanup action\(s\) did not complete/i, "$1 项未能完成"],
-      [/cleanup item is locked/i, "目标正被占用，已跳过"],
-      [/cleanup item changed after scan/i, "扫描后内容已变化，已跳过"],
-      [/cleanup item metadata changed after scan/i, "扫描后元数据已变化，已跳过"],
-      [/a related application is currently running/i, "相关应用正在运行，已跳过"],
-      [/a related application started after the cleanup scan/i, "扫描后相关应用已启动，已取消该项"],
-      [/cleanup items changed after scan; no targets remain executable/i, "选中目标在扫描后均已变化，请重新扫描"],
-      [/cleanup inventory revision is stale/i, "清单已过期，请重新扫描"],
-      [/confirmation token is missing or expired/i, "确认已过期，请重新预览"],
-    ];
-    for (const [pattern, label] of map) {
-      if (pattern.test(raw)) return raw.replace(pattern, label);
-    }
-    return raw;
-  }
-
-  function safeCleanupRetention(group) {
-    const settings = hudSettingsFromPayload();
-    const category = String(group?.category || group?.id || "").toLowerCase();
-    if (category === "background_usage_history") return `保留 ${Math.max(1, Number(settings.cleanup_background_retention_days || 30))} 天`;
-    if (category === "codex_logs_history") return `保留 ${Math.max(1, Number(settings.cleanup_log_retention_hours || 24))} 小时`;
-    const retention = String(group?.retention || "").trim();
-    const days = retention.match(/^(\d+) days?$/i);
-    if (days) return `保留 ${days[1]} 天`;
-    const hours = retention.match(/^(\d+) hours?$/i);
-    if (hours) return `保留 ${hours[1]} 小时`;
-    const seconds = retention.match(/^(\d+) seconds?$/i);
-    if (seconds) return `保留 ${seconds[1]} 秒`;
-    if (retention) return retention;
-    return "按安全策略";
-  }
-
-  function safeCleanupBackupLocationLabel(operation) {
-    const volumeLabels = Array.isArray(operation?.backupVolumeLabels)
-      ? operation.backupVolumeLabels.map((value) => String(value || "").trim()).filter(Boolean)
-      : [];
-    const directoryLabels = Array.isArray(operation?.backupDirectoryLabels)
-      ? operation.backupDirectoryLabels.map((value) => String(value || "").trim()).filter(Boolean)
-      : [];
-    const volume = String(operation?.backupVolumeLabel || volumeLabels.join("、") || "").trim();
-    const directory = String(operation?.backupDirectoryLabel || operation?.backupLabel || directoryLabels.join("、") || "").trim();
-    return [volume ? `卷 ${volume}` : "", directory && directory !== volume ? `目录 ${directory}` : ""].filter(Boolean).join(" · ");
-  }
-
-  function safeCleanupPreviewSpaceSummary(operation) {
-    const estimated = Math.max(0, Number(operation?.estimatedBytes ?? operation?.bytes ?? 0));
-    const backupBytes = Math.max(0, Number(operation?.backupBytes ?? 0));
-    const sameVolumeBytes = Math.max(0, Number(operation?.sameVolumeBackupBytes ?? 0));
-    const netEstimated = Math.max(0, Number(operation?.netEstimatedBytes ?? estimated));
-    const location = safeCleanupBackupLocationLabel(operation);
-    if (!backupBytes) return `预计释放 ${storageFormatBytes(estimated)}`;
-    if (!sameVolumeBytes) {
-      return `源盘预计释放 ${storageFormatBytes(netEstimated)} · 备份 ${storageFormatBytes(backupBytes)} 存到其他磁盘${location ? `（${location}）` : ""}，不占用源盘`;
-    }
-    if (sameVolumeBytes >= backupBytes) {
-      return `预计清理 ${storageFormatBytes(estimated)} · 同盘备份占用 ${storageFormatBytes(backupBytes)} · 源盘预计净释放 ${storageFormatBytes(netEstimated)}`;
-    }
-    return `预计清理 ${storageFormatBytes(estimated)} · 备份共 ${storageFormatBytes(backupBytes)}（同卷 ${storageFormatBytes(sameVolumeBytes)}） · 源盘预计净释放 ${storageFormatBytes(netEstimated)}`;
-  }
-
-  function safeCleanupConfirmSpaceSummary(operation) {
-    const estimated = Math.max(0, Number(operation?.estimatedBytes ?? operation?.bytes ?? 0));
-    const backupBytes = Math.max(0, Number(operation?.backupBytes ?? 0));
-    const sameVolumeBytes = Math.max(0, Number(operation?.sameVolumeBackupBytes ?? 0));
-    const netEstimated = Math.max(0, Number(operation?.netEstimatedBytes ?? estimated));
-    const location = safeCleanupBackupLocationLabel(operation);
-    if (!backupBytes) return `预计释放 ${storageFormatBytes(estimated)}`;
-    if (!sameVolumeBytes) {
-      return `预计源盘释放 ${storageFormatBytes(netEstimated)}；备份 ${storageFormatBytes(backupBytes)} 将保存到其他磁盘${location ? `（${location}）` : ""}，不占用源盘`;
-    }
-    if (sameVolumeBytes >= backupBytes) {
-      return `预计源盘净释放 ${storageFormatBytes(netEstimated)}，已扣除同卷备份 ${storageFormatBytes(backupBytes)}`;
-    }
-    return `预计源盘净释放 ${storageFormatBytes(netEstimated)}；备份共 ${storageFormatBytes(backupBytes)}，其中同卷占用 ${storageFormatBytes(sameVolumeBytes)}`;
-  }
-
-  function safeCleanupResultBackupSummary(operation) {
-    const backupBytes = Math.max(0, Number(operation?.backupBytes ?? 0));
-    if (!backupBytes) return "";
-    const location = safeCleanupBackupLocationLabel(operation);
-    const files = Array.isArray(operation?.backupFiles)
-      ? operation.backupFiles.map((value) => String(value || "").trim()).filter(Boolean)
-      : [];
-    const visibleFiles = files.slice(0, 3).join("、");
-    const fileSuffix = files.length > 3 ? ` 等 ${files.length} 个文件` : visibleFiles;
-    return `备份 ${storageFormatBytes(backupBytes)}${location ? ` · ${location}` : ""}${fileSuffix ? ` · ${fileSuffix}` : ""}`;
-  }
-
-  function syncSafeCleanupDefaults(data = safeCleanupFromPayload()) {
-    const settings = hudSettingsFromPayload();
-    const status = currentPayload()?.settingsCommandStatus;
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const selectedDirectory = String(
-      data?.backupDirectory
-      || operation?.backupDirectory
-      || status?.cleanupBackupDirectory
-      || ""
-    ).trim();
-    if (selectedDirectory) {
-      safeCleanupState.backupDirectory = selectedDirectory;
-      safeCleanupState.backupDirectoryDirty = false;
-    } else if (!safeCleanupState.backupDirectoryDirty && !safeCleanupState.backupDirectory) {
-      safeCleanupState.backupDirectory = String(settings.cleanup_backup_directory || "").trim();
-    }
-  }
-
-  function safeCleanupSourceSummary(group, data = safeCleanupFromPayload()) {
-    const category = String(group?.category || "");
-    const platform = String(data?.platform || "").toLowerCase();
-    const sources = {
-      user_temp: platform.startsWith("win") ? "%TEMP%" : "用户临时目录",
-      codex_temp: "Codex 临时目录",
-      hud_diagnostics: "HUD 本地诊断目录",
-      hud_overlay_history: "HUD 本地运行目录",
-      cleanup_backups: "HUD 清理备份目录",
-      codex_logs_history: "Codex 本地诊断库",
-      background_usage_history: "HUD 本地用量库",
-      sqlite_history: "本地 SQLite 历史库",
-    };
-    return sources[category] || "本地缓存目录";
-  }
-
-  function safeCleanupModifiedRangeLabel(group) {
-    const oldest = String(group?.oldestModifiedAt || "");
-    const newest = String(group?.newestModifiedAt || "");
-    if (!oldest && !newest) return "";
-    const oldestLabel = backgroundUsageTime(oldest || newest, { compact: true });
-    const newestLabel = backgroundUsageTime(newest || oldest, { compact: true });
-    if (oldestLabel === newestLabel) return `修改于 ${newestLabel}`;
-    return `最早 ${oldestLabel} · 最近 ${newestLabel}`;
-  }
-
-  function safeCleanupPathKindLabel(value) {
-    return ({ file: "文件", directory: "目录", unknown: "类型未知" })[String(value || "unknown")] || "类型未知";
-  }
-
-  function safeCleanupGroupDetailsHtml(group, { showResults = false } = {}) {
-    const rows = (Array.isArray(group?.entries) ? group.entries : []).map((entry) => {
-      const itemId = String(entry?.id || "");
-      const path = String(entry?.path || "");
-      const modified = String(entry?.modifiedAt || "") ? backgroundUsageTime(entry.modifiedAt) : "时间未知";
-      const resultState = String(entry?.state || "");
-      const stateLabel = resultState
-        ? safeCleanupResultStateLabel(resultState)
-        : safeCleanupTierLabel(entry?.tier);
-      const meta = [
-        safeCleanupPathKindLabel(entry?.pathKind),
-        storageFormatBytes(entry?.bytes),
-        `${Math.max(0, Number(entry?.files || 0)).toLocaleString()} 个文件`,
-        modified,
-        safeCleanupRetention(entry),
-        stateLabel,
-      ].filter(Boolean).join(" · ");
-      const note = String(entry?.error || "").trim() || safeCleanupDisplayImpact(entry);
-      const actions = path && itemId
-        ? `<span class="codex-usage-hud-cleanup-target-actions"><button type="button" class="codex-usage-hud-cleanup-target-action" data-action="safe-cleanup-copy-path" data-item-id="${escapeHtml(itemId)}" title="复制完整路径" aria-label="复制完整路径">${cleanupIconSvg("copy")}</button><button type="button" class="codex-usage-hud-cleanup-target-action" data-action="safe-cleanup-reveal" data-item-id="${escapeHtml(itemId)}" title="在资源管理器或 Finder 中打开位置" aria-label="在系统文件管理器中打开位置">${cleanupIconSvg("folder")}</button></span>`
-        : "";
-      return `<div class="codex-usage-hud-cleanup-target" data-state="${escapeHtml(resultState || String(entry?.tier || "protected"))}"><div class="codex-usage-hud-cleanup-target-head"><code class="codex-usage-hud-cleanup-target-path" title="${escapeHtml(path || "路径不可用")}">${escapeHtml(path || "路径不可用")}</code>${actions}</div><div class="codex-usage-hud-cleanup-target-meta">${escapeHtml(meta)}</div>${note ? `<div class="codex-usage-hud-cleanup-target-note" data-result="${showResults}">${escapeHtml(note)}</div>` : ""}</div>`;
-    }).join("");
-    return `<div class="codex-usage-hud-cleanup-details" data-cleanup-details="${escapeHtml(group?.presentationId || "")}">${rows || '<div class="codex-usage-hud-cleanup-target-note">没有可显示的目标详情。</div>'}</div>`;
-  }
-
-  function safeCleanupGroupRowHtml(group, {
-    selectedIds = [],
-    kind = "safe",
-    interactive = true,
-    showResults = false,
-  } = {}) {
-    const selected = new Set((selectedIds || []).map((id) => String(id || "")).filter(Boolean));
-    const executableIds = Array.isArray(group?.executableIds) ? group.executableIds : [];
-    const selectedCount = executableIds.filter((id) => selected.has(String(id))).length;
-    const checked = executableIds.length > 0 && selectedCount === executableIds.length;
-    const partial = selectedCount > 0 && selectedCount < executableIds.length;
-    const tier = String(group?.tier || "protected");
-    const presentationId = String(group?.presentationId || group?.id || "");
-    const expanded = safeCleanupState.expandedGroupIds.has(presentationId);
-    const source = safeCleanupSourceSummary(group);
-    const modified = safeCleanupModifiedRangeLabel(group);
-    const meta = [
-      source,
-      `${Math.max(0, Number(group?.targetCount || 0)).toLocaleString()} 个目标`,
-      `${Math.max(0, Number(group?.files || 0)).toLocaleString()} 个文件`,
-      safeCleanupRetention(group),
-      modified,
-    ].filter(Boolean).join(" · ");
-    const resultState = String(group?.state || "selected");
-    const impact = showResults
-      ? [safeCleanupResultStateLabel(resultState), group?.hasResults ? `实际 ${storageFormatBytes(group?.actualBytes)}` : ""].filter(Boolean).join(" · ")
-      : safeCleanupDisplayImpact(group);
-    const size = showResults && group?.hasResults ? group.actualBytes : group?.bytes;
-    const selector = showResults
-      ? `<span class="codex-usage-hud-cleanup-result-mark" data-state="${escapeHtml(resultState)}" aria-label="${escapeHtml(safeCleanupResultStateLabel(resultState))}">${resultState === "completed" ? "✓" : (resultState === "running" ? "…" : (resultState === "selected" ? "○" : "–"))}</span>`
-      : `<button type="button" class="codex-usage-hud-cleanup-check" role="checkbox" aria-checked="${partial ? "mixed" : checked}" data-checked="${checked}" data-partial="${partial}" data-disabled="${!interactive || !executableIds.length}" data-action="safe-cleanup-group-toggle" data-cleanup-group-id="${escapeHtml(presentationId)}" ${!interactive || !executableIds.length ? "disabled" : ""} aria-label="${escapeHtml(`${checked ? "取消选择" : "选择"}${safeCleanupDisplayLabel(group)}`)}"></button>`;
-    const chevron = `<button type="button" class="codex-usage-hud-cleanup-row-chevron" data-action="safe-cleanup-group-expand" data-cleanup-group-id="${escapeHtml(presentationId)}" aria-expanded="${expanded}" title="${expanded ? "收起路径详情" : "展开路径详情"}" aria-label="${expanded ? "收起路径详情" : "展开路径详情"}">${cleanupIconSvg("chevron")}</button>`;
-    return `<div class="codex-usage-hud-cleanup-group" data-group-id="${escapeHtml(presentationId)}" data-expanded="${expanded}"><div class="codex-usage-hud-cleanup-row" data-tier="${escapeHtml(tier)}" data-kind="${escapeHtml(kind)}" data-result-state="${escapeHtml(showResults ? resultState : "")}">${selector}<div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(safeCleanupDisplayLabel(group))}</div><div class="codex-usage-hud-cleanup-row-meta" title="${escapeHtml(meta)}">${escapeHtml(meta || "按安全策略")}</div></div><div class="codex-usage-hud-cleanup-row-impact">${escapeHtml(impact)}</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(size)}</div>${chevron}</div>${expanded ? safeCleanupGroupDetailsHtml(group, { showResults }) : ""}</div>`;
-  }
-
-  function safeCleanupGroupsHtml(data, {
-    selectedIds = [],
-    prerequisitesHtml = "",
-  } = {}) {
-    const groups = safeCleanupGroups(data);
-    const selected = new Set((selectedIds || []).map((id) => String(id || "")).filter(Boolean));
-    const safeGroups = groups.filter((group) => String(group?.tier || "protected") === "safe");
-    const consentGroups = groups.filter((group) => String(group?.tier || "protected") === "consent");
-    const protectedGroups = groups.filter((group) => String(group?.tier || "protected") === "protected");
-    const interactive = !isSafeCleanupBusy(data);
-    const safeRows = safeGroups.map((group) => safeCleanupGroupRowHtml(group, {
-      selectedIds,
-      kind: "safe",
-      interactive,
-    })).join("");
-    const consentIds = consentGroups.flatMap((group) => group.executableIds || []);
-    const consentSelectedCount = consentIds.filter((id) => selected.has(String(id))).length;
-    const consentChecked = consentIds.length > 0 && consentSelectedCount === consentIds.length;
-    const consentPartial = consentSelectedCount > 0 && consentSelectedCount < consentIds.length;
-    const consentBytes = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    const consentTargets = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.targetCount || 0)), 0);
-    const consentFiles = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.files || 0)), 0);
-    const deepExpanded = safeCleanupState.expandedGroupIds.has(safeCleanupDeepGroupId);
-    const deepRow = consentGroups.length ? `<div class="codex-usage-hud-cleanup-row" data-tier="consent" data-kind="deep"><button type="button" class="codex-usage-hud-cleanup-check" role="checkbox" aria-checked="${consentPartial ? "mixed" : consentChecked}" data-checked="${consentChecked}" data-partial="${consentPartial}" data-disabled="${!interactive || !consentIds.length}" data-action="safe-cleanup-consent-toggle" ${!interactive || !consentIds.length ? "disabled" : ""} aria-label="${consentChecked ? "取消全部深度清理" : "选择全部深度清理"}"></button><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">深度清理（可选）</div><div class="codex-usage-hud-cleanup-row-meta">${consentGroups.length} 类 · ${consentTargets} 个目标 · ${consentFiles.toLocaleString()} 个文件</div></div><div class="codex-usage-hud-cleanup-row-impact">需单独确认，部分项需备份或退出</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(consentBytes)}</div><button type="button" class="codex-usage-hud-cleanup-row-chevron" data-action="cleanup-deep-toggle" aria-expanded="${deepExpanded}" title="${deepExpanded ? "收起深度清理分类" : "展开深度清理分类"}" aria-label="${deepExpanded ? "收起深度清理分类" : "展开深度清理分类"}">${cleanupIconSvg("chevron")}</button></div>` : "";
-    const expandedConsent = deepExpanded
-      ? consentGroups.map((group) => safeCleanupGroupRowHtml(group, {
-        selectedIds,
-        kind: "consent",
-        interactive,
-      })).join("")
-      : "";
-    const protectedBytes = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    const protectedTargets = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.targetCount || 0)), 0);
-    const protectedExpanded = safeCleanupState.expandedGroupIds.has(safeCleanupProtectedGroupId);
-    const protectedNote = protectedGroups.length
-      ? `<div class="codex-usage-hud-cleanup-protected-note"><button type="button" data-action="safe-cleanup-protected-toggle" aria-expanded="${protectedExpanded}"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 类 / ${protectedTargets} 个目标</span><span>查看路径 ${cleanupIconSvg("chevron")}</span></button></div>${protectedExpanded ? protectedGroups.map((group) => safeCleanupGroupRowHtml(group, { selectedIds, kind: "protected", interactive: false })).join("") : ""}`
-      : "";
-    // Prerequisites deliberately sit directly under the deep-cleanup switch.
-    // They must remain visible while the detail rows are collapsed: otherwise a
-    // valid-looking footer action can only write an off-screen status error.
-    return `${safeRows}${deepRow}${deepRow && prerequisitesHtml ? prerequisitesHtml : ""}${expandedConsent}${protectedNote}`;
-  }
-
-  function safeCleanupResultGroupsHtml(data, selectedIds, results, { fallbackState = "selected" } = {}) {
-    const resultById = new Map((Array.isArray(results) ? results : [])
-      .map((result) => [String(result?.id || ""), result])
-      .filter(([id]) => !!id));
-    const completeResults = (Array.isArray(selectedIds) ? selectedIds : []).map((id) => {
-      const normalizedId = String(id || "");
-      return resultById.get(normalizedId) || { id: normalizedId, state: fallbackState };
-    });
-    return safeCleanupPresentationGroups(data, { itemIds: selectedIds, results: completeResults })
-      .map((group) => safeCleanupGroupRowHtml(group, {
-        selectedIds,
-        kind: `result-${String(group?.tier || "protected")}`,
-        interactive: false,
-        showResults: true,
-      }))
-      .join("");
-  }
-
-  function safeCleanupPreviewHtml(data) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const state = String(operation?.state || "idle");
-    if (operation?.action === "scan") return "";
-    if (!new Set(["preview", "completed", "partial", "failed", "restored", "cancelled"]).has(state) || safeCleanupState.previewHidden) return "";
-    const results = Array.isArray(operation?.results) ? operation.results : [];
-    const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : safeCleanupSelectedGroupIds(data);
-    if (state === "preview" && !safeCleanupPreviewMatchesSelection(data)) return "";
-    const actual = operation?.actualBytes;
-    const value = actual === null || actual === undefined
-      ? safeCleanupPreviewSpaceSummary(operation)
-      : `实际回收 ${storageFormatBytes(actual)}`;
-    const backupSummary = actual === null || actual === undefined ? "" : safeCleanupResultBackupSummary(operation);
-    // Preview reuses the upper selection list. Only terminal result states
-    // render a dedicated result list so selection and outcomes are not duplicated.
-    const showResultRows = new Set(["completed", "partial", "failed", "restored"]).has(state);
-    const rows = showResultRows
-      ? safeCleanupResultGroupsHtml(data, selectedIds, results)
-      : "";
-    const resultsHtml = showResultRows
-      ? `<div class="codex-usage-hud-cleanup-results">${rows || '<div class="codex-usage-hud-cleanup-meta">当前没有已选目标。</div>'}</div>`
-      : "";
-    const friendlyError = safeCleanupErrorText(operation?.error);
-    const errorKind = state === "completed" ? "note" : "error";
-    return `<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(value)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div>${resultsHtml}${friendlyError ? `<div class="codex-usage-hud-cleanup-meta" data-kind="${errorKind}">${escapeHtml(friendlyError)}</div>` : ""}</div>`;
-  }
-
-
-  function isCleanupScanningRevision(revision) {
-    return String(revision || "").startsWith("scanning:");
-  }
-
-  function isSafeCleanupExecuting(data = safeCleanupFromPayload()) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const state = String(operation?.state || "").toLowerCase();
-    const action = String(operation?.action || "");
-    const isExecuteAction = !action
-      || new Set(["execute", "safeCleanupExecute"]).has(action);
-    if (safeCleanupState.pendingRequestId && String(safeCleanupState.pendingRequestId).startsWith("safe-cleanup-execute")) {
-      return true;
-    }
-    if (!isExecuteAction) return false;
-    // accepted/running/queued_exit are the normal in-flight states.
-    if (new Set(["accepted", "running", "queued_exit"]).has(state)) return true;
-    // Cooperative cancel keeps action=execute and state=cancelled until the
-    // worker finishes the current item and publishes the final result. Treat
-    // that window as still executing so the "正在取消..." footer stays up and
-    // other tabs are not forced into a half-finished execute surface.
-    return state === "cancelled";
-  }
-
-  function isSafeCleanupBusy(data = safeCleanupFromPayload()) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const state = String(operation?.state || "").toLowerCase();
-    return new Set(["scanning", "accepted", "running", "queued_exit"]).has(state)
-      || !!safeCleanupState.pendingRequestId
-      || isSafeCleanupExecuting(data);
-  }
-
-  function isSafeCleanupScanning(data = safeCleanupFromPayload()) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const state = String(operation?.state || "").toLowerCase();
-    const action = String(operation?.action || "");
-    if (safeCleanupState.pendingRequestId && !String(data?.revision || "")) return true;
-    if (!new Set(["scanning", "accepted"]).has(state)) return false;
-    if (action && !new Set(["scan", "safeCleanupScan", ""]).has(action)) {
-      // execute/preview accepted states are not inventory scans
-      return state === "scanning";
-    }
-    return true;
-  }
-
-  function hasStableSafeCleanupInventory(data = safeCleanupState.stableData) {
-    const revision = String(data?.revision || "");
-    return !!revision && !isCleanupScanningRevision(revision);
-  }
-
-  function safeCleanupPhaseLabel(operation = {}) {
-    const phase = String(operation?.phase || "").toLowerCase();
-    const raw = String(operation?.phaseLabel || "").trim();
-    const map = {
-      hud: "HUD 诊断",
-      codex: "Codex 临时项",
-      processes: "相关应用状态",
-      caches: "应用与开发缓存",
-      backups: "旧清理备份",
-      sqlite: "历史数据库",
-      preview: "生成默认安全预览",
-      sessions: "读取会话索引",
-      merge: "归并主会话与子任务",
-      capability: "校验删除能力",
-      prepare: "准备清理",
-      execute: "正在删除",
-      queued_exit: "等待退出后清理",
-
-    };
-    if (map[phase]) {
-      // Keep neutral detail after English label if backend appended ": detail"
-      if (raw.includes(":")) {
-        const detail = raw.split(":").slice(1).join(":").trim();
-        if (detail && phase === "caches") return `${map[phase]} · ${detail}`;
-      }
-      return map[phase];
-    }
-    if (raw) {
-      const english = {
-        "HUD diagnostics": "HUD 诊断",
-        "Codex temporary items": "Codex 临时项",
-        "Related application state": "相关应用状态",
-        "Application and developer caches": "应用与开发缓存",
-        "Old cleanup backups": "旧清理备份",
-        "Historical databases": "历史数据库",
-        "Default safe preview": "生成默认安全预览",
-      };
-      for (const [en, zh] of Object.entries(english)) {
-        if (raw === en || raw.startsWith(`${en}:`)) {
-          const detail = raw.startsWith(`${en}:`) ? raw.slice(en.length + 1).trim() : "";
-          return detail ? `${zh} · ${detail}` : zh;
-        }
-      }
-      return raw;
-    }
-    return "正在扫描";
-  }
-
-  function formatCleanupElapsed(startedAt) {
-    const start = Number(startedAt || 0);
-    if (!start) return "0:00";
-    const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${String(secs).padStart(2, "0")}`;
-  }
-
-  function safeCleanupScanStripHtml(data, {
-    title = "扫描进度",
-    rescan = false,
-    mode = "scan",
-    startedAt = 0,
-  } = {}) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const maxProgress = mode === "execute" ? 100 : 99;
-    const progress = Math.max(0, Math.min(maxProgress, Number(operation?.progress || 0)));
-    const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
-    const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || (mode === "execute" ? 1 : 6)));
-    const phaseLabel = safeCleanupPhaseLabel(operation);
-    const discoveredGroups = Number(operation?.discoveredGroups ?? (Array.isArray(data?.groups) ? data.groups.length : 0));
-    const discoveredBytes = Number(operation?.discoveredBytes ?? data?.totals?.reclaimableBytes ?? 0);
-    const results = Array.isArray(operation?.results) ? operation.results : [];
-    const doneCount = results.filter((item) => {
-      const state = String(item?.state || "").toLowerCase();
-      return new Set(["deleted", "completed", "skipped", "failed", "restored"]).has(state);
-    }).length;
-    const actualBytes = Number(operation?.actualBytes || 0);
-    const elapsed = formatCleanupElapsed(startedAt || (mode === "execute" ? safeCleanupState.executeStartedAt : safeCleanupState.scanStartedAt));
-    const indeterminate = progress <= 0;
-    const elapsedHtml = `<span data-safe-cleanup-elapsed="${escapeHtml(mode)}">${escapeHtml(elapsed)}</span>`;
-    const meta = mode === "execute"
-      ? `第 ${phaseIndex}/${phaseCount} 项 · ${progress || 1}% · 已用时 ${elapsedHtml}`
-      : `第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${elapsedHtml}`;
-    const stageRight = mode === "execute"
-      ? `已处理 ${doneCount}/${phaseCount} · 已回收 ${storageFormatBytes(actualBytes)}`
-      : `已发现 ${discoveredGroups} 组 · ${storageFormatBytes(discoveredBytes)}`;
-    return `<div class="codex-usage-hud-cleanup-scan-strip" data-mode="${escapeHtml(mode)}" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>${escapeHtml(rescan ? "重新扫描" : title)}</div><div class="codex-usage-hud-cleanup-scan-strip-meta">${meta}</div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${indeterminate}" style="width:${Math.max(progress, indeterminate ? 38 : 4)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel)}</strong></span><span>${stageRight}</span></div></div>`;
-  }
-
-  function safeCleanupBootHtml(data, { pending = true } = {}) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
-    const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 6));
-    const phaseLabel = safeCleanupPhaseLabel(operation);
-    const elapsed = formatCleanupElapsed(safeCleanupState.scanStartedAt);
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">准备本地清理清单 · <strong>第 ${phaseIndex}/${phaseCount} 步 · ${escapeHtml(phaseLabel)}</strong></p><div class="codex-usage-hud-cleanup-scan-track" style="width:min(280px,70%);margin-top:4px"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="true" style="width:38%"></div></div><p class="codex-usage-hud-cleanup-empty-meta">已用时 <span data-safe-cleanup-elapsed="scan">${escapeHtml(elapsed)}</span> · 不会在扫描时删除任何文件</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel" ${pending ? "" : "disabled"}>取消扫描</button></div></section>`;
-  }
-
-  function safeCleanupPlaceholderRowsHtml(data) {
-    const groups = safeCleanupGroups(data);
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const phase = String(operation?.phase || "").toLowerCase();
-    const safeGroups = groups.filter((group) => String(group?.tier || "protected") === "safe");
-    const consentGroups = groups.filter((group) => String(group?.tier || "protected") === "consent");
-    const protectedGroups = groups.filter((group) => String(group?.tier || "protected") === "protected");
-    const selected = new Set(safeCleanupSelectedGroupIds(data));
-    const placeholders = [
-      { id: "ph-app-cache", title: "应用缓存", meta: "Chrome、Edge、VS Code", kind: "safe", phaseKey: "caches" },
-      { id: "ph-dev-cache", title: "开发工具缓存", meta: "pip、npm、NuGet、着色器", kind: "safe", phaseKey: "caches" },
-      { id: "ph-runtime", title: "运行残留", meta: "过期临时项与旧清理备份", kind: "safe", phaseKey: "codex" },
-      { id: "ph-hud", title: "HUD 诊断日志", meta: "当前与轮转日志", kind: "safe", phaseKey: "hud" },
-    ];
-    const foundRows = safeGroups.map((group) => {
-      const executableIds = Array.isArray(group?.executableIds) ? group.executableIds : [];
-      const checked = executableIds.length > 0 && executableIds.every((id) => selected.has(String(id)));
-      const impact = safeCleanupDisplayImpact(group);
-      const items = Array.isArray(group?.items) ? group.items.length : Number(group?.items || group?.itemCount || 0);
-      const meta = [safeCleanupRetention(group), items > 0 ? `${items} 项` : ""].filter(Boolean).join(" · ");
-      return `<div class="codex-usage-hud-cleanup-row" data-scan-state="found" data-tier="${escapeHtml(String(group?.tier || "safe"))}"><span class="codex-usage-hud-cleanup-check" data-checked="${checked}" data-disabled="false"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(safeCleanupDisplayLabel(group))}</div><div class="codex-usage-hud-cleanup-row-meta">${escapeHtml(meta || "按安全策略")}</div></div><div class="codex-usage-hud-cleanup-row-impact">${escapeHtml(impact)}</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(group?.bytes)}</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
-    }).join("");
-    // If real rows already present, only show deep/protected pending extras.
-    const showPlaceholders = safeGroups.length === 0;
-    const pendingRows = showPlaceholders ? placeholders.map((item) => {
-      const isCurrent = phase === item.phaseKey || (item.phaseKey === "caches" && ["caches", "processes"].includes(phase));
-      const scanState = isCurrent ? "current" : "pending";
-      return `<div class="codex-usage-hud-cleanup-row" data-scan-state="${scanState}" data-kind="${escapeHtml(item.kind)}"><span class="codex-usage-hud-cleanup-check" data-checked="false" data-disabled="true" data-skeleton="true"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">${escapeHtml(item.title)}</div><div class="codex-usage-hud-cleanup-row-meta">${isCurrent ? "正在统计…" : escapeHtml(item.meta)}</div></div><div class="codex-usage-hud-cleanup-row-impact">${isCurrent ? `<span class="codex-usage-hud-cleanup-row-status"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描中</span>` : "排队中"}</div><div class="codex-usage-hud-cleanup-row-size" style="color:var(--codex-usage-hud-muted,#9da1a8);font-weight:600">—</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
-    }).join("") : "";
-    const consentBytes = consentGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    const deepPending = !consentGroups.length;
-    const deepRow = deepPending
-      ? `<div class="codex-usage-hud-cleanup-row" data-tier="consent" data-kind="deep" data-scan-state="${["sqlite", "backups", "preview"].includes(phase) ? "current" : "pending"}"><span class="codex-usage-hud-cleanup-check" data-checked="false" data-disabled="true" data-skeleton="true"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">深度清理（可选）</div><div class="codex-usage-hud-cleanup-row-meta">${["sqlite", "backups", "preview"].includes(phase) ? "旧 Codex 诊断历史 · 计量中" : "扫描完成后可选"}</div></div><div class="codex-usage-hud-cleanup-row-impact">${["sqlite", "backups", "preview"].includes(phase) ? `<span class="codex-usage-hud-cleanup-row-status"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描中</span>` : "需备份并关闭 Codex"}</div><div class="codex-usage-hud-cleanup-row-size" style="color:var(--codex-usage-hud-muted,#9da1a8);font-weight:600">—</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`
-      : `<div class="codex-usage-hud-cleanup-row" data-tier="consent" data-kind="deep"><span class="codex-usage-hud-cleanup-check" data-checked="false" data-disabled="false"></span><div class="codex-usage-hud-cleanup-row-main"><div class="codex-usage-hud-cleanup-row-title">深度清理（可选）</div><div class="codex-usage-hud-cleanup-row-meta">旧 Codex 诊断历史 · 保留最近 24 小时</div></div><div class="codex-usage-hud-cleanup-row-impact">需备份并关闭 Codex</div><div class="codex-usage-hud-cleanup-row-size">${storageFormatBytes(consentBytes)}</div><span class="codex-usage-hud-cleanup-row-chevron">${cleanupIconSvg("chevron")}</span></div>`;
-    const protectedBytes = protectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    const protectedNote = protectedGroups.length
-      ? `<div class="codex-usage-hud-cleanup-protected-note"><span>${cleanupIconSvg("shield")}${escapeHtml(storageFormatBytes(protectedBytes))} 正在使用或受保护 · ${protectedGroups.length} 类</span><span>配置、凭据和会话默认受保护</span></div>`
-      : `<div class="codex-usage-hud-cleanup-protected-note" style="opacity:.55"><span>${cleanupIconSvg("shield")}受保护项统计中…</span><span>配置与会话不会入选</span></div>`;
-    return `${foundRows}${pendingRows}${deepRow}${protectedNote}`;
-  }
-
-  function safeCleanupScanningPanelHtml(data, {
-    rescan = false,
-    stableData = null,
-  } = {}) {
-    const live = data && typeof data === "object" ? data : {};
-    const operation = live?.operation && typeof live.operation === "object" ? live.operation : {};
-    const groups = safeCleanupGroups(live);
-    const discoveredBytes = Number(operation?.discoveredBytes ?? live?.totals?.reclaimableBytes ?? 0);
-    const discoveredGroups = Number(operation?.discoveredGroups ?? groups.length);
-    const strip = safeCleanupScanStripHtml(live, { rescan });
-    if (rescan && stableData && hasStableSafeCleanupInventory(stableData)) {
-      const stableTotals = stableData?.totals && typeof stableData.totals === "object" ? stableData.totals : {};
-      const stableReclaimable = stableTotals?.reclaimableBytes;
-      return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-rescan-shell"><div class="codex-usage-hud-cleanup-rescan-chip"><span class="codex-usage-hud-cleanup-mini-spinner"></span>正在重新扫描本地可清理项…</div><div class="codex-usage-hud-cleanup-rescan-dim"><div class="codex-usage-hud-cleanup-summary-band" data-scanning="true"><div><div class="codex-usage-hud-cleanup-summary-label">上次结果（将被替换）</div><div class="codex-usage-hud-cleanup-summary-value" style="font-size:20px;opacity:.8">${storageFormatBytes(stableReclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">确认清理已锁定<br>等待新清单…</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(stableData, { selectedIds: safeCleanupSelectedGroupIds(stableData) })}</div></div></div></section>`;
-    }
-    if (!groups.length && Number(operation?.progress || 0) < 12) {
-      return safeCleanupBootHtml(live, { pending: true });
-    }
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-summary-band" data-scanning="true"><div><div class="codex-usage-hud-cleanup-summary-label"><span class="codex-usage-hud-cleanup-mini-spinner"></span>累计可清理（扫描中）</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(discoveredBytes)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已发现 ${discoveredGroups} 组<br>仍在扫描更多位置…</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupPlaceholderRowsHtml(live)}</div></section>`;
-  }
-
-  function safeCleanupExecutingPanelHtml(data) {
-    const live = data && typeof data === "object" ? data : {};
-    const operation = live?.operation && typeof live.operation === "object" ? live.operation : {};
-    const state = String(operation?.state || "running").toLowerCase();
-    const title = state === "queued_exit"
-      ? "等待退出后清理"
-      : (state === "accepted" ? "准备清理" : "正在清理");
-    const strip = safeCleanupScanStripHtml(live, {
-      title,
-      mode: "execute",
-      startedAt: safeCleanupState.executeStartedAt,
-    });
-    const selectedIds = Array.isArray(operation?.selectedIds)
-      ? operation.selectedIds.map((id) => String(id || "")).filter(Boolean)
-      : safeCleanupSelectedGroupIds(live);
-    const results = Array.isArray(operation?.results) ? operation.results : [];
-    const rows = safeCleanupResultGroupsHtml(live, selectedIds, results, {
-      fallbackState: state === "accepted" ? "selected" : "running",
-    });
-    const offline = safeCleanupRequiresOffline(live);
-    const note = state === "queued_exit"
-      ? "HUD 即将退出，离线清理会在退出后继续，完成后自动恢复。"
-      : (state === "accepted"
-        ? (offline
-          ? "已确认。HUD 将短暂退出并在后台清理，完成后会自动恢复并展示结果。"
-          : "正在检查活动任务与进程占用，通过后开始删除。")
-        : "正在逐项删除；被占用或无法删除的项会自动跳过。");
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理" aria-busy="true">${strip}<div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(note)}</div></div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(state)}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows || `<div class="codex-usage-hud-cleanup-meta">等待清理项清单…</div>`}</div>${operation?.error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="error">${escapeHtml(operation.error)}</div>` : ""}</div></section>`;
-  }
-
-  function isSafeCleanupTerminalResult(data = safeCleanupFromPayload()) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const action = String(operation?.action || "");
-    const state = String(operation?.state || "").toLowerCase();
-    return new Set(["execute", "safeCleanupExecute"]).has(action)
-      && new Set(["completed", "partial", "failed", "restored"]).has(state);
-  }
-
-  function safeCleanupMaintenanceResultRowsHtml(results) {
-    return (Array.isArray(results) ? results : []).map((result, index) => {
-      const estimated = Math.max(0, Number(result?.estimatedBytes || 0));
-      const actual = Math.max(0, Number(result?.actualBytes || 0));
-      return safeCleanupGroupRowHtml({
-        presentationId: `maintenance-result-${index}-${String(result?.id || "")}`,
-        category: String(result?.category || ""),
-        tier: "safe",
-        targetCount: 1,
-        files: 0,
-        retention: "",
-        bytes: estimated,
-        actualBytes: actual,
-        hasResults: true,
-        state: String(result?.state || "failed"),
-        impact: safeCleanupErrorText(result?.error) || "离线维护完成后返回的结果。",
-      }, {
-        selectedIds: [],
-        kind: "result-maintenance",
-        interactive: false,
-        showResults: true,
-      });
-    }).join("");
-  }
-
-  function safeCleanupMaintenanceResultPanelHtml(data) {
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const results = Array.isArray(operation?.results) ? operation.results : [];
-    const actual = Math.max(0, Number(operation?.actualBytes || 0));
-    const estimated = Math.max(0, Number(operation?.estimatedBytes || 0));
-    const rows = safeCleanupMaintenanceResultRowsHtml(results);
-    const summary = actual
-      ? `实际回收 ${storageFormatBytes(actual)}`
-      : (estimated ? `未回收数据（原预计 ${storageFormatBytes(estimated)}）` : "本次没有可回收的数据");
-    const backupSummary = safeCleanupResultBackupSummary(operation);
-    const error = safeCleanupErrorText(operation?.error);
-    const restartNote = operation?.restartRequested
-      ? (operation?.restartState === "failed"
-        ? "HUD 自动恢复失败，请从桌面快捷方式重新启动。"
-        : "HUD 已在离线清理后自动恢复。")
-      : "";
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}上次清理</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(actual)}</div></div><div class="codex-usage-hud-cleanup-summary-side">${escapeHtml(safeCleanupOperationLabel(operation))}<br>${escapeHtml(summary)}</div></div><div class="codex-usage-hud-cleanup-preview" aria-live="polite"><div class="codex-usage-hud-cleanup-preview-head"><div><strong>${escapeHtml(safeCleanupOperationLabel(operation))}</strong><div class="codex-usage-hud-cleanup-meta">${escapeHtml(summary)}</div>${backupSummary ? `<div class="codex-usage-hud-cleanup-meta">${escapeHtml(backupSummary)}</div>` : ""}${restartNote ? `<div class="codex-usage-hud-cleanup-meta" data-kind="${operation?.restartState === "failed" ? "error" : "note"}">${escapeHtml(restartNote)}</div>` : ""}</div><span class="codex-usage-hud-storage-status" data-state="${escapeHtml(String(operation?.state || "completed"))}">${escapeHtml(safeCleanupOperationLabel(operation))}</span></div><div class="codex-usage-hud-cleanup-results">${rows || `<div class="codex-usage-hud-cleanup-meta">没有可展示的逐项结果。</div>`}</div>${error ? `<div class="codex-usage-hud-cleanup-meta" data-kind="${String(operation?.state || "") === "completed" ? "note" : "error"}">${escapeHtml(error)}</div>` : ""}</div><div class="codex-usage-hud-cleanup-empty-state" style="padding-top:14px"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true">${cleanupIconSvg("refresh")}重新扫描</button></div></section>`;
-  }
-
-  function safeCleanupPanelHtml() {
-    const data = safeCleanupFromPayload();
-    const scanning = isSafeCleanupScanning(data);
-    const executing = isSafeCleanupExecuting(data);
-    const scanned = !!String(data?.revision || "") && !isCleanupScanningRevision(data?.revision);
-    const pending = !!safeCleanupState.pendingRequestId;
-    const stable = hasStableSafeCleanupInventory(safeCleanupState.stableData) ? safeCleanupState.stableData : null;
-    if (!scanned && isSafeCleanupTerminalResult(data)) {
-      // A maintenance helper restarts the HUD with a fresh inventory. Preserve
-      // and present its terminal result instead of falling through to "尚未扫描".
-      return safeCleanupMaintenanceResultPanelHtml(data);
-    }
-    if (scanning) {
-      return safeCleanupScanningPanelHtml(data, {
-        rescan: !!stable,
-        stableData: stable,
-      });
-    }
-    if (executing) {
-      return safeCleanupExecutingPanelHtml(data);
-    }
-    if (!data || !scanned) {
-      const failed = String(data?.operation?.state || "") === "failed";
-      const cancelled = String(data?.operation?.state || "") === "cancelled";
-      if (failed) {
-        const errorText = String(data?.operation?.error || "扫描未能完成");
-        return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" style="border-color:#754247;background:#2b191b;color:#ff858a">${cleanupIconSvg("alert", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">扫描未能完成</h2><p class="codex-usage-hud-cleanup-empty-meta">${escapeHtml(errorText)}</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large">${cleanupIconSvg("refresh")}重新扫描</button></div></section>`;
-      }
-      if (cancelled) {
-        return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark" style="border-color:#6b5c38;background:#282218;color:#f0c66b">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">扫描已取消</h2><p class="codex-usage-hud-cleanup-empty-meta">未修改本地数据，可随时重新扫描。</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large">${cleanupIconSvg("refresh")}重新扫描</button></div></section>`;
-      }
-      return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("scan", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描</h2><p class="codex-usage-hud-cleanup-empty-meta">本机缓存、临时文件与 HUD 诊断数据</p><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true" data-size="large" ${pending ? "disabled" : ""}>${pending ? "正在扫描..." : `${cleanupIconSvg("scan")}扫描垃圾`}</button></div></section>`;
-    }
-    syncSafeCleanupSelection(data);
-    syncSafeCleanupDefaults(data);
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const operationState = String(operation?.state || "idle");
-    const previewLocked = operationState === "preview"
-      && !safeCleanupState.previewHidden
-      && safeCleanupPreviewMatchesSelection(data);
-    const prerequisites = safeCleanupPrerequisites(data);
-    const requiresBackup = prerequisites.requiresBackup;
-    const requiresCodexClose = prerequisites.requiresCodexClose;
-    const selectedIds = safeCleanupSelectedGroupIds(data);
-    const selectedGroups = safeCleanupPresentationGroups(data, { itemIds: selectedIds });
-    const reclaimable = previewLocked
-      ? (operation?.netEstimatedBytes ?? operation?.estimatedBytes)
-      : selectedGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    const backupLocation = safeCleanupBackupLocationLabel(operation);
-    const backupDirectory = String(safeCleanupState.backupDirectory || "").trim();
-    const backupControl = requiresBackup ? (previewLocked && !backupDirectory
-      ? `<div class="codex-usage-hud-cleanup-prerequisite-step"><strong>SQLite 备份目录</strong><span class="codex-usage-hud-cleanup-meta">当前预览已绑定${backupLocation ? ` ${escapeHtml(backupLocation)}` : "已验证的备份目录"}；无需重新选择。</span></div>`
-      : `<div class="codex-usage-hud-cleanup-prerequisite-step"><strong>SQLite 备份目录</strong><span class="codex-usage-hud-cleanup-meta">${previewLocked ? "当前预览已绑定此目录；如要更改，请重新选择清理项。" : "SQLite 历史会先备份到此目录；选择后会自动生成新预览。"}</span><div class="codex-usage-hud-cleanup-backup"><input type="text" data-cleanup-backup-directory="true" value="${escapeHtml(backupDirectory)}" placeholder="选择备份目录" aria-label="SQLite 备份目录" ${previewLocked ? "disabled" : ""}><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-choose-backup" ${previewLocked ? "disabled" : ""}>选择目录</button></div></div>`)
-      : "";
-    const autoCloseControl = requiresCodexClose ? `<label class="codex-usage-hud-cleanup-control"><input type="checkbox" data-cleanup-auto-close="true" ${safeCleanupState.autoCloseConfirmed ? "checked" : ""}><span><strong>允许自动关闭并恢复 Codex App 与 HUD</strong><span class="codex-usage-hud-cleanup-meta">检测到独立 Codex CLI 或活动任务时仍会停止执行</span></span></label>` : "";
-    const prerequisiteMessage = safeCleanupPrerequisiteMessage(prerequisites);
-    const controls = (backupControl || autoCloseControl)
-      ? `<div class="codex-usage-hud-cleanup-controls" data-cleanup-prerequisites="true" data-ready="${prerequisites.ready}"><div class="codex-usage-hud-cleanup-prerequisite-title">${prerequisites.ready ? "深度清理前置步骤已完成" : `继续前请先${escapeHtml(prerequisiteMessage)}`}</div>${backupControl}${autoCloseControl}</div>`
-      : "";
-    return `<section class="codex-usage-hud-cleanup" aria-label="垃圾清理"><div class="codex-usage-hud-cleanup-summary-band"><div><div class="codex-usage-hud-cleanup-summary-label">${cleanupIconSvg("check")}当前选择</div><div class="codex-usage-hud-cleanup-summary-value">${storageFormatBytes(reclaimable)}</div></div><div class="codex-usage-hud-cleanup-summary-side">已选 ${selectedGroups.length} 类 / ${selectedIds.length} 个目标<br>${escapeHtml(safeCleanupOperationLabel(operation))}</div></div><div class="codex-usage-hud-cleanup-list">${safeCleanupGroupsHtml(data, { selectedIds, prerequisitesHtml: controls })}</div>${safeCleanupPreviewHtml(data)}</section>`;
-  }
-
   function storagePanelHtml() {
-    const isSessions = cleanupActiveSection === "sessions";
     const sessionData = sessionCleanupFromPayload();
-    const cleanupData = safeCleanupFromPayload();
-    const sessionCount = Number(sessionData?.totals?.sessions || (Array.isArray(sessionData?.sessions) ? sessionData.sessions.length : 0));
-    const sessionOperation = sessionData?.operation && typeof sessionData.operation === "object"
+    const operation = sessionData?.operation && typeof sessionData.operation === "object"
       ? sessionData.operation
       : {};
-    const sessionOperationAction = String(sessionOperation?.action || "");
-    const sessionOperationState = String(sessionOperation?.state || "");
-    const sessionScanInProgress = new Set(["scan", "sessionCleanupScan"]).has(sessionOperationAction)
-      && new Set(["scanning", "accepted"]).has(sessionOperationState);
-    const sessionExecuting = new Set(["execute", "sessionCleanupExecute"]).has(sessionOperationAction)
-      && new Set(["accepted", "running"]).has(sessionOperationState);
-    const headMeta = isSessions
-      ? (sessionScanInProgress
-        ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>正在扫描会话…`
-        : (sessionExecuting
-          ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>正在永久删除…`
-        : (sessionCount ? `${sessionCount.toLocaleString()} 个本地会话` : "按需扫描 · 无后台轮询"))
-        )
-      : (isSafeCleanupScanning(cleanupData)
-        ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>${escapeHtml(safeCleanupPhaseLabel(cleanupData?.operation || {}) || "正在扫描…")}`
-        : (isSafeCleanupExecuting(cleanupData)
-          ? `<span class="codex-usage-hud-cleanup-pulse-dot"></span>${escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {}) || "正在清理")}`
-          : (cleanupData?.revision && !isCleanupScanningRevision(cleanupData?.revision)
-            ? escapeHtml(safeCleanupOperationLabel(cleanupData?.operation || {}))
-            : "按需扫描 · 无后台轮询")));
-    const body = isSessions ? sessionCleanupPanelHtml() : safeCleanupPanelHtml();
-    const junkScanning = isSafeCleanupScanning(cleanupData);
-    const junkScanned = !!String(cleanupData?.revision || "") && !isCleanupScanningRevision(cleanupData?.revision) && !junkScanning;
-    const junkBusy = isSafeCleanupBusy(cleanupData);
-    const sessionScanned = !!String(sessionData?.revision || "");
-    const sessionBusy = new Set(["scanning", "accepted", "running"]).has(sessionOperationState) || !!sessionCleanupState.pendingRequestId;
-    const selectedCleanupIds = safeCleanupSelectedGroupIds(cleanupData);
-    const selectedCleanupGroups = safeCleanupPresentationGroups(cleanupData, { itemIds: selectedCleanupIds });
-    const junkReady = String(cleanupData?.operation?.state || "") === "preview"
-      && !!String(cleanupData?.operation?.confirmationToken || "")
-      && !safeCleanupState.previewHidden
-      && safeCleanupPreviewMatchesSelection(cleanupData);
-    const reclaimable = junkReady
-      ? (cleanupData?.operation?.netEstimatedBytes ?? cleanupData?.operation?.estimatedBytes)
-      : selectedCleanupGroups.reduce((sum, group) => sum + Math.max(0, Number(group?.bytes || 0)), 0);
-    let footerMeta = "配置、凭据和会话默认受保护";
-    let footerActions = "";
-    if (isSessions) {
-      const selectedCount = sessionCleanupState.selectedIds.size;
-      const selectedRows = sessionCleanupRows(sessionData).filter((item) => sessionCleanupState.selectedIds.has(String(item?.id || "")));
-      const descendants = selectedRows.reduce((sum, item) => sum + Math.max(0, Number(item?.descendantCount || 0)), 0);
-      const bytes = selectedRows.reduce((sum, item) => sum + Math.max(0, Number(item?.bytes || 0)), 0);
-      footerMeta = sessionExecuting
-        ? "正在永久删除所选会话，完成后将直接刷新当前列表"
-        : (selectedCount
-          ? `已选 ${selectedCount} 个会话 · 含 ${descendants} 个关联子任务 · ${storageFormatBytes(bytes)}`
-          : (sessionScanned ? "当前/运行中会话不可选；子任务随主会话汇总" : "上次扫描：--"));
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" ${sessionBusy ? "disabled" : ""}>${sessionBusy ? (sessionExecuting ? "正在删除..." : "正在扫描...") : (sessionScanned ? "重新扫描" : "扫描会话")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-preview" data-danger="true" data-size="large" ${sessionBusy || !selectedCount || sessionData?.capability?.available !== true ? "disabled" : ""}>${cleanupIconSvg("trash")}永久删除</button></div>`;
-    } else if (junkScanning) {
-      footerMeta = "仅统计可清理项 · 扫描时不删除";
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel">取消扫描</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled>${cleanupIconSvg("check")}确认清理</button></div>`;
-    } else if (isSafeCleanupTerminalResult(cleanupData)) {
-      const operation = cleanupData?.operation && typeof cleanupData.operation === "object" ? cleanupData.operation : {};
-      const actual = Math.max(0, Number(operation?.actualBytes || 0));
-      footerMeta = `${safeCleanupOperationLabel(operation)} · ${actual ? `实际回收 ${storageFormatBytes(actual)}` : "未回收数据"}`;
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-scan" data-primary="true">${cleanupIconSvg("refresh")}重新扫描</button></div>`;
-    } else if (!junkScanned) {
-      footerMeta = `上次扫描：-- · ${cleanupIconSvg("shield")} 配置、凭据和会话默认受保护`;
-      footerActions = "";
-    } else if (isSafeCleanupExecuting(cleanupData)) {
-      const operation = cleanupData?.operation && typeof cleanupData.operation === "object" ? cleanupData.operation : {};
-      const progress = Math.max(0, Math.min(100, Number(operation?.progress || 0)));
-      const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
-      const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 1));
-      const cancelPending = String(operation?.state || "").toLowerCase() === "cancelled"
-        || String(operation?.error || "").includes("清理已取消");
-      footerMeta = cancelPending
-        ? `正在停止清理 ${phaseIndex}/${phaseCount} · 已用时 <span data-safe-cleanup-elapsed="execute">${escapeHtml(formatCleanupElapsed(safeCleanupState.executeStartedAt))}</span>`
-        : `正在清理 ${phaseIndex}/${phaseCount} · ${progress || 1}% · 已用时 <span data-safe-cleanup-elapsed="execute">${escapeHtml(formatCleanupElapsed(safeCleanupState.executeStartedAt))}</span>`;
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-cancel" ${cancelPending ? "disabled" : ""}>${cancelPending ? "正在取消..." : "取消清理"}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" disabled><span class="codex-usage-hud-cleanup-mini-spinner" aria-hidden="true"></span>${cancelPending ? "正在停止" : `正在清理 ${progress || 1}%`}</button></div>`;
-    } else {
-      const offline = safeCleanupRequiresOffline(cleanupData);
-      const prerequisites = safeCleanupPrerequisites(cleanupData);
-      const requiresBackup = prerequisites.requiresBackup;
-      const requiresCodexClose = prerequisites.requiresCodexClose;
-      const prerequisiteMessage = safeCleanupPrerequisiteMessage(prerequisites);
-      footerMeta = `已选 ${selectedCleanupGroups.length} 类 / ${selectedCleanupIds.length} 个目标 · 执行前重验路径与指纹${requiresBackup ? " · 需 SQLite 备份" : (requiresCodexClose ? " · 需重启 Codex" : (offline ? " · HUD 将短暂重启" : ""))}${!prerequisites.ready ? ` · 先${escapeHtml(prerequisiteMessage)}` : ""}`;
-      const confirmLabel = junkBusy
-        ? (String(cleanupData?.operation?.state || "") === "accepted"
-          ? "准备清理..."
-          : "正在清理...")
-        : (!junkReady
-          ? `${cleanupIconSvg("check")}${requiresBackup && !prerequisites.backupReady ? "选择备份目录后生成预览" : "等待清理预览..."}`
-          : (!prerequisites.ready
-            ? `${cleanupIconSvg("check")}完成深度清理前置步骤`
-            : `${cleanupIconSvg("check")}确认清理 ${storageFormatBytes(reclaimable)}`));
-      footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-cleanup-icon-button" data-action="safe-cleanup-scan" aria-label="重新扫描" ${junkBusy ? "disabled" : ""}>${cleanupIconSvg("refresh")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm" data-primary="true" data-size="large" ${junkBusy || !junkReady ? "disabled" : ""}>${confirmLabel}</button></div>`;
-    }
-    return `<div class="codex-usage-hud-cleanup-workspace"><div class="codex-usage-hud-cleanup-page-head"><div class="codex-usage-hud-cleanup-segments" role="tablist" aria-label="空间清理分类"><button type="button" role="tab" aria-selected="${isSessions}" data-action="cleanup-section" data-cleanup-section="sessions" data-active="${isSessions}">${cleanupIconSvg("trash")}会话管理</button><button type="button" role="tab" aria-selected="${!isSessions}" data-action="cleanup-section" data-cleanup-section="junk" data-active="${!isSessions}">${cleanupIconSvg("scan")}垃圾清理</button></div><span class="codex-usage-hud-cleanup-head-meta">${headMeta}</span></div><div class="codex-usage-hud-cleanup-content">${body}</div><div class="codex-usage-hud-cleanup-footer"><span class="codex-usage-hud-cleanup-footer-meta">${footerMeta}</span>${footerActions}</div></div>`;
+    const action = String(operation?.action || "");
+    const state = String(operation?.state || "");
+    const scanned = !!String(sessionData?.revision || "");
+    const executing = new Set(["execute", "sessionCleanupExecute"]).has(action)
+      && new Set(["accepted", "running"]).has(state);
+    const busy = new Set(["scanning", "accepted", "running"]).has(state)
+      || !!sessionCleanupState.pendingRequestId;
+    const selectedCount = sessionCleanupState.selectedIds.size;
+    const selectedRows = sessionCleanupRows(sessionData)
+      .filter((item) => sessionCleanupState.selectedIds.has(String(item?.id || "")));
+    const descendants = selectedRows.reduce(
+      (sum, item) => sum + Math.max(0, Number(item?.descendantCount || 0)),
+      0,
+    );
+    const bytes = selectedRows.reduce(
+      (sum, item) => sum + Math.max(0, Number(item?.bytes || 0)),
+      0,
+    );
+    const footerMeta = executing
+      ? "正在永久删除所选会话，完成后将直接刷新当前列表"
+      : (selectedCount
+        ? `已选 ${selectedCount} 个会话 · 含 ${descendants} 个关联子任务 · ${storageFormatBytes(bytes)}`
+        : (scanned ? "当前/运行中会话不可选；子任务随主会话汇总" : "上次扫描：--"));
+    const footerActions = `<div class="codex-usage-hud-cleanup-footer-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" ${busy ? "disabled" : ""}>${busy ? (executing ? "正在删除..." : "正在扫描...") : (scanned ? "重新扫描" : "扫描会话")}</button><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-preview" data-danger="true" data-size="large" ${busy || !selectedCount || sessionData?.capability?.available !== true ? "disabled" : ""}>${cleanupIconSvg("trash")}永久删除</button></div>`;
+    return `<div class="codex-usage-hud-cleanup-workspace"><div class="codex-usage-hud-cleanup-content">${sessionCleanupPanelHtml()}</div><div class="codex-usage-hud-cleanup-footer"><span class="codex-usage-hud-cleanup-footer-meta">${footerMeta}</span>${footerActions}</div></div>`;
   }
 
   function sessionCleanupRows(data = sessionCleanupFromPayload()) {
@@ -9026,6 +7157,16 @@ scanStartedAt: 0,
     return reason;
   }
 
+  function sessionCleanupPhaseLabel(operation = {}) {
+    const raw = String(operation?.phaseLabel || "").trim();
+    const labels = {
+      "Reading session index": "读取会话索引",
+      "Resolving session families": "归并主会话与关联子任务",
+      "Checking deletion protection": "检查永久删除保护状态",
+    };
+    return labels[raw] || raw || "读取会话索引";
+  }
+
   function sessionCleanupPanelHtml() {
     const data = sessionCleanupFromPayload();
     const scanned = !!String(data?.revision || "");
@@ -9036,7 +7177,7 @@ scanStartedAt: 0,
     const scanInProgress = new Set(["scan", "sessionCleanupScan"]).has(operationAction)
       && new Set(["scanning", "accepted"]).has(state);
     if (scanInProgress) {
-      const phaseLabel = safeCleanupPhaseLabel(operation);
+      const phaseLabel = sessionCleanupPhaseLabel(operation);
       const progress = Math.max(0, Math.min(99, Number(operation?.progress || 0)));
       const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
       const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 3));
@@ -9102,12 +7243,6 @@ scanStartedAt: 0,
     if (cleanupContent) cleanupContentScrollTop = cleanupContent.scrollTop;
     const sessionTable = modal?.querySelector?.(".codex-usage-hud-session-table");
     if (sessionTable) sessionTableScrollTop = sessionTable.scrollTop;
-    const backup = modal?.querySelector?.("[data-cleanup-backup-directory='true']");
-    if (backup instanceof HTMLInputElement) safeCleanupState.backupDirectory = String(backup.value || "").trim();
-    const consent = modal?.querySelector?.("[data-cleanup-consent='true']");
-    if (consent instanceof HTMLInputElement) safeCleanupState.includeConsent = !!consent.checked;
-    const autoClose = modal?.querySelector?.("[data-cleanup-auto-close='true']");
-    if (autoClose instanceof HTMLInputElement) safeCleanupState.autoCloseConfirmed = !!autoClose.checked;
   }
 
   function restoreStorageUiState() {
@@ -9226,55 +7361,6 @@ scanStartedAt: 0,
     return submitted;
   }
 
-  function requestSafeCleanupScan() {
-    if (safeCleanupState.pendingRequestId) return false;
-    const current = safeCleanupFromPayload();
-    if (hasStableSafeCleanupInventory(current)) {
-      safeCleanupState.stableData = current;
-    } else if (!hasStableSafeCleanupInventory(safeCleanupState.stableData)) {
-      safeCleanupState.stableData = null;
-    }
-    const requestId = typedSettingsRequestId("safe-cleanup-scan");
-    safeCleanupState.pendingRequestId = requestId;
-    safeCleanupState.scanStartedAt = Date.now();
-    safeCleanupState.previewHidden = false;
-    safeCleanupState.previewBackupDirectory = "";
-    ensureSafeCleanupLiveTicker();
-    rerenderUsageInsightsIfVisible();
-    const submitted = submitSettingsCommand(
-      { action: "safeCleanupScan", requestId },
-      "正在扫描可安全清理的本地数据...",
-      { preserveOverlay: true },
-    );
-    if (!submitted) safeCleanupState.pendingRequestId = "";
-    return submitted;
-  }
-
-  function requestSafeCleanupCancel() {
-    const data = safeCleanupFromPayload();
-    const executing = isSafeCleanupExecuting(data);
-    const scanning = isSafeCleanupScanning(data);
-    const requestId = typedSettingsRequestId("safe-cleanup-cancel");
-    const statusText = executing
-      ? "正在取消清理；当前项结束后会跳过剩余项..."
-      : (scanning ? "正在取消扫描..." : "已请求取消清理操作。");
-    const submitted = submitSettingsCommand(
-      { action: "safeCleanupCancel", requestId },
-      statusText,
-      { preserveOverlay: true },
-    );
-    if (submitted) {
-      // Keep executeStartedAt while the worker finishes the current action so the
-      // elapsed ticker stays honest; clear scan pending immediately.
-      safeCleanupState.pendingRequestId = "";
-      if (!executing) {
-        safeCleanupState.scanStartedAt = 0;
-        safeCleanupState.executeStartedAt = 0;
-      }
-    }
-    return submitted;
-  }
-
   function requestSessionCleanupCancel() {
     const requestId = typedSettingsRequestId("session-cleanup-cancel");
     const submitted = submitSettingsCommand(
@@ -9289,228 +7375,6 @@ scanStartedAt: 0,
     return submitted;
   }
 
-  function refreshSafeCleanupSelection(data = safeCleanupFromPayload()) {
-    const itemById = new Map(safeCleanupRawItems(data).map((item) => [String(item?.id || ""), item]));
-    safeCleanupState.includeConsent = [...safeCleanupState.selectedIds]
-      .some((id) => String(itemById.get(id)?.tier || "") === "consent");
-    safeCleanupState.previewHidden = true;
-    safeCleanupState.previewBackupDirectory = "";
-    if (!safeCleanupSelectedGroupIds(data).length) {
-      clearTimeout(safeCleanupPreviewTimer);
-      if (safeCleanupState.pendingRequestId === "pending-preview") safeCleanupState.pendingRequestId = "";
-      setSettingsStatus("未选择清理目标。", "");
-      rerenderUsageInsightsIfVisible();
-      return;
-    }
-    scheduleSafeCleanupPreview();
-  }
-
-  function toggleSafeCleanupItemIds(itemIds, data = safeCleanupFromPayload()) {
-    const validIds = (Array.isArray(itemIds) ? itemIds : [])
-      .map((id) => String(id || ""))
-      .filter(Boolean);
-    if (!validIds.length) return false;
-    const allSelected = validIds.every((id) => safeCleanupState.selectedIds.has(id));
-    validIds.forEach((id) => {
-      if (allSelected) safeCleanupState.selectedIds.delete(id);
-      else safeCleanupState.selectedIds.add(id);
-    });
-    refreshSafeCleanupSelection(data);
-    return true;
-  }
-
-  function requestSafeCleanupPreview() {
-    captureStorageUiState();
-    const data = safeCleanupFromPayload();
-    const groupIds = safeCleanupSelectedGroupIds(data);
-    const inventoryRevision = String(data?.revision || "");
-    const requiresBackup = safeCleanupRequiresBackup(data);
-    if (!inventoryRevision || !groupIds.length) {
-      setSettingsStatus("请先扫描可清理项。", "error");
-      return false;
-    }
-    if (requiresBackup && !safeCleanupState.backupDirectory) {
-      setSettingsStatus("SQLite 维护必须先选择备份目录。", "error");
-      return false;
-    }
-    const requestId = typedSettingsRequestId("safe-cleanup-preview");
-    safeCleanupState.pendingRequestId = requestId;
-    safeCleanupState.previewHidden = false;
-    const previewBackupDirectory = requiresBackup ? safeCleanupState.backupDirectory : "";
-    const submitted = submitSettingsCommand({
-      action: "safeCleanupPreview",
-      requestId,
-      groupIds,
-      inventoryRevision,
-      consentConfirmed: safeCleanupState.includeConsent,
-      backupDirectory: safeCleanupState.backupDirectory,
-      autoCloseAndRestore: safeCleanupState.autoCloseConfirmed,
-    }, "正在生成清理预览...", { preserveOverlay: true });
-    if (submitted) {
-      safeCleanupState.previewBackupDirectory = previewBackupDirectory;
-    } else {
-      safeCleanupState.pendingRequestId = "";
-      safeCleanupState.previewBackupDirectory = "";
-    }
-    return submitted;
-  }
-
-  function requestSafeCleanupReveal(itemId) {
-    const data = safeCleanupFromPayload();
-    const normalizedItemId = String(itemId || "").trim();
-    const inventoryRevision = String(data?.revision || "");
-    if (!normalizedItemId || !inventoryRevision || isCleanupScanningRevision(inventoryRevision)) {
-      setSettingsStatus("该路径已过期，请重新扫描后再打开。", "error");
-      return false;
-    }
-    return submitSettingsCommand({
-      action: "safeCleanupReveal",
-      requestId: typedSettingsRequestId("safe-cleanup-reveal"),
-      inventoryRevision,
-      itemId: normalizedItemId,
-    }, "正在打开本地位置...", { preserveOverlay: true });
-  }
-
-  function openSafeCleanupExecuteConfirm() {
-    captureStorageUiState();
-    const dialog = settingsDialogRoot();
-    const data = safeCleanupFromPayload();
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    if (!dialog || String(operation?.state || "") !== "preview") return;
-    if (safeCleanupState.previewHidden || !safeCleanupPreviewMatchesSelection(data)) {
-      setSettingsStatus("清理选择已变化，请等待新预览。", "error");
-      return;
-    }
-    const offline = safeCleanupRequiresOffline(data);
-    const prerequisites = safeCleanupPrerequisites(data);
-    const requiresBackup = prerequisites.requiresBackup;
-    const requiresCodexClose = prerequisites.requiresCodexClose;
-    const selectedIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : [];
-    const itemById = new Map(safeCleanupRawItems(data).map((item) => [String(item?.id || ""), item]));
-    const includesConsent = operation?.includesConsent === true
-      || selectedIds.some((id) => String(itemById.get(String(id))?.tier || "") === "consent");
-    const selectedGroupCount = safeCleanupPresentationGroups(data, { itemIds: selectedIds }).length;
-    if (requiresBackup && !prerequisites.backupReady) {
-      setSettingsStatus("请先选择 SQLite 备份目录，随后会自动生成新的清理预览。", "error");
-      focusSafeCleanupPrerequisite('[data-cleanup-backup-directory="true"]');
-      return;
-    }
-    if (requiresCodexClose && !prerequisites.autoCloseReady) {
-      setSettingsStatus("请先确认允许自动关闭并恢复 Codex App 与 HUD。", "error");
-      focusSafeCleanupPrerequisite('[data-cleanup-auto-close="true"]');
-      return;
-    }
-    // Do not use previewBackupDirectory as an execute gate. It is only a
-    // renderer convenience value and resets on CDP reinjection; the one-use
-    // backend confirmation token already binds and validates the real path.
-    const previewBackupDirectory = String(
-      safeCleanupState.previewBackupDirectory || safeCleanupState.backupDirectory || ""
-    ).trim();
-    const backupLocation = safeCleanupBackupLocationLabel(operation);
-    closeSettingsConfirm();
-    const layer = document.createElement("div");
-    layer.className = "codex-usage-hud-settings-confirm-layer";
-    layer.dataset.settingsConfirm = "true";
-    const offlineNote = requiresBackup
-      ? `\nSQLite 将先备份到${previewBackupDirectory ? `：${escapeHtml(previewBackupDirectory)}` : (backupLocation ? ` ${escapeHtml(backupLocation)}` : "预览已验证的目录")}\nHUD 会短暂退出并在清理后自动恢复；活动任务或独立 Codex CLI 会阻止执行。`
-      : (requiresCodexClose ? "\nCodex App 与 HUD 会正常退出并在清理后自动恢复。活动任务或独立 Codex CLI 会阻止执行。" : (offline ? "\nHUD 会短暂退出并在清理自身日志后自动恢复。活动任务会阻止执行。" : ""));
-    const spaceSummary = safeCleanupConfirmSpaceSummary(operation);
-    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认一键清理"><div class="codex-usage-hud-settings-confirm-main"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">清理 ${selectedGroupCount} 类、${selectedIds.length} 个本地目标？</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(spaceSummary)}。${includesConsent ? "已包含会失去历史或诊断信息的确认项。" : "仅包含可直接清理项。"}${offlineNote}</div></div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="safe-cleanup-execute" data-primary="true">确认并开始清理</button></div></div>`;
-    dialog.appendChild(layer);
-    layer.querySelector('[data-action="safe-cleanup-confirm-cancel"]')?.focus?.();
-  }
-
-  function executeSafeCleanup() {
-    const data = safeCleanupFromPayload();
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    if (String(operation?.state || "") !== "preview" || safeCleanupState.previewHidden || !safeCleanupPreviewMatchesSelection(data)) {
-      setSettingsStatus("清理选择尚未完成预览，请稍候。", "error");
-      return false;
-    }
-    const groupIds = Array.isArray(operation?.selectedIds) ? operation.selectedIds : safeCleanupSelectedGroupIds(data);
-    const requestId = typedSettingsRequestId("safe-cleanup-execute");
-    safeCleanupState.pendingRequestId = requestId;
-    safeCleanupState.executeStartedAt = Date.now();
-    safeCleanupState.previewHidden = false;
-    if (safeCleanupState.data && typeof safeCleanupState.data === "object") {
-      const previous = safeCleanupState.data.operation && typeof safeCleanupState.data.operation === "object"
-        ? safeCleanupState.data.operation
-        : {};
-      safeCleanupState.data = {
-        ...safeCleanupState.data,
-        operation: {
-          ...previous,
-          requestId,
-          action: "safeCleanupExecute",
-          state: "accepted",
-          progress: 5,
-          phase: "prepare",
-          phaseLabel: "Preparing cleanup",
-          phaseIndex: 1,
-          phaseCount: Math.max(1, groupIds.length || Number(previous?.phaseCount || 1)),
-          selectedIds: groupIds,
-          results: groupIds.map((id) => ({
-            id,
-            state: "selected",
-            estimatedBytes: 0,
-            actualBytes: 0,
-            deletedRows: 0,
-            error: "",
-          })),
-        },
-      };
-    }
-    closeSettingsConfirm();
-    ensureSafeCleanupLiveTicker();
-    rerenderUsageInsightsIfVisible();
-    const offline = safeCleanupRequiresOffline(data);
-    const pendingMessage = offline
-      ? "已确认，HUD 将短暂退出并在后台清理；完成后会自动恢复并展示结果。"
-      : "清理已确认，正在检查安全门禁...";
-    setSettingsStatus(pendingMessage);
-    // Give the renderer one frame to paint the accepted/offline hand-off before
-    // the backend closes Codex for maintenance. This is a one-shot UX hand-off,
-    // not recurring polling.
-    window.setTimeout(() => {
-      const submitted = submitSettingsCommand({
-        action: "safeCleanupExecute",
-        requestId,
-        groupIds,
-        inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""),
-        confirmationToken: String(operation?.confirmationToken || ""),
-        autoCloseAndRestore: safeCleanupState.autoCloseConfirmed,
-      }, pendingMessage, { preserveOverlay: true });
-      if (!submitted) {
-        safeCleanupState.pendingRequestId = "";
-        safeCleanupState.executeStartedAt = 0;
-        rerenderUsageInsightsIfVisible();
-      }
-    }, 120);
-    return true;
-  }
-
-  function scheduleSafeCleanupPreview() {
-    clearTimeout(safeCleanupPreviewTimer);
-    safeCleanupState.pendingRequestId = "pending-preview";
-    rerenderUsageInsightsIfVisible();
-    safeCleanupPreviewTimer = setTimeout(() => {
-      safeCleanupState.pendingRequestId = "";
-      const submitted = requestSafeCleanupPreview();
-      if (!submitted) {
-        rerenderUsageInsightsIfVisible();
-        const data = safeCleanupFromPayload();
-        const selectedIds = safeCleanupSelectedGroupIds(data);
-        const missingBackup = safeCleanupRequiresBackup(data) && !safeCleanupState.backupDirectory;
-        setSettingsStatus(
-          !selectedIds.length
-            ? "未选择清理目标。"
-            : (missingBackup ? "SQLite 维护必须先选择备份目录。" : "无法提交清理预览。"),
-          "error",
-        );
-      }
-    }, 280);
-  }
-
   function requestSessionCleanupScan() {
     if (sessionCleanupState.pendingRequestId) return false;
     const requestId = typedSettingsRequestId("session-cleanup-scan");
@@ -9518,12 +7382,19 @@ scanStartedAt: 0,
     sessionCleanupState.scanStartedAt = Date.now();
     sessionCleanupState.selectedIds.clear();
     sessionCleanupState.previewTokenShown = "";
+    // Paint the busy state before the command crosses the renderer bridge.
+    // Keeping the existing modal visible avoids a close/reopen flash when the
+    // scan acknowledgement arrives during the same interaction.
+    renderSettingsModal("storage", "正在扫描本地会话清单...");
     const submitted = submitSettingsCommand(
       { action: "sessionCleanupScan", requestId },
       "正在扫描本地会话清单...",
       { preserveOverlay: true },
     );
-    if (!submitted) sessionCleanupState.pendingRequestId = "";
+    if (!submitted) {
+      sessionCleanupState.pendingRequestId = "";
+      refreshStoragePanelIfVisible();
+    }
     return submitted;
   }
 
@@ -9580,7 +7451,6 @@ scanStartedAt: 0,
         !modal
         || modal.hidden
         || settingsActiveTab !== "storage"
-        || cleanupActiveSection !== "sessions"
         || String(operation?.state || "") !== "preview"
         || currentToken !== token
       ) return;
@@ -9623,40 +7493,6 @@ scanStartedAt: 0,
       restoreSessionCleanupConfirm(String(operation?.confirmationToken || ""));
     }
     return submitted;
-  }
-
-  function storageSelectedItemIds() {
-    return Array.from(document.querySelectorAll(`#${settingsModalId} [data-storage-item-id]`))
-      .filter((node) => node instanceof HTMLInputElement && node.checked)
-      .map((node) => String(node.dataset.storageItemId || "")).filter(Boolean);
-  }
-
-  function storagePreviewSelected(managedAction = "", managedItemId = "") {
-    const data = fileManagementFromPayload();
-    const itemIds = managedItemId ? [managedItemId] : storageSelectedItemIds();
-    const revision = String(data?.revision || "");
-    if (!revision || !itemIds.length) {
-      setSettingsStatus("请先扫描并选择一个可候选项。", "error");
-      return;
-    }
-    storagePreviewHidden = false;
-    submitSettingsCommand({ action: "preview", itemIds, inventoryRevision: revision, managedAction }, managedAction ? "官方动作预览已提交..." : "清理预览请求已提交...", { preserveOverlay: true });
-  }
-
-  function openStorageExecuteConfirm() {
-    const dialog = settingsDialogRoot();
-    const data = fileManagementFromPayload();
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    if (!dialog || String(operation?.state || "") !== "preview") return;
-    closeSettingsConfirm();
-    const managedAction = String(operation?.managedAction || "");
-    const count = Array.isArray(operation?.items) ? operation.items.length : 0;
-    const layer = document.createElement("div");
-    layer.className = "codex-usage-hud-settings-confirm-layer";
-    layer.dataset.settingsConfirm = "true";
-    layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认存储操作"><div class="codex-usage-hud-settings-confirm-kicker">二次确认</div><div class="codex-usage-hud-settings-confirm-title">${escapeHtml(managedAction ? "执行官方 Codex 动作？" : "加入退出后清理队列？")}</div><div class="codex-usage-hud-settings-confirm-body">已预览 ${count} 个项。${managedAction ? "将只调用官方命令，不会直接删除会话或插件文件。" : "Codex 仍在运行时不会修改原始文件；退出后会再次检查。"}</div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="storage-confirm-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-action="storage-confirm-execute" data-primary="true">确认</button></div></div>`;
-    dialog.appendChild(layer);
-    layer.querySelector('[data-action="storage-confirm-cancel"]')?.focus?.();
   }
 
   function backgroundUsageFormatCost(value) {
@@ -10346,13 +8182,14 @@ scanStartedAt: 0,
     const settings = hudSettingsFromPayload();
     const activeTab = ["storage", "backgroundUsage", "support", "about"].includes(tab) ? tab : "settings";
     settingsActiveTab = activeTab;
+    writeSettingsUiState(true, activeTab);
     if (activeTab === "settings") ensureSettingsProviderDraft(settings, resetProviderDraft);
     const path = settingsPathLabel();
     const bridge = settingsBridgeUrl();
     const defaultStatus = activeTab === "about"
       ? "可检查 GitHub Release 并启动 Windows 安装器。"
       : activeTab === "storage"
-        ? "扫描与永久删除只在用户明确操作时执行。"
+        ? "扫描和永久删除仅在用户明确操作时执行。"
         : activeTab === "backgroundUsage"
           ? "Tokens 来自本机日志；费用均为 HUD 估算。"
         : (bridge ? "设置将保存到本地配置文件" : "设置桥接未连接，可导出 JSON 手动写入配置文件");
@@ -10364,7 +8201,7 @@ scanStartedAt: 0,
         </div>
         <div class="codex-usage-hud-settings-tabs" role="tablist">
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="settings" data-active="${activeTab === "settings"}">设置</button>
-          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="storage" data-active="${activeTab === "storage"}">空间清理</button>
+          <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="storage" data-active="${activeTab === "storage"}">会话管理</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="backgroundUsage" data-active="${activeTab === "backgroundUsage"}">用量总览</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="support" data-active="${activeTab === "support"}">请作者喝咖啡</button>
           <button type="button" class="codex-usage-hud-settings-tab" data-action="settings-tab" data-tab="about" data-active="${activeTab === "about"}">版本更新</button>
@@ -10398,6 +8235,14 @@ scanStartedAt: 0,
         void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
       }
     }
+  }
+
+  function restoreOpenSettingsModal() {
+    const modal = document.getElementById(settingsModalId);
+    const settingsUiState = readSettingsUiState();
+    if (!modal || !modal.hidden || settingsUiState?.open !== true) return false;
+    renderSettingsModal(String(settingsUiState.tab || settingsActiveTab));
+    return true;
   }
 
   function settingsPanelHtml(settings, bridge, path) {
@@ -10482,7 +8327,6 @@ scanStartedAt: 0,
     const interval = Math.min(180, Math.max(1, Math.round(Number(settings.rest_reminder_interval_minutes) || 45)));
     const breakMinutes = Math.min(10, Math.max(1, Math.round(Number(settings.rest_reminder_break_minutes) || 2)));
     const postpone = Math.min(30, Math.max(5, Math.round(Number(settings.rest_reminder_postpone_minutes) || 10)));
-    const idleReset = Math.min(60, Math.max(0, Math.round(Number(settings.rest_reminder_idle_reset_minutes) || 5)));
     const workStart = String(settings.rest_reminder_work_start_time || "09:00");
     const workEnd = String(settings.rest_reminder_work_end_time || "18:00");
     const lunchEnabled = settings.rest_reminder_lunch_enabled !== false;
@@ -10491,11 +8335,8 @@ scanStartedAt: 0,
     const reminder = currentPayload()?.restReminder && typeof currentPayload().restReminder === "object"
       ? currentPayload().restReminder : {};
     const startTime = formatRestReminderInputTime(Number(reminder.timerStartedAtMs));
-    const notification = reminder.notification && typeof reminder.notification === "object"
-      ? reminder.notification : {};
-    const notificationLabel = notification.status === "failed"
-      ? `通知不可用${notification.error ? `：${notification.error}` : ""}`
-      : notification.status === "sent" ? "通知 OK" : "待测试";
+    const todayRestedSeconds = Math.max(0, Number(reminder.todayRestedSeconds) || 0);
+    const restSummary = `今日已休息 ${formatRestReminderRemaining(todayRestedSeconds)}`;
     const qrItems = images.map((item) => `
       <div class="codex-usage-hud-support-qr">
         <div class="codex-usage-hud-support-qr-title">
@@ -10532,10 +8373,6 @@ scanStartedAt: 0,
               <span>延后</span>
               <input data-setting-key="rest_reminder_postpone_minutes" type="number" min="5" max="30" step="1" value="${escapeHtml(postpone)}" aria-label="稍后提醒（分钟）">
             </label>
-            <label class="codex-usage-hud-rest-reminder-field" title="离开多久算作休息（分钟）；回来开始新一轮">
-              <span>离开</span>
-              <input data-setting-key="rest_reminder_idle_reset_minutes" type="number" min="0" max="60" step="1" value="${escapeHtml(idleReset)}" aria-label="离开多久算作休息（分钟）">
-            </label>
             <label class="codex-usage-hud-rest-reminder-field" title="本轮开始时间，可校正当前轮">
               <span>本轮</span>
               <input data-rest-reminder-start-time="true" type="time" value="${escapeHtml(startTime)}" aria-label="本轮开始时间">
@@ -10564,7 +8401,7 @@ scanStartedAt: 0,
             </div>
           </div>
           <div class="codex-usage-hud-rest-reminder-foot">
-            <div class="codex-usage-hud-rest-reminder-notify" data-kind="${escapeHtml(notification.status === "failed" ? "failed" : notification.status === "sent" ? "sent" : "pending")}" data-rest-reminder-notification="true" title="${escapeHtml(notificationLabel)}">${escapeHtml(notificationLabel)}</div>
+            <div class="codex-usage-hud-rest-reminder-summary" data-rest-reminder-summary="true" title="${escapeHtml(restSummary)}">${escapeHtml(restSummary)}</div>
             <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-test-notification" title="发送系统通知并预览提醒">测试</button>
             <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-save" title="保存提醒设置">保存</button>
           </div>
@@ -10962,14 +8799,6 @@ scanStartedAt: 0,
         30,
       );
     }
-    if (settingNode("rest_reminder_idle_reset_minutes")) {
-      next.rest_reminder_idle_reset_minutes = integerValue(
-        "rest_reminder_idle_reset_minutes",
-        Number(settings.rest_reminder_idle_reset_minutes) || 5,
-        0,
-        60,
-      );
-    }
     [
       "rest_reminder_work_start_time",
       "rest_reminder_work_end_time",
@@ -11211,6 +9040,7 @@ scanStartedAt: 0,
       clearBackgroundUsageRequestTimeout("detail");
     }
     modal.hidden = true;
+    writeSettingsUiState(false, settingsActiveTab);
     ensureRestReminderCountdownTicker();
     settingsProviderDraft = null;
     settingsDirtyProviders.clear();
@@ -11319,12 +9149,6 @@ scanStartedAt: 0,
         restStartInput.dataset.userEdited = "true";
         return;
       }
-      const backupInput = event.target?.closest?.('[data-cleanup-backup-directory="true"]');
-      if (backupInput && root.contains(backupInput)) {
-        safeCleanupState.backupDirectory = String(backupInput.value || "").trim();
-        safeCleanupState.backupDirectoryDirty = true;
-        return;
-      }
       const sessionDateStart = event.target?.closest?.('[data-session-cleanup-date-start="true"]');
       if (sessionDateStart && root.contains(sessionDateStart)) {
         sessionCleanupState.dateDraftStart = String(sessionDateStart.value || "");
@@ -11364,28 +9188,6 @@ scanStartedAt: 0,
       const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
       if (restStartInput && root.contains(restStartInput)) {
         restStartInput.dataset.userEdited = "true";
-        return;
-      }
-      const consent = event.target?.closest?.('[data-cleanup-consent="true"]');
-      if (consent && root.contains(consent)) {
-        safeCleanupState.includeConsent = !!consent.checked;
-        safeCleanupState.previewHidden = true;
-        scheduleSafeCleanupPreview();
-        return;
-      }
-      const backup = event.target?.closest?.('[data-cleanup-backup-directory="true"]');
-      if (backup && root.contains(backup)) {
-        safeCleanupState.backupDirectory = String(backup.value || "").trim();
-        safeCleanupState.backupDirectoryDirty = true;
-        scheduleSafeCleanupPreview();
-        return;
-      }
-      const autoClose = event.target?.closest?.('[data-cleanup-auto-close="true"]');
-      if (autoClose && root.contains(autoClose)) {
-        safeCleanupState.autoCloseConfirmed = !!autoClose.checked;
-        // The footer CTA changes from a guided prerequisite action to the
-        // actual confirmation action as soon as the user grants this consent.
-        rerenderUsageInsightsIfVisible();
         return;
       }
       const sessionFilter = event.target?.closest?.("[data-session-cleanup-filter]");
@@ -11545,15 +9347,7 @@ scanStartedAt: 0,
         event.preventDefault();
         event.stopPropagation();
         const tab = action.dataset.tab || "settings";
-        if (tab === "storage") cleanupActiveSection = "sessions";
         renderSettingsModal(tab);
-        return;
-      }
-      if (action.dataset.action === "cleanup-section") {
-        event.preventDefault();
-        event.stopPropagation();
-        cleanupActiveSection = String(action.dataset.cleanupSection || "junk");
-        renderSettingsModal("storage");
         return;
       }
       if (action.dataset.action === "session-cleanup-date-toggle") {
@@ -11618,69 +9412,6 @@ scanStartedAt: 0,
         sessionCleanupState.modelProvider = "all";
         sessionCleanupState.selectedIds.clear();
         renderSettingsModal("storage");
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-group-toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        const groupId = String(action.dataset.cleanupGroupId || "");
-        const group = safeCleanupGroups().find((item) => String(item?.presentationId || "") === groupId);
-        if (group) toggleSafeCleanupItemIds(group.executableIds);
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-consent-toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        const consentIds = safeCleanupGroups()
-          .filter((group) => String(group?.tier || "") === "consent")
-          .flatMap((group) => group.executableIds || []);
-        toggleSafeCleanupItemIds(consentIds);
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-group-expand") {
-        event.preventDefault();
-        event.stopPropagation();
-        captureStorageUiState();
-        const groupId = String(action.dataset.cleanupGroupId || "");
-        if (safeCleanupState.expandedGroupIds.has(groupId)) safeCleanupState.expandedGroupIds.delete(groupId);
-        else safeCleanupState.expandedGroupIds.add(groupId);
-        renderSettingsModal("storage");
-        return;
-      }
-      if (action.dataset.action === "cleanup-deep-toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        captureStorageUiState();
-        if (safeCleanupState.expandedGroupIds.has(safeCleanupDeepGroupId)) safeCleanupState.expandedGroupIds.delete(safeCleanupDeepGroupId);
-        else safeCleanupState.expandedGroupIds.add(safeCleanupDeepGroupId);
-        renderSettingsModal("storage");
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-protected-toggle") {
-        event.preventDefault();
-        event.stopPropagation();
-        captureStorageUiState();
-        if (safeCleanupState.expandedGroupIds.has(safeCleanupProtectedGroupId)) safeCleanupState.expandedGroupIds.delete(safeCleanupProtectedGroupId);
-        else safeCleanupState.expandedGroupIds.add(safeCleanupProtectedGroupId);
-        renderSettingsModal("storage");
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-copy-path") {
-        event.preventDefault();
-        event.stopPropagation();
-        const itemId = String(action.dataset.itemId || "");
-        const item = safeCleanupRawItems().find((entry) => String(entry?.id || "") === itemId);
-        const path = String(item?.path || "");
-        void copyHudText(path).then((ok) => {
-          setSettingsStatus(ok ? "已复制完整路径。" : "路径复制失败。", ok ? "" : "error");
-          flashCopyState(action, ok);
-        });
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-reveal") {
-        event.preventDefault();
-        event.stopPropagation();
-        requestSafeCleanupReveal(action.dataset.itemId);
         return;
       }
       if (action.dataset.action === "background-usage-range") {
@@ -11755,67 +9486,10 @@ scanStartedAt: 0,
         if (submitted) closeSettingsModal();
         return;
       }
-      if (action.dataset.action === "safe-cleanup-scan") {
-        event.preventDefault();
-        event.stopPropagation();
-        requestSafeCleanupScan();
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-cancel") {
-        event.preventDefault();
-        event.stopPropagation();
-        requestSafeCleanupCancel();
-        return;
-      }
       if (action.dataset.action === "session-cleanup-cancel") {
         event.preventDefault();
         event.stopPropagation();
         requestSessionCleanupCancel();
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-preview") {
-        event.preventDefault();
-        event.stopPropagation();
-        requestSafeCleanupPreview();
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-confirm") {
-        event.preventDefault();
-        event.stopPropagation();
-        const cleanup = safeCleanupFromPayload();
-        const cleanupOperation = cleanup?.operation && typeof cleanup.operation === "object" ? cleanup.operation : {};
-        if (cleanupOperation?.includesConsent === true || cleanupOperation?.requiresBackup === true || cleanupOperation?.requiresCodexClose === true) {
-          openSafeCleanupExecuteConfirm();
-        } else {
-          executeSafeCleanup();
-        }
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-confirm-cancel") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsConfirm();
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-execute") {
-        event.preventDefault();
-        event.stopPropagation();
-        executeSafeCleanup();
-        return;
-      }
-      if (action.dataset.action === "safe-cleanup-choose-backup") {
-        event.preventDefault();
-        event.stopPropagation();
-        const requestId = typedSettingsRequestId("safe-cleanup-backup");
-        submitSettingsCommand(
-          {
-            action: "safeCleanupChooseBackupDirectory",
-            requestId,
-            currentDirectory: safeCleanupState.backupDirectory,
-          },
-          "正在选择 SQLite 备份目录...",
-          { preserveOverlay: true },
-        );
         return;
       }
       if (action.dataset.action === "session-cleanup-scan") {
@@ -11845,63 +9519,6 @@ scanStartedAt: 0,
         event.preventDefault();
         event.stopPropagation();
         executeSessionCleanup();
-        return;
-      }
-      if (action.dataset.action === "storage-filter") {
-        event.preventDefault();
-        event.stopPropagation();
-        storageFilter = String(action.dataset.storageFilter || "all");
-        renderSettingsModal("storage");
-        return;
-      }
-      if (action.dataset.action === "storage-scan") {
-        event.preventDefault();
-        event.stopPropagation();
-        storagePreviewHidden = true;
-        submitSettingsCommand({ action: "scan" }, "正在准备新的存储扫描...", { preserveOverlay: true });
-        return;
-      }
-      if (action.dataset.action === "storage-preview") {
-        event.preventDefault();
-        event.stopPropagation();
-        storagePreviewSelected();
-        return;
-      }
-      if (action.dataset.action === "storage-managed-preview") {
-        event.preventDefault();
-        event.stopPropagation();
-        storagePreviewSelected(action.dataset.storageManagedAction || "", action.dataset.storageItemId || "");
-        return;
-      }
-      if (action.dataset.action === "storage-clear-preview") {
-        event.preventDefault();
-        event.stopPropagation();
-        storagePreviewHidden = true;
-        renderSettingsModal("storage");
-        return;
-      }
-      if (action.dataset.action === "storage-confirm-preview") {
-        event.preventDefault();
-        event.stopPropagation();
-        openStorageExecuteConfirm();
-        return;
-      }
-      if (action.dataset.action === "storage-confirm-cancel") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsConfirm();
-        return;
-      }
-      if (action.dataset.action === "storage-confirm-execute") {
-        event.preventDefault();
-        event.stopPropagation();
-        const data = fileManagementFromPayload();
-        const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-        const managedAction = String(operation?.managedAction || "");
-        const itemIds = Array.isArray(operation?.itemIds) ? operation.itemIds : [];
-        const commandAction = managedAction || "execute";
-        closeSettingsConfirm();
-        submitSettingsCommand({ action: commandAction, itemIds, inventoryRevision: String(data?.revision || operation?.inventoryRevision || ""), confirmationToken: String(operation?.confirmationToken || "") }, commandAction === "execute" ? "清理已加入退出后队列..." : "官方动作已提交...", { preserveOverlay: true });
         return;
       }
       if (action.dataset.action === "settings-provider-tab") {
@@ -12097,6 +9714,14 @@ scanStartedAt: 0,
     });
     root.addEventListener("pointerdown", (event) => {
       if (event.button !== undefined && event.button !== 0) return;
+      const settingsModal = event.target?.closest?.(`#${settingsModalId}`);
+      if (settingsModal && root.contains(settingsModal)) {
+        // Codex also listens for pointerdown outside its own surfaces. Do not
+        // let interactions inside the HUD settings dialog trigger that path;
+        // the delegated HUD click handler still owns buttons and backdrop.
+        event.stopPropagation();
+        return;
+      }
       const runtimeToggle = event.target?.closest?.("[data-action='runtime-errors-toggle']");
       if (runtimeToggle && root.contains(runtimeToggle)) return;
       const runtimeMove = event.target?.closest?.("[data-action='runtime-errors-move']");
@@ -14477,7 +12102,7 @@ scanStartedAt: 0,
     const provided = payload?.payloadDomains && typeof payload.payloadDomains === "object"
       ? payload.payloadDomains
       : {};
-    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "backgroundUsage", "diagnostics", "fileManagement", "usageInsights", "safeCleanup", "sessionCleanup"];
+    const allDomains = ["startup", "currentSession", "sessionSwitch", "budget", "settings", "overlay", "backgroundUsage", "diagnostics", "usageInsights", "sessionCleanup"];
     const domains = {};
     if (Object.keys(provided).length > 0) {
       for (const name of allDomains) {
@@ -14960,53 +12585,11 @@ scanStartedAt: 0,
     }
   }
 
-  function applyFileManagementPayload(_root, payload) {
-    const modal = document.getElementById(settingsModalId);
-    if (!modal || modal.hidden || settingsActiveTab !== "storage") return;
-    if (String(payload?.fileManagement?.operation?.state || "") === "preview") storagePreviewHidden = false;
-    else storagePreviewHidden = true;
-    refreshStoragePanelIfVisible();
-  }
-
-  function updateSafeCleanupElapsedNodes() {
-    const modal = document.getElementById(settingsModalId);
-    if (!modal || modal.hidden || settingsActiveTab !== "storage") return;
-    for (const node of modal.querySelectorAll("[data-safe-cleanup-elapsed]")) {
-      const mode = String(node.dataset.safeCleanupElapsed || "scan");
-      const startedAt = mode === "execute"
-        ? safeCleanupState.executeStartedAt
-        : safeCleanupState.scanStartedAt;
-      node.textContent = formatCleanupElapsed(startedAt);
-    }
-  }
-
-  function ensureSafeCleanupLiveTicker() {
-    const data = safeCleanupFromPayload();
-    const live = isSafeCleanupScanning(data) || isSafeCleanupExecuting(data);
-    if (!live) {
-      if (safeCleanupLiveTimer) {
-        clearInterval(safeCleanupLiveTimer);
-        safeCleanupLiveTimer = 0;
-      }
-      return;
-    }
-    if (safeCleanupLiveTimer) return;
-    safeCleanupLiveTimer = setInterval(() => {
-      const current = safeCleanupFromPayload();
-      if (!isSafeCleanupScanning(current) && !isSafeCleanupExecuting(current)) {
-        clearInterval(safeCleanupLiveTimer);
-        safeCleanupLiveTimer = 0;
-        return;
-      }
-      updateSafeCleanupElapsedNodes();
-    }, 1000);
-  }
-
   function rerenderUsageInsightsIfVisible({ cleanupProgress = false } = {}) {
     const modal = document.getElementById(settingsModalId);
     if (!modal || modal.hidden) return;
     // Never force the storage tab from payload ticks — only rewrite the body
-    // when the user is already on 空间清理. Other tabs stay usable while cleanup runs.
+    // when the user is already on 会话管理. Other tabs stay usable during scans.
     if (settingsActiveTab === "storage") {
       if (cleanupProgress) {
         // Progress may arrive once per cache definition. Coalesce it to a
@@ -15040,71 +12623,6 @@ scanStartedAt: 0,
     }
     usageInsightsState.error = String(data.error || "");
     rerenderUsageInsightsIfVisible();
-  }
-
-  function applySafeCleanupPayload(_root, payload) {
-    const data = payload?.safeCleanup;
-    if (!data || typeof data !== "object") return;
-    const commandStatus = payload?.settingsCommandStatus && typeof payload.settingsCommandStatus === "object"
-      ? payload.settingsCommandStatus
-      : {};
-    const pickerRequestId = String(commandStatus?.safeCleanupRequestId || "");
-    const pickerDirectory = String(commandStatus?.cleanupBackupDirectory || "").trim();
-    const pickerChanged = !!pickerRequestId
-      && !!pickerDirectory
-      && pickerRequestId !== safeCleanupState.lastBackupPickerRequestId;
-    if (pickerRequestId) safeCleanupState.lastBackupPickerRequestId = pickerRequestId;
-    safeCleanupState.data = data;
-    syncSafeCleanupSelection(data);
-    syncSafeCleanupDefaults(data);
-    const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
-    const state = String(operation.state || "").toLowerCase();
-    const action = String(operation.action || "");
-    const responseRequestId = String(operation.requestId || "");
-    const revision = String(data?.revision || "");
-    if (revision && !isCleanupScanningRevision(revision) && new Set(["preview", "completed", "partial", "restored"]).has(state)) {
-      safeCleanupState.stableData = data;
-      safeCleanupState.scanStartedAt = 0;
-    } else if (state === "failed" || state === "cancelled") {
-      safeCleanupState.scanStartedAt = 0;
-    }
-    if (state === "preview") {
-      if (operation?.requiresBackup === true && safeCleanupState.previewBackupDirectory) {
-        safeCleanupState.backupDirectory = safeCleanupState.previewBackupDirectory;
-      }
-    } else if (
-      new Set(["scan", "cancel", "execute", "safeCleanupScan", "safeCleanupCancel", "safeCleanupExecute"]).has(action)
-      || (action === "safeCleanupPreview" && state === "failed")
-    ) {
-      safeCleanupState.previewBackupDirectory = "";
-    }
-    if (
-      !new Set(["scanning", "accepted", "running", "queued_exit"]).has(state)
-      && (!safeCleanupState.pendingRequestId || responseRequestId === safeCleanupState.pendingRequestId)
-    ) {
-      safeCleanupState.pendingRequestId = "";
-      if (new Set(["completed", "partial", "failed", "cancelled", "restored", "preview"]).has(state)) {
-        safeCleanupState.executeStartedAt = 0;
-      }
-    } else if (new Set(["accepted", "running", "queued_exit"]).has(state)
-      && new Set(["execute", "safeCleanupExecute"]).has(action)
-      && !safeCleanupState.executeStartedAt) {
-      safeCleanupState.executeStartedAt = Date.now();
-    }
-    if (
-      pickerChanged
-      && safeCleanupState.includeConsent
-      && safeCleanupRequiresBackup(data)
-      && (state !== "preview" || safeCleanupState.previewHidden)
-    ) {
-      safeCleanupState.previewHidden = true;
-      scheduleSafeCleanupPreview();
-      return;
-    }
-    ensureSafeCleanupLiveTicker();
-    rerenderUsageInsightsIfVisible({
-      cleanupProgress: new Set(["scanning", "accepted", "running", "queued_exit"]).has(state),
-    });
   }
 
   function applySessionCleanupPayload(_root, payload) {
@@ -15176,14 +12694,8 @@ scanStartedAt: 0,
       renderRuntimeErrors(root, diagnosticsPayload);
       applyConnectionHealth(root, diagnosticsPayload);
     }
-    if ("fileManagement" in domains) {
-      applyFileManagementPayload(root, { ...(payload || {}), ...(domains.fileManagement || {}) });
-    }
     if ("usageInsights" in domains) {
       applyUsageInsightsPayload(root, { ...(payload || {}), ...(domains.usageInsights || {}) });
-    }
-    if ("safeCleanup" in domains) {
-      applySafeCleanupPayload(root, { ...(payload || {}), ...(domains.safeCleanup || {}) });
     }
     if ("sessionCleanup" in domains) {
       applySessionCleanupPayload(root, { ...(payload || {}), ...(domains.sessionCleanup || {}) });
@@ -15256,6 +12768,7 @@ scanStartedAt: 0,
     );
     applyPayloadDomains(root, nextPayload, renderedDomains);
     renderStartupBubble(root, nextPayload.startup);
+    if (root !== previousRoot) restoreOpenSettingsModal();
     const wasReady = root.dataset.hudReady === "true";
     // A settings/theme/diagnostics partial update follows the first complete
     // payload during startup. It must preserve visible HUD panels rather than
@@ -15297,10 +12810,6 @@ scanStartedAt: 0,
     restReminderCountdownTimer = 0;
     clearInterval(restReminderOverlayTimer);
     restReminderOverlayTimer = 0;
-    clearInterval(safeCleanupLiveTimer);
-    safeCleanupLiveTimer = 0;
-    clearTimeout(safeCleanupPreviewTimer);
-    safeCleanupPreviewTimer = 0;
     cancelAnimationFrame(storageRefreshRaf);
     storageRefreshRaf = 0;
     clearTimeout(storageRefreshTimer);
@@ -15372,6 +12881,7 @@ scanStartedAt: 0,
       // both misleading and needlessly causes layout work while Codex loads.
       startBootstrapObserver();
     }
+    restoreOpenSettingsModal();
     scheduleCodexModelPickerPatch();
   };
   if (document.body) {
@@ -15560,9 +13070,7 @@ class RendererHudPayload:
     background_usage_notification: dict[str, object] = field(default_factory=dict)
     rest_reminder: dict[str, object] = field(default_factory=dict)
     settings_command_status: dict[str, object] = field(default_factory=dict)
-    file_management: dict[str, object] = field(default_factory=dict)
     usage_insights: dict[str, object] = field(default_factory=dict)
-    safe_cleanup: dict[str, object] = field(default_factory=dict)
     session_cleanup: dict[str, object] = field(default_factory=dict)
     work_overlay_selectable_max: int = 6
     desktop_overlay_dependency: dict[str, object] = field(default_factory=dict)
@@ -15619,9 +13127,7 @@ class RendererHudPayload:
             "backgroundUsageNotification": dict(self.background_usage_notification),
             "restReminder": dict(self.rest_reminder),
             "settingsCommandStatus": dict(self.settings_command_status),
-            "fileManagement": dict(self.file_management),
             "usageInsights": dict(self.usage_insights),
-            "safeCleanup": dict(self.safe_cleanup),
             "sessionCleanup": dict(self.session_cleanup),
             "workOverlaySelectableMax": int(self.work_overlay_selectable_max),
             "desktopOverlayDependency": dict(self.desktop_overlay_dependency),
@@ -15756,9 +13262,7 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "settingsCommandStatus",
     )
     diagnostics_keys = ("debug", "runtimeErrors", "connectionHealth")
-    file_management = payload.get("fileManagement")
     usage_insights = payload.get("usageInsights")
-    safe_cleanup = payload.get("safeCleanup")
     session_cleanup = payload.get("sessionCleanup")
 
     def pick(keys: tuple[str, ...]) -> dict[str, object]:
@@ -15773,12 +13277,8 @@ def _payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]
         "backgroundUsage": pick(background_usage_keys),
         "diagnostics": pick(diagnostics_keys),
     }
-    if isinstance(file_management, dict) and file_management:
-        domains["fileManagement"] = {"fileManagement": dict(file_management)}
     if isinstance(usage_insights, dict) and usage_insights:
         domains["usageInsights"] = {"usageInsights": dict(usage_insights)}
-    if isinstance(safe_cleanup, dict) and safe_cleanup:
-        domains["safeCleanup"] = {"safeCleanup": dict(safe_cleanup)}
     if isinstance(session_cleanup, dict) and session_cleanup:
         domains["sessionCleanup"] = {"sessionCleanup": dict(session_cleanup)}
     return domains
@@ -16379,9 +13879,7 @@ class RendererHudClient:
         desktop_overlay_dependency: dict[str, object] | None = None,
         provider_registry: dict[str, object] | None = None,
         app_provider: str = "",
-        file_management: dict[str, object] | None = None,
         usage_insights: dict[str, object] | None = None,
-        safe_cleanup: dict[str, object] | None = None,
         session_cleanup: dict[str, object] | None = None,
         connection_health: dict[str, object] | ConnectionHealth | None = None,
     ) -> bool:
@@ -16413,9 +13911,7 @@ class RendererHudClient:
             desktop_overlay_dependency=desktop_overlay_dependency,
             provider_registry=provider_registry,
             app_provider=app_provider,
-            file_management=file_management,
             usage_insights=usage_insights,
-            safe_cleanup=safe_cleanup,
             session_cleanup=session_cleanup,
             connection_health=connection_health,
         ).to_json()
@@ -16942,9 +14438,7 @@ def payload_from_snapshot(
     desktop_overlay_dependency: dict[str, object] | None = None,
     provider_registry: dict[str, object] | None = None,
     app_provider: str = "",
-    file_management: dict[str, object] | None = None,
     usage_insights: dict[str, object] | None = None,
-    safe_cleanup: dict[str, object] | None = None,
     session_cleanup: dict[str, object] | None = None,
     connection_health: dict[str, object] | ConnectionHealth | None = None,
 ) -> RendererHudPayload:
@@ -17041,9 +14535,7 @@ def payload_from_snapshot(
         background_usage_notification=dict(background_usage_notification or {}),
         rest_reminder=dict(rest_reminder or {}),
         settings_command_status=settings_command_status or {},
-        file_management=file_management or {},
         usage_insights=usage_insights or {},
-        safe_cleanup=safe_cleanup or {},
         session_cleanup=session_cleanup or {},
         work_overlay_selectable_max=max(1, int(work_overlay_selectable_max or 1)),
         desktop_overlay_dependency=desktop_overlay_dependency or {},

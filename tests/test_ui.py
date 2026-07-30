@@ -231,6 +231,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _workdir_clickable_for_item,
     _workdir_link_pending_for_item,
     _work_overlay_header_text,
+    _work_overlay_item_with_live_elapsed_text,
     _work_overlay_live_elapsed_text,
     _workdir_display_name,
     run_work_overlay_helper_qt,
@@ -3800,6 +3801,24 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
 
+    def test_desktop_work_overlay_starts_with_empty_initial_payload(self) -> None:
+        overlay = DesktopWorkOverlay(item_limit=2)
+        helper = SimpleNamespace(poll=MagicMock(return_value=None))
+
+        def start_helper() -> None:
+            overlay._process = helper
+
+        with (
+            patch.object(overlay, "_runtime_available", return_value=True),
+            patch.object(overlay, "_theme_payload", return_value={}),
+            patch.object(overlay, "_start", side_effect=start_helper) as start,
+            patch("codex_usage_hud.cli.write_json_object") as write_json,
+        ):
+            overlay.update([])
+
+        start.assert_called_once_with()
+        self.assertEqual(write_json.call_args.args[1]["items"], [])
+
     def test_desktop_rest_reminder_bypasses_zero_session_item_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -5624,10 +5643,26 @@ with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             path = root / "session-unstarted.jsonl"
             rows = [
-                row(-94, "session_meta", {"id": "session-unstarted"}),
-                row(-93, "event_msg", {"type": "task_started"}),
+                row(-120, "session_meta", {"id": "session-unstarted"}),
+                row(-119, "event_msg", {"type": "task_started"}),
                 row(
-                    -92,
+                    -118,
+                    "event_msg",
+                    {"type": "user_message", "message": "上一轮任务"},
+                ),
+                row(
+                    -117,
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "phase": "final_answer",
+                        "message": "上一轮已完成",
+                    },
+                ),
+                row(-116, "event_msg", {"type": "task_complete"}),
+                row(-94, "event_msg", {"type": "task_started"}),
+                row(
+                    -93,
                     "event_msg",
                     {"type": "user_message", "message": "未开始的任务"},
                 ),
@@ -5637,6 +5672,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
                 encoding="utf-8",
             )
             snapshot = parser.parse_file(path)
+            self.assertNotEqual(snapshot.last_output.kind, "idle")
             context = SimpleNamespace(
                 sessions_root=root,
                 parser=parser,
@@ -6567,6 +6603,13 @@ with tempfile.TemporaryDirectory() as temp_dir:
             ),
             "已处理 1h25m14s",
         )
+        self.assertEqual(
+            _work_overlay_item_with_live_elapsed_text(
+                {**active_item, "elapsedText": "已处理 1h25m"},
+                now=started_at + timedelta(hours=1, minutes=25, seconds=14),
+            )["elapsedText"],
+            "已处理 1h25m14s",
+        )
         self.assertIsNone(
             _work_overlay_live_elapsed_text(
                 {**active_item, "status": "recent"},
@@ -6733,6 +6776,24 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
             self.assertIn("Removed stale", message)
             self.assertFalse(path.exists())
+
+    def test_stop_running_hud_removes_renderer_before_clearing_stale_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud.pid"
+            path.write_text("not-a-pid", encoding="utf-8")
+
+            with (
+                patch(
+                    "codex_usage_hud.cli._read_persisted_renderer_cdp_port",
+                    return_value=61100,
+                ),
+                patch(
+                    "codex_usage_hud.cli.remove_renderer_hud_from_pages"
+                ) as remove_renderer,
+            ):
+                stop_running_hud(path)
+
+            remove_renderer.assert_called_once_with(port=61100)
 
 
 class WorkOverlayTransitionTests(unittest.TestCase):
@@ -12960,150 +13021,8 @@ class DaemonLifecycleTests(unittest.TestCase):
             },
         )
 
-    def test_safe_cleanup_active_task_blocks_before_process_or_plan_changes(self) -> None:
-        manager = MagicMock()
-        manager.selection_requirements.return_value = {
-            "requiresOffline": True,
-            "requiresBackup": True,
-            "requiresCodexClose": True,
-        }
-        context = SimpleNamespace()
-        command = {
-            "requestId": "cleanup-active",
-            "groupIds": ["sqlite-item"],
-            "inventoryRevision": "revision-1",
-            "confirmationToken": "confirmation-1",
-            "autoCloseAndRestore": True,
-        }
-        with (
-            patch(
-                "codex_usage_hud.cli._safe_cleanup_active_task_ids",
-                return_value=("active-session",),
-            ),
-            patch(
-                "codex_usage_hud.cli._running_standalone_codex_cli_pids"
-            ) as standalone_pids,
-            patch(
-                "codex_usage_hud.cli._request_codex_desktop_close"
-            ) as close_desktop,
-        ):
-            with self.assertRaisesRegex(cli_module.SafeCleanupError, "活动任务"):
-                cli_module._execute_safe_cleanup_command(context, manager, command)
 
-        manager.create_plan.assert_not_called()
-        standalone_pids.assert_not_called()
-        close_desktop.assert_not_called()
 
-    def test_safe_cleanup_online_safe_path_ignores_active_tasks(self) -> None:
-        """Default regenerable-cache cleanup must not cancel for active Codex work."""
-
-        from codex_usage_hud.core.safe_cleanup import MaintenancePlan, MaintenanceResult
-
-        plan = MaintenancePlan(
-            id="plan-online-safe",
-            created_at=1.0,
-            expires_at=1000.0,
-            parent_pid=0,
-            wait_pids=(),
-            wait_timeout_seconds=0.0,
-            backup_directory="",
-            actions=(),
-            result_path="",
-            restart_command=(),
-        )
-        result = MaintenanceResult(
-            plan_id=plan.id,
-            state="completed",
-            started_at=1.0,
-            completed_at=2.0,
-            actions=(),
-            error="",
-        )
-        manager = MagicMock()
-        manager.selection_requirements.return_value = {
-            "requiresOffline": False,
-            "requiresBackup": False,
-            "requiresCodexClose": False,
-        }
-        manager.create_plan.return_value = plan
-        manager.apply_maintenance_result.return_value = {
-            "revision": "revision-1",
-            "operation": {"state": "completed", "action": "execute"},
-        }
-        running_snapshot = {
-            "revision": "revision-1",
-            "operation": {"state": "running", "action": "execute"},
-        }
-        manager.mark_operation.return_value = running_snapshot
-        publisher = MagicMock()
-        context = SimpleNamespace(
-            safe_cleanup_worker=SimpleNamespace(_publish=publisher)
-        )
-        command = {
-            "requestId": "cleanup-online-safe",
-            "groupIds": ["cache-item"],
-            "inventoryRevision": "revision-1",
-            "confirmationToken": "confirmation-1",
-            "autoCloseAndRestore": False,
-        }
-        with (
-            patch(
-                "codex_usage_hud.cli._safe_cleanup_active_task_ids",
-                return_value=("active-session",),
-            ) as active_tasks,
-            patch(
-                "codex_usage_hud.cli.run_maintenance_plan",
-                return_value=result,
-            ) as run_plan,
-        ):
-            snapshot = cli_module._execute_safe_cleanup_command(
-                context, manager, command
-            )
-
-        active_tasks.assert_not_called()
-        manager.create_plan.assert_called_once()
-        run_plan.assert_called_once()
-        self.assertNotIn("progress_callback", run_plan.call_args.kwargs)
-        manager.snapshot.assert_not_called()
-        publisher.assert_called_once_with(running_snapshot)
-        manager.apply_maintenance_result.assert_called_once_with(
-            result, request_id="cleanup-online-safe"
-        )
-        self.assertEqual(snapshot["operation"]["state"], "completed")
-
-    def test_safe_cleanup_native_backup_picker_persists_selected_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            selected = Path(temporary).resolve()
-            current = selected.parent
-            settings_store = MagicMock()
-            settings_store.load.return_value = UserConfig()
-            context = SimpleNamespace(settings_store=settings_store)
-            command = {
-                "id": "transport-backup-picker",
-                "requestId": "backup-picker-1",
-                "action": "safeCleanupChooseBackupDirectory",
-                "currentDirectory": str(current),
-            }
-
-            with (
-                patch(
-                    "codex_usage_hud.cli._choose_safe_cleanup_backup_directory",
-                    return_value=selected,
-                ) as choose_directory,
-                patch("codex_usage_hud.cli._save_renderer_user_config") as save_config,
-            ):
-                status = _handle_renderer_settings_command(
-                    command,
-                    context,
-                    MagicMock(),
-                    MagicMock(),
-                )
-
-            choose_directory.assert_called_once_with(str(current))
-            saved_config = save_config.call_args.args[1]
-            self.assertEqual(saved_config.cleanup_backup_directory, str(selected))
-            self.assertEqual(status["cleanupBackupDirectory"], str(selected))
-            self.assertEqual(status["safeCleanupRequestId"], "backup-picker-1")
 
     def test_rest_reminder_save_echoes_success_request_for_dirty_reset(self) -> None:
         current = UserConfig.from_dict(
@@ -13206,244 +13125,12 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn("已开始休息计时", started["message"])
         self.assertIn("新一轮专注计时已开始", finished["message"])
 
-    def test_safe_cleanup_reveal_resolves_opaque_item_before_launch(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary).resolve()
-            manager = MagicMock()
-            manager.resolve_reveal_path.return_value = target
-            context = SimpleNamespace(
-                safe_cleanup_worker=SimpleNamespace(manager=manager)
-            )
-            command = {
-                "id": "transport-reveal",
-                "requestId": "reveal-1",
-                "action": "safeCleanupReveal",
-                "inventoryRevision": "revision-1",
-                "itemId": "opaque-item-1",
-            }
 
-            with patch("codex_usage_hud.cli.reveal_cleanup_path") as reveal:
-                status = _handle_renderer_settings_command(
-                    command,
-                    context,
-                    MagicMock(),
-                    MagicMock(),
-                )
 
-            manager.resolve_reveal_path.assert_called_once_with(
-                "opaque-item-1", "revision-1"
-            )
-            reveal.assert_called_once_with(target)
-            self.assertEqual(status["safeCleanupRequestId"], "reveal-1")
-            self.assertEqual(status["safeCleanupAction"], "safeCleanupReveal")
-            self.assertNotIn(str(target), str(status["message"]))
 
-    def test_safe_cleanup_reveal_never_accepts_renderer_path_authority(self) -> None:
-        manager = MagicMock()
-        manager.resolve_reveal_path.side_effect = cli_module.SafeCleanupError(
-            "unknown cleanup item id"
-        )
-        context = SimpleNamespace(
-            safe_cleanup_worker=SimpleNamespace(manager=manager)
-        )
-        command = {
-            "requestId": "reveal-forged",
-            "action": "safeCleanupReveal",
-            "inventoryRevision": "revision-1",
-            "path": "C:\\forged\\target",
-        }
 
-        with patch("codex_usage_hud.cli.reveal_cleanup_path") as reveal:
-            status = _handle_renderer_settings_command(
-                command,
-                context,
-                MagicMock(),
-                MagicMock(),
-            )
 
-        manager.resolve_reveal_path.assert_called_once_with("", "revision-1")
-        reveal.assert_not_called()
-        self.assertEqual(status["kind"], "error")
-        self.assertEqual(status["safeCleanupRequestId"], "reveal-forged")
 
-    def test_safe_cleanup_activity_gate_includes_observed_waiting_work(self) -> None:
-        item = WorkStatusItem(
-            id="work-1",
-            session_id="session-1",
-            title="Waiting task",
-            status="waiting_user",
-            status_label="Waiting",
-            detail="Approval required",
-        )
-        context = SimpleNamespace(
-            _work_overlay_visible_item_cache={item.id: item},
-        )
-
-        active = cli_module._safe_cleanup_active_task_ids(context)
-
-        self.assertEqual(active, ("session-1",))
-
-    def test_safe_cleanup_codex_candidate_requires_close_consent_without_backup(
-        self,
-    ) -> None:
-        manager = MagicMock()
-        manager.selection_requirements.return_value = {
-            "requiresOffline": True,
-            "requiresBackup": False,
-            "requiresCodexClose": True,
-        }
-        with patch(
-            "codex_usage_hud.cli._safe_cleanup_active_task_ids"
-        ) as active_tasks:
-            with self.assertRaisesRegex(cli_module.SafeCleanupError, "明确同意"):
-                cli_module._execute_safe_cleanup_command(
-                    SimpleNamespace(),
-                    manager,
-                    {
-                        "requestId": "cleanup-codex-temp",
-                        "groupIds": ["codex-temp"],
-                        "inventoryRevision": "revision-1",
-                        "confirmationToken": "confirmation-1",
-                        "autoCloseAndRestore": False,
-                    },
-                )
-
-        active_tasks.assert_not_called()
-        manager.create_plan.assert_not_called()
-
-    def test_safe_cleanup_standalone_cli_blocks_before_desktop_or_plan_changes(self) -> None:
-        manager = MagicMock()
-        manager.selection_requirements.return_value = {
-            "requiresOffline": True,
-            "requiresBackup": True,
-            "requiresCodexClose": True,
-        }
-        command = {
-            "requestId": "cleanup-cli",
-            "groupIds": ["sqlite-item"],
-            "inventoryRevision": "revision-1",
-            "confirmationToken": "confirmation-1",
-            "autoCloseAndRestore": True,
-        }
-        with (
-            patch(
-                "codex_usage_hud.cli._safe_cleanup_active_task_ids",
-                return_value=(),
-            ),
-            patch(
-                "codex_usage_hud.cli._running_standalone_codex_cli_pids",
-                return_value=(321,),
-            ),
-            patch(
-                "codex_usage_hud.cli._audited_running_codex_desktop_processes"
-            ) as desktop_processes,
-        ):
-            with self.assertRaisesRegex(cli_module.SafeCleanupError, "独立 Codex CLI"):
-                cli_module._execute_safe_cleanup_command(
-                    SimpleNamespace(),
-                    manager,
-                    command,
-                )
-
-        manager.create_plan.assert_not_called()
-        desktop_processes.assert_not_called()
-
-    def test_safe_cleanup_background_shutdown_timeout_keeps_runtime_reference(self) -> None:
-        runtime = SimpleNamespace(
-            request_scan=MagicMock(),
-            wait_until_idle=MagicMock(return_value=False),
-            close=MagicMock(return_value=False),
-            worker_alive=True,
-        )
-        context = SimpleNamespace(background_usage_runtime=runtime)
-
-        with self.assertRaisesRegex(cli_module.SafeCleanupError, "安全停止"):
-            cli_module._close_background_usage_for_cleanup(context)
-
-        self.assertIs(context.background_usage_runtime, runtime)
-        runtime.request_scan.assert_called_once_with()
-        runtime.wait_until_idle.assert_called_once_with(
-            cli_module.SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS
-        )
-        runtime.close.assert_called_once_with(
-            cli_module.SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS
-        )
-
-    def test_cleanup_helper_and_restart_commands_preserve_runtime_shape(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            executable = root / "python.exe"
-            frozen_executable = root / "codex-usage-hud.exe"
-            plan = root / "plan.json"
-            result = root / "result.json"
-            with (
-                patch.object(sys, "platform", "linux"),
-                patch.object(sys, "executable", str(executable)),
-                patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "hud",
-                        "--cleanup-maintenance-helper",
-                        "--cleanup-plan-file",
-                        "old-plan.json",
-                        "--cleanup-result-file",
-                        "old-result.json",
-                        "--profile",
-                        "custom",
-                    ],
-                ),
-                patch.object(sys, "frozen", False, create=True),
-            ):
-                source_helper = cli_module._cleanup_helper_command(plan, result)
-                source_restart = cli_module._cleanup_restart_command(daemon_mode=True)
-            with (
-                patch.object(sys, "platform", "win32"),
-                patch.object(sys, "executable", str(frozen_executable)),
-                patch.object(sys, "argv", ["hud", "--profile", "custom"]),
-                patch.object(sys, "frozen", True, create=True),
-            ):
-                frozen_helper = cli_module._cleanup_helper_command(plan, result)
-                frozen_restart = cli_module._cleanup_restart_command(daemon_mode=True)
-
-        source_prefix = [str(executable.resolve()), "-m", "codex_usage_hud"]
-        self.assertEqual(source_helper[:3], source_prefix)
-        self.assertEqual(
-            source_helper[3:],
-            [
-                "--cleanup-maintenance-helper",
-                "--cleanup-plan-file",
-                str(plan),
-                "--cleanup-result-file",
-                str(result),
-            ],
-        )
-        self.assertEqual(source_restart[:3], tuple(source_prefix))
-        self.assertEqual(source_restart[3:], ("--profile", "custom", "--daemon"))
-        self.assertEqual(frozen_helper[0], str(frozen_executable.resolve()))
-        self.assertNotIn("-m", frozen_helper)
-        self.assertEqual(
-            frozen_restart,
-            (
-                str(frozen_executable.resolve()),
-                "--profile",
-                "custom",
-                "--daemon",
-            ),
-        )
-
-    def test_renderer_storage_command_is_immediately_acked_to_worker(self) -> None:
-        worker = SimpleNamespace(enqueue=MagicMock(return_value={"status": "accepted", "requestId": "storage-1"}))
-        context = SimpleNamespace(file_manager_worker=worker)
-        status = _handle_renderer_settings_command(
-            {"action": "scan", "requestId": "storage-1"},
-            context,
-            MagicMock(),
-            MagicMock(),
-        )
-        self.assertEqual(status["fileManagementRequestId"], "storage-1")
-        self.assertIn("排队", status["message"])
-        worker.enqueue.assert_called_once_with({"action": "scan", "requestId": "storage-1"})
 
     def test_renderer_session_cleanup_command_is_immediately_acked_to_worker(self) -> None:
         worker = SimpleNamespace(
@@ -14494,74 +14181,6 @@ class DaemonLifecycleTests(unittest.TestCase):
             (59629,),
         )
 
-    def test_windows_cleanup_close_posts_wm_close_with_explicit_ctypes_signatures(
-        self,
-    ) -> None:
-        import ctypes
-
-        class FakeFunction:
-            def __init__(self, implementation: Callable[..., object]) -> None:
-                self.implementation = implementation
-                self.argtypes: object = None
-                self.restype: object = None
-                self.calls: list[tuple[object, ...]] = []
-
-            def __call__(self, *args: object) -> object:
-                self.calls.append(args)
-                return self.implementation(*args)
-
-        process = cli_module._CodexDesktopProcess(
-            pid=22,
-            name="ChatGPT.exe",
-            executable_path="C:\\Codex\\ChatGPT.exe",
-            command_line="ChatGPT.exe",
-        )
-
-        def assign_pid(_hwnd: object, pointer: object) -> int:
-            pointer._obj.value = process.pid
-            return 1
-
-        get_window_pid = FakeFunction(assign_pid)
-        is_window_visible = FakeFunction(lambda _hwnd: 1)
-        post_message = FakeFunction(lambda *_args: 1)
-        enum_windows = FakeFunction(lambda callback, lparam: callback(1001, lparam))
-        user32 = SimpleNamespace(
-            GetWindowThreadProcessId=get_window_pid,
-            IsWindowVisible=is_window_visible,
-            PostMessageW=post_message,
-            EnumWindows=enum_windows,
-        )
-
-        with (
-            patch.object(sys, "platform", "win32"),
-            patch.object(ctypes, "WinDLL", return_value=user32, create=True),
-            patch.object(
-                ctypes,
-                "WINFUNCTYPE",
-                new=lambda *_types: lambda callback: callback,
-                create=True,
-            ),
-            patch(
-                "codex_usage_hud.cli._process_exists",
-                return_value=False,
-            ),
-        ):
-            closed = cli_module._request_windows_codex_desktop_close(
-                [process],
-                timeout_seconds=0.5,
-            )
-
-        self.assertTrue(closed)
-        for function in (
-            get_window_pid,
-            is_window_visible,
-            post_message,
-            enum_windows,
-        ):
-            self.assertIsNotNone(function.argtypes)
-            self.assertIsNotNone(function.restype)
-        self.assertEqual(len(post_message.calls), 1)
-        self.assertEqual(post_message.calls[0][1], 0x0010)
 
     def test_macos_process_query_requires_codex_app_executable(self) -> None:
         completed = SimpleNamespace(
@@ -15208,47 +14827,6 @@ class DaemonLifecycleTests(unittest.TestCase):
         run_renderer.assert_called_once()
         self.assertTrue(run_renderer.call_args.kwargs["launched_codex"])
 
-    def test_daemon_restarts_for_code_10_but_exits_for_cleanup_code_11(self) -> None:
-        manager = SimpleNamespace(
-            wait_for_codex=MagicMock(),
-            poll_seconds=0.1,
-        )
-        loading = MagicMock()
-        loading.start.return_value = loading
-        args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
-
-        with (
-            patch("codex_usage_hud.cli.configure_daemon_logging"),
-            patch("codex_usage_hud.cli._attach_cli_logger_to_daemon_log"),
-            patch("codex_usage_hud.cli.hide_console_window"),
-            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
-            patch("codex_usage_hud.cli.HudInstanceLock"),
-            patch(
-                "codex_usage_hud.cli._daemon_startup_decision",
-                return_value=cli_module.DaemonStartupDecision(
-                    cli_module.DAEMON_STARTUP_WAIT,
-                ),
-            ),
-            patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
-            patch(
-                "codex_usage_hud.cli.run_hud_session",
-                side_effect=[
-                    cli_module.DAEMON_RESTART_REQUESTED,
-                    cli_module.CLEANUP_MAINTENANCE_REQUESTED,
-                ],
-            ) as run_hud,
-        ):
-            exit_code = run_daemon(args)
-
-        self.assertEqual(exit_code, cli_module.CLEANUP_MAINTENANCE_REQUESTED)
-        self.assertEqual(manager.wait_for_codex.call_count, 2)
-        self.assertEqual(run_hud.call_count, 2)
-        self.assertFalse(
-            run_hud.call_args_list[0].kwargs["observed_codex_launch"]
-        )
-        self.assertTrue(
-            run_hud.call_args_list[1].kwargs["observed_codex_launch"]
-        )
 
     def test_daemon_automatically_relaunches_new_plain_codex_once(self) -> None:
         manager = SimpleNamespace(

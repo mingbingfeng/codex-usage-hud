@@ -58,7 +58,6 @@ jobs:
           python -m pytest \
             tests/test_config.py \
             tests/test_renderer_hud.py \
-            tests/test_safe_cleanup.py \
             tests/test_build_exe.py \
             tests/test_platforms.py \
             tests/test_ui.py::BudgetHelperTests::test_desktop_work_overlay_skips_when_pyside6_unavailable \

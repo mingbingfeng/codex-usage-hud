@@ -1346,6 +1346,19 @@ def _work_overlay_live_elapsed_text(
     return f"已处理 {elapsed}"
 
 
+def _work_overlay_item_with_live_elapsed_text(
+    item: Mapping[str, object],
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Normalize incoming active-card elapsed copy before each render."""
+    normalized = dict(item)
+    elapsed_text = _work_overlay_live_elapsed_text(normalized, now=now)
+    if elapsed_text is not None:
+        normalized["elapsedText"] = elapsed_text
+    return normalized
+
+
 def _item_dismiss_key(item: Mapping[str, object]) -> str:
     status = str(item.get("status") or "")
     error_text = str(item.get("statusText") or item.get("detail") or "") if status == "error" else ""
@@ -3913,10 +3926,11 @@ def run_work_overlay_helper_qt(
                 item = record.get("item")
                 if not isinstance(item, Mapping):
                     continue
-                elapsed_text = _work_overlay_live_elapsed_text(item)
-                if elapsed_text is None or elapsed_text == str(item.get("elapsedText") or ""):
+                updated_item = _work_overlay_item_with_live_elapsed_text(item)
+                elapsed_text = str(updated_item.get("elapsedText") or "")
+                if elapsed_text == str(item.get("elapsedText") or ""):
                     continue
-                record["item"] = {**item, "elapsedText": elapsed_text}
+                record["item"] = updated_item
                 header = record.get("header")
                 if isinstance(header, QLabel):
                     header.setText(
@@ -4152,6 +4166,7 @@ def run_work_overlay_helper_qt(
             *,
             collect_anchors: bool = True,
         ) -> None:
+            item = _work_overlay_item_with_live_elapsed_text(item)
             record["item"] = dict(item)
             status = str(item.get("status") or "")
             system_action = _item_is_system_action(item)

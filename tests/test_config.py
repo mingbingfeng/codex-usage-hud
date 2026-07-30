@@ -220,32 +220,6 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertNotIn("work_overlay_enabled", config.to_dict())
         self.assertEqual(config.to_dict()["work_overlay_max_items"], 0)
 
-    def test_cleanup_settings_round_trip_with_conservative_bounds(self) -> None:
-        config = UserConfig.from_dict(
-            {
-                "cleanup_backup_directory": r"D:\Codex backups",
-                "cleanup_log_retention_hours": 0,
-                "cleanup_background_retention_days": 99999,
-            }
-        )
-
-        self.assertEqual(config.cleanup_backup_directory, r"D:\Codex backups")
-        self.assertEqual(config.cleanup_log_retention_hours, 1)
-        self.assertEqual(config.cleanup_background_retention_days, 3650)
-        payload = config.to_dict()
-        self.assertEqual(payload["cleanup_backup_directory"], r"D:\Codex backups")
-        self.assertEqual(payload["cleanup_log_retention_hours"], 1)
-        self.assertEqual(payload["cleanup_background_retention_days"], 3650)
-
-        defaults = UserConfig.from_dict(
-            {
-                "cleanup_log_retention_hours": "invalid",
-                "cleanup_background_retention_days": None,
-            }
-        )
-        self.assertEqual(defaults.cleanup_log_retention_hours, 24)
-        self.assertEqual(defaults.cleanup_background_retention_days, 30)
-
     def test_display_mode_normalizes_legacy_modes_to_renderer(self) -> None:
         self.assertEqual(normalize_display_mode("auto"), "renderer")
         self.assertEqual(normalize_display_mode("qt"), "renderer")

@@ -32,13 +32,11 @@ VALID_DISPLAY_MODES = {"renderer"}
 DEFAULT_SUPPORT_URL = "https://github.com/mingbingfeng/codex-usage-hud"
 DEFAULT_WORK_OVERLAY_MAX_ITEMS = 6
 DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED = False
-DEFAULT_CLEANUP_LOG_RETENTION_HOURS = 24
-DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS = 30
 DEFAULT_REST_REMINDER_ENABLED = False
 DEFAULT_REST_REMINDER_INTERVAL_MINUTES = 45
 DEFAULT_REST_REMINDER_BREAK_MINUTES = 2
 DEFAULT_REST_REMINDER_POSTPONE_MINUTES = 10
-DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES = 5
+DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES = 0
 DEFAULT_REST_REMINDER_WORK_START_TIME = "09:00"
 DEFAULT_REST_REMINDER_WORK_END_TIME = "18:00"
 DEFAULT_REST_REMINDER_LUNCH_ENABLED = True
@@ -231,11 +229,6 @@ class UserConfig:
     rest_reminder_lunch_enabled: bool = DEFAULT_REST_REMINDER_LUNCH_ENABLED
     rest_reminder_lunch_start_time: str = DEFAULT_REST_REMINDER_LUNCH_START_TIME
     rest_reminder_lunch_end_time: str = DEFAULT_REST_REMINDER_LUNCH_END_TIME
-    cleanup_backup_directory: str = ""
-    cleanup_log_retention_hours: int = DEFAULT_CLEANUP_LOG_RETENTION_HOURS
-    cleanup_background_retention_days: int = (
-        DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS
-    )
 
     @classmethod
     def defaults(cls) -> "UserConfig":
@@ -333,12 +326,9 @@ class UserConfig:
                 minimum=REST_REMINDER_POSTPONE_MIN,
                 maximum=REST_REMINDER_POSTPONE_MAX,
             ),
-            rest_reminder_idle_reset_minutes=_bounded_int(
-                value.get("rest_reminder_idle_reset_minutes"),
-                defaults.rest_reminder_idle_reset_minutes,
-                minimum=REST_REMINDER_IDLE_RESET_MIN,
-                maximum=REST_REMINDER_IDLE_RESET_MAX,
-            ),
+            # Legacy value is deliberately ignored: brief idle periods must not
+            # silently reset a user's focus timer.
+            rest_reminder_idle_reset_minutes=DEFAULT_REST_REMINDER_IDLE_RESET_MINUTES,
             rest_reminder_work_start_time=normalize_time_text(
                 value.get("rest_reminder_work_start_time"),
                 defaults.rest_reminder_work_start_time,
@@ -359,21 +349,6 @@ class UserConfig:
             rest_reminder_lunch_end_time=normalize_time_text(
                 value.get("rest_reminder_lunch_end_time"),
                 defaults.rest_reminder_lunch_end_time,
-            ),
-            cleanup_backup_directory=(
-                _optional_str(value.get("cleanup_backup_directory")) or ""
-            ),
-            cleanup_log_retention_hours=_bounded_int(
-                value.get("cleanup_log_retention_hours"),
-                defaults.cleanup_log_retention_hours,
-                minimum=1,
-                maximum=24 * 30,
-            ),
-            cleanup_background_retention_days=_bounded_int(
-                value.get("cleanup_background_retention_days"),
-                defaults.cleanup_background_retention_days,
-                minimum=1,
-                maximum=3650,
             ),
         )
 
@@ -409,11 +384,6 @@ class UserConfig:
             "rest_reminder_lunch_enabled": bool(self.rest_reminder_lunch_enabled),
             "rest_reminder_lunch_start_time": self.rest_reminder_lunch_start_time,
             "rest_reminder_lunch_end_time": self.rest_reminder_lunch_end_time,
-            "cleanup_backup_directory": self.cleanup_backup_directory,
-            "cleanup_log_retention_hours": int(self.cleanup_log_retention_hours),
-            "cleanup_background_retention_days": int(
-                self.cleanup_background_retention_days
-            ),
             "model_prices": {
                 name: price.to_dict()
                 for name, price in sorted(self.model_prices.items())
@@ -989,8 +959,6 @@ def _bounded_int(
 
 __all__ = [
     "DEFAULT_BUDGET_THRESHOLDS",
-    "DEFAULT_CLEANUP_BACKGROUND_RETENTION_DAYS",
-    "DEFAULT_CLEANUP_LOG_RETENTION_HOURS",
     "DEFAULT_DAILY_BUDGET_USD",
     "DEFAULT_DAILY_RESET_TIME",
     "DEFAULT_DISPLAY_MODE",

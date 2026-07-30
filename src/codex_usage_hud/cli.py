@@ -72,28 +72,10 @@ from .core.rest_reminder import RestReminderPresenter
 from .core.runtime_events import RuntimeEvent, RuntimeEventBus
 from .core.background_usage import BACKGROUND_USAGE_KIND, background_feature_label
 from .core.runtime_errors import RuntimeErrorRegistry
-from .core.codex_file_manager import (
-    CodexCleanupCandidate,
-    CodexFileManager,
-    CodexFileManagerWorker,
-    FileManagementError,
-)
 from .core.deleted_usage import (
     DeletedUsageEvent,
     DeletedUsageLedger,
     DeletedUsageLedgerError,
-)
-from .core.safe_cleanup import (
-    CleanupPlanError,
-    MaintenancePlan,
-    SQLiteTarget,
-    SafeCleanupError,
-    SafeCleanupManager,
-    read_maintenance_result,
-    reveal_cleanup_path,
-    run_maintenance_plan,
-    run_maintenance_plan_file,
-    write_maintenance_plan,
 )
 from .core.session_cleanup import (
     SessionCleanupError,
@@ -138,6 +120,7 @@ from .settings_bridge import SettingsBridgeServer
 from .ui.renderer_hud import (
     RendererHudClient,
     payload_from_snapshot,
+    remove_renderer_hud_from_pages,
     session_switch_payload_from_snapshot,
     wait_for_renderer,
 )
@@ -179,7 +162,6 @@ HUD_MUTEX_NAME = "Local\\codex_usage_hud_single_instance"
 ERROR_ALREADY_EXISTS = 183
 STILL_ACTIVE = 259
 DAEMON_RESTART_REQUESTED = 10
-CLEANUP_MAINTENANCE_REQUESTED = 11
 RENDERER_HUD_UNAVAILABLE = 20
 HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
@@ -248,12 +230,7 @@ WORK_OVERLAY_RESTART_ACTION = "restartCodex"
 WORK_OVERLAY_SYSTEM_ACTION_READY = "systemActionReady"
 WORK_OVERLAY_RESTART_ACTION_ID = "restart-codex-for-renderer"
 WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS = 2.0
-SAFE_CLEANUP_RESULT_FILENAME = "safe-cleanup-result.json"
-SAFE_CLEANUP_PLAN_PREFIX = "safe-cleanup-plan-"
 DELETED_SESSION_USAGE_FILENAME = "deleted-session-usage.json"
-SAFE_CLEANUP_ACTIVE_SESSION_SCAN_LIMIT = 64
-SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS = 5.0
-SAFE_CLEANUP_PROCESS_CLOSE_TIMEOUT_SECONDS = 8.0
 DESKTOP_OVERLAY_PACKAGE = "PySide6"
 DESKTOP_OVERLAY_PIP_SPEC = "PySide6>=6.8"
 _LOGGER = logging.getLogger("codex_usage_hud.cli")
@@ -913,83 +890,12 @@ def _work_overlay_command(state_path: Path) -> list[str]:
     ]
 
 
-def _cleanup_helper_command(plan_path: Path, result_path: Path) -> list[str]:
-    arguments = [
-        "--cleanup-maintenance-helper",
-        "--cleanup-plan-file",
-        str(plan_path),
-        "--cleanup-result-file",
-        str(result_path),
-    ]
-    if getattr(sys, "frozen", False):
-        return [str(Path(sys.executable).resolve()), *arguments]
-    helper_python = Path(sys.executable).resolve()
-    if sys.platform.startswith("win") and helper_python.name.casefold() == "python.exe":
-        candidate = helper_python.with_name("pythonw.exe")
-        if candidate.exists():
-            helper_python = candidate
-    return [str(helper_python), "-m", "codex_usage_hud", *arguments]
 
 
-def _cleanup_restart_command(*, daemon_mode: bool) -> tuple[str, ...]:
-    raw = list(sys.argv[1:])
-    filtered: list[str] = []
-    skip_next = False
-    value_options = {"--cleanup-plan-file", "--cleanup-result-file"}
-    for argument in raw:
-        if skip_next:
-            skip_next = False
-            continue
-        if argument in value_options:
-            skip_next = True
-            continue
-        if argument == "--cleanup-maintenance-helper":
-            continue
-        filtered.append(argument)
-    if daemon_mode and "--daemon" not in filtered:
-        filtered.append("--daemon")
-    executable = Path(sys.executable).resolve()
-    if sys.platform.startswith("win") and executable.name.casefold() == "python.exe":
-        candidate = executable.with_name("pythonw.exe")
-        if candidate.exists():
-            executable = candidate
-    if getattr(sys, "frozen", False):
-        return (str(executable), *filtered)
-    return (str(executable), "-m", "codex_usage_hud", *filtered)
 
 
-def _launch_cleanup_maintenance_helper(
-    plan_path: Path,
-    result_path: Path,
-) -> subprocess.Popen[Any]:
-    return subprocess.Popen(
-        _cleanup_helper_command(plan_path, result_path),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        creationflags=(
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            if sys.platform.startswith("win")
-            else 0
-        ),
-        start_new_session=not sys.platform.startswith("win"),
-    )
 
 
-def run_cleanup_maintenance_helper(
-    plan_file: str | os.PathLike[str],
-    result_file: str | os.PathLike[str],
-) -> int:
-    try:
-        result = run_maintenance_plan_file(
-            Path(plan_file),
-            Path(result_file),
-        )
-    except Exception as exc:
-        _LOGGER.exception("safe_cleanup_helper_failed error=%s", exc)
-        return 1
-    return 0 if result.state in {"completed", "partial"} else 1
 
 
 def _work_overlay_owner_pid(path: Path) -> int | None:
@@ -1375,8 +1281,6 @@ class DesktopWorkOverlay:
         else:
             payload_items = [work_item_to_overlay_dict(item) for item in items]
         payload_items = self._apply_switch_completed_override(payload_items)
-        if not payload_items and self._process is None:
-            return
         theme_payload = self._theme_payload()
         next_signature = self._state_signature(
             payload_items,
@@ -3111,83 +3015,8 @@ def _running_standalone_codex_cli_pids() -> tuple[int, ...]:
     raise RuntimeError(f"Codex process audit is unsupported on {sys.platform}")
 
 
-def _request_windows_codex_desktop_close(
-    processes: Sequence[_CodexDesktopProcess],
-    *,
-    timeout_seconds: float = SAFE_CLEANUP_PROCESS_CLOSE_TIMEOUT_SECONDS,
-) -> bool:
-    if not sys.platform.startswith("win"):
-        return False
-    target_pids = {int(process.pid) for process in processes if int(process.pid) > 0}
-    if not target_pids:
-        return True
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        enum_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        get_window_pid = user32.GetWindowThreadProcessId
-        get_window_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        get_window_pid.restype = wintypes.DWORD
-        is_window_visible = user32.IsWindowVisible
-        is_window_visible.argtypes = [wintypes.HWND]
-        is_window_visible.restype = wintypes.BOOL
-        post_message = user32.PostMessageW
-        post_message.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        post_message.restype = wintypes.BOOL
-        enum_windows = user32.EnumWindows
-        enum_windows.argtypes = [enum_type, wintypes.LPARAM]
-        enum_windows.restype = wintypes.BOOL
-        posted: set[int] = set()
-
-        def close_window(hwnd: int, _lparam: int) -> bool:
-            pid = wintypes.DWORD()
-            get_window_pid(wintypes.HWND(hwnd), ctypes.byref(pid))
-            value = int(pid.value)
-            if value not in target_pids:
-                return True
-            if not is_window_visible(wintypes.HWND(hwnd)):
-                return True
-            if post_message(wintypes.HWND(hwnd), 0x0010, 0, 0):
-                posted.add(value)
-            return True
-
-        if not enum_windows(enum_type(close_window), 0):
-            return False
-    except Exception as exc:
-        _LOGGER.info("safe_cleanup_desktop_close_failed error=%s", exc)
-        return False
-    if not posted:
-        return False
-    deadline = time.monotonic() + max(0.5, float(timeout_seconds))
-    while time.monotonic() < deadline:
-        if not any(_process_exists(pid) for pid in target_pids):
-            return True
-        time.sleep(0.1)
-    return not any(_process_exists(pid) for pid in target_pids)
 
 
-def _request_codex_desktop_close(
-    processes: Sequence[_CodexDesktopProcess],
-    *,
-    timeout_seconds: float = SAFE_CLEANUP_PROCESS_CLOSE_TIMEOUT_SECONDS,
-) -> bool:
-    if not processes:
-        return True
-    if sys.platform.startswith("win"):
-        return _request_windows_codex_desktop_close(
-            processes,
-            timeout_seconds=timeout_seconds,
-        )
-    if sys.platform == "darwin":
-        return _stop_macos_codex_app(timeout_seconds=timeout_seconds)
-    return False
 
 
 def _append_renderer_cdp_candidate(
@@ -4732,6 +4561,13 @@ def stop_running_hud(path: Path | None = None) -> str:
     """Stop the HUD instance recorded in the local pid-file lock."""
     lock_path = path or hud_lock_path()
     pid = _read_pid(lock_path)
+    # The desktop bubbles are a child of this process, but renderer injection
+    # lives in Codex.  Always remove that DOM first so --stop cannot leave a
+    # renderer-only half of the HUD visible after the process is gone.
+    try:
+        remove_renderer_hud_from_pages(port=_read_persisted_renderer_cdp_port())
+    except Exception:
+        _LOGGER.debug("renderer_hud_shutdown_cleanup_failed", exc_info=True)
     if pid is None:
         try:
             lock_path.unlink()
@@ -6184,172 +6020,6 @@ class _UsageInsightsWorker:
             )
 
 
-class _SafeCleanupWorker:
-    """Serialize explicit cleanup scans and plans without idle polling."""
-
-    _ACTIONS = {
-        "safeCleanupScan",
-        "safeCleanupPreview",
-        "safeCleanupExecute",
-        "safeCleanupCancel",
-    }
-
-    def __init__(self, context: object, manager: SafeCleanupManager) -> None:
-        self._context = context
-        self.manager = manager
-        self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
-        self._closed = Event()
-        self._worker = threading.Thread(
-            target=self._run,
-            name="codex-usage-hud-safe-cleanup",
-            daemon=True,
-        )
-        self._worker.start()
-
-    def enqueue(self, command: Mapping[str, object]) -> dict[str, object]:
-        action = str(command.get("action") or "").strip()
-        if action not in self._ACTIONS:
-            raise SafeCleanupError("unsupported safe-cleanup command")
-        if self._closed.is_set():
-            raise SafeCleanupError("safe cleanup worker is closed")
-        request_id = str(command.get("requestId") or "").strip()
-        if not request_id:
-            request_id = uuid.uuid4().hex
-        payload = dict(command)
-        payload["requestId"] = request_id
-        if action == "safeCleanupCancel":
-            snapshot = self.manager.cancel(request_id=request_id)
-            self._publish(snapshot)
-        else:
-            self.manager.mark_operation(
-                request_id=request_id,
-                action=action,
-                state="scanning" if action == "safeCleanupScan" else "accepted",
-                progress=0,
-            )
-            self._publish(self.manager.snapshot())
-            self._queue.put_nowait(payload)
-        return {"status": "accepted", "requestId": request_id, "action": action}
-
-    def close(self, timeout_seconds: float = 2.0) -> bool:
-        if self._closed.is_set():
-            return not self._worker.is_alive()
-        self._closed.set()
-        self._queue.put_nowait(None)
-        if self._worker is not threading.current_thread() and self._worker.is_alive():
-            self._worker.join(timeout=max(0.0, float(timeout_seconds)))
-        return not self._worker.is_alive()
-
-    def _run(self) -> None:
-        while True:
-            command = self._queue.get()
-            if command is None:
-                return
-            action = str(command.get("action") or "")
-            request_id = str(command.get("requestId") or "")
-            try:
-                # Clear only when this queued operation actually starts.  If a
-                # user cancels a long scan and immediately queues another one,
-                # clearing at enqueue time would let the old scan continue.
-                clear_cancel = getattr(self.manager, "clear_cancel", None)
-                if callable(clear_cancel):
-                    clear_cancel()
-                if action == "safeCleanupScan":
-                    previous_publisher = getattr(
-                        self.manager, "progress_publisher", None
-                    )
-                    self.manager.progress_publisher = self._publish
-                    try:
-                        snapshot = self.manager.scan(request_id=request_id)
-                    finally:
-                        self.manager.progress_publisher = previous_publisher
-                    operation = snapshot.get("operation")
-                    operation_values = (
-                        operation if isinstance(operation, Mapping) else {}
-                    )
-                    scan_completed = (
-                        str(operation_values.get("action") or "") == "scan"
-                        and str(operation_values.get("state") or "") == "completed"
-                        and str(operation_values.get("requestId") or "") == request_id
-                    )
-                    default_ids = (
-                        _cleanup_string_list(snapshot.get("defaultSelectedIds"))
-                        if scan_completed
-                        else []
-                    )
-                    revision = str(snapshot.get("revision") or "")
-                    if (
-                        default_ids
-                        and revision
-                        and not str(revision).startswith("scanning:")
-                    ):
-                        self.manager.mark_operation(
-                            request_id=request_id,
-                            action="scan",
-                            state="scanning",
-                            progress=99,
-                            phase="preview",
-                            phaseLabel="Default safe preview",
-                            phaseIndex=6,
-                            phaseCount=6,
-                        )
-                        self._publish(self.manager.snapshot())
-                        snapshot = self.manager.preview(
-                            default_ids,
-                            revision,
-                            request_id=request_id,
-                        )
-                elif action == "safeCleanupPreview":
-                    backup_text = str(command.get("backupDirectory") or "").strip()
-                    snapshot = self.manager.preview(
-                        _cleanup_string_list(command.get("groupIds")),
-                        str(command.get("inventoryRevision") or ""),
-                        consent=bool(command.get("consentConfirmed")),
-                        backup_directory=Path(backup_text) if backup_text else None,
-                        request_id=request_id,
-                    )
-                else:
-                    snapshot = _execute_safe_cleanup_command(
-                        self._context,
-                        self.manager,
-                        command,
-                    )
-            except Exception as exc:
-                message = str(exc) or type(exc).__name__
-                cancelled_like = (
-                    message.startswith("清理已取消")
-                    or "未修改任何数据" in message
-                    or "未执行" in message
-                    or "未关闭应用" in message
-                )
-                snapshot = self.manager.mark_operation(
-                    request_id=request_id,
-                    action=action,
-                    state="cancelled" if cancelled_like else "failed",
-                    progress=100,
-                    error=message,
-                )
-            self._publish(snapshot)
-
-    def _publish(self, payload: Mapping[str, object]) -> None:
-        snapshot = dict(payload)
-        setattr(self._context, "safe_cleanup_payload", snapshot)
-        event_bus = getattr(self._context, "runtime_events", None)
-        publish = getattr(event_bus, "publish", None)
-        if not callable(publish):
-            return
-        operation = snapshot.get("operation")
-        values = operation if isinstance(operation, Mapping) else {}
-        publish(
-            "safe_cleanup_changed",
-            source="safe_cleanup",
-            context={
-                "requestId": str(values.get("requestId") or ""),
-                "action": str(values.get("action") or ""),
-                "state": str(values.get("state") or ""),
-                "revision": str(snapshot.get("revision") or ""),
-            },
-        )
 
 
 class _SessionCleanupWorker:
@@ -6761,7 +6431,6 @@ def _work_item_model_startup_timed_out(
         or snapshot.final_answer_at is not None
         or snapshot.request.status != "running"
         or snapshot.activity.kind != "user"
-        or snapshot.last_output.kind != "idle"
     ):
         return False
     updated_at = (
@@ -7562,306 +7231,16 @@ def active_work_items_for_snapshot(
     return selected
 
 
-def _safe_cleanup_active_task_ids(context: object) -> tuple[str, ...]:
-    """Reparse recent sessions without provider or visible-item filtering."""
-
-    visible_cache = getattr(context, "_work_overlay_visible_item_cache", None)
-    if isinstance(visible_cache, Mapping):
-        observed = [
-            str(item.session_id or item.id)
-            for item in visible_cache.values()
-            if isinstance(item, WorkStatusItem)
-            and item.status in {"running", "tool", "active", "waiting_user"}
-            and str(item.session_id or item.id).strip()
-        ]
-        if observed:
-            return tuple(dict.fromkeys(observed))
-
-    resolver = getattr(context, "session_resolver", None)
-    current_path: Path | None = None
-    resolve = getattr(resolver, "resolve", None)
-    if callable(resolve):
-        try:
-            resolved, _source = resolve()
-            current_path = Path(resolved) if resolved is not None else None
-        except Exception as exc:
-            raise SafeCleanupError("current task state could not be verified") from exc
-    parser = getattr(context, "parser", None)
-    parse_file = getattr(parser, "parse_file", None)
-    if not callable(parse_file):
-        raise SafeCleanupError("session parser is unavailable for the activity gate")
-    sessions_root = Path(getattr(context, "sessions_root"))
-    paths = _recent_session_files(
-        sessions_root,
-        current_path=current_path,
-        limit=SAFE_CLEANUP_ACTIVE_SESSION_SCAN_LIMIT,
-    )
-    now = datetime.now().astimezone()
-    active: list[str] = []
-    current_key = _session_path_key(current_path)
-    for path in paths:
-        try:
-            parsed = parse_file(path)
-        except Exception as exc:
-            raise SafeCleanupError("recent task state could not be verified") from exc
-        item = _work_item_from_snapshot(
-            parsed,
-            current=_session_path_key(path) == current_key,
-            now=now,
-        )
-        if item is None or item.status not in {
-            "running",
-            "tool",
-            "active",
-            "waiting_user",
-        }:
-            continue
-        active.append(str(item.session_id or item.id or path.stem))
-    return tuple(dict.fromkeys(active))
 
 
-def _ensure_safe_cleanup_activity_idle(context: object) -> None:
-    active = _safe_cleanup_active_task_ids(context)
-    if active:
-        raise SafeCleanupError(
-            f"清理已取消：检测到 {len(active)} 个活动任务；未关闭应用，也未修改任何数据。"
-        )
 
 
-def _close_background_usage_for_cleanup(context: object) -> None:
-    runtime = getattr(context, "background_usage_runtime", None)
-    if runtime is None:
-        return
-    request_scan = getattr(runtime, "request_scan", None)
-    wait_until_idle = getattr(runtime, "wait_until_idle", None)
-    close = getattr(runtime, "close", None)
-    if not callable(request_scan) or not callable(wait_until_idle) or not callable(close):
-        raise SafeCleanupError("后台用量运行时无法安全停机。")
-    request_scan()
-    idle = bool(wait_until_idle(SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS))
-    closed = close(SAFE_CLEANUP_BACKGROUND_IDLE_TIMEOUT_SECONDS)
-    worker_alive = bool(getattr(runtime, "worker_alive", False))
-    if not idle or closed is False or worker_alive:
-        raise SafeCleanupError("后台用量归档未能在超时前安全停止；未执行清理。")
-    setattr(context, "background_usage_runtime", None)
 
 
-def _close_file_manager_for_cleanup(context: object) -> None:
-    worker = getattr(context, "file_manager_worker", None)
-    if worker is None:
-        return
-    close = getattr(worker, "close", None)
-    if not callable(close):
-        raise SafeCleanupError("旧存储管理 worker 无法安全停止。")
-    close()
-    setattr(context, "file_manager_worker", None)
 
 
-def _cleanup_plan_file(plan: MaintenancePlan) -> Path:
-    return hud_runtime_dir() / f"{SAFE_CLEANUP_PLAN_PREFIX}{plan.id}.json"
 
 
-def _execute_safe_cleanup_command(
-    context: object,
-    manager: SafeCleanupManager,
-    command: Mapping[str, object],
-) -> dict[str, object]:
-    request_id = str(command.get("requestId") or "")
-    item_ids = _cleanup_string_list(command.get("groupIds"))
-    revision = str(command.get("inventoryRevision") or "")
-    token = str(command.get("confirmationToken") or "")
-    requirements = manager.selection_requirements(item_ids, revision)
-    requires_offline = bool(requirements.get("requiresOffline"))
-    requires_backup = bool(requirements.get("requiresBackup"))
-    requires_codex_close = bool(requirements.get("requiresCodexClose"))
-    if requires_codex_close and not bool(command.get("autoCloseAndRestore")):
-        raise SafeCleanupError("该清理需要明确同意自动关闭并恢复 Codex App 与 HUD。")
-
-    # Publish a prepare phase before the potentially slow activity gate so the UI
-    # never sits on a blank "正在更新" state after the user confirms cleanup.
-    running_snapshot = manager.mark_operation(
-        request_id=request_id,
-        action="execute",
-        state="running",
-        progress=8,
-        selectedIds=item_ids,
-        phase="prepare",
-        phaseLabel="prepare",
-        phaseIndex=1,
-        phaseCount=max(1, len(item_ids)),
-        results=[
-            {
-                "id": item_id,
-                "state": "selected",
-                "estimatedBytes": 0,
-                "actualBytes": 0,
-                "deletedRows": 0,
-                "error": "",
-            }
-            for item_id in item_ids
-        ],
-    )
-    publish = getattr(getattr(context, "safe_cleanup_worker", None), "_publish", None)
-    if callable(publish):
-        publish(running_snapshot)
-
-    # Active tasks only block offline / Codex-close cleanup. Default safe path
-    # deletes (regenerable caches) must still run while Codex is working.
-    if requires_offline or requires_codex_close:
-        _ensure_safe_cleanup_activity_idle(context)
-    desktop_processes: list[_CodexDesktopProcess] = []
-    if requires_codex_close:
-        standalone = _running_standalone_codex_cli_pids()
-        if standalone:
-            raise SafeCleanupError(
-                "检测到独立 Codex CLI；请先在对应终端中正常退出后再清理 SQLite。"
-            )
-        desktop_processes = _audited_running_codex_desktop_processes()
-        if not desktop_processes:
-            raise SafeCleanupError("Codex App 进程状态无法验证；未执行 SQLite 维护。")
-
-    result_path = _safe_cleanup_result_path() if requires_offline else None
-    restart_command = (
-        tuple(getattr(context, "cleanup_restart_command", ()) or ())
-        if requires_offline
-        else ()
-    )
-    if requires_offline and not restart_command:
-        restart_command = _cleanup_restart_command(
-            daemon_mode=bool(getattr(context, "cleanup_daemon_mode", False))
-        )
-    plan = manager.create_plan(
-        item_ids,
-        revision,
-        token,
-        parent_pid=os.getpid() if requires_offline else 0,
-        wait_pids=(
-            tuple(process.pid for process in desktop_processes)
-            if requires_codex_close
-            else ()
-        ),
-        result_path=result_path,
-        restart_command=list(restart_command),
-    )
-    if not requires_offline:
-        result = run_maintenance_plan(
-            plan,
-            should_cancel=lambda: bool(
-                getattr(manager, "is_cancel_requested", lambda: False)()
-            ),
-        )
-        preplan_skips = manager.consume_preplan_skips(plan.id)
-        if not isinstance(preplan_skips, list):
-            preplan_skips = []
-        if preplan_skips:
-            merged_actions = tuple(preplan_skips) + tuple(result.actions)
-            success = sum(
-                1
-                for action in merged_actions
-                if action.state in {"deleted", "completed"}
-            )
-            skipped = sum(1 for action in merged_actions if action.state == "skipped")
-            restored = sum(1 for action in merged_actions if action.state == "restored")
-            hard_failures = sum(1 for action in merged_actions if action.state == "failed")
-            if hard_failures and not success and not restored:
-                state = "failed"
-            elif restored and not success and not hard_failures:
-                state = "restored"
-            elif success and not hard_failures:
-                state = "completed"
-            elif success or restored:
-                state = "partial"
-            else:
-                state = "partial"
-            skip_note = (
-                f"{skipped} item(s) skipped (locked, busy, or changed)"
-                if skipped and state == "completed"
-                else ""
-            )
-            incomplete = hard_failures + skipped + restored
-            result = replace(
-                result,
-                actions=merged_actions,
-                state=state,
-                error=(
-                    skip_note
-                    if skip_note
-                    else (
-                        f"{incomplete} cleanup action(s) did not complete"
-                        if incomplete and state != "completed"
-                        else ""
-                    )
-                ),
-            )
-        return manager.apply_maintenance_result(result, request_id=request_id)
-
-    _ensure_safe_cleanup_activity_idle(context)
-    if requires_codex_close and _running_standalone_codex_cli_pids():
-        raise SafeCleanupError(
-            "检测到独立 Codex CLI；SQLite 维护已停止，未修改任何数据。"
-        )
-    plan_path = _cleanup_plan_file(plan)
-    write_maintenance_plan(plan_path, plan)
-    desktop_closed = False
-    try:
-        if requires_backup:
-            _close_background_usage_for_cleanup(context)
-        _close_file_manager_for_cleanup(context)
-        _ensure_safe_cleanup_activity_idle(context)
-        if requires_codex_close and _running_standalone_codex_cli_pids():
-            raise SafeCleanupError(
-                "关闭前检测到独立 Codex CLI；SQLite 维护已停止。"
-            )
-        if requires_codex_close:
-            if not _request_codex_desktop_close(desktop_processes):
-                raise SafeCleanupError(
-                    "Codex App 未能正常退出；没有强制结束进程，也未执行清理。"
-                )
-            desktop_closed = True
-        _launch_cleanup_maintenance_helper(plan_path, result_path or _safe_cleanup_result_path())
-    except Exception:
-        try:
-            plan_path.unlink()
-        except OSError:
-            pass
-        if desktop_closed:
-            launch_codex_app(debugger=True)
-        raise
-
-    snapshot = manager.mark_operation(
-        id=plan.id,
-        request_id=request_id,
-        action="execute",
-        state="queued_exit",
-        progress=30,
-        selectedIds=item_ids,
-        estimatedBytes=sum(action.estimated_bytes for action in plan.actions),
-        phase="queued_exit",
-        phaseLabel="Waiting for HUD to exit before offline cleanup",
-        phaseIndex=1,
-        phaseCount=max(1, len(plan.actions)),
-        requiresOffline=True,
-        requiresBackup=requires_backup,
-        requiresCodexClose=requires_codex_close,
-        results=[
-            {
-                "id": action.item_id,
-                "category": action.category,
-                "state": "selected",
-                "estimatedBytes": int(action.estimated_bytes),
-                "actualBytes": 0,
-                "deletedRows": 0,
-                "error": "",
-            }
-            for action in plan.actions
-        ],
-    )
-    exit_event = getattr(context, "cleanup_exit_requested", None)
-    set_exit = getattr(exit_event, "set", None)
-    if not callable(set_exit):
-        raise SafeCleanupError("HUD 维护退出信号不可用。")
-    set_exit()
-    return snapshot
 
 
 class _RendererActiveWorkPump:
@@ -7997,58 +7376,13 @@ class _VisibleAppErrorCache:
         return ""
 
 
-def _safe_cleanup_result_path() -> Path:
-    return hud_runtime_dir() / SAFE_CLEANUP_RESULT_FILENAME
 
 
-def _build_safe_cleanup_manager(context: object) -> SafeCleanupManager:
-    config = getattr(context, "user_config", UserConfig.defaults())
-    sqlite_targets: list[SQLiteTarget] = []
-    logs_path = getattr(context, "sqlite_log_path", None)
-    if logs_path is not None:
-        sqlite_targets.append(SQLiteTarget(Path(logs_path), "logs"))
-    background_path = hud_runtime_dir() / BACKGROUND_USAGE_DATABASE_FILENAME
-    sqlite_targets.append(SQLiteTarget(background_path, "background"))
-    backup_text = str(getattr(config, "cleanup_backup_directory", "") or "").strip()
-
-    def codex_candidates() -> tuple[CodexCleanupCandidate, ...]:
-        file_manager = getattr(context, "file_manager", None)
-        if file_manager is None:
-            raise SafeCleanupError("Codex file inventory is unavailable")
-        payload = file_manager.scan(request_id="safe-cleanup")
-        operation = payload.get("operation") if isinstance(payload, Mapping) else None
-        state = str(operation.get("state") or "") if isinstance(operation, Mapping) else ""
-        if state != "completed":
-            raise SafeCleanupError("Codex file inventory did not complete")
-        return tuple(file_manager.cleanup_candidates())
-
-    manager = SafeCleanupManager(
-        platform=sys.platform,
-        hud_runtime_root=hud_runtime_dir(),
-        sqlite_targets=tuple(sqlite_targets),
-        codex_candidate_provider=codex_candidates,
-        backup_roots=(Path(backup_text),) if backup_text else (),
-        log_retention_hours=float(
-            getattr(config, "cleanup_log_retention_hours", 24) or 24
-        ),
-        background_retention_days=float(
-            getattr(config, "cleanup_background_retention_days", 30) or 30
-        ),
-    )
-    result_path = _safe_cleanup_result_path()
-    try:
-        if result_path.is_file():
-            result = read_maintenance_result(result_path)
-            manager.apply_maintenance_result(result)
-            result_path.unlink()
-    except (OSError, CleanupPlanError, SafeCleanupError) as exc:
-        _LOGGER.info("safe_cleanup_result_load_failed error=%s", exc)
-    return manager
 
 
 def _session_cleanup_current_ids(context: object) -> tuple[str, ...]:
     values: list[str] = []
-    values.append(str(getattr(context, "cleanup_current_session_id", "") or ""))
+    values.append(str(getattr(context, "session_management_current_session_id", "") or ""))
     resolver = getattr(context, "session_resolver", None)
     values.append(str(getattr(resolver, "session_id", "") or ""))
     tracker = getattr(context, "active_session_tracker", None)
@@ -8057,7 +7391,7 @@ def _session_cleanup_current_ids(context: object) -> tuple[str, ...]:
 
 
 def _session_cleanup_active_ids(context: object) -> tuple[str, ...]:
-    values = getattr(context, "cleanup_active_session_ids", set())
+    values = getattr(context, "session_management_active_session_ids", set())
     return tuple(str(value) for value in values)
 
 
@@ -8143,23 +7477,14 @@ class RuntimeContext:
     current_session_tail_state: JsonlTailState | None = None
     session_snapshot_cache: "SessionSnapshotCache | None" = None
     renderer_mode: bool = True
-    file_manager: CodexFileManager | None = None
-    file_manager_worker: CodexFileManagerWorker | None = None
-    file_management_payload: dict[str, object] = field(default_factory=dict)
     background_usage_runtime: BackgroundUsageRuntime | None = None
     usage_insights_payload: dict[str, object] = field(default_factory=dict)
     usage_insights_worker: _UsageInsightsWorker | None = None
-    safe_cleanup_manager: SafeCleanupManager | None = None
-    safe_cleanup_worker: _SafeCleanupWorker | None = None
-    safe_cleanup_payload: dict[str, object] = field(default_factory=dict)
     session_cleanup_manager: SessionCleanupManager | None = None
     session_cleanup_worker: _SessionCleanupWorker | None = None
     session_cleanup_payload: dict[str, object] = field(default_factory=dict)
-    cleanup_current_session_id: str = ""
-    cleanup_active_session_ids: set[str] = field(default_factory=set)
-    cleanup_exit_requested: Event = field(default_factory=Event)
-    cleanup_restart_command: tuple[str, ...] = ()
-    cleanup_daemon_mode: bool = False
+    session_management_current_session_id: str = ""
+    session_management_active_session_ids: set[str] = field(default_factory=set)
     rest_reminder: RestReminderPresenter | None = None
 
     def __post_init__(self) -> None:
@@ -8180,35 +7505,10 @@ class RuntimeContext:
                 event_bus=self.runtime_events,
                 sse_tracker=self.sse_tracker,
             )
-        if self.renderer_mode and self.file_manager is None:
-            self.file_manager = CodexFileManager(
-                env=os.environ,
-                platform_candidates=(
-                    self.sessions_root.parent,
-                    self.sqlite_log_path.parent
-                    if self.sqlite_log_path
-                    else self.sessions_root.parent,
-                ),
-            )
-        if self.renderer_mode and self.file_manager is not None:
-            self.file_management_payload = self.file_manager.snapshot()
-            if self.file_manager_worker is None:
-                self.file_manager_worker = CodexFileManagerWorker(
-                    self.file_manager,
-                    on_update=self._on_file_manager_update,
-                )
         if self.renderer_mode:
             self.usage_insights_payload = _refresh_usage_insights_payload(self)
             if self.usage_insights_worker is None:
                 self.usage_insights_worker = _UsageInsightsWorker(self)
-            if self.safe_cleanup_manager is None:
-                self.safe_cleanup_manager = _build_safe_cleanup_manager(self)
-            self.safe_cleanup_payload = self.safe_cleanup_manager.snapshot()
-            if self.safe_cleanup_worker is None:
-                self.safe_cleanup_worker = _SafeCleanupWorker(
-                    self,
-                    self.safe_cleanup_manager,
-                )
             if self.session_cleanup_manager is None:
                 self.session_cleanup_manager = _build_session_cleanup_manager(self)
             self.session_cleanup_payload = self.session_cleanup_manager.snapshot()
@@ -8221,9 +7521,6 @@ class RuntimeContext:
     def close(self) -> None:
         """Release any background helpers created for the runtime context."""
         _stop_active_session_tracker(self)
-        if self.safe_cleanup_worker is not None:
-            self.safe_cleanup_worker.close()
-            self.safe_cleanup_worker = None
         if self.session_cleanup_worker is not None:
             self.session_cleanup_worker.close()
             self.session_cleanup_worker = None
@@ -8233,40 +7530,10 @@ class RuntimeContext:
         if self.background_usage_runtime is not None:
             self.background_usage_runtime.close()
             self.background_usage_runtime = None
-        if self.file_manager_worker is not None:
-            try:
-                operation = self.file_manager.snapshot().get("operation", {}) if self.file_manager else {}
-                if (
-                    isinstance(operation, Mapping)
-                    and operation.get("state") == "queued_exit"
-                    and self.file_manager is not None
-                    and not self.file_manager.process_gate()
-                ):
-                    self.file_manager_worker.enqueue(
-                        {"action": "execute_pending", "requestId": "codex-exit"}
-                    )
-            except Exception:
-                pass
-            self.file_manager_worker.close()
-            self.file_manager_worker = None
         if self.session_snapshot_cache is not None:
             self.session_snapshot_cache.close()
         if self.pre_send_estimator is not None:
             self.pre_send_estimator.close()
-
-    def _on_file_manager_update(self, payload: dict[str, object]) -> None:
-        self.file_management_payload = dict(payload)
-        operation = payload.get("operation")
-        operation_payload = dict(operation) if isinstance(operation, Mapping) else {}
-        self.runtime_events.publish(
-            "file_management_changed",
-            source="codex_file_manager",
-            context={
-                "revision": str(payload.get("revision") or ""),
-                "action": str(operation_payload.get("action") or ""),
-                "state": str(operation_payload.get("state") or ""),
-            },
-        )
 
     def reload_user_config(self) -> None:
         """Reload user config and reset cost caches when pricing changes."""
@@ -8718,20 +7985,6 @@ def _apply_user_config_to_runtime_context(
             provider=str(getattr(context, "app_provider", "") or ""),
             price_table=next_config.price_table(),
         )
-    cleanup_manager = getattr(context, "safe_cleanup_manager", None)
-    if cleanup_manager is not None:
-        cleanup_manager.log_retention_hours = max(
-            1.0 / 60.0,
-            float(next_config.cleanup_log_retention_hours),
-        )
-        cleanup_manager.background_retention_days = max(
-            1.0 / 24.0,
-            float(next_config.cleanup_background_retention_days),
-        )
-        backup_text = str(next_config.cleanup_backup_directory or "").strip()
-        cleanup_manager.backup_roots = (
-            (Path(backup_text).expanduser().absolute(),) if backup_text else ()
-        )
     rest_reminder = getattr(context, "rest_reminder", None)
     if rest_reminder is not None:
         rest_reminder.configure(next_config)
@@ -8781,10 +8034,6 @@ def _partial_domains_for_settings_command(
     current_config: UserConfig,
 ) -> set[str] | None:
     action = str(command.get("action") or "").strip()
-    if action in FILE_MANAGEMENT_COMMANDS:
-        return {"settings", "fileManagement"}
-    if action in SAFE_CLEANUP_COMMANDS:
-        return {"settings", "safeCleanup"}
     if action in SESSION_CLEANUP_COMMANDS:
         return {"settings", "sessionCleanup"}
     if action == "usageInsightsRefresh":
@@ -8967,32 +8216,6 @@ def _background_usage_query_payload_with_preview(
     return payload
 
 
-FILE_MANAGEMENT_COMMANDS = {
-    "scan",
-    "preview",
-    "execute",
-    "cancel",
-    "archive_session",
-    "delete_session",
-    "remove_plugin",
-    "logout",
-}
-
-USAGE_INSIGHTS_COMMANDS = {
-    "usageInsightsRefresh",
-    "openUsageInsightsSession",
-    "openBackgroundUsageFromInsights",
-}
-
-SAFE_CLEANUP_COMMANDS = {
-    "safeCleanupScan",
-    "safeCleanupPreview",
-    "safeCleanupExecute",
-    "safeCleanupCancel",
-    "safeCleanupChooseBackupDirectory",
-    "safeCleanupReveal",
-}
-
 SESSION_CLEANUP_COMMANDS = {
     "sessionCleanupScan",
     "sessionCleanupPreview",
@@ -9001,163 +8224,10 @@ SESSION_CLEANUP_COMMANDS = {
 }
 
 
-def _handle_renderer_file_management_command(
-    command: Mapping[str, Any],
-    context: RuntimeContext,
-) -> dict[str, object]:
-    action = str(command.get("action") or "").strip()
-    worker = getattr(context, "file_manager_worker", None)
-    if action not in FILE_MANAGEMENT_COMMANDS:
-        return _renderer_settings_status(
-            f"无法处理未知存储命令：{action or 'empty'}",
-            kind="error",
-        )
-    if worker is None:
-        return _renderer_settings_status(
-            "当前 HUD 不是 Renderer 存储管理模式。",
-            kind="error",
-        )
-    try:
-        accepted = worker.enqueue(command)
-    except FileManagementError as exc:
-        return _renderer_settings_status(str(exc), kind="error")
-    request_id = str(accepted.get("requestId") or command.get("requestId") or "")
-    labels = {
-        "scan": "存储扫描已排队；不会读取文件内容。",
-        "preview": "清理预览已排队；执行前会再次校验。",
-        "execute": "清理请求已排队；Codex 运行期间不会直接修改文件。",
-        "cancel": "已请求取消当前存储操作。",
-        "archive_session": "会话归档请求已排队，将调用官方 Codex 动作。",
-        "delete_session": "会话删除请求已排队，将调用官方 Codex 动作。",
-        "remove_plugin": "插件移除请求已排队，将调用官方 Codex 动作。",
-        "logout": "退出登录请求已排队，将调用官方 Codex 动作。",
-    }
-    status = _renderer_settings_status(labels.get(action, "存储命令已排队。"))
-    status["fileManagementRequestId"] = request_id
-    status["fileManagementAction"] = action
-    return status
 
 
-def _choose_safe_cleanup_backup_directory(current: str = "") -> Path | None:
-    if sys.platform.startswith("win"):
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
-            "$dialog.Description = 'Select a SQLite backup directory'; "
-            "$dialog.ShowNewFolderButton = $true; "
-            "if ($env:CODEX_USAGE_HUD_CLEANUP_PICKER_INITIAL) { "
-            "$dialog.SelectedPath = $env:CODEX_USAGE_HUD_CLEANUP_PICKER_INITIAL }; "
-            "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
-            "[Console]::Out.Write($dialog.SelectedPath) }"
-        )
-        environment = dict(os.environ)
-        environment["CODEX_USAGE_HUD_CLEANUP_PICKER_INITIAL"] = str(current or "")
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-STA", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=120.0,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            env=environment,
-            check=False,
-        )
-        selected = result.stdout.strip() if result.returncode == 0 else ""
-    elif sys.platform == "darwin":
-        result = subprocess.run(
-            [
-                "osascript",
-                "-e",
-                'POSIX path of (choose folder with prompt "Select a SQLite backup directory")',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120.0,
-            check=False,
-        )
-        selected = result.stdout.strip() if result.returncode == 0 else ""
-    else:
-        raise SafeCleanupError("当前平台不支持原生备份目录选择器。")
-    if not selected:
-        return None
-    try:
-        path = Path(selected).expanduser().resolve(strict=True)
-    except OSError as exc:
-        raise SafeCleanupError("所选备份目录无法验证。") from exc
-    if not path.is_dir():
-        raise SafeCleanupError("所选备份位置不是目录。")
-    return path
 
 
-def _handle_renderer_safe_cleanup_command(
-    command: Mapping[str, Any],
-    context: RuntimeContext,
-) -> dict[str, object]:
-    action = str(command.get("action") or "").strip()
-    request_id = str(command.get("requestId") or "").strip()
-    if action not in SAFE_CLEANUP_COMMANDS:
-        return _renderer_settings_status(
-            f"无法处理未知安全清理命令：{action or 'empty'}",
-            kind="error",
-        )
-    if action == "safeCleanupReveal":
-        worker = getattr(context, "safe_cleanup_worker", None)
-        manager = getattr(worker, "manager", None)
-        resolve_target = getattr(manager, "resolve_reveal_path", None)
-        if not callable(resolve_target):
-            status = _renderer_settings_status(
-                "安全清理运行时当前不可用。",
-                kind="error",
-            )
-            status["safeCleanupRequestId"] = request_id
-            return status
-        try:
-            target = resolve_target(
-                str(command.get("itemId") or ""),
-                str(command.get("inventoryRevision") or ""),
-            )
-            reveal_cleanup_path(target)
-        except SafeCleanupError as exc:
-            status = _renderer_settings_status(str(exc), kind="error")
-            status["safeCleanupRequestId"] = request_id
-            return status
-        status = _renderer_settings_status("已在系统文件管理器中打开目标位置。")
-        status["safeCleanupRequestId"] = request_id
-        status["safeCleanupAction"] = action
-        return status
-    if action == "safeCleanupChooseBackupDirectory":
-        selected = _choose_safe_cleanup_backup_directory(
-            str(command.get("currentDirectory") or "")
-        )
-        if selected is None:
-            return _renderer_settings_status("已取消选择备份目录。")
-        config = replace(
-            context.settings_store.load(),
-            cleanup_backup_directory=str(selected),
-        )
-        _save_renderer_user_config(context, config)
-        status = _renderer_settings_status("已选择并保存 SQLite 备份目录。")
-        status["cleanupBackupDirectory"] = str(selected)
-        status["safeCleanupRequestId"] = request_id
-        return status
-    worker = getattr(context, "safe_cleanup_worker", None)
-    enqueue = getattr(worker, "enqueue", None)
-    if not callable(enqueue):
-        return _renderer_settings_status(
-            "安全清理运行时当前不可用。",
-            kind="error",
-        )
-    accepted = enqueue(command)
-    accepted_request_id = str(accepted.get("requestId") or request_id)
-    labels = {
-        "safeCleanupScan": "安全清理扫描已开始。",
-        "safeCleanupPreview": "正在生成可重验的清理预览。",
-        "safeCleanupExecute": "清理请求已进入活动任务与进程安全门禁。",
-        "safeCleanupCancel": "已请求取消清理；剩余项将跳过。",
-    }
-    status = _renderer_settings_status(labels.get(action, "安全清理命令已提交。"))
-    status["safeCleanupRequestId"] = accepted_request_id
-    status["safeCleanupAction"] = action
-    return status
 
 
 def _handle_renderer_session_cleanup_command(
@@ -9293,10 +8363,6 @@ def _handle_renderer_settings_command(
         command.get("requestId") or command.get("id") or ""
     ).strip()
     try:
-        if action in FILE_MANAGEMENT_COMMANDS:
-            return _handle_renderer_file_management_command(command, context)
-        if action in SAFE_CLEANUP_COMMANDS:
-            return _handle_renderer_safe_cleanup_command(command, context)
         if action in SESSION_CLEANUP_COMMANDS:
             return _handle_renderer_session_cleanup_command(command, context)
         if action in {"usageInsightsRefresh", "openUsageInsightsSession"}:
@@ -10139,16 +9205,16 @@ def _update_session_cleanup_activity(
         canonical = str(uuid.UUID(session_id))
     except (AttributeError, TypeError, ValueError):
         canonical = ""
-    context.cleanup_current_session_id = (
+    context.session_management_current_session_id = (
         canonical if canonical == session_id.casefold() else ""
     )
     active: set[str] = set()
-    if context.cleanup_current_session_id and (
+    if context.session_management_current_session_id and (
         snapshot.request.status == "running"
         or snapshot.slow.current_gap_active
         or snapshot.activity.kind in {"tool call", "agent", "assistant"}
     ):
-        active.add(context.cleanup_current_session_id)
+        active.add(context.session_management_current_session_id)
     for item in snapshot.active_work_items:
         value = str(item.session_id or "").strip()
         try:
@@ -10157,7 +9223,7 @@ def _update_session_cleanup_activity(
             continue
         if canonical == value.casefold() and str(item.status or "") not in {"recent"}:
             active.add(canonical)
-    context.cleanup_active_session_ids = active
+    context.session_management_active_session_ids = active
 
 
 def _apply_pre_send_and_activity(
@@ -10467,21 +9533,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=argparse.SUPPRESS,
     )
-    parser.add_argument(
-        "--cleanup-maintenance-helper",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--cleanup-plan-file",
-        default="",
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--cleanup-result-file",
-        default="",
-        help=argparse.SUPPRESS,
-    )
     return parser
 
 
@@ -10624,10 +9675,6 @@ def run_renderer_hud_session(
                     return RENDERER_HUD_UNAVAILABLE
                 launched_codex = True
             context = build_runtime_context(args)
-            context.cleanup_daemon_mode = daemon_manager is not None
-            context.cleanup_restart_command = _cleanup_restart_command(
-                daemon_mode=context.cleanup_daemon_mode
-            )
             display_mode = normalize_display_mode(
                 getattr(args, "hud_mode", None) or context.user_config.display_mode
             )
@@ -10707,10 +9754,8 @@ def run_renderer_hud_session(
                         "renderer_layout_changed",
                         "renderer_theme_changed",
                         "session_snapshot_hydrated",
-                        "file_management_changed",
                         "background_usage_changed",
                         "usage_insights_changed",
-                        "safe_cleanup_changed",
                         "session_cleanup_changed",
                     }:
                         command_refresh_requested.set()
@@ -11536,16 +10581,6 @@ def run_renderer_hud_session(
                     if action in {"installDesktopOverlay", "enableDesktopOverlay"}:
                         request.request_domains("settings", "overlay", force_fast=True)
                         return
-                    if action in FILE_MANAGEMENT_COMMANDS:
-                        request.request_domains(
-                            "settings", "fileManagement", force_fast=True
-                        )
-                        return
-                    if action in SAFE_CLEANUP_COMMANDS:
-                        request.request_domains(
-                            "settings", "safeCleanup", force_fast=True
-                        )
-                        return
                     if action in SESSION_CLEANUP_COMMANDS:
                         request.request_domains(
                             "settings", "sessionCleanup", force_fast=True
@@ -11622,17 +10657,6 @@ def run_renderer_hud_session(
                         force_fast=True,
                     )
 
-                def handle_safe_cleanup_changed(
-                    event: object,
-                    request: _RendererEventRefreshRequest,
-                ) -> None:
-                    del event
-                    request.request_domains(
-                        "settings",
-                        "safeCleanup",
-                        force_fast=True,
-                    )
-
                 def handle_session_cleanup_changed(
                     event: object,
                     request: _RendererEventRefreshRequest,
@@ -11706,13 +10730,6 @@ def run_renderer_hud_session(
                         request.theme_payload = dict(theme)
                         request.request_domains("settings", force_fast=True)
 
-                def handle_file_management_changed(
-                    event: object,
-                    request: _RendererEventRefreshRequest,
-                ) -> None:
-                    del event
-                    request.request_domains("fileManagement", force_fast=True)
-
                 def handle_active_work_refresh_requested(
                     event: object,
                     request: _RendererEventRefreshRequest,
@@ -11734,10 +10751,8 @@ def run_renderer_hud_session(
                     "update_state_changed": handle_update_state_changed,
                     "rest_reminder_due": handle_rest_reminder_due,
                     "renderer_theme_changed": handle_renderer_theme_changed,
-                    "file_management_changed": handle_file_management_changed,
                     "background_usage_changed": handle_background_usage_changed,
                     "usage_insights_changed": handle_usage_insights_changed,
-                    "safe_cleanup_changed": handle_safe_cleanup_changed,
                     "session_cleanup_changed": handle_session_cleanup_changed,
                 }
 
@@ -12313,14 +11328,8 @@ def run_renderer_hud_session(
                             desktop_overlay_dependency=_desktop_overlay_dependency_status(),
                             provider_registry=_provider_registry_payload(context),
                             app_provider=str(getattr(context, "app_provider", "") or ""),
-                            file_management=dict(
-                                getattr(context, "file_management_payload", {}) or {}
-                            ),
                             usage_insights=dict(
                                 getattr(context, "usage_insights_payload", {}) or {}
-                            ),
-                            safe_cleanup=dict(
-                                getattr(context, "safe_cleanup_payload", {}) or {}
                             ),
                             session_cleanup=dict(
                                 getattr(context, "session_cleanup_payload", {}) or {}
@@ -12442,14 +11451,8 @@ def run_renderer_hud_session(
                         desktop_overlay_dependency=_desktop_overlay_dependency_status(),
                         provider_registry=_provider_registry_payload(context),
                         app_provider=str(getattr(context, "app_provider", "") or ""),
-                        file_management=dict(
-                            getattr(context, "file_management_payload", {}) or {}
-                        ),
                         usage_insights=dict(
                             getattr(context, "usage_insights_payload", {}) or {}
-                        ),
-                        safe_cleanup=dict(
-                            getattr(context, "safe_cleanup_payload", {}) or {}
                         ),
                         session_cleanup=dict(
                             getattr(context, "session_cleanup_payload", {}) or {}
@@ -12945,16 +11948,6 @@ def run_renderer_hud_session(
                     return delay_value
 
                 while True:
-                    cleanup_exit = getattr(context, "cleanup_exit_requested", None)
-                    cleanup_exit_set = bool(
-                        getattr(cleanup_exit, "is_set", lambda: False)()
-                    )
-                    if cleanup_exit_set:
-                        # Offline cleanup must exit the HUD process so the helper
-                        # can wait on parent_pid. Never treat Codex close as a
-                        # normal daemon restart while cleanup is in flight.
-                        _LOGGER.info("renderer_hud_cleanup_maintenance_requested")
-                        return CLEANUP_MAINTENANCE_REQUESTED
                     if (
                         daemon_manager is not None
                         and time.monotonic() >= loop_state.next_daemon_check_at
@@ -12973,10 +11966,6 @@ def run_renderer_hud_session(
                     apply_settings_command(tick)
                     apply_background_usage_change(tick)
                     apply_partial_settings_file_change(tick)
-                    cleanup_exit = getattr(context, "cleanup_exit_requested", None)
-                    if bool(getattr(cleanup_exit, "is_set", lambda: False)()):
-                        _LOGGER.info("renderer_hud_cleanup_maintenance_requested")
-                        return CLEANUP_MAINTENANCE_REQUESTED
                     if exit_requested.is_set():
                         _LOGGER.info("renderer_hud_exit_requested")
                         return 0
@@ -13021,6 +12010,13 @@ def run_renderer_hud_session(
                     local_loading.close()
                 return 130
             finally:
+                if exit_requested.is_set():
+                    try:
+                        remove_renderer_hud_from_pages(port=startup_plan.port)
+                    except Exception:
+                        _LOGGER.debug(
+                            "renderer_hud_exit_cleanup_failed", exc_info=True
+                        )
                 if callable(runtime_event_unsubscribe):
                     runtime_event_unsubscribe()
                 if callable(tracker_change_callback):
@@ -13253,9 +12249,6 @@ def run_daemon(args: argparse.Namespace) -> int:
                     observed_codex_launch = True
                     _LOGGER.info("daemon_restarting_wait_for_codex")
                     continue
-                if exit_code == CLEANUP_MAINTENANCE_REQUESTED:
-                    _LOGGER.info("daemon_exiting_for_cleanup_maintenance")
-                    return CLEANUP_MAINTENANCE_REQUESTED
                 if force_renderer_retry and exit_code == RENDERER_HUD_UNAVAILABLE:
                     _LOGGER.info("daemon_renderer_unavailable_retrying")
                     time.sleep(manager.poll_seconds)
@@ -13271,13 +12264,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_stdout()
     parser = build_parser()
     args = parser.parse_args(argv)
-    if getattr(args, "cleanup_maintenance_helper", False):
-        if not args.cleanup_plan_file or not args.cleanup_result_file:
-            return 2
-        return run_cleanup_maintenance_helper(
-            args.cleanup_plan_file,
-            args.cleanup_result_file,
-        )
     _enable_crash_diagnostics()
     _init_force_desktop_overlay_missing_from_env()
     if getattr(args, "loading_feedback_helper", False):

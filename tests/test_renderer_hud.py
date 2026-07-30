@@ -964,7 +964,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("-webkit-user-select: text;", script)
 
         jump_start = script.index("function applyBackgroundUsagePayload")
-        jump_end = script.index("function applyFileManagementPayload", jump_start)
+        jump_end = script.index("function rerenderUsageInsightsIfVisible", jump_start)
         jump_contract = script[jump_start:jump_end]
         self.assertIn("backgroundUsageOpenEventId", jump_contract)
         self.assertIn('renderSettingsModal("backgroundUsage")', jump_contract)
@@ -1007,356 +1007,43 @@ class RendererHudPayloadTests(unittest.TestCase):
             "void loadBackgroundUsageDetail(eventId, { markViewed: true })",
             open_click_contract,
         )
-
-    def test_renderer_usage_insights_safe_cleanup_contract(self) -> None:
+    def test_session_management_is_the_only_storage_settings_surface(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('data-tab="storage"', script)
-        self.assertIn('>空间清理</button>', script)
-        self.assertIn('data-cleanup-section="junk"', script)
-        self.assertIn('data-cleanup-section="sessions"', script)
+        self.assertIn('data-tab="storage" data-active="${activeTab === "storage"}">会话管理</button>', script)
+        self.assertIn("function storagePanelHtml()", script)
+        self.assertIn("${sessionCleanupPanelHtml()}", script)
+        self.assertNotIn("safeCleanup", script)
+        self.assertNotIn("safe-cleanup", script)
+        self.assertNotIn("垃圾清理", script)
+        self.assertNotIn("空间清理", script)
+        self.assertIn("grid-template-rows: minmax(0, 1fr) auto;", script)
+        self.assertIn("function readSettingsUiState()", script)
+        self.assertIn("function writeSettingsUiState(open, tab)", script)
+        self.assertIn("sessionStorage.setItem(settingsUiStorageKey", script)
+        self.assertIn("writeSettingsUiState(true, activeTab);", script)
+        self.assertIn("writeSettingsUiState(false, settingsActiveTab);", script)
+        self.assertIn("function restoreOpenSettingsModal()", script)
+        self.assertIn("if (root !== previousRoot) restoreOpenSettingsModal();", script)
+        self.assertIn("settingsUiState?.open !== true", script)
+        self.assertIn(
+            'const settingsModal = event.target?.closest?.(`#${settingsModalId}`);',
+            script,
+        )
+        self.assertIn("if (settingsModal && root.contains(settingsModal))", script)
+        self.assertNotIn("SessionCleanupModalGuard", script)
+        scan_start = script.index("function requestSessionCleanupScan")
+        scan_end = script.index("function requestSessionCleanupPreview", scan_start)
+        scan_script = script[scan_start:scan_end]
         self.assertLess(
-            script.index('data-cleanup-section="sessions"'),
-            script.index('data-cleanup-section="junk"'),
+            scan_script.index('renderSettingsModal("storage"'),
+            scan_script.index("submitSettingsCommand("),
         )
-        self.assertIn('data-action="session-cleanup-date-toggle"', script)
-        self.assertIn('data-action="session-cleanup-date-confirm"', script)
-        self.assertIn('data-session-cleanup-filter="${key}"', script)
-        self.assertIn('<label><span>${label}</span><select', script)
-        self.assertIn('control("archive", "归档状态"', script)
-        self.assertIn('control("availability", "删除状态"', script)
-        self.assertIn('control("clientKind", "客户端"', script)
-        self.assertIn('control("modelProvider", "模型提供方"', script)
-        self.assertIn('control("sort", "排序"', script)
-        self.assertNotIn('control("workdir", "工作目录"', script)
-        self.assertIn('codex-usage-hud-session-date-popover', script)
-        self.assertIn('codex-usage-hud-session-filter-controls', script)
-        self.assertNotIn('data-action="session-cleanup-status"', script)
-        self.assertNotIn('data-action="session-cleanup-time"', script)
-        self.assertIn('data-session-cleanup-select-all="true"', script)
-        self.assertIn('data-danger="true"', script)
-        # Visual structure contracts against docs/designs/space-cleanup-session-delete-v1.html
-        self.assertIn("codex-usage-hud-cleanup-page-head", script)
-        self.assertIn("codex-usage-hud-cleanup-segments", script)
-        self.assertIn('let cleanupActiveSection = "sessions";', script)
-        self.assertIn('if (tab === "storage") cleanupActiveSection = "sessions";', script)
-        self.assertIn("grid-template-columns: repeat(2, minmax(96px, 1fr))", script)
-        self.assertIn("min-height: 31px", script)
-        self.assertIn("codex-usage-hud-cleanup-footer", script)
-        self.assertIn("min-height: 50px", script)
-        self.assertIn("height: min(572px, calc(100vh - 48px))", script)
-        self.assertIn("calc(100vw - 48px)", script)
-        self.assertIn("codex-usage-hud-cleanup-empty-state", script)
-        self.assertIn("codex-usage-hud-cleanup-scan-strip", script)
-        self.assertIn("function safeCleanupScanningPanelHtml", script)
-        self.assertIn("function isSafeCleanupScanning", script)
-        self.assertIn("safeCleanupState.stableData", script)
-        self.assertIn('data-action="safe-cleanup-cancel"', script)
-        self.assertIn("累计可清理（扫描中）", script)
-        self.assertIn("正在扫描会话", script)
-        self.assertIn("codex-usage-hud-cleanup-scan-mark", script)
-        self.assertIn("codex-usage-hud-cleanup-empty-title", script)
-        self.assertIn("尚未扫描", script)
-        self.assertIn('data-size="large"', script)
-        self.assertIn("codex-usage-hud-cleanup-summary-band", script)
-        self.assertIn("background: #16261a", script)
-        self.assertIn("codex-usage-hud-cleanup-row", script)
-        self.assertIn("min-height: 54px", script)
-        self.assertIn('data-kind="deep"', script)
-        self.assertIn("codex-usage-hud-cleanup-protected-note", script)
-        self.assertIn("codex-usage-hud-session-head", script)
-        self.assertIn("grid-template-columns: 28px minmax(0, 1.35fr) minmax(0, .9fr) 88px 72px 82px", script)
-        self.assertIn(">会话</span>", script)
-        self.assertIn(">工作目录</span>", script)
-        self.assertIn(">最后活动</span>", script)
-        self.assertIn(">状态</span>", script)
-        self.assertIn(">占用</span>", script)
-        self.assertIn("codex-usage-hud-session-search", script)
-        self.assertIn(
-            'span[data-secondary="true"] {\n'
-            "        display: none;\n"
-            "      }",
-            script,
-        )
-        self.assertIn("cleanupContentScrollTop", script)
-        self.assertIn("sessionTableScrollTop", script)
-        self.assertIn('data-tone="danger"', script)
-        self.assertIn("codex-usage-hud-settings-confirm-danger-mark", script)
-        self.assertIn('grid-template-areas: "check title workdir time status size"', script)
-        self.assertIn("check title title status size", script)
-        self.assertIn("background: #3b8eea", script)
-        self.assertIn("background: #c43e45", script)
-        self.assertIn('grid-template-columns: repeat(5, minmax(0, 1fr))', script)
-        self.assertIn('session-filter-control label > span', script)
-        self.assertIn('session-search {\n          flex: 0 0 auto;', script)
-        self.assertIn('session-date-popover {\n          left: 0;', script)
-        self.assertIn('sessionCleanupDateRangeError', script)
-        self.assertIn('sessionCleanupDatePresetValues', script)
-        self.assertIn('sessionCleanupFilterSummary', script)
-        self.assertIn("codex-usage-hud-settings-confirm-summary", script)
-        self.assertIn("codex-usage-hud-settings-confirm-note", script)
-        self.assertIn("function cleanupIconSvg", script)
-        self.assertIn(
-            'sessionCleanupState.search = String(sessionSearch.value || "");\n'
-            "        sessionCleanupState.selectedIds.clear();",
-            script,
-        )
-        self.assertIn(
-            'sessionCleanupState[key] = String(sessionFilter.value || "all");\n'
-            '        if (key !== "sort") sessionCleanupState.selectedIds.clear();',
-            script,
-        )
-        self.assertIn(
-            "sessionCleanupState.dateStart = sessionCleanupState.dateDraftStart;\n"
-            "        sessionCleanupState.dateEnd = sessionCleanupState.dateDraftEnd;",
-            script,
-        )
-        self.assertIn("function sessionCleanupReasonLabel", script)
-        self.assertIn('action: "sessionCleanupPreview"', script)
-        self.assertIn('action: "sessionCleanupExecute"', script)
-        self.assertIn('action: "sessionCleanupCancel"', script)
-        self.assertIn('const sessionExecuting = new Set(["execute", "sessionCleanupExecute"]).has(sessionOperationAction)', script)
-        self.assertIn('const sessionScanInProgress = new Set(["scan", "sessionCleanupScan"]).has(sessionOperationAction)', script)
-        self.assertIn('正在永久删除…', script)
-        self.assertIn('const scanInProgress = new Set(["scan", "sessionCleanupScan"]).has(operationAction)', script)
-        self.assertIn('const showResultDetails = results.length > 0 && state !== "completed";', script)
-        self.assertIn('完成后将直接刷新当前列表', script)
-        self.assertIn("Codex App 的归档入口无法恢复这些会话", script)
-        self.assertIn(
-            "const body = isSessions ? sessionCleanupPanelHtml() : safeCleanupPanelHtml();",
-            script,
-        )
-        self.assertNotIn("function usageInsightsPanelHtml", script)
-        self.assertIn("function safeCleanupRequiresCodexClose", script)
-        self.assertIn("item?.requiresCodexClose === true", script)
-        self.assertIn("function safeCleanupPrerequisites", script)
-        self.assertIn("function focusSafeCleanupPrerequisite", script)
-        self.assertIn('data-cleanup-prerequisites="true"', script)
-        self.assertIn('data-ready="${prerequisites.ready}"', script)
-        self.assertIn(
-            "const autoCloseReady = !requiresCodexClose || safeCleanupState.autoCloseConfirmed",
-            script,
-        )
-        self.assertIn("SQLite 维护必须先选择备份目录。", script)
-        self.assertIn("Codex App 与 HUD 会正常退出并在清理后自动恢复", script)
-        self.assertIn('action: "safeCleanupPreview"', script)
-        self.assertIn('action: "safeCleanupExecute"', script)
-        self.assertNotIn('data-action="safe-cleanup-preview"', script)
-        self.assertIn("pickerChanged", script)
-        self.assertIn("scheduleSafeCleanupPreview();", script)
-        self.assertIn('operation?.action === "scan"', script)
-        self.assertIn('return "扫描完成"', script)
-        self.assertIn("function safeCleanupResultStateLabel", script)
-        self.assertIn("function safeCleanupDisplayLabel", script)
-        self.assertIn("function safeCleanupDisplayImpact", script)
-        self.assertIn('system_cache: "系统可再生成缓存"', script)
-        self.assertIn('system_temp: "Windows 系统临时文件"', script)
-        self.assertIn('model_cache: "模型与数据缓存"', script)
-        self.assertIn('diagnostic_history: "系统诊断历史"', script)
-        self.assertIn('"DirectX shader cache": "DirectX 着色器缓存"', script)
-        self.assertIn('"Old macOS diagnostic reports": "macOS 旧诊断报告"', script)
-        self.assertIn('"Windows system temporary data": "Windows 系统临时文件"', script)
-        self.assertIn('"Active user temporary data": "正在使用的临时文件（保留）"', script)
-        self.assertIn(
-            '"Files newer than the retention threshold are retained because they may still be in use."',
-            script,
-        )
-        self.assertIn(
-            '"Old operating-system diagnostics will no longer be available."',
-            script,
-        )
-        self.assertIn("function safeCleanupPresentationGroups", script)
-        self.assertIn("function safeCleanupResultGroupsHtml", script)
-        self.assertIn("function isSafeCleanupTerminalResult", script)
-        self.assertIn("function safeCleanupMaintenanceResultPanelHtml", script)
-        self.assertIn("A maintenance helper restarts the HUD with a fresh inventory", script)
-        self.assertIn("const safeRows = safeGroups.map", script)
-        self.assertNotIn("safeGroups.slice(0, 8)", script)
-        self.assertNotIn("orderedPreviewItems.slice(0, 16)", script)
-        self.assertIn("${protectedGroups.length} 类 / ${protectedTargets} 个目标", script)
-        self.assertIn("已选 ${selectedGroups.length} 类 / ${selectedIds.length} 个目标", script)
-        self.assertIn("function safeCleanupPreviewSpaceSummary", script)
-        self.assertIn("function safeCleanupConfirmSpaceSummary", script)
-        self.assertIn("function safeCleanupResultBackupSummary", script)
-        self.assertIn("operation?.sameVolumeBackupBytes", script)
-        self.assertIn("operation?.netEstimatedBytes", script)
-        self.assertIn("源盘预计净释放", script)
-        self.assertIn("存到其他磁盘", script)
-        self.assertIn("不占用源盘", script)
-        self.assertIn("backupVolumeLabel", script)
-        self.assertIn("backupDirectoryLabel", script)
-        self.assertIn("operation?.backupFiles", script)
-        self.assertNotIn(
-            "备份约 ${storageFormatBytes(totals?.backupBytes)}",
-            script,
-        )
-        self.assertIn('category === "codex_logs_history"', script)
-        self.assertIn('if (operation?.action === "scan") return "";', script)
-        self.assertIn('previewBackupDirectory: ""', script)
-        self.assertIn('const previewLocked = operationState === "preview"', script)
-        self.assertIn('${previewLocked ? "disabled" : ""}', script)
-        self.assertIn('return "清理完成（部分项已跳过）"', script)
-        self.assertIn('return "清理失败"', script)
-        self.assertIn('return "本次未删除（目标已跳过）"', script)
-        self.assertIn("function safeCleanupErrorText", script)
-        label_start = script.index("function safeCleanupOperationLabel")
-        label_end = script.index("function safeCleanupResultStateLabel", label_start)
-        label_fn = script[label_start:label_end]
-        self.assertNotIn('failed: "需要处理"', label_fn)
-        self.assertNotIn('return "需要处理"', label_fn)
-        self.assertIn('return "清理失败"', label_fn)
-        preview_html_start = script.index("function safeCleanupPreviewHtml")
-        preview_html_end = script.index("function isCleanupScanningRevision", preview_html_start)
-        preview_html = script[preview_html_start:preview_html_end]
-        self.assertIn("const showResultRows = new Set([\"completed\", \"partial\", \"failed\", \"restored\"]).has(state);", preview_html)
-        self.assertIn("? safeCleanupResultGroupsHtml(data, selectedIds, results)", preview_html)
-        self.assertIn("safeCleanupErrorText(operation?.error)", preview_html)
-        self.assertNotIn(
-            "const rows = safeCleanupResultGroupsHtml(data, selectedIds, results);",
-            preview_html,
-        )
-        refresh_start = script.index("function refreshStoragePanelIfVisible")
-        refresh_end = script.index("function requestUsageInsightsRefresh", refresh_start)
-        refresh_contract = script[refresh_start:refresh_end]
-        self.assertIn('settingsActiveTab !== "storage"', refresh_contract)
-        self.assertIn("const focus = captureStorageFocus(body);", refresh_contract)
-        self.assertIn("body.innerHTML = storagePanelHtml();", refresh_contract)
-        self.assertIn("restoreStorageFocus(body, focus);", refresh_contract)
-        schedule_start = script.index("function scheduleStoragePanelRefresh")
-        schedule_end = script.index("function refreshStoragePanelIfVisible", schedule_start)
-        schedule_contract = script[schedule_start:schedule_end]
-        self.assertIn("requestAnimationFrame", schedule_contract)
-        self.assertIn("storageRefreshLastAt", schedule_contract)
-        self.assertIn("storageRefreshTimer", schedule_contract)
-        focus_start = script.index("function captureStorageFocus")
-        focus_end = script.index("function requestUsageInsightsRefresh", focus_start)
-        self.assertIn('candidate.matches?.(":disabled")', script[focus_start:focus_end])
-        ticker_start = script.index("function ensureSafeCleanupLiveTicker")
-        ticker_end = script.index("function rerenderUsageInsightsIfVisible", ticker_start)
-        ticker_contract = script[ticker_start:ticker_end]
-        self.assertIn("updateSafeCleanupElapsedNodes();", ticker_contract)
-        self.assertNotIn("rerenderUsageInsightsIfVisible();", ticker_contract)
-        self.assertNotIn('renderSettingsModal("storage")', ticker_contract)
-        remove_contract = script[script.index("window.__codexUsageHudRemove"):]
-        self.assertIn("clearInterval(safeCleanupLiveTimer);", remove_contract)
-        self.assertIn("clearTimeout(safeCleanupPreviewTimer);", remove_contract)
-        self.assertIn("cancelAnimationFrame(storageRefreshRaf);", remove_contract)
-        self.assertIn("clearTimeout(storageRefreshTimer);", remove_contract)
-        file_payload_start = script.index("function applyFileManagementPayload")
-        file_payload_end = script.index("function updateSafeCleanupElapsedNodes", file_payload_start)
-        file_payload_contract = script[file_payload_start:file_payload_end]
-        self.assertIn("refreshStoragePanelIfVisible();", file_payload_contract)
-        self.assertNotIn('renderSettingsModal("storage")', file_payload_contract)
-        # Opening settings always lands on the settings tab — never forced to storage
-        # while a long cleanup is running (focus-steal regression).
-        settings_open_start = script.index('if (action.dataset.action === "settings-open")')
-        settings_open_end = script.index("return;", settings_open_start)
-        settings_open_contract = script[settings_open_start:settings_open_end]
-        self.assertIn('renderSettingsModal("settings"', settings_open_contract)
-        self.assertNotIn('renderSettingsModal("storage"', settings_open_contract)
-        # Execute cancel UX: cooperative cancel keeps the execute footer alive.
-        exec_fn_start = script.index("function isSafeCleanupExecuting")
-        exec_fn_end = script.index("function isSafeCleanupBusy", exec_fn_start)
-        exec_fn = script[exec_fn_start:exec_fn_end]
-        self.assertIn('state === "cancelled"', exec_fn)
-        self.assertIn('new Set(["accepted", "running", "queued_exit"]).has(state)', exec_fn)
-        cancel_fn_start = script.index("function requestSafeCleanupCancel")
-        cancel_fn_end = script.index("function requestSessionCleanupCancel", cancel_fn_start)
-        cancel_fn = script[cancel_fn_start:cancel_fn_end]
-        self.assertIn("正在取消清理", cancel_fn)
-        self.assertIn("safeCleanupState.pendingRequestId = \"\"", cancel_fn)
-        self.assertIn("if (!executing)", cancel_fn)
-        self.assertIn("取消清理", script)
-        self.assertIn("正在取消...", script)
-        self.assertIn("正在停止", script)
-        self.assertIn("扫描已取消", script)
-        payload_start = script.index("function applySafeCleanupPayload")
-        payload_end = script.index("function applySessionCleanupPayload", payload_start)
-        payload_contract = script[payload_start:payload_end]
-        self.assertIn("cleanupProgress:", payload_contract)
-        self.assertIn('scheduleStoragePanelRefresh({ throttleMs: 200 });', script)
-        self.assertIn('data-safe-cleanup-elapsed="scan"', script)
-        self.assertIn('data-safe-cleanup-elapsed="execute"', script)
-        confirm_start = script.index("function openSafeCleanupExecuteConfirm")
-        execute_start = script.index("function executeSafeCleanup", confirm_start)
-        confirm_contract = script[confirm_start:execute_start]
-        self.assertIn("operation?.includesConsent === true", confirm_contract)
-        self.assertIn("safeCleanupState.previewBackupDirectory", confirm_contract)
-        self.assertIn("safeCleanupConfirmSpaceSummary(operation)", confirm_contract)
-        self.assertIn("Do not use previewBackupDirectory as an execute gate", confirm_contract)
-        self.assertIn("focusSafeCleanupPrerequisite", confirm_contract)
-        self.assertNotIn("safeCleanupState.includeConsent ?", confirm_contract)
-        execute_end = script.index("function storageSelectedItemIds", execute_start)
-        execute_contract = script[execute_start:execute_end]
-        self.assertNotIn("consentConfirmed:", execute_contract)
-        self.assertNotIn("backupDirectory:", execute_contract)
-        self.assertIn("HUD 将短暂退出并在后台清理", execute_contract)
-        self.assertIn("window.setTimeout", execute_contract)
-        self.assertNotIn(
-            'selectedIds.map((id) => ({ id, state: "selected" }))',
-            script,
-        )
-
-    def test_renderer_safe_cleanup_grouping_and_path_details_contract(self) -> None:
-        script = renderer_hud.RENDERER_HUD_SCRIPT
-
-        self.assertIn('inventoryRevision: ""', script)
-        self.assertIn("selectedIds: new Set()", script)
-        self.assertIn("expandedGroupIds: new Set()", script)
-        self.assertIn("function syncSafeCleanupSelection", script)
-        self.assertIn("safeCleanupState.inventoryRevision !== revision", script)
-        self.assertIn("data?.defaultSelectedIds", script)
-        self.assertIn("safeCleanupState.expandedGroupIds.clear();", script)
-
-        projection_start = script.index("function safeCleanupPresentationKey")
-        projection_end = script.index("function safeCleanupTierLabel", projection_start)
-        projection_contract = script[projection_start:projection_end]
-        for field in (
-            "item?.category",
-            "item?.tier",
-            "item?.label",
-            "item?.retention",
-            "item?.impact",
-            "item?.blockedReason",
-            "item?.requiresOffline",
-            "item?.requiresBackup",
-            "item?.requiresCodexClose",
-            "item?.relatedProcesses",
-        ):
-            self.assertIn(field, projection_contract)
-        self.assertIn("group.bytes +=", projection_contract)
-        self.assertIn("group.files +=", projection_contract)
-        self.assertIn("group.targetCount += 1", projection_contract)
-        self.assertIn("group.executableIds.push(itemId)", projection_contract)
-        self.assertIn("oldestModifiedAt", projection_contract)
-        self.assertIn("newestModifiedAt", projection_contract)
-
-        self.assertIn('data-action="safe-cleanup-group-toggle"', script)
-        self.assertIn('data-action="safe-cleanup-group-expand"', script)
-        self.assertIn('data-action="safe-cleanup-copy-path"', script)
-        self.assertIn('data-action="safe-cleanup-reveal"', script)
-        self.assertIn("codex-usage-hud-cleanup-target-path", script)
-        self.assertIn("overflow-wrap: anywhere", script)
-        self.assertIn("user-select: text", script)
-        self.assertIn("safeCleanupRawItems().find", script)
-        self.assertIn("copyHudText(path)", script)
-
-        reveal_start = script.index("function requestSafeCleanupReveal")
-        reveal_end = script.index("function openSafeCleanupExecuteConfirm", reveal_start)
-        reveal_contract = script[reveal_start:reveal_end]
-        self.assertIn('action: "safeCleanupReveal"', reveal_contract)
-        self.assertIn("inventoryRevision", reveal_contract)
-        self.assertIn("itemId: normalizedItemId", reveal_contract)
-        self.assertNotIn("path:", reveal_contract)
-
-        self.assertIn(
-            "safeCleanupPresentationGroups(data, { itemIds: selectedIds, results: completeResults })",
-            script,
-        )
-        self.assertIn("fallbackState: state === \"accepted\"", script)
-        self.assertIn("safeCleanupAggregateResultState", script)
-        self.assertIn("selectedGroupCount", script)
-        self.assertIn("${selectedGroupCount} 类、${selectedIds.length} 个本地目标", script)
+        session_payload_start = script.index("function applySessionCleanupPayload")
+        session_payload_end = script.index("function applyPayloadDomains", session_payload_start)
+        session_payload_script = script[session_payload_start:session_payload_end]
+        self.assertNotIn("restoreOpenSettingsModal();", session_payload_script)
+        self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr));", script)
 
     def test_session_cleanup_confirm_survives_same_token_repaint(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -1433,34 +1120,6 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("topDetails", partial)
         self.assertNotIn("requestRows", partial)
         self.assertNotIn("requestRowDetails", partial)
-
-    def test_renderer_payload_can_emit_independent_file_management_domain(self) -> None:
-        file_management = {
-            "rootLabel": "CODEX_HOME",
-            "revision": "1-opaque",
-            "totals": {"bytes": 42, "files": 1, "items": 1},
-            "categories": [{"category": "expired_temp", "policy": "candidate", "size": 42}],
-            "items": [{
-                "id": "opaque-item",
-                "relativePath": ".tmp/staging-old",
-                "policy": "candidate",
-                "category": "expired_temp",
-                "size": 42,
-                "mtime": 1.0,
-                "source": "inferred",
-                "risk": "success",
-                "reason": "expired",
-            }],
-            "operation": {"state": "idle", "progress": 0},
-        }
-        payload = payload_from_snapshot(
-            ParsedSession(status="parsed"), file_management=file_management
-        )
-        partial = payload.to_domain_json("fileManagement")
-        self.assertEqual(set(partial["payloadDomains"]), {"fileManagement"})
-        self.assertEqual(partial["fileManagement"]["revision"], "1-opaque")
-        self.assertNotIn("topLine", partial)
-        self.assertNotIn("relative/absolute", str(partial))
 
     def test_renderer_payload_can_emit_private_session_cleanup_domain(self) -> None:
         session_cleanup = {
@@ -1791,7 +1450,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "47";', script)
+        self.assertIn('const version = "48";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)
@@ -1964,7 +1623,15 @@ class RendererHudPayloadTests(unittest.TestCase):
         )
         self.assertIn('data-setting-key="rest_reminder_break_minutes"', script)
         self.assertIn('case "break": return "休息中"', script)
-        self.assertIn("离开多久算作休息", script)
+        self.assertNotIn("离开多久算作休息", script)
+        self.assertNotIn('data-setting-key="rest_reminder_idle_reset_minutes"', script)
+        self.assertIn(
+            "grid-template-columns: repeat(4, minmax(0, 1fr));",
+            script,
+        )
+        self.assertIn("今日已休息 ${formatRestReminderRemaining(todayRestedSeconds)}", script)
+        self.assertIn('data-rest-reminder-summary="true"', script)
+        self.assertNotIn('notification.status === "sent" ? "通知 OK" : "待测试"', script)
         self.assertIn("rest_reminder_work_start_time", script)
         self.assertIn("rest_reminder_lunch_enabled", script)
         self.assertIn("rest-reminder-test-notification", script)

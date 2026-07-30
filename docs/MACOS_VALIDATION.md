@@ -24,7 +24,7 @@ This smoke workflow is intentionally limited. It does **not** prove real desktop
 1. `python -m pip install -e ".[desktop-overlay]"`
 2. lazy import check for `codex_usage_hud.cli`
 3. `python -m compileall -q src tests tools`
-4. task-related pytest coverage for renderer HUD, safe-cleanup platform contracts,
+4. task-related pytest coverage for renderer HUD, session-management contracts,
    desktop overlay branching, and macOS launch argument behavior
 
 ### How to use it
@@ -54,26 +54,13 @@ codex-hud --daemon
 - Clicking a bubble triggers `activateSession` and switches to the target session.
 - Stopping the HUD cleans up the helper subprocess and overlay state files.
 
-### Space cleanup and permanent session deletion
+### Session management
 
-- Open `空间清理` in the real renderer and confirm it contains only `垃圾清理`
-  and `会话管理`, with no horizontal overflow. Usage rankings remain in
-  `用量总览`.
-- Run `扫描垃圾` only. Confirm macOS cache roots are user-scoped, symlinks are
-  protected, and a running related app protects its complete cache category.
-- Confirm Homebrew downloads and Xcode DerivedData are default-safe when their
-  related processes are idle. DiagnosticReports/CrashReporter entries newer
-  than seven days stay protected; older entries remain unchecked until consent.
-- Confirm `~/.Trash` is not inventoried by the generic path cleanup flow.
-- Confirm HUD diagnostics are selected by default and the SQLite history groups
-  are unchecked. `logs_2.sqlite` must show the 24-hour retention and background
-  usage history must show 30 days.
-- Generate the default preview and confirm it requires only the stated HUD/app
-  restart and does not request a SQLite backup. Expand a grouped category and
-  confirm every target shows its absolute local path; copying returns that exact
-  path, while `打开位置` sends only revision + opaque item ID and opens the
-  verified target in Finder.
-- On disposable fixture databases, opt into each SQLite group and verify a
+- Open `会话管理` in the real renderer and confirm it directly shows the existing
+  session list and filters, with no secondary cleanup switch or horizontal overflow.
+- Scan sessions and confirm current, running, unresolved, and unavailable sessions
+  remain visible but cannot be selected.
+- On disposable fixture sessions, generate a deletion preview and verify a
   user-selected backup directory, backup integrity, cutoff deletion, VACUUM,
   post-check, and failure restoration. Do not use a real user database for this
   check without separate explicit authorization.
