@@ -429,6 +429,7 @@ class RestReminderScheduler:
             "lunchEnabled": bool(self._config.lunch_enabled),
             "lunchStartTime": self._config.lunch_start_time,
             "lunchEndTime": self._config.lunch_end_time,
+            "scheduleWaiting": bool(self._schedule_waiting),
             "dailyDate": self._daily_date,
             "dailyRestedSeconds": int(round(self._daily_rested_seconds)),
             "reminderMessage": self._active_message,
@@ -500,6 +501,20 @@ class RestReminderScheduler:
         self._restore_focus_times(current, wall_now, started_wall, next_wall)
         phase = str(state.get("phase") or "focus").strip().lower()
 
+        if phase == "focus" and bool(state.get("scheduleWaiting")):
+            resume_wall = next_wall
+            if resume_wall > wall_now:
+                self._schedule_waiting = True
+                return True
+            interval = float(self._config.interval_minutes) * 60.0
+            self._restore_focus_times(
+                current,
+                wall_now,
+                resume_wall,
+                resume_wall + interval,
+            )
+            return True
+
         if phase in {"break", "resting"}:
             try:
                 rest_started_wall = float(state.get("restStartedAtMs") or 0.0) / 1000.0
@@ -567,7 +582,9 @@ class RestReminderScheduler:
         self._phase = "focus"
         if next_wall <= wall_now:
             self._postpone_used = False
-            self._arm_from(current, wall_now)
+            # Preserve the missed deadline so the first post-restart tick emits
+            # the reminder instead of silently starting a fresh full interval.
+            self._next_fire_at = current
         return True
 
     def configure(

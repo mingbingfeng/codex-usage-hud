@@ -993,7 +993,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertEqual(restarted.phase, "prompt")
         self.assertAlmostEqual(restarted.seconds_until_prompt_end() or 0.0, 40.0)
 
-    def test_expired_focus_snapshot_starts_fresh_round_after_restart(self) -> None:
+    def test_expired_focus_snapshot_fires_on_first_tick_after_restart(self) -> None:
         clock = {"now": 0.0}
         wall = {"now": self.WORK_WALL}
         scheduler = RestReminderScheduler(
@@ -1030,9 +1030,52 @@ class RestReminderSchedulerTests(unittest.TestCase):
         )
 
         self.assertTrue(restarted.restore_wall_state(snapshot))
-        self.assertEqual(restarted.cycle_started_at, 5.0)
-        self.assertEqual(restarted.next_fire_at, 65.0)
-        self.assertIsNone(restarted.tick())
+        self.assertEqual(restarted.next_fire_at, 5.0)
+        self.assertIsNotNone(restarted.tick())
+        self.assertTrue(restarted.showing)
+
+    def test_lunch_wait_snapshot_resumes_round_from_lunch_end_after_restart(self) -> None:
+        clock = {"now": 0.0}
+        lunch_start = datetime.fromtimestamp(self.WORK_WALL).replace(
+            hour=12, minute=30, second=0, microsecond=0
+        ).timestamp()
+        wall = {"now": lunch_start}
+        config = RestReminderConfig(
+            enabled=True,
+            interval_minutes=45,
+            idle_reset_minutes=0,
+            work_start_time="09:00",
+            work_end_time="18:00",
+            lunch_enabled=True,
+            lunch_start_time="12:00",
+            lunch_end_time="13:30",
+        )
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        scheduler.configure(config, force_reset=True)
+        self.assertIsNone(scheduler.tick())
+        snapshot = scheduler.export_wall_state()
+        assert snapshot is not None
+        self.assertTrue(snapshot["scheduleWaiting"])
+
+        wall["now"] += 90 * 60
+        restarted_clock = {"now": 5.0}
+        restarted = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            clock=lambda: restarted_clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        restarted.configure(config, force_reset=True)
+
+        self.assertTrue(restarted.restore_wall_state(snapshot))
+        self.assertAlmostEqual(restarted.seconds_until_next() or 0.0, 15 * 60)
+        restarted_clock["now"] += 15 * 60
+        wall["now"] += 15 * 60
+        self.assertIsNotNone(restarted.tick())
+        self.assertTrue(restarted.showing)
 
     def test_windows_notification_requests_max_notifyicon_lifetime(self) -> None:
         with patch.object(rest_reminder_module.sys, "platform", "win32"), patch.object(
@@ -1119,7 +1162,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
             remaining = presenter2.scheduler.seconds_until_next() or 0.0
             self.assertAlmostEqual(remaining, 45 * 60 - 300.0, places=1)
 
-    def test_presenter_rewrites_expired_snapshot_after_fresh_restart(self) -> None:
+    def test_presenter_keeps_expired_snapshot_due_until_first_tick(self) -> None:
         from codex_usage_hud.config import (
             load_rest_reminder_state,
             save_rest_reminder_state,
@@ -1163,8 +1206,12 @@ class RestReminderSchedulerTests(unittest.TestCase):
 
             saved = load_rest_reminder_state(path)
             self.assertEqual(saved["phase"], "focus")
-            self.assertGreater(saved["nextFireAtMs"], int(wall["now"] * 1000))
+            self.assertLessEqual(saved["nextFireAtMs"], int(wall["now"] * 1000))
             self.assertFalse(restarted.showing)
+            due = presenter.tick()
+            assert due is not None
+            self.assertTrue(due["due"])
+            self.assertTrue(restarted.showing)
 
 
 if __name__ == "__main__":
