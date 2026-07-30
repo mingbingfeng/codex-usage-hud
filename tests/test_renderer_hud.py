@@ -1039,11 +1039,21 @@ class RendererHudPayloadTests(unittest.TestCase):
             scan_script.index('renderSettingsModal("storage"'),
             scan_script.index("submitSettingsCommand("),
         )
+        self.assertIn("function formatSessionCleanupElapsed(startedAt)", script)
+        self.assertIn(
+            "const elapsed = formatSessionCleanupElapsed(sessionCleanupState.scanStartedAt);",
+            script,
+        )
+        self.assertNotIn("formatCleanupElapsed(", script)
         session_payload_start = script.index("function applySessionCleanupPayload")
         session_payload_end = script.index("function applyPayloadDomains", session_payload_start)
         session_payload_script = script[session_payload_start:session_payload_end]
         self.assertNotIn("restoreOpenSettingsModal();", session_payload_script)
         self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr));", script)
+        self.assertIn(
+            ".codex-usage-hud-session-cleanup:has(> .codex-usage-hud-cleanup-empty-state):not(:has(> .codex-usage-hud-cleanup-scan-strip))",
+            script,
+        )
 
     def test_session_cleanup_confirm_survives_same_token_repaint(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -1450,7 +1460,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "48";', script)
+        self.assertIn('const version = "50";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)

@@ -95,7 +95,7 @@ def _renderer_theme_payload(snapshot: CodexThemeSnapshot | None) -> dict[str, ob
 
 _RENDERER_HUD_SCRIPT_TEMPLATE = r"""
 (() => {
-  const version = "48";
+  const version = "50";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
@@ -3241,7 +3241,7 @@ scanStartedAt: 0,
         grid-template-rows: auto minmax(0, 1fr);
         align-content: start;
       }
-      #${rootId} .codex-usage-hud-session-cleanup:has(.codex-usage-hud-cleanup-empty-state) {
+      #${rootId} .codex-usage-hud-session-cleanup:has(> .codex-usage-hud-cleanup-empty-state):not(:has(> .codex-usage-hud-cleanup-scan-strip)) {
         grid-template-rows: minmax(0, 1fr);
       }
       #${rootId} .codex-usage-hud-session-tools {
@@ -7167,6 +7167,14 @@ scanStartedAt: 0,
     return labels[raw] || raw || "读取会话索引";
   }
 
+  function formatSessionCleanupElapsed(startedAt) {
+    const start = Number(startedAt || 0);
+    if (!start) return "0:00";
+    const seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
   function sessionCleanupPanelHtml() {
     const data = sessionCleanupFromPayload();
     const scanned = !!String(data?.revision || "");
@@ -7181,7 +7189,7 @@ scanStartedAt: 0,
       const progress = Math.max(0, Math.min(99, Number(operation?.progress || 0)));
       const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
       const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 3));
-      const elapsed = formatCleanupElapsed(sessionCleanupState.scanStartedAt);
+      const elapsed = formatSessionCleanupElapsed(sessionCleanupState.scanStartedAt);
       return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理" aria-busy="true"><div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描本地会话</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}</div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${progress <= 0}" style="width:${Math.max(progress, 8)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel || "读取会话索引")}</strong></span><span>筛选与删除在完成后解锁</span></div></div><div class="codex-usage-hud-cleanup-empty-state" style="min-height:180px"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话归并本地记录与关联子任务</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-cancel">取消扫描</button></div></section>`;
     }
     if (!data || !scanned) {
