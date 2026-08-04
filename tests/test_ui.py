@@ -27,53 +27,79 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-import codex_usage_hud.cli as cli_module
-from codex_usage_hud.cli import (
-    ACTIVE_WORK_STALE_SECONDS,
-    DAEMON_STARTUP_RENDERER,
-    DesktopWorkOverlay,
-    HudAlreadyRunningError,
-    HudInstanceLock,
-    HUD_SWITCH_TO_RENDERER,
-    HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
-    RENDERER_HUD_UNAVAILABLE,
+import codex_usage_hud.runtime_orchestration as runtime_orchestration
+import codex_usage_hud.runtime_diagnostics as runtime_diagnostics
+import codex_usage_hud.runtime_snapshot_service as runtime_snapshot_service
+import codex_usage_hud.runtime_settings as runtime_settings
+import codex_usage_hud.runtime_context as runtime_context
+import codex_usage_hud.runtime_paths as runtime_paths
+import codex_usage_hud.codex_app_runtime as codex_app_runtime
+import codex_usage_hud.renderer_startup as renderer_startup
+import codex_usage_hud.renderer_runtime as renderer_runtime
+import codex_usage_hud.daemon_runtime as daemon_runtime
+import codex_usage_hud.active_work as active_work
+import codex_usage_hud.overlay_projection as overlay_projection
+import codex_usage_hud.overlay_runtime as overlay_runtime
+import codex_usage_hud.renderer_file_events as renderer_file_events
+import codex_usage_hud.desktop_overlay as desktop_overlay_module
+import codex_usage_hud.loading_feedback as loading_feedback
+from codex_usage_hud.desktop_overlay import DesktopWorkOverlay
+from codex_usage_hud.loading_feedback import (
+    HudLoadingFeedback,
+    LOADING_FEEDBACK_STALE_SECONDS,
+    cleanup_stale_loading_feedback_files,
+)
+from codex_usage_hud.overlay_command_pump import WorkOverlayCommandPump
+from codex_usage_hud.runtime_orchestration import (
     RENDERER_UPDATE_FAILURE_LIMIT,
     RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
-    SessionSnapshotCache,
-    UsageSummaryCache,
-    _VisibleAppErrorCache,
-    _WorkOverlayCommandPump,
     _active_session_switch_pending,
-    _apply_visible_app_error,
-    background_usage_to_work_item,
-    _build_session_switch_controller,
-    _enable_crash_diagnostics,
-    active_work_items_for_snapshot,
-    is_independent_desktop_delegation,
-    is_subagent_session,
     _prepare_codex_window_for_renderer,
     _renderer_refresh_delay_seconds,
     _renderer_should_refresh_active_work_items,
-    _renderer_snapshot_selection_is_stale,
     _wait_for_visible_codex_window,
     _renderer_update_failure_limit,
-    _handle_renderer_settings_command,
     budget_warnings,
-    launch_codex_app,
     main,
-    parse_thresholds,
     run_renderer_hud_session,
-    run_qt_hud_session,
-    snapshot_to_text,
+    stop_running_hud,
+)
+from codex_usage_hud.daemon_runtime import (
+    DEFAULT_DAEMON_STARTUP_RENDERER as DAEMON_STARTUP_RENDERER,
+    HUD_SWITCH_TO_RENDERER,
+    HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
+    RENDERER_HUD_UNAVAILABLE,
     run_daemon,
     run_hud_session,
-    run_work_overlay_helper,
+    run_qt_hud_session,
     run_tk_hud_session,
-    cleanup_stale_loading_feedback_files,
-    work_item_to_overlay_dict,
-    stop_running_hud,
-    usage_before_today_in_week,
 )
+from codex_usage_hud.codex_app_runtime import launch_codex_app
+from codex_usage_hud.config import parse_thresholds
+from codex_usage_hud.desktop_overlay_setup import run_work_overlay_helper
+from codex_usage_hud.instance_lock import HudAlreadyRunningError, HudInstanceLock
+from codex_usage_hud.overlay_commands import _build_session_switch_controller
+from codex_usage_hud.runtime_commands import _handle_renderer_settings_command
+from codex_usage_hud.runtime_diagnostics import enable_crash_diagnostics as _enable_crash_diagnostics
+from codex_usage_hud.active_work import (
+    ACTIVE_WORK_STALE_SECONDS,
+    active_work_items_for_snapshot,
+    is_independent_desktop_delegation,
+    is_subagent_session,
+)
+from codex_usage_hud.overlay_projection import work_item_to_overlay_dict
+from codex_usage_hud.overlay_runtime import background_usage_to_work_item
+from codex_usage_hud.runtime_usage import usage_before_today_in_week
+from codex_usage_hud.usage_cache import UsageSummaryCache
+from codex_usage_hud.session_snapshots import (
+    SessionSnapshotCache,
+    selection_is_stale as _renderer_snapshot_selection_is_stale,
+)
+from codex_usage_hud.snapshot_builder import (
+    VisibleAppErrorCache as _VisibleAppErrorCache,
+    _apply_visible_app_error,
+)
+from codex_usage_hud.runtime_snapshot_service import snapshot_to_text
 from codex_usage_hud.platforms.session_switch import (
     SessionSwitchController,
     SessionSwitchRequest,
@@ -91,9 +117,10 @@ from codex_usage_hud.core.deleted_usage import DeletedUsageLedger
 from codex_usage_hud.core.session_cleanup import SessionCleanupItem
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.platforms.codex_theme import CodexThemeExport, CodexThemeSnapshot, HudThemeTokens
-from codex_usage_hud.ui.renderer_hud import payload_from_snapshot
+from codex_usage_hud.renderer_payload_builder import payload_from_snapshot
 from codex_usage_hud.core.parser import (
     Activity,
+    CostEstimator,
     GapTiming,
     JsonlSessionParser,
     ParsedSession,
@@ -102,6 +129,7 @@ from codex_usage_hud.core.parser import (
     SlowSummary,
     ToolCallTiming,
     UsageSummary,
+    UsageCalculator,
     WorkStatusItem,
 )
 from codex_usage_hud.ui.work_overlay_qt import (
@@ -164,6 +192,7 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _workdir_clickable_for_item,
     _workdir_link_pending_for_item,
     _work_overlay_header_text,
+    _refresh_overlay_state_from_event,
     _work_overlay_item_with_live_elapsed_text,
     _work_overlay_live_elapsed_text,
     _workdir_display_name,
@@ -177,6 +206,83 @@ class _FakeWindow:
         self._y = y
         self._width = width
         self._height = height
+
+
+def _runtime_services_for_test(
+    *,
+    context: object,
+    renderer: object,
+    overlay: object,
+    updates: object,
+    bridge: object,
+    snapshot_builder: Callable[..., object],
+    bridge_factory: Callable[..., object] | None = None,
+    command_pump_factory: Callable[..., object] | None = None,
+    file_event_source_factory: Callable[..., object] | None = None,
+    active_work_pump_factory: Callable[..., object] | None = None,
+) -> object:
+    return runtime_orchestration.RuntimeServices(
+        clock=runtime_orchestration._SystemRuntimeClock(),
+        context_factory=lambda _args: context,
+        renderer_factory=lambda _port, _timeout: renderer,
+        overlay_factory=lambda _context: overlay,
+        update_manager_factory=lambda: updates,
+        bridge_factory=bridge_factory or (lambda *_args, **_kwargs: bridge),
+        snapshot_builder=snapshot_builder,
+        command_pump_factory=command_pump_factory,
+        file_event_source_factory=file_event_source_factory,
+        active_work_pump_factory=active_work_pump_factory,
+    )
+
+
+def _daemon_services_for_test(
+    *,
+    manager: object,
+    startup_decision: Callable[..., object],
+    create_loading: Callable[..., object],
+    run_renderer: Callable[..., int],
+    run_hud: Callable[..., int] | None = None,
+    restart_codex: Callable[[], bool] | None = None,
+    select_launch_port: Callable[[], int] | None = None,
+    launch: Callable[..., bool] | None = None,
+    append_diagnostic: Callable[..., object] | None = None,
+) -> daemon_runtime.DaemonServices:
+    return daemon_runtime.DaemonServices(
+        manager_factory=lambda **_kwargs: manager,
+        lock_factory=MagicMock(return_value=MagicMock()),
+        configure_logging=MagicMock(),
+        attach_logger=MagicMock(),
+        hide_console=MagicMock(),
+        startup_decision=startup_decision,
+        create_loading=create_loading,
+        run_renderer=run_renderer,
+        run_hud=run_hud,
+        restart_codex=restart_codex,
+        select_launch_port=select_launch_port,
+        launch=launch or MagicMock(return_value=True),
+        append_diagnostic=append_diagnostic or MagicMock(),
+    )
+
+
+def _renderer_diagnostic_sink_for_test(root: Path) -> runtime_diagnostics.JsonlDiagnosticSink:
+    return runtime_diagnostics.JsonlDiagnosticSink(
+        lambda: root / "renderer_fallback.log"
+    )
+
+
+def _renderer_session_ports_for_test(
+    **changes: object,
+) -> renderer_runtime.RendererSessionPorts:
+    ports = renderer_runtime.RendererSessionPorts.from_mapping(
+        vars(runtime_orchestration)
+    )
+    return replace(
+        ports,
+        **{
+            "_append_renderer_diagnostic": runtime_diagnostics.append_renderer_diagnostic,
+            **changes,
+        },
+    )
 
     def winfo_x(self) -> int:
         return self._x
@@ -1289,7 +1395,7 @@ class BudgetHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            cli_module._usage_insights_actionable_session_ids(context),
+            runtime_orchestration._usage_insights_actionable_session_ids(context),
             {
                 top_usage_id,
                 top_cost_id,
@@ -1315,7 +1421,7 @@ class BudgetHelperTests(unittest.TestCase):
         )
 
         with patch(
-            "codex_usage_hud.cli._refocus_codex_window_after_current_session_click",
+            "codex_usage_hud.overlay_runtime._refocus_codex_window_after_current_session_click",
             return_value=(True, "visible", "", 123),
         ):
             status = _handle_renderer_settings_command(
@@ -1543,11 +1649,11 @@ class BudgetHelperTests(unittest.TestCase):
             current.write_text("{}\n", encoding="utf-8")
             other.write_text("{}\n", encoding="utf-8")
 
-            self.assertTrue(cli_module._paths_only_current_session({current}, current))
+            self.assertTrue(runtime_orchestration._paths_only_current_session({current}, current))
             self.assertFalse(
-                cli_module._paths_only_current_session({current, other}, current)
+                runtime_orchestration._paths_only_current_session({current, other}, current)
             )
-            self.assertFalse(cli_module._paths_only_current_session(set(), current))
+            self.assertFalse(runtime_orchestration._paths_only_current_session(set(), current))
 
     def test_renderer_budget_aggregate_skips_current_session_only_change(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1558,7 +1664,7 @@ class BudgetHelperTests(unittest.TestCase):
             signature = ("sessions", 1, "day", "week")
 
             self.assertFalse(
-                cli_module._renderer_should_refresh_budget_aggregate(
+                runtime_orchestration._renderer_should_refresh_budget_aggregate(
                     latest_snapshot=snapshot,
                     latest_budget_signature=signature,
                     budget_signature=signature,
@@ -1576,7 +1682,7 @@ class BudgetHelperTests(unittest.TestCase):
             signature = ("sessions", "day", "week")
 
             self.assertFalse(
-                cli_module._renderer_should_refresh_budget_aggregate(
+                runtime_orchestration._renderer_should_refresh_budget_aggregate(
                     latest_snapshot=snapshot,
                     latest_budget_signature=signature,
                     budget_signature=signature,
@@ -1597,7 +1703,7 @@ class BudgetHelperTests(unittest.TestCase):
             signature = ("sessions", 1, "day", "week")
 
             self.assertFalse(
-                cli_module._renderer_should_refresh_budget_aggregate(
+                runtime_orchestration._renderer_should_refresh_budget_aggregate(
                     latest_snapshot=snapshot,
                     latest_budget_signature=signature,
                     budget_signature=signature,
@@ -1616,7 +1722,7 @@ class BudgetHelperTests(unittest.TestCase):
             signature = ("sessions", 1, "day", "week")
 
             self.assertTrue(
-                cli_module._renderer_should_refresh_budget_aggregate(
+                runtime_orchestration._renderer_should_refresh_budget_aggregate(
                     latest_snapshot=snapshot,
                     latest_budget_signature=signature,
                     budget_signature=signature,
@@ -1659,10 +1765,10 @@ class BudgetHelperTests(unittest.TestCase):
             )
 
             with patch(
-                "codex_usage_hud.cli.active_work_items_for_snapshot",
+                "codex_usage_hud.runtime_snapshot_service.active_work_items_for_snapshot",
                 return_value=[],
             ) as active_work:
-                result = cli_module.build_snapshot(
+                result = runtime_snapshot_service.build_snapshot(
                     context,
                     refresh_budget_aggregate=False,
                     refresh_active_work_items=False,
@@ -1710,7 +1816,7 @@ class BudgetHelperTests(unittest.TestCase):
                 budget_thresholds=[],
             )
 
-            cli_module.build_snapshot(
+            runtime_snapshot_service.build_snapshot(
                 context,
                 refresh_budget_aggregate=False,
                 refresh_budget_paths=(other_path,),
@@ -1758,7 +1864,7 @@ class BudgetHelperTests(unittest.TestCase):
                 budget_thresholds=[],
             )
 
-            result = cli_module.build_snapshot(
+            result = runtime_snapshot_service.build_snapshot(
                 context,
                 refresh_budget_aggregate=False,
                 refresh_active_work_items=False,
@@ -1810,7 +1916,7 @@ class BudgetHelperTests(unittest.TestCase):
                 budget_thresholds=[],
             )
 
-            result = cli_module.build_snapshot(
+            result = runtime_snapshot_service.build_snapshot(
                 context,
                 refresh_budget_aggregate=False,
                 refresh_active_work_items=False,
@@ -1864,7 +1970,7 @@ class BudgetHelperTests(unittest.TestCase):
                 pre_send_estimator=None,
             )
 
-            result = cli_module.build_snapshot(
+            result = runtime_snapshot_service.build_snapshot(
                 context,
                 refresh_budget_aggregate=False,
                 refresh_active_work_items=False,
@@ -1917,8 +2023,8 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(complete.session_id, "thread-1")
 
     def test_session_cache_preview_preserves_complete_cost_during_append(self) -> None:
-        estimator = cli_module.CostEstimator(
-            cli_module.UsageCalculator(
+        estimator = CostEstimator(
+            UsageCalculator(
                 {
                     "gpt-5": {
                         "input": 1,
@@ -2013,7 +2119,7 @@ class BudgetHelperTests(unittest.TestCase):
             follow_timing={"observedAt": 1},
         )
 
-        cloned = cli_module._clone_cached_session_snapshot(source)
+        cloned = runtime_orchestration._clone_cached_session_snapshot(source)
 
         self.assertIs(cloned.request_history, history)
         self.assertIsNot(cloned.request, source.request)
@@ -2063,8 +2169,14 @@ class BudgetHelperTests(unittest.TestCase):
                 runtime_errors=registry,
             )
 
-            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root):
-                cli_module.build_snapshot(
+            with patch.object(
+                runtime_diagnostics,
+                "_renderer_sink",
+                runtime_diagnostics.JsonlDiagnosticSink(
+                    lambda: root / "renderer_fallback.log"
+                ),
+            ):
+                runtime_snapshot_service.build_snapshot(
                     context,
                     refresh_budget_aggregate=False,
                     refresh_active_work_items=False,
@@ -2127,7 +2239,7 @@ class BudgetHelperTests(unittest.TestCase):
                 activity_monitor=None,
             )
 
-            snapshot = cli_module.build_snapshot(
+            snapshot = runtime_snapshot_service.build_snapshot(
                 context,
                 refresh_budget_aggregate=False,
                 refresh_active_work_items=False,
@@ -2173,7 +2285,7 @@ class BudgetHelperTests(unittest.TestCase):
                     activity_monitor=None,
                 )
 
-                snapshot = cli_module.build_snapshot(
+                snapshot = runtime_snapshot_service.build_snapshot(
                     context,
                     refresh_budget_aggregate=False,
                     refresh_active_work_items=False,
@@ -2197,12 +2309,11 @@ class BudgetHelperTests(unittest.TestCase):
                 active_session_tracker=tracker,
             )
 
-            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root):
-                cli_module._record_active_session_runtime_error(
-                    context,
-                    "renderer-pending-session",
-                    None,
-                )
+            runtime_snapshot_service._record_active_session_runtime_error(
+                context,
+                "renderer-pending-session",
+                None,
+            )
 
             payload = registry.to_payload()
 
@@ -2226,8 +2337,14 @@ class BudgetHelperTests(unittest.TestCase):
                 timeout_seconds=0.45,
             )
 
-            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root):
-                cli_module._record_cdp_update_failure(context, client, failures=2)
+            with patch.object(
+                runtime_diagnostics,
+                "_renderer_sink",
+                runtime_diagnostics.JsonlDiagnosticSink(
+                    lambda: root / "renderer_fallback.log"
+                ),
+            ):
+                runtime_snapshot_service._record_cdp_update_failure(context, client, failures=2)
                 diagnostic = (root / "renderer_fallback.log").read_text(
                     encoding="utf-8"
                 )
@@ -2263,7 +2380,7 @@ class BudgetHelperTests(unittest.TestCase):
             signature = ("sessions", 1, "day", "week")
 
             self.assertTrue(
-                cli_module._renderer_should_refresh_budget_aggregate(
+                runtime_orchestration._renderer_should_refresh_budget_aggregate(
                     latest_snapshot=snapshot,
                     latest_budget_signature=signature,
                     budget_signature=signature,
@@ -2517,10 +2634,10 @@ class BudgetHelperTests(unittest.TestCase):
 
             items = active_work_items_for_snapshot(context, snapshot, current)
             with patch(
-                "codex_usage_hud.cli._recent_session_files",
+                "codex_usage_hud.active_work._recent_session_files",
                 return_value=[current],
             ), patch(
-                "codex_usage_hud.cli._select_runtime_work_overlay_items",
+                "codex_usage_hud.active_work._select_runtime_work_overlay_items",
                 side_effect=lambda _context, candidates, **_kwargs: [
                     item for item in candidates if item.id == "session-current"
                 ],
@@ -2625,23 +2742,23 @@ class BudgetHelperTests(unittest.TestCase):
             app_provider="custom",
         )
 
-        initial = cli_module._stabilize_published_work_overlay_items(
+        initial = overlay_projection._stabilize_published_work_overlay_items(
             context,
             [older, newer],
         )
-        retained = cli_module._stabilize_published_work_overlay_items(
+        retained = overlay_projection._stabilize_published_work_overlay_items(
             context,
             [older],
         )
         preview_newer = replace(newer, session_started_at=now)
-        refreshed = cli_module._stabilize_published_work_overlay_items(
+        refreshed = overlay_projection._stabilize_published_work_overlay_items(
             context,
             [older, preview_newer],
         )
         context._work_overlay_terminal_item_tasks[newer.id] = (
             newer.task_started_at.isoformat()
         )
-        after_terminal = cli_module._stabilize_published_work_overlay_items(
+        after_terminal = overlay_projection._stabilize_published_work_overlay_items(
             context,
             [older],
         )
@@ -2683,7 +2800,7 @@ class BudgetHelperTests(unittest.TestCase):
         completed.request.updated_at = now
         context = SimpleNamespace(user_config=UserConfig.defaults(), app_provider="custom")
 
-        refreshed = cli_module._refresh_visible_current_work_item(
+        refreshed = active_work._refresh_visible_current_work_item(
             context,
             [stale],
             completed,
@@ -2724,13 +2841,13 @@ class BudgetHelperTests(unittest.TestCase):
             app_provider="custom",
         )
 
-        cli_module._stabilize_published_work_overlay_items(context, [completed])
-        stabilized = cli_module._stabilize_published_work_overlay_items(
+        overlay_projection._stabilize_published_work_overlay_items(context, [completed])
+        stabilized = overlay_projection._stabilize_published_work_overlay_items(
             context,
             [stale_running],
         )
         resumed_at = now + timedelta(seconds=1)
-        resumed = cli_module._stabilize_published_work_overlay_items(
+        resumed = overlay_projection._stabilize_published_work_overlay_items(
             context,
             [
                 replace(
@@ -3238,7 +3355,7 @@ class BudgetHelperTests(unittest.TestCase):
             overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
             overlay.take_commands = MagicMock(return_value=[])
             overlay.mark_switch_completed = MagicMock()
-            session_controller = MagicMock()
+            command_handler = MagicMock(return_value=0)
             watchers: list[object] = []
 
             class FakeWatcher:
@@ -3255,13 +3372,12 @@ class BudgetHelperTests(unittest.TestCase):
                 def close(self) -> None:
                     self.closed = True
 
-            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
-                pump = cli_module._WorkOverlayCommandPump(
-                    overlay,
-                    session_controller,
-                    poll_ms=60,
-                )
-                pump.start()
+            pump = WorkOverlayCommandPump(
+                overlay,
+                command_handler,
+                watcher_factory=FakeWatcher,
+            )
+            pump.start()
 
             self.assertEqual(len(watchers), 1)
             watcher = watchers[0]
@@ -3269,10 +3385,10 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(len(watcher.specs), 1)
             self.assertEqual(watcher.specs[0].path, overlay._command_path)
             self.assertEqual(watcher.specs[0].reason, "work-overlay-command")
-            overlay.take_commands.assert_called_once()
+            command_handler.assert_called_once()
 
             watcher.callback({"work-overlay-command"}, {overlay._command_path})
-            self.assertEqual(overlay.take_commands.call_count, 2)
+            self.assertEqual(command_handler.call_count, 2)
 
             pump.close()
             self.assertTrue(watcher.closed)
@@ -3297,7 +3413,7 @@ class BudgetHelperTests(unittest.TestCase):
         )
         session_controller = MagicMock()
 
-        handled = cli_module._handle_work_overlay_commands(
+        handled = overlay_runtime._handle_work_overlay_commands(
             overlay,
             session_controller,
             runtime_events=runtime_events,
@@ -3345,10 +3461,10 @@ class BudgetHelperTests(unittest.TestCase):
         runtime_events = RuntimeEventBus(clock=lambda: 123.0)
 
         with patch(
-            "codex_usage_hud.cli._refocus_codex_window_after_work_overlay_switch",
+            "codex_usage_hud.overlay_runtime._refocus_codex_window_after_work_overlay_switch",
             return_value=(True, "visible", "", 123),
         ) as refocus:
-            handled = cli_module._handle_work_overlay_commands(
+            handled = overlay_runtime._handle_work_overlay_commands(
                 overlay,
                 session_controller,
                 runtime_events=runtime_events,
@@ -3384,7 +3500,7 @@ class BudgetHelperTests(unittest.TestCase):
         callback = MagicMock(return_value=True)
         runtime_events = RuntimeEventBus(clock=lambda: 123.0)
 
-        handled = cli_module._handle_work_overlay_commands(
+        handled = overlay_runtime._handle_work_overlay_commands(
             overlay,
             session_controller,
             runtime_events=runtime_events,
@@ -3407,7 +3523,7 @@ class BudgetHelperTests(unittest.TestCase):
             runtime_events = RuntimeEventBus(clock=lambda: 150.0)
             registry = RuntimeErrorRegistry(clock=lambda: 150.0)
             context = SimpleNamespace(runtime_errors=registry)
-            cli_module._ensure_runtime_error_diagnostics(context)
+            runtime_snapshot_service._ensure_runtime_error_diagnostics(context)
             overlay = SimpleNamespace(
                 command_path=root / "work-overlay-commands.jsonl",
                 take_commands=MagicMock(
@@ -3425,8 +3541,12 @@ class BudgetHelperTests(unittest.TestCase):
             )
             session_controller = MagicMock()
 
-            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root):
-                handled = cli_module._handle_work_overlay_commands(
+            with patch.object(
+                runtime_diagnostics,
+                "_renderer_sink",
+                _renderer_diagnostic_sink_for_test(root),
+            ):
+                handled = overlay_runtime._handle_work_overlay_commands(
                     overlay,
                     session_controller,
                     runtime_events=runtime_events,
@@ -3467,42 +3587,49 @@ class BudgetHelperTests(unittest.TestCase):
         )
         session_controller = SimpleNamespace(
             activate_session=MagicMock(
-                return_value=SessionSwitchResult(
-                    ok=True,
-                    status="switched",
-                    backend="cdp",
-                    requested_session_id="thread-1",
-                    requested_title="Thread One",
-                    active_title="Thread One",
-                )
+                side_effect=[
+                    SessionSwitchResult(
+                        ok=False,
+                        status="cdp-error",
+                        backend="cdp",
+                        requested_session_id="thread-1",
+                        requested_title="Thread One",
+                    ),
+                    SessionSwitchResult(
+                        ok=True,
+                        status="switched",
+                        backend="cdp",
+                        requested_session_id="thread-1",
+                        requested_title="Thread One",
+                        active_title="Thread One",
+                    ),
+                ]
             )
         )
-        pump = _WorkOverlayCommandPump(overlay, session_controller)
-
         with patch(
-            "codex_usage_hud.cli._prepare_codex_window_for_standalone",
+            "codex_usage_hud.overlay_runtime._prepare_codex_window_for_work_overlay_switch",
             return_value=(True, "visible", "", 321),
         ) as prepare_window:
-            handled = pump.drain_once()
+            handled = overlay_runtime._handle_work_overlay_commands(
+                overlay,
+                session_controller,
+            )
 
         self.assertEqual(handled, 1)
         overlay.take_commands.assert_called_once()
         overlay.mark_switch_completed.assert_called_once_with(command)
-        session_controller.activate_session.assert_called_once_with(
+        self.assertEqual(session_controller.activate_session.call_count, 2)
+        session_controller.activate_session.assert_called_with(
             session_id="thread-1",
             title="Thread One",
             workdir="",
         )
-        self.assertEqual(prepare_window.call_count, 1)
-        self.assertEqual(
-            prepare_window.call_args_list[0].kwargs["timeout_seconds"],
-            cli_module.WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS,
-        )
+        prepare_window.assert_called_once_with()
 
     def test_cli_work_overlay_command_never_activates_app_session(self) -> None:
         session_controller = SimpleNamespace(activate_session=MagicMock())
 
-        result = cli_module._handle_work_overlay_command(
+        result = overlay_runtime._handle_work_overlay_command(
             {
                 "action": "activateSession",
                 "sessionId": "cli-thread",
@@ -3567,10 +3694,10 @@ class BudgetHelperTests(unittest.TestCase):
         activation_meta: dict[str, object] = {}
 
         with patch(
-            "codex_usage_hud.cli._prepare_codex_window_for_work_overlay_switch",
+            "codex_usage_hud.overlay_runtime._prepare_codex_window_for_work_overlay_switch",
             return_value=(True, "visible", "", 321),
         ) as prepare_window:
-            result = cli_module._handle_work_overlay_command(
+            result = overlay_runtime._handle_work_overlay_command(
                 command,
                 session_controller,
                 activation_meta=activation_meta,
@@ -3609,7 +3736,7 @@ class BudgetHelperTests(unittest.TestCase):
         )
         runtime_events = RuntimeEventBus()
 
-        handled = cli_module._handle_work_overlay_commands(
+        handled = overlay_runtime._handle_work_overlay_commands(
             overlay,
             session_controller,
             prepare_window=False,
@@ -3657,7 +3784,7 @@ class BudgetHelperTests(unittest.TestCase):
         )
         runtime_events = RuntimeEventBus()
 
-        cli_module._handle_work_overlay_commands(
+        overlay_runtime._handle_work_overlay_commands(
             overlay,
             session_controller,
             prepare_window=True,
@@ -3688,15 +3815,15 @@ class BudgetHelperTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli._prepare_codex_window_for_standalone",
+                "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_standalone",
                 return_value=(True, "visible", "", 321),
             ) as prepare_window,
             patch(
-                "codex_usage_hud.cli._refocus_codex_window_after_current_session_click",
+                "codex_usage_hud.overlay_runtime._refocus_codex_window_after_current_session_click",
                 return_value=(True, "visible", "", 321),
             ) as refocus_window,
         ):
-            cli_module._handle_work_overlay_command(
+            overlay_runtime._handle_work_overlay_command(
                 {
                     "action": "activateSession",
                     "sessionId": "thread-1",
@@ -3718,9 +3845,9 @@ class BudgetHelperTests(unittest.TestCase):
     def test_work_overlay_switch_activates_codex_on_macos(self) -> None:
         with (
             patch.object(sys, "platform", "darwin"),
-            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch,
+            patch("codex_usage_hud.overlay_commands.launch_codex_app", return_value=True) as launch,
         ):
-            result = cli_module._prepare_codex_window_for_work_overlay_switch()
+            result = overlay_runtime._prepare_codex_window_for_work_overlay_switch()
 
         self.assertEqual(result, (True, "activated", "", 0))
         launch.assert_called_once_with(debugger=False)
@@ -3732,7 +3859,7 @@ class BudgetHelperTests(unittest.TestCase):
             overlay._state_path = root / "work-overlay-123-1.json"
             overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
 
-            with patch("codex_usage_hud.cli.write_json_object") as write_json:
+            with patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json:
                 overlay._write_state([{"id": "thread-1"}], close=False)
 
             write_json.assert_called_once()
@@ -3745,7 +3872,7 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertEqual(payload_arg["itemLimit"], 2)
             self.assertFalse(payload_arg["close"])
 
-    def test_desktop_work_overlay_starts_with_empty_initial_payload(self) -> None:
+    def test_desktop_work_overlay_does_not_start_with_empty_initial_payload(self) -> None:
         overlay = DesktopWorkOverlay(item_limit=2)
         helper = SimpleNamespace(poll=MagicMock(return_value=None))
 
@@ -3756,12 +3883,13 @@ class BudgetHelperTests(unittest.TestCase):
             patch.object(overlay, "_runtime_available", return_value=True),
             patch.object(overlay, "_theme_payload", return_value={}),
             patch.object(overlay, "_start", side_effect=start_helper) as start,
-            patch("codex_usage_hud.cli.write_json_object") as write_json,
+            patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
         ):
             overlay.update([])
 
-        start.assert_called_once_with()
-        self.assertEqual(write_json.call_args.args[1]["items"], [])
+        start.assert_not_called()
+        write_json.assert_not_called()
+        self.assertEqual(overlay._last_payload_items, [])
 
     def test_desktop_rest_reminder_bypasses_zero_session_item_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3788,7 +3916,7 @@ class BudgetHelperTests(unittest.TestCase):
                 patch.object(overlay, "_runtime_available", return_value=True),
                 patch.object(overlay, "_theme_payload", return_value={}),
                 patch.object(overlay, "_start", side_effect=start_helper),
-                patch("codex_usage_hud.cli.write_json_object") as write_json,
+                patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
             ):
                 shown = overlay.update_rest_reminder(reminder)
 
@@ -3846,9 +3974,9 @@ class BudgetHelperTests(unittest.TestCase):
                 patch.object(
                     overlay,
                     "_wait_for_system_action_command",
-                    return_value={"action": cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY},
+                    return_value={"action": desktop_overlay_module.WORK_OVERLAY_SYSTEM_ACTION_READY},
                 ),
-                patch("codex_usage_hud.cli.write_json_object") as write_json,
+                patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
             ):
                 offered = overlay.offer_codex_restart(
                     title="需要重启 Codex",
@@ -3862,7 +3990,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["items"], [])
         self.assertEqual(
             payload["systemAction"]["action"],
-            cli_module.WORK_OVERLAY_RESTART_ACTION,
+            desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
         )
         self.assertTrue(payload["systemAction"]["persistent"])
 
@@ -3872,16 +4000,16 @@ class BudgetHelperTests(unittest.TestCase):
             overlay = DesktopWorkOverlay(item_limit=0)
             overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
             overlay._system_action = {
-                "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
-                "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                "id": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                "action": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
             }
             block_forever = threading.Event()
             overlay._process = SimpleNamespace(wait=block_forever.wait)
             overlay._command_path.write_text(
                 json.dumps(
                     {
-                        "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
-                        "actionId": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                        "action": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
+                        "actionId": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
                     }
                 )
                 + "\n",
@@ -3899,8 +4027,8 @@ class BudgetHelperTests(unittest.TestCase):
             overlay = DesktopWorkOverlay(item_limit=0)
             overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
             overlay._system_action = {
-                "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
-                "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                "id": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                "action": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
             }
             block_forever = threading.Event()
             overlay._process = SimpleNamespace(wait=block_forever.wait)
@@ -3909,12 +4037,12 @@ class BudgetHelperTests(unittest.TestCase):
                     json.dumps(command)
                     for command in (
                         {
-                            "action": cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY,
-                            "actionId": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                            "action": desktop_overlay_module.WORK_OVERLAY_SYSTEM_ACTION_READY,
+                            "actionId": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
                         },
                         {
-                            "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
-                            "actionId": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                            "action": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
+                            "actionId": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
                         },
                     )
                 )
@@ -3923,14 +4051,14 @@ class BudgetHelperTests(unittest.TestCase):
             )
 
             ready = overlay._wait_for_system_action_command(
-                {cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY},
+                {desktop_overlay_module.WORK_OVERLAY_SYSTEM_ACTION_READY},
                 timeout_seconds=0.1,
             )
             requested = overlay.wait_for_codex_restart_request()
 
         self.assertEqual(
             ready["action"],
-            cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY,
+            desktop_overlay_module.WORK_OVERLAY_SYSTEM_ACTION_READY,
         )
         self.assertTrue(requested)
 
@@ -3940,14 +4068,14 @@ class BudgetHelperTests(unittest.TestCase):
             overlay = DesktopWorkOverlay(item_limit=0)
             overlay._command_path = root / "work-overlay-123-1-commands.jsonl"
             overlay._system_action = {
-                "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
-                "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                "id": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                "action": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
             }
             overlay._process = SimpleNamespace(wait=lambda: None)
             overlay._command_path.write_text(
                 json.dumps(
                     {
-                        "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                        "action": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
                         "actionId": "stale-action",
                     }
                 )
@@ -3974,7 +4102,7 @@ class BudgetHelperTests(unittest.TestCase):
             patch.object(overlay, "_runtime_available", return_value=True),
             patch.object(overlay, "_theme_payload", return_value={"variant": "dark"}),
             patch.object(overlay, "_start"),
-            patch("codex_usage_hud.cli.write_json_object") as write_json,
+            patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
         ):
             overlay.update([item])
             overlay.update([item])
@@ -3992,16 +4120,14 @@ class BudgetHelperTests(unittest.TestCase):
 
         self.assertIn("QFileSystemWatcher", source)
         self.assertNotIn("poll_timer.start(WORK_OVERLAY_POLL_MS)", source)
-        self.assertIn("state_read = overlay.poll_state()", source)
+        self.assertIn("_refresh_overlay_state_from_event(", source)
+        self.assertIn("read_state=overlay.poll_state", source)
         self.assertIn("state_read_retry_timer.setSingleShot(True)", source)
         self.assertIn(
             "state_read_retry_timer.timeout.connect(refresh_state_from_watcher)",
             source,
         )
-        self.assertIn(
-            "state_read_retry_timer.start(WORK_OVERLAY_STATE_READ_RETRY_MS)",
-            source,
-        )
+        self.assertIn("start_retry=state_read_retry_timer.start", source)
 
     def test_work_overlay_helper_collects_completed_workdir_click_hotspot(self) -> None:
         source = (
@@ -4025,7 +4151,83 @@ class BudgetHelperTests(unittest.TestCase):
             WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS * 1000,
         )
 
+    def test_work_overlay_state_retry_policy_uses_fake_scheduling(self) -> None:
+        reads = iter([False, True])
+        retry_delays: list[int] = []
+        events: list[str] = []
+        retry_running = False
+        heartbeat_running = False
+
+        def start_retry(delay: int) -> None:
+            nonlocal retry_running
+            retry_running = True
+            retry_delays.append(delay)
+
+        def stop_retry() -> None:
+            nonlocal retry_running
+            retry_running = False
+            events.append("retry-stopped")
+
+        def start_heartbeat() -> None:
+            nonlocal heartbeat_running
+            heartbeat_running = True
+            events.append("heartbeat-started")
+
+        assert not _refresh_overlay_state_from_event(
+            read_state=lambda: next(reads),
+            retry_active=lambda: retry_running,
+            start_retry=start_retry,
+            stop_retry=stop_retry,
+            heartbeat_active=lambda: heartbeat_running,
+            start_heartbeat=start_heartbeat,
+            schedule_stale=lambda: events.append("stale-scheduled"),
+        )
+        assert retry_delays == [WORK_OVERLAY_STATE_READ_RETRY_MS]
+        assert events == []
+
+        assert _refresh_overlay_state_from_event(
+            read_state=lambda: next(reads),
+            retry_active=lambda: retry_running,
+            start_retry=start_retry,
+            stop_retry=stop_retry,
+            heartbeat_active=lambda: heartbeat_running,
+            start_heartbeat=start_heartbeat,
+            schedule_stale=lambda: events.append("stale-scheduled"),
+        )
+        assert events == ["retry-stopped", "heartbeat-started", "stale-scheduled"]
+
+    @pytest.mark.qt_ui
     def test_work_overlay_helper_retries_transient_state_read(self) -> None:
+        subprocess_marker = "CODEX_USAGE_HUD_QT_RETRY_SUBPROCESS"
+        if os.environ.get(subprocess_marker) != "1":
+            environment = os.environ.copy()
+            environment[subprocess_marker] = "1"
+            environment.setdefault("QT_QPA_PLATFORM", "offscreen")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "--rootdir",
+                    str(PROJECT_ROOT),
+                    "-p",
+                    "no:cacheprovider",
+                    f"{Path(__file__).relative_to(PROJECT_ROOT)}::{self.__class__.__name__}::{self._testMethodName}",
+                    "-q",
+                ],
+                cwd=PROJECT_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            return
+
         try:
             import PySide6  # noqa: F401
         except Exception as exc:
@@ -4091,7 +4293,38 @@ class BudgetHelperTests(unittest.TestCase):
             else:
                 os.environ["QT_QPA_PLATFORM"] = previous_platform
 
+    @pytest.mark.qt_ui
     def test_work_overlay_restart_action_survives_stale_state_and_clicks_once(self) -> None:
+        subprocess_marker = "CODEX_USAGE_HUD_QT_RESTART_ACTION_SUBPROCESS"
+        if os.environ.get(subprocess_marker) != "1":
+            environment = os.environ.copy()
+            environment[subprocess_marker] = "1"
+            environment.setdefault("QT_QPA_PLATFORM", "offscreen")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "--rootdir",
+                    str(PROJECT_ROOT),
+                    "-p",
+                    "no:cacheprovider",
+                    f"{Path(__file__).relative_to(PROJECT_ROOT)}::{self.__class__.__name__}::{self._testMethodName}",
+                    "-q",
+                ],
+                cwd=PROJECT_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            return
+
         try:
             from PySide6.QtCore import QPoint, QTimer, Qt
             from PySide6.QtTest import QTest
@@ -4112,8 +4345,8 @@ class BudgetHelperTests(unittest.TestCase):
                     "commandPath": str(command_path),
                     "items": [],
                     "systemAction": {
-                        "id": cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
-                        "action": cli_module.WORK_OVERLAY_RESTART_ACTION,
+                        "id": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
+                        "action": desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION,
                         "title": "需要重启 Codex",
                         "message": "保存当前工作后继续。",
                         "label": "重启 Codex",
@@ -4173,14 +4406,14 @@ class BudgetHelperTests(unittest.TestCase):
             self.assertTrue(observed_hotspots)
             self.assertEqual(
                 sum(
-                    command.get("action") == cli_module.WORK_OVERLAY_SYSTEM_ACTION_READY
+                    command.get("action") == desktop_overlay_module.WORK_OVERLAY_SYSTEM_ACTION_READY
                     for command in commands
                 ),
                 1,
             )
             self.assertEqual(
                 sum(
-                    command.get("action") == cli_module.WORK_OVERLAY_RESTART_ACTION
+                    command.get("action") == desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION
                     for command in commands
                 ),
                 1,
@@ -4514,7 +4747,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         ]
         overlay._last_theme_payload = {"variant": "dark"}
 
-        with patch("codex_usage_hud.cli.write_json_object") as write_json:
+        with patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json:
             marked = overlay.mark_switch_completed(
                 {
                     "action": "activateSession",
@@ -4563,7 +4796,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             patch.object(overlay, "_runtime_available", return_value=True),
             patch.object(overlay, "_theme_payload", return_value={}),
             patch.object(overlay, "_start"),
-            patch("codex_usage_hud.cli.write_json_object") as write_json,
+            patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
         ):
             self.assertTrue(
                 overlay.mark_switch_completed(
@@ -4591,8 +4824,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
         overlay = DesktopWorkOverlay(item_limit=2)
 
         with (
-            patch("codex_usage_hud.cli.importlib.util.find_spec", return_value=None),
-            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+            patch("codex_usage_hud.desktop_overlay.importlib.util.find_spec", return_value=None),
+            patch("codex_usage_hud.desktop_overlay._append_renderer_diagnostic") as diagnostic,
             patch.object(overlay, "_start") as start,
         ):
             overlay.update([item])
@@ -4623,8 +4856,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
             )
 
             with (
-                patch("codex_usage_hud.cli.importlib.util.find_spec", return_value=object()),
-                patch("codex_usage_hud.cli.subprocess.Popen", return_value=fake_process) as popen,
+                patch("codex_usage_hud.desktop_overlay.importlib.util.find_spec", return_value=object()),
+                patch("codex_usage_hud.desktop_overlay.subprocess.Popen", return_value=fake_process) as popen,
             ):
                 # The first HUD snapshot is historical persisted state and
                 # must not open a bubble; the following event may publish it.
@@ -4646,7 +4879,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             overlay = DesktopWorkOverlay(item_limit=2)
             overlay._state_path = root / "work-overlay-123-1.json"
-            heartbeat_path = cli_module._work_overlay_heartbeat_path(overlay._state_path)
+            heartbeat_path = runtime_orchestration._work_overlay_heartbeat_path(overlay._state_path)
             heartbeat_path.write_text("ready", encoding="utf-8")
             overlay._refresh_helper_heartbeat()
 
@@ -4669,7 +4902,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             patch.object(overlay, "_start") as start,
         ):
             overlay._ensure_helper_healthy(
-                100.0 + cli_module.WORK_OVERLAY_HELPER_HEARTBEAT_TIMEOUT_SECONDS
+                100.0 + desktop_overlay_module.WORK_OVERLAY_HELPER_HEARTBEAT_TIMEOUT_SECONDS
             )
 
         process.terminate.assert_called_once()
@@ -4687,8 +4920,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         with (
             patch(
-                "codex_usage_hud.cli._windows_user_object_count",
-                return_value=cli_module.WORK_OVERLAY_HELPER_MAX_USER_OBJECTS,
+                "codex_usage_hud.desktop_overlay._windows_user_object_count",
+                return_value=desktop_overlay_module.WORK_OVERLAY_HELPER_MAX_USER_OBJECTS,
             ),
             patch.object(overlay, "_restart_unresponsive_helper") as restart,
         ):
@@ -4698,7 +4931,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             process,
             unittest.mock.ANY,
             reason=(
-                f"user_objects={cli_module.WORK_OVERLAY_HELPER_MAX_USER_OBJECTS}"
+                f"user_objects={desktop_overlay_module.WORK_OVERLAY_HELPER_MAX_USER_OBJECTS}"
             ),
         )
 
@@ -4717,7 +4950,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             patch.object(overlay, "_runtime_available", return_value=True),
             patch.object(overlay, "_theme_payload", return_value={}),
             patch.object(overlay, "_start"),
-            patch("codex_usage_hud.cli.write_json_object") as write_json,
+            patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
         ):
             overlay.update([item])
             write_json.assert_not_called()
@@ -4752,7 +4985,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
             patch.object(overlay, "_runtime_available", return_value=True),
             patch.object(overlay, "_theme_payload", return_value={}),
             patch.object(overlay, "_start"),
-            patch("codex_usage_hud.cli.write_json_object") as write_json,
+            patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
         ):
             overlay.update([session_item, background_item])
 
@@ -4773,8 +5006,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
             overlay._process = SimpleNamespace(poll=MagicMock(return_value=None))
 
             with (
-                patch("codex_usage_hud.cli.time.monotonic", return_value=17.0),
-                patch("codex_usage_hud.cli.write_json_object") as write_json,
+                patch("codex_usage_hud.desktop_overlay.time.monotonic", return_value=17.0),
+                patch("codex_usage_hud.desktop_overlay.write_json_object") as write_json,
                 patch.object(overlay, "_start") as start,
             ):
                 overlay.keep_alive()
@@ -4789,12 +5022,12 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
     def test_desktop_work_overlay_keep_alive_uses_conservative_idle_interval(self) -> None:
         self.assertGreaterEqual(
-            cli_module.WORK_OVERLAY_KEEPALIVE_SECONDS,
-            cli_module.WORK_OVERLAY_STALE_SECONDS * 0.5,
+            desktop_overlay_module.WORK_OVERLAY_KEEPALIVE_SECONDS,
+            runtime_orchestration.WORK_OVERLAY_STALE_SECONDS * 0.5,
         )
         self.assertLess(
-            cli_module.WORK_OVERLAY_KEEPALIVE_SECONDS,
-            cli_module.WORK_OVERLAY_STALE_SECONDS,
+            desktop_overlay_module.WORK_OVERLAY_KEEPALIVE_SECONDS,
+            runtime_orchestration.WORK_OVERLAY_STALE_SECONDS,
         )
 
     def test_desktop_work_overlay_keep_alive_restarts_clean_helper_exit(self) -> None:
@@ -4812,10 +5045,10 @@ with tempfile.TemporaryDirectory() as temp_dir:
             )
 
             with (
-                patch("codex_usage_hud.cli.time.monotonic", return_value=17.0),
-                patch("codex_usage_hud.cli.write_json_object"),
+                patch("codex_usage_hud.desktop_overlay.time.monotonic", return_value=17.0),
+                patch("codex_usage_hud.desktop_overlay.write_json_object"),
                 patch.object(overlay, "_start") as start,
-                patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+                patch("codex_usage_hud.desktop_overlay._append_renderer_diagnostic") as diagnostic,
             ):
                 overlay.keep_alive()
 
@@ -4875,14 +5108,14 @@ with tempfile.TemporaryDirectory() as temp_dir:
     def test_loading_feedback_writes_state_with_atomic_json_helper(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            feedback = cli_module.HudLoadingFeedback(
+            feedback = HudLoadingFeedback(
                 "Switching HUD",
                 "Opening Tk overlay...",
                 enabled=True,
             )
             feedback._state_path = root / "loading-123-1.json"
 
-            with patch("codex_usage_hud.cli.write_json_object") as write_json:
+            with patch("codex_usage_hud.loading_feedback.write_json_object") as write_json:
                 feedback._write_state(close=True)
 
             write_json.assert_called_once()
@@ -4896,13 +5129,13 @@ with tempfile.TemporaryDirectory() as temp_dir:
     def test_loading_feedback_consumes_restart_request_from_start_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            feedback = cli_module.HudLoadingFeedback(
+            feedback = HudLoadingFeedback(
                 "还差一步：重启 Codex",
                 "准备好后点击按钮继续。",
                 enabled=True,
             )
             feedback._state_path = root / "loading-123-1.json"
-            feedback._restart_request_path = cli_module._loading_feedback_restart_path(
+            feedback._restart_request_path = loading_feedback._loading_feedback_restart_path(
                 feedback._state_path
             )
             feedback._restart_request_path.write_text(
@@ -4917,13 +5150,13 @@ with tempfile.TemporaryDirectory() as temp_dir:
     def test_loading_feedback_restart_wait_uses_file_change_watcher(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            feedback = cli_module.HudLoadingFeedback(
+            feedback = HudLoadingFeedback(
                 "还差一步：重启 Codex",
                 "准备好后点击按钮继续。",
                 enabled=True,
             )
             feedback._state_path = root / "loading-123-1.json"
-            feedback._restart_request_path = cli_module._loading_feedback_restart_path(
+            feedback._restart_request_path = loading_feedback._loading_feedback_restart_path(
                 feedback._state_path
             )
             helper_exit = threading.Event()
@@ -4952,21 +5185,21 @@ with tempfile.TemporaryDirectory() as temp_dir:
                 def close(self):
                     self.closed = True
 
-            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
+            with patch("codex_usage_hud.loading_feedback.FileChangeWatcher", FakeWatcher):
                 requested = feedback.wait_for_codex_restart_request()
 
         self.assertTrue(requested)
         watcher = created[0]
         self.assertEqual(
             watcher.kwargs["fallback_poll_seconds"],
-            cli_module.WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS,
+            desktop_overlay_module.WORK_OVERLAY_COMMAND_FALLBACK_POLL_SECONDS,
         )
         self.assertEqual(watcher.specs[0].path, feedback._restart_request_path)
         self.assertTrue(watcher.closed)
 
     def test_loading_feedback_uses_renderer_bubble_top_right_geometry(self) -> None:
         self.assertEqual(
-            cli_module._loading_feedback_top_right_geometry(
+            loading_feedback._loading_feedback_top_right_geometry(
                 screen_width=1920,
                 screen_height=1080,
                 width=228,
@@ -4983,21 +5216,20 @@ with tempfile.TemporaryDirectory() as temp_dir:
                 '{"ownerPid":123,"restartVisible":true}',
                 encoding="utf-8",
             )
-            old = time.time() - cli_module.LOADING_FEEDBACK_STALE_SECONDS - 5.0
+            old = time.time() - LOADING_FEEDBACK_STALE_SECONDS - 5.0
             os.utime(state_path, (old, old))
 
-            with (
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root),
-                patch("codex_usage_hud.cli._process_exists", return_value=True),
-            ):
-                cleanup_stale_loading_feedback_files()
+            cleanup_stale_loading_feedback_files(
+                runtime_dir=lambda: root,
+                process_exists=lambda _pid: True,
+            )
 
             self.assertTrue(state_path.exists())
 
     def test_no_startup_prompt_flag_does_not_hide_restart_card(self) -> None:
         with patch.object(sys, "platform", "win32"):
             self.assertTrue(
-                cli_module._loading_feedback_enabled(
+                loading_feedback._loading_feedback_enabled(
                     SimpleNamespace(no_startup_prompt=True)
                 )
             )
@@ -5016,8 +5248,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
             def __init__(self, platform: object) -> None:
                 self.platform = platform
 
-        with patch("codex_usage_hud.cli.CdpSessionSwitchBackend", FakeCdpBackend), patch(
-            "codex_usage_hud.cli.WindowsSearchSessionSwitchBackend",
+        with patch("codex_usage_hud.overlay_commands.CdpSessionSwitchBackend", FakeCdpBackend), patch(
+            "codex_usage_hud.overlay_commands.WindowsSearchSessionSwitchBackend",
             FakeNativeBackend,
         ), patch.dict(os.environ, {"CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH": ""}, clear=False):
             controller = _build_session_switch_controller(
@@ -5040,8 +5272,8 @@ with tempfile.TemporaryDirectory() as temp_dir:
                 ["windows-search", "cdp"],
             )
 
-        with patch("codex_usage_hud.cli.CdpSessionSwitchBackend", FakeCdpBackend), patch(
-            "codex_usage_hud.cli.WindowsSearchSessionSwitchBackend",
+        with patch("codex_usage_hud.overlay_commands.CdpSessionSwitchBackend", FakeCdpBackend), patch(
+            "codex_usage_hud.overlay_commands.WindowsSearchSessionSwitchBackend",
             FakeNativeBackend,
         ), patch.dict(os.environ, {"CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH": "off"}, clear=False):
             disabled = _build_session_switch_controller(
@@ -5318,14 +5550,14 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
     def test_renderer_retries_unapplied_current_selection_sequence(self) -> None:
         self.assertTrue(
-            cli_module._renderer_active_session_observation_should_refresh(
+            runtime_orchestration._renderer_active_session_observation_should_refresh(
                 changed=False,
                 selection_seq=7,
                 tracker=SimpleNamespace(selection_seq=7),
             )
         )
         self.assertFalse(
-            cli_module._renderer_active_session_observation_should_refresh(
+            runtime_orchestration._renderer_active_session_observation_should_refresh(
                 changed=False,
                 selection_seq=6,
                 tracker=SimpleNamespace(selection_seq=7),
@@ -5336,7 +5568,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self,
     ) -> None:
         self.assertTrue(
-            cli_module._renderer_should_use_visible_first_active_session(
+            runtime_orchestration._renderer_should_use_visible_first_active_session(
                 active_session_requested=True,
                 latest_snapshot=ParsedSession(),
                 has_command=False,
@@ -5347,14 +5579,14 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
     def test_renderer_defers_active_work_until_selection_quiet_window(self) -> None:
         self.assertFalse(
-            cli_module._renderer_deferred_active_work_refresh_due(
+            runtime_orchestration._renderer_deferred_active_work_refresh_due(
                 pending=True,
                 not_before=11.2,
                 now_monotonic=11.1,
             )
         )
         self.assertTrue(
-            cli_module._renderer_deferred_active_work_refresh_due(
+            runtime_orchestration._renderer_deferred_active_work_refresh_due(
                 pending=True,
                 not_before=11.2,
                 now_monotonic=11.2,
@@ -5362,20 +5594,23 @@ with tempfile.TemporaryDirectory() as temp_dir:
         )
 
     def test_renderer_active_work_pump_returns_sequence_bound_result(self) -> None:
+        from codex_usage_hud.active_work import RendererActiveWorkPump
+
         wake = threading.Event()
         snapshot = ParsedSession(selection_seq=12)
         expected_items = [SimpleNamespace(id="work-1")]
-        with patch(
-            "codex_usage_hud.cli.active_work_items_for_snapshot",
-            return_value=expected_items,
-        ) as build_items:
-            pump = cli_module._RendererActiveWorkPump(SimpleNamespace(), wake)
-            try:
-                self.assertTrue(pump.request(snapshot, Path("session.jsonl")))
-                self.assertTrue(wake.wait(1.0))
-                self.assertEqual(pump.take_latest(), (12, expected_items))
-            finally:
-                pump.close()
+        build_items = MagicMock(return_value=expected_items)
+        pump = RendererActiveWorkPump(
+            SimpleNamespace(),
+            wake,
+            build_items=build_items,
+        )
+        try:
+            self.assertTrue(pump.request(snapshot, Path("session.jsonl")))
+            self.assertTrue(wake.wait(1.0))
+            self.assertEqual(pump.take_latest(), (12, expected_items))
+        finally:
+            pump.close()
         build_items.assert_called_once()
 
     def test_work_overlay_recent_item_keeps_last_output_text(self) -> None:
@@ -6079,7 +6314,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self.assertEqual(items[0].elapsed_text, "已处理 1m00s")
         self.assertEqual(items[0].cache_hit_text, "25%")
 
-    def test_overlay_items_keep_completed_first_and_active_sessions_newest_first(self) -> None:
+    def test_overlay_items_keep_active_sessions_ahead_of_completed_history(self) -> None:
         completed_latest = {
             "id": "session-completed-latest",
             "status": "recent",
@@ -6114,10 +6349,10 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self.assertEqual(
             [item["id"] for item in ordered],
             [
-                "session-completed-oldest",
-                "session-completed-latest",
                 "session-active-latest",
                 "session-active-oldest",
+                "session-completed-oldest",
+                "session-completed-latest",
             ],
         )
 
@@ -6145,7 +6380,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         self.assertEqual([item["id"] for item in visible], [active["id"]])
 
-    def test_current_task_survives_live_like_six_item_limit(self) -> None:
+    def test_active_cli_task_survives_live_like_six_item_limit(self) -> None:
         background_usage = [
             {
                 "id": f"background-{index}",
@@ -6172,6 +6407,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         other_active = {
             "id": "other-session",
             "status": "running",
+            "clientKind": "cli",
             "sessionStartedAt": "2026-07-20T11:00:00+08:00",
         }
 
@@ -6182,7 +6418,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
         self.assertEqual(ordered[0]["id"], current["id"])
         self.assertIn(current["id"], [item["id"] for item in visible])
-        self.assertNotIn(other_active["id"], [item["id"] for item in visible])
+        self.assertIn(other_active["id"], [item["id"] for item in visible])
 
     def test_completed_badge_hover_ignores_bounding_box_corner(self) -> None:
         self.assertFalse(
@@ -6632,7 +6868,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
     def test_work_overlay_helper_delegates_to_qt_runner(self) -> None:
         runner = MagicMock(return_value=7)
-        with patch("codex_usage_hud.cli._work_overlay_helper_qt", return_value=runner):
+        with patch("codex_usage_hud.desktop_overlay_setup._work_overlay_helper_qt", return_value=runner):
             exit_code = run_work_overlay_helper("overlay-state.json")
 
         self.assertEqual(exit_code, 7)
@@ -6731,11 +6967,11 @@ with tempfile.TemporaryDirectory() as temp_dir:
 
             with (
                 patch(
-                    "codex_usage_hud.cli._read_persisted_renderer_cdp_port",
+                    "codex_usage_hud.runtime_orchestration._read_persisted_renderer_cdp_port",
                     return_value=61100,
                 ),
                 patch(
-                    "codex_usage_hud.cli.remove_renderer_hud_from_pages"
+                    "codex_usage_hud.runtime_orchestration.remove_renderer_hud_from_pages"
                 ) as remove_renderer,
             ):
                 stop_running_hud(path)
@@ -10005,7 +10241,7 @@ class TokenHudWindowLifecycleTests(unittest.TestCase):
 
         self.assertIn("class _SettingsComboBox(QComboBox):", qt_source)
         self.assertEqual(qt_source.count("_SettingsComboBox()"), 3)
-        self.assertIn('root.addEventListener("wheel"', renderer_source)
+        self.assertIn('rootScope.listen(root, "wheel"', renderer_source)
         self.assertIn("select[data-setting-key]", renderer_source)
         self.assertIn("passive: false", renderer_source)
 
@@ -12568,7 +12804,7 @@ class TkSnapshotPumpTests(unittest.TestCase):
             release.wait(1.0)
             return ParsedSession(status="parsed")
 
-        with patch("codex_usage_hud.cli.build_snapshot", side_effect=slow_build):
+        with patch("codex_usage_hud.runtime_snapshot_service.build_snapshot", side_effect=slow_build):
             pump = _TkSnapshotPump(context)
             try:
                 self.assertTrue(pump.request_refresh())
@@ -12584,7 +12820,7 @@ class TkSnapshotPumpTests(unittest.TestCase):
         context = SimpleNamespace(reload_user_config=MagicMock())
 
         with patch(
-            "codex_usage_hud.cli.build_snapshot",
+            "codex_usage_hud.runtime_snapshot_service.build_snapshot",
             side_effect=RuntimeError("boom"),
         ):
             pump = _TkSnapshotPump(context)
@@ -12614,7 +12850,7 @@ class TkSnapshotPumpTests(unittest.TestCase):
             release.wait(1.0)
             return ParsedSession(status="parsed")
 
-        with patch("codex_usage_hud.cli.build_snapshot", side_effect=slow_build):
+        with patch("codex_usage_hud.runtime_snapshot_service.build_snapshot", side_effect=slow_build):
             pump = _TkSnapshotPump(context)
             self.assertTrue(pump.request_refresh())
             self.assertTrue(started.wait(1.0))
@@ -12629,32 +12865,32 @@ class TkSnapshotPumpTests(unittest.TestCase):
 class DaemonLifecycleTests(unittest.TestCase):
     def test_background_usage_response_retry_is_bounded_and_typed(self) -> None:
         self.assertEqual(
-            cli_module.BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS,
+            runtime_settings.BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS,
             (0.15, 0.35, 0.75),
         )
         self.assertEqual(
-            cli_module._background_usage_response_retry_delay_seconds(1),
+            runtime_orchestration._background_usage_response_retry_delay_seconds(1),
             0.15,
         )
         self.assertEqual(
-            cli_module._background_usage_response_retry_delay_seconds(3),
+            runtime_orchestration._background_usage_response_retry_delay_seconds(3),
             0.75,
         )
         self.assertIsNone(
-            cli_module._background_usage_response_retry_delay_seconds(4)
+            runtime_orchestration._background_usage_response_retry_delay_seconds(4)
         )
         self.assertTrue(
-            cli_module._has_pending_background_usage_response(
+            runtime_orchestration._has_pending_background_usage_response(
                 {"backgroundUsageResponse": {"kind": "query", "requestId": "q-1"}}
             )
         )
         self.assertFalse(
-            cli_module._has_pending_background_usage_response(
+            runtime_orchestration._has_pending_background_usage_response(
                 {"backgroundUsageResponse": {"kind": "query", "requestId": ""}}
             )
         )
         self.assertFalse(
-            cli_module._has_pending_background_usage_response(
+            runtime_orchestration._has_pending_background_usage_response(
                 {"backgroundUsageResponse": {"kind": "unknown", "requestId": "q-1"}}
             )
         )
@@ -12790,7 +13026,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         context = SimpleNamespace(background_usage_runtime=runtime)
 
-        notification = cli_module._background_usage_notification_for_session(
+        notification = runtime_orchestration._background_usage_notification_for_session(
             context,
             "session-4",
         )
@@ -12814,7 +13050,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         context = SimpleNamespace(background_usage_runtime=runtime)
 
         self.assertEqual(
-            cli_module._background_usage_notification_for_session(
+            runtime_orchestration._background_usage_notification_for_session(
                 context,
                 "session-4",
             ),
@@ -12988,24 +13224,24 @@ class DaemonLifecycleTests(unittest.TestCase):
         context = SimpleNamespace(
             settings_store=settings_store,
             rest_reminder=presenter,
+            reload_user_config=MagicMock(),
         )
         settings = current.to_dict()
         settings["rest_reminder_timer_started_at_ms"] = 1_700_000_000_000
 
-        with patch("codex_usage_hud.cli._save_renderer_user_config") as save_config:
-            status = _handle_renderer_settings_command(
-                {
-                    "id": "rest-save-1",
-                    "action": "save",
-                    "section": "restReminder",
-                    "settings": settings,
-                },
-                context,
-                MagicMock(),
-                MagicMock(),
-            )
+        status = _handle_renderer_settings_command(
+            {
+                "id": "rest-save-1",
+                "action": "save",
+                "section": "restReminder",
+                "settings": settings,
+            },
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
 
-        save_config.assert_called_once()
+        settings_store.save.assert_called_once()
         presenter.adjust_cycle_started_at_ms.assert_called_once_with(
             1_700_000_000_000
         )
@@ -13116,7 +13352,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             cleanup_current_session_id="",
             cleanup_active_session_ids=set(),
         )
-        manager = cli_module._build_session_cleanup_manager(context)
+        manager = runtime_orchestration._build_session_cleanup_manager(context)
 
         self.assertEqual(manager.state_db_path, Path("state_5.sqlite"))
         self.assertEqual(manager.sessions_root, Path("sessions"))
@@ -13228,7 +13464,7 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli._desktop_overlay_dependency_status",
+                "codex_usage_hud.runtime_commands._desktop_overlay_dependency_status",
                 return_value={
                     "installed": False,
                     "canInstall": True,
@@ -13236,7 +13472,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                     "requiresRestart": False,
                 },
             ),
-            patch("codex_usage_hud.cli._start_desktop_overlay_install", return_value=True) as install,
+            patch("codex_usage_hud.runtime_commands._start_desktop_overlay_install", return_value=True) as install,
         ):
             status = _handle_renderer_settings_command(
                 {"action": "installDesktopOverlay"},
@@ -13268,7 +13504,7 @@ class DaemonLifecycleTests(unittest.TestCase):
 
             with (
                 patch(
-                    "codex_usage_hud.cli._desktop_overlay_dependency_status",
+                    "codex_usage_hud.runtime_commands._desktop_overlay_dependency_status",
                     return_value={
                         "installed": True,
                         "version": "6.8.1",
@@ -13277,7 +13513,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                         "requiresRestart": False,
                     },
                 ),
-                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.runtime_commands._work_overlay_screen_max_items", return_value=4),
             ):
                 status = _handle_renderer_settings_command(
                     {"action": "enableDesktopOverlay"},
@@ -13410,10 +13646,10 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_legacy_tk_hud_session_returns_renderer_only_unavailable(self) -> None:
         loading = SimpleNamespace(close=MagicMock())
 
-        with patch("codex_usage_hud.cli.HudInstanceLock") as instance_lock:
+        with patch("codex_usage_hud.instance_lock.HudInstanceLock") as instance_lock:
             exit_code = run_tk_hud_session(
                 SimpleNamespace(compact=False),
-                loading_feedback=loading,
+                loading_feedback_instance=loading,
             )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
@@ -13423,10 +13659,10 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_legacy_qt_hud_session_returns_renderer_only_unavailable(self) -> None:
         loading = SimpleNamespace(close=MagicMock())
 
-        with patch("codex_usage_hud.cli.HudInstanceLock") as instance_lock:
+        with patch("codex_usage_hud.instance_lock.HudInstanceLock") as instance_lock:
             exit_code = run_qt_hud_session(
                 SimpleNamespace(compact=False),
-                loading_feedback=loading,
+                loading_feedback_instance=loading,
             )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
@@ -13436,7 +13672,7 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_legacy_tk_window_session_stub_closes_context(self) -> None:
         fake_context = SimpleNamespace(close=MagicMock())
 
-        exit_code = cli_module._run_tk_window_session(
+        exit_code = runtime_orchestration._run_tk_window_session(
             fake_context,
             SimpleNamespace(compact=False),
         )
@@ -13447,57 +13683,20 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_legacy_qt_window_session_stub_closes_context(self) -> None:
         fake_context = SimpleNamespace(close=MagicMock())
 
-        exit_code = cli_module._run_qt_window_session(
+        exit_code = runtime_orchestration._run_qt_window_session(
             fake_context,
             SimpleNamespace(compact=False),
         )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         fake_context.close.assert_called_once_with()
-    def test_cli_import_does_not_eagerly_import_qt_hud(self) -> None:
-        env = os.environ.copy()
-        existing_pythonpath = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = (
-            str(SRC_ROOT)
-            if not existing_pythonpath
-            else str(SRC_ROOT) + os.pathsep + existing_pythonpath
-        )
-        script = (
-            "import sys\n"
-            "import codex_usage_hud.cli\n"
-            "names = [\n"
-            "    'PySide6',\n"
-            "    'PySide6.QtCore',\n"
-            "    'codex_usage_hud.ui.qt_hud',\n"
-            "    'codex_usage_hud.ui.tk_hud',\n"
-            "    'codex_usage_hud.ui.work_overlay_qt',\n"
-            "]\n"
-            "print('\\n'.join(f'{name}={name in sys.modules}' for name in names))\n"
-        )
-
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            cwd=PROJECT_ROOT,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=15,
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("PySide6=False", result.stdout)
-        self.assertIn("PySide6.QtCore=False", result.stdout)
-        self.assertIn("codex_usage_hud.ui.qt_hud=False", result.stdout)
-        self.assertIn("codex_usage_hud.ui.tk_hud=False", result.stdout)
-        self.assertIn("codex_usage_hud.ui.work_overlay_qt=False", result.stdout)
-
     def test_main_defaults_to_renderer_daemon_from_auto_config(self) -> None:
         config = UserConfig.defaults()
 
         with (
-            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
-            patch("codex_usage_hud.cli.run_hud_session") as run_session,
+            patch("codex_usage_hud.runtime_orchestration.UserConfigStore") as store_class,
+            patch("codex_usage_hud.runtime_orchestration.run_daemon", return_value=0) as run_daemon,
+            patch("codex_usage_hud.runtime_orchestration.run_hud_session") as run_session,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main([])
@@ -13536,14 +13735,14 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
 
             with (
-                patch("codex_usage_hud.cli.get_current_platform", return_value=platform),
-                patch("codex_usage_hud.cli.UserConfigStore", return_value=settings_store),
+                patch("codex_usage_hud.runtime_context.get_current_platform", return_value=platform),
+                patch("codex_usage_hud.runtime_context.UserConfigStore", return_value=settings_store),
                 patch(
-                    "codex_usage_hud.cli.ActiveSessionTracker",
+                    "codex_usage_hud.runtime_context.ActiveSessionTracker",
                     return_value=tracker,
                 ) as tracker_class,
             ):
-                context = cli_module.build_runtime_context(args)
+                context = runtime_context.build_runtime_context(args)
 
             try:
                 platform.suspend_native_active_title.assert_called_once_with(True)
@@ -13567,8 +13766,8 @@ class DaemonLifecycleTests(unittest.TestCase):
                 context.close()
 
     def test_legacy_active_session_diagnostics_flag_is_accepted_but_noop(self) -> None:
-        default_args = cli_module.build_parser().parse_args([])
-        diagnostic_args = cli_module.build_parser().parse_args(
+        default_args = runtime_orchestration.build_parser().parse_args([])
+        diagnostic_args = runtime_orchestration.build_parser().parse_args(
             ["--legacy-active-session-diagnostics"]
         )
 
@@ -13604,14 +13803,14 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
 
             with (
-                patch("codex_usage_hud.cli.get_current_platform", return_value=platform),
-                patch("codex_usage_hud.cli.UserConfigStore", return_value=settings_store),
+                patch("codex_usage_hud.runtime_context.get_current_platform", return_value=platform),
+                patch("codex_usage_hud.runtime_context.UserConfigStore", return_value=settings_store),
                 patch(
-                    "codex_usage_hud.cli.ActiveSessionTracker",
+                    "codex_usage_hud.runtime_context.ActiveSessionTracker",
                     return_value=tracker,
                 ) as tracker_class,
             ):
-                context = cli_module.build_runtime_context(args)
+                context = runtime_context.build_runtime_context(args)
 
             try:
                 platform.suspend_native_active_title.assert_called_once_with(True)
@@ -13650,14 +13849,14 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
 
             with (
-                patch("codex_usage_hud.cli.get_current_platform", return_value=platform),
-                patch("codex_usage_hud.cli.UserConfigStore", return_value=settings_store),
+                patch("codex_usage_hud.runtime_context.get_current_platform", return_value=platform),
+                patch("codex_usage_hud.runtime_context.UserConfigStore", return_value=settings_store),
                 patch(
-                    "codex_usage_hud.cli.ActiveSessionTracker",
+                    "codex_usage_hud.runtime_context.ActiveSessionTracker",
                     return_value=tracker,
                 ),
             ):
-                context = cli_module.build_runtime_context(args)
+                context = runtime_context.build_runtime_context(args)
 
             try:
                 self.assertIsNone(context.pre_send_estimator)
@@ -13669,8 +13868,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         config.display_mode = "tk"
 
         with (
-            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
+            patch("codex_usage_hud.runtime_orchestration.UserConfigStore") as store_class,
+            patch("codex_usage_hud.runtime_orchestration.run_daemon", return_value=0) as run_daemon,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main(["--hud-mode", "renderer"])
@@ -13685,8 +13884,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         config.display_mode = "qt"
 
         with (
-            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
+            patch("codex_usage_hud.runtime_orchestration.UserConfigStore") as store_class,
+            patch("codex_usage_hud.runtime_orchestration.run_daemon", return_value=0) as run_daemon,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main([])
@@ -13702,8 +13901,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         config.display_mode = "tk"
 
         with (
-            patch("codex_usage_hud.cli.UserConfigStore") as store_class,
-            patch("codex_usage_hud.cli.run_daemon", return_value=0) as run_daemon,
+            patch("codex_usage_hud.runtime_orchestration.UserConfigStore") as store_class,
+            patch("codex_usage_hud.runtime_orchestration.run_daemon", return_value=0) as run_daemon,
         ):
             store_class.return_value.load.return_value = config
             exit_code = main([])
@@ -13719,13 +13918,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli.run_renderer_hud_session",
+                "codex_usage_hud.runtime_orchestration.run_renderer_hud_session",
                 return_value=RENDERER_HUD_UNAVAILABLE,
             ) as renderer_session,
-            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
-            patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
+            patch("codex_usage_hud.runtime_orchestration.run_qt_hud_session", return_value=0) as qt_session,
+            patch("codex_usage_hud.runtime_orchestration.run_tk_hud_session", return_value=0) as tk_session,
         ):
-            exit_code = run_hud_session(args)
+            exit_code = run_hud_session(args, run_renderer=renderer_session)
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         renderer_session.assert_called_once()
@@ -13737,13 +13936,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli.run_renderer_hud_session",
+                "codex_usage_hud.runtime_orchestration.run_renderer_hud_session",
                 return_value=RENDERER_HUD_UNAVAILABLE,
-            ),
-            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
-            patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
+            ) as renderer_session,
+            patch("codex_usage_hud.runtime_orchestration.run_qt_hud_session", return_value=0) as qt_session,
+            patch("codex_usage_hud.runtime_orchestration.run_tk_hud_session", return_value=0) as tk_session,
         ):
-            exit_code = run_hud_session(args)
+            exit_code = run_hud_session(args, run_renderer=renderer_session)
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         qt_session.assert_not_called()
@@ -13755,13 +13954,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli.run_renderer_hud_session",
+                "codex_usage_hud.runtime_orchestration.run_renderer_hud_session",
                 return_value=renderer_exit,
             ) as renderer_session,
-            patch("codex_usage_hud.cli.run_tk_hud_session", return_value=0) as tk_session,
-            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
+            patch("codex_usage_hud.runtime_orchestration.run_tk_hud_session", return_value=0) as tk_session,
+            patch("codex_usage_hud.runtime_orchestration.run_qt_hud_session", return_value=0) as qt_session,
         ):
-            exit_code = run_hud_session(args)
+            exit_code = run_hud_session(args, run_renderer=renderer_session)
 
         self.assertEqual(exit_code, renderer_exit)
         renderer_session.assert_called_once()
@@ -13798,7 +13997,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_context = SimpleNamespace(close=MagicMock())
         fake_window = SimpleNamespace(close=MagicMock())
 
-        exit_code = cli_module._run_tk_window_session(
+        exit_code = runtime_orchestration._run_tk_window_session(
             fake_context,
             SimpleNamespace(compact=False),
             existing_window=fake_window,
@@ -13813,13 +14012,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli.run_tk_hud_session",
+                "codex_usage_hud.runtime_orchestration.run_tk_hud_session",
                 return_value=0,
             ) as tk_session,
-            patch("codex_usage_hud.cli.run_qt_hud_session", return_value=0) as qt_session,
-            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
+            patch("codex_usage_hud.runtime_orchestration.run_qt_hud_session", return_value=0) as qt_session,
+            patch("codex_usage_hud.runtime_orchestration.run_renderer_hud_session", return_value=0) as renderer_session,
         ):
-            exit_code = run_hud_session(args)
+            exit_code = run_hud_session(args, run_renderer=renderer_session)
 
         self.assertEqual(exit_code, 0)
         renderer_session.assert_called_once()
@@ -13831,12 +14030,12 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli.run_tk_hud_session",
+                "codex_usage_hud.runtime_orchestration.run_tk_hud_session",
                 return_value=HUD_SWITCH_TO_RENDERER,
             ) as tk_session,
-            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
+            patch("codex_usage_hud.runtime_orchestration.run_renderer_hud_session", return_value=0) as renderer_session,
         ):
-            exit_code = run_hud_session(args)
+            exit_code = run_hud_session(args, run_renderer=renderer_session)
 
         self.assertEqual(exit_code, 0)
         renderer_session.assert_called_once()
@@ -13850,13 +14049,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli.run_tk_hud_session",
+                "codex_usage_hud.runtime_orchestration.run_tk_hud_session",
                 return_value=HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
             ) as tk_session,
-            patch("codex_usage_hud.cli._restart_codex_for_renderer", return_value=True) as restart_codex,
-            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as renderer_session,
+            patch("codex_usage_hud.runtime_orchestration._restart_codex_for_renderer", return_value=True) as restart_codex,
+            patch("codex_usage_hud.runtime_orchestration.run_renderer_hud_session", return_value=0) as renderer_session,
         ):
-            exit_code = run_hud_session(args)
+            exit_code = run_hud_session(args, run_renderer=renderer_session)
 
         self.assertEqual(exit_code, 0)
         renderer_session.assert_called_once()
@@ -13880,26 +14079,67 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
+            fake_overlay = MagicMock()
+            fake_updates = MagicMock()
+            factory_calls: list[tuple[str, object]] = []
+            services = runtime_orchestration.RuntimeServices(
+                clock=runtime_orchestration._SystemRuntimeClock(),
+                context_factory=lambda _args: factory_calls.append(
+                    ("context", None)
+                )
+                or fake_context,
+                renderer_factory=lambda port, timeout: factory_calls.append(
+                    ("renderer", (port, timeout))
+                )
+                or fake_client,
+                overlay_factory=lambda _context: factory_calls.append(
+                    ("overlay", None)
+                )
+                or fake_overlay,
+                update_manager_factory=lambda: factory_calls.append(
+                    ("updates", None)
+                )
+                or fake_updates,
+                bridge_factory=lambda *_args, **_kwargs: factory_calls.append(
+                    ("bridge", None)
+                )
+                or fake_bridge,
+                snapshot_builder=MagicMock(
+                    side_effect=AssertionError("snapshot must not be built")
+                ),
+            )
+            startup_plan = renderer_startup.RendererStartupPlan(
+                scenario=renderer_startup.RENDERER_STARTUP_ATTACH,
+                port=9229,
+                port_source="test",
+            )
+            ports = _renderer_session_ports_for_test(
+                _renderer_startup_plan=MagicMock(return_value=startup_plan),
+                _prepare_codex_window_for_renderer=MagicMock(
+                    return_value=(True, "visible", "", 123)
+                ),
+                _renderer_initial_failure_should_recover_cdp_port=MagicMock(
+                    return_value=False
+                ),
+                _renderer_initial_failure_can_be_fixed_by_restart=MagicMock(
+                    return_value=False
+                ),
+            )
 
             with (
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
-                    return_value=(True, "visible", "", 123),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=False),
+                patch("codex_usage_hud.loading_feedback._loading_feedback_enabled", return_value=False),
+                patch.object(
+                    runtime_diagnostics,
+                    "_renderer_sink",
+                    _renderer_diagnostic_sink_for_test(temp_root),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=False),
-                patch(
-                    "codex_usage_hud.cli._assign_fresh_renderer_cdp_port",
-                    side_effect=RuntimeError("no available CDP port"),
-                ),
-                patch("codex_usage_hud.cli._loading_feedback_enabled", return_value=False),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
             ):
-                exit_code = run_renderer_hud_session(
+                exit_code = renderer_runtime.run_renderer_hud_session(
                     SimpleNamespace(no_startup_prompt=True),
                     lock_already_held=True,
+                    services=services,
+                    ports=ports,
                 )
 
             diagnostic = (temp_root / "renderer_fallback.log").read_text(
@@ -13911,7 +14151,13 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn("Timed out waiting for CDP command response", diagnostic)
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
+        fake_overlay.close.assert_called_once()
+        fake_updates.close.assert_called_once()
         fake_context.close.assert_called_once()
+        self.assertEqual(
+            [name for name, _value in factory_calls],
+            ["context", "overlay", "updates", "renderer", "bridge"],
+        )
 
     def test_renderer_initial_connect_error_on_live_cdp_does_not_offer_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -13929,45 +14175,58 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
-            startup_plan = cli_module.RendererStartupPlan(
-                scenario=cli_module.RENDERER_STARTUP_ATTACH,
+            fake_overlay = MagicMock()
+            fake_updates = MagicMock()
+            startup_plan = runtime_orchestration.RendererStartupPlan(
+                scenario=runtime_orchestration.RENDERER_STARTUP_ATTACH,
                 port=9229,
                 port_source="desktop-process",
+            )
+            services = runtime_orchestration.RuntimeServices(
+                clock=runtime_orchestration._SystemRuntimeClock(),
+                context_factory=lambda _args: fake_context,
+                renderer_factory=lambda _port, _timeout: fake_client,
+                overlay_factory=lambda _context: fake_overlay,
+                update_manager_factory=lambda: fake_updates,
+                bridge_factory=lambda *_args, **_kwargs: fake_bridge,
+                snapshot_builder=MagicMock(
+                    side_effect=AssertionError("snapshot must not be built")
+                ),
             )
 
             with (
                 patch(
-                    "codex_usage_hud.cli._renderer_startup_plan",
+                    "codex_usage_hud.runtime_orchestration._renderer_startup_plan",
                     return_value=startup_plan,
                 ),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
                 patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ) as prepare_window,
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=False),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=False),
                 patch(
-                    "codex_usage_hud.cli._validate_renderer_cdp_candidate",
+                    "codex_usage_hud.runtime_orchestration._validate_renderer_cdp_candidate",
                     return_value=(True, ""),
                 ),
-                patch("codex_usage_hud.cli._create_loading_feedback") as create_loading,
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch("codex_usage_hud.loading_feedback._create_loading_feedback") as create_loading,
+                patch("codex_usage_hud.runtime_orchestration.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(no_startup_prompt=True),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         create_loading.assert_not_called()
         prepare_window.assert_called_once_with(
-            timeout_seconds=cli_module.RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
+            timeout_seconds=runtime_orchestration.RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
             launch_if_missing=False,
         )
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
+        fake_overlay.close.assert_called_once()
+        fake_updates.close.assert_called_once()
         fake_context.close.assert_called_once()
 
     def test_existing_codex_daemon_attach_uses_one_short_startup_probe(self) -> None:
@@ -13986,44 +14245,62 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
+            fake_overlay = MagicMock()
+            fake_updates = MagicMock()
+            renderer_calls: list[tuple[int, float]] = []
+            services = runtime_orchestration.RuntimeServices(
+                clock=runtime_orchestration._SystemRuntimeClock(),
+                context_factory=lambda _args: fake_context,
+                renderer_factory=lambda port, timeout: renderer_calls.append(
+                    (port, timeout)
+                )
+                or fake_client,
+                overlay_factory=lambda _context: fake_overlay,
+                update_manager_factory=lambda: fake_updates,
+                bridge_factory=lambda *_args, **_kwargs: fake_bridge,
+                snapshot_builder=MagicMock(
+                    side_effect=AssertionError("snapshot must not be built")
+                ),
+            )
             daemon = SimpleNamespace()
             loading = MagicMock()
             loading.offer_codex_restart.return_value = False
             with (
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+                patch("codex_usage_hud.runtime_orchestration._codex_processes_running", return_value=True),
                 patch(
-                    "codex_usage_hud.cli.RendererHudClient",
-                    return_value=fake_client,
-                ) as client_class,
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli._wait_for_visible_codex_window") as wait_window,
-                patch("codex_usage_hud.cli.wait_for_renderer") as wait_renderer,
+                patch("codex_usage_hud.runtime_orchestration._wait_for_visible_codex_window") as wait_window,
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer") as wait_renderer,
                 patch(
-                    "codex_usage_hud.cli._assign_fresh_renderer_cdp_port",
+                    "codex_usage_hud.runtime_orchestration._assign_fresh_renderer_cdp_port",
                     side_effect=RuntimeError("no available CDP port"),
                 ),
-                patch("codex_usage_hud.cli._loading_feedback_enabled", return_value=False),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch("codex_usage_hud.loading_feedback._loading_feedback_enabled", return_value=False),
+                patch("codex_usage_hud.runtime_orchestration.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(no_startup_prompt=True),
                     lock_already_held=True,
                     daemon_manager=daemon,
                     loading_feedback=loading,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
+        self.assertEqual(len(renderer_calls), 1)
         self.assertEqual(
-            client_class.call_args.kwargs["timeout_seconds"],
-            cli_module.RENDERER_CDP_TIMEOUT_SECONDS,
+            renderer_calls[0][1],
+            runtime_orchestration.RENDERER_CDP_TIMEOUT_SECONDS,
         )
         wait_renderer.assert_not_called()
         wait_window.assert_not_called()
+        fake_client.close.assert_called_once()
+        fake_bridge.close.assert_called_once()
+        fake_overlay.close.assert_called_once()
+        fake_updates.close.assert_called_once()
+        fake_context.close.assert_called_once()
 
     def test_renderer_cdp_port_selection_reuses_persisted_port_for_launch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -14033,12 +14310,11 @@ class DaemonLifecycleTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
-            ):
-                port = cli_module._select_initial_renderer_cdp_port()
-                env_port = os.environ.get(cli_module.CDP_PORT_ENV)
+            with patch.dict(os.environ, {}, clear=True):
+                port = renderer_startup.select_initial_cdp_port(
+                    state_path=lambda: temp_root / "renderer_cdp_state.json",
+                )
+                env_port = os.environ.get(runtime_orchestration.CDP_PORT_ENV)
 
         self.assertEqual(port, 9444)
         self.assertEqual(env_port, "9444")
@@ -14051,15 +14327,12 @@ class DaemonLifecycleTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
-                patch(
-                    "codex_usage_hud.cli._localhost_cdp_port_is_listening",
-                    return_value=True,
-                ) as port_is_listening,
-            ):
-                port = cli_module._select_initial_renderer_cdp_port()
+            port_is_listening = MagicMock(return_value=True)
+            with patch.dict(os.environ, {}, clear=True):
+                port = renderer_startup.select_initial_cdp_port(
+                    state_path=lambda: temp_root / "renderer_cdp_state.json",
+                    listening=port_is_listening,
+                )
 
         self.assertEqual(port, 9555)
         port_is_listening.assert_called_once_with(9555)
@@ -14070,8 +14343,11 @@ class DaemonLifecycleTests(unittest.TestCase):
             state_path = temp_root / "renderer_cdp_state.json"
             state_path.write_text('{"lastSuccessfulPort":9444}\n', encoding="utf-8")
 
-            with patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root):
-                cli_module._remember_requested_renderer_cdp_port(9555)
+            renderer_startup.remember_cdp_port(
+                9555,
+                requested=True,
+                state_path=lambda: state_path,
+            )
 
             state = json.loads(state_path.read_text(encoding="utf-8"))
 
@@ -14079,15 +14355,15 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(state["lastRequestedPort"], 9555)
 
     def test_renderer_cdp_port_selection_honors_explicit_fixed_port(self) -> None:
-        with patch.dict(os.environ, {cli_module.CDP_PORT_ENV: "9444"}, clear=True):
-            port = cli_module._select_initial_renderer_cdp_port()
-            env_port = os.environ.get(cli_module.CDP_PORT_ENV)
+        with patch.dict(os.environ, {runtime_orchestration.CDP_PORT_ENV: "9444"}, clear=True):
+            port = runtime_orchestration._select_initial_renderer_cdp_port()
+            env_port = os.environ.get(runtime_orchestration.CDP_PORT_ENV)
 
         self.assertEqual(port, 9444)
         self.assertEqual(env_port, "9444")
 
     def test_remote_debugging_ports_parse_both_chromium_flag_forms(self) -> None:
-        ports = cli_module._remote_debugging_ports_from_command_line(
+        ports = runtime_orchestration._remote_debugging_ports_from_command_line(
             '"C:\\Codex\\ChatGPT.exe" --remote-debugging-port=59629 '
             "--remote-debugging-port 60123 --remote-debugging-port=70000"
         )
@@ -14120,13 +14396,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch.object(sys, "platform", "win32"),
-            patch("codex_usage_hud.cli.subprocess.run", return_value=completed),
+            patch("codex_usage_hud.codex_app_runtime.subprocess.run", return_value=completed),
         ):
-            processes = cli_module._windows_running_codex_desktop_processes()
+            processes = codex_app_runtime.windows_running_codex_desktop_processes()
 
         self.assertEqual([item.pid for item in processes], [22])
         self.assertEqual(
-            cli_module._remote_debugging_ports_from_command_line(
+            runtime_orchestration._remote_debugging_ports_from_command_line(
                 processes[0].command_line
             ),
             (59629,),
@@ -14146,13 +14422,13 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch.object(sys, "platform", "darwin"),
-            patch("codex_usage_hud.cli.subprocess.run", return_value=completed),
+            patch("codex_usage_hud.codex_app_runtime.subprocess.run", return_value=completed),
         ):
-            processes = cli_module._macos_running_codex_desktop_processes()
+            processes = codex_app_runtime.macos_running_codex_desktop_processes()
 
         self.assertEqual([item.pid for item in processes], [22])
         self.assertEqual(
-            cli_module._remote_debugging_ports_from_command_line(
+            runtime_orchestration._remote_debugging_ports_from_command_line(
                 processes[0].command_line
             ),
             (59629,),
@@ -14172,12 +14448,12 @@ class DaemonLifecycleTests(unittest.TestCase):
             patch.object(sys, "platform", "darwin"),
             patch.dict(
                 os.environ,
-                {cli_module.CODEX_APP_PATH_ENV: "/Applications/OpenAI Codex.app"},
+                {runtime_paths.CODEX_APP_PATH_ENV: "/Applications/OpenAI Codex.app"},
                 clear=False,
             ),
-            patch("codex_usage_hud.cli.subprocess.run", return_value=completed),
+            patch("codex_usage_hud.codex_app_runtime.subprocess.run", return_value=completed),
         ):
-            processes = cli_module._macos_running_codex_desktop_processes()
+            processes = codex_app_runtime.macos_running_codex_desktop_processes()
 
         self.assertEqual([item.pid for item in processes], [22])
         self.assertEqual(
@@ -14191,17 +14467,18 @@ class DaemonLifecycleTests(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
-                    cli_module.CODEX_APP_PATH_ENV: "/Applications/OpenAI Codex.app",
-                    cli_module.CDP_PORT_ENV: "59629",
+                    runtime_paths.CODEX_APP_PATH_ENV: "/Applications/OpenAI Codex.app",
+                    runtime_orchestration.CDP_PORT_ENV: "59629",
                 },
                 clear=False,
             ),
-            patch("codex_usage_hud.cli.subprocess.Popen") as popen,
-            patch(
-                "codex_usage_hud.cli._remember_requested_renderer_cdp_port"
-            ) as remember_port,
+            patch("codex_usage_hud.codex_app_runtime.subprocess.Popen") as popen,
         ):
-            launched = cli_module.launch_codex_app(debugger=True)
+            remember_port = MagicMock()
+            launched = codex_app_runtime.launch_codex_app(
+                debugger=True,
+                on_debugger_launch=remember_port,
+            )
 
         self.assertTrue(launched)
         command = popen.call_args.args[0]
@@ -14210,7 +14487,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         remember_port.assert_called_once_with(59629)
 
     def test_existing_renderer_port_requires_verified_codex_target(self) -> None:
-        process = cli_module._CodexDesktopProcess(
+        process = runtime_orchestration._CodexDesktopProcess(
             pid=22,
             name="ChatGPT.exe",
             executable_path="C:\\Codex\\ChatGPT.exe",
@@ -14225,24 +14502,24 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as temp_dir,
-            patch("codex_usage_hud.cli._running_codex_desktop_processes", return_value=[process]),
-            patch("codex_usage_hud.cli.hud_runtime_dir", return_value=Path(temp_dir)),
-            patch("codex_usage_hud.cli._localhost_cdp_port_is_listening", return_value=True),
+            patch("codex_usage_hud.runtime_orchestration._running_codex_desktop_processes", return_value=[process]),
+            patch("codex_usage_hud.runtime_orchestration.hud_runtime_dir", return_value=Path(temp_dir)),
+            patch("codex_usage_hud.runtime_orchestration._localhost_cdp_port_is_listening", return_value=True),
             patch(
-                "codex_usage_hud.cli.cdp_version_info",
+                "codex_usage_hud.runtime_orchestration.cdp_version_info",
                 return_value={"Protocol-Version": "1.3"},
             ) as version_info,
-            patch("codex_usage_hud.cli.list_targets", return_value=[target]),
-            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+            patch("codex_usage_hud.runtime_orchestration.list_targets", return_value=[target]),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic") as diagnostic,
         ):
-            candidate = cli_module._find_existing_renderer_cdp_candidate()
+            candidate = runtime_orchestration._find_existing_renderer_cdp_candidate()
 
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.port, 59629)
         self.assertEqual(candidate.source, "desktop-process")
         version_info.assert_called_once_with(
             59629,
-            cli_module.RENDERER_CDP_DISCOVERY_TIMEOUT_SECONDS,
+            renderer_startup.RENDERER_CDP_DISCOVERY_TIMEOUT_SECONDS,
         )
         diagnostic.assert_called_once_with(
             "renderer_cdp_process_port_discovered",
@@ -14252,77 +14529,77 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
 
     def test_existing_renderer_port_rejects_invalid_version_endpoint(self) -> None:
-        candidate = cli_module._RendererCdpPortCandidate(
+        candidate = runtime_orchestration._RendererCdpPortCandidate(
             port=59629,
             source="desktop-process",
             pid=22,
         )
         with (
             patch(
-                "codex_usage_hud.cli._localhost_cdp_port_is_listening",
+                "codex_usage_hud.runtime_orchestration._localhost_cdp_port_is_listening",
                 return_value=True,
             ),
             patch(
-                "codex_usage_hud.cli.cdp_version_info",
+                "codex_usage_hud.runtime_orchestration.cdp_version_info",
                 side_effect=RuntimeError("CDP version response has no protocol identity"),
             ),
-            patch("codex_usage_hud.cli.list_targets") as list_cdp_targets,
+            patch("codex_usage_hud.runtime_orchestration.list_targets") as list_cdp_targets,
         ):
-            valid, reason = cli_module._validate_renderer_cdp_candidate(candidate)
+            valid, reason = runtime_orchestration._validate_renderer_cdp_candidate(candidate)
 
         self.assertFalse(valid)
         self.assertIn("protocol identity", reason)
         list_cdp_targets.assert_not_called()
 
     def test_renderer_startup_plan_covers_three_scenarios_and_recovery(self) -> None:
-        candidate = cli_module._RendererCdpPortCandidate(
+        candidate = runtime_orchestration._RendererCdpPortCandidate(
             port=59629,
             source="desktop-process",
             pid=22,
         )
         with (
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
-            patch("codex_usage_hud.cli._select_launch_renderer_cdp_port", return_value=60100),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._codex_processes_running", return_value=False),
+            patch("codex_usage_hud.runtime_orchestration._select_launch_renderer_cdp_port", return_value=60100),
         ):
-            launch = cli_module._renderer_startup_plan()
+            launch = runtime_orchestration._renderer_startup_plan()
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
-            patch("codex_usage_hud.cli._find_existing_renderer_cdp_candidate", return_value=candidate),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._codex_processes_running", return_value=True),
+            patch("codex_usage_hud.runtime_orchestration._find_existing_renderer_cdp_candidate", return_value=candidate),
         ):
-            attach = cli_module._renderer_startup_plan()
-            attached_port = os.environ.get(cli_module.CDP_PORT_ENV)
+            attach = runtime_orchestration._renderer_startup_plan()
+            attached_port = os.environ.get(runtime_orchestration.CDP_PORT_ENV)
         with (
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
-            patch("codex_usage_hud.cli._find_existing_renderer_cdp_candidate", return_value=None),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._codex_processes_running", return_value=True),
+            patch("codex_usage_hud.runtime_orchestration._find_existing_renderer_cdp_candidate", return_value=None),
         ):
-            restart = cli_module._renderer_startup_plan()
+            restart = runtime_orchestration._renderer_startup_plan()
         with (
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
-            patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=60200),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=60200),
         ):
-            recovery = cli_module._renderer_startup_plan(launched_codex=True)
+            recovery = runtime_orchestration._renderer_startup_plan(launched_codex=True)
 
-        self.assertEqual(launch.scenario, cli_module.RENDERER_STARTUP_LAUNCH)
+        self.assertEqual(launch.scenario, runtime_orchestration.RENDERER_STARTUP_LAUNCH)
         self.assertEqual(launch.port, 60100)
-        self.assertEqual(attach.scenario, cli_module.RENDERER_STARTUP_ATTACH)
+        self.assertEqual(attach.scenario, runtime_orchestration.RENDERER_STARTUP_ATTACH)
         self.assertEqual(attach.port, 59629)
         self.assertEqual(attached_port, "59629")
         self.assertEqual(
             restart.scenario,
-            cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+            runtime_orchestration.RENDERER_STARTUP_RESTART_REQUIRED,
         )
         self.assertEqual(
             recovery.scenario,
-            cli_module.RENDERER_STARTUP_ATTACH_LAUNCHED,
+            renderer_startup.RENDERER_STARTUP_ATTACH_LAUNCHED,
         )
         self.assertEqual(recovery.port, 60200)
 
     def test_observed_renderer_startup_plan_attaches_to_declared_port(self) -> None:
-        process = cli_module._CodexDesktopProcess(
+        process = runtime_orchestration._CodexDesktopProcess(
             pid=22,
             name="ChatGPT.exe",
             executable_path="C:\\Codex\\ChatGPT.exe",
@@ -14331,50 +14608,58 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
             patch(
-                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                "codex_usage_hud.runtime_orchestration._audited_running_codex_desktop_processes",
                 return_value=[process],
             ),
-            patch("codex_usage_hud.cli._validate_renderer_cdp_candidate") as validate,
+            patch("codex_usage_hud.runtime_orchestration._validate_renderer_cdp_candidate") as validate,
         ):
-            plan = cli_module._renderer_startup_plan(observed_codex_launch=True)
-            selected_port = os.environ.get(cli_module.CDP_PORT_ENV)
+            plan = runtime_orchestration._renderer_startup_plan(observed_codex_launch=True)
+            selected_port = os.environ.get(runtime_orchestration.CDP_PORT_ENV)
 
-        self.assertEqual(plan.scenario, cli_module.RENDERER_STARTUP_ATTACH_OBSERVED)
+        self.assertEqual(plan.scenario, runtime_orchestration.RENDERER_STARTUP_ATTACH_OBSERVED)
         self.assertEqual(plan.port, 59629)
         self.assertEqual(selected_port, "59629")
         validate.assert_not_called()
 
     def test_observed_plain_launch_requests_one_automatic_relaunch(self) -> None:
-        process = cli_module._CodexDesktopProcess(
+        process = runtime_orchestration._CodexDesktopProcess(
             pid=22,
             name="ChatGPT.exe",
             executable_path="C:\\Codex\\ChatGPT.exe",
             command_line="ChatGPT.exe",
         )
         loading = MagicMock()
+        factory_calls: list[str] = []
+        services = runtime_orchestration.RuntimeServices(
+            clock=runtime_orchestration._SystemRuntimeClock(),
+            context_factory=lambda _args: factory_calls.append("context"),
+            renderer_factory=lambda _port, _timeout: factory_calls.append("renderer"),
+            overlay_factory=lambda _context: factory_calls.append("overlay"),
+            update_manager_factory=lambda: factory_calls.append("updates"),
+            bridge_factory=lambda *_args, **_kwargs: factory_calls.append("bridge"),
+            snapshot_builder=lambda *_args, **_kwargs: factory_calls.append("snapshot"),
+        )
 
         with (
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
             patch(
-                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                "codex_usage_hud.runtime_orchestration._audited_running_codex_desktop_processes",
                 return_value=[process],
             ),
-            patch("codex_usage_hud.cli.build_runtime_context") as build_context,
-            patch("codex_usage_hud.cli.RendererHudClient") as client_class,
         ):
             exit_code = run_renderer_hud_session(
                 SimpleNamespace(),
                 lock_already_held=True,
                 observed_codex_launch=True,
                 loading_feedback=loading,
+                services=services,
             )
 
-        self.assertEqual(exit_code, cli_module.HUD_AUTO_RESTART_CODEX)
+        self.assertEqual(exit_code, runtime_orchestration.HUD_AUTO_RESTART_CODEX)
         loading.update.assert_called_once()
-        build_context.assert_not_called()
-        client_class.assert_not_called()
+        self.assertEqual(factory_calls, [])
 
     def test_observed_cdp_launch_attaches_exact_port_without_restart_card(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -14389,50 +14674,62 @@ class DaemonLifecycleTests(unittest.TestCase):
                 last_status="failed",
                 last_error="TimeoutError: timed out waiting for the delayed page target",
                 close=MagicMock(),
-                timeout_seconds=cli_module.RENDERER_RESTART_CDP_TIMEOUT_SECONDS,
+                timeout_seconds=runtime_orchestration.RENDERER_RESTART_CDP_TIMEOUT_SECONDS,
             )
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
-            startup_plan = cli_module.RendererStartupPlan(
-                scenario=cli_module.RENDERER_STARTUP_ATTACH_OBSERVED,
+            fake_overlay = MagicMock()
+            fake_updates = MagicMock()
+            renderer_calls: list[tuple[int, float]] = []
+            startup_plan = runtime_orchestration.RendererStartupPlan(
+                scenario=runtime_orchestration.RENDERER_STARTUP_ATTACH_OBSERVED,
                 port=59629,
                 port_source="observed-desktop-process",
             )
             loading = MagicMock()
+            services = runtime_orchestration.RuntimeServices(
+                clock=runtime_orchestration._SystemRuntimeClock(),
+                context_factory=lambda _args: fake_context,
+                renderer_factory=lambda port, timeout: renderer_calls.append(
+                    (port, timeout)
+                )
+                or fake_client,
+                overlay_factory=lambda _context: fake_overlay,
+                update_manager_factory=lambda: fake_updates,
+                bridge_factory=lambda *_args, **_kwargs: fake_bridge,
+                snapshot_builder=MagicMock(
+                    side_effect=AssertionError("snapshot must not be built")
+                ),
+            )
 
             with (
                 patch(
-                    "codex_usage_hud.cli._renderer_startup_plan",
+                    "codex_usage_hud.runtime_orchestration._renderer_startup_plan",
                     return_value=startup_plan,
                 ) as startup_plan_fn,
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
                 patch(
-                    "codex_usage_hud.cli.RendererHudClient",
-                    return_value=fake_client,
-                ) as client_class,
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
                 patch(
-                    "codex_usage_hud.cli._wait_for_visible_codex_window",
+                    "codex_usage_hud.runtime_orchestration._wait_for_visible_codex_window",
                     return_value=(True, "visible", "", 123),
                 ) as wait_window,
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=False) as wait_renderer,
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=False) as wait_renderer,
                 patch(
-                    "codex_usage_hud.cli._validate_renderer_cdp_candidate",
+                    "codex_usage_hud.runtime_orchestration._validate_renderer_cdp_candidate",
                     return_value=(True, ""),
                 ),
-                patch("codex_usage_hud.cli._wait_for_renderer_restart_request") as restart_card,
-                patch("codex_usage_hud.cli._loading_feedback_enabled", return_value=False),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch("codex_usage_hud.runtime_orchestration._wait_for_renderer_restart_request") as restart_card,
+                patch("codex_usage_hud.loading_feedback._loading_feedback_enabled", return_value=False),
+                patch("codex_usage_hud.runtime_orchestration.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(no_startup_prompt=True),
                     lock_already_held=True,
                     observed_codex_launch=True,
                     loading_feedback=loading,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
@@ -14441,33 +14738,32 @@ class DaemonLifecycleTests(unittest.TestCase):
             observed_codex_launch=True,
         )
         self.assertEqual(
-            client_class.call_args.kwargs,
-            {
-                "port": 59629,
-                "timeout_seconds": cli_module.RENDERER_RESTART_CDP_TIMEOUT_SECONDS,
-            },
+            renderer_calls,
+            [(59629, runtime_orchestration.RENDERER_RESTART_CDP_TIMEOUT_SECONDS)],
         )
         wait_window.assert_called_once_with(
-            timeout_seconds=cli_module.DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
+            timeout_seconds=runtime_orchestration.DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS,
         )
         self.assertEqual(
             wait_renderer.call_args.kwargs["timeout_seconds"],
-            cli_module.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS,
+            runtime_orchestration.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS,
         )
         restart_card.assert_not_called()
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
+        fake_overlay.close.assert_called_once()
+        fake_updates.close.assert_called_once()
         fake_context.close.assert_called_once()
 
     def test_observed_launch_ambiguity_fails_closed_to_restart_action(self) -> None:
         processes = [
-            cli_module._CodexDesktopProcess(
+            runtime_orchestration._CodexDesktopProcess(
                 pid=22,
                 name="ChatGPT.exe",
                 executable_path="C:\\Codex\\ChatGPT.exe",
                 command_line="ChatGPT.exe --remote-debugging-port=59629",
             ),
-            cli_module._CodexDesktopProcess(
+            runtime_orchestration._CodexDesktopProcess(
                 pid=23,
                 name="ChatGPT.exe",
                 executable_path="C:\\Codex\\ChatGPT.exe",
@@ -14475,45 +14771,44 @@ class DaemonLifecycleTests(unittest.TestCase):
             ),
         ]
         with (
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
             patch(
-                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                "codex_usage_hud.runtime_orchestration._audited_running_codex_desktop_processes",
                 return_value=processes,
             ),
         ):
-            conflicting = cli_module._renderer_startup_plan(
+            conflicting = runtime_orchestration._renderer_startup_plan(
                 observed_codex_launch=True
             )
         with (
-            patch("codex_usage_hud.cli._append_renderer_diagnostic"),
+            patch("codex_usage_hud.runtime_orchestration._append_renderer_diagnostic"),
             patch(
-                "codex_usage_hud.cli._audited_running_codex_desktop_processes",
+                "codex_usage_hud.runtime_orchestration._audited_running_codex_desktop_processes",
                 side_effect=RuntimeError("access denied"),
             ),
         ):
-            audit_failed = cli_module._renderer_startup_plan(
+            audit_failed = runtime_orchestration._renderer_startup_plan(
                 observed_codex_launch=True
             )
 
         self.assertEqual(
             conflicting.scenario,
-            cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+            runtime_orchestration.RENDERER_STARTUP_RESTART_REQUIRED,
         )
         self.assertIn("conflicting", conflicting.reason)
         self.assertEqual(
             audit_failed.scenario,
-            cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+            runtime_orchestration.RENDERER_STARTUP_RESTART_REQUIRED,
         )
         self.assertIn("audit-failed", audit_failed.reason)
 
     def test_launch_port_selection_uses_fresh_port_when_preferred_is_occupied(self) -> None:
-        with (
-            patch.dict(os.environ, {cli_module.CDP_PORT_ENV: "9444"}, clear=True),
-            patch("codex_usage_hud.cli._localhost_cdp_port_available", return_value=False),
-            patch("codex_usage_hud.cli._allocate_fresh_renderer_cdp_port", return_value=9555),
-        ):
-            port = cli_module._select_launch_renderer_cdp_port()
-            env_port = os.environ.get(cli_module.CDP_PORT_ENV)
+        with patch.dict(os.environ, {runtime_orchestration.CDP_PORT_ENV: "9444"}, clear=True):
+            port = renderer_startup.select_launch_cdp_port(
+                available=MagicMock(return_value=False),
+                allocate=MagicMock(return_value=9555),
+            )
+            env_port = os.environ.get(runtime_orchestration.CDP_PORT_ENV)
 
         self.assertEqual(port, 9555)
         self.assertEqual(env_port, "9555")
@@ -14551,51 +14846,58 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_work_overlay = MagicMock()
             fake_work_overlay.offer_codex_restart.return_value = True
             fake_work_overlay.wait_for_codex_restart_request.return_value = True
-            startup_plan = cli_module.RendererStartupPlan(
-                scenario=cli_module.RENDERER_STARTUP_ATTACH,
+            fake_updates = MagicMock()
+            renderer_calls: list[tuple[int, float]] = []
+            startup_plan = runtime_orchestration.RendererStartupPlan(
+                scenario=runtime_orchestration.RENDERER_STARTUP_ATTACH,
                 port=9229,
                 port_source="desktop-process",
             )
+            services = runtime_orchestration.RuntimeServices(
+                clock=runtime_orchestration._SystemRuntimeClock(),
+                context_factory=lambda _args: fake_context,
+                renderer_factory=lambda port, timeout: renderer_calls.append(
+                    (port, timeout)
+                )
+                or failed_client,
+                overlay_factory=lambda _context: fake_work_overlay,
+                update_manager_factory=lambda: fake_updates,
+                bridge_factory=lambda *_args, **_kwargs: fake_bridge,
+                snapshot_builder=MagicMock(
+                    side_effect=AssertionError("snapshot must not be built")
+                ),
+            )
 
             with (
-                patch.dict(os.environ, {cli_module.CDP_PORT_ENV: "9229"}),
+                patch.dict(os.environ, {runtime_orchestration.CDP_PORT_ENV: "9229"}),
                 patch(
-                    "codex_usage_hud.cli._renderer_startup_plan",
+                    "codex_usage_hud.runtime_orchestration._renderer_startup_plan",
                     return_value=startup_plan,
                 ),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
                 patch(
-                    "codex_usage_hud.cli.RendererHudClient",
-                    return_value=failed_client,
-                ) as client_class,
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch(
-                    "codex_usage_hud.cli.DesktopWorkOverlay",
-                    return_value=fake_work_overlay,
-                ),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
                 patch(
-                    "codex_usage_hud.cli.wait_for_renderer",
+                    "codex_usage_hud.renderer_runtime.wait_for_renderer",
                     return_value=False,
                 ) as wait_renderer,
                 patch(
-                    "codex_usage_hud.cli._validate_renderer_cdp_candidate",
+                    "codex_usage_hud.runtime_orchestration._validate_renderer_cdp_candidate",
                     return_value=(False, "not-listening"),
                 ),
-                patch("codex_usage_hud.cli._select_launch_renderer_cdp_port") as select_launch_port,
-                patch("codex_usage_hud.cli._restart_codex_for_renderer") as restart_codex,
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch("codex_usage_hud.runtime_orchestration._select_launch_renderer_cdp_port") as select_launch_port,
+                patch("codex_usage_hud.runtime_orchestration._restart_codex_for_renderer") as restart_codex,
+                patch("codex_usage_hud.runtime_orchestration.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, HUD_SWITCH_TO_RENDERER_RESTART_CODEX)
-        self.assertEqual(client_class.call_count, 1)
+        self.assertEqual(renderer_calls, [(9229, runtime_orchestration.RENDERER_CDP_TIMEOUT_SECONDS)])
         self.assertEqual(wait_renderer.call_count, 1)
         select_launch_port.assert_not_called()
         fake_work_overlay.offer_codex_restart.assert_called_once()
@@ -14604,6 +14906,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         failed_client.close.assert_called()
         active_tracker.close.assert_not_called()
         fake_bridge.close.assert_called_once()
+        fake_work_overlay.close.assert_called_once()
+        fake_updates.close.assert_called_once()
         fake_context.close.assert_called_once()
 
     def test_renderer_running_without_cdp_waits_before_client_construction(self) -> None:
@@ -14615,33 +14919,36 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_work_overlay.offer_codex_restart.return_value = True
         fake_work_overlay.wait_for_codex_restart_request.return_value = True
         loading = MagicMock()
-        startup_plan = cli_module.RendererStartupPlan(
-            scenario=cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+        startup_plan = runtime_orchestration.RendererStartupPlan(
+            scenario=runtime_orchestration.RENDERER_STARTUP_RESTART_REQUIRED,
             reason="running-codex-has-no-verified-cdp-target",
+        )
+        factory_calls: list[str] = []
+        services = runtime_orchestration.RuntimeServices(
+            clock=runtime_orchestration._SystemRuntimeClock(),
+            context_factory=lambda _args: factory_calls.append("context") or fake_context,
+            renderer_factory=lambda _port, _timeout: factory_calls.append("renderer"),
+            overlay_factory=lambda _context: factory_calls.append("overlay") or fake_work_overlay,
+            update_manager_factory=lambda: factory_calls.append("updates"),
+            bridge_factory=lambda *_args, **_kwargs: factory_calls.append("bridge"),
+            snapshot_builder=lambda *_args, **_kwargs: factory_calls.append("snapshot"),
         )
 
         with (
             patch(
-                "codex_usage_hud.cli._renderer_startup_plan",
+                "codex_usage_hud.runtime_orchestration._renderer_startup_plan",
                 return_value=startup_plan,
             ),
-            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-            patch(
-                "codex_usage_hud.cli.DesktopWorkOverlay",
-                return_value=fake_work_overlay,
-            ),
-            patch("codex_usage_hud.cli.RendererHudClient") as client_class,
-            patch("codex_usage_hud.cli.SettingsBridgeServer") as bridge_class,
         ):
             exit_code = run_renderer_hud_session(
                 SimpleNamespace(),
                 lock_already_held=True,
                 loading_feedback=loading,
+                services=services,
             )
 
         self.assertEqual(exit_code, HUD_SWITCH_TO_RENDERER_RESTART_CODEX)
-        client_class.assert_not_called()
-        bridge_class.assert_not_called()
+        self.assertEqual(factory_calls, ["context", "overlay"])
         fake_work_overlay.offer_codex_restart.assert_called_once()
         fake_work_overlay.wait_for_codex_restart_request.assert_called_once_with()
         loading.close.assert_called_once_with()
@@ -14659,32 +14966,37 @@ class DaemonLifecycleTests(unittest.TestCase):
         loading = MagicMock()
         loading.offer_codex_restart.return_value = True
         loading.wait_for_codex_restart_request.return_value = True
-        startup_plan = cli_module.RendererStartupPlan(
-            scenario=cli_module.RENDERER_STARTUP_RESTART_REQUIRED,
+        startup_plan = runtime_orchestration.RendererStartupPlan(
+            scenario=runtime_orchestration.RENDERER_STARTUP_RESTART_REQUIRED,
             reason="running-codex-has-no-verified-cdp-target",
         )
+        factory_calls: list[str] = []
+        services = runtime_orchestration.RuntimeServices(
+            clock=runtime_orchestration._SystemRuntimeClock(),
+            context_factory=lambda _args: factory_calls.append("context") or fake_context,
+            renderer_factory=lambda _port, _timeout: factory_calls.append("renderer"),
+            overlay_factory=lambda _context: factory_calls.append("overlay") or fake_work_overlay,
+            update_manager_factory=lambda: factory_calls.append("updates"),
+            bridge_factory=lambda *_args, **_kwargs: factory_calls.append("bridge"),
+            snapshot_builder=lambda *_args, **_kwargs: factory_calls.append("snapshot"),
+        )
 
-        with (
-            patch(
-                "codex_usage_hud.cli._renderer_startup_plan",
-                return_value=startup_plan,
-            ),
-            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-            patch(
-                "codex_usage_hud.cli.DesktopWorkOverlay",
-                return_value=fake_work_overlay,
-            ),
-            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
-            patch("codex_usage_hud.cli.RendererHudClient") as client_class,
-        ):
-            exit_code = run_renderer_hud_session(
+        ports = _renderer_session_ports_for_test(
+            _renderer_startup_plan=MagicMock(return_value=startup_plan),
+        )
+        with patch(
+            "codex_usage_hud.runtime_diagnostics.append_renderer_diagnostic"
+        ) as diagnostic:
+            exit_code = renderer_runtime.run_renderer_hud_session(
                 SimpleNamespace(),
                 lock_already_held=True,
                 loading_feedback=loading,
+                services=services,
+                ports=ports,
             )
 
         self.assertEqual(exit_code, HUD_SWITCH_TO_RENDERER_RESTART_CODEX)
-        client_class.assert_not_called()
+        self.assertEqual(factory_calls, ["context", "overlay"])
         loading.offer_codex_restart.assert_called_once()
         loading.wait_for_codex_restart_request.assert_called_once_with()
         loading.close.assert_called_once_with()
@@ -14699,27 +15011,27 @@ class DaemonLifecycleTests(unittest.TestCase):
         with (
             patch.object(sys, "platform", "win32"),
             patch(
-                "codex_usage_hud.cli._stop_codex_processes",
+                "codex_usage_hud.codex_app_runtime.stop_codex_app",
                 side_effect=lambda: call_order.append("stop") or True,
             ),
             patch(
-                "codex_usage_hud.cli._select_launch_renderer_cdp_port",
+                "codex_usage_hud.renderer_startup.select_launch_cdp_port",
                 side_effect=lambda **_kwargs: call_order.append("select") or 59629,
             ) as select_port,
             patch(
-                "codex_usage_hud.cli.launch_codex_app",
+                "codex_usage_hud.codex_app_runtime.launch_codex_app",
                 side_effect=lambda **_kwargs: call_order.append("launch") or True,
             ),
-            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
+            patch("codex_usage_hud.runtime_diagnostics.append_renderer_diagnostic") as diagnostic,
         ):
-            restarted = cli_module._restart_codex_for_renderer()
+            restarted = renderer_runtime._restart_codex_for_renderer()
 
         self.assertTrue(restarted)
         self.assertEqual(call_order, ["stop", "select", "launch"])
         select_port.assert_called_once_with(require_fresh=True)
         diagnostic.assert_called_once_with(
             "renderer_restart_requested_by_user",
-            action_id=cli_module.WORK_OVERLAY_RESTART_ACTION_ID,
+            action_id=desktop_overlay_module.WORK_OVERLAY_RESTART_ACTION_ID,
             port=59629,
         )
 
@@ -14728,12 +15040,16 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         with (
             patch(
-                "codex_usage_hud.cli.run_renderer_hud_session",
+                "codex_usage_hud.runtime_orchestration.run_renderer_hud_session",
                 side_effect=[HUD_SWITCH_TO_RENDERER_RESTART_CODEX, 0],
             ) as renderer_session,
-            patch("codex_usage_hud.cli._restart_codex_for_renderer", return_value=True) as restart_codex,
+            patch("codex_usage_hud.runtime_orchestration._restart_codex_for_renderer", return_value=True) as restart_codex,
         ):
-            exit_code = run_hud_session(args)
+            exit_code = run_hud_session(
+                args,
+                run_renderer=renderer_session,
+                restart_codex=restart_codex,
+            )
 
         self.assertEqual(exit_code, 0)
         restart_codex.assert_called_once_with()
@@ -14750,28 +15066,24 @@ class DaemonLifecycleTests(unittest.TestCase):
         loading.start.return_value = loading
         args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
 
-        with (
-            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
-            patch("codex_usage_hud.cli.HudInstanceLock"),
-            patch(
-                "codex_usage_hud.cli._daemon_startup_decision",
-                return_value=cli_module.DaemonStartupDecision(
+        select_port = MagicMock(return_value=59629)
+        launch_app = MagicMock(return_value=True)
+        run_renderer = MagicMock(return_value=0)
+        services = _daemon_services_for_test(
+            manager=manager,
+            startup_decision=MagicMock(
+                return_value=daemon_runtime.DaemonStartupDecision(
                     DAEMON_STARTUP_RENDERER,
                     launch_codex=True,
-                ),
+                )
             ),
-            patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
-            patch(
-                "codex_usage_hud.cli._select_launch_renderer_cdp_port",
-                return_value=59629,
-            ) as select_port,
-            patch(
-                "codex_usage_hud.cli.launch_codex_app",
-                return_value=True,
-            ) as launch_app,
-            patch("codex_usage_hud.cli.run_renderer_hud_session", return_value=0) as run_renderer,
-        ):
-            self.assertEqual(run_daemon(args), 0)
+            create_loading=MagicMock(return_value=loading),
+            run_renderer=run_renderer,
+            select_launch_port=select_port,
+            launch=launch_app,
+        )
+
+        self.assertEqual(run_daemon(args, services=services), 0)
 
         select_port.assert_called_once_with()
         launch_app.assert_called_once_with(debugger=True)
@@ -14788,36 +15100,28 @@ class DaemonLifecycleTests(unittest.TestCase):
         loading.start.return_value = loading
         args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
 
-        with (
-            patch("codex_usage_hud.cli.configure_daemon_logging"),
-            patch("codex_usage_hud.cli._attach_cli_logger_to_daemon_log"),
-            patch("codex_usage_hud.cli.hide_console_window"),
-            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
-            patch("codex_usage_hud.cli.HudInstanceLock"),
-            patch(
-                "codex_usage_hud.cli._daemon_startup_decision",
-                return_value=cli_module.DaemonStartupDecision(
-                    cli_module.DAEMON_STARTUP_WAIT,
-                ),
+        run_hud = MagicMock(
+            side_effect=[
+                daemon_runtime.DAEMON_RESTART_REQUESTED,
+                daemon_runtime.HUD_AUTO_RESTART_CODEX,
+            ]
+        )
+        run_renderer = MagicMock(return_value=0)
+        restart_codex = MagicMock(return_value=True)
+        services = _daemon_services_for_test(
+            manager=manager,
+            startup_decision=MagicMock(
+                return_value=daemon_runtime.DaemonStartupDecision(
+                    daemon_runtime.DEFAULT_DAEMON_STARTUP_WAIT,
+                )
             ),
-            patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
-            patch(
-                "codex_usage_hud.cli.run_hud_session",
-                side_effect=[
-                    cli_module.DAEMON_RESTART_REQUESTED,
-                    cli_module.HUD_AUTO_RESTART_CODEX,
-                ],
-            ) as run_hud,
-            patch(
-                "codex_usage_hud.cli.run_renderer_hud_session",
-                return_value=0,
-            ) as run_renderer,
-            patch(
-                "codex_usage_hud.cli._restart_codex_for_renderer",
-                return_value=True,
-            ) as restart_codex,
-        ):
-            exit_code = run_daemon(args)
+            create_loading=MagicMock(return_value=loading),
+            run_renderer=run_renderer,
+            run_hud=run_hud,
+            restart_codex=restart_codex,
+        )
+
+        exit_code = run_daemon(args, services=services)
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(run_hud.call_count, 2)
@@ -14838,25 +15142,24 @@ class DaemonLifecycleTests(unittest.TestCase):
         loading.start.return_value = loading
         args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
 
-        with (
-            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
-            patch("codex_usage_hud.cli.HudInstanceLock"),
-            patch(
-                "codex_usage_hud.cli._daemon_startup_decision",
-                return_value=cli_module.DaemonStartupDecision(
+        launch_app = MagicMock(return_value=False)
+        diagnostic = MagicMock()
+        services = _daemon_services_for_test(
+            manager=manager,
+            startup_decision=MagicMock(
+                return_value=daemon_runtime.DaemonStartupDecision(
                     DAEMON_STARTUP_RENDERER,
                     launch_codex=True,
-                ),
+                )
             ),
-            patch("codex_usage_hud.cli._create_loading_feedback", return_value=loading),
-            patch(
-                "codex_usage_hud.cli._select_launch_renderer_cdp_port",
-                return_value=59629,
-            ),
-            patch("codex_usage_hud.cli.launch_codex_app", return_value=False) as launch_app,
-            patch("codex_usage_hud.cli._append_renderer_diagnostic") as diagnostic,
-        ):
-            exit_code = run_daemon(args)
+            create_loading=MagicMock(return_value=loading),
+            run_renderer=MagicMock(),
+            select_launch_port=MagicMock(return_value=59629),
+            launch=launch_app,
+            append_diagnostic=diagnostic,
+        )
+
+        exit_code = run_daemon(args, services=services)
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)
         launch_app.assert_called_once_with(debugger=True)
@@ -14877,22 +15180,21 @@ class DaemonLifecycleTests(unittest.TestCase):
         loading.start.return_value = loading
         args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
 
-        with (
-            patch("codex_usage_hud.cli.CodexDaemonManager", return_value=manager),
-            patch("codex_usage_hud.cli.HudInstanceLock"),
-            patch(
-                "codex_usage_hud.cli._daemon_startup_decision",
-                return_value=cli_module.DaemonStartupDecision(
-                    cli_module.DAEMON_STARTUP_WAIT,
-                ),
+        create_loading = MagicMock(return_value=loading)
+        run_hud = MagicMock(return_value=0)
+        services = _daemon_services_for_test(
+            manager=manager,
+            startup_decision=MagicMock(
+                return_value=daemon_runtime.DaemonStartupDecision(
+                    daemon_runtime.DEFAULT_DAEMON_STARTUP_WAIT,
+                )
             ),
-            patch(
-                "codex_usage_hud.cli._create_loading_feedback",
-                return_value=loading,
-            ) as create_loading,
-            patch("codex_usage_hud.cli.run_hud_session", return_value=0) as run_hud,
-        ):
-            self.assertEqual(run_daemon(args), 0)
+            create_loading=create_loading,
+            run_renderer=MagicMock(),
+            run_hud=run_hud,
+        )
+
+        self.assertEqual(run_daemon(args, services=services), 0)
 
         create_loading.assert_called_once_with(
             args,
@@ -14905,7 +15207,7 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_daemon_startup_launches_missing_codex_directly_with_renderer(self) -> None:
         manager = SimpleNamespace(snapshot=MagicMock(return_value=SimpleNamespace(found=False)))
 
-        decision = cli_module._daemon_startup_decision(
+        decision = runtime_orchestration._daemon_startup_decision(
             SimpleNamespace(no_startup_prompt=True),
             manager,
         )
@@ -14916,9 +15218,9 @@ class DaemonLifecycleTests(unittest.TestCase):
     def test_daemon_startup_attaches_to_existing_codex_without_relaunch(self) -> None:
         manager = SimpleNamespace(snapshot=MagicMock(return_value=SimpleNamespace(found=True)))
 
-        decision = cli_module._daemon_startup_decision(SimpleNamespace(), manager)
+        decision = runtime_orchestration._daemon_startup_decision(SimpleNamespace(), manager)
 
-        self.assertEqual(decision.mode, cli_module.DAEMON_STARTUP_WAIT)
+        self.assertEqual(decision.mode, daemon_runtime.DEFAULT_DAEMON_STARTUP_WAIT)
         self.assertFalse(decision.launch_codex)
 
     def test_legacy_auto_mode_uses_renderer_failure_limit(self) -> None:
@@ -14975,7 +15277,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             session_path = root / "sessions" / "2026" / "06" / "session.jsonl"
 
-            specs = cli_module._renderer_file_watch_specs(context, session_path)
+            specs = renderer_file_events.renderer_file_watch_specs(context, session_path)
 
         reasons_by_name = {(spec.path.name, spec.kind): spec.reason for spec in specs}
         self.assertEqual(reasons_by_name[("hud_settings.json", "file")], "settings")
@@ -14999,8 +15301,8 @@ class DaemonLifecycleTests(unittest.TestCase):
                 sessions_root=sessions_root,
             )
 
-            with patch.object(cli_module.sys, "platform", "darwin"):
-                specs = cli_module._renderer_file_watch_specs(context, session_path)
+            with patch.object(renderer_file_events.sys, "platform", "darwin"):
+                specs = renderer_file_events.renderer_file_watch_specs(context, session_path)
 
         self.assertFalse(any(spec.kind == "tree" for spec in specs))
         self.assertTrue(
@@ -15037,11 +15339,12 @@ class DaemonLifecycleTests(unittest.TestCase):
                 def close(self):
                     return None
 
-            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
-                source = cli_module._RendererFileEventSource(
+            with patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher):
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=0,
+                    diagnostic_setup=runtime_snapshot_service._ensure_runtime_error_diagnostics,
                 )
                 watcher = created[0]
                 watcher.callback({"session-map", "settings"}, {root / "state_5.sqlite"})
@@ -15081,8 +15384,8 @@ class DaemonLifecycleTests(unittest.TestCase):
                 def close(self):
                     return None
 
-            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
-                source = cli_module._RendererFileEventSource(
+            with patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher):
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=0.05,
@@ -15128,8 +15431,8 @@ class DaemonLifecycleTests(unittest.TestCase):
                 def close(self):
                     return None
 
-            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
-                source = cli_module._RendererFileEventSource(
+            with patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher):
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=10.0,
@@ -15171,8 +15474,8 @@ class DaemonLifecycleTests(unittest.TestCase):
                 def close(self):
                     return None
 
-            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
-                source = cli_module._RendererFileEventSource(
+            with patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher):
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=10.0,
@@ -15221,11 +15524,12 @@ class DaemonLifecycleTests(unittest.TestCase):
                 def close(self):
                     return None
 
-            with patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher):
-                source = cli_module._RendererFileEventSource(
+            with patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher):
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=0,
+                    diagnostic_setup=runtime_snapshot_service._ensure_runtime_error_diagnostics,
                 )
                 watcher = created[0]
                 session_path = root / "sessions" / "one.jsonl"
@@ -15274,13 +15578,18 @@ class DaemonLifecycleTests(unittest.TestCase):
                     return None
 
             with (
-                patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root),
+                patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher),
+                patch.object(
+                    runtime_diagnostics,
+                    "_renderer_sink",
+                    _renderer_diagnostic_sink_for_test(root),
+                ),
             ):
-                source = cli_module._RendererFileEventSource(
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=0,
+                    diagnostic_setup=runtime_snapshot_service._ensure_runtime_error_diagnostics,
                 )
                 source.update_session_path(root / "sessions" / "session.jsonl")
                 source.close()
@@ -15341,13 +15650,18 @@ class DaemonLifecycleTests(unittest.TestCase):
                     return None
 
             with (
-                patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root),
+                patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher),
+                patch.object(
+                    runtime_diagnostics,
+                    "_renderer_sink",
+                    _renderer_diagnostic_sink_for_test(root),
+                ),
             ):
-                source = cli_module._RendererFileEventSource(
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=0,
+                    diagnostic_setup=runtime_snapshot_service._ensure_runtime_error_diagnostics,
                 )
                 first_session_path = root / "sessions" / "one.jsonl"
                 second_session_path = root / "sessions" / "two.jsonl"
@@ -15407,13 +15721,18 @@ class DaemonLifecycleTests(unittest.TestCase):
                     return None
 
             with (
-                patch("codex_usage_hud.cli.FileChangeWatcher", FakeWatcher),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=root),
+                patch("codex_usage_hud.renderer_file_events.FileChangeWatcher", FakeWatcher),
+                patch.object(
+                    runtime_diagnostics,
+                    "_renderer_sink",
+                    _renderer_diagnostic_sink_for_test(root),
+                ),
             ):
-                source = cli_module._RendererFileEventSource(
+                source = renderer_file_events.RendererFileEventSource(
                     context,
                     wake_event,
                     debounce_seconds=0,
+                    diagnostic_setup=runtime_snapshot_service._ensure_runtime_error_diagnostics,
                 )
                 watcher = created[0]
                 session_path = root / "sessions" / "one.jsonl"
@@ -15445,7 +15764,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         file_events = SimpleNamespace(event_driven=True)
 
         self.assertTrue(
-            cli_module._renderer_event_idle_wait_enabled(
+            runtime_orchestration._renderer_event_idle_wait_enabled(
                 file_events,
                 snapshot,
                 {"phase": "idle"},
@@ -15454,7 +15773,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            cli_module._renderer_event_idle_wait_enabled(
+            runtime_orchestration._renderer_event_idle_wait_enabled(
                 file_events,
                 snapshot,
                 {"phase": "idle"},
@@ -15464,13 +15783,13 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
 
     def test_renderer_active_session_click_prefers_parent_identity_row(self) -> None:
-        renderer_source = Path(payload_from_snapshot.__code__.co_filename).read_text(
-            encoding="utf-8"
-        )
+        from codex_usage_hud.ui.renderer_script import _RENDERER_HUD_SCRIPT_TEMPLATE
+
+        renderer_source = _RENDERER_HUD_SCRIPT_TEMPLATE
 
         self.assertIn("activeSessionIdentitySelector", renderer_source)
         self.assertIn("activeSessionBindingName", renderer_source)
-        self.assertIn("binding(JSON.stringify(payload));", renderer_source)
+        self.assertIn("ctx.bindings.send(activeSessionBindingName, payload);", renderer_source)
         self.assertIn(
             "const identityRow = event.target?.closest?.(activeSessionIdentitySelector);",
             renderer_source,
@@ -15510,29 +15829,36 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
             fake_work_overlay = MagicMock()
+            fake_update_manager = MagicMock()
             snapshot = ParsedSession(status="parsed", session_path=session_file)
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = runtime_orchestration.RuntimeServices(
+                clock=runtime_orchestration._SystemRuntimeClock(),
+                context_factory=lambda _args: fake_context,
+                renderer_factory=lambda _port, _timeout: fake_client,
+                overlay_factory=lambda _context: fake_work_overlay,
+                update_manager_factory=lambda: fake_update_manager,
+                bridge_factory=lambda *_args, **_kwargs: fake_bridge,
+                snapshot_builder=build_snapshot,
+            )
 
             with (
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
                 patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=[0.0, KeyboardInterrupt],
                 ),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch("codex_usage_hud.runtime_orchestration.hud_runtime_dir", return_value=temp_root),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -15584,35 +15910,36 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_bridge = SimpleNamespace(close=MagicMock())
             fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
             snapshot = ParsedSession(status="parsed", session_path=session_file)
+            services = runtime_orchestration.RuntimeServices(
+                clock=runtime_orchestration._SystemRuntimeClock(),
+                context_factory=lambda _args: fake_context,
+                renderer_factory=lambda _port, _timeout: fake_client,
+                overlay_factory=lambda _context: fake_work_overlay,
+                update_manager_factory=lambda: fake_update_manager,
+                bridge_factory=lambda *_args, **_kwargs: fake_bridge,
+                snapshot_builder=MagicMock(return_value=snapshot),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=KeyboardInterrupt,
                 ),
-                patch("codex_usage_hud.cli._create_loading_feedback") as create_loading,
+                patch("codex_usage_hud.loading_feedback._create_loading_feedback") as create_loading,
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -15659,38 +15986,40 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_bridge = SimpleNamespace(close=MagicMock())
             fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
             snapshot = ParsedSession(status="parsed", session_path=session_file)
+            build_snapshot = MagicMock(return_value=snapshot)
+            command_pump_factory = MagicMock(return_value=fake_command_pump)
+            services = _runtime_services_for_test(
+                context=fake_context,
+                renderer=fake_client,
+                overlay=fake_work_overlay,
+                updates=fake_update_manager,
+                bridge=fake_bridge,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=command_pump_factory,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
                 patch(
-                    "codex_usage_hud.cli._renderer_runtime_signature",
+                    "codex_usage_hud.runtime_orchestration._renderer_runtime_signature",
                     side_effect=[("initial",), ("changed-without-event",)],
                 ) as runtime_signature,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=[0.0, KeyboardInterrupt],
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -15698,6 +16027,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         build_snapshot.assert_called_once()
         fake_client.update.assert_called_once()
         fake_work_overlay.keep_alive.assert_called_once()
+        self.assertIs(command_pump_factory.call_args.args[0], fake_work_overlay)
+        self.assertTrue(callable(command_pump_factory.call_args.args[1]))
 
     def test_renderer_loop_bootstraps_active_session_before_first_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -15764,28 +16095,27 @@ class DaemonLifecycleTests(unittest.TestCase):
                 del args, kwargs
                 call_order.append("snapshot")
                 return snapshot
+            services = _runtime_services_for_test(
+                context=fake_context,
+                renderer=fake_client,
+                overlay=fake_work_overlay,
+                updates=fake_update_manager,
+                bridge=fake_bridge,
+                snapshot_builder=build_snapshot_order,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", side_effect=build_snapshot_order),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=[0.0, KeyboardInterrupt],
                 ),
             ):
@@ -15793,6 +16123,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                     SimpleNamespace(),
                     lock_already_held=True,
                     loading_feedback=loading_feedback,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -15856,35 +16187,35 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_bridge = SimpleNamespace(close=MagicMock())
             fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
             snapshot = ParsedSession(status="parsed", session_path=session_file, session_id="session-a")
+            services = _runtime_services_for_test(
+                context=fake_context,
+                renderer=fake_client,
+                overlay=fake_work_overlay,
+                updates=fake_update_manager,
+                bridge=fake_bridge,
+                snapshot_builder=MagicMock(return_value=snapshot),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration.hud_runtime_dir", return_value=temp_root),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=[0.0, KeyboardInterrupt],
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -15935,34 +16266,35 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_bridge = SimpleNamespace(close=MagicMock())
             fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
             snapshot = ParsedSession(status="parsed", session_path=session_file)
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context,
+                renderer=fake_client,
+                overlay=fake_work_overlay,
+                updates=fake_update_manager,
+                bridge=fake_bridge,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=[0.0, KeyboardInterrupt],
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -16021,27 +16353,31 @@ class DaemonLifecycleTests(unittest.TestCase):
 
                 fake_bridge.start = MagicMock(side_effect=start)
                 return fake_bridge
+            services = _runtime_services_for_test(
+                context=fake_context,
+                renderer=fake_client,
+                overlay=fake_work_overlay,
+                updates=fake_update_manager,
+                bridge=fake_bridge,
+                bridge_factory=bridge_factory,
+                snapshot_builder=MagicMock(
+                    side_effect=AssertionError("snapshot must not be built")
+                ),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 0)
@@ -16137,51 +16473,55 @@ class DaemonLifecycleTests(unittest.TestCase):
                             "filters": {},
                         }
                     )
-                elif delay_calls >= 6:
+                elif delay_calls >= 12:
                     raise KeyboardInterrupt
                 return 0.0
+            services = _runtime_services_for_test(
+                context=fake_context,
+                renderer=fake_client,
+                overlay=fake_work_overlay,
+                updates=fake_update_manager,
+                bridge=fake_bridge,
+                bridge_factory=bridge_factory,
+                snapshot_builder=MagicMock(return_value=snapshot),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
-                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
-                patch("codex_usage_hud.cli._record_cdp_update_failure"),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.runtime_snapshot_service._record_cdp_update_failure"),
                 patch(
-                    "codex_usage_hud.cli.BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS",
-                    (0.0, 0.0, 0.0),
+                    "codex_usage_hud.runtime_orchestration._background_usage_response_retry_delay_seconds",
+                    side_effect=lambda attempt: 0.0 if attempt <= 3 else None,
                 ),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_query,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
         self.assertEqual(fake_client.update.call_count, 1)
-        self.assertEqual(fake_client.update_payload.call_count, 2)
-        first_payload, second_payload = [
-            call.args[0] for call in fake_client.update_payload.call_args_list
+        background_payloads = [
+            call.args[0]
+            for call in fake_client.update_payload.call_args_list
+            if "backgroundUsage" in call.args[0].get("payloadDomains", {})
         ]
+        self.assertEqual(len(background_payloads), 2)
+        first_payload, second_payload = background_payloads
         self.assertEqual(
             set(first_payload["payloadDomains"]),
             {"backgroundUsage"},
@@ -16288,40 +16628,41 @@ class DaemonLifecycleTests(unittest.TestCase):
                 elif delay_calls >= 6:
                     raise KeyboardInterrupt
                 return 0.0
+            services = _runtime_services_for_test(
+                context=fake_context,
+                renderer=fake_client,
+                overlay=fake_work_overlay,
+                updates=fake_update_manager,
+                bridge=fake_bridge,
+                bridge_factory=bridge_factory,
+                snapshot_builder=MagicMock(return_value=snapshot),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
-                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
-                patch("codex_usage_hud.cli._record_cdp_update_failure"),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.runtime_snapshot_service._record_cdp_update_failure"),
                 patch(
-                    "codex_usage_hud.cli.BACKGROUND_USAGE_RESPONSE_RETRY_DELAYS_SECONDS",
-                    (0.0, 0.0, 0.0),
+                    "codex_usage_hud.runtime_orchestration._background_usage_response_retry_delay_seconds",
+                    side_effect=lambda attempt: 0.0 if attempt <= 3 else None,
                 ),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_query,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -16399,35 +16740,34 @@ class DaemonLifecycleTests(unittest.TestCase):
                 assert callable(callback)
                 callback({"action": "checkUpdate", "id": "bridge-command"})
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
-                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration._work_overlay_screen_max_items", return_value=4),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_command,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -16512,27 +16852,25 @@ class DaemonLifecycleTests(unittest.TestCase):
                 assert callable(callback)
                 callback({"action": "enableDesktopOverlay", "id": "bridge-command"})
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
                 patch(
-                    "codex_usage_hud.cli._desktop_overlay_dependency_status",
+                    "codex_usage_hud.runtime_commands._desktop_overlay_dependency_status",
                     return_value={
                         "installed": True,
                         "version": "6.8.1",
@@ -16541,15 +16879,16 @@ class DaemonLifecycleTests(unittest.TestCase):
                         "requiresRestart": False,
                     },
                 ),
-                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.runtime_commands._work_overlay_screen_max_items", return_value=4),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_command,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -16632,35 +16971,34 @@ class DaemonLifecycleTests(unittest.TestCase):
                 assert callable(callback)
                 callback({"action": "dismissWarningsToday", "id": "bridge-command"})
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
-                patch("codex_usage_hud.cli._work_overlay_screen_max_items", return_value=4),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration._work_overlay_screen_max_items", return_value=4),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_command,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -16754,34 +17092,33 @@ class DaemonLifecycleTests(unittest.TestCase):
                     }
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_command,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -16870,34 +17207,33 @@ class DaemonLifecycleTests(unittest.TestCase):
                     }
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_command,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17023,27 +17359,25 @@ class DaemonLifecycleTests(unittest.TestCase):
                     }
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
                 patch(
-                    "codex_usage_hud.cli.fetch_model_prices",
+                    "codex_usage_hud.runtime_orchestration.fetch_model_prices",
                     return_value={
                         "gpt-5.5": ModelPrice(
                             input=5.0,
@@ -17053,15 +17387,16 @@ class DaemonLifecycleTests(unittest.TestCase):
                         )
                     },
                 ),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_command,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17169,34 +17504,33 @@ class DaemonLifecycleTests(unittest.TestCase):
                     }
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_enqueue_command,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17289,34 +17623,33 @@ class DaemonLifecycleTests(unittest.TestCase):
                     context={"reasons": ["settings"]},
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_settings_event,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17372,34 +17705,32 @@ class DaemonLifecycleTests(unittest.TestCase):
             fake_bridge = SimpleNamespace(close=MagicMock())
             fake_bridge.start = MagicMock(return_value="http://127.0.0.1:8765")
             snapshot = ParsedSession(status="parsed", session_path=session_file)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge,
+                snapshot_builder=MagicMock(return_value=snapshot),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=KeyboardInterrupt,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17468,34 +17799,32 @@ class DaemonLifecycleTests(unittest.TestCase):
 
                 fake_bridge.start = MagicMock(side_effect=start)
                 return fake_bridge
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=MagicMock(return_value=snapshot),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=KeyboardInterrupt,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17564,34 +17893,32 @@ class DaemonLifecycleTests(unittest.TestCase):
 
                 fake_bridge.start = MagicMock(side_effect=start)
                 return fake_bridge
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=MagicMock(return_value=snapshot),
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=KeyboardInterrupt,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17688,38 +18015,35 @@ class DaemonLifecycleTests(unittest.TestCase):
                 if delay_calls >= 2:
                     raise KeyboardInterrupt
                 return 0.0
+            build_snapshot = MagicMock(
+                side_effect=[pending_snapshot, resolved_snapshot]
+            )
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+                file_event_source_factory=FakeFileEvents,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
-                patch("codex_usage_hud.cli._WorkOverlayCommandPump", return_value=fake_command_pump),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._RendererFileEventSource",
-                    FakeFileEvents,
-                ),
-                patch(
-                    "codex_usage_hud.cli.build_snapshot",
-                    side_effect=[pending_snapshot, resolved_snapshot],
-                ) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
-                patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_after_mapping,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17805,42 +18129,41 @@ class DaemonLifecycleTests(unittest.TestCase):
                     }
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, bridge_factory=bridge_factory,
+                snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", side_effect=bridge_factory),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli.active_work_items_for_snapshot",
+                    "codex_usage_hud.runtime_snapshot_service.active_work_items_for_snapshot",
                     return_value=[],
                 ),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_wakeup,
                 ),
                 patch(
-                    "codex_usage_hud.cli.RENDERER_ACTIVE_WORK_AFTER_SESSION_DELAY_SECONDS",
+                    "codex_usage_hud.runtime_orchestration.RENDERER_ACTIVE_WORK_AFTER_SESSION_DELAY_SECONDS",
                     0.0,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -17950,42 +18273,40 @@ class DaemonLifecycleTests(unittest.TestCase):
                 assert callable(callback)
                 callback()
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
                 patch(
-                    "codex_usage_hud.cli.active_work_items_for_snapshot",
+                    "codex_usage_hud.runtime_snapshot_service.active_work_items_for_snapshot",
                     return_value=[],
                 ),
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_tracker_wakeup,
                 ),
                 patch(
-                    "codex_usage_hud.cli.RENDERER_ACTIVE_WORK_AFTER_SESSION_DELAY_SECONDS",
+                    "codex_usage_hud.runtime_orchestration.RENDERER_ACTIVE_WORK_AFTER_SESSION_DELAY_SECONDS",
                     0.0,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -18061,34 +18382,32 @@ class DaemonLifecycleTests(unittest.TestCase):
                     context={"action": "recorded"},
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_runtime_error,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -18154,34 +18473,32 @@ class DaemonLifecycleTests(unittest.TestCase):
                     context={"reasons": ["settings"]},
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_settings_event,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -18278,37 +18595,32 @@ class DaemonLifecycleTests(unittest.TestCase):
                     context={"reasons": ["session"]},
                 )
                 return 0.0
+            build_snapshot = MagicMock(side_effect=[active, completed])
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli.build_snapshot",
-                    side_effect=[active, completed],
-                ) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
-                patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_session_event,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -18371,34 +18683,32 @@ class DaemonLifecycleTests(unittest.TestCase):
                     context={"reason": "move", "panel": "top"},
                 )
                 return 0.0
+            build_snapshot = MagicMock(return_value=snapshot)
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_work_overlay, updates=fake_update_manager,
+                bridge=fake_bridge, snapshot_builder=build_snapshot,
+                command_pump_factory=lambda *_args, **_kwargs: fake_command_pump,
+            )
 
             with (
-                patch("codex_usage_hud.cli._select_initial_renderer_cdp_port", return_value=9229),
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-                patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_work_overlay),
-                patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
+                patch("codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port", return_value=9229),
+                patch("codex_usage_hud.runtime_orchestration._build_session_switch_controller"),
                 patch(
-                    "codex_usage_hud.cli._WorkOverlayCommandPump",
-                    return_value=fake_command_pump,
-                ),
-                patch("codex_usage_hud.cli._build_session_switch_controller"),
-                patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=snapshot) as build_snapshot,
-                patch("codex_usage_hud.cli._desktop_overlay_dependency_status", return_value={}),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._desktop_overlay_dependency_status", return_value={}),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=delay_then_layout_event,
                 ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
         self.assertEqual(exit_code, 130)
@@ -18427,27 +18737,37 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
             fake_bridge = MagicMock()
             fake_bridge.start.return_value = "http://127.0.0.1:8765"
+            fake_overlay = MagicMock()
+            fake_updates = MagicMock()
+            snapshot = ParsedSession(status="parsed")
+            services = _runtime_services_for_test(
+                context=fake_context, renderer=fake_client,
+                overlay=fake_overlay, updates=fake_updates,
+                bridge=fake_bridge,
+                snapshot_builder=MagicMock(return_value=snapshot),
+            )
 
             with (
-                patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-                patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-                patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
                 patch(
-                    "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                    "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                     return_value=(True, "visible", "", 123),
                 ),
-                patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-                patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
-                patch("codex_usage_hud.cli._renderer_update_failure_limit", return_value=1),
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
+                patch("codex_usage_hud.runtime_orchestration._renderer_update_failure_limit", return_value=1),
                 patch(
-                    "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                    "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                     side_effect=KeyboardInterrupt,
                 ),
-                patch("codex_usage_hud.cli.hud_runtime_dir", return_value=temp_root),
+                patch.object(
+                    runtime_diagnostics,
+                    "_renderer_sink",
+                    _renderer_diagnostic_sink_for_test(temp_root),
+                ),
             ):
                 exit_code = run_renderer_hud_session(
                     SimpleNamespace(),
                     lock_already_held=True,
+                    services=services,
                 )
 
             diagnostic = (temp_root / "renderer_fallback.log").read_text(
@@ -18462,6 +18782,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         fake_client.update.assert_called_once()
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
+        fake_overlay.close.assert_called_once()
+        fake_updates.close.assert_called_once()
         fake_context.close.assert_called_once()
 
     def test_wait_for_visible_codex_window_returns_when_tracker_becomes_visible(self) -> None:
@@ -18485,14 +18807,12 @@ class DaemonLifecycleTests(unittest.TestCase):
             ),
         )
 
-        with (
-            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
-            patch("codex_usage_hud.cli.time.sleep", return_value=None),
-        ):
-            ready, status, reason, hwnd = _wait_for_visible_codex_window(
-                timeout_seconds=1.0,
-                poll_seconds=0.0,
-            )
+        ready, status, reason, hwnd = codex_app_runtime.wait_for_visible_codex_window(
+            timeout_seconds=1.0,
+            poll_seconds=0.0,
+            tracker_factory=lambda: tracker,
+            sleep=MagicMock(),
+        )
 
         self.assertTrue(ready)
         self.assertEqual(status, "visible")
@@ -18512,10 +18832,10 @@ class DaemonLifecycleTests(unittest.TestCase):
             ),
         )
 
-        with patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker):
-            ready, status, reason, hwnd = _wait_for_visible_codex_window(
-                timeout_seconds=0.0
-            )
+        ready, status, reason, hwnd = codex_app_runtime.wait_for_visible_codex_window(
+            timeout_seconds=0.0,
+            tracker_factory=lambda: tracker,
+        )
 
         self.assertFalse(ready)
         self.assertEqual(status, "hidden")
@@ -18543,15 +18863,14 @@ class DaemonLifecycleTests(unittest.TestCase):
             activate_main_window=MagicMock(return_value=321),
         )
 
-        with (
-            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
-            patch("codex_usage_hud.cli._activate_running_codex_app", return_value=True) as activate_app,
-            patch("codex_usage_hud.cli.time.sleep", return_value=None),
-        ):
-            ready, status, reason, hwnd = _prepare_codex_window_for_renderer(
-                timeout_seconds=0.0,
-            )
+        activate_app = MagicMock(return_value=True)
+        ready, status, reason, hwnd = codex_app_runtime.prepare_codex_window_for_renderer(
+            timeout_seconds=0.0,
+            tracker_factory=lambda: tracker,
+            processes_running=MagicMock(return_value=True),
+            activate=activate_app,
+            sleep=MagicMock(),
+        )
 
         self.assertTrue(ready)
         self.assertEqual(status, "visible")
@@ -18581,25 +18900,25 @@ class DaemonLifecycleTests(unittest.TestCase):
             activate_main_window=MagicMock(side_effect=[0, 654]),
         )
 
-        with (
-            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
-            patch("codex_usage_hud.cli._activate_running_codex_app", return_value=False) as activate_app,
-            patch("codex_usage_hud.cli._restart_codex_for_renderer", return_value=True) as restart_codex,
-            patch("codex_usage_hud.cli.time.sleep", return_value=None),
-        ):
-            ready, status, reason, hwnd = _prepare_codex_window_for_renderer(
-                timeout_seconds=1.0,
-                poll_seconds=0.0,
-                launch_if_missing=True,
-            )
+        activate_app = MagicMock(return_value=False)
+        launch_app = MagicMock(return_value=True)
+        ready, status, reason, hwnd = codex_app_runtime.prepare_codex_window_for_renderer(
+            timeout_seconds=1.0,
+            poll_seconds=0.0,
+            launch_if_missing=True,
+            tracker_factory=lambda: tracker,
+            processes_running=MagicMock(return_value=True),
+            activate=activate_app,
+            launch=launch_app,
+            sleep=MagicMock(),
+        )
 
         self.assertTrue(ready)
         self.assertEqual(status, "visible")
         self.assertEqual(reason, "")
         self.assertEqual(hwnd, 654)
         activate_app.assert_called_once()
-        restart_codex.assert_not_called()
+        launch_app.assert_not_called()
 
     def test_prepare_codex_window_reactivates_existing_tray_instance_for_tk(self) -> None:
         tracker = SimpleNamespace(
@@ -18622,17 +18941,16 @@ class DaemonLifecycleTests(unittest.TestCase):
             activate_main_window=MagicMock(return_value=0),
         )
 
-        with (
-            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=True),
-            patch("codex_usage_hud.cli._activate_running_codex_app", return_value=True) as activate_app,
-            patch("codex_usage_hud.cli.time.sleep", return_value=None),
-        ):
-            ready, status, reason, hwnd = cli_module._prepare_codex_window_for_standalone(
-                timeout_seconds=1.0,
-                poll_seconds=0.0,
-                launch_if_missing=True,
-            )
+        activate_app = MagicMock(return_value=True)
+        ready, status, reason, hwnd = codex_app_runtime.prepare_codex_window_for_renderer(
+            timeout_seconds=1.0,
+            poll_seconds=0.0,
+            launch_if_missing=True,
+            tracker_factory=lambda: tracker,
+            processes_running=MagicMock(return_value=True),
+            activate=activate_app,
+            sleep=MagicMock(),
+        )
 
         self.assertTrue(ready)
         self.assertEqual(status, "visible")
@@ -18666,16 +18984,14 @@ class DaemonLifecycleTests(unittest.TestCase):
             activate_main_window=MagicMock(return_value=777),
         )
 
-        with (
-            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
-            patch("codex_usage_hud.cli.time.sleep", return_value=None),
-        ):
-            ready, status, reason, hwnd = cli_module._prepare_codex_window_for_standalone(
-                timeout_seconds=1.0,
-                poll_seconds=0.0,
-                launch_if_missing=False,
-            )
+        ready, status, reason, hwnd = codex_app_runtime.prepare_codex_window_for_renderer(
+            timeout_seconds=1.0,
+            poll_seconds=0.0,
+            launch_if_missing=False,
+            tracker_factory=lambda: tracker,
+            processes_running=MagicMock(return_value=False),
+            sleep=MagicMock(),
+        )
 
         self.assertTrue(ready)
         self.assertEqual(status, "visible")
@@ -18705,23 +19021,22 @@ class DaemonLifecycleTests(unittest.TestCase):
             activate_main_window=MagicMock(return_value=0),
         )
 
-        with (
-            patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
-            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch_app,
-            patch("codex_usage_hud.cli.time.sleep", return_value=None),
-        ):
-            ready, status, reason, hwnd = cli_module._prepare_codex_window_for_standalone(
-                timeout_seconds=1.0,
-                poll_seconds=0.0,
-                launch_if_missing=True,
-            )
+        launch_app = MagicMock(return_value=True)
+        ready, status, reason, hwnd = codex_app_runtime.prepare_codex_window_for_renderer(
+            timeout_seconds=1.0,
+            poll_seconds=0.0,
+            launch_if_missing=True,
+            tracker_factory=lambda: tracker,
+            processes_running=MagicMock(return_value=False),
+            launch=launch_app,
+            sleep=MagicMock(),
+        )
 
         self.assertTrue(ready)
         self.assertEqual(status, "visible")
         self.assertEqual(reason, "")
         self.assertEqual(hwnd, 777)
-        launch_app.assert_called_once_with(debugger=True)
+        launch_app.assert_called_once_with(debugger=True, cdp_port=None)
 
     def test_prepare_missing_desktop_launches_with_fixed_default_cdp_port(self) -> None:
         tracker = SimpleNamespace(
@@ -18742,33 +19057,33 @@ class DaemonLifecycleTests(unittest.TestCase):
                 patch.object(sys, "platform", "win32"),
                 patch.dict(os.environ, {}, clear=True),
                 patch(
-                    "codex_usage_hud.cli.hud_runtime_dir",
+                    "codex_usage_hud.runtime_orchestration.hud_runtime_dir",
                     return_value=Path(temp_dir),
                 ),
-                patch("codex_usage_hud.cli.CodexWindowTracker", return_value=tracker),
-                patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
-                patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch_app,
+                patch("codex_usage_hud.runtime_orchestration.CodexWindowTracker", return_value=tracker),
+                patch("codex_usage_hud.runtime_orchestration._codex_processes_running", return_value=False),
+                patch("codex_usage_hud.runtime_orchestration.launch_codex_app", return_value=True) as launch_app,
             ):
                 ready, status, reason, hwnd = _prepare_codex_window_for_renderer(
                     timeout_seconds=0.0,
                     poll_seconds=0.0,
                     launch_if_missing=True,
                 )
-                selected_port = os.environ.get(cli_module.CDP_PORT_ENV)
+                selected_port = os.environ.get(runtime_orchestration.CDP_PORT_ENV)
 
         self.assertFalse(ready)
         self.assertEqual(status, "not_found")
         self.assertEqual(reason, "Codex HWND not found")
         self.assertEqual(hwnd, 0)
-        self.assertEqual(selected_port, str(cli_module.DEFAULT_CDP_PORT))
+        self.assertEqual(selected_port, str(runtime_orchestration.DEFAULT_CDP_PORT))
         launch_app.assert_called_once_with(debugger=True)
 
     def test_launch_codex_app_debugger_uses_macos_open_args(self) -> None:
         with (
             patch.object(sys, "platform", "darwin"),
-            patch("codex_usage_hud.cli.cdp_port_from_env", return_value=9333),
+            patch("codex_usage_hud.codex_app_runtime.cdp_port_from_env", return_value=9333),
             patch.dict(os.environ, {}, clear=True),
-            patch("codex_usage_hud.cli.subprocess.Popen") as popen,
+            patch("codex_usage_hud.codex_app_runtime.subprocess.Popen") as popen,
         ):
             launched = launch_codex_app(debugger=True)
 
@@ -18796,35 +19111,40 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         fake_bridge = MagicMock()
         fake_bridge.start.return_value = "http://127.0.0.1:8765"
-        startup_plan = cli_module.RendererStartupPlan(
-            scenario=cli_module.RENDERER_STARTUP_LAUNCH,
+        startup_plan = runtime_orchestration.RendererStartupPlan(
+            scenario=runtime_orchestration.RENDERER_STARTUP_LAUNCH,
             port=9333,
             port_source="launch",
+        )
+        fake_overlay = MagicMock()
+        fake_updates = MagicMock()
+        services = _runtime_services_for_test(
+            context=fake_context, renderer=fake_client,
+            overlay=fake_overlay, updates=fake_updates,
+            bridge=fake_bridge,
+            snapshot_builder=MagicMock(return_value=ParsedSession(status="parsed")),
         )
 
         with (
             patch(
-                "codex_usage_hud.cli._renderer_startup_plan",
+                "codex_usage_hud.runtime_orchestration._renderer_startup_plan",
                 return_value=startup_plan,
             ),
-            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
-            patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-            patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-            patch("codex_usage_hud.cli.launch_codex_app", return_value=True) as launch_app,
+            patch("codex_usage_hud.runtime_orchestration.launch_codex_app", return_value=True) as launch_app,
             patch(
-                "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                 return_value=(True, "visible", "", 123),
             ) as prepare_window,
             patch(
-                "codex_usage_hud.cli._wait_for_visible_codex_window",
+                "codex_usage_hud.runtime_orchestration._wait_for_visible_codex_window",
                 return_value=(True, "visible", "", 123),
             ),
-            patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-            patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
+            patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
         ):
             exit_code = run_renderer_hud_session(
                 SimpleNamespace(),
                 lock_already_held=True,
+                services=services,
             )
 
         self.assertEqual(exit_code, 130)
@@ -18835,6 +19155,8 @@ class DaemonLifecycleTests(unittest.TestCase):
         launch_app.assert_called_once_with(debugger=True)
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
+        fake_overlay.close.assert_called_once()
+        fake_updates.close.assert_called_once()
         fake_context.close.assert_called_once()
 
     def test_renderer_recovery_waits_without_launching_codex_twice(self) -> None:
@@ -18855,39 +19177,50 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         fake_bridge = MagicMock()
         fake_bridge.start.return_value = "http://127.0.0.1:8765"
+        fake_overlay = MagicMock()
+        fake_updates = MagicMock()
+        renderer_calls: list[tuple[int, float]] = []
+        services = _runtime_services_for_test(
+            context=fake_context, renderer=fake_client,
+            overlay=fake_overlay, updates=fake_updates,
+            bridge=fake_bridge,
+            snapshot_builder=MagicMock(return_value=ParsedSession(status="parsed")),
+        )
+        services = replace(
+            services,
+            renderer_factory=lambda port, timeout: renderer_calls.append(
+                (port, timeout)
+            )
+            or fake_client,
+        )
 
         with (
-            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
+            patch("codex_usage_hud.runtime_orchestration._codex_processes_running", return_value=False),
             patch(
-                "codex_usage_hud.cli.RendererHudClient", return_value=fake_client
-            ) as client_class,
-            patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-            patch("codex_usage_hud.cli._codex_processes_running", return_value=False),
-            patch(
-                "codex_usage_hud.cli._select_initial_renderer_cdp_port",
+                "codex_usage_hud.runtime_orchestration._select_initial_renderer_cdp_port",
                 return_value=60200,
             ),
             patch(
-                "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                 return_value=(True, "visible", "", 123),
             ) as prepare_window,
             patch(
-                "codex_usage_hud.cli._wait_for_visible_codex_window",
+                "codex_usage_hud.runtime_orchestration._wait_for_visible_codex_window",
                 return_value=(True, "visible", "", 123),
             ),
-            patch("codex_usage_hud.cli.wait_for_renderer", return_value=True) as wait_renderer,
-            patch("codex_usage_hud.cli.build_snapshot", return_value=ParsedSession(status="parsed")),
+            patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True) as wait_renderer,
         ):
             exit_code = run_renderer_hud_session(
                 SimpleNamespace(),
                 lock_already_held=True,
                 launched_codex=True,
+                services=services,
             )
 
         self.assertEqual(exit_code, 130)
-        client_class.assert_called_once_with(
-            port=60200,
-            timeout_seconds=cli_module.RENDERER_RESTART_CDP_TIMEOUT_SECONDS
+        self.assertEqual(
+            renderer_calls,
+            [(60200, runtime_orchestration.RENDERER_RESTART_CDP_TIMEOUT_SECONDS)],
         )
         prepare_window.assert_called_once_with(
             timeout_seconds=RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS,
@@ -18895,7 +19228,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(
             wait_renderer.call_args.kwargs["timeout_seconds"],
-            cli_module.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS,
+            runtime_orchestration.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS,
         )
 
     def test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep(self) -> None:
@@ -18975,53 +19308,53 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         fake_client.update.side_effect = update_side_effect
 
-        startup_plan = cli_module.RendererStartupPlan(
-            scenario=cli_module.RENDERER_STARTUP_ATTACH,
+        startup_plan = runtime_orchestration.RendererStartupPlan(
+            scenario=runtime_orchestration.RENDERER_STARTUP_ATTACH,
             port=9222,
             port_source="test",
         )
+        services = _runtime_services_for_test(
+            context=fake_context, renderer=fake_client,
+            overlay=fake_overlay, updates=fake_update_manager,
+            bridge=fake_bridge,
+            snapshot_builder=MagicMock(return_value=fake_snapshot),
+        )
         with (
             patch.object(sys, "platform", "win32"),
-            patch("codex_usage_hud.cli.build_runtime_context", return_value=fake_context),
             patch(
-                "codex_usage_hud.cli._renderer_startup_plan",
+                "codex_usage_hud.runtime_orchestration._renderer_startup_plan",
                 return_value=startup_plan,
             ),
-            patch("codex_usage_hud.cli.RendererHudClient", return_value=fake_client),
-            patch("codex_usage_hud.cli.SettingsBridgeServer", return_value=fake_bridge),
-            patch("codex_usage_hud.cli.DesktopWorkOverlay", return_value=fake_overlay) as overlay_class,
-            patch("codex_usage_hud.cli.AutoUpdateManager", return_value=fake_update_manager),
             patch(
-                "codex_usage_hud.cli._build_session_switch_controller",
+                "codex_usage_hud.runtime_orchestration._build_session_switch_controller",
                 return_value=session_controller,
             ),
             patch(
-                "codex_usage_hud.cli._prepare_codex_window_for_renderer",
+                "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_renderer",
                 return_value=(True, "visible", "", 123),
             ) as prepare_window,
-            patch("codex_usage_hud.cli._primary_screen_height", return_value=1080),
+            patch("codex_usage_hud.runtime_orchestration._primary_screen_height", return_value=1080),
             patch(
-                "codex_usage_hud.cli._prepare_codex_window_for_standalone",
+                "codex_usage_hud.runtime_orchestration._prepare_codex_window_for_standalone",
                 return_value=(True, "visible", "", 321),
             ) as prepare_overlay_window,
             patch(
-                "codex_usage_hud.cli._refocus_codex_window_after_current_session_click",
+                "codex_usage_hud.overlay_runtime._refocus_codex_window_after_current_session_click",
                 return_value=(True, "visible", "", 321),
             ) as refocus_overlay_window,
-            patch("codex_usage_hud.cli.wait_for_renderer", return_value=True),
-            patch("codex_usage_hud.cli.build_snapshot", return_value=fake_snapshot),
+            patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=True),
             patch(
-                "codex_usage_hud.cli._renderer_refresh_delay_seconds",
+                "codex_usage_hud.runtime_orchestration._renderer_refresh_delay_seconds",
                 side_effect=KeyboardInterrupt,
             ),
         ):
             exit_code = run_renderer_hud_session(
                 SimpleNamespace(hud_mode="renderer"),
                 lock_already_held=True,
+                services=services,
             )
 
         self.assertEqual(exit_code, 130)
-        overlay_class.assert_called_once_with(item_limit=6)
         self.assertTrue(command_started.is_set())
         self.assertTrue(command_finished.is_set())
         fake_overlay.take_commands.assert_called()
@@ -19056,13 +19389,13 @@ class DaemonLifecycleTests(unittest.TestCase):
         loading = SimpleNamespace(close=MagicMock())
 
         with (
-            patch("codex_usage_hud.cli.build_runtime_context") as build_context,
-            patch("codex_usage_hud.cli._prepare_codex_window_for_standalone") as prepare_window,
+            patch("codex_usage_hud.runtime_context.build_runtime_context") as build_context,
+            patch("codex_usage_hud.runtime_orchestration._prepare_codex_window_for_standalone") as prepare_window,
         ):
             exit_code = run_tk_hud_session(
                 SimpleNamespace(compact=False),
                 lock_already_held=True,
-                loading_feedback=loading,
+                loading_feedback_instance=loading,
             )
 
         self.assertEqual(exit_code, RENDERER_HUD_UNAVAILABLE)

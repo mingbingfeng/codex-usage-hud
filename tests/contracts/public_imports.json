@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "supportedCliImports": [
+    "UsageSummaryCache",
+    "current_budget_windows",
+    "main",
+    "renderer_diagnostic_path"
+  ],
+  "explicitCompatibilityExports": ["UsageSummaryCache"],
+  "consumers": [
+    {"path": "pyproject.toml", "kind": "entry-point", "imports": ["main"]},
+    {"path": "src/codex_usage_hud/__main__.py", "kind": "relative-import", "imports": ["main"]},
+    {"path": "tools/build_exe.py", "kind": "generated-bootstrap", "imports": ["main"]},
+    {"path": "tools/measure_renderer_latency.py", "kind": "absolute-import", "imports": ["current_budget_windows"]},
+    {"path": "tools/run_live_acceptance.py", "kind": "absolute-import", "imports": ["renderer_diagnostic_path"]}
+  ],
+  "rendererFacadeImports": [
+    "RendererHudClient",
+    "payload_from_snapshot",
+    "remove_renderer_hud_from_pages",
+    "session_switch_payload_from_snapshot",
+    "wait_for_renderer"
+  ],
+  "rendererConsumers": [],
+  "privateMonkeypatchPropagationIsPublic": false
+}

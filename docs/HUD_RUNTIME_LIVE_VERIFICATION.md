@@ -1,6 +1,6 @@
 # HUD Runtime Live Verification
 
-Last updated: 2026-07-08
+Last updated: 2026-08-03
 
 This checklist is for the remaining items that are not fully proven by:
 
@@ -46,6 +46,21 @@ Example shape:
 }
 ```
 
+For a `pass` on a P8 real-App interaction item (for example
+`windows_renderer_startup` or `windows_active_session`), include
+`"evidence_scope": "real-codex-app"`. Daemon-only samples and Chromium or
+smoke-host captures remain non-eligible and are recorded as `FAIL` when marked
+`pass`; use `unknown`/`not-run` while the real App check is unavailable.
+For idle CPU, also declare a renderer measurement scope; an observation with
+`"measurement_scope": "hud-daemon-process-only"` cannot pass even when its
+evidence scope says `real-codex-app`.
+
+Keep the artifact eligibility metadata in the observation when it is available.
+The acceptance runner rejects `p8_eligible=false` and evidence marked
+`INVALIDATED`, `INELIGIBLE`, or equivalent even when the wrapper declares
+`evidence_scope="real-codex-app"`. A low-CPU sample with watched input changes
+must therefore remain a failed or pending check, never a P8 idle pass.
+
 If you want the tool to collect a simple HUD-process idle CPU sample for the
 launched daemon, add:
 
@@ -63,6 +78,42 @@ These are the remaining live-runtime items called out in
 1. Real Codex App end-to-end latency
 2. Real Codex App idle CPU / no background work
 3. Real Codex App page-lifecycle confirmation beyond localhost smoke-host pages
+4. Native Windows theme and drag/resize interaction
+
+## Latest Settled Idle Attempt
+
+The real `app://-/index.html` page was reattached through the public Renderer
+bootstrap path and sampled read-only for 60 seconds on 2026-08-03
+(`output/playwright/real-codex-app-idle-settled-20260803.json`). The HUD root
+stayed ready, its payload signature stayed stable, and the scoped HUD-root
+MutationObserver saw zero mutations. The complete Codex App process averaged
+about `0.0065%` normalized CPU, but that process measurement cannot isolate HUD
+JavaScript CPU.
+
+The sample is **invalidated**, not an idle pass: four watched Codex session
+JSONL files changed during the interval, including the current agent rollout.
+The artifact records `status=INVALIDATED`, `noWatchedInputChanges=false`, and
+`p8_eligible=false`. Do not promote this low-CPU observation to the P8 idle
+requirement; repeat only when no watched session, settings, or background input
+changes for the full interval.
+
+## Active-Session Role-List Fix Evidence
+
+The real App sidebar inspection confirmed that the selected thread rows are
+descendants of `[role='list']` containers. Before the fix, the renderer could
+fall back to a row-local parent, producing a title-only selection key with an
+empty raw renderer session ID. `activeSessionContainer()` now prefers the
+nearest row `[role='list']` ancestor and the document-level `[role='list']`
+fallback before broad sidebar selectors.
+
+The read-only real-App artifact
+`output/playwright/real-codex-app-active-session-role-list-fix-20260803.json`
+records the full result. After bootstrap, the selected 7-row list produced a
+canonical ID immediately. Two existing-thread switches converged raw/canonical
+state in `138.9-167.7ms`; `selectionSeq` advanced at the same point, while
+authoritative `appliedSeq` confirmation took `996.5-1263.2ms`. The original
+thread was restored. No Codex request, storage write, or product binding write
+was made, and the temporary probe was removed.
 
 ## Preparation
 
@@ -135,6 +186,12 @@ Pass condition:
 - HUD state visibly tracks the selected thread within about 9 frames at 60fps
   (`~150ms`)
 
+Current evidence status:
+- row/canonical selection is now confirmed against the real `[role='list']`
+  sidebar, but authoritative stable confirmation remains above the target;
+  keep this check as `fail` until the remaining `appliedSeq`/visible-stability
+  tail is resolved.
+
 Evidence to capture:
 - screen recording
 - optional note of observed worst-case frame delta
@@ -180,7 +237,27 @@ Pass condition:
 - no obvious periodic bursts that suggest recurring snapshot rebuilds or payload
   pushes during idle
 
-### 5. Normal-Mode Diagnostics
+### 5. Renderer CDP Update Failure Recovery
+
+Goal:
+- verify a real Renderer update failure is recorded and clears after the
+  update function is restored
+
+Steps:
+1. In a local CDP evaluation, retain `window.__codexUsageHudUpdate` and
+   temporarily replace it with a function that throws.
+2. Trigger `window.__codexUsageHudReportActiveSession(...)` once and wait for
+   the DEBUG error count to increase.
+3. Inspect `renderer_fallback.log` for `source=cdp` and
+   `code=cdp.update_failed`.
+4. Restore the retained update function, trigger one more active-session
+   report, and confirm a matching `runtime_error_resolved` record and zero
+   visible errors.
+
+Evidence must declare `evidence_scope: real-codex-app`; do not use a smoke-host
+page for this check.
+
+### 6. Normal-Mode Diagnostics
 
 Goal:
 - verify non-DEBUG mode still writes structured diagnostics in a real Codex App
@@ -226,6 +303,7 @@ manual-only evidence items:
 - real Codex App active-session latency under `<150ms`
 - real Codex App current-session update latency under `<250ms`
 - real Codex App idle CPU / no recurring background work
+- native Windows theme and drag/resize persistence
 
 ## Close-Out Guidance
 

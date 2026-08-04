@@ -1,0 +1,211 @@
+"""Per-user paths for HUD runtime state and diagnostics."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+import os
+from pathlib import Path
+import sys
+
+
+HUD_RUNTIME_DIRNAME = "codex-usage-hud"
+HUD_LOCK_FILENAME = "codex_usage_hud.pid"
+RENDERER_DIAGNOSTIC_FILENAME = "renderer_fallback.log"
+RENDERER_CDP_STATE_FILENAME = "renderer_cdp_state.json"
+CRASH_DIAGNOSTIC_FILENAME = "crash.log"
+DAEMON_LOG_FILENAME = "daemon.log"
+DAEMON_LOG_ENV = "CODEX_USAGE_HUD_DAEMON_LOG"
+CODEX_APP_PATH_ENV = "CODEX_USAGE_HUD_CODEX_APP"
+CODEX_APP_ID_ENV = "CODEX_USAGE_HUD_CODEX_APP_ID"
+CODEX_APP_DEFAULT_ID = "OpenAI.Codex_2p2nqsd0c76g0!App"
+
+
+def hud_runtime_dir(
+    *,
+    platform: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Return the established per-user directory for lightweight HUD state."""
+    platform_name = sys.platform if platform is None else str(platform)
+    values = os.environ if environ is None else environ
+    user_home = Path.home() if home is None else Path(home)
+    if platform_name.startswith("win"):
+        root = values.get("LOCALAPPDATA")
+        base = Path(root) if root else user_home / "AppData" / "Local"
+    elif platform_name == "darwin":
+        base = user_home / "Library" / "Application Support"
+    else:
+        base = Path(
+            values.get("XDG_RUNTIME_DIR")
+            or values.get("XDG_STATE_HOME")
+            or user_home / ".local" / "state"
+        )
+    return base / HUD_RUNTIME_DIRNAME
+
+
+def runtime_file_path(filename: str, *, runtime_dir: Path | None = None) -> Path:
+    """Return one named file below the HUD runtime directory."""
+    name = Path(str(filename or "")).name
+    if not name or name in {".", ".."}:
+        raise ValueError("runtime filename must name one file")
+    return (runtime_dir or hud_runtime_dir()) / name
+
+
+def hud_lock_path(*, runtime_dir: Path | None = None) -> Path:
+    return runtime_file_path(HUD_LOCK_FILENAME, runtime_dir=runtime_dir)
+
+
+def renderer_diagnostic_path(*, runtime_dir: Path | None = None) -> Path:
+    return runtime_file_path(RENDERER_DIAGNOSTIC_FILENAME, runtime_dir=runtime_dir)
+
+
+def renderer_cdp_state_path(*, runtime_dir: Path | None = None) -> Path:
+    return runtime_file_path(RENDERER_CDP_STATE_FILENAME, runtime_dir=runtime_dir)
+
+
+def crash_diagnostic_path(*, runtime_dir: Path | None = None) -> Path:
+    return runtime_file_path(CRASH_DIAGNOSTIC_FILENAME, runtime_dir=runtime_dir)
+
+
+def daemon_log_path(
+    *,
+    platform: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Return the daemon log path without changing its legacy location rules."""
+    values = os.environ if environ is None else environ
+    explicit = values.get(DAEMON_LOG_ENV)
+    if explicit:
+        return Path(explicit).expanduser()
+    platform_name = sys.platform if platform is None else str(platform)
+    user_home = Path.home() if home is None else Path(home)
+    if platform_name.startswith("win"):
+        root = values.get("LOCALAPPDATA")
+        base = Path(root) if root else user_home / "AppData" / "Local"
+    else:
+        base = Path(values.get("XDG_STATE_HOME") or user_home / ".local" / "state")
+    return base / HUD_RUNTIME_DIRNAME / DAEMON_LOG_FILENAME
+
+
+def _unique_strings(items: Sequence[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = str(item or "").strip()
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
+def codex_app_shell_targets(
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Return Windows shell targets that can activate Codex normally."""
+    values = os.environ if environ is None else environ
+    targets: list[str] = []
+    configured_id = values.get(CODEX_APP_ID_ENV, "").strip()
+    if configured_id:
+        targets.append(
+            configured_id
+            if configured_id.lower().startswith("shell:")
+            else f"shell:AppsFolder\\{configured_id}"
+        )
+    targets.append(f"shell:AppsFolder\\{CODEX_APP_DEFAULT_ID}")
+    configured_path = values.get(CODEX_APP_PATH_ENV, "").strip()
+    if configured_path:
+        targets.append(configured_path)
+    for root in (values.get("APPDATA", ""), values.get("PROGRAMDATA", "")):
+        if not root:
+            continue
+        base = Path(root) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+        targets.extend(
+            str(base / name)
+            for name in (
+                "Codex.lnk",
+                "OpenAI Codex.lnk",
+                Path("OpenAI") / "Codex.lnk",
+            )
+        )
+    return _unique_strings(targets)
+
+
+def codex_app_executable_candidates(
+    *,
+    appx_install_locations: Sequence[Path] = (),
+    environ: Mapping[str, str] | None = None,
+) -> list[Path]:
+    """Return existing Codex GUI executables in established priority order."""
+    values = os.environ if environ is None else environ
+    candidates: list[Path] = []
+    configured = values.get(CODEX_APP_PATH_ENV, "").strip()
+    if configured and not configured.lower().startswith("shell:"):
+        path = Path(configured).expanduser()
+        if path.suffix.lower() == ".exe":
+            candidates.append(path)
+
+    local_appdata = values.get("LOCALAPPDATA")
+    if local_appdata:
+        relocated = Path(local_appdata) / "Programs" / "CodexRelocated" / "app"
+        candidates.extend([relocated / "ChatGPT.exe", relocated / "Codex.exe"])
+
+    for root_name in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+        root = values.get(root_name)
+        if not root:
+            continue
+        base = Path(root)
+        for relative in (
+            Path("Programs") / "Codex",
+            Path("Programs") / "codex",
+            Path("Programs") / "OpenAI Codex",
+            Path("Codex"),
+            Path("OpenAI Codex"),
+        ):
+            app_dir = base / relative
+            candidates.extend([app_dir / "ChatGPT.exe", app_dir / "Codex.exe"])
+
+    program_files = values.get("ProgramFiles")
+    if program_files:
+        windows_apps = Path(program_files) / "WindowsApps"
+        try:
+            candidates.extend(
+                windows_apps.glob("OpenAI.Codex_*__2p2nqsd0c76g0/app/ChatGPT.exe")
+            )
+            candidates.extend(
+                windows_apps.glob("OpenAI.Codex_*__2p2nqsd0c76g0/app/Codex.exe")
+            )
+        except OSError:
+            pass
+    for install_location in appx_install_locations:
+        app_dir = Path(install_location) / "app"
+        candidates.extend([app_dir / "ChatGPT.exe", app_dir / "Codex.exe"])
+    existing = [path for path in candidates if path.exists()]
+    return [Path(item) for item in _unique_strings(str(path) for path in existing)]
+
+
+__all__ = [
+    "CODEX_APP_DEFAULT_ID",
+    "CODEX_APP_ID_ENV",
+    "CODEX_APP_PATH_ENV",
+    "CRASH_DIAGNOSTIC_FILENAME",
+    "DAEMON_LOG_ENV",
+    "DAEMON_LOG_FILENAME",
+    "HUD_LOCK_FILENAME",
+    "HUD_RUNTIME_DIRNAME",
+    "RENDERER_CDP_STATE_FILENAME",
+    "RENDERER_DIAGNOSTIC_FILENAME",
+    "crash_diagnostic_path",
+    "codex_app_executable_candidates",
+    "codex_app_shell_targets",
+    "daemon_log_path",
+    "hud_lock_path",
+    "hud_runtime_dir",
+    "renderer_cdp_state_path",
+    "renderer_diagnostic_path",
+    "runtime_file_path",
+]

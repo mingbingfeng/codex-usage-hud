@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
+import queue
 import sys
+import socket
 import threading
 import time
 from types import SimpleNamespace
@@ -29,9 +32,10 @@ from codex_usage_hud.core.parser import (
 from codex_usage_hud.core.runtime_errors import RuntimeErrorEvent
 from codex_usage_hud.platforms.codex_theme import CodexThemeSnapshot
 from codex_usage_hud.support_assets import support_qr_asset_paths, support_qr_payload
-from codex_usage_hud.ui import renderer_hud
-from codex_usage_hud.ui.renderer_hud import (
-    RendererHudClient,
+from codex_usage_hud import renderer_client as renderer_hud
+from codex_usage_hud.renderer_cdp import bindings as renderer_bindings
+from codex_usage_hud.renderer_client import RendererHudClient
+from codex_usage_hud.renderer_payload_builder import (
     _renderer_theme_payload,
     payload_from_snapshot,
 )
@@ -342,7 +346,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("rendererSessionId: rawRendererSessionId", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("selectionSeq", renderer_hud.RENDERER_HUD_SCRIPT)
         binding_send = renderer_hud.RENDERER_HUD_SCRIPT.index(
-            "binding(JSON.stringify(payload));"
+            "ctx.bindings.send(activeSessionBindingName, payload);"
         )
         delivered_signature = renderer_hud.RENDERER_HUD_SCRIPT.index(
             "window[activeSessionLastSignatureName] = signature;",
@@ -368,8 +372,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("data-codex-usage-hud-model-option", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("reasoningEffortLabel", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("ultra", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("const binding = window[settingsCommandBindingName];", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("binding(JSON.stringify(payload));", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("ctx.bindings.available(settingsCommandBindingName)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("ctx.bindings.send(settingsCommandBindingName, payload)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('setSettingsStatus(state.message || state.title || "", state.error ? "error" : "")', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("window.__codexUsageHudRemove()", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("expiresAt: Date.now() + 10000", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -389,7 +393,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("new ResizeObserver", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function startBootstrapObserver()", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("window[bootstrapObserverName].observe(document.body", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn("setTimeout(stopBootstrapObserver, 5000)", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('"layout_bootstrap"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-startup-bubble", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('root.dataset.hudReady = "false";', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("function renderStartupBubble(root, startup)", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -885,8 +889,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         )
         self.assertIn(
             '.codex-usage-hud-settings-dialog[data-active-tab="backgroundUsage"] '
-            ".codex-usage-hud-settings-body {\n          overflow: auto;",
+            ".codex-usage-hud-settings-body {",
             script,
+        )
+        self.assertRegex(
+            script,
+            r'\.codex-usage-hud-settings-dialog\[data-active-tab="backgroundUsage"\] '
+            r'\.codex-usage-hud-settings-body \{\s+overflow: auto;',
         )
 
         detail_start = script.index("async function loadBackgroundUsageDetail(eventId,")
@@ -917,15 +926,15 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('{ markViewed: true }', script)
         self.assertIn("markViewed: markViewed === true", script)
         self.assertIn('["all", "全部"]', script)
-        self.assertIn(
-            "backgroundUsageState.range = normalizeBackgroundUsageRange(\n"
-            "          response?.payload?.range,",
+        self.assertRegex(
             script,
+            r"backgroundUsageState\.range = normalizeBackgroundUsageRange\(\s+"
+            r"response\?\.payload\?\.range,",
         )
-        self.assertIn(
-            ".${requestClass} .codex-usage-hud-collapsed[data-has-badge=\"true\"] {\n"
-            "        grid-template-columns: auto minmax(0, 1fr) auto 22px;",
+        self.assertRegex(
             script,
+            r"\.\$\{requestClass\} \.codex-usage-hud-collapsed\[data-has-badge=\"true\"\] "
+            r"\{\s+grid-template-columns: auto minmax\(0, 1fr\) auto 22px;",
         )
         submit_start = script.index("function submitBackgroundUsageCommand")
         submit_end = script.index("function readThemeStorage", submit_start)
@@ -964,7 +973,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("-webkit-user-select: text;", script)
 
         jump_start = script.index("function applyBackgroundUsagePayload")
-        jump_end = script.index("function rerenderUsageInsightsIfVisible", jump_start)
+        jump_end = script.index("function install()", jump_start)
         jump_contract = script[jump_start:jump_end]
         self.assertIn("backgroundUsageOpenEventId", jump_contract)
         self.assertIn('renderSettingsModal("backgroundUsage")', jump_contract)
@@ -981,11 +990,10 @@ class RendererHudPayloadTests(unittest.TestCase):
             jump_contract,
         )
         # Auto-located open from the bottom-right badge must mark the event viewed.
-        self.assertIn(
-            "void loadBackgroundUsageDetail(\n"
-            "            backgroundUsageState.selectedEventId,\n"
-            "            { markViewed: true },",
+        self.assertRegex(
             jump_contract,
+            r"void loadBackgroundUsageDetail\(\s+"
+            r"backgroundUsageState\.selectedEventId,\s+\{ markViewed: true \},",
         )
         self.assertIn(
             "markBackgroundUsageEventViewed(openEventId)",
@@ -1020,7 +1028,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("grid-template-rows: minmax(0, 1fr) auto;", script)
         self.assertIn("function readSettingsUiState()", script)
         self.assertIn("function writeSettingsUiState(open, tab)", script)
-        self.assertIn("sessionStorage.setItem(settingsUiStorageKey", script)
+        self.assertIn("ctx.storage.write(sessionStorage, settingsUiStorageKey", script)
         self.assertIn("writeSettingsUiState(true, activeTab);", script)
         self.assertIn("writeSettingsUiState(false, settingsActiveTab);", script)
         self.assertIn("function restoreOpenSettingsModal()", script)
@@ -1220,10 +1228,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('scheduleActiveSessionSendFollowup("composer-send")', script)
         self.assertIn('scheduleActiveSessionSendFollowup("composer-submit")', script)
         self.assertIn('scheduleActiveSessionSendFollowup("composer-enter")', script)
-        self.assertIn('document.addEventListener("submit", submit, true)', script)
-        self.assertIn('document.addEventListener("keydown", keydown, true)', script)
-        self.assertIn('document.removeEventListener("submit", composerHandler.submit, true)', script)
-        self.assertIn('document.removeEventListener("keydown", composerHandler.keydown, true)', script)
+        self.assertIn('activeSessionScope.listen(document, "submit", submit, true)', script)
+        self.assertIn('activeSessionScope.listen(document, "keydown", keydown, true)', script)
         self.assertIn("const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000]", script)
 
     def test_renderer_active_session_filters_out_folder_rows(self) -> None:
@@ -1257,7 +1263,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn("const delays = [32, 120, 320, 800, 1600, 3200, 5600, 9000]", script)
-        self.assertIn("delays.map((ms) => setTimeout(", script)
+        self.assertIn("delays.map((ms) => ctx.lifecycle.timeout(", script)
         self.assertIn(
             "function activeSessionComposerSubmitButton(button)",
             script,
@@ -1271,7 +1277,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn(
-            'input.addEventListener("keydown", handlers.keydown, true)',
+            'composerScope.listen(input, "keydown", handlers.keydown, true)',
             script,
         )
         self.assertIn(
@@ -1406,7 +1412,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("img[src^='data:image']", script)
         self.assertIn("collectImageAttachment", script)
         self.assertIn("scheduleComposerBadgeUpdate", script)
-        self.assertIn("requestAnimationFrame(() => updateComposerBadgeText", script)
+        self.assertIn('ctx.frames.schedule("composer_badge"', script)
         self.assertIn("composerAttachmentsDebounceMs", script)
         self.assertIn("}, composerAttachmentsDebounceMs)", script)
 
@@ -1518,33 +1524,33 @@ class RendererHudPayloadTests(unittest.TestCase):
             "scrollbar-color: var(--codex-usage-hud-divider) var(--codex-usage-hud-surface);",
             script,
         )
-        self.assertIn(
-            "#${rootId} .codex-usage-hud-activity-main,\n"
-            "      #${rootId} .codex-usage-hud-activity-step,\n"
-            "      #${rootId} .codex-usage-hud-activity-metric,\n"
-            "      #${rootId} .codex-usage-hud-session-insight,\n"
-            "      #${rootId} .codex-usage-hud-heavy-round,\n"
-            "      #${rootId} .codex-usage-hud-token-chip {\n"
-            "        background: var(--codex-usage-hud-request-panel-surface);",
+        self.assertRegex(
             script,
+            r"#\$\{rootId\} \.codex-usage-hud-activity-main,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-activity-step,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-activity-metric,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-session-insight,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-heavy-round,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-token-chip \{\s+"
+            r"background: var\(--codex-usage-hud-request-panel-surface\);",
         )
-        self.assertIn(
-            "#${rootId} .codex-usage-hud-chip {\n"
-            "        background: var(--codex-usage-hud-header-surface);\n"
-            "        color: var(--codex-usage-hud-text);",
+        self.assertRegex(
             script,
+            r"#\$\{rootId\} \.codex-usage-hud-chip \{\s+"
+            r"background: var\(--codex-usage-hud-header-surface\);\s+"
+            r"color: var\(--codex-usage-hud-text\);",
         )
-        self.assertIn(
-            "#${rootId} .codex-usage-hud-stat-label,\n"
-            "      #${rootId} .codex-usage-hud-section-title,\n"
-            "      #${rootId} .codex-usage-hud-token-chip span:first-child,\n"
-            "      #${rootId} .codex-usage-hud-heavy-round-detail,\n"
-            "      #${rootId} .codex-usage-hud-activity-node-time,\n"
-            "      #${rootId} .codex-usage-hud-activity-node-detail,\n"
-            "      #${rootId} .codex-usage-hud-session-composition,\n"
-            "      #${rootId} .codex-usage-hud-value.muted {\n"
-            "        color: var(--codex-usage-hud-muted);",
+        self.assertRegex(
             script,
+            r"#\$\{rootId\} \.codex-usage-hud-stat-label,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-section-title,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-token-chip span:first-child,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-heavy-round-detail,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-activity-node-time,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-activity-node-detail,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-session-composition,\s+"
+            r"#\$\{rootId\} \.codex-usage-hud-value\.muted \{\s+"
+            r"color: var\(--codex-usage-hud-muted\);",
         )
         self.assertIn(
             "background: color-mix(in srgb, var(--codex-usage-hud-warning) 13%, var(--codex-usage-hud-panel-surface));",
@@ -1613,7 +1619,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("data-rest-reminder-status-title", script)
         self.assertIn("data-rest-reminder-remaining", script)
         self.assertIn("restReminderStatusTitle", script)
-        self.assertIn("setInterval(syncRestReminderCountdown, 1000)", script)
+        self.assertIn('"rest_reminder_settings"', script)
         self.assertIn('startInput.dataset.userEdited !== "true"', script)
         self.assertIn(
             "formatRestReminderInputTime(Number(timing?.timerStartedAtMs))",
@@ -1713,7 +1719,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("codex-usage-hud-rest-toast-hint", script)
         self.assertIn('aria-live="assertive"', script)
         self.assertIn('data-rest-reminder-break-countdown="true"', script)
-        self.assertIn("setInterval(syncRestReminderOverlayCountdown, 1000)", script)
+        self.assertIn('"rest_reminder_overlay"', script)
         self.assertIn("stopRestReminderOverlayTicker()", script)
         self.assertIn('toast.dataset.visible = "false"', script)
         self.assertIn("等待选择 ${remaining} · 超时自动跳过本次休息", script)
@@ -1736,7 +1742,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function positionRestReminderBubble", script)
         self.assertIn("const composer = composerRect()", script)
         self.assertIn("positionRestReminderBubble(root)", script)
-        self.assertIn("requestAnimationFrame(() => positionRestReminderBubble(root))", script)
+        self.assertIn('ctx.lifecycle.frame("rest_reminder", () => positionRestReminderBubble(root))', script)
         self.assertIn("休息已延迟", script)
         self.assertIn("本次已休息", script)
         self.assertIn("今日累计", script)
@@ -1824,8 +1830,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("themeMediaQueryName", layout_section)
         self.assertNotIn("themeStorageHandlerName", layout_section)
         self.assertNotIn("themeTimerName", stale_section)
-        self.assertIn("stopRendererThemeObserver();", remove_section)
-        self.assertIn("clearTimeout(window[themeTimerName] || 0);", script)
+        self.assertIn("ctx.teardown.run();", remove_section)
+        self.assertIn('ctx.teardown.add("theme", stopRendererThemeObserver);', script)
+        self.assertIn("ctx.lifecycle.clearTimeout(window[themeTimerName] || 0);", script)
 
     def test_renderer_theme_snapshot_prefers_current_codex_chrome_tokens(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -2251,7 +2258,7 @@ class RendererHudClientTests(unittest.TestCase):
     def test_client_installs_renderer_script_with_model_catalog(self) -> None:
         install_calls: list[str] = []
         originals = (
-            renderer_hud._renderer_model_catalog_payload,
+            renderer_hud._renderer_hud_script_with_model_catalog,
             renderer_hud.list_targets,
             renderer_hud.install_new_document_script,
             renderer_hud.send_cdp_command,
@@ -2283,19 +2290,10 @@ class RendererHudClientTests(unittest.TestCase):
             del websocket_url, method, params, timeout_seconds
             return {"result": {"result": {"value": True}}}
 
-        renderer_hud._renderer_model_catalog_payload = lambda: [
-            {
-                "model": "gpt-5.6-sol",
-                "displayName": "GPT-5.6-Sol",
-                "description": "New frontier model.",
-                "defaultReasoningEffort": "low",
-                "supportedReasoningEfforts": [
-                    {"reasoningEffort": "low", "description": "Fast"},
-                    {"reasoningEffort": "ultra", "description": "Deep"},
-                ],
-                "inputModalities": ["text", "image"],
-            }
-        ]
+        renderer_hud._renderer_hud_script_with_model_catalog = lambda: (
+            renderer_hud.RENDERER_HUD_SCRIPT
+            + "\n// GPT-5.6-Sol gpt-5.6-sol ultra"
+        )
         (
             renderer_hud.list_targets,
             renderer_hud.install_new_document_script,
@@ -2306,7 +2304,7 @@ class RendererHudClientTests(unittest.TestCase):
             self.assertTrue(client.update_payload({"topLine": "A", "requestLine": "B"}))
         finally:
             (
-                renderer_hud._renderer_model_catalog_payload,
+                renderer_hud._renderer_hud_script_with_model_catalog,
                 renderer_hud.list_targets,
                 renderer_hud.install_new_document_script,
                 renderer_hud.send_cdp_command,
@@ -2657,6 +2655,156 @@ class RendererHudClientTests(unittest.TestCase):
 
         self.assertEqual(result["result"], {"ok": True})
 
+    def _fake_binding_transport(
+        self,
+    ) -> tuple[
+        object,
+        queue.Queue[str],
+        renderer_hud._RendererBinding,
+        object,
+    ]:
+        incoming: queue.Queue[str] = queue.Queue()
+
+        class FakeSocket:
+            def shutdown(self, _how: int) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        fake_socket = FakeSocket()
+
+        def fake_receive(_sock: object) -> str:
+            try:
+                return incoming.get(timeout=0.05)
+            except queue.Empty:
+                raise socket.timeout()
+
+        def fake_send(_sock, command_id, method, params):
+            del method, params
+            incoming.put(
+                json.dumps(
+                    {
+                        "id": command_id,
+                        "result": {"ok": True} if command_id >= 100 else {},
+                    }
+                )
+            )
+
+        binding = renderer_hud._RendererBinding(
+            "testBinding",
+            lambda _payload: None,
+            timeout_seconds=0.05,
+        )
+        binding._connect = lambda _url: fake_socket  # type: ignore[method-assign]
+        binding._send_command = fake_send  # type: ignore[method-assign]
+        return fake_socket, incoming, binding, fake_receive
+
+    def test_binding_reader_routes_command_response_while_callback_is_blocked(self) -> None:
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+        observed_threads: tuple[threading.Thread | None, threading.Thread | None] = (
+            None,
+            None,
+        )
+
+        def callback(_payload):
+            callback_started.set()
+            release_callback.wait(1.0)
+
+        _fake_socket, incoming, binding, fake_receive = self._fake_binding_transport()
+        binding.callback = callback
+        with patch.object(renderer_bindings, "receive_message", fake_receive):
+            binding.ensure("ws://127.0.0.1:9229/devtools/page/1", "target-1")
+            try:
+                self.assertTrue(binding.wait_ready(0.5))
+                incoming.put(
+                    json.dumps(
+                        {
+                            "method": "Runtime.bindingCalled",
+                            "params": {
+                                "name": "testBinding",
+                                "payload": json.dumps({"event": "blocked"}),
+                            },
+                        }
+                    )
+                )
+                self.assertTrue(callback_started.wait(0.2))
+                observed_threads = (binding._thread, binding._callback_thread)
+                started = time.perf_counter()
+                result = binding.send_command(
+                    "ws://127.0.0.1:9229/devtools/page/1",
+                    "Runtime.evaluate",
+                    {"expression": "1"},
+                    0.2,
+                )
+                self.assertEqual(result["result"], {"ok": True})
+                self.assertLess(time.perf_counter() - started, 0.15)
+            finally:
+                release_callback.set()
+                binding.close(join_timeout=0.5)
+        self.assertFalse(observed_threads[0].is_alive())
+        self.assertFalse(observed_threads[1].is_alive())
+
+    def test_binding_callback_worker_preserves_event_order(self) -> None:
+        observed: list[dict[str, object]] = []
+        _fake_socket, incoming, binding, fake_receive = self._fake_binding_transport()
+        binding.callback = observed.append
+        with patch.object(renderer_bindings, "receive_message", fake_receive):
+            binding.ensure("ws://127.0.0.1:9229/devtools/page/1", "target-1")
+            try:
+                self.assertTrue(binding.wait_ready(0.5))
+                for value in (1, 2, 3):
+                    incoming.put(
+                        json.dumps(
+                            {
+                                "method": "Runtime.bindingCalled",
+                                "params": {
+                                    "name": "testBinding",
+                                    "payload": json.dumps({"value": value}),
+                                },
+                            }
+                        )
+                    )
+                deadline = time.monotonic() + 0.5
+                while len(observed) < 3 and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertEqual(observed, [{"value": 1}, {"value": 2}, {"value": 3}])
+            finally:
+                binding.close(join_timeout=0.5)
+
+    def test_binding_disconnect_follows_queued_events(self) -> None:
+        observed: list[object] = []
+        callback_queue: queue.Queue[object] = queue.Queue()
+        stop_event = threading.Event()
+        worker = threading.Thread(
+            target=renderer_bindings._RendererBinding._run_callback_worker,
+            args=(
+                callback_queue,
+                stop_event,
+                observed.append,
+                lambda reason: observed.append(("disconnect", reason)),
+            ),
+            daemon=True,
+        )
+        worker.start()
+        callback_queue.put({"value": 1})
+        callback_queue.put(renderer_bindings._BindingDisconnect("closed"))
+        worker.join(timeout=0.5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(observed, [{"value": 1}, ("disconnect", "closed")])
+
+    def test_binding_close_stops_reader_and_callback_worker(self) -> None:
+        _fake_socket, _incoming, binding, fake_receive = self._fake_binding_transport()
+        with patch.object(renderer_bindings, "receive_message", fake_receive):
+            binding.ensure("ws://127.0.0.1:9229/devtools/page/1", "target-1")
+            self.assertTrue(binding.wait_ready(0.5))
+            reader = binding._thread
+            callback_worker = binding._callback_thread
+            binding.close(join_timeout=0.5)
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(callback_worker.is_alive())
+
     def test_renderer_update_prefers_persistent_active_session_channel(self) -> None:
         client = RendererHudClient(port=9229, timeout_seconds=0.05, enabled=True)
         persistent = MagicMock(
@@ -2668,7 +2816,7 @@ class RendererHudClientTests(unittest.TestCase):
         )
         client._active_session_binding = SimpleNamespace(send_command=persistent)
 
-        with patch("codex_usage_hud.ui.renderer_hud.send_cdp_command") as fallback:
+        with patch("codex_usage_hud.renderer_client.send_cdp_command") as fallback:
             self.assertTrue(
                 client._send_update(
                     "ws://127.0.0.1:9229/devtools/page/1",

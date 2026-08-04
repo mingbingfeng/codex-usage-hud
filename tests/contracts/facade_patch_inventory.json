@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "sourceGlob": "tests/**/*.py",
+  "facadePrefixes": [
+    "codex_usage_hud.cli.",
+    "codex_usage_hud.ui.renderer_hud."
+  ],
+  "totalPaths": 0,
+  "totalReferences": 0,
+  "referencesByPhase": {},
+  "entries": [],
+  "extractionErrors": []
+}

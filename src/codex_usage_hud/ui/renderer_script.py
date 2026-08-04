@@ -1,0 +1,11 @@
+"""Compatibility facade for the ordered Renderer asset manifest."""
+
+from __future__ import annotations
+
+from ..config import DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED
+from ..renderer_assets import RENDERER_HUD_SCRIPT_TEMPLATE
+
+COMPOSER_TIKTOKEN_BADGE_ENABLED = DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED
+_RENDERER_HUD_SCRIPT_TEMPLATE = RENDERER_HUD_SCRIPT_TEMPLATE
+
+__all__ = ["COMPOSER_TIKTOKEN_BADGE_ENABLED", "_RENDERER_HUD_SCRIPT_TEMPLATE"]

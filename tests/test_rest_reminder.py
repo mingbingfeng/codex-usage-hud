@@ -624,6 +624,77 @@ class RestReminderSchedulerTests(unittest.TestCase):
         clock["now"] = 10 * 60 * 60
         self.assertEqual(scheduler.state, "off")
 
+    def test_repeated_schedule_waiting_ticks_keep_the_same_deadline(self) -> None:
+        clock = {"now": 100.0}
+        wall = {"now": self.WORK_WALL + 9 * 60 * 60}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        scheduler.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=45,
+                idle_reset_minutes=0,
+                work_start_time="09:00",
+                work_end_time="18:00",
+                lunch_enabled=False,
+            ),
+            force_reset=True,
+        )
+
+        self.assertIsNone(scheduler.tick())
+        first = scheduler.export_wall_state()
+        assert first is not None
+
+        clock["now"] += 10.0
+        wall["now"] += 10.0
+        self.assertIsNone(scheduler.tick())
+        second = scheduler.export_wall_state()
+        assert second is not None
+
+        self.assertEqual(second["cycleStartedAtMs"], first["cycleStartedAtMs"])
+        self.assertEqual(second["nextFireAtMs"], first["nextFireAtMs"])
+        self.assertTrue(second["scheduleWaiting"])
+
+    def test_off_hours_presenter_persists_only_when_waiting_boundary_changes(self) -> None:
+        from codex_usage_hud import config as config_module
+
+        clock = {"now": 100.0}
+        wall = {"now": self.WORK_WALL + 9 * 60 * 60}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        presenter = RestReminderPresenter(
+            scheduler,
+            wall_clock=lambda: wall["now"],
+            persist_enabled=True,
+        )
+        config = RestReminderConfig(
+            enabled=True,
+            interval_minutes=45,
+            idle_reset_minutes=0,
+            work_start_time="09:00",
+            work_end_time="18:00",
+            lunch_enabled=False,
+        )
+
+        with patch.object(
+            config_module,
+            "save_rest_reminder_state",
+            wraps=config_module.save_rest_reminder_state,
+        ) as save_state:
+            presenter.configure(config, force_reset=True)
+            presenter.tick()
+            clock["now"] += 10.0
+            wall["now"] += 10.0
+            presenter.tick()
+
+        self.assertEqual(save_state.call_count, 2)
+
     def test_lunch_boundary_closes_visible_break_and_defers_next_round(self) -> None:
         clock = {"now": 0.0}
         wall = {"now": self.WORK_WALL + 118 * 60}

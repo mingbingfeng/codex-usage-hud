@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .. import overlay_ipc, overlay_projection
 from ..config import normalize_work_overlay_max_items
 from ..core import parse_timestamp
 
@@ -1138,57 +1139,20 @@ def _overlay_item_timestamp_seconds(
     item: Mapping[str, object],
     *keys: str,
 ) -> float:
-    for key in keys:
-        value = item.get(key)
-        if isinstance(value, datetime):
-            return value.timestamp()
-        text = str(value or "").strip()
-        if not text:
-            continue
-        parsed = parse_timestamp(text)
-        if parsed is not None:
-            return parsed.timestamp()
-    return 0.0
+    return overlay_projection.payload_timestamp_seconds(
+        item,
+        *keys,
+        parse_timestamp=parse_timestamp,
+    )
 
 
 def _ordered_overlay_items(items: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
-    current_active: list[Mapping[str, object]] = []
-    background_usage: list[Mapping[str, object]] = []
-    completed: list[Mapping[str, object]] = []
-    active: list[Mapping[str, object]] = []
-    for item in items:
-        if _item_is_background_usage(item):
-            background_usage.append(item)
-        elif _item_is_completed(item):
-            completed.append(item)
-        elif bool(item.get("current")):
-            current_active.append(item)
-        else:
-            active.append(item)
-    background_usage.sort(
-        key=lambda item: _overlay_item_timestamp_seconds(item, "updatedAt"),
-        reverse=True,
+    return overlay_projection.order_payload_items(
+        items,
+        is_background=_item_is_background_usage,
+        is_completed=_item_is_completed,
+        parse_timestamp=parse_timestamp,
     )
-    completed.sort(
-        key=lambda item: _overlay_item_timestamp_seconds(
-            item,
-            "updatedAt",
-            "taskStartedAt",
-            "startedAt",
-        )
-    )
-    for group in (current_active, active):
-        group.sort(
-            key=lambda item: _overlay_item_timestamp_seconds(
-                item,
-                "sessionStartedAt",
-                "taskStartedAt",
-                "startedAt",
-                "updatedAt",
-            ),
-            reverse=True,
-        )
-    return current_active + background_usage + completed + active
 
 
 def _completed_badge_row_width(count: int) -> int:
@@ -1389,22 +1353,12 @@ def _visible_overlay_items(
     *,
     item_limit: int,
 ) -> list[Mapping[str, object]]:
-    visible: list[Mapping[str, object]] = []
-    live_ids: set[str] = set()
-    for item in items[:item_limit]:
-        item_id = str(item.get("id") or "")
-        if item_id:
-            live_ids.add(item_id)
-        dismiss_key = _item_dismiss_key(item)
-        if item_id and dismissed_instances.get(item_id) == dismiss_key:
-            continue
-        if item_id and item_id in dismissed_instances:
-            dismissed_instances.pop(item_id, None)
-        visible.append(item)
-    for item_id in list(dismissed_instances):
-        if item_id not in live_ids:
-            dismissed_instances.pop(item_id, None)
-    return visible
+    return overlay_projection.visible_payload_items(
+        items,
+        dismissed_instances,
+        item_limit=item_limit,
+        dismiss_key=_item_dismiss_key,
+    )
 
 
 def _transition_hides_source_before_effect_reset(transition_type: str) -> bool:
@@ -1791,11 +1745,33 @@ def _transition_palette(
 
 
 def _work_overlay_command_path(state_path: Path) -> Path:
-    return state_path.with_name(f"{state_path.stem}-commands.jsonl")
+    return overlay_ipc.command_path(state_path)
 
 
 def _work_overlay_heartbeat_path(state_path: Path) -> Path:
-    return state_path.with_name(f"{state_path.stem}-heartbeat")
+    return overlay_ipc.heartbeat_path(state_path)
+
+
+def _refresh_overlay_state_from_event(
+    *,
+    read_state: Callable[[], bool],
+    retry_active: Callable[[], bool],
+    start_retry: Callable[[int], None],
+    stop_retry: Callable[[], None],
+    heartbeat_active: Callable[[], bool],
+    start_heartbeat: Callable[[], None],
+    schedule_stale: Callable[[], None],
+) -> bool:
+    """Apply the deterministic retry/heartbeat policy after a watcher wake."""
+    if not read_state():
+        if not retry_active():
+            start_retry(WORK_OVERLAY_STATE_READ_RETRY_MS)
+        return False
+    stop_retry()
+    if not heartbeat_active():
+        start_heartbeat()
+    schedule_stale()
+    return True
 
 
 def run_work_overlay_helper_qt(
@@ -3668,9 +3644,10 @@ def run_work_overlay_helper_qt(
 
         def _append_command(self, payload: Mapping[str, object]) -> bool:
             try:
+                command = overlay_ipc.command_message(**dict(payload))
                 self._command_path.parent.mkdir(parents=True, exist_ok=True)
                 with self._command_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(dict(payload), ensure_ascii=False) + "\n")
+                    handle.write(json.dumps(command, ensure_ascii=False) + "\n")
             except OSError:
                 return False
             return True
@@ -5942,17 +5919,19 @@ def run_work_overlay_helper_qt(
 
     def refresh_state_from_watcher(*_args: object) -> None:
         watch_state_path()
-        state_read = overlay.poll_state()
+        _refresh_overlay_state_from_event(
+            read_state=overlay.poll_state,
+            retry_active=state_read_retry_timer.isActive,
+            start_retry=state_read_retry_timer.start,
+            stop_retry=state_read_retry_timer.stop,
+            heartbeat_active=helper_heartbeat_timer.isActive,
+            start_heartbeat=lambda: (
+                overlay.emit_helper_heartbeat(),
+                helper_heartbeat_timer.start(WORK_OVERLAY_HELPER_HEARTBEAT_MS),
+            ),
+            schedule_stale=schedule_stale_check,
+        )
         watch_state_path()
-        if not state_read:
-            if not state_read_retry_timer.isActive():
-                state_read_retry_timer.start(WORK_OVERLAY_STATE_READ_RETRY_MS)
-            return
-        state_read_retry_timer.stop()
-        if not helper_heartbeat_timer.isActive():
-            overlay.emit_helper_heartbeat()
-            helper_heartbeat_timer.start(WORK_OVERLAY_HELPER_HEARTBEAT_MS)
-        schedule_stale_check()
 
     state_watcher.fileChanged.connect(refresh_state_from_watcher)
     state_watcher.directoryChanged.connect(refresh_state_from_watcher)

@@ -11,8 +11,9 @@ from pathlib import Path
 import select
 import sys
 import threading
-import time
 from typing import Any
+
+from ..usage_contributions import iter_usage_jsonl_files, usage_jsonl_stat_tokens
 
 
 FileChangeCallback = Callable[[set[str], set[Path]], None]
@@ -487,7 +488,12 @@ def _tree_paths(path: Path, suffixes: tuple[str, ...]) -> set[Path]:
         return set()
     values: set[Path] = set()
     try:
-        for candidate in path.rglob("*"):
+        candidates = (
+            iter_usage_jsonl_files(path)
+            if suffixes == (".jsonl",)
+            else path.rglob("*")
+        )
+        for candidate in candidates:
             if suffixes and candidate.suffix.lower() not in suffixes:
                 continue
             if candidate.is_file():
@@ -502,7 +508,22 @@ def _tree_token(path: Path, suffixes: tuple[str, ...]) -> tuple[tuple[str, int, 
         return ()
     values: list[tuple[str, int, int]] = []
     try:
-        iterator = path.rglob("*")
+        if suffixes == (".jsonl",):
+            return tuple(
+                sorted(
+                    (
+                        os.path.normcase(os.path.normpath(str(candidate))),
+                        mtime_ns,
+                        size,
+                    )
+                    for candidate, mtime_ns, size in usage_jsonl_stat_tokens(path)
+                )
+            )
+        iterator = (
+            iter_usage_jsonl_files(path)
+            if suffixes == (".jsonl",)
+            else path.rglob("*")
+        )
         for candidate in iterator:
             if suffixes and candidate.suffix.lower() not in suffixes:
                 continue

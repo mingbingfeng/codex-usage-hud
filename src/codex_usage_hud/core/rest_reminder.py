@@ -637,15 +637,21 @@ class RestReminderScheduler:
                 self._finalize_rest(current, wall_now, "schedule_ended", arm=False)
             elif self.showing:
                 self._clear_prompt()
+            waiting_for_same_boundary = bool(
+                self._schedule_waiting
+                and boundary is not None
+                and abs(self._next_fire_wall - boundary) <= 1e-6
+            )
             self._phase = "focus"
             self._postpone_until_wall = 0.0
             self._schedule_waiting = True
             self._idle_break_active = False
-            self._cycle_started_at = current
-            self._cycle_started_wall = wall_now
-            wait = max(0.0, (boundary or wall_now) - wall_now)
-            self._next_fire_at = current + wait
-            self._next_fire_wall = wall_now + wait
+            if not waiting_for_same_boundary:
+                self._cycle_started_at = current
+                self._cycle_started_wall = wall_now
+                wait = max(0.0, (boundary or wall_now) - wall_now)
+                self._next_fire_at = current + wait
+                self._next_fire_wall = float(boundary or wall_now)
             self._postpone_used = False
             return None
         if self._schedule_waiting:

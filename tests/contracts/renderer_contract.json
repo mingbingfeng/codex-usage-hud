@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "p0Baseline": {
+    "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
+    "byteLength": 548705
+  },
+  "currentBundle": {
+    "phase": "P6.7",
+    "sha256": "d60d7dd601c13e270946ccb6d6734673a19c0a733ebafd09b1d01dbe3306c2a4",
+    "byteLength": 624470
+  },
+  "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
+  "byteLength": 548705,
+  "publicGlobals": [
+    "__codexUsageHudCachedPreview",
+    "__codexUsageHudRemove",
+    "__codexUsageHudReportActiveSession",
+    "__codexUsageHudReportTheme",
+    "__codexUsageHudUpdate"
+  ],
+  "bindings": [
+    "codexUsageHudActiveSession",
+    "codexUsageHudComposerAttachments",
+    "codexUsageHudLayout",
+    "codexUsageHudSettingsCommand",
+    "codexUsageHudTheme"
+  ],
+  "multiplexedSettingsActions": ["backgroundUsage", "sessionCleanup", "audit"],
+  "storageKeys": [
+    "codexUsageHudPanelState:v5",
+    "codexUsageHudSettingsUiState:v1",
+    "codexUsageHudSupportImages:v1"
+  ],
+  "payloadApplyOrder": [
+    "currentSession", "sessionSwitch", "budget", "settings", "overlay",
+    "backgroundUsage", "diagnostics", "usageInsights", "sessionCleanup"
+  ],
+  "lifecycleCounts": {
+    "mutationObservers": 6,
+    "resizeObservers": 1,
+    "setIntervals": 3,
+    "setTimeouts": 21,
+    "kernelSetIntervals": 1,
+    "kernelSetTimeouts": 1
+  },
+  "lifecycleInventory": [
+    {
+      "kind": "MutationObserver",
+      "owner": "theme",
+      "creation": "window[themeObserverName] = new MutationObserver",
+      "startCondition": "theme reporting is installed",
+      "cleanup": "window[themeObserverName]?.disconnect?.()"
+    },
+    {
+      "kind": "MutationObserver",
+      "owner": "active_session",
+      "creation": "window[activeSessionObserverName] = new MutationObserver",
+      "startCondition": "selected-session anchor is available",
+      "cleanup": "window[activeSessionObserverName]?.disconnect?.()"
+    },
+    {
+      "kind": "MutationObserver",
+      "owner": "active_session_bootstrap",
+      "creation": "window[activeSessionBootstrapObserverName] = new MutationObserver",
+      "startCondition": "selected-session anchor is not yet available",
+      "cleanup": "window[activeSessionBootstrapObserverName]?.disconnect?.()"
+    },
+    {
+      "kind": "MutationObserver",
+      "owner": "composer_attachments",
+      "creation": "const observer = new MutationObserver(() => scheduleComposerAttachmentsReport())",
+      "startCondition": "composer attachment reporting is installed",
+      "cleanup": "window[composerAttachmentsObserverName]?.disconnect?.()"
+    },
+    {
+      "kind": "MutationObserver",
+      "owner": "layout",
+      "creation": "window[mutationObserverName] = new MutationObserver(handleLayoutMutations)",
+      "startCondition": "header or composer layout anchor is available",
+      "cleanup": "window[mutationObserverName]?.disconnect?.()"
+    },
+    {
+      "kind": "MutationObserver",
+      "owner": "layout_bootstrap",
+      "creation": "window[bootstrapObserverName] = new MutationObserver",
+      "startCondition": "layout anchors are not both available",
+      "cleanup": "window[bootstrapObserverName]?.disconnect?.()"
+    },
+    {
+      "kind": "ResizeObserver",
+      "owner": "layout",
+      "creation": "window[resizeObserverName] = new ResizeObserver",
+      "startCondition": "ResizeObserver exists and a layout anchor is available",
+      "cleanup": "window[resizeObserverName]?.disconnect?.()"
+    },
+    {
+      "kind": "setInterval",
+      "owner": "rest_reminder_settings",
+      "creation": "restReminderCountdownTimer = setInterval(syncRestReminderCountdown, 1000)",
+      "startCondition": "rest-reminder settings countdown is visible",
+      "cleanup": "clearInterval(restReminderCountdownTimer)"
+    },
+    {
+      "kind": "setInterval",
+      "owner": "session_view",
+      "creation": "window[runningTimerName] = setInterval(refreshRunningRows, 1000)",
+      "startCondition": "at least one rendered session row is running",
+      "cleanup": "clearInterval(window[runningTimerName])"
+    },
+    {
+      "kind": "setInterval",
+      "owner": "rest_reminder_overlay",
+      "creation": "restReminderOverlayTimer = setInterval(syncRestReminderOverlayCountdown, 1000)",
+      "startCondition": "rest-reminder overlay countdown is visible",
+      "cleanup": "clearInterval(restReminderOverlayTimer)"
+    }
+  ],
+  "currentLifecycleInventory": [
+    {"kind": "MutationObserver", "owner": "theme", "creation": "ctx.observers.set(\"theme\", new MutationObserver", "startCondition": "theme reporting is installed", "cleanup": "ctx.observers.clear(\"theme\")"},
+    {"kind": "MutationObserver", "owner": "active_session", "creation": "ctx.observers.set(\"active_session\", new MutationObserver", "startCondition": "selected-session anchor is available", "cleanup": "ctx.observers.clear(\"active_session\")"},
+    {"kind": "MutationObserver", "owner": "active_session_bootstrap", "creation": "ctx.observers.set(\"active_session_bootstrap\", new MutationObserver", "startCondition": "selected-session anchor is not yet available", "cleanup": "ctx.observers.clear(\"active_session_bootstrap\")"},
+    {"kind": "MutationObserver", "owner": "composer_attachments", "creation": "ctx.observers.set(\"composer_attachments\", new MutationObserver", "startCondition": "composer attachment reporting is installed", "cleanup": "ctx.observers.clear(\"composer_attachments\")"},
+    {"kind": "MutationObserver", "owner": "layout", "creation": "ctx.observers.set(\"layout\", new MutationObserver", "startCondition": "header or composer layout anchor is available", "cleanup": "ctx.observers.clear(\"layout\")"},
+    {"kind": "MutationObserver", "owner": "layout_bootstrap", "creation": "ctx.observers.set(\"layout_bootstrap\", new MutationObserver", "startCondition": "layout anchors are not both available", "cleanup": "ctx.observers.clear(\"layout_bootstrap\")"},
+    {"kind": "ResizeObserver", "owner": "layout", "creation": "ctx.observers.set(\"layout_resize\", new ResizeObserver", "startCondition": "ResizeObserver exists and a layout anchor is available", "cleanup": "ctx.observers.clear(\"layout_resize\")"},
+    {"kind": "setInterval", "owner": "rest_reminder_settings", "creation": "ctx.lifecycle.interval(", "startCondition": "rest-reminder settings countdown is visible", "cleanup": "ctx.lifecycle.clearInterval(restReminderCountdownTimer)"},
+    {"kind": "setInterval", "owner": "session_view", "creation": "ctx.lifecycle.interval(\"session_view\"", "startCondition": "at least one rendered session row is running", "cleanup": "ctx.lifecycle.clearInterval(window[runningTimerName])"},
+    {"kind": "setInterval", "owner": "rest_reminder_overlay", "creation": "ctx.lifecycle.interval(", "startCondition": "rest-reminder overlay countdown is visible", "cleanup": "ctx.lifecycle.clearInterval(restReminderOverlayTimer)"}
+  ],
+  "currentTimeoutOwners": [
+    "model_picker", "theme", "active_session", "active_session", "active_session",
+    "active_session_bootstrap", "storage", "background_usage_request", "background_usage_fetch",
+    "settings_restart", "settings_export", "composer_attachments", "layout_report",
+    "layout_settle", "layout_settle", "layout_settle", "composer_layout", "layout_bootstrap",
+    "session_view_progress", "copy_feedback", "stale_guard"
+  ],
+  "timeoutInventory": [
+    {"owner": "model_picker", "creation": "ctx.lifecycle.timeout(\"model_picker\", patchCodexModelPicker, delay)", "cleanup": "ctx.lifecycle.clearTimeout(timer)"},
+    {"owner": "theme", "creation": "window[themeTimerName] = setTimeout", "cleanup": "clearTimeout(window[themeTimerName] || 0)"},
+    {"owner": "active_session", "creation": "window[activeSessionSettledTimerName] = setTimeout", "cleanup": "clearTimeout(window[activeSessionSettledTimerName] || 0)"},
+    {"owner": "active_session", "creation": "window[activeSessionTimerName] = setTimeout", "cleanup": "clearTimeout(window[activeSessionTimerName] || 0)"},
+    {"owner": "active_session", "creation": "delays.map((ms) => setTimeout", "cleanup": "clearTimeout(timer)"},
+    {"owner": "active_session_bootstrap", "creation": "window[activeSessionBootstrapTimerName] = setTimeout", "cleanup": "clearTimeout(window[activeSessionBootstrapTimerName] || 0)"},
+    {"owner": "storage", "creation": "storageRefreshTimer = setTimeout", "cleanup": "clearTimeout(storageRefreshTimer)"},
+    {"owner": "background_usage_request", "creation": "const timeoutId = setTimeout(onTimeout, backgroundUsageRequestTimeoutMs)", "cleanup": "clearTimeout(backgroundUsageQueryTimeoutId)"},
+    {"owner": "background_usage_fetch", "creation": "const timeoutId = setTimeout(\n      () => controller.abort()", "cleanup": "clearTimeout(timeoutId)"},
+    {"owner": "settings_restart", "creation": "setTimeout(() => {\n        try {\n          if (typeof window.__codexUsageHudRemove", "cleanup": "one-shot callback"},
+    {"owner": "settings_export", "creation": "setTimeout(() => URL.revokeObjectURL(url), 1000)", "cleanup": "one-shot callback"},
+    {"owner": "composer_attachments", "creation": "window[composerAttachmentsTimerName] = setTimeout", "cleanup": "clearTimeout(window[composerAttachmentsTimerName] || 0)"},
+    {"owner": "layout_report", "creation": "window[layoutReportTimerName] = setTimeout", "cleanup": "clearTimeout(window[layoutReportTimerName] || 0)"},
+    {"owner": "layout_settle", "creation": "setTimeout(() => syncPosition(names), 50)", "cleanup": "clearTimeout(timer)"},
+    {"owner": "layout_settle", "creation": "setTimeout(() => syncPosition(names), 140)", "cleanup": "clearTimeout(timer)"},
+    {"owner": "layout_settle", "creation": "setTimeout(() => syncPosition(names), 260)", "cleanup": "clearTimeout(timer)"},
+    {"owner": "composer_layout", "creation": "window[composerSettleTimerName] = setTimeout", "cleanup": "clearTimeout(window[composerSettleTimerName] || 0)"},
+    {"owner": "layout_bootstrap", "creation": "window[bootstrapTimerName] = setTimeout(stopBootstrapObserver, 5000)", "cleanup": "clearTimeout(window[bootstrapTimerName] || 0)"},
+    {"owner": "session_view_progress", "creation": "setTimeout(() => root.querySelectorAll(\".codex-usage-hud-progress-rail\")", "cleanup": "one-shot callback"},
+    {"owner": "copy_feedback", "creation": "setTimeout(() => {\n      if (!node.isConnected) return", "cleanup": "one-shot callback"},
+    {"owner": "stale_guard", "creation": "window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250)", "cleanup": "clearTimeout(window[staleTimerName] || 0)"}
+  ],
+  "bindingInventory": [
+    {"name": "codexUsageHudActiveSession", "installOrder": 1, "owner": "active_session", "startCondition": "active-session callback is configured", "cleanup": "self._active_session_binding.close()"},
+    {"name": "codexUsageHudSettingsCommand", "installOrder": 2, "owner": "settings_command", "startCondition": "settings-command callback is configured", "cleanup": "self._settings_command_binding.close()"},
+    {"name": "codexUsageHudComposerAttachments", "installOrder": 3, "owner": "composer_attachments", "startCondition": "attachments callback is configured", "cleanup": "self._attachments_binding.close()"},
+    {"name": "codexUsageHudLayout", "installOrder": 4, "owner": "layout", "startCondition": "layout callback is configured", "cleanup": "self._layout_binding.close()"},
+    {"name": "codexUsageHudTheme", "installOrder": 5, "owner": "theme", "startCondition": "theme callback is configured", "cleanup": "self._theme_binding.close()"}
+  ],
+  "sequenceKeys": [
+    "__codexUsageHudActiveSessionSelectionSeq",
+    "__codexUsageHudActiveSessionAppliedSeq"
+  ],
+  "representativeScreenshot": {
+    "path": "tests/contracts/screenshots/p0-renderer-windows.png",
+    "sha256": "7b5ef938f0aadc304bcf186f4215c339ad3854d6ef9d8ec359e84f9097236a05",
+    "width": 1273,
+    "height": 760,
+    "capturedAt": "2026-07-30T21:30:00+08:00",
+    "platform": "windows",
+    "targetUrl": "app://-/index.html",
+    "rootSelector": "#codex-usage-hud-root",
+    "status": "current-live-cdp-capture"
+  }
+}

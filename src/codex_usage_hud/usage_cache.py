@@ -1,0 +1,693 @@
+"""Usage summary query and invalidation facade."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
+import logging
+from pathlib import Path
+import re
+import time
+from typing import Any
+import uuid
+
+from .core import (
+    JsonlSessionParser,
+    UsageSummary,
+    extract_session_thread_identity,
+    message_text,
+)
+from .core.deleted_usage import (
+    DeletedUsageEvent,
+    DeletedUsageLedger,
+    DeletedUsageLedgerError,
+)
+from .session_cleanup_runtime import DeletedUsageTransactions
+from .runtime_usage import (
+    merge_usage as _merge_usage,
+    replace_usage as _replace_usage,
+    workdir_leaf as _workdir_leaf,
+)
+from .usage_insights import UsageInsightsProjector
+from .usage_contributions import (
+    FileUsageContribution as _UsageCacheEntry,
+    UsageInsightAggregate as _UsageInsightAggregate,
+    canonical_usage_path,
+    iter_usage_jsonl_files,
+    path_under_usage_roots,
+    usage_parser_version,
+    usage_scan_roots,
+)
+
+DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
+USAGE_INSIGHTS_TOP_SESSION_LIMIT = 10
+_LOGGER = logging.getLogger("codex_usage_hud.usage_cache")
+
+@dataclass
+class _UsageInsightSessionAggregate:
+    session_id: str
+    session_key: str
+    title: str
+    provider: str
+    workdir_name: str
+    archived: bool
+    can_activate: bool
+    models: dict[tuple[str, str], _UsageInsightAggregate] = field(default_factory=dict)
+    usage: _UsageInsightAggregate = field(default_factory=_UsageInsightAggregate)
+
+
+class UsageSummaryCache:
+    """Cache rolling day/week usage summaries per JSONL session file."""
+
+    def __init__(
+        self,
+        parser: JsonlSessionParser,
+        *,
+        min_rescan_seconds: float = DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS,
+        deleted_usage_ledger: DeletedUsageLedger | None = None,
+    ) -> None:
+        self._parser = parser
+        self._min_rescan_seconds = max(0.0, float(min_rescan_seconds))
+        self._deleted_usage_ledger = deleted_usage_ledger
+        self._deleted_usage_transactions = DeletedUsageTransactions(
+            deleted_usage_ledger,
+            parser,
+            on_commit=self._touch_insights,
+        )
+        self._entries: dict[Path, _UsageCacheEntry] = {}
+        self._deleted_entries: list[_UsageCacheEntry] = []
+        self._last_scan_key: tuple[tuple[Path, ...], datetime, datetime] | None = None
+        self._last_scan_at = 0.0
+        self._last_day_total = UsageSummary()
+        self._last_week_total = UsageSummary()
+        self._insights_revision = 0
+        self._insights_generated_at: datetime | None = None
+        self._insights_projector = UsageInsightsProjector(self)
+
+    @staticmethod
+    def _cache_path(path: Path) -> Path:
+        return canonical_usage_path(path)
+
+    @staticmethod
+    def _scan_roots(sessions_root: Path) -> tuple[Path, ...]:
+        return usage_scan_roots(sessions_root)
+
+    def _touch_insights(self) -> None:
+        self._insights_revision += 1
+        self._insights_generated_at = datetime.now().astimezone()
+
+    def prepare_deleted_session_usage(self, item: object) -> str:
+        return self._deleted_usage_transactions.prepare(item)
+
+    def commit_deleted_session_usage(self, receipt: object) -> None:
+        self._deleted_usage_transactions.commit(receipt)
+
+    def discard_deleted_session_usage(self, receipt: object) -> None:
+        self._deleted_usage_transactions.discard(receipt)
+
+    def _deleted_usage_entries(
+        self,
+        day_start: datetime,
+        week_start: datetime,
+        live_session_ids: set[str],
+    ) -> list[_UsageCacheEntry]:
+        ledger = self._deleted_usage_ledger
+        if ledger is None:
+            return []
+        try:
+            sessions = ledger.sessions()
+        except DeletedUsageLedgerError as exc:
+            _LOGGER.warning("deleted_session_usage_load_failed error=%s", exc)
+            return []
+        month_start = day_start - timedelta(days=29)
+        entries: list[_UsageCacheEntry] = []
+        for session in sessions:
+            if live_session_ids.intersection(session.family_session_ids):
+                continue
+            providers: dict[str, list[DeletedUsageEvent]] = {}
+            for event in session.events:
+                providers.setdefault(event.provider, []).append(event)
+            for provider, events in providers.items():
+                summary_day = self._parser.summarize_usage_events(events, day_start)
+                summary_week = self._parser.summarize_usage_events(events, week_start)
+                summary_month = self._parser.summarize_usage_events(events, month_start)
+                (
+                    models_day,
+                    day_priced_event_count,
+                    day_total_event_count,
+                    day_latest_event_at,
+                ) = self._model_insights_for_window(events, day_start)
+                (
+                    models_week,
+                    week_priced_event_count,
+                    week_total_event_count,
+                    week_latest_event_at,
+                ) = self._model_insights_for_window(events, week_start)
+                (
+                    models_month,
+                    month_priced_event_count,
+                    month_total_event_count,
+                    month_latest_event_at,
+                ) = self._model_insights_for_window(events, month_start)
+                entries.append(
+                    _UsageCacheEntry(
+                        mtime=None,
+                        file_size=None,
+                        day_start=day_start,
+                        week_start=week_start,
+                        month_start=month_start,
+                        model_provider=provider,
+                        summary_day=summary_day,
+                        summary_week=summary_week,
+                        summary_month=summary_month,
+                        session_id=session.session_id,
+                        session_key=(
+                            "deleted-session-"
+                            + uuid.uuid5(uuid.NAMESPACE_URL, session.session_id).hex[:16]
+                        ),
+                        session_title=session.title,
+                        workdir_name=session.workdir_name,
+                        archived=True,
+                        can_activate=False,
+                        models_day=models_day,
+                        models_week=models_week,
+                        models_month=models_month,
+                        day_priced_event_count=day_priced_event_count,
+                        day_total_event_count=day_total_event_count,
+                        week_priced_event_count=week_priced_event_count,
+                        week_total_event_count=week_total_event_count,
+                        month_priced_event_count=month_priced_event_count,
+                        month_total_event_count=month_total_event_count,
+                        day_latest_event_at=day_latest_event_at,
+                        week_latest_event_at=week_latest_event_at,
+                        month_latest_event_at=month_latest_event_at,
+                    )
+                )
+        return entries
+
+    def _session_meta_payload(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        payload: Mapping[str, Any] = {}
+        payload_reader = getattr(self._parser, "session_meta_payload", None)
+        if callable(payload_reader):
+            raw_payload = payload_reader(records)
+            if isinstance(raw_payload, Mapping):
+                payload = raw_payload
+        if not payload:
+            for record in records:
+                if record.get("type") != "session_meta":
+                    continue
+                raw_payload = record.get("payload")
+                if isinstance(raw_payload, Mapping):
+                    payload = raw_payload
+                    break
+        return payload
+
+    @staticmethod
+    def _canonical_session_id(value: object) -> str:
+        candidate = str(value or "").strip()
+        try:
+            canonical = str(uuid.UUID(candidate))
+        except (ValueError, AttributeError, TypeError):
+            return ""
+        return canonical if candidate.casefold() == canonical else ""
+
+    @classmethod
+    def _delegated_source_session_id(
+        cls,
+        records: Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Recover the parent ID from legacy desktop subagent prompts."""
+        for record in records:
+            if record.get("type") != "response_item":
+                continue
+            payload = record.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            if payload.get("type") != "message" or payload.get("role") != "user":
+                continue
+            text = message_text(payload)
+            if "<codex_delegation" not in text:
+                continue
+            match = re.search(
+                r"<source_thread_id>\s*([^<]+?)\s*</source_thread_id>",
+                text,
+                re.IGNORECASE,
+            )
+            if match:
+                parent_id = cls._canonical_session_id(match.group(1))
+                if parent_id:
+                    return parent_id
+        return ""
+
+    def _is_archived_path(
+        self,
+        path: Path,
+        scan_roots: Sequence[Path],
+    ) -> bool:
+        resolved = self._cache_path(path)
+        for root in scan_roots:
+            if root.name.casefold() != "archived_sessions":
+                continue
+            try:
+                resolved.relative_to(self._cache_path(root))
+            except ValueError:
+                continue
+            return True
+        return False
+
+    def _model_insights_for_window(
+        self, events: Sequence[object], start: datetime
+    ) -> tuple[dict[str, _UsageInsightAggregate], int, int, datetime | None]:
+        return self._insights_projector._model_insights_for_window(events, start)
+
+    def insights(
+        self,
+        sessions_root: Path,
+        day_start: datetime,
+        week_start: datetime,
+        *,
+        included_providers: Iterable[str] | None = None,
+        limit: int = 8,
+    ) -> dict[str, object]:
+        return self._insights_projector.insights(
+            sessions_root,
+            day_start,
+            week_start,
+            included_providers=included_providers,
+            limit=limit,
+        )
+
+
+
+
+
+
+
+
+
+
+    def summarize(
+        self,
+        sessions_root: Path,
+        day_start: datetime,
+        week_start: datetime,
+        *,
+        allow_stale: bool = False,
+        force_rescan: bool = False,
+        refresh_paths: Iterable[Path] = (),
+        included_providers: Iterable[str] | None = None,
+    ) -> tuple[UsageSummary, UsageSummary]:
+        now = time.monotonic()
+        sessions_root = self._cache_path(sessions_root)
+        scan_roots = self._scan_roots(sessions_root)
+        scan_key = (scan_roots, day_start, week_start)
+        refresh_path_tuple = tuple(
+            dict.fromkeys(self._cache_path(path) for path in refresh_paths)
+        )
+        if not force_rescan and self._last_scan_key == scan_key and refresh_path_tuple:
+            self._refresh_paths(
+                refresh_path_tuple,
+                scan_roots,
+                day_start,
+                week_start,
+            )
+            self._last_scan_at = now
+        if allow_stale and self._last_scan_key == scan_key:
+            return self._totals_for_providers(
+                scan_roots,
+                day_start,
+                week_start,
+                included_providers,
+            )
+        if (
+            not force_rescan
+            and self._last_scan_key == scan_key
+            and now - self._last_scan_at < self._min_rescan_seconds
+        ):
+            return self._totals_for_providers(
+                scan_roots,
+                day_start,
+                week_start,
+                included_providers,
+            )
+
+        day_total = UsageSummary()
+        week_total = UsageSummary()
+        previous_scan_key = self._last_scan_key
+        revision_before_scan = self._insights_revision
+        previous_deleted_entries = list(self._deleted_entries)
+
+        existing_roots = [root for root in scan_roots if root.exists()]
+        if not existing_roots:
+            had_entries = bool(self._entries)
+            self._entries.clear()
+            deleted_entries = self._deleted_usage_entries(day_start, week_start, set())
+            self._deleted_entries = deleted_entries
+            if deleted_entries != previous_deleted_entries:
+                self._touch_insights()
+            for entry in deleted_entries:
+                _merge_usage(day_total, entry.summary_day)
+                _merge_usage(week_total, entry.summary_week)
+            self._last_scan_key = scan_key
+            self._last_scan_at = now
+            self._last_day_total = day_total
+            self._last_week_total = week_total
+            if had_entries or previous_scan_key != scan_key:
+                self._touch_insights()
+            return self._totals_for_providers(
+                scan_roots,
+                day_start,
+                week_start,
+                included_providers,
+            )
+
+        seen_paths: set[Path] = set()
+        for root in existing_roots:
+            archived = root.name.casefold() == "archived_sessions"
+            for path in iter_usage_jsonl_files(root):
+                path = self._cache_path(path)
+                seen_paths.add(path)
+                summary_day, summary_week, _summary_month = self._summaries_for_file(
+                    path,
+                    day_start,
+                    week_start,
+                    archived=archived,
+                )
+                _merge_usage(day_total, summary_day)
+                _merge_usage(week_total, summary_week)
+
+        for cached_path in list(self._entries):
+            if cached_path not in seen_paths:
+                del self._entries[cached_path]
+                self._touch_insights()
+
+        live_session_ids = {
+            entry.session_id for entry in self._entries.values() if entry.session_id
+        }
+        self._deleted_entries = self._deleted_usage_entries(
+            day_start,
+            week_start,
+            live_session_ids,
+        )
+        if self._deleted_entries != previous_deleted_entries:
+            self._touch_insights()
+        for entry in self._deleted_entries:
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
+
+        self._last_scan_key = scan_key
+        self._last_scan_at = now
+        self._last_day_total = replace(day_total)
+        self._last_week_total = replace(week_total)
+        if previous_scan_key != scan_key and revision_before_scan == self._insights_revision:
+            self._touch_insights()
+        return self._totals_for_providers(
+            scan_roots,
+            day_start,
+            week_start,
+            included_providers,
+        )
+
+    def _totals_for_providers(
+        self,
+        scan_roots: Sequence[Path],
+        day_start: datetime,
+        week_start: datetime,
+        included_providers: Iterable[str] | None,
+    ) -> tuple[UsageSummary, UsageSummary]:
+        if included_providers is None:
+            return replace(self._last_day_total), replace(self._last_week_total)
+        providers = {
+            str(provider or "").strip().lower()
+            for provider in included_providers
+            if str(provider or "").strip()
+        }
+        day_total = UsageSummary()
+        week_total = UsageSummary()
+        for path, entry in self._entries.items():
+            if entry.day_start != day_start or entry.week_start != week_start:
+                continue
+            if entry.model_provider not in providers:
+                continue
+            if not self._path_under_scan_roots(path, scan_roots):
+                continue
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
+        for entry in self._deleted_entries:
+            if entry.model_provider not in providers:
+                continue
+            _merge_usage(day_total, entry.summary_day)
+            _merge_usage(week_total, entry.summary_week)
+        return day_total, week_total
+
+    def family_lifetime_usage(
+        self,
+        session_id: str,
+        *,
+        included_providers: Iterable[str] | None = None,
+    ) -> UsageSummary:
+        """Sum lifetime usage for a root session and its subagent children."""
+        root_id = self._canonical_session_id(session_id)
+        total = UsageSummary()
+        if not root_id:
+            return total
+        providers = None
+        if included_providers is not None:
+            providers = {
+                str(provider or "").strip().lower()
+                for provider in included_providers
+                if str(provider or "").strip()
+            }
+        session_entries = {
+            entry.session_id: entry
+            for entry in list(self._entries.values()) + list(self._deleted_entries)
+            if entry.session_id
+        }
+
+        def root_of(entry: _UsageCacheEntry) -> str:
+            if not entry.session_id:
+                return ""
+            current = entry
+            chain = [entry.session_id]
+            while current.parent_session_id:
+                parent_id = current.parent_session_id
+                if parent_id in chain:
+                    return min(chain[chain.index(parent_id) :])
+                chain.append(parent_id)
+                parent = session_entries.get(parent_id)
+                if parent is None:
+                    return parent_id
+                current = parent
+            return current.session_id
+
+        for entry in list(self._entries.values()) + list(self._deleted_entries):
+            if providers is not None and entry.model_provider not in providers:
+                continue
+            member_id = entry.session_id or ""
+            if member_id != root_id and root_of(entry) != root_id:
+                continue
+            summary = entry.summary_all
+            if summary.tokens <= 0 and float(summary.cost_usd or 0.0) <= 0.0:
+                # Older cache entries or deleted ledger rows without lifetime.
+                summary = entry.summary_month
+            _merge_usage(total, summary)
+        return total
+
+    def _path_under_scan_roots(self, path: Path, scan_roots: Sequence[Path]) -> bool:
+        return path_under_usage_roots(path, scan_roots)
+
+    def _entry_for_window(
+        self,
+        path: Path,
+        day_start: datetime,
+        week_start: datetime,
+    ) -> _UsageCacheEntry | None:
+        entry = self._entries.get(path)
+        if (
+            entry is not None
+            and entry.day_start == day_start
+            and entry.week_start == week_start
+            and entry.month_start == day_start - timedelta(days=29)
+        ):
+            return entry
+        return None
+
+    def _refresh_paths(
+        self,
+        paths: Sequence[Path],
+        scan_roots: Sequence[Path],
+        day_start: datetime,
+        week_start: datetime,
+    ) -> None:
+        day_total = replace(self._last_day_total)
+        week_total = replace(self._last_week_total)
+        empty = UsageSummary()
+
+        for path in paths:
+            if not self._path_under_scan_roots(path, scan_roots):
+                continue
+            old_entry = self._entry_for_window(path, day_start, week_start)
+            old_day = old_entry.summary_day if old_entry is not None else empty
+            old_week = old_entry.summary_week if old_entry is not None else empty
+
+            if path.exists():
+                new_day, new_week, _new_month = self._summaries_for_file(
+                    path,
+                    day_start,
+                    week_start,
+                    force=True,
+                    archived=self._is_archived_path(path, scan_roots),
+                )
+            else:
+                if self._entries.pop(path, None) is not None:
+                    self._touch_insights()
+                new_day = empty
+                new_week = empty
+
+            day_total = _replace_usage(day_total, old_day, new_day)
+            week_total = _replace_usage(week_total, old_week, new_week)
+
+        self._last_day_total = day_total
+        self._last_week_total = week_total
+
+    def _summaries_for_file(
+        self,
+        path: Path,
+        day_start: datetime,
+        week_start: datetime,
+        *,
+        force: bool = False,
+        archived: bool | None = None,
+    ) -> tuple[UsageSummary, UsageSummary, UsageSummary]:
+        try:
+            stat = path.stat()
+        except OSError:
+            if self._entries.pop(path, None) is not None:
+                self._touch_insights()
+            return UsageSummary(), UsageSummary(), UsageSummary()
+
+        entry = self._entries.get(path)
+        if (
+            not force
+            and entry is not None
+            and entry.mtime == stat.st_mtime
+            and entry.file_size == stat.st_size
+            and entry.day_start == day_start
+            and entry.week_start == week_start
+            and entry.month_start == day_start - timedelta(days=29)
+            and (archived is None or entry.archived == archived)
+        ):
+            return entry.summary_day, entry.summary_week, entry.summary_month
+
+        parser_version = usage_parser_version(self._parser)
+        incremental_reader = getattr(self._parser, "parse_file_incremental", None)
+        tail_state = None
+        try:
+            if callable(incremental_reader):
+                previous_state = (
+                    entry.tail_state
+                    if entry is not None and entry.parser_version == parser_version
+                    else None
+                )
+                _snapshot, tail_state = incremental_reader(path, previous_state)
+                records = tail_state.records
+            else:
+                records = self._parser.load_records_lenient(path)
+        except OSError:
+            if self._entries.pop(path, None) is not None:
+                self._touch_insights()
+            return UsageSummary(), UsageSummary(), UsageSummary()
+
+        events = self._parser.usage_events(records)
+        provider_reader = getattr(self._parser, "session_model_provider", None)
+        model_provider = (
+            str(provider_reader(records) or "").strip().lower()
+            if callable(provider_reader)
+            else "unknown"
+        ) or "unknown"
+        summary_day = self._parser.summarize_usage_events(events, day_start)
+        summary_week = self._parser.summarize_usage_events(events, week_start)
+        month_start = day_start - timedelta(days=29)
+        summary_month = self._parser.summarize_usage_events(events, month_start)
+        lifetime_start = day_start - timedelta(days=36500)
+        summary_all = self._parser.summarize_usage_events(events, lifetime_start)
+        (
+            models_day,
+            day_priced_event_count,
+            day_total_event_count,
+            day_latest_event_at,
+        ) = self._model_insights_for_window(events, day_start)
+        (
+            models_week,
+            week_priced_event_count,
+            week_total_event_count,
+            week_latest_event_at,
+        ) = self._model_insights_for_window(events, week_start)
+        (
+            models_month,
+            month_priced_event_count,
+            month_total_event_count,
+            month_latest_event_at,
+        ) = self._model_insights_for_window(events, month_start)
+        session_meta = self._session_meta_payload(records)
+        session_id = self._canonical_session_id(session_meta.get("id"))
+        session_title = " ".join(
+            str(
+                session_meta.get("title")
+                or session_meta.get("session_title")
+                or session_meta.get("name")
+                or ""
+            ).split()
+        )
+        _thread_source, raw_parent_id, _agent_nickname, is_subagent = (
+            extract_session_thread_identity(session_meta)
+        )
+        if is_subagent and not raw_parent_id:
+            raw_parent_id = self._delegated_source_session_id(records)
+        parent_session_id = (
+            self._canonical_session_id(raw_parent_id) if is_subagent else ""
+        )
+        if parent_session_id == session_id:
+            parent_session_id = ""
+        is_archived = bool(archived) if archived is not None else (
+            "archived_sessions" in {part.casefold() for part in path.parts}
+        )
+        self._entries[path] = _UsageCacheEntry(
+            mtime=stat.st_mtime,
+            file_size=stat.st_size,
+            day_start=day_start,
+            week_start=week_start,
+            month_start=month_start,
+            model_provider=model_provider,
+            summary_day=summary_day,
+            summary_week=summary_week,
+            summary_month=summary_month,
+            summary_all=summary_all,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            session_key=path.stem,
+            session_title=session_title,
+            workdir_name=_workdir_leaf(session_meta.get("cwd")),
+            archived=is_archived,
+            can_activate=bool(session_id) and not is_archived,
+            models_day=models_day,
+            models_week=models_week,
+            models_month=models_month,
+            day_priced_event_count=day_priced_event_count,
+            day_total_event_count=day_total_event_count,
+            week_priced_event_count=week_priced_event_count,
+            week_total_event_count=week_total_event_count,
+            month_priced_event_count=month_priced_event_count,
+            month_total_event_count=month_total_event_count,
+            day_latest_event_at=day_latest_event_at,
+            week_latest_event_at=week_latest_event_at,
+            month_latest_event_at=month_latest_event_at,
+            parser_version=parser_version,
+            tail_state=tail_state,
+        )
+        self._touch_insights()
+        return summary_day, summary_week, summary_month

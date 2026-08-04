@@ -87,6 +87,30 @@ and a degraded diagnostic. It must not become the primary architecture.
 - Desktop overlay state and commands should be event/watcher awakened; unchanged
   overlay payloads must not rewrite state.
 
+### Module boundaries
+
+- `ui/renderer_script.py` owns the injected JavaScript asset.
+- `ui/renderer_domains.py` owns renderer payload-domain compatibility exports;
+  `renderer_client.py` owns renderer install/update/bootstrap/close lifecycle.
+  `ui/renderer_hud.py` is a compatibility import only.
+- `renderer_cdp/` owns target discovery, websocket connection primitives, and
+  the persistent CDP binding. Its `__init__.py` is an explicit transport-only
+  compatibility facade with no payload, settings, or runtime-loop knowledge.
+- `runtime_orchestration.py` owns CLI/runtime coordination and the renderer run
+  loop. `cli.py` is a compatibility import only.
+- `runtime_policies.py` contains refresh/invalidation decisions and the small
+  thread-safe wake/command coordinator used by one renderer run.
+- `runtime_settings.py` owns pure settings-command contracts: config merging,
+  changed-key classification, partial payload domains, and correlated status
+  response shapes.
+- `runtime_usage.py` owns usage arithmetic and current-task/request projection
+  helpers used by caches and overlays.
+- `overlay_ipc.py` owns versioned desktop-overlay sidecar contracts and paths;
+  `overlay_projection.py` owns pure projection/order/cache rules;
+  `desktop_overlay.py`, `overlay_command_pump.py`, `overlay_commands.py`, and
+  `loading_feedback.py` own supervision, watcher, routing, and feedback lifecycles.
+  None may depend on the runtime coordinator or compatibility facades.
+
 ## Legacy Boundary
 
 - CLI/config legacy display-mode aliases normalize to `renderer`.

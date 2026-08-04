@@ -24,14 +24,15 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from codex_usage_hud.cli import UsageSummaryCache, current_budget_windows  # noqa: E402
+from codex_usage_hud.cli import current_budget_windows  # noqa: E402
+from codex_usage_hud.usage_cache import UsageSummaryCache  # noqa: E402
 from codex_usage_hud.config import UserConfig  # noqa: E402
 from codex_usage_hud.core.parser import JsonlSessionParser  # noqa: E402
 from codex_usage_hud.platforms.file_watcher import (  # noqa: E402
     FileWatchSpec,
     _poll_signature,
 )
-from codex_usage_hud.ui.renderer_hud import payload_from_snapshot  # noqa: E402
+from codex_usage_hud.renderer_payload_builder import payload_from_snapshot  # noqa: E402
 
 
 DEFAULT_REGRESSION_BUDGETS_MS = {

@@ -147,7 +147,7 @@ class ConnectionHealthTests(unittest.TestCase):
 class ConnectionHealthPayloadTests(unittest.TestCase):
     def test_payload_from_snapshot_includes_connection_health(self) -> None:
         from codex_usage_hud.core.parser import ParsedSession
-        from codex_usage_hud.ui.renderer_hud import payload_from_snapshot
+        from codex_usage_hud.renderer_payload_builder import payload_from_snapshot
 
         health = ConnectionHealth()
         health.note_failure("update-failed", now=1.0)
@@ -164,7 +164,7 @@ class ConnectionHealthPayloadTests(unittest.TestCase):
         self.assertIn("connectionHealth", domains["diagnostics"])
 
     def test_renderer_script_includes_connection_dot(self) -> None:
-        from codex_usage_hud.ui import renderer_hud
+        from codex_usage_hud import renderer_client as renderer_hud
 
         script = renderer_hud.RENDERER_HUD_SCRIPT
         self.assertIn("codex-usage-hud-connection-dot", script)
@@ -172,13 +172,13 @@ class ConnectionHealthPayloadTests(unittest.TestCase):
         self.assertIn("applyConnectionHealth", script)
         self.assertIn("codex-usage-hud-connection-breathe", script)
         self.assertIn(
-            "applyConnectionHealth(root, diagnosticsPayload)",
+            "diagnosticsDomain.apply(root",
             script,
         )
         self.assertIn("header-title", script)
         self.assertIn("5600", script)  # extended composer follow-up
         expanded_start = script.index("function requestExpandedMarkup()")
-        expanded_end = script.index("function settingsChromeMarkup()", expanded_start)
+        expanded_end = script.index("function escapeHtml", expanded_start)
         expanded = script[expanded_start:expanded_end]
         self.assertIn('class="codex-usage-hud-left-controls"', expanded)
         self.assertLess(

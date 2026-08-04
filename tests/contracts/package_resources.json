@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "resources": [
+    "codex_usage_hud/assets/sponsor_alipay.jpg",
+    "codex_usage_hud/assets/sponsor_alipay.png",
+    "codex_usage_hud/assets/sponsor_wechat.jpg",
+    "codex_usage_hud/assets/sponsor_wechat.png"
+  ],
+  "futureResourceRoots": ["codex_usage_hud/renderer_assets"]
+}

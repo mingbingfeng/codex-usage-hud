@@ -1,0 +1,489 @@
+"""Desktop-overlay command routing with explicit activation ports."""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
+import uuid
+
+from .codex_app_runtime import (
+    activate_running_codex_app,
+    codex_processes_running,
+    launch_codex_app,
+    prepare_codex_window_for_renderer,
+)
+from .platforms import (
+    CdpSessionSwitchBackend,
+    CodexWindowTracker,
+    SessionSwitchController,
+    WindowsSearchSessionSwitchBackend,
+)
+from .platforms.base import BasePlatform
+from . import overlay_window
+
+
+NATIVE_SEARCH_SESSION_SWITCH_ENV = "CODEX_USAGE_HUD_NATIVE_SEARCH_SWITCH"
+WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS = 3.0
+WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS = 0.8
+WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS = 0.8
+WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS = 0.08
+
+_LOGGER = logging.getLogger("codex_usage_hud.overlay_commands")
+WindowAction = Callable[[], tuple[bool, str, str, int]]
+
+
+def _prepare_codex_window_for_standalone(
+    *,
+    timeout_seconds: float,
+    poll_seconds: float = 0.25,
+    launch_if_missing: bool = False,
+) -> tuple[bool, str, str, int]:
+    return overlay_window.prepare_codex_window_for_standalone(
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        launch_if_missing=launch_if_missing,
+        prepare_window_for_renderer=prepare_codex_window_for_renderer,
+        tracker_factory=lambda: CodexWindowTracker(enable_uia=False),
+        processes_running=codex_processes_running,
+        activate=activate_running_codex_app,
+        launch=lambda **_kwargs: launch_codex_app(debugger=False),
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayRuntimeCommandCallbacks:
+    """Route overlay-only background and reminder commands to their owners."""
+
+    background_runtime: object | None
+    rest_reminder: object | None
+    work_overlay: object
+    enqueue_renderer_command: Callable[[dict[str, object]], None]
+    request_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex
+
+    def handle_background(self, command: dict[str, object]) -> bool:
+        action = str(command.get("action") or "").strip()
+        event_id = str(command.get("eventId") or "").strip()
+        if self.background_runtime is None or not event_id:
+            return False
+        if action == "dismissBackgroundUsage":
+            confirm = getattr(self.background_runtime, "confirm", None)
+            return bool(callable(confirm) and confirm(event_id))
+        if action == "openBackgroundUsage":
+            request_id = f"background-overlay-{self.request_id_factory()}"
+            self.enqueue_renderer_command(
+                {
+                    "id": request_id,
+                    "requestId": request_id,
+                    "action": "openBackgroundUsage",
+                    "eventId": event_id,
+                }
+            )
+            return True
+        return False
+
+    def handle_rest_reminder(self, command: dict[str, object]) -> bool:
+        presenter = self.rest_reminder
+        if presenter is None:
+            return False
+        action = str(command.get("action") or "").strip()
+        if action == "restReminderAck":
+            presenter.acknowledge()
+            ok = True
+        elif action == "restReminderPostpone":
+            ok = bool(presenter.postpone())
+        elif action == "restReminderStart":
+            ok = bool(presenter.start_rest())
+        elif action == "restReminderFinish":
+            ok = bool(presenter.finish_rest())
+        else:
+            return False
+        self.work_overlay.update_rest_reminder(
+            presenter.desktop_bubble_payload()
+        )
+        return ok
+
+def _handle_work_overlay_command(
+    command: Mapping[str, object],
+    session_controller: object,
+    *,
+    prepare_window: bool = True,
+    activation_meta: dict[str, object] | None = None,
+    backend_names: tuple[str, ...] | None = None,
+    prepare_window_callback: WindowAction | None = None,
+    refocus_window_callback: WindowAction | None = None,
+) -> Any | None:
+    action = str(command.get("action") or "").strip()
+    if action != "activateSession":
+        return None
+    if str(command.get("clientKind") or "").strip().lower() == "cli":
+        _LOGGER.info("work_overlay_command_ignored reason=cli_session")
+        return None
+    is_current = bool(command.get("current"))
+    session_id = str(command.get("sessionId") or "").strip()
+    target_title = str(command.get("targetTitle") or command.get("title") or "").strip()
+    if not session_id and not target_title:
+        _LOGGER.info("work_overlay_command_ignored reason=missing_target")
+        return None
+
+    def activate_session() -> Any:
+        workdir = str(command.get("workdir") or "").strip()
+        if backend_names is None:
+            return session_controller.activate_session(
+                session_id=session_id,
+                title=target_title,
+                workdir=workdir,
+            )
+        return session_controller.activate_session(
+            session_id=session_id,
+            title=target_title,
+            workdir=workdir,
+            backend_names=backend_names,
+        )
+
+    # CDP can reach a live Codex renderer without first foregrounding the
+    # desktop window.  Defer the expensive window preparation until transport
+    # or backend failure, then retry once as the bounded recovery path.
+    result = activate_session()
+    window_prepared = False
+    if (
+        prepare_window
+        and not result.ok
+        and result.status in {"cdp-error", "backend-error", "no-backend"}
+    ):
+        window_ready, window_status, window_reason, window_hwnd = (
+            prepare_window_callback() if prepare_window_callback is not None else (False, "unavailable", "", 0)
+        )
+        window_prepared = True
+        if not window_ready:
+            _LOGGER.info(
+                "work_overlay_command_window_prepare_best_effort_failed status=%s hwnd=%s reason=%s",
+                window_status,
+                window_hwnd,
+                window_reason,
+            )
+        result = activate_session()
+    if activation_meta is not None:
+        activation_meta["windowPrepared"] = window_prepared
+    _LOGGER.info(
+        "work_overlay_command_processed ok=%s status=%s backend=%s requested_session=%s active_session=%s matched_by=%s message=%s",
+        result.ok,
+        result.status,
+        result.backend or "-",
+        result.requested_session_id or "-",
+        result.active_session_id or "-",
+        result.matched_by or "-",
+        result.message or "-",
+    )
+    if prepare_window and (is_current or result.ok or result.status == "already-active"):
+        window_ready, window_status, window_reason, window_hwnd = (
+            refocus_window_callback() if refocus_window_callback is not None else (False, "unavailable", "", 0)
+        )
+        _LOGGER.info(
+            "work_overlay_command_session_refocus ok=%s status=%s hwnd=%s reason=%s",
+            window_ready,
+            window_status,
+            window_hwnd,
+            window_reason or "-",
+        )
+    return result
+
+
+def _handle_work_overlay_commands(
+    work_overlay: object,
+    session_controller: object,
+    *,
+    prepare_window: bool = True,
+    runtime_events: object | None = None,
+    runtime_errors: object | None = None,
+    background_command_callback: Callable[[dict[str, object]], bool] | None = None,
+    rest_reminder_command_callback: Callable[[dict[str, object]], bool] | None = None,
+    prepare_window_callback: WindowAction | None = None,
+    refocus_window_callback: WindowAction | None = None,
+    background_refocus_callback: WindowAction | None = None,
+    clock: Callable[[], float] = time.time,
+) -> int:
+    take_commands = getattr(work_overlay, "take_commands", None)
+    if not callable(take_commands):
+        return 0
+    handled = 0
+    for command in take_commands():
+        ack_status = "rejected"
+        ack_result: dict[str, object] = {}
+        try:
+            ack_status, ack_result = _route_work_overlay_command(
+                command,
+                work_overlay,
+                session_controller,
+                prepare_window=prepare_window,
+                runtime_events=runtime_events,
+                runtime_errors=runtime_errors,
+                background_command_callback=background_command_callback,
+                rest_reminder_command_callback=rest_reminder_command_callback,
+                prepare_window_callback=prepare_window_callback,
+                refocus_window_callback=refocus_window_callback,
+                background_refocus_callback=background_refocus_callback,
+                clock=clock,
+            )
+        except Exception as exc:
+            ack_status = "error"
+            ack_result = {"message": str(exc)}
+            raise
+        finally:
+            acknowledge = getattr(work_overlay, "acknowledge_command", None)
+            if callable(acknowledge):
+                acknowledge(command, status=ack_status, result=ack_result)
+        handled += 1
+    return handled
+
+
+def _route_work_overlay_command(
+    command: Mapping[str, object],
+    work_overlay: object,
+    session_controller: object,
+    *,
+    prepare_window: bool,
+    runtime_events: object | None,
+    runtime_errors: object | None,
+    background_command_callback: Callable[[dict[str, object]], bool] | None,
+    rest_reminder_command_callback: Callable[[dict[str, object]], bool] | None,
+    prepare_window_callback: WindowAction | None,
+    refocus_window_callback: WindowAction | None,
+    background_refocus_callback: WindowAction | None,
+    clock: Callable[[], float],
+) -> tuple[str, dict[str, object]]:
+    if _handle_work_overlay_runtime_error_command(command, runtime_events, runtime_errors):
+        return "completed", {"handled": True}
+    action = str(command.get("action") or "").strip()
+    if action in {"restReminderAck", "restReminderPostpone", "restReminderStart", "restReminderFinish"}:
+        callback_handled = rest_reminder_command_callback is not None
+        callback_ok = bool(rest_reminder_command_callback(dict(command))) if rest_reminder_command_callback else False
+        meta = {"handled": callback_handled, "ok": callback_ok, "restReminder": True}
+        _publish_work_overlay_command_event(runtime_events, command, None, activation_context=meta, clock=clock)
+        return ("completed" if callback_ok else "rejected"), meta
+    if action in {"dismissBackgroundUsage", "openBackgroundUsage"}:
+        callback_handled = background_command_callback is not None
+        callback_ok = bool(background_command_callback(dict(command))) if background_command_callback else False
+        meta: dict[str, object] = {"handled": callback_handled, "ok": callback_ok}
+        if action == "openBackgroundUsage":
+            meta["backgroundCommandQueued"] = callback_ok
+            if callback_ok and prepare_window:
+                try:
+                    ready, status, reason, hwnd = background_refocus_callback() if background_refocus_callback else (False, "unavailable", "", 0)
+                except Exception as exc:
+                    ready, status, reason, hwnd = False, "refocus-error", str(exc), 0
+                meta.update({"windowRefocused": ready, "windowStatus": status, "windowReason": reason, "windowHwnd": hwnd})
+        _publish_work_overlay_command_event(runtime_events, command, None, activation_context=meta, clock=clock)
+        return ("completed" if callback_ok else "rejected"), meta
+    activation_meta: dict[str, object] = {}
+    result = _handle_work_overlay_command(
+        command,
+        session_controller,
+        prepare_window=prepare_window,
+        activation_meta=activation_meta,
+        prepare_window_callback=prepare_window_callback,
+        refocus_window_callback=refocus_window_callback,
+    )
+    _publish_work_overlay_command_event(runtime_events, command, result, activation_context=activation_meta, clock=clock)
+    if result is not None and result.ok:
+        _publish_work_overlay_active_session_changed(runtime_events, command, result, activation_context=activation_meta, clock=clock)
+    if result is not None and (bool(command.get("current")) or result.ok or result.status == "already-active"):
+        mark_completed = getattr(work_overlay, "mark_switch_completed", None)
+        if callable(mark_completed):
+            mark_completed(command)
+    meta = {**activation_meta, "handled": result is not None, "ok": bool(getattr(result, "ok", False))}
+    return ("completed" if meta["ok"] else "rejected"), meta
+
+
+def _handle_work_overlay_runtime_error_command(
+    command: Mapping[str, object],
+    runtime_events: object | None,
+    runtime_errors: object | None = None,
+) -> bool:
+    action = str(command.get("action") or "").strip()
+    if action != "runtimeError":
+        return False
+    context_value = command.get("context")
+    context = dict(context_value) if isinstance(context_value, Mapping) else {}
+    severity = str(command.get("severity") or "error").strip() or "error"
+    code = str(command.get("code") or "helper_error").strip() or "helper_error"
+    message = str(command.get("message") or "Desktop work overlay helper error.").strip()
+    source = str(command.get("source") or "work_overlay_helper").strip()
+    if runtime_errors is not None:
+        if runtime_errors.event_bus is None and runtime_events is not None:
+            runtime_errors.event_bus = runtime_events
+        runtime_errors.record(
+            source=source,
+            severity=severity,
+            code=code,
+            message=message,
+            context=context,
+        )
+        return True
+    publish = getattr(runtime_events, "publish", None)
+    if not callable(publish):
+        return True
+    publish(
+        "runtime_error",
+        source=source,
+        session=str(command.get("sessionId") or "") or None,
+        context=context,
+        error={
+            "source": source,
+            "severity": severity,
+            "code": code,
+            "message": message,
+            "context": context,
+        },
+    )
+    return True
+
+
+def _publish_work_overlay_command_event(
+    runtime_events: object | None,
+    command: Mapping[str, object],
+    result: Any | None,
+    *,
+    activation_context: Mapping[str, object] | None = None,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    publish = getattr(runtime_events, "publish", None)
+    if not callable(publish):
+        return
+    context = _work_overlay_activation_context(command, result, clock=clock)
+    context.update(dict(activation_context or {}))
+    publish(
+        "overlay_command_received",
+        source="work_overlay",
+        session=str(command.get("sessionId") or "") or None,
+        context=context,
+    )
+
+
+def _work_overlay_activation_context(
+    command: Mapping[str, object],
+    result: Any | None,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> dict[str, object]:
+    """Project one structured local activation result for runtime events."""
+    context: dict[str, object] = {
+        "action": str(command.get("action") or ""),
+        "sessionId": str(command.get("sessionId") or ""),
+        "requestedSessionId": str(command.get("sessionId") or ""),
+        "activeSessionId": str(getattr(result, "active_session_id", "") or ""),
+        "requestedTitle": str(
+            command.get("targetTitle") or command.get("title") or ""
+        ),
+        "activeTitle": str(getattr(result, "active_title", "") or ""),
+        "current": bool(command.get("current")),
+        "handled": result is not None,
+        "ok": bool(getattr(result, "ok", False)) if result is not None else False,
+        "backend": str(getattr(result, "backend", "") or "") if result is not None else "",
+        "status": str(getattr(result, "status", "") or "") if result is not None else "",
+        "matchedBy": str(getattr(result, "matched_by", "") or "") if result is not None else "",
+        "message": str(getattr(result, "message", "") or "") if result is not None else "",
+    }
+    requested_at = command.get("requestedAt")
+    try:
+        requested_timestamp = float(requested_at)
+    except (TypeError, ValueError):
+        requested_timestamp = 0.0
+    if requested_timestamp > 0:
+        context["latencyMs"] = round(
+            max(0.0, (clock() - requested_timestamp) * 1000.0),
+            1,
+        )
+    return context
+
+
+def _publish_work_overlay_active_session_changed(
+    runtime_events: object | None,
+    command: Mapping[str, object],
+    result: Any,
+    *,
+    activation_context: Mapping[str, object] | None = None,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    publish = getattr(runtime_events, "publish", None)
+    if not callable(publish):
+        return
+    context = _work_overlay_activation_context(command, result, clock=clock)
+    context.update(dict(activation_context or {}))
+    publish(
+        "active_session_changed",
+        source="work_overlay",
+        session=(
+            str(result.active_session_id or "").strip()
+            or str(command.get("sessionId") or "").strip()
+            or None
+        ),
+        context={"reason": "overlay_session_activation", **context},
+    )
+
+
+handle_command = _handle_work_overlay_command
+handle_commands = _handle_work_overlay_commands
+activation_context = _work_overlay_activation_context
+
+
+def _build_session_switch_controller(
+    platform: BasePlatform,
+    *,
+    prefer_native_search: bool,
+    cdp_port: int | None = None,
+) -> SessionSwitchController:
+    cdp = CdpSessionSwitchBackend(
+        timeout_seconds=WORK_OVERLAY_CDP_SWITCH_TIMEOUT_SECONDS,
+        port=cdp_port,
+    )
+    native_setting = os.environ.get(NATIVE_SEARCH_SESSION_SWITCH_ENV, "").strip().lower()
+    native_enabled = native_setting not in {"0", "false", "no", "off"}
+    backends: list[object] = [cdp]
+    if native_enabled:
+        native = WindowsSearchSessionSwitchBackend(platform)
+        backends = [native, cdp] if prefer_native_search else [cdp, native]
+    return SessionSwitchController(backends)
+
+
+def _prepare_codex_window_for_work_overlay_switch() -> tuple[bool, str, str, int]:
+    return overlay_window.prepare_codex_window_for_work_overlay_switch(
+        platform=sys.platform,
+        launch_codex_app=launch_codex_app,
+        prepare_standalone=_prepare_codex_window_for_standalone,
+        timeout_seconds=WORK_OVERLAY_WINDOW_PREPARE_TIMEOUT_SECONDS,
+        poll_seconds=0.08,
+        launch_if_missing=True,
+    )
+
+
+def _refocus_codex_window_after_work_overlay_switch() -> tuple[bool, str, str, int]:
+    return overlay_window.refocus_codex_window_after_work_overlay_switch(
+        platform=sys.platform,
+        launch_codex_app=launch_codex_app,
+        prepare_standalone=_prepare_codex_window_for_standalone,
+        sleep=time.sleep,
+        delay_seconds=WORK_OVERLAY_SWITCH_REFOCUS_DELAY_SECONDS,
+        timeout_seconds=WORK_OVERLAY_SWITCH_REFOCUS_TIMEOUT_SECONDS,
+        poll_seconds=0.08,
+        launch_if_missing=True,
+    )
+
+
+def _refocus_codex_window_after_current_session_click() -> tuple[bool, str, str, int]:
+    return overlay_window.refocus_codex_window_after_current_session_click(
+        _refocus_codex_window_after_work_overlay_switch
+    )
+
+__all__ = [
+    "OverlayRuntimeCommandCallbacks",
+    "activation_context",
+    "handle_command",
+    "handle_commands",
+]
