@@ -298,6 +298,22 @@ class DeletedUsageLedger:
         return transaction_id
 
     @staticmethod
+    def _transaction_ids(value: object) -> tuple[str, ...]:
+        if isinstance(value, str):
+            candidates: Sequence[object] = (value,)
+        elif isinstance(value, Sequence):
+            candidates = value
+        else:
+            candidates = ()
+        return tuple(
+            dict.fromkeys(
+                transaction_id
+                for candidate in candidates
+                if (transaction_id := str(candidate or "").strip())
+            )
+        )
+
+    @staticmethod
     def _merge_committed(
         committed: dict[str, object], pending_row: Mapping[str, object], now: datetime
     ) -> None:
@@ -315,6 +331,18 @@ class DeletedUsageLedger:
         for raw_event in pending_row.get("events", []):
             if isinstance(raw_event, Mapping) and str(raw_event.get("id") or ""):
                 merged_events[str(raw_event["id"])] = dict(raw_event)
+        transaction_ids = list(
+            dict.fromkeys(
+                (
+                    *DeletedUsageLedger._transaction_ids(
+                        previous_row.get("transactionIds")
+                    ),
+                    *DeletedUsageLedger._transaction_ids(
+                        pending_row.get("transactionId")
+                    ),
+                )
+            )
+        )
         committed[session_id] = {
             "sessionId": session_id,
             "familySessionIds": list(pending_row.get("familySessionIds") or []),
@@ -322,7 +350,19 @@ class DeletedUsageLedger:
             "workdirName": str(pending_row.get("workdirName") or ""),
             "deletedAt": now.isoformat(timespec="seconds"),
             "events": list(merged_events.values()),
+            "transactionIds": transaction_ids,
         }
+
+    @staticmethod
+    def _is_committed_transaction(
+        committed: Mapping[str, object], transaction_id: str
+    ) -> bool:
+        return any(
+            isinstance(raw_row, Mapping)
+            and transaction_id
+            in DeletedUsageLedger._transaction_ids(raw_row.get("transactionIds"))
+            for raw_row in committed.values()
+        )
 
     def commit(self, transaction_id: str, *, now: datetime | None = None) -> None:
         if not transaction_id:
@@ -333,6 +373,10 @@ class DeletedUsageLedger:
             pending = dict(payload["pending"])
             raw_row = pending.pop(transaction_id, None)
             if not isinstance(raw_row, Mapping):
+                if self._is_committed_transaction(
+                    dict(payload["committed"]), transaction_id
+                ):
+                    return
                 raise DeletedUsageLedgerError(
                     "Pending deleted-session usage snapshot is unavailable."
                 )

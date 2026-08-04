@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -14,6 +14,7 @@ from codex_usage_hud.core.session_cleanup import (
     SessionDeleteCapability,
     SessionCleanupManager,
 )
+from codex_usage_hud.core.deleted_usage import DeletedUsageLedger
 
 
 ROOT_ID = "10000000-0000-4000-8000-000000000001"
@@ -252,6 +253,77 @@ class SessionCleanupManagerTests(unittest.TestCase):
             events,
             [("prepare", ROOT_ID), ("commit", "usage-receipt")],
         )
+
+    def test_delete_commit_is_idempotent_after_usage_refresh_recovers_snapshot(self) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        now = datetime.now(timezone.utc)
+        ledger = DeletedUsageLedger(root / "deleted-session-usage.json")
+
+        class Parser:
+            @staticmethod
+            def load_records_lenient(path: Path) -> Path:
+                return path
+
+            @staticmethod
+            def usage_events(_path: Path) -> tuple[dict[str, object], ...]:
+                return (
+                    {
+                        "timestamp": now,
+                        "model": "gpt-test",
+                        "total_tokens": 10,
+                        "input_tokens": 8,
+                        "output_tokens": 2,
+                    },
+                )
+
+            @staticmethod
+            def session_model_provider(_path: Path) -> str:
+                return "custom"
+
+        parser = Parser()
+
+        def prepare(item) -> str:
+            return ledger.prepare(
+                session_id=item._session_id,
+                family_session_ids=(item._session_id, *item._descendant_ids),
+                title=item.title,
+                workdir_name=item.workdir_name,
+                rollout_paths=item._rollout_paths,
+                parser=parser,
+                now=now,
+            )
+
+        manager.usage_snapshot_prepare = prepare
+        manager.usage_snapshot_commit = lambda receipt: ledger.commit(
+            str(receipt), now=now
+        )
+        manager.usage_snapshot_discard = lambda receipt: ledger.discard(str(receipt))
+        scan = manager.scan()
+        root_row = next(row for row in scan["sessions"] if row["title"] == "Root")
+        preview = manager.preview([root_row["id"]], scan["revision"])
+        verify_deleted = manager._verify_deleted_batch
+
+        def verify_and_refresh(items) -> None:
+            verify_deleted(items)
+            self.assertEqual(len(ledger.sessions(now=now)), 1)
+
+        with patch.object(
+            manager,
+            "_verify_deleted_batch",
+            side_effect=verify_and_refresh,
+        ):
+            result = manager.execute(
+                [root_row["id"]],
+                scan["revision"],
+                preview["operation"]["confirmationToken"],
+            )
+
+        sessions = ledger.sessions(now=now)
+        self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(len(sessions[0].events), 2)
 
     def test_delete_failure_discards_pending_usage_snapshot(self) -> None:
         fixture = self._fixture()

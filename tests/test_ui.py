@@ -113,7 +113,10 @@ from codex_usage_hud.config import (
 )
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
 from codex_usage_hud.core.runtime_errors import RuntimeErrorRegistry
-from codex_usage_hud.core.deleted_usage import DeletedUsageLedger
+from codex_usage_hud.core.deleted_usage import (
+    DeletedUsageLedger,
+    DeletedUsageLedgerError,
+)
 from codex_usage_hud.core.session_cleanup import SessionCleanupItem
 from codex_usage_hud.platforms.cdp_probe import CdpDomSnapshot, CdpRect
 from codex_usage_hud.platforms.codex_theme import CodexThemeExport, CodexThemeSnapshot, HudThemeTokens
@@ -1040,12 +1043,25 @@ class BudgetHelperTests(unittest.TestCase):
 
             rollout.unlink()
             sessions = ledger.sessions(now=now)
+            ledger.commit(receipt, now=now)
+            sessions_after_commit = ledger.sessions(now=now)
             payload = json.loads(ledger_path.read_text(encoding="utf-8"))
+            with self.assertRaisesRegex(
+                DeletedUsageLedgerError,
+                "Pending deleted-session usage snapshot is unavailable",
+            ):
+                ledger.commit("unknown-transaction", now=now)
 
         self.assertEqual(len(sessions), 1)
         self.assertEqual([event.model for event in sessions[0].events], ["gpt-recent"])
+        self.assertEqual(len(sessions_after_commit), 1)
+        self.assertEqual(len(sessions_after_commit[0].events), 1)
         self.assertEqual(payload["pending"], {})
         self.assertIn(session_id, payload["committed"])
+        self.assertEqual(
+            payload["committed"][session_id]["transactionIds"],
+            [receipt],
+        )
 
     def test_usage_summary_cache_filters_cached_provider_contributions_without_rescan(self) -> None:
         parser = _FileBackedUsageParser()
