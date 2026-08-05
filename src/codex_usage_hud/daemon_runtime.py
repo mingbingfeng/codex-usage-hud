@@ -38,6 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 class DaemonStartupDecision:
     mode: str
     launch_codex: bool = False
+    codex_was_running: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,7 +100,10 @@ def daemon_startup_decision(
     del args
     snapshot = manager.snapshot()
     if snapshot.found:
-        return DaemonStartupDecision(DEFAULT_DAEMON_STARTUP_WAIT)
+        return DaemonStartupDecision(
+            DEFAULT_DAEMON_STARTUP_WAIT,
+            codex_was_running=True,
+        )
     return DaemonStartupDecision(
         DEFAULT_DAEMON_STARTUP_RENDERER,
         launch_codex=True,
@@ -242,6 +246,8 @@ def run_daemon(
         raise RuntimeError("daemon runtime requires a renderer session callback")
     if hud is None:
         def default_hud(current_args: argparse.Namespace, **kwargs: object) -> int:
+            if "loading_feedback" in kwargs:
+                kwargs["loading_feedback_instance"] = kwargs.pop("loading_feedback")
             return run_hud_session(
                 current_args,
                 run_renderer=renderer,
@@ -266,6 +272,9 @@ def run_daemon(
             startup_loading: Any | None = None
             launched_codex_for_renderer = False
             observed_codex_launch = False
+            codex_was_running_at_start = bool(
+                getattr(startup, "codex_was_running", False)
+            )
             if startup.mode == DEFAULT_DAEMON_STARTUP_WAIT:
                 startup_loading = services.create_loading(
                     args,
@@ -366,7 +375,13 @@ def run_daemon(
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
                     launched_codex_for_renderer = False
-                    observed_codex_launch = True
+                    # A process that existed before the HUD started must still
+                    # use the user-confirmed restart bubble if it is replaced
+                    # before the first renderer session settles.  Automatic
+                    # takeover remains for a Codex launched after the daemon
+                    # was already watching an empty process set.
+                    observed_codex_launch = not codex_was_running_at_start
+                    codex_was_running_at_start = False
                     continue
                 if force_renderer_retry and exit_code == RENDERER_HUD_UNAVAILABLE:
                     time.sleep(manager.poll_seconds)

@@ -7,6 +7,7 @@ import pytest
 
 from codex_usage_hud.codex_app_runtime import CodexDesktopProcess
 from codex_usage_hud import renderer_startup as startup
+from codex_usage_hud import runtime_orchestration as orchestration
 
 
 def _process(pid: int, command_line: str) -> CodexDesktopProcess:
@@ -50,6 +51,20 @@ def test_launch_port_allocates_once_when_all_preferred_ports_are_occupied(
     assert port == 9555
     assert allocated == ["fresh"]
     assert startup.os.environ[startup.CDP_PORT_ENV] == "9555"
+
+
+def test_orchestration_requested_port_wrapper_persists_to_injected_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "renderer_cdp_state.json"
+    monkeypatch.setattr(orchestration, "renderer_cdp_state_path", lambda: state)
+
+    orchestration._remember_requested_renderer_cdp_port(60123)
+
+    assert json.loads(state.read_text(encoding="utf-8"))[
+        "lastRequestedPort"
+    ] == 60123
 
 
 def test_observed_plain_launch_requests_one_bounded_relaunch() -> None:

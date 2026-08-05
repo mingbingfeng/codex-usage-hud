@@ -152,12 +152,25 @@ def remember_cdp_port(
         return
 
 
-def remember_requested_cdp_port(port: int | None) -> None:
-    remember_cdp_port(port, requested=True)
+def remember_requested_cdp_port(
+    port: int | None,
+    *,
+    state_path: Callable[[], object] = renderer_cdp_state_path,
+) -> None:
+    remember_cdp_port(port, requested=True, state_path=state_path)
 
 
-def remember_successful_cdp_port(port: int | None) -> None:
-    remember_cdp_port(port, requested=True, successful=True)
+def remember_successful_cdp_port(
+    port: int | None,
+    *,
+    state_path: Callable[[], object] = renderer_cdp_state_path,
+) -> None:
+    remember_cdp_port(
+        port,
+        requested=True,
+        successful=True,
+        state_path=state_path,
+    )
 
 
 def localhost_cdp_port_is_listening(port: int | None) -> bool:
