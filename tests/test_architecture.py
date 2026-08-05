@@ -385,6 +385,64 @@ def test_cli_facade_import_does_not_eagerly_load_qt_hud() -> None:
     assert "codex_usage_hud.ui.work_overlay_qt=False" in result.stdout
 
 
+def test_work_overlay_facade_is_small_and_lazy() -> None:
+    facade_path = SRC / "ui/work_overlay_qt.py"
+    source = facade_path.read_text(encoding="utf-8")
+
+    assert len(source.splitlines()) <= 120
+    assert not {name for name in _imports(facade_path) if name.startswith("PySide6")}
+    assert "class OverlayWindow" not in source
+    assert "QFileSystemWatcher" not in source
+    assert "from .work_overlay.qt_runtime import" in source
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = (
+        str(ROOT / "src")
+        if not env.get("PYTHONPATH")
+        else str(ROOT / "src") + os.pathsep + env["PYTHONPATH"]
+    )
+    script = (
+        "import sys\n"
+        "import codex_usage_hud.ui.work_overlay_qt\n"
+        "print('PySide6=' + str('PySide6' in sys.modules))\n"
+        "print('qt_runtime=' + str('codex_usage_hud.ui.work_overlay.qt_runtime' in sys.modules))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "PySide6=False" in result.stdout
+    assert "qt_runtime=False" in result.stdout
+
+
+def test_work_overlay_owner_dependency_direction_is_explicit() -> None:
+    pure_owner_paths = [
+        SRC / "ui/work_overlay/constants.py",
+        SRC / "ui/work_overlay/model.py",
+        SRC / "ui/work_overlay/geometry.py",
+        SRC / "ui/work_overlay/theme.py",
+    ]
+    for path in pure_owner_paths:
+        assert not {name for name in _imports(path) if name.startswith("PySide6")}, path
+
+    runtime_source = (SRC / "ui/work_overlay/qt_runtime.py").read_text(encoding="utf-8")
+    assert "QFileSystemWatcher" in runtime_source
+    assert "from .work_overlay" not in runtime_source
+    assert "from .qt_window import OverlayWindow" in runtime_source
+
+    facade_source = (SRC / "ui/work_overlay_qt.py").read_text(encoding="utf-8")
+    assert "from .work_overlay.constants import *" in facade_source
+    assert "from .work_overlay.geometry import *" in facade_source
+    assert "from .work_overlay.model import *" in facade_source
+    assert "from .work_overlay.theme import *" in facade_source
+
+
 def test_usage_cache_public_facade_resolves_to_owner() -> None:
     import codex_usage_hud.cli as cli
     from codex_usage_hud.usage_cache import UsageSummaryCache

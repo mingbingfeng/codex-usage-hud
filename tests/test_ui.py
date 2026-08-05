@@ -3322,7 +3322,12 @@ class BudgetHelperTests(unittest.TestCase):
 
     def test_rest_reminder_card_does_not_reserve_close_button_space(self) -> None:
         source = (
-            PROJECT_ROOT / "src" / "codex_usage_hud" / "ui" / "work_overlay_qt.py"
+            PROJECT_ROOT
+            / "src"
+            / "codex_usage_hud"
+            / "ui"
+            / "work_overlay"
+            / "qt_rendering.py"
         ).read_text(encoding="utf-8")
 
         self.assertIn('close_anchor = record["close_anchor"]', source)
@@ -4131,7 +4136,8 @@ class BudgetHelperTests(unittest.TestCase):
             / "src"
             / "codex_usage_hud"
             / "ui"
-            / "work_overlay_qt.py"
+            / "work_overlay"
+            / "qt_runtime.py"
         ).read_text(encoding="utf-8")
 
         self.assertIn("QFileSystemWatcher", source)
@@ -4151,7 +4157,8 @@ class BudgetHelperTests(unittest.TestCase):
             / "src"
             / "codex_usage_hud"
             / "ui"
-            / "work_overlay_qt.py"
+            / "work_overlay"
+            / "qt_rendering.py"
         ).read_text(encoding="utf-8")
 
         self.assertIn('"workdir_anchor": workdir_anchor', source)

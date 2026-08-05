@@ -1,0 +1,236 @@
+{
+  "card_circle_rect": [
+    320.0,
+    188.0,
+    110.0,
+    110.0
+  ],
+  "completed_slot_moves": {
+    "C2": [
+      [
+        262.0,
+        0.0,
+        168.0,
+        168.0
+      ],
+      [
+        86.0,
+        0.0,
+        168.0,
+        168.0
+      ]
+    ]
+  },
+  "completed_slot_rects": {
+    "C2": [
+      86.0,
+      0.0,
+      168.0,
+      168.0
+    ],
+    "R1": [
+      262.0,
+      0.0,
+      168.0,
+      168.0
+    ]
+  },
+  "constants": {
+    "WORK_OVERLAY_BODY_MAX_LINES": 3,
+    "WORK_OVERLAY_CARD_SPACING": 7,
+    "WORK_OVERLAY_CARD_X_PADDING": 10,
+    "WORK_OVERLAY_CARD_Y_PADDING": 8,
+    "WORK_OVERLAY_CLOSE_SIZE": 22,
+    "WORK_OVERLAY_COMPLETED_ANNIHILATION_MARGIN": 16,
+    "WORK_OVERLAY_COMPLETED_ANNIHILATION_MS": 1200,
+    "WORK_OVERLAY_COMPLETED_BADGE_ANIMATION_MS": 520,
+    "WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT": 180,
+    "WORK_OVERLAY_COMPLETED_BADGE_SIZE": 168,
+    "WORK_OVERLAY_COMPLETED_BADGE_SPACING": 8,
+    "WORK_OVERLAY_COMPLETED_PENDING_FINISH_SECONDS": 0.85,
+    "WORK_OVERLAY_COMPLETED_PENDING_LAUNCH_SECONDS": 0.45,
+    "WORK_OVERLAY_ELAPSED_TEXT_TIMER_MS": 1000,
+    "WORK_OVERLAY_EMPTY_GRACE_SECONDS": 0.8,
+    "WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT": 160,
+    "WORK_OVERLAY_HELPER_HEARTBEAT_MS": 5000,
+    "WORK_OVERLAY_HOTSPOT_HIT_ALPHA": 8,
+    "WORK_OVERLAY_HOTSPOT_HOVER_ALPHA": 0.96,
+    "WORK_OVERLAY_MARGIN": 16,
+    "WORK_OVERLAY_POINTER_SYNC_MS": 60,
+    "WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED": true,
+    "WORK_OVERLAY_RESTORE_DESCEND_MS": 400,
+    "WORK_OVERLAY_RESTORE_FADE_IN_MS": 150,
+    "WORK_OVERLAY_RESTORE_FADE_OUT_MS": 200,
+    "WORK_OVERLAY_RESTORE_SHIFT_MS": 300,
+    "WORK_OVERLAY_SHIMMER_BAND_WIDTH_PX": 58,
+    "WORK_OVERLAY_SHIMMER_HIGHLIGHT": "#FFFFFF",
+    "WORK_OVERLAY_SHIMMER_PEAK_ALPHA": 245,
+    "WORK_OVERLAY_SHIMMER_STEP_PX": 3.5,
+    "WORK_OVERLAY_SHIMMER_TIMER_MS": 30,
+    "WORK_OVERLAY_STACK_SPACING": 8,
+    "WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS": 1.2,
+    "WORK_OVERLAY_STATE_READ_RETRY_MS": 80,
+    "WORK_OVERLAY_SWITCH_PENDING_MIN_WIDTH": 150,
+    "WORK_OVERLAY_SWITCH_PENDING_SLOW_SECONDS": 3.0,
+    "WORK_OVERLAY_SWITCH_PENDING_TIMEOUT_SECONDS": 45.0,
+    "WORK_OVERLAY_SWITCH_PENDING_TIMER_MS": 120,
+    "WORK_OVERLAY_TEXT_WRAP_WIDTH": 402,
+    "WORK_OVERLAY_TOP_OFFSET": 56,
+    "WORK_OVERLAY_TRANSITION_CARD_HEIGHT": 110,
+    "WORK_OVERLAY_TRANSITION_CLEARANCE_PX": 176,
+    "WORK_OVERLAY_TRANSITION_MOVE_MS": 280,
+    "WORK_OVERLAY_TRANSITION_PAUSE_MS": 140,
+    "WORK_OVERLAY_TRANSITION_SHIFT_MS": 240,
+    "WORK_OVERLAY_TRANSITION_SHRINK_MS": 220,
+    "WORK_OVERLAY_WIDTH": 430
+  },
+  "default_theme": {
+    "accent": "#F3D27A",
+    "error": "#FF6B6B",
+    "info": "#9CCBFF",
+    "muted": "#8492A6",
+    "panelBorder": "#263241",
+    "panelSurface": "#141B24",
+    "progressOverflowBadge": "#7F3E3A",
+    "progressOverflowBadgeEdge": "#FF875A",
+    "requestMuted": "#5E6A78",
+    "requestPanelSurface": "#10161D",
+    "requestText": "#B8C6D8",
+    "success": "#8FE3A1",
+    "surface": "#10161D",
+    "text": "#DCE7F2",
+    "warning": "#FFB86B"
+  },
+  "deferred_items": [
+    {
+      "id": "C1",
+      "sessionId": "C1",
+      "status": "tool"
+    },
+    {
+      "id": "C2",
+      "sessionId": "C2",
+      "status": "recent"
+    },
+    {
+      "id": "R1",
+      "sessionId": "R1",
+      "status": "tool"
+    },
+    {
+      "id": "R2",
+      "sessionId": "R2",
+      "status": "tool"
+    }
+  ],
+  "detect_transition": "completed_to_card",
+  "detect_transition_item_id": "C1",
+  "pending_states": {
+    "0.0": {
+      "caption_opacity_completed": 1.0,
+      "caption_opacity_pending": 0.0,
+      "finish_progress": 0.0,
+      "launch_progress": 0.0,
+      "launch_scale": 1.0
+    },
+    "0.225": {
+      "caption_opacity_completed": 1.0,
+      "caption_opacity_pending": 1.0,
+      "finish_progress": 0.2647058823529412,
+      "launch_progress": 0.5,
+      "launch_scale": 0.9961428262318297
+    },
+    "0.45": {
+      "caption_opacity_completed": 0.37947496266627856,
+      "caption_opacity_pending": 1.0,
+      "finish_progress": 0.5294117647058824,
+      "launch_progress": 1.0,
+      "launch_scale": 1.0
+    },
+    "0.7": {
+      "caption_opacity_completed": 0.02001137498435457,
+      "caption_opacity_pending": 1.0,
+      "finish_progress": 0.8235294117647058,
+      "launch_progress": 1.0,
+      "launch_scale": 1.0
+    },
+    "1.3": {
+      "caption_opacity_completed": 0.0,
+      "caption_opacity_pending": 1.0,
+      "finish_progress": 1.0,
+      "launch_progress": 1.0,
+      "launch_scale": 1.0
+    }
+  },
+  "restore_slot_moves": {
+    "C2": [
+      [
+        262.0,
+        0.0,
+        168.0,
+        168.0
+      ],
+      [
+        262.0,
+        0.0,
+        168.0,
+        168.0
+      ],
+      [
+        86.0,
+        0.0,
+        168.0,
+        168.0
+      ]
+    ]
+  },
+  "restore_staged": [
+    {
+      "id": "C1",
+      "sessionId": "C1",
+      "status": "recent"
+    },
+    {
+      "id": "C2",
+      "sessionId": "C2",
+      "status": "recent"
+    },
+    {
+      "id": "R1",
+      "sessionId": "R1",
+      "status": "tool"
+    },
+    {
+      "id": "R2",
+      "sessionId": "R2",
+      "status": "tool"
+    }
+  ],
+  "transition_changes": [
+    [
+      "C1",
+      "completed_to_card"
+    ],
+    [
+      "R1",
+      "card_to_completed"
+    ]
+  ],
+  "transition_clearance": -171.89504373177843,
+  "transition_palette": {
+    "border": "#868763",
+    "fillEnd": "#292d29",
+    "fillMid": "#263631",
+    "fillStart": "#282e2d",
+    "markText": "#ded99b",
+    "subtitleText": "#94a1b4",
+    "titleText": "#DCE7F2"
+  },
+  "transition_rect": [
+    262.0,
+    159.0,
+    168.0,
+    168.0
+  ],
+  "transition_total_ms": 640
+}
