@@ -93,6 +93,8 @@ def reduce_event(
         plan.request_diagnostics()
     elif event_type in {"update_state_changed", "rest_reminder_due"}:
         plan.request_domains("settings", force_fast=True)
+    elif event_type == "usage_cache_hydrated":
+        plan.request_snapshot(force_fast=True)
     elif event_type == "usage_insights_changed":
         plan.request_domains("settings", "usageInsights", force_fast=True)
     elif event_type == "session_cleanup_changed":

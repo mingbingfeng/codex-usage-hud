@@ -733,6 +733,8 @@ class UsageInsightsWorker:
                 }
             setattr(self._context, "usage_insights_payload", payload)
             self._publish(payload)
+            if bool(payload.get("ready")):
+                self._publish_cache_hydrated(payload)
 
     def _publish(self, payload: Mapping[str, object]) -> None:
         event_bus = getattr(self._context, "runtime_events", None)
@@ -745,6 +747,19 @@ class UsageInsightsWorker:
                     "requestId": str(payload.get("requestId") or ""),
                     "revision": int(payload.get("revision") or 0),
                     "state": str(payload.get("state") or ""),
+                },
+            )
+
+    def _publish_cache_hydrated(self, payload: Mapping[str, object]) -> None:
+        event_bus = getattr(self._context, "runtime_events", None)
+        publish = getattr(event_bus, "publish", None)
+        if callable(publish):
+            publish(
+                "usage_cache_hydrated",
+                source="usage_insights",
+                context={
+                    "requestId": str(payload.get("requestId") or ""),
+                    "revision": int(payload.get("revision") or 0),
                 },
             )
 

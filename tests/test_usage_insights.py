@@ -30,6 +30,7 @@ def test_usage_insights_worker_publishes_ready_payload_and_closes() -> None:
         assert [event.type for event in published] == [
             "usage_insights_changed",
             "usage_insights_changed",
+            "usage_cache_hydrated",
         ]
         assert published[-1].context["revision"] == 7
     finally:

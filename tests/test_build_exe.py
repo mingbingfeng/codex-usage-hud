@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = PROJECT_ROOT / "tools"
@@ -93,6 +95,18 @@ class PyInstallerCommandTests(unittest.TestCase):
         self.assertIn("PyInstaller", text)
         self.assertIn("--name", text)
         self.assertIn("codex-hud", text)
+
+    def test_build_environment_pins_submodule_discovery_to_selected_source(self) -> None:
+        source_root = PROJECT_ROOT / "src"
+        with patch.dict(
+            os.environ,
+            {"PYTHONHOME": "foreign-home", "PYTHONPATH": "foreign-checkout"},
+        ):
+            environment = build_exe.build_environment(source_root=source_root)
+
+        self.assertNotIn("PYTHONHOME", environment)
+        self.assertEqual(environment["PYTHONPATH"], str(source_root.resolve()))
+        self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
@@ -16,17 +17,279 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.config import (
+    MAX_PRICING_RESPONSE_BYTES,
+    ModelPrice,
+    PriceVersion,
     UserConfig,
     UserConfigStore,
     effective_display_mode,
     extract_model_prices,
+    fetch_model_prices,
     normalize_display_mode,
     write_json_object,
 )
 from codex_usage_hud.cli import current_budget_windows
+from codex_usage_hud.pricing import (
+    PRICING_UNIT,
+    PricingConflictError,
+    empty_pricing_template,
+    minimal_price_example,
+)
 
 
 class UserConfigStoreTests(unittest.TestCase):
+    def test_failed_legacy_migration_write_keeps_file_time_version_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text(
+                json.dumps(
+                    {"user": {"model_prices": {"custom": {"input": 1, "output": 2}}}}
+                ),
+                encoding="utf-8",
+            )
+            expected = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            store = UserConfigStore(path)
+
+            with patch(
+                "codex_usage_hud.config.write_json_object",
+                side_effect=OSError("read-only"),
+            ):
+                first = store.load()
+                second = store.load()
+
+        self.assertEqual(first.pricing_versions, second.pricing_versions)
+        self.assertEqual(first.pricing_versions[0].effective_at, expected)
+
+    def test_store_persists_legacy_price_migration_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "user": {
+                            "model_prices": {
+                                "custom": {"input": 1, "output": 2}
+                            }
+                        },
+                        "future": {"keep": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = UserConfigStore(path)
+
+            first = store.load()
+            second = store.load()
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(first.pricing_versions, second.pricing_versions)
+        self.assertEqual(len(first.pricing_versions), 1)
+        self.assertEqual(
+            persisted["user"]["pricing_versions"][0]["version_id"],
+            first.pricing_versions[0].version_id,
+        )
+        self.assertEqual(persisted["future"], {"keep": True})
+
+    def test_price_fetch_allows_only_bounded_http_responses(self) -> None:
+        with self.assertRaisesRegex(ValueError, "HTTP"):
+            fetch_model_prices("file:///tmp/prices.json")
+
+        class OversizedResponse:
+            def __enter__(self) -> "OversizedResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, limit: int) -> bytes:
+                self.limit = limit
+                return b"x" * limit
+
+        response = OversizedResponse()
+        with patch("codex_usage_hud.config.urlopen", return_value=response):
+            with self.assertRaisesRegex(ValueError, "too large"):
+                fetch_model_prices("https://pricing.example/prices.json")
+        self.assertEqual(response.limit, MAX_PRICING_RESPONSE_BYTES + 1)
+
+    def test_legacy_prices_migrate_to_stable_immutable_versions(self) -> None:
+        migration_at = datetime(2026, 8, 5, 4, 30, tzinfo=timezone.utc)
+        raw = {
+            "model_prices": {
+                "custom-model": {
+                    "input": 1.5,
+                    "cached_input": 0.15,
+                    "cache_write": 1.75,
+                    "output": 8.0,
+                    "reasoning": 8.0,
+                }
+            }
+        }
+
+        first = UserConfig.from_dict(raw, migration_at=migration_at)
+        second = UserConfig.from_dict(raw, migration_at=migration_at)
+
+        self.assertIsInstance(first.pricing_versions, tuple)
+        self.assertEqual(first.pricing_versions, second.pricing_versions)
+        self.assertEqual(len(first.pricing_versions), 1)
+        version = first.pricing_versions[0]
+        self.assertEqual(version.created_by, "builtin_migration")
+        self.assertEqual(version.source, "builtin")
+        self.assertEqual(version.effective_at, migration_at)
+        with self.assertRaises(FrozenInstanceError):
+            version.input = 9  # type: ignore[misc]
+
+        persisted = UserConfig.from_dict(first.to_dict())
+        self.assertEqual(persisted.pricing_versions, first.pricing_versions)
+
+    def test_price_version_rejects_negative_and_nonfinite_prices(self) -> None:
+        base = {
+            "model": "custom-model",
+            "input": 1,
+            "output": 2,
+            "effective_at": "2026-08-01T00:00:00Z",
+        }
+        for field, invalid in (("input", -1), ("output", float("nan")), ("input", float("inf"))):
+            with self.subTest(field=field, invalid=invalid):
+                with self.assertRaises(ValueError):
+                    PriceVersion.from_mapping({**base, field: invalid})
+
+    def test_export_round_trip_preserves_every_version_field(self) -> None:
+        now = datetime(2026, 8, 5, 5, 0, tzinfo=timezone.utc)
+        initial = UserConfig.defaults()
+        updated, _result = initial.apply_price_updates(
+            {
+                "custom-*": ModelPrice(
+                    input=1.25,
+                    cached_input=0.125,
+                    cache_write=1.5,
+                    output=7.5,
+                    reasoning=8.0,
+                    model="custom-*",
+                    base_url="https://api.example.com/v1/",
+                )
+            },
+            effective_at=now - timedelta(days=1),
+            provider="Vendor-A",
+            created_at=now,
+        )
+
+        exported = updated.export_pricing_payload()
+        self.assertEqual(exported["schema_version"], 1)
+        self.assertEqual(exported["unit"], PRICING_UNIT)
+        preview = UserConfig.defaults().preview_pricing_import(exported, now=now)
+        imported, result = UserConfig.defaults().apply_pricing_import(
+            preview,
+            conflict_policy="cancel",
+            applied_at=now,
+        )
+
+        self.assertEqual(result.added_count, 1)
+        self.assertEqual(imported.pricing_versions, updated.pricing_versions)
+        row = imported.pricing_versions[0]
+        self.assertEqual(row.provider, "vendor-a")
+        self.assertEqual(row.base_url, "https://api.example.com/v1")
+        self.assertEqual(row.match_pattern, "custom-*")
+        self.assertEqual(float(row.cache_write), 1.5)
+
+    def test_default_price_export_includes_visible_builtin_prices(self) -> None:
+        exported = UserConfig.defaults().export_pricing_payload()
+
+        self.assertEqual(exported["schema_version"], 1)
+        self.assertEqual(exported["unit"], PRICING_UNIT)
+        self.assertTrue(exported["prices"])
+        self.assertTrue(
+            any(
+                row.get("model") == "gpt-5.6-sol"
+                for row in exported["prices"]
+                if isinstance(row, dict)
+            )
+        )
+
+    def test_empty_template_and_minimal_example_are_unambiguous(self) -> None:
+        template = empty_pricing_template()
+        self.assertEqual(template["prices"], [])
+        self.assertIn("effective_at", template["__description"])
+
+        example_payload = {
+            "schema_version": 1,
+            "unit": PRICING_UNIT,
+            "prices": [minimal_price_example()],
+        }
+        preview = UserConfig.defaults().preview_pricing_import(
+            example_payload,
+            now=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+        self.assertEqual(preview.added_count, 1)
+
+    def test_invalid_import_is_atomic_and_conflicts_require_resolution(self) -> None:
+        now = datetime(2026, 8, 5, 5, 0, tzinfo=timezone.utc)
+        original, _result = UserConfig.defaults().apply_price_updates(
+            {"custom": {"input": 1, "output": 2}},
+            effective_at=now - timedelta(days=1),
+            provider="vendor-a",
+            created_at=now,
+        )
+        original_version = original.pricing_versions[0]
+        invalid = {
+            "schema_version": 1,
+            "unit": PRICING_UNIT,
+            "prices": [
+                {
+                    "model": "custom",
+                    "provider": "vendor-a",
+                    "input": -1,
+                    "output": 3,
+                    "effective_at": "2026-08-04T05:00:00Z",
+                }
+            ],
+        }
+        with self.assertRaises(ValueError):
+            original.preview_pricing_import(invalid, now=now)
+        self.assertEqual(original.pricing_versions, (original_version,))
+
+        replacement_payload = {
+            "schema_version": 1,
+            "unit": PRICING_UNIT,
+            "prices": [
+                {
+                    "model": "custom",
+                    "provider": "vendor-a",
+                    "input": 4,
+                    "output": 5,
+                    "effective_at": "2026-08-04T05:00:00Z",
+                }
+            ],
+        }
+        preview = original.preview_pricing_import(replacement_payload, now=now)
+        self.assertEqual(preview.updated_count, 1)
+        self.assertEqual(len(preview.conflicts), 1)
+        with self.assertRaises(PricingConflictError):
+            original.apply_pricing_import(preview, conflict_policy="cancel", applied_at=now)
+        self.assertEqual(original.pricing_versions, (original_version,))
+
+        replaced, result = original.apply_pricing_import(
+            preview,
+            conflict_policy="overwrite",
+            applied_at=now,
+        )
+        self.assertEqual(result.updated_count, 1)
+        self.assertEqual(len(replaced.pricing_versions), 1)
+        self.assertNotEqual(replaced.pricing_versions[0].version_id, original_version.version_id)
+        self.assertEqual(result.audit[0].replaced_version_id, original_version.version_id)
+
+    def test_user_edit_rejects_future_or_naive_effective_time_atomically(self) -> None:
+        now = datetime(2026, 8, 5, 5, 0, tzinfo=timezone.utc)
+        original = UserConfig.defaults()
+        for effective_at in (now + timedelta(seconds=1), datetime(2026, 8, 1)):
+            with self.subTest(effective_at=effective_at):
+                with self.assertRaises(ValueError):
+                    original.apply_price_updates(
+                        {"custom": {"input": 1, "output": 2}},
+                        effective_at=effective_at,
+                        created_at=now,
+                    )
+        self.assertEqual(original.pricing_versions, ())
+
     def test_save_preserves_geometry_and_unknown_top_level_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "hud_settings.json"

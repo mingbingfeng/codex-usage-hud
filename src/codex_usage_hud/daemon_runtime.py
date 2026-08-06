@@ -272,9 +272,6 @@ def run_daemon(
             startup_loading: Any | None = None
             launched_codex_for_renderer = False
             observed_codex_launch = False
-            codex_was_running_at_start = bool(
-                getattr(startup, "codex_was_running", False)
-            )
             if startup.mode == DEFAULT_DAEMON_STARTUP_WAIT:
                 startup_loading = services.create_loading(
                     args,
@@ -375,13 +372,13 @@ def run_daemon(
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
                     launched_codex_for_renderer = False
-                    # A process that existed before the HUD started must still
-                    # use the user-confirmed restart bubble if it is replaced
-                    # before the first renderer session settles.  Automatic
-                    # takeover remains for a Codex launched after the daemon
-                    # was already watching an empty process set.
-                    observed_codex_launch = not codex_was_running_at_start
-                    codex_was_running_at_start = False
+                    # The renderer session has already been running when this
+                    # watchdog signal is emitted. A replacement Codex must be
+                    # classified as an observed launch so a plain (non-CDP)
+                    # process is stopped and relaunched with CDP automatically.
+                    # Initial startup of an already-running Codex never emits
+                    # this signal and keeps its explicit confirmation flow.
+                    observed_codex_launch = True
                     continue
                 if force_renderer_retry and exit_code == RENDERER_HUD_UNAVAILABLE:
                     time.sleep(manager.poll_seconds)

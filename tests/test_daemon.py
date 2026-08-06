@@ -213,6 +213,25 @@ class DaemonStateMachineTests(unittest.TestCase):
         self.assertTrue(monitor.closed)
         self.assertEqual(manager.state, DaemonState.EXITING)
 
+    def test_codex_replacement_is_reported_as_exit_for_renderer_restart(self) -> None:
+        listener = _FakeListener(
+            [
+                ProcessSnapshot(found=True, pids=(123,)),
+                ProcessSnapshot(found=True, pids=(456,)),
+            ]
+        )
+        monitor = _FakeExitMonitor([False])
+        manager = CodexDaemonManager(
+            listener=listener,
+            poll_ms=1,
+            exit_monitor_factory=lambda snapshot: monitor,
+        )
+        manager.snapshot()
+
+        self.assertFalse(manager.codex_is_running())
+        self.assertEqual(manager.last_snapshot.primary_pid, 456)
+        self.assertEqual(manager.state, DaemonState.EXITING)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -169,6 +169,15 @@ def test_runtime_signals_coalesce_events_and_preserve_command_order() -> None:
     assert signals.take_command() is None
 
 
+def test_runtime_signals_wakes_for_usage_cache_hydration() -> None:
+    signals = runtime_policies.RendererRuntimeSignals()
+
+    signals.wake_for_runtime_event(SimpleNamespace(type="usage_cache_hydrated"))
+
+    assert signals.command_refresh.is_set()
+    assert not signals.active_session_refresh.is_set()
+
+
 def test_runtime_signals_active_session_wakes_both_channels() -> None:
     signals = runtime_policies.RendererRuntimeSignals()
 

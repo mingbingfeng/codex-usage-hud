@@ -5,11 +5,11 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import secrets
-from threading import Thread
+from threading import Thread, current_thread
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urlparse
 
-from .config import UserConfig, UserConfigStore, fetch_model_prices
+from .config import ProviderSettings, UserConfig, UserConfigStore
 
 DEFAULT_SETTINGS_BRIDGE_PORT = 57322
 
@@ -80,12 +80,19 @@ class SettingsBridgeServer:
 
     def close(self) -> None:
         server = self._server
+        thread = self._thread
         self._server = None
+        self._thread = None
+        self.url = ""
         if server is None:
+            if thread is not None and thread is not current_thread():
+                thread.join(timeout=2.0)
             return
         try:
             server.shutdown()
         finally:
+            if thread is not None and thread is not current_thread():
+                thread.join(timeout=2.0)
             server.server_close()
 
     def _handler_type(self) -> type[BaseHTTPRequestHandler]:
@@ -257,6 +264,17 @@ class SettingsBridgeServer:
                 if isinstance(payload, dict):
                     merged.update(payload)
                 config = UserConfig.from_dict(merged)
+                if self._pricing_state_changed(current, config):
+                    self._send_json(
+                        {
+                            "status": "failed",
+                            "message": (
+                                "价格有变更，请通过 Renderer 设置新价格的生效时间并先预览。"
+                            ),
+                        },
+                        409,
+                    )
+                    return
                 try:
                     store.save(config)
                 except OSError as exc:
@@ -268,37 +286,41 @@ class SettingsBridgeServer:
                 self._send_config(config, "ok", "settings saved")
 
             def _fetch_prices(self) -> None:
-                body = self._read_json()
-                current = store.load()
-                provider = str(body.get("provider") or "").strip().lower()
-                provider_url = (
-                    current.provider_settings.get(provider).pricing_url
-                    if provider and provider in current.provider_settings
-                    else ""
+                self._read_json()
+                self._send_json(
+                    {
+                        "status": "failed",
+                        "message": (
+                            "旧版直接拉取已停用，请在 Renderer 中设置生效时间并先预览。"
+                        ),
+                    },
+                    409,
                 )
-                url = str(body.get("url") or provider_url or current.pricing_url or "").strip()
-                try:
-                    prices = fetch_model_prices(url)
-                    config = current.with_price_updates(
-                        prices,
-                        pricing_url=url,
-                        provider=provider or None,
-                    )
-                    store.save(config)
-                except (OSError, ValueError) as exc:
-                    self._send_json(
-                        {"status": "failed", "message": str(exc)},
-                        400,
-                    )
-                    return
-                self._send_config(
-                    config,
-                    "ok",
-                    f"fetched {len(prices)} model price entries",
-                    extra={"fetched": len(prices)},
+
+            @staticmethod
+            def _pricing_state_changed(
+                current: UserConfig, candidate: UserConfig
+            ) -> bool:
+                if (
+                    current.pricing_versions != candidate.pricing_versions
+                    or current.pricing_audit != candidate.pricing_audit
+                ):
+                    return True
+                if current.model_prices != candidate.model_prices:
+                    return True
+                providers = set(current.provider_settings) | set(
+                    candidate.provider_settings
+                )
+                return any(
+                    current.provider_settings.get(name, ProviderSettings()).model_prices
+                    != candidate.provider_settings.get(name, ProviderSettings()).model_prices
+                    for name in providers
                 )
 
             def _request_restart(self) -> None:
+                # Consume the POST body before replying; otherwise Windows can
+                # reset the connection while the client is still uploading it.
+                self._read_json()
                 if restart_callback is None:
                     self._send_json(
                         {

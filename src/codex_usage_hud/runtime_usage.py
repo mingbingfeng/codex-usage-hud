@@ -9,6 +9,8 @@ from .core import ParsedSession, RequestRound, UsageSummary
 
 
 def format_money(value: float | None) -> str:
+    if value is None:
+        return "不可用"
     return f"${float(value or 0.0):,.6f}"
 
 
@@ -114,6 +116,8 @@ def merge_usage(target: UsageSummary, addition: UsageSummary) -> None:
     target.output_tokens += addition.output_tokens
     target.reasoning_tokens += addition.reasoning_tokens
     target.cost_usd = round(target.cost_usd + addition.cost_usd, 6)
+    target.priced_event_count += max(0, int(addition.priced_event_count or 0))
+    target.total_event_count += max(0, int(addition.total_event_count or 0))
 
 
 def replace_usage(
@@ -131,6 +135,18 @@ def replace_usage(
             0, total.reasoning_tokens - old.reasoning_tokens + new.reasoning_tokens
         ),
         cost_usd=round(max(0.0, total.cost_usd - old.cost_usd + new.cost_usd), 6),
+        priced_event_count=max(
+            0,
+            total.priced_event_count
+            - old.priced_event_count
+            + new.priced_event_count,
+        ),
+        total_event_count=max(
+            0,
+            total.total_event_count
+            - old.total_event_count
+            + new.total_event_count,
+        ),
     )
 
 

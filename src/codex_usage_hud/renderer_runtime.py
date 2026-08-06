@@ -325,6 +325,10 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                     return ports.RENDERER_HUD_UNAVAILABLE
                 else:
                     ports._remember_successful_renderer_cdp_port(getattr(client, 'port', None))
+                usage_insights_worker = getattr(context, 'usage_insights_worker', None)
+                request_usage_refresh = getattr(usage_insights_worker, 'request_refresh', None)
+                if callable(request_usage_refresh):
+                    request_usage_refresh(request_id='startup')
                 session_controller = ports._build_session_switch_controller(getattr(context, 'platform', get_current_platform()), prefer_native_search=False, cdp_port=getattr(client, 'port', None))
                 command_pump_factory = services.command_pump_factory or WorkOverlayCommandPump
                 file_event_source_factory = services.file_event_source_factory or ports._RendererFileEventSource

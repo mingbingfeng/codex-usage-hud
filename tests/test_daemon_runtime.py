@@ -46,7 +46,7 @@ def test_hud_session_restarts_once_then_attaches() -> None:
     assert renderer.call_args_list[1].kwargs["launched_codex"] is True
 
 
-def test_existing_codex_replacement_still_waits_for_user_restart() -> None:
+def test_existing_codex_replacement_after_hud_started_relaunches_automatically() -> None:
     manager = SimpleNamespace(
         wait_for_codex=MagicMock(),
         poll_seconds=0.1,
@@ -54,7 +54,7 @@ def test_existing_codex_replacement_still_waits_for_user_restart() -> None:
     renderer = MagicMock(
         side_effect=[
             daemon_runtime.DAEMON_RESTART_REQUESTED,
-            daemon_runtime.HUD_SWITCH_TO_RENDERER_RESTART_CODEX,
+            daemon_runtime.HUD_AUTO_RESTART_CODEX,
             0,
         ]
     )
@@ -84,7 +84,7 @@ def test_existing_codex_replacement_still_waits_for_user_restart() -> None:
     assert result == 0
     assert renderer.call_count == 3
     assert renderer.call_args_list[0].kwargs["observed_codex_launch"] is False
-    assert renderer.call_args_list[1].kwargs["observed_codex_launch"] is False
+    assert renderer.call_args_list[1].kwargs["observed_codex_launch"] is True
     assert renderer.call_args_list[2].kwargs["launched_codex"] is True
     assert renderer.call_args_list[2].kwargs["observed_codex_launch"] is False
     restart_codex.assert_called_once_with()

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from codex_usage_hud.core import JsonlSessionParser
+from codex_usage_hud.core.parser import CostEstimator
+from codex_usage_hud.core.pricing_snapshots import PricingSnapshotLedger
 from codex_usage_hud.usage_cache import UsageSummaryCache
 
 
@@ -33,6 +35,90 @@ def _token_count(timestamp: str, cumulative_input: int) -> dict[str, object]:
 def _append_record(path: Path, payload: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(payload) + "\n")
+
+
+def test_usage_cache_reports_warm_only_after_matching_window_scan(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    cache = UsageSummaryCache(JsonlSessionParser())
+    day = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    week = datetime(2026, 7, 27, tzinfo=timezone.utc)
+
+    assert not cache.is_warm_for(sessions, day, week)
+
+    cache.summarize(sessions, day, week)
+
+    assert cache.is_warm_for(sessions, day, week)
+    assert not cache.is_warm_for(sessions, day + timedelta(days=1), week)
+
+
+def test_usage_cache_bounds_retained_raw_tail_records(tmp_path: Path) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    for index in range(3):
+        (sessions / f"session-{index}.jsonl").write_text(
+            json.dumps(
+                _record(
+                    "2026-07-30T00:00:00Z",
+                    "session_meta",
+                    {"id": f"s{index}", "model_provider": "custom"},
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    cache = UsageSummaryCache(
+        JsonlSessionParser(),
+        max_tail_state_bytes=0,
+    )
+    day = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    week = datetime(2026, 7, 27, tzinfo=timezone.utc)
+
+    cache.summarize(sessions, day, week)
+
+    assert all(entry.tail_state is None for entry in cache._entries.values())
+
+
+def test_cold_usage_scan_batches_price_snapshot_transactions(tmp_path: Path) -> None:
+    class CountingLedger(PricingSnapshotLedger):
+        def __init__(self, path: Path) -> None:
+            self.connection_count = 0
+            super().__init__(path)
+
+        def _connect(self):
+            self.connection_count += 1
+            return super()._connect()
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    for index in range(3):
+        (sessions / f"session-{index}.jsonl").write_text(
+            json.dumps(
+                _record(
+                    "2026-07-30T00:00:00Z",
+                    "session_meta",
+                    {"id": f"s{index}", "model_provider": "custom"},
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    ledger = CountingLedger(tmp_path / "pricing.sqlite3")
+    ledger.connection_count = 0
+    parser = JsonlSessionParser(cost_estimator=CostEstimator(pricing_ledger=ledger))
+    cache = UsageSummaryCache(parser)
+
+    cache.summarize(
+        sessions,
+        datetime(2026, 7, 30, tzinfo=timezone.utc),
+        datetime(2026, 7, 27, tzinfo=timezone.utc),
+    )
+
+    assert ledger.connection_count == 1
 
 
 def test_usage_cache_append_reuses_tail_state_and_matches_full_rebuild(
@@ -83,6 +169,41 @@ def test_usage_cache_append_reuses_tail_state_and_matches_full_rebuild(
     assert first.tokens == 10
     assert incremental == rebuilt
     assert incremental.tokens == 25
+
+
+def test_usage_cache_does_not_build_full_session_snapshots_for_aggregate_scan(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    current = sessions / "current.jsonl"
+    current.write_text(
+        json.dumps(
+            _record(
+                "2026-07-30T00:00:00Z",
+                "session_meta",
+                {"id": "s1", "model_provider": "custom"},
+            )
+        )
+        + "\n"
+        + json.dumps(_token_count("2026-07-30T00:00:01Z", 10))
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    class AggregateParser(JsonlSessionParser):
+        def parse_file_incremental(self, *args: object, **kwargs: object):
+            raise AssertionError("aggregate scans must not build ParsedSession")
+
+    cache = UsageSummaryCache(AggregateParser(), min_rescan_seconds=60)
+    day = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    week = datetime(2026, 7, 27, tzinfo=timezone.utc)
+
+    summary, _ = cache.summarize(sessions, day, week)
+
+    assert summary.tokens == 10
+    assert cache._entries[current.resolve()].tail_state is not None
 
 
 def test_usage_cache_parser_version_change_resets_tail_state(tmp_path: Path) -> None:

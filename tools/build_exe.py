@@ -144,11 +144,17 @@ def format_command(command: Sequence[str]) -> str:
     return shlex.join(command)
 
 
-def build_environment() -> dict[str, str]:
-    """Return a small sanitized environment for the build subprocesses."""
+def build_environment(*, source_root: Path | None = None) -> dict[str, str]:
+    """Return a small, source-pinned environment for build subprocesses."""
     env = os.environ.copy()
     env.pop("PYTHONHOME", None)
     env.pop("PYTHONPATH", None)
+    if source_root is not None:
+        # ``--paths`` is applied during Analysis, after PyInstaller evaluates
+        # the generated spec's ``collect_submodules`` call. Pin that earlier
+        # discovery too, otherwise an editable checkout elsewhere on the host
+        # can leak extra module names into an otherwise isolated worktree build.
+        env["PYTHONPATH"] = str(Path(source_root).resolve())
     env["PYTHONNOUSERSITE"] = "1"
     return env
 
@@ -266,7 +272,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         subprocess.run(
             command,
             cwd=str(build_root),
-            env=build_environment(),
+            env=build_environment(source_root=SRC_ROOT),
             check=True,
         )
 

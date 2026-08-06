@@ -641,21 +641,27 @@ def _top_progress_metric(
 
 def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
     cache_ratio, _cache_estimated = _session_cache_hit_rate(snapshot)
-    day_overflow = _budget_progress_overflow_ratio(
-        snapshot.today_cost_usd,
-        snapshot.daily_limit_usd,
+    day_complete = snapshot.today_cost_usd is not None
+    week_complete = snapshot.week_cost_usd is not None
+    day_overflow = (
+        _budget_progress_overflow_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd)
+        if day_complete
+        else 0.0
     )
-    week_overflow = _budget_progress_overflow_ratio(
-        snapshot.week_cost_usd,
-        snapshot.weekly_limit_usd,
+    week_overflow = (
+        _budget_progress_overflow_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd)
+        if week_complete
+        else 0.0
     )
-    day_badge, day_badge_compact = _budget_progress_overflow_parts(
-        snapshot.today_cost_usd,
-        snapshot.daily_limit_usd,
+    day_badge, day_badge_compact = (
+        _budget_progress_overflow_parts(snapshot.today_cost_usd, snapshot.daily_limit_usd)
+        if day_complete
+        else ("", "")
     )
-    week_badge, week_badge_compact = _budget_progress_overflow_parts(
-        snapshot.week_cost_usd,
-        snapshot.weekly_limit_usd,
+    week_badge, week_badge_compact = (
+        _budget_progress_overflow_parts(snapshot.week_cost_usd, snapshot.weekly_limit_usd)
+        if week_complete
+        else ("", "")
     )
     session = _top_progress_metric(
         _top_session_usage_summary(snapshot),
@@ -672,7 +678,11 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
         # Keep full usage/amount on the left; only the badge shrinks under pressure.
-        right_text="" if day_overflow > 0.0 else _budget_limit_text(snapshot.daily_limit_usd),
+        right_text=(
+            ""
+            if not day_complete or day_overflow > 0.0
+            else _budget_limit_text(snapshot.daily_limit_usd)
+        ),
         overflow_ratio=day_overflow,
         overflow_badge=day_badge,
         overflow_badge_compact=day_badge_compact,
@@ -682,7 +692,11 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
-        right_text="" if week_overflow > 0.0 else _budget_limit_text(snapshot.weekly_limit_usd),
+        right_text=(
+            ""
+            if not week_complete or week_overflow > 0.0
+            else _budget_limit_text(snapshot.weekly_limit_usd)
+        ),
         overflow_ratio=week_overflow,
         overflow_badge=week_badge,
         overflow_badge_compact=week_badge_compact,
@@ -691,7 +705,11 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         f"今日 {_format_usage_money(snapshot.today_tokens, snapshot.today_cost_usd)}",
         _budget_progress_ratio(snapshot.today_cost_usd, snapshot.daily_limit_usd),
         "day",
-        right_text="" if day_overflow > 0.0 else _budget_limit_text(snapshot.daily_limit_usd),
+        right_text=(
+            ""
+            if not day_complete or day_overflow > 0.0
+            else _budget_limit_text(snapshot.daily_limit_usd)
+        ),
         overflow_ratio=day_overflow,
         overflow_badge=day_badge,
         overflow_badge_compact=day_badge_compact,
@@ -701,7 +719,11 @@ def _top_progress(snapshot: ParsedSession) -> dict[str, object]:
         f"本周 {_format_usage_money(snapshot.week_tokens, snapshot.week_cost_usd)}",
         _budget_progress_ratio(snapshot.week_cost_usd, snapshot.weekly_limit_usd),
         "week",
-        right_text="" if week_overflow > 0.0 else _budget_limit_text(snapshot.weekly_limit_usd),
+        right_text=(
+            ""
+            if not week_complete or week_overflow > 0.0
+            else _budget_limit_text(snapshot.weekly_limit_usd)
+        ),
         overflow_ratio=week_overflow,
         overflow_badge=week_badge,
         overflow_badge_compact=week_badge_compact,
@@ -788,6 +810,8 @@ def _session_tokens(snapshot: ParsedSession) -> int:
 def _budget_status(snapshot: ParsedSession) -> str:
     if snapshot.budget_error:
         return "预算不可用"
+    if snapshot.today_cost_usd is None or snapshot.week_cost_usd is None:
+        return "价格不可用"
     if snapshot.budget_warnings:
         tags: list[str] = []
         for warning in snapshot.budget_warnings:
@@ -960,13 +984,23 @@ def _budget_warning_summary(
         return ""
     messages: list[str] = []
     for warning in snapshot.budget_warnings:
-        if warning.startswith("日额度已用") and "超过 " in warning and snapshot.daily_limit_usd > 0:
+        if (
+            warning.startswith("日额度已用")
+            and "超过 " in warning
+            and snapshot.today_cost_usd is not None
+            and snapshot.daily_limit_usd > 0
+        ):
             threshold = warning.split("超过 ", 1)[1].split("%", 1)[0].strip()
             messages.append(
                 f"日已用 {snapshot.today_cost_usd / snapshot.daily_limit_usd:.0%}，超过 {threshold}% 阈值"
             )
             continue
-        if warning.startswith("周额度已用") and "超过 " in warning and snapshot.weekly_limit_usd > 0:
+        if (
+            warning.startswith("周额度已用")
+            and "超过 " in warning
+            and snapshot.week_cost_usd is not None
+            and snapshot.weekly_limit_usd > 0
+        ):
             threshold = warning.split("超过 ", 1)[1].split("%", 1)[0].strip()
             messages.append(
                 f"周已用 {snapshot.week_cost_usd / snapshot.weekly_limit_usd:.0%}，超过 {threshold}% 阈值"

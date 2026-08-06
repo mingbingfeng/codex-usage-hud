@@ -504,12 +504,27 @@ class CodexDaemonManager:
 
     def codex_is_running(self) -> bool:
         """Return whether the watched Codex process family is still alive."""
+        previous_pid = self.last_snapshot.primary_pid
         if self._exit_monitor is not None:
+            monitored_pid = self._exit_monitor_pid
             running = self._exit_monitor.is_running()
             if running is True:
                 return True
             self._clear_exit_monitor()
+            previous_pid = monitored_pid or previous_pid
         snapshot = self.snapshot()
+        if (
+            snapshot.found
+            and previous_pid is not None
+            and previous_pid not in snapshot.pids
+        ):
+            self.state = DaemonState.EXITING
+            _logger.info(
+                "daemon_codex_replaced old_pid=%s new_pid=%s",
+                previous_pid,
+                snapshot.primary_pid,
+            )
+            return False
         if not snapshot.found:
             self.state = DaemonState.EXITING
         return snapshot.found

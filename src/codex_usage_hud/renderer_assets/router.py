@@ -166,6 +166,11 @@ TEXT = r"""
         restStartInput.dataset.userEdited = "true";
         return;
       }
+      const pricingImportFile = event.target?.closest?.('[data-pricing-import-file="true"]');
+      if (pricingImportFile && root.contains(pricingImportFile)) {
+        void readPricingImportFile(pricingImportFile);
+        return;
+      }
       const sessionFilter = event.target?.closest?.("[data-session-cleanup-filter]");
       if (sessionFilter && root.contains(sessionFilter)) {
         const key = String(sessionFilter.dataset.sessionCleanupFilter || "");
@@ -635,6 +640,93 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         void fetchPricesFromModal();
+        return;
+      }
+      if (action.dataset.action === "pricing-export") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSettingsCommand(
+          { action: "pricingExport" },
+          "正在生成当前价格 JSON...",
+        );
+        return;
+      }
+      if (action.dataset.action === "pricing-template") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSettingsCommand(
+          { action: "pricingTemplate" },
+          "正在生成空价格模板...",
+        );
+        return;
+      }
+      if (action.dataset.action === "pricing-copy-example") {
+        event.preventDefault();
+        event.stopPropagation();
+        copyPricingExample();
+        return;
+      }
+      if (action.dataset.action === "pricing-import-open") {
+        event.preventDefault();
+        event.stopPropagation();
+        openPricingImportDialog();
+        return;
+      }
+      if (action.dataset.action === "pricing-import-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        setSettingsStatus("已取消价格导入。");
+        return;
+      }
+      if (action.dataset.action === "pricing-import-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        previewPricingImport();
+        return;
+      }
+      if (action.dataset.action === "pricing-import-commit") {
+        event.preventDefault();
+        event.stopPropagation();
+        commitPricingImport();
+        return;
+      }
+      if (action.dataset.action === "pricing-recalculate-open") {
+        event.preventDefault();
+        event.stopPropagation();
+        openPricingRecalculationDialog();
+        return;
+      }
+      if (action.dataset.action === "pricing-recalc-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        setSettingsStatus("已取消历史费用重算。");
+        return;
+      }
+      if (action.dataset.action === "pricing-recalc-preview") {
+        event.preventDefault();
+        event.stopPropagation();
+        previewPricingRecalculation();
+        return;
+      }
+      if (action.dataset.action === "pricing-recalc-execute") {
+        event.preventDefault();
+        event.stopPropagation();
+        executePricingRecalculation();
+        return;
+      }
+      if (action.dataset.action === "pricing-effective-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        setSettingsStatus("已取消价格保存。");
+        return;
+      }
+      if (action.dataset.action === "pricing-effective-confirm") {
+        event.preventDefault();
+        event.stopPropagation();
+        confirmPricingEffectiveAt();
         return;
       }
       if (action.dataset.action === "settings-check-update") {

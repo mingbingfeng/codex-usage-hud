@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "d60d7dd601c13e270946ccb6d6734673a19c0a733ebafd09b1d01dbe3306c2a4",
-    "byteLength": 624470
+    "sha256": "b9a29f2e0a5e978b42fcd0bb01f21e1e11ee93e6ae5a9783122cb14d9a3bc842",
+    "byteLength": 672693
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -39,9 +39,9 @@
     "mutationObservers": 6,
     "resizeObservers": 1,
     "setIntervals": 3,
-    "setTimeouts": 21,
+    "setTimeouts": 22,
     "kernelSetIntervals": 1,
-    "kernelSetTimeouts": 1
+    "kernelSetTimeouts": 3
   },
   "lifecycleInventory": [
     {
@@ -132,7 +132,7 @@
     "active_session_bootstrap", "storage", "background_usage_request", "background_usage_fetch",
     "settings_restart", "settings_export", "composer_attachments", "layout_report",
     "layout_settle", "layout_settle", "layout_settle", "composer_layout", "layout_bootstrap",
-    "session_view_progress", "copy_feedback", "stale_guard"
+    "session_view_progress", "copy_feedback", "stale_guard", "pricing_download"
   ],
   "timeoutInventory": [
     {"owner": "model_picker", "creation": "ctx.lifecycle.timeout(\"model_picker\", patchCodexModelPicker, delay)", "cleanup": "ctx.lifecycle.clearTimeout(timer)"},
@@ -155,7 +155,8 @@
     {"owner": "layout_bootstrap", "creation": "window[bootstrapTimerName] = setTimeout(stopBootstrapObserver, 5000)", "cleanup": "clearTimeout(window[bootstrapTimerName] || 0)"},
     {"owner": "session_view_progress", "creation": "setTimeout(() => root.querySelectorAll(\".codex-usage-hud-progress-rail\")", "cleanup": "one-shot callback"},
     {"owner": "copy_feedback", "creation": "setTimeout(() => {\n      if (!node.isConnected) return", "cleanup": "one-shot callback"},
-    {"owner": "stale_guard", "creation": "window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250)", "cleanup": "clearTimeout(window[staleTimerName] || 0)"}
+    {"owner": "stale_guard", "creation": "window[staleTimerName] = setTimeout(markHudStale, staleUpdateMs + 250)", "cleanup": "clearTimeout(window[staleTimerName] || 0)"},
+    {"owner": "pricing_download", "creation": "ctx.lifecycle.timeout(\"pricing_download\", () => URL.revokeObjectURL(url), 1000)", "cleanup": "one-shot callback"}
   ],
   "bindingInventory": [
     {"name": "codexUsageHudActiveSession", "installOrder": 1, "owner": "active_session", "startCondition": "active-session callback is configured", "cleanup": "self._active_session_binding.close()"},

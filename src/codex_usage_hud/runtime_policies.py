@@ -23,6 +23,7 @@ RUNTIME_REFRESH_EVENTS = frozenset(
         "session_snapshot_hydrated",
         "background_usage_changed",
         "usage_insights_changed",
+        "usage_cache_hydrated",
         "session_cleanup_changed",
     }
 )
@@ -108,8 +109,8 @@ def budget_windows(
 
 
 def budget_warning_messages(
-    day_cost: float,
-    week_cost: float,
+    day_cost: float | None,
+    week_cost: float | None,
     daily_limit_usd: float,
     weekly_limit_usd: float,
     thresholds: Sequence[float],
@@ -119,7 +120,7 @@ def budget_warning_messages(
         ("日", day_cost, daily_limit_usd),
         ("周", week_cost, weekly_limit_usd),
     ):
-        if limit <= 0:
+        if used is None or limit <= 0:
             continue
         ratio = used / limit
         crossed = [item for item in thresholds if ratio >= item]

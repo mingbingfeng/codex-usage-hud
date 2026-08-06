@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import logging
@@ -41,6 +42,8 @@ from .usage_contributions import (
 )
 
 DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
+DEFAULT_USAGE_SUMMARY_TAIL_STATE_BYTES = 32 * 1024 * 1024
+PRICING_SNAPSHOT_BATCH_FILES = 64
 USAGE_INSIGHTS_TOP_SESSION_LIMIT = 10
 _LOGGER = logging.getLogger("codex_usage_hud.usage_cache")
 
@@ -65,10 +68,12 @@ class UsageSummaryCache:
         parser: JsonlSessionParser,
         *,
         min_rescan_seconds: float = DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS,
+        max_tail_state_bytes: int = DEFAULT_USAGE_SUMMARY_TAIL_STATE_BYTES,
         deleted_usage_ledger: DeletedUsageLedger | None = None,
     ) -> None:
         self._parser = parser
         self._min_rescan_seconds = max(0.0, float(min_rescan_seconds))
+        self._max_tail_state_bytes = max(0, int(max_tail_state_bytes))
         self._deleted_usage_ledger = deleted_usage_ledger
         self._deleted_usage_transactions = DeletedUsageTransactions(
             deleted_usage_ledger,
@@ -96,6 +101,43 @@ class UsageSummaryCache:
     def _touch_insights(self) -> None:
         self._insights_revision += 1
         self._insights_generated_at = datetime.now().astimezone()
+
+    def is_warm_for(
+        self,
+        sessions_root: Path,
+        day_start: datetime,
+        week_start: datetime,
+    ) -> bool:
+        """Return whether this cache has scanned the requested budget windows."""
+        sessions_root = self._cache_path(sessions_root)
+        scan_key = (self._scan_roots(sessions_root), day_start, week_start)
+        return self._last_scan_key == scan_key
+
+    def _trim_tail_states(self) -> None:
+        """Bound retained raw JSONL records while keeping recent files incremental."""
+        retained_bytes = 0
+        entries = sorted(
+            self._entries.items(),
+            key=lambda item: (float(item[1].mtime or 0.0), str(item[0])),
+            reverse=True,
+        )
+        for _path, entry in entries:
+            if entry.tail_state is None:
+                continue
+            file_size = max(0, int(entry.file_size or 0))
+            if (
+                file_size > self._max_tail_state_bytes
+                or retained_bytes + file_size > self._max_tail_state_bytes
+            ):
+                entry.tail_state = None
+                continue
+            retained_bytes += file_size
+
+    def _pricing_snapshot_batch(self):
+        estimator = getattr(self._parser, "cost_estimator", None)
+        ledger = getattr(estimator, "pricing_ledger", None)
+        batch = getattr(ledger, "batch", None)
+        return batch() if callable(batch) else nullcontext()
 
     def prepare_deleted_session_usage(self, item: object) -> str:
         return self._deleted_usage_transactions.prepare(item)
@@ -366,19 +408,28 @@ class UsageSummaryCache:
             )
 
         seen_paths: set[Path] = set()
+        scan_items: list[tuple[Path, bool]] = []
         for root in existing_roots:
             archived = root.name.casefold() == "archived_sessions"
             for path in iter_usage_jsonl_files(root):
                 path = self._cache_path(path)
                 seen_paths.add(path)
-                summary_day, summary_week, _summary_month = self._summaries_for_file(
-                    path,
-                    day_start,
-                    week_start,
-                    archived=archived,
-                )
-                _merge_usage(day_total, summary_day)
-                _merge_usage(week_total, summary_week)
+                scan_items.append((path, archived))
+        for offset in range(0, len(scan_items), PRICING_SNAPSHOT_BATCH_FILES):
+            with self._pricing_snapshot_batch():
+                for path, archived in scan_items[
+                    offset : offset + PRICING_SNAPSHOT_BATCH_FILES
+                ]:
+                    summary_day, summary_week, _summary_month = (
+                        self._summaries_for_file(
+                            path,
+                            day_start,
+                            week_start,
+                            archived=archived,
+                        )
+                    )
+                    _merge_usage(day_total, summary_day)
+                    _merge_usage(week_total, summary_week)
 
         for cached_path in list(self._entries):
             if cached_path not in seen_paths:
@@ -584,15 +635,23 @@ class UsageSummaryCache:
             return entry.summary_day, entry.summary_week, entry.summary_month
 
         parser_version = usage_parser_version(self._parser)
+        incremental_record_reader = getattr(
+            self._parser,
+            "load_records_incremental",
+            None,
+        )
         incremental_reader = getattr(self._parser, "parse_file_incremental", None)
         tail_state = None
         try:
-            if callable(incremental_reader):
-                previous_state = (
-                    entry.tail_state
-                    if entry is not None and entry.parser_version == parser_version
-                    else None
-                )
+            previous_state = (
+                entry.tail_state
+                if entry is not None and entry.parser_version == parser_version
+                else None
+            )
+            if callable(incremental_record_reader):
+                tail_state = incremental_record_reader(path, previous_state)
+                records = tail_state.records
+            elif callable(incremental_reader):
                 _snapshot, tail_state = incremental_reader(path, previous_state)
                 records = tail_state.records
             else:
@@ -689,5 +748,6 @@ class UsageSummaryCache:
             parser_version=parser_version,
             tail_state=tail_state,
         )
+        self._trim_tail_states()
         self._touch_insights()
         return summary_day, summary_week, summary_month

@@ -65,7 +65,8 @@ def format_usage_money(
     short_formatter: ShortNumberFormatter = short_num,
     money_formatter: MoneyFormatter = format_money,
 ) -> str:
-    return f"{short_formatter(tokens)}/{money_formatter(cost)}"
+    money = "不可用" if cost is None else money_formatter(cost)
+    return f"{short_formatter(tokens)}/{money}"
 
 
 def format_time(value: datetime | None) -> str:

@@ -12,6 +12,7 @@ from pathlib import Path
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
+from uuid import uuid4
 
 from .calculator import UsageCalculator
 
@@ -21,7 +22,7 @@ DEFAULT_IMPORT_DAYS = 30
 DEFAULT_GRACE_SECONDS = 8.0
 UNKNOWN_FEATURE_KEY = "unknown"
 UNKNOWN_FEATURE_LABEL = "未知后台任务"
-BACKGROUND_USAGE_SCHEMA_VERSION = 2
+BACKGROUND_USAGE_SCHEMA_VERSION = 3
 REQUEST_SPLIT_REPAIR_METADATA_KEY = "request_split_repair_v1"
 TITLE_DESCRIPTION_FEATURE_KEY = "title_description"
 TITLE_DESCRIPTION_USER_PROMPT_MARKER = "User prompt:"
@@ -297,6 +298,47 @@ def _epoch_seconds(value: object) -> int:
     return max(0, int(timestamp))
 
 
+def _optional_epoch_seconds(value: object, *, field_name: str) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    timestamp = _epoch_seconds(value)
+    if timestamp <= 0:
+        raise ValueError(f"{field_name} must be a valid timestamp")
+    return timestamp
+
+
+def _snapshot_metadata(
+    snapshot: Mapping[str, object] | None,
+) -> tuple[str, str]:
+    if snapshot is None:
+        return "unavailable", ""
+    status = str(snapshot.get("status") or "").strip().lower()
+    if status not in {"versioned", "fallback", "unavailable"}:
+        status = "fallback" if snapshot.get("prices") else "unavailable"
+    version_id = str(snapshot.get("version_id") or "").strip()
+    return status, version_id
+
+
+def _snapshot_json(snapshot: Mapping[str, object] | None) -> str:
+    return (
+        json.dumps(dict(snapshot), ensure_ascii=False, sort_keys=True)
+        if snapshot is not None
+        else ""
+    )
+
+
+def _normalized_snapshot(
+    snapshot: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    normalized = dict(snapshot)
+    status, version_id = _snapshot_metadata(normalized)
+    normalized["status"] = status
+    normalized["version_id"] = version_id or None
+    return normalized
+
+
 class BackgroundUsageStore:
     """HUD-owned SQLite history queried by the overlay and settings bridge."""
 
@@ -366,7 +408,43 @@ class BackgroundUsageStore:
                     estimated_output_tokens INTEGER NOT NULL,
                     estimated_cost_usd REAL,
                     price_snapshot_json TEXT NOT NULL DEFAULT '',
+                    price_status TEXT NOT NULL DEFAULT 'unavailable',
+                    price_version_id TEXT NOT NULL DEFAULT '',
+                    last_recalculated_at INTEGER,
+                    last_recalculation_id TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(event_id) REFERENCES background_events(event_id)
+                        ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS background_recalculations (
+                    recalculation_id TEXT PRIMARY KEY,
+                    recalculated_at INTEGER NOT NULL,
+                    provider TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    start_at INTEGER,
+                    end_at INTEGER,
+                    request_count INTEGER NOT NULL,
+                    changed_count INTEGER NOT NULL,
+                    before_total_usd REAL NOT NULL,
+                    after_total_usd REAL NOT NULL,
+                    delta_usd REAL NOT NULL,
+                    before_unavailable_count INTEGER NOT NULL,
+                    after_unavailable_count INTEGER NOT NULL,
+                    scope_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS background_recalculation_items (
+                    recalculation_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    old_cost_usd REAL,
+                    new_cost_usd REAL,
+                    old_price_snapshot_json TEXT NOT NULL DEFAULT '',
+                    new_price_snapshot_json TEXT NOT NULL DEFAULT '',
+                    old_price_status TEXT NOT NULL DEFAULT 'unavailable',
+                    new_price_status TEXT NOT NULL DEFAULT 'unavailable',
+                    old_price_version_id TEXT NOT NULL DEFAULT '',
+                    new_price_version_id TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(recalculation_id, request_id),
+                    FOREIGN KEY(recalculation_id)
+                        REFERENCES background_recalculations(recalculation_id)
                         ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_background_events_last_seen
@@ -377,7 +455,9 @@ class BackgroundUsageStore:
                     ON background_requests(event_id, source_log_id);
                 CREATE INDEX IF NOT EXISTS idx_background_requests_model
                     ON background_requests(model, occurred_at DESC);
-                INSERT OR IGNORE INTO metadata(key, value) VALUES('schema_version', '2');
+                CREATE INDEX IF NOT EXISTS idx_background_recalculations_time
+                    ON background_recalculations(recalculated_at DESC);
+                INSERT OR IGNORE INTO metadata(key, value) VALUES('schema_version', '3');
                 INSERT OR IGNORE INTO metadata(key, value) VALUES('revision', '0');
                 """
             )
@@ -395,6 +475,30 @@ class BackgroundUsageStore:
                     "ALTER TABLE background_events "
                     "ADD COLUMN association_kind TEXT NOT NULL DEFAULT ''"
                 )
+            request_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(background_requests)")
+            }
+            if "price_status" not in request_columns:
+                connection.execute(
+                    "ALTER TABLE background_requests "
+                    "ADD COLUMN price_status TEXT NOT NULL DEFAULT 'unavailable'"
+                )
+            if "price_version_id" not in request_columns:
+                connection.execute(
+                    "ALTER TABLE background_requests "
+                    "ADD COLUMN price_version_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "last_recalculated_at" not in request_columns:
+                connection.execute(
+                    "ALTER TABLE background_requests ADD COLUMN last_recalculated_at INTEGER"
+                )
+            if "last_recalculation_id" not in request_columns:
+                connection.execute(
+                    "ALTER TABLE background_requests "
+                    "ADD COLUMN last_recalculation_id TEXT NOT NULL DEFAULT ''"
+                )
+            self._backfill_price_metadata(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_background_events_related_session
@@ -404,6 +508,38 @@ class BackgroundUsageStore:
             connection.execute(
                 "UPDATE metadata SET value=? WHERE key='schema_version'",
                 (str(BACKGROUND_USAGE_SCHEMA_VERSION),),
+            )
+
+    @staticmethod
+    def _backfill_price_metadata(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT request_id, estimated_cost_usd, price_snapshot_json,
+                   price_status, price_version_id
+            FROM background_requests
+            WHERE price_status NOT IN ('versioned', 'fallback', 'unavailable')
+               OR (price_status='unavailable' AND price_snapshot_json<>'')
+               OR (price_version_id='' AND price_snapshot_json<>'')
+            """
+        ).fetchall()
+        for row in rows:
+            snapshot: Mapping[str, object] | None = None
+            try:
+                decoded = json.loads(str(row["price_snapshot_json"] or ""))
+                if isinstance(decoded, dict):
+                    snapshot = decoded
+            except json.JSONDecodeError:
+                pass
+            status, version_id = _snapshot_metadata(snapshot)
+            if row["estimated_cost_usd"] is None:
+                status = "unavailable"
+            connection.execute(
+                """
+                UPDATE background_requests
+                SET price_status=?, price_version_id=?
+                WHERE request_id=?
+                """,
+                (status, version_id, str(row["request_id"])),
             )
 
     def revision(self) -> int:
@@ -698,6 +834,378 @@ class BackgroundUsageStore:
             },
         }
 
+    @staticmethod
+    def _recalculation_scope(
+        *,
+        provider: object = "",
+        model: object = "",
+        start_at: object = None,
+        end_at: object = None,
+    ) -> tuple[dict[str, object], list[str], list[object]]:
+        normalized_provider = str(provider or "").strip().lower()
+        normalized_model = str(model or "").strip()
+        start_timestamp = _optional_epoch_seconds(start_at, field_name="start_at")
+        end_timestamp = _optional_epoch_seconds(end_at, field_name="end_at")
+        if (
+            start_timestamp is not None
+            and end_timestamp is not None
+            and start_timestamp > end_timestamp
+        ):
+            raise ValueError("start_at must not be later than end_at")
+        clauses = ["e.classification_state='background'"]
+        params: list[object] = []
+        if normalized_provider:
+            clauses.append("LOWER(e.provider)=?")
+            params.append(normalized_provider)
+        if normalized_model:
+            clauses.append("r.model=?")
+            params.append(normalized_model)
+        if start_timestamp is not None:
+            clauses.append("r.occurred_at>=?")
+            params.append(start_timestamp)
+        if end_timestamp is not None:
+            clauses.append("r.occurred_at<=?")
+            params.append(end_timestamp)
+        scope = {
+            "provider": normalized_provider,
+            "model": normalized_model,
+            "startAt": (
+                _timestamp_iso(start_timestamp) if start_timestamp is not None else ""
+            ),
+            "endAt": _timestamp_iso(end_timestamp) if end_timestamp is not None else "",
+        }
+        return scope, clauses, params
+
+    @classmethod
+    def _recalculation_rows(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        provider: object = "",
+        model: object = "",
+        start_at: object = None,
+        end_at: object = None,
+    ) -> tuple[dict[str, object], list[sqlite3.Row]]:
+        scope, clauses, params = cls._recalculation_scope(
+            provider=provider,
+            model=model,
+            start_at=start_at,
+            end_at=end_at,
+        )
+        rows = connection.execute(
+            f"""
+            SELECT r.*, e.provider
+            FROM background_requests r
+            JOIN background_events e ON e.event_id=r.event_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY r.occurred_at, r.source_log_id
+            """,
+            tuple(params),
+        ).fetchall()
+        return scope, rows
+
+    @staticmethod
+    def _recalculation_preview(
+        calculator: UsageCalculator,
+        *,
+        scope: Mapping[str, object],
+        rows: Iterable[sqlite3.Row],
+        effective_at: object = None,
+    ) -> tuple[dict[str, object], list[dict[str, object]]]:
+        items: list[dict[str, object]] = []
+        before_total = 0.0
+        after_total = 0.0
+        before_unavailable = 0
+        after_unavailable = 0
+        changed_count = 0
+        effective_timestamp = (
+            _optional_epoch_seconds(effective_at, field_name="effective_at")
+            if effective_at is not None
+            else None
+        )
+        time_breakdown: dict[str, object] = {}
+        if effective_timestamp is not None:
+            time_breakdown = {
+                "effectiveAt": _timestamp_iso(effective_timestamp),
+                "before": {
+                    "recordCount": 0,
+                    "pricedCount": 0,
+                    "unavailableCount": 0,
+                    "costUsd": 0.0,
+                },
+                "after": {
+                    "recordCount": 0,
+                    "pricedCount": 0,
+                    "unavailableCount": 0,
+                    "costUsd": 0.0,
+                },
+            }
+        for row in rows:
+            old_cost = (
+                float(row["estimated_cost_usd"])
+                if row["estimated_cost_usd"] is not None
+                else None
+            )
+            new_cost, raw_snapshot = calculator.calculate_cost_with_snapshot(
+                model_name=str(row["model"] or ""),
+                input_tokens=int(row["estimated_input_tokens"] or 0),
+                cached_input_tokens=int(row["estimated_cached_tokens"] or 0),
+                output_tokens=int(row["estimated_output_tokens"] or 0),
+                provider=str(row["provider"] or ""),
+                occurred_at=int(row["occurred_at"] or 0),
+            )
+            new_snapshot = _normalized_snapshot(raw_snapshot) or {}
+            new_status, new_version_id = _snapshot_metadata(new_snapshot)
+            new_snapshot_json = _snapshot_json(new_snapshot)
+            old_snapshot_json = str(row["price_snapshot_json"] or "")
+            old_status = str(row["price_status"] or "unavailable")
+            old_version_id = str(row["price_version_id"] or "")
+            before_total += old_cost or 0.0
+            after_total += new_cost or 0.0
+            before_unavailable += old_cost is None
+            after_unavailable += new_cost is None
+            if effective_timestamp is not None:
+                period = (
+                    "before"
+                    if int(row["occurred_at"] or 0) < effective_timestamp
+                    else "after"
+                )
+                bucket = time_breakdown[period]
+                assert isinstance(bucket, dict)
+                bucket["recordCount"] = int(bucket["recordCount"]) + 1
+                if new_cost is None:
+                    bucket["unavailableCount"] = int(
+                        bucket["unavailableCount"]
+                    ) + 1
+                else:
+                    bucket["pricedCount"] = int(bucket["pricedCount"]) + 1
+                    bucket["costUsd"] = float(bucket["costUsd"]) + float(new_cost)
+            changed = (
+                old_cost != new_cost
+                or old_snapshot_json != new_snapshot_json
+                or old_status != new_status
+                or old_version_id != new_version_id
+            )
+            changed_count += changed
+            items.append(
+                {
+                    "requestId": str(row["request_id"]),
+                    "eventId": str(row["event_id"]),
+                    "oldCostUsd": old_cost,
+                    "newCostUsd": new_cost,
+                    "oldSnapshotJson": old_snapshot_json,
+                    "newSnapshotJson": new_snapshot_json,
+                    "oldStatus": old_status,
+                    "newStatus": new_status,
+                    "oldVersionId": old_version_id,
+                    "newVersionId": new_version_id,
+                    "changed": changed,
+                }
+            )
+        before_total = round(before_total, 6)
+        after_total = round(after_total, 6)
+        if effective_timestamp is not None:
+            for period in ("before", "after"):
+                bucket = time_breakdown[period]
+                assert isinstance(bucket, dict)
+                bucket["costUsd"] = round(float(bucket["costUsd"]), 6)
+        preview = {
+            "scope": dict(scope),
+            "requestCount": len(items),
+            "changedCount": changed_count,
+            "beforeTotalUsd": before_total,
+            "afterTotalUsd": after_total,
+            "deltaUsd": round(after_total - before_total, 6),
+            "beforeUnavailableCount": before_unavailable,
+            "afterUnavailableCount": after_unavailable,
+            "beforeCostComplete": before_unavailable == 0,
+            "afterCostComplete": after_unavailable == 0,
+            "timeBreakdown": time_breakdown,
+        }
+        return preview, items
+
+    def preview_recalculation(
+        self,
+        calculator: UsageCalculator,
+        *,
+        provider: object = "",
+        model: object = "",
+        start_at: object = None,
+        end_at: object = None,
+        effective_at: object = None,
+        effectiveAt: object = None,
+    ) -> dict[str, object]:
+        """Preview an explicit historical reprice without mutating stored rows."""
+        if effective_at is not None and effectiveAt is not None:
+            raise ValueError("effective_at and effectiveAt are mutually exclusive")
+        boundary = effective_at if effective_at is not None else effectiveAt
+        with closing(self._connect()) as connection:
+            scope, rows = self._recalculation_rows(
+                connection,
+                provider=provider,
+                model=model,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            preview, _items = self._recalculation_preview(
+                calculator,
+                scope=scope,
+                rows=rows,
+                effective_at=boundary,
+            )
+        return preview
+
+    def execute_recalculation(
+        self,
+        calculator: UsageCalculator,
+        *,
+        provider: object = "",
+        model: object = "",
+        start_at: object = None,
+        end_at: object = None,
+        recalculated_at: object = None,
+    ) -> dict[str, object]:
+        """Atomically apply an explicitly requested historical reprice with audit."""
+        timestamp = (
+            _optional_epoch_seconds(
+                recalculated_at,
+                field_name="recalculated_at",
+            )
+            if recalculated_at is not None
+            else int(time.time())
+        )
+        assert timestamp is not None
+        recalculation_id = str(uuid4())
+        with closing(self._connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                scope, rows = self._recalculation_rows(
+                    connection,
+                    provider=provider,
+                    model=model,
+                    start_at=start_at,
+                    end_at=end_at,
+                )
+                preview, items = self._recalculation_preview(
+                    calculator,
+                    scope=scope,
+                    rows=rows,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO background_recalculations(
+                        recalculation_id, recalculated_at, provider, model,
+                        start_at, end_at, request_count, changed_count,
+                        before_total_usd, after_total_usd, delta_usd,
+                        before_unavailable_count, after_unavailable_count,
+                        scope_json
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        recalculation_id,
+                        timestamp,
+                        str(scope["provider"]),
+                        str(scope["model"]),
+                        _optional_epoch_seconds(start_at, field_name="start_at"),
+                        _optional_epoch_seconds(end_at, field_name="end_at"),
+                        int(preview["requestCount"]),
+                        int(preview["changedCount"]),
+                        float(preview["beforeTotalUsd"]),
+                        float(preview["afterTotalUsd"]),
+                        float(preview["deltaUsd"]),
+                        int(preview["beforeUnavailableCount"]),
+                        int(preview["afterUnavailableCount"]),
+                        json.dumps(scope, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
+                affected_events: set[str] = set()
+                for item in items:
+                    connection.execute(
+                        """
+                        INSERT INTO background_recalculation_items(
+                            recalculation_id, request_id, old_cost_usd, new_cost_usd,
+                            old_price_snapshot_json, new_price_snapshot_json,
+                            old_price_status, new_price_status,
+                            old_price_version_id, new_price_version_id
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            recalculation_id,
+                            item["requestId"],
+                            item["oldCostUsd"],
+                            item["newCostUsd"],
+                            item["oldSnapshotJson"],
+                            item["newSnapshotJson"],
+                            item["oldStatus"],
+                            item["newStatus"],
+                            item["oldVersionId"],
+                            item["newVersionId"],
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE background_requests
+                        SET estimated_cost_usd=?, price_snapshot_json=?,
+                            price_status=?, price_version_id=?,
+                            last_recalculated_at=?, last_recalculation_id=?
+                        WHERE request_id=?
+                        """,
+                        (
+                            item["newCostUsd"],
+                            item["newSnapshotJson"],
+                            item["newStatus"],
+                            item["newVersionId"],
+                            timestamp,
+                            recalculation_id,
+                            item["requestId"],
+                        ),
+                    )
+                    affected_events.add(str(item["eventId"]))
+                for event_id in affected_events:
+                    self._refresh_recalculated_event(connection, event_id)
+                self._bump_revision(connection)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            **preview,
+            "recalculationId": recalculation_id,
+            "recalculatedAt": _timestamp_iso(timestamp),
+        }
+
+    @staticmethod
+    def _refresh_recalculated_event(
+        connection: sqlite3.Connection,
+        event_id: str,
+    ) -> None:
+        aggregate = connection.execute(
+            """
+            SELECT COUNT(*) AS request_count,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost,
+                   SUM(CASE WHEN estimated_cost_usd IS NULL THEN 1 ELSE 0 END)
+                       AS missing_costs
+            FROM background_requests WHERE event_id=?
+            """,
+            (event_id,),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE background_events
+            SET request_count=?, total_tokens=?, estimated_cost_usd=?,
+                cost_available=?
+            WHERE event_id=?
+            """,
+            (
+                int(aggregate["request_count"] or 0),
+                int(aggregate["total_tokens"] or 0),
+                float(aggregate["estimated_cost"] or 0.0),
+                1 if int(aggregate["missing_costs"] or 0) == 0 else 0,
+                event_id,
+            ),
+        )
+
     def detail(self, event_id: object) -> dict[str, object] | None:
         normalized = valid_background_event_id(event_id)
         if not normalized:
@@ -804,6 +1312,10 @@ class BackgroundUsageStore:
                 else None
             ),
             "priceSnapshot": price_snapshot,
+            "priceStatus": str(row["price_status"] or "unavailable"),
+            "priceVersionId": str(row["price_version_id"] or ""),
+            "lastRecalculatedAt": _timestamp_iso(row["last_recalculated_at"]),
+            "lastRecalculationId": str(row["last_recalculation_id"] or ""),
             "costSource": "estimate",
             "tokensSource": "local_log",
         }
@@ -820,6 +1332,7 @@ class BackgroundUsageScanner:
         store: BackgroundUsageStore,
         provider: str = "",
         price_table: Mapping[str, Mapping[str, Any]] | None = None,
+        pricing_versions: Iterable[Any] | None = None,
         import_days: int = DEFAULT_IMPORT_DAYS,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
         app_process_ids: Iterable[int] = (),
@@ -835,13 +1348,22 @@ class BackgroundUsageScanner:
             int(value) for value in app_process_ids if int(value) > 0
         }
         self._clock = now or time.time
-        self._calculator = UsageCalculator(price_table)
+        self._price_table = (
+            None
+            if price_table is None
+            else {str(name): dict(prices) for name, prices in price_table.items()}
+        )
+        self._calculator = UsageCalculator(
+            self._price_table,
+            pricing_versions=pricing_versions,
+        )
 
     def reconfigure(
         self,
         *,
         provider: str,
         price_table: Mapping[str, Mapping[str, Any]],
+        pricing_versions: Iterable[Any] | None = None,
         app_process_ids: Iterable[int] = (),
     ) -> None:
         """Apply pricing/process evidence for requests discovered after a settings change."""
@@ -849,7 +1371,48 @@ class BackgroundUsageScanner:
         self.app_process_ids = {
             int(value) for value in app_process_ids if int(value) > 0
         }
-        self._calculator = UsageCalculator(price_table)
+        self._price_table = {
+            str(name): dict(prices) for name, prices in price_table.items()
+        }
+        self._calculator = UsageCalculator(
+            self._price_table,
+            pricing_versions=pricing_versions,
+        )
+
+    def preview_recalculation(self, **scope: object) -> dict[str, object]:
+        candidate_versions = scope.pop("pricing_versions", None)
+        effective_at = scope.pop("effective_at", None)
+        effective_at_alias = scope.pop("effectiveAt", None)
+        if effective_at is not None and effective_at_alias is not None:
+            raise ValueError("effective_at and effectiveAt are mutually exclusive")
+        if effective_at is None:
+            effective_at = effective_at_alias
+        calculator = self._calculator
+        if candidate_versions is not None:
+            normalized_versions: list[object] = []
+            for raw_version in candidate_versions:
+                if isinstance(raw_version, Mapping):
+                    version = dict(raw_version)
+                    if (
+                        "effective_at" not in version
+                        and "effectiveAt" in version
+                    ):
+                        version["effective_at"] = version["effectiveAt"]
+                    normalized_versions.append(version)
+                else:
+                    normalized_versions.append(raw_version)
+            calculator = UsageCalculator(
+                self._price_table,
+                pricing_versions=normalized_versions,
+            )
+        return self.store.preview_recalculation(
+            calculator,
+            effective_at=effective_at,
+            **scope,
+        )
+
+    def execute_recalculation(self, **scope: object) -> dict[str, object]:
+        return self.store.execute_recalculation(self._calculator, **scope)
 
     def scan(self) -> BackgroundScanResult:
         diagnostics: list[str] = []
@@ -1260,14 +1823,17 @@ class BackgroundUsageScanner:
             cached_input_tokens=cached_input,
             output_tokens=output_tokens,
             provider=provider,
+            occurred_at=request.occurred_at,
         )
+        price_status, price_version_id = _snapshot_metadata(price_snapshot)
         connection.execute(
             """
             INSERT INTO background_requests(
                 request_id, event_id, source_log_id, occurred_at, model, endpoint,
                 total_tokens, estimated_input_tokens, estimated_cached_tokens,
-                estimated_output_tokens, estimated_cost_usd, price_snapshot_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                estimated_output_tokens, estimated_cost_usd, price_snapshot_json,
+                price_status, price_version_id
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"log:{request.source_log_id}",
@@ -1281,11 +1847,9 @@ class BackgroundUsageScanner:
                 cached_input,
                 output_tokens,
                 estimated_cost,
-                (
-                    json.dumps(price_snapshot, ensure_ascii=False, sort_keys=True)
-                    if price_snapshot is not None
-                    else ""
-                ),
+                _snapshot_json(price_snapshot),
+                price_status,
+                price_version_id,
             ),
         )
         self._refresh_event_totals(connection, event_id, request.occurred_at)
@@ -1299,24 +1863,17 @@ class BackgroundUsageScanner:
         cached_input_tokens: int,
         output_tokens: int,
         provider: str,
+        occurred_at: object,
     ) -> tuple[float | None, dict[str, object] | None]:
-        price_snapshot = self._calculator.price_snapshot(
+        estimated_cost, snapshot = self._calculator.calculate_cost_with_snapshot(
             model,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            output_tokens=output_tokens,
             provider=provider,
+            occurred_at=occurred_at,
         )
-        estimated_cost: float | None = None
-        if price_snapshot is not None:
-            try:
-                estimated_cost = self._calculator.calculate_cost_usd(
-                    model,
-                    input_tokens=input_tokens,
-                    cached_input_tokens=cached_input_tokens,
-                    output_tokens=output_tokens,
-                    provider=provider,
-                )
-            except ValueError:
-                estimated_cost = None
-        return estimated_cost, price_snapshot
+        return estimated_cost, _normalized_snapshot(snapshot)
 
     def _refresh_event_totals(
         self,
@@ -1400,7 +1957,8 @@ class BackgroundUsageScanner:
             )
             requests = connection.execute(
                 """
-                SELECT request_id, total_tokens, estimated_input_tokens, model
+                SELECT request_id, total_tokens, estimated_input_tokens, model,
+                       occurred_at
                 FROM background_requests
                 WHERE event_id=?
                 ORDER BY source_log_id
@@ -1429,7 +1987,9 @@ class BackgroundUsageScanner:
                         cached_input_tokens=cached_input,
                         output_tokens=output_tokens,
                         provider=provider,
+                        occurred_at=int(request["occurred_at"] or 0),
                     )
+                    price_status, price_version_id = _snapshot_metadata(price_snapshot)
                     connection.execute(
                         """
                         UPDATE background_requests
@@ -1437,7 +1997,9 @@ class BackgroundUsageScanner:
                             estimated_cached_tokens=?,
                             estimated_output_tokens=?,
                             estimated_cost_usd=?,
-                            price_snapshot_json=?
+                            price_snapshot_json=?,
+                            price_status=?,
+                            price_version_id=?
                         WHERE request_id=?
                         """,
                         (
@@ -1445,15 +2007,9 @@ class BackgroundUsageScanner:
                             cached_input,
                             output_tokens,
                             estimated_cost,
-                            (
-                                json.dumps(
-                                    price_snapshot,
-                                    ensure_ascii=False,
-                                    sort_keys=True,
-                                )
-                                if price_snapshot is not None
-                                else ""
-                            ),
+                            _snapshot_json(price_snapshot),
+                            price_status,
+                            price_version_id,
                             str(request["request_id"]),
                         ),
                     )

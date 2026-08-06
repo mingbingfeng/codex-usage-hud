@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -15,6 +15,22 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .core.calculator import MODEL_PRICES
+from .pricing import (
+    PriceAuditRecord,
+    PriceVersion,
+    PricingApplyResult,
+    PricingImportPreview,
+    apply_pricing_import as apply_pricing_import_preview,
+    empty_pricing_template,
+    minimal_price_example,
+    normalize_price_audit,
+    normalize_price_versions,
+    parse_utc_datetime,
+    preview_price_versions,
+    preview_pricing_import as build_pricing_import_preview,
+    pricing_export_payload,
+    utc_now,
+)
 
 HUD_SETTINGS_FILENAME = "hud_settings.json"
 USER_CONFIG_KEY = "user"
@@ -52,6 +68,7 @@ REST_REMINDER_IDLE_RESET_MIN = 0
 REST_REMINDER_IDLE_RESET_MAX = 60
 JSON_WRITE_REPLACE_RETRIES = 8
 JSON_WRITE_REPLACE_DELAY_SECONDS = 0.01
+MAX_PRICING_RESPONSE_BYTES = 2 * 1024 * 1024
 
 _PRICE_ALIASES = {
     "input": ("input", "prompt", "input_price", "input_per_million"),
@@ -209,6 +226,8 @@ class UserConfig:
     display_mode: str = DEFAULT_DISPLAY_MODE
     work_overlay_max_items: int = DEFAULT_WORK_OVERLAY_MAX_ITEMS
     model_prices: dict[str, ModelPrice] = field(default_factory=default_model_prices)
+    pricing_versions: tuple[PriceVersion, ...] = ()
+    pricing_audit: tuple[PriceAuditRecord, ...] = ()
     pricing_url: str = ""
     budget_thresholds: list[float] = field(
         default_factory=lambda: list(DEFAULT_BUDGET_THRESHOLDS)
@@ -235,12 +254,26 @@ class UserConfig:
         return cls()
 
     @classmethod
-    def from_dict(cls, value: Any) -> "UserConfig":
+    def from_dict(
+        cls,
+        value: Any,
+        *,
+        migration_at: datetime | None = None,
+    ) -> "UserConfig":
         if not isinstance(value, Mapping):
             return cls.defaults()
         defaults = cls.defaults()
         prices = dict(defaults.model_prices)
         prices.update(normalize_model_prices(value.get("model_prices")))
+        pricing_versions = normalize_price_versions(value.get("pricing_versions"))
+        pricing_audit = normalize_price_audit(value.get("pricing_audit"))
+        if "pricing_versions" not in value:
+            migrated_versions, migrated_audit = _migrate_legacy_price_versions(
+                value,
+                migration_at=migration_at,
+            )
+            pricing_versions = migrated_versions
+            pricing_audit = (*pricing_audit, *migrated_audit)
         legacy_overlay_enabled = _optional_bool(value.get("work_overlay_enabled"))
         work_overlay_max_items = normalize_work_overlay_max_items(
             value.get("work_overlay_max_items"),
@@ -290,6 +323,8 @@ class UserConfig:
             display_mode=normalize_display_mode(value.get("display_mode")),
             work_overlay_max_items=work_overlay_max_items,
             model_prices=prices,
+            pricing_versions=pricing_versions,
+            pricing_audit=pricing_audit,
             pricing_url=_optional_str(value.get("pricing_url")) or "",
             budget_thresholds=parse_thresholds(
                 value.get("budget_thresholds"), defaults.budget_thresholds
@@ -388,7 +423,148 @@ class UserConfig:
                 name: price.to_dict()
                 for name, price in sorted(self.model_prices.items())
             },
+            "pricing_versions": [
+                version.to_dict() for version in self.pricing_versions
+            ],
+            "pricing_audit": [record.to_dict() for record in self.pricing_audit],
         }
+
+    def export_pricing_payload(self) -> dict[str, object]:
+        """Return every immutable price version in the portable schema-v1 shape.
+
+        Fresh configurations expose builtin prices before the first versioned
+        save.  Represent those visible prices as non-persisted migration rows
+        during export so the generated JSON is useful immediately and can be
+        imported without losing the table shown in settings.
+        """
+        versions = self.pricing_versions
+        if not versions:
+            versions, _audit = _migrate_legacy_price_versions(
+                self.to_dict(),
+                migration_at=utc_now(),
+            )
+        return pricing_export_payload(versions)
+
+    @staticmethod
+    def empty_pricing_template() -> dict[str, object]:
+        return empty_pricing_template()
+
+    @staticmethod
+    def minimal_price_example() -> dict[str, object]:
+        return minimal_price_example()
+
+    def preview_pricing_import(
+        self,
+        payload: str | bytes | Mapping[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> PricingImportPreview:
+        return build_pricing_import_preview(
+            self.pricing_versions,
+            payload,
+            now=now,
+        )
+
+    def apply_pricing_import(
+        self,
+        preview: PricingImportPreview,
+        *,
+        conflict_policy: str = "cancel",
+        applied_at: datetime | None = None,
+    ) -> tuple["UserConfig", PricingApplyResult]:
+        """Apply a previously validated preview without mutating this config."""
+        result = apply_pricing_import_preview(
+            self.pricing_versions,
+            preview,
+            conflict_policy=conflict_policy,
+            applied_at=applied_at,
+        )
+        return (
+            replace(
+                self,
+                pricing_versions=result.versions,
+                pricing_audit=(*self.pricing_audit, *result.audit),
+            ),
+            result,
+        )
+
+    def apply_price_updates(
+        self,
+        prices: Mapping[str, ModelPrice | Mapping[str, Any]],
+        *,
+        effective_at: datetime | str,
+        provider: str = "",
+        created_at: datetime | None = None,
+    ) -> tuple["UserConfig", PricingApplyResult]:
+        """Validate and atomically append one immutable version per edited row."""
+        current = parse_utc_datetime(created_at or utc_now(), field_name="created_at")
+        effective = parse_utc_datetime(effective_at, field_name="effective_at")
+        if effective > current:
+            raise ValueError("effective_at must not be in the future")
+        normalized_provider = normalize_provider(provider)
+        incoming: list[PriceVersion] = []
+        normalized_prices: dict[str, ModelPrice] = {}
+        for key, raw_price in prices.items():
+            model_key = str(key or "").strip()
+            if not model_key:
+                raise ValueError("price update model key is required")
+            if isinstance(raw_price, ModelPrice):
+                price = raw_price
+                payload = price.to_dict()
+            elif isinstance(raw_price, Mapping):
+                price = ModelPrice.from_mapping(raw_price, model_key)
+                if price is None:
+                    raise ValueError(f"invalid price update for {model_key}")
+                payload = dict(raw_price)
+            else:
+                raise ValueError(f"invalid price update for {model_key}")
+            normalized_prices[model_key] = price
+            payload["model"] = str(
+                payload.get("model") or payload.get("model_pattern") or model_key
+            ).strip()
+            payload["provider"] = normalized_provider or normalize_provider(
+                payload.get("provider")
+            )
+            payload["effective_at"] = effective
+            payload["created_at"] = current
+            payload["created_by"] = "user_edit"
+            payload["source"] = "manual"
+            incoming.append(PriceVersion.from_mapping(payload, now=current))
+        preview = preview_price_versions(self.pricing_versions, incoming)
+        result = apply_pricing_import_preview(
+            self.pricing_versions,
+            preview,
+            conflict_policy="overwrite",
+            applied_at=current,
+        )
+        legacy_updated = self.with_price_updates(
+            normalized_prices,
+            provider=normalized_provider,
+        )
+        return (
+            replace(
+                legacy_updated,
+                pricing_versions=result.versions,
+                pricing_audit=(*self.pricing_audit, *result.audit),
+            ),
+            result,
+        )
+
+    def with_price_version_updates(
+        self,
+        prices: Mapping[str, ModelPrice | Mapping[str, Any]],
+        *,
+        effective_at: datetime | str,
+        provider: str = "",
+        created_at: datetime | None = None,
+    ) -> "UserConfig":
+        updated, _result = self.apply_price_updates(
+            prices,
+            effective_at=effective_at,
+            provider=provider,
+            created_at=created_at,
+        )
+        return updated
 
     def price_table(self) -> dict[str, dict[str, object]]:
         table = {name: price.to_dict() for name, price in self.model_prices.items()}
@@ -528,7 +704,25 @@ class UserConfigStore:
 
     def load(self) -> UserConfig:
         raw = read_json_object(self.path)
-        return UserConfig.from_dict(raw.get(USER_CONFIG_KEY))
+        raw_user = raw.get(USER_CONFIG_KEY)
+        file_mtime = self.mtime()
+        migration_at = (
+            datetime.fromtimestamp(file_mtime, tz=timezone.utc)
+            if file_mtime is not None
+            else None
+        )
+        config = UserConfig.from_dict(raw_user, migration_at=migration_at)
+        if (
+            isinstance(raw_user, Mapping)
+            and "pricing_versions" not in raw_user
+            and config.pricing_versions
+        ):
+            raw[USER_CONFIG_KEY] = config.to_dict()
+            try:
+                write_json_object(self.path, raw)
+            except OSError:
+                pass
+        return config
 
     def save(self, config: UserConfig) -> None:
         raw = read_json_object(self.path)
@@ -762,11 +956,82 @@ def normalize_model_prices(value: Any) -> dict[str, ModelPrice]:
     return prices
 
 
+def _migrate_legacy_price_versions(
+    value: Mapping[str, Any],
+    *,
+    migration_at: datetime | None = None,
+) -> tuple[tuple[PriceVersion, ...], tuple[PriceAuditRecord, ...]]:
+    """Turn explicitly persisted legacy rows into deterministic migration versions."""
+    current = parse_utc_datetime(migration_at or utc_now(), field_name="migration_at")
+    candidates: list[tuple[str, str, ModelPrice]] = []
+    for key, price in normalize_model_prices(value.get("model_prices")).items():
+        candidates.append((key, normalize_provider(price.provider), price))
+
+    raw_provider_settings = value.get("provider_settings")
+    if isinstance(raw_provider_settings, Mapping):
+        for raw_provider, raw_settings in raw_provider_settings.items():
+            provider = normalize_provider(raw_provider)
+            if not provider or not isinstance(raw_settings, Mapping):
+                continue
+            for key, price in normalize_model_prices(
+                raw_settings.get("model_prices")
+            ).items():
+                candidates.append((key, provider, price))
+
+    by_conflict: dict[tuple[str, str, str, datetime], PriceVersion] = {}
+    for key, provider, price in candidates:
+        payload = price.to_dict()
+        payload.update(
+            {
+                "model": price.model or key,
+                "provider": provider,
+                "effective_at": current,
+                "created_at": current,
+                "created_by": "builtin_migration",
+                "source": "builtin",
+            }
+        )
+        version = PriceVersion.from_mapping(
+            payload,
+            now=current,
+            default_created_by="builtin_migration",
+            default_source="builtin",
+            deterministic_id=True,
+        )
+        by_conflict[version.conflict_key] = version
+
+    versions = tuple(
+        sorted(
+            by_conflict.values(),
+            key=lambda item: (
+                item.provider,
+                item.base_url,
+                item.match_pattern.lower(),
+                item.effective_at,
+            ),
+        )
+    )
+    audit = tuple(
+        PriceAuditRecord(
+            audit_id=f"migration:{version.version_id}",
+            action="migrate",
+            version_id=version.version_id,
+            occurred_at=current,
+            created_by="builtin_migration",
+        )
+        for version in versions
+    )
+    return versions, audit
+
+
 def fetch_model_prices(url: str, timeout_seconds: float = 8.0) -> dict[str, ModelPrice]:
-    """Fetch and normalize a JSON model-pricing table from an arbitrary URL."""
+    """Fetch and normalize a bounded JSON model-pricing table over HTTP(S)."""
     target = str(url or "").strip()
     if not target:
         raise ValueError("pricing URL is empty")
+    parsed_target = urlsplit(target)
+    if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+        raise ValueError("pricing URL must use HTTP(S)")
     request = Request(
         target,
         headers={
@@ -776,8 +1041,11 @@ def fetch_model_prices(url: str, timeout_seconds: float = 8.0) -> dict[str, Mode
     )
     try:
         with urlopen(request, timeout=max(1.0, timeout_seconds)) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, json.JSONDecodeError) as exc:
+            body = response.read(MAX_PRICING_RESPONSE_BYTES + 1)
+            if len(body) > MAX_PRICING_RESPONSE_BYTES:
+                raise ValueError("pricing response is too large")
+            payload = json.loads(body.decode("utf-8"))
+    except (OSError, URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"unable to fetch pricing: {exc}") from exc
     prices = extract_model_prices(payload)
     if not prices:
@@ -968,7 +1236,12 @@ __all__ = [
     "DEFAULT_WEEKLY_RESET_WEEKDAY",
     "DEFAULT_WORK_OVERLAY_MAX_ITEMS",
     "HUD_SETTINGS_FILENAME",
+    "MAX_PRICING_RESPONSE_BYTES",
     "ModelPrice",
+    "PriceAuditRecord",
+    "PriceVersion",
+    "PricingApplyResult",
+    "PricingImportPreview",
     "ProviderSettings",
     "REST_REMINDER_STATE_KEY",
     "RUNTIME_STATE_KEY",
@@ -980,17 +1253,21 @@ __all__ = [
     "default_settings_path",
     "dismiss_warning_for_today",
     "effective_display_mode",
+    "empty_pricing_template",
     "extract_model_prices",
     "fetch_model_prices",
     "load_rest_reminder_state",
     "local_date_key",
     "normalize_display_mode",
     "normalize_model_prices",
+    "normalize_price_versions",
     "normalize_provider_names",
     "normalize_provider_settings",
     "save_rest_reminder_state",
     "normalize_work_overlay_max_items",
     "parse_thresholds",
+    "pricing_export_payload",
+    "minimal_price_example",
     "read_json_object",
     "time_parts",
     "warning_dismissed_today",

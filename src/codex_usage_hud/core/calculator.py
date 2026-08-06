@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from fnmatch import fnmatchcase
 import math
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
+
+from ..pricing import PriceVersion, datetime_to_json, parse_utc_datetime, utc_now
 
 MODEL_PRICES: dict[str, dict[str, float]] = {
     "gpt-5.6-sol": {
@@ -65,6 +68,12 @@ class _PriceProfile:
     provider: str
     base_url: str
     prices: dict[str, float]
+    status: str = "fallback"
+    version_id: str = ""
+    effective_at: datetime | None = None
+    created_at: datetime | None = None
+    created_by: str = ""
+    source: str = ""
 
 
 def _normalize_model_text(value: str) -> str:
@@ -111,7 +120,12 @@ def _model_matches(pattern: str, model_name: str) -> tuple[bool, int]:
     return False, 0
 
 
-def _price_profile_from_mapping(key: str, value: Mapping[str, Any]) -> _PriceProfile:
+def _price_profile_from_mapping(
+    key: str,
+    value: Mapping[str, Any],
+    *,
+    status: str = "fallback",
+) -> _PriceProfile:
     prices = {
         "input": float(value["input"]),
         "cached_input": float(value["cached_input"]),
@@ -137,6 +151,23 @@ def _price_profile_from_mapping(key: str, value: Mapping[str, Any]) -> _PricePro
         provider=provider,
         base_url=base_url,
         prices=prices,
+        status=status,
+    )
+
+
+def _price_profile_from_version(version: PriceVersion) -> _PriceProfile:
+    return _PriceProfile(
+        key=version.match_pattern,
+        model_pattern=version.match_pattern,
+        provider=version.provider,
+        base_url=version.base_url,
+        prices=version.prices,
+        status="versioned",
+        version_id=version.version_id,
+        effective_at=version.effective_at,
+        created_at=version.created_at,
+        created_by=version.created_by,
+        source=version.source,
     )
 
 
@@ -157,14 +188,38 @@ class UsageCalculator:
     """Calculate usage cost from token counts and per-model pricing."""
 
     def __init__(
-        self, model_prices: Mapping[str, Mapping[str, Any]] | None = None
+        self,
+        model_prices: Mapping[str, Mapping[str, Any]] | None = None,
+        *,
+        pricing_versions: Iterable[PriceVersion | Mapping[str, Any]] | None = None,
     ) -> None:
         source = MODEL_PRICES if model_prices is None else model_prices
         self._model_prices = {name: dict(prices) for name, prices in source.items()}
         self._price_profiles = [
-            _price_profile_from_mapping(name, prices)
+            _price_profile_from_mapping(
+                name,
+                prices,
+                status="fallback",
+            )
             for name, prices in self._model_prices.items()
             if all(field in prices for field in REQUIRED_PRICE_FIELDS)
+        ]
+        self._builtin_profiles = [
+            _price_profile_from_mapping(name, prices, status="fallback")
+            for name, prices in MODEL_PRICES.items()
+            if all(field in prices for field in REQUIRED_PRICE_FIELDS)
+        ]
+        self._has_version_catalog = pricing_versions is not None
+        versions: list[PriceVersion] = []
+        for raw_version in pricing_versions or ():
+            if isinstance(raw_version, PriceVersion):
+                versions.append(raw_version)
+            elif isinstance(raw_version, Mapping):
+                versions.append(PriceVersion.from_mapping(raw_version))
+            else:
+                raise ValueError("pricing_versions entries must be PriceVersion or mappings")
+        self._version_profiles = [
+            _price_profile_from_version(version) for version in versions
         ]
 
     def normalize_model_name(self, model_name: str) -> str:
@@ -191,33 +246,126 @@ class UsageCalculator:
         *,
         provider: str = "",
         base_url: str = "",
+        occurred_at: datetime | str | int | float | None = None,
     ) -> _PriceProfile | None:
-        normalized_provider = _normalize_provider(provider)
-        normalized_base_url = _normalize_base_url(base_url)
+        if self._has_version_catalog:
+            occurred = parse_utc_datetime(
+                occurred_at if occurred_at is not None else utc_now(),
+                field_name="occurred_at",
+            )
+            scope_profiles = self._resolve_version_scope(
+                model_name,
+                provider=provider,
+                base_url=base_url,
+            )
+            if scope_profiles:
+                eligible = [
+                    profile
+                    for profile in scope_profiles
+                    if profile.effective_at is not None
+                    and profile.effective_at <= occurred
+                ]
+                if eligible:
+                    return max(
+                        eligible,
+                        key=lambda profile: (
+                            profile.effective_at or occurred,
+                            profile.created_at or occurred,
+                            profile.version_id,
+                        ),
+                    )
+            return self._resolve_from_profiles(
+                self._builtin_profiles,
+                model_name,
+                provider=provider,
+                base_url=base_url,
+            )
+        return self._resolve_from_profiles(
+            self._price_profiles,
+            model_name,
+            provider=provider,
+            base_url=base_url,
+        )
+
+    def _resolve_version_scope(
+        self,
+        model_name: str,
+        *,
+        provider: str,
+        base_url: str,
+    ) -> list[_PriceProfile]:
+        grouped: dict[tuple[str, str, str], list[_PriceProfile]] = {}
+        for profile in self._version_profiles:
+            grouped.setdefault(
+                (profile.provider, profile.base_url, profile.model_pattern.lower()),
+                [],
+            ).append(profile)
+        candidates: list[tuple[int, tuple[str, str, str]]] = []
+        for scope_key, profiles in grouped.items():
+            score = self._profile_score(
+                profiles[0],
+                model_name,
+                provider=provider,
+                base_url=base_url,
+            )
+            if score is not None:
+                candidates.append((score, scope_key))
+        if not candidates:
+            return []
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return grouped[candidates[0][1]]
+
+    def _resolve_from_profiles(
+        self,
+        profiles: Iterable[_PriceProfile],
+        model_name: str,
+        *,
+        provider: str,
+        base_url: str,
+    ) -> _PriceProfile | None:
         candidates: list[tuple[int, _PriceProfile]] = []
-        for profile in self._price_profiles:
-            matches, score = _model_matches(profile.model_pattern, model_name)
-            if not matches:
-                continue
-            if normalized_provider:
-                if profile.provider and profile.provider != normalized_provider:
-                    continue
-                if profile.provider == normalized_provider:
-                    score += 1000
-            elif profile.provider:
-                score -= 200
-            if normalized_base_url:
-                if profile.base_url and not normalized_base_url.startswith(profile.base_url):
-                    continue
-                if profile.base_url:
-                    score += 2000 + len(profile.base_url)
-            elif profile.base_url:
-                score -= 400
-            candidates.append((score, profile))
+        for profile in profiles:
+            score = self._profile_score(
+                profile,
+                model_name,
+                provider=provider,
+                base_url=base_url,
+            )
+            if score is not None:
+                candidates.append((score, profile))
         if not candidates:
             return None
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
+
+    @staticmethod
+    def _profile_score(
+        profile: _PriceProfile,
+        model_name: str,
+        *,
+        provider: str,
+        base_url: str,
+    ) -> int | None:
+        normalized_provider = _normalize_provider(provider)
+        normalized_base_url = _normalize_base_url(base_url)
+        matches, score = _model_matches(profile.model_pattern, model_name)
+        if not matches:
+            return None
+        if normalized_provider:
+            if profile.provider and profile.provider != normalized_provider:
+                return None
+            if profile.provider == normalized_provider:
+                score += 1000
+        elif profile.provider:
+            score -= 200
+        if normalized_base_url:
+            if profile.base_url and not normalized_base_url.startswith(profile.base_url):
+                return None
+            if profile.base_url:
+                score += 2000 + len(profile.base_url)
+        elif profile.base_url:
+            score -= 400
+        return score
 
     def price_snapshot(
         self,
@@ -225,22 +373,47 @@ class UsageCalculator:
         *,
         provider: str = "",
         base_url: str = "",
-    ) -> dict[str, object] | None:
+        occurred_at: datetime | str | int | float | None = None,
+    ) -> dict[str, object]:
         """Return the exact local price profile selected for an estimate."""
         profile = self._resolve_price_profile(
             model_name,
             provider=provider,
             base_url=base_url,
+            occurred_at=occurred_at,
         )
         if profile is None:
-            return None
-        return {
+            return {
+                "key": _normalize_model_text(model_name),
+                "model": str(model_name or "").strip(),
+                "provider": _normalize_provider(provider),
+                "baseUrl": _normalize_base_url(base_url),
+                "prices": None,
+                "version_id": None,
+                "effective_at": None,
+                "status": "unavailable",
+            }
+        snapshot: dict[str, object] = {
             "key": profile.key,
             "model": profile.model_pattern,
             "provider": profile.provider or _normalize_provider(provider),
             "baseUrl": profile.base_url or _normalize_base_url(base_url),
             "prices": dict(profile.prices),
+            "version_id": profile.version_id or None,
+            "effective_at": (
+                datetime_to_json(profile.effective_at)
+                if profile.effective_at is not None
+                else None
+            ),
+            "status": profile.status,
         }
+        if profile.created_at is not None:
+            snapshot["created_at"] = datetime_to_json(profile.created_at)
+        if profile.created_by:
+            snapshot["created_by"] = profile.created_by
+        if profile.source:
+            snapshot["source"] = profile.source
+        return snapshot
 
     def calculate_cost_usd(
         self,
@@ -253,12 +426,14 @@ class UsageCalculator:
         cache_write_tokens: int = 0,
         provider: str = "",
         base_url: str = "",
+        occurred_at: datetime | str | int | float | None = None,
     ) -> float:
         """Calculate total USD cost rounded to 6 decimal places."""
         profile = self._resolve_price_profile(
             model_name,
             provider=provider,
             base_url=base_url,
+            occurred_at=occurred_at,
         )
         if profile is None:
             raise ValueError(f"Unsupported model: {model_name}")
@@ -281,3 +456,40 @@ class UsageCalculator:
             + (output_count * prices["output"])
         ) / 1_000_000.0
         return round(total_cost, 6)
+
+    def calculate_cost_with_snapshot(
+        self,
+        model_name: str,
+        input_tokens: int,
+        cached_input_tokens: int,
+        output_tokens: int,
+        reasoning_tokens: int = 0,
+        *,
+        cache_write_tokens: int = 0,
+        provider: str = "",
+        base_url: str = "",
+        occurred_at: datetime | str | int | float | None = None,
+    ) -> tuple[float | None, dict[str, object]]:
+        """Return a nullable cost together with the immutable selection snapshot."""
+        snapshot = self.price_snapshot(
+            model_name,
+            provider=provider,
+            base_url=base_url,
+            occurred_at=occurred_at,
+        )
+        if snapshot["status"] == "unavailable":
+            return None, snapshot
+        return (
+            self.calculate_cost_usd(
+                model_name=model_name,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cache_write_tokens=cache_write_tokens,
+                provider=provider,
+                base_url=base_url,
+                occurred_at=occurred_at,
+            ),
+            snapshot,
+        )

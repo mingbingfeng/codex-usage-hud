@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import sys
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.core.calculator import MODEL_PRICES, UsageCalculator, estimate_tokens
+from codex_usage_hud.pricing import PriceVersion
 
 
 class EstimateTokensTests(unittest.TestCase):
@@ -31,6 +33,179 @@ class EstimateTokensTests(unittest.TestCase):
 class UsageCalculatorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.calculator = UsageCalculator()
+
+    @staticmethod
+    def _version(
+        version_id: str,
+        *,
+        model: str,
+        input_price: float,
+        effective_at: str,
+        provider: str = "",
+        base_url: str = "",
+    ) -> PriceVersion:
+        return PriceVersion.from_mapping(
+            {
+                "version_id": version_id,
+                "model": model,
+                "provider": provider,
+                "base_url": base_url,
+                "input": input_price,
+                "cached_input": input_price,
+                "cache_write": input_price,
+                "output": input_price,
+                "reasoning": input_price,
+                "effective_at": effective_at,
+                "created_at": "2026-08-05T00:00:00Z",
+                "created_by": "user_edit",
+                "source": "manual",
+            }
+        )
+
+    def test_price_versions_use_old_before_boundary_and_new_at_boundary(self) -> None:
+        old = self._version(
+            "old-version",
+            model="gpt-5.5",
+            input_price=1,
+            effective_at="2026-07-01T00:00:00Z",
+        )
+        new = self._version(
+            "new-version",
+            model="gpt-5.5",
+            input_price=2,
+            effective_at="2026-08-05T09:00:00+08:00",
+        )
+        calculator = UsageCalculator({}, pricing_versions=(old, new))
+
+        before_cost, before_snapshot = calculator.calculate_cost_with_snapshot(
+            "gpt-5.5",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            occurred_at="2026-08-05T00:59:59Z",
+        )
+        boundary_cost, boundary_snapshot = calculator.calculate_cost_with_snapshot(
+            "gpt-5.5",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            occurred_at="2026-08-05T01:00:00Z",
+        )
+
+        self.assertEqual(before_cost, 1.0)
+        self.assertEqual(before_snapshot["version_id"], "old-version")
+        self.assertEqual(before_snapshot["status"], "versioned")
+        self.assertEqual(boundary_cost, 2.0)
+        self.assertEqual(boundary_snapshot["version_id"], "new-version")
+        self.assertEqual(boundary_snapshot["effective_at"], "2026-08-05T01:00:00Z")
+
+    def test_scope_priority_is_resolved_before_effective_version(self) -> None:
+        global_old = self._version(
+            "global-old",
+            model="gpt-5.5",
+            input_price=9,
+            effective_at="2026-01-01T00:00:00Z",
+        )
+        scoped_future = self._version(
+            "scoped-future",
+            model="gpt-5.5",
+            input_price=2,
+            provider="vendor-a",
+            base_url="https://api.vendor-a.example/v1",
+            effective_at="2026-08-01T00:00:00Z",
+        )
+        calculator = UsageCalculator({}, pricing_versions=(global_old, scoped_future))
+
+        cost, snapshot = calculator.calculate_cost_with_snapshot(
+            "gpt-5.5",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            provider="vendor-a",
+            base_url="https://api.vendor-a.example/v1/chat/completions",
+            occurred_at="2026-07-31T23:59:59Z",
+        )
+
+        self.assertEqual(cost, MODEL_PRICES["gpt-5.5"]["input"])
+        self.assertEqual(snapshot["status"], "fallback")
+        self.assertIsNone(snapshot["version_id"])
+
+    def test_provider_and_base_url_specific_version_wins(self) -> None:
+        versions = (
+            self._version(
+                "global",
+                model="custom-model",
+                input_price=1,
+                effective_at="2026-01-01T00:00:00Z",
+            ),
+            self._version(
+                "provider",
+                model="custom-model",
+                input_price=2,
+                provider="vendor-a",
+                effective_at="2026-01-01T00:00:00Z",
+            ),
+            self._version(
+                "base-url",
+                model="custom-model",
+                input_price=3,
+                provider="vendor-a",
+                base_url="https://api.vendor-a.example/v1",
+                effective_at="2026-01-01T00:00:00Z",
+            ),
+        )
+        calculator = UsageCalculator({}, pricing_versions=versions)
+
+        cost, snapshot = calculator.calculate_cost_with_snapshot(
+            "custom-model",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            provider="vendor-a",
+            base_url="https://api.vendor-a.example/v1/chat",
+            occurred_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(cost, 3.0)
+        self.assertEqual(snapshot["version_id"], "base-url")
+
+    def test_pre_version_builtin_fallback_and_unknown_unavailable(self) -> None:
+        future = self._version(
+            "future-relative-to-event",
+            model="gpt-5.5",
+            input_price=2,
+            effective_at="2026-08-01T00:00:00Z",
+        )
+        calculator = UsageCalculator({}, pricing_versions=(future,))
+
+        fallback_cost, fallback_snapshot = calculator.calculate_cost_with_snapshot(
+            "gpt-5.5",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            occurred_at="2026-07-01T00:00:00Z",
+        )
+        unavailable_cost, unavailable_snapshot = calculator.calculate_cost_with_snapshot(
+            "unknown-model",
+            input_tokens=1_000_000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            occurred_at="2026-07-01T00:00:00Z",
+        )
+
+        self.assertEqual(fallback_cost, MODEL_PRICES["gpt-5.5"]["input"])
+        self.assertEqual(fallback_snapshot["status"], "fallback")
+        self.assertIsNone(unavailable_cost)
+        self.assertEqual(unavailable_snapshot["status"], "unavailable")
+        self.assertIsNone(unavailable_snapshot["prices"])
+
+    def test_explicit_naive_occurred_at_is_rejected(self) -> None:
+        calculator = UsageCalculator({}, pricing_versions=())
+        with self.assertRaises(ValueError):
+            calculator.price_snapshot(
+                "gpt-5.5",
+                occurred_at=datetime(2026, 8, 5, 9, 0),
+            )
 
     def test_cached_input_discount_for_gpt_5_5(self) -> None:
         cost = self.calculator.calculate_cost_usd(

@@ -25,6 +25,7 @@ from .core import (
     SseRequestStateMachine,
     UsageCalculator,
 )
+from .core.pricing_snapshots import PricingSnapshotLedger
 from .core.deleted_usage import DeletedUsageLedger
 from .core.rest_reminder import RestReminderPresenter
 from .core.runtime_errors import RuntimeErrorRegistry
@@ -52,6 +53,7 @@ DEFAULT_SQLITE_LOG = "logs_2.sqlite"
 DEFAULT_STATE_DB = "state_5.sqlite"
 DEFAULT_SESSION_INDEX = "session_index.jsonl"
 DELETED_SESSION_USAGE_FILENAME = "deleted_session_usage.json"
+PRICING_SNAPSHOT_DATABASE_FILENAME = "pricing-snapshots.sqlite3"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +94,7 @@ class RuntimeContext:
     current_session_tail_state: object | None = None
     session_snapshot_cache: object | None = None
     renderer_mode: bool = True
+    defer_cold_renderer_budget: bool = True
     background_usage_runtime: object | None = None
     usage_insights_payload: dict[str, object] = field(default_factory=dict)
     usage_insights_worker: object | None = None
@@ -228,7 +231,15 @@ def _stop_active_session_tracker(context: "RuntimeContext") -> None:
 
 
 def _cost_estimator_from_config(config: UserConfig) -> CostEstimator:
-    return CostEstimator(UsageCalculator(config.price_table()))
+    return CostEstimator(
+        UsageCalculator(
+            config.price_table(),
+            pricing_versions=getattr(config, "pricing_versions", ()),
+        ),
+        pricing_ledger=PricingSnapshotLedger(
+            hud_runtime_dir() / PRICING_SNAPSHOT_DATABASE_FILENAME
+        ),
+    )
 
 
 def _configure_ui_cost_estimators(estimator: CostEstimator) -> None:
@@ -347,6 +358,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         runtime_errors=RuntimeErrorRegistry(),
         visible_app_error_cache=VisibleAppErrorCache(),
         renderer_mode=renderer_active_session_bridge,
+        defer_cold_renderer_budget=not bool(getattr(args, "once", False)),
         config_overrides=runtime_config.cli_overrides(args),
         config_reload=lambda runtime: runtime_config.reload_if_changed(
             runtime, _runtime_config_ports()
@@ -364,6 +376,7 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
                     ),
                     provider=provider_registry.app_provider,
                     price_table=user_config.price_table(),
+                    pricing_versions=getattr(user_config, "pricing_versions", ()),
                     event_bus=context.runtime_events,
                     runtime_errors=context.runtime_errors,
                 ).start()

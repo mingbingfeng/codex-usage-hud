@@ -31,7 +31,9 @@ _REST_KEYS = frozenset(
         "rest_reminder_lunch_end_time",
     }
 )
-PRICING_KEYS = frozenset({"pricing_url", "model_prices"})
+PRICING_KEYS = frozenset(
+    {"pricing_url", "model_prices", "pricing_versions", "pricing_audit"}
+)
 BUDGET_KEYS = frozenset(
     {
         "daily_budget_usd",
@@ -106,8 +108,22 @@ def partial_domains_for_command(
         return partial_domains_for_changed_config(
             changed_config_keys(previous_config, current_config)
         )
-    if action == "fetchPrices":
+    if action in {
+        "fetchPrices",
+        "savePricing",
+        "pricingImportCommit",
+        "pricingRecalculationExecute",
+    }:
         return {"currentSession", "settings"}
+    if action in {
+        "fetchPricesPreview",
+        "pricingImportPreview",
+        "pricingExport",
+        "pricingTemplate",
+        "pricingRecalculationPreview",
+        "pricingImpactPreview",
+    }:
+        return {"settings"}
     if action in {
         "openBackgroundUsage",
         "backgroundUsageQuery",

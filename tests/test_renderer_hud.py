@@ -42,6 +42,24 @@ from codex_usage_hud.renderer_payload_builder import (
 
 
 class RendererHudPayloadTests(unittest.TestCase):
+    def test_partial_budget_cost_is_not_presented_as_zero_or_complete(self) -> None:
+        snapshot = ParsedSession(status="parsed")
+        snapshot.today_tokens = 1200
+        snapshot.today_cost_usd = None
+        snapshot.week_tokens = 4200
+        snapshot.week_cost_usd = None
+
+        payload = payload_from_snapshot(snapshot).to_json()
+
+        self.assertIn("今日 1,200/不可用", payload["topLine"])
+        self.assertIn("本周 4,200/不可用", payload["topLine"])
+        self.assertEqual(payload["topProgress"]["budget"][0]["label"], "今日 1,200/不可用")
+        self.assertEqual(payload["topProgress"]["budget"][1]["label"], "本周 4,200/不可用")
+        self.assertEqual(payload["topProgress"]["budget"][0].get("rightText", ""), "")
+        self.assertIn("价格不可用", payload["topLine"])
+        self.assertNotIn("今日 1,200/$0", payload["topLine"])
+        self.assertNotIn("本周 4,200/$0", payload["topLine"])
+
     def test_renderer_theme_payload_accepts_persisted_source(self) -> None:
         snapshot = CodexThemeSnapshot.from_probe_result(
             {
@@ -256,7 +274,22 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-price-field="base_url"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="cache_write"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("缓存写入", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertNotIn('data-price-field="reasoning"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-price-field="reasoning"', renderer_hud.RENDERER_HUD_SCRIPT)
+        for action in (
+            "pricing-export",
+            "pricing-template",
+            "pricing-import-open",
+            "pricing-copy-example",
+            "pricing-recalculate-open",
+            "pricing-effective-confirm",
+            "pricing-import-preview",
+            "pricing-import-commit",
+            "pricing-recalc-preview",
+            "pricing-recalc-execute",
+        ):
+            self.assertIn(f'data-action="{action}"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("applyPricingCommandStatus", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-pricing-import-file="true"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("unknownPriceModels", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-add-detected-model", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-action="settings-exit"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -556,6 +589,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-provider-notification-only="true"', script)
         self.assertIn("仅气泡通知不统计", script)
         self.assertIn("function captureSettingsProviderForm", script)
+        self.assertIn('data-price-model="${escapeHtml(model)}"', script)
+        self.assertIn('const originalKey = String(row.dataset.priceKey || "").trim();', script)
+        self.assertIn("const sameScope = originalKey", script)
+        self.assertIn("? originalKey", script)
         self.assertIn("function switchSettingsProvider", script)
         self.assertIn("settingsDirtyProviders.add(activeProvider)", script)
         self.assertIn("${count} 个 Provider 有未保存修改", script)

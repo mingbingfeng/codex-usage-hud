@@ -68,6 +68,127 @@ def test_snapshot_keeps_selection_sequence_captured_before_parse() -> None:
     assert snapshot.selection_observed_at_ms == 100
 
 
+def test_renderer_snapshot_defers_cold_budget_aggregation() -> None:
+    tracker = SimpleNamespace(
+        selection_seq=1,
+        selection_observed_at_ms=1,
+        title_for_session=lambda path, session_id: "current title",
+    )
+    summarize_calls: list[object] = []
+    active_work_calls: list[object] = []
+
+    class ColdCache:
+        def is_warm_for(self, *_args: object) -> bool:
+            return False
+
+        def summarize(self, *_args: object, **_kwargs: object) -> tuple[UsageSummary, UsageSummary]:
+            summarize_calls.append(True)
+            return UsageSummary(), UsageSummary()
+
+    context = SimpleNamespace(
+        reload_user_config=lambda: None,
+        renderer_mode=True,
+        active_session_tracker=tracker,
+        session_resolver=SimpleNamespace(
+            resolve=lambda: (Path("current.jsonl"), "renderer:current"),
+            session_id="current",
+        ),
+        session_snapshot_cache=SimpleNamespace(
+            snapshot_for=lambda path, session_id: ParsedSession(
+                session_id="current", status="parsed"
+            )
+        ),
+        visible_app_error_cache=SimpleNamespace(resolve=lambda snapshot, error: ""),
+        platform=SimpleNamespace(get_active_app_error=lambda: ""),
+        user_config=UserConfig.defaults(),
+        usage_cache=ColdCache(),
+        sessions_root=Path("."),
+        daily_budget_usd=1.0,
+        weekly_budget_usd=2.0,
+        budget_thresholds=[],
+        pre_send_estimator=None,
+        parser=SimpleNamespace(),
+        session_management_current_session_id="",
+        session_management_active_session_ids=set(),
+    )
+    ports = SnapshotBuilderPorts(
+        record_active_session_error=lambda *args: None,
+        provider_scope=lambda *args: None,
+        refresh_usage_insights=lambda *args: None,
+        active_work_items=lambda *args: active_work_calls.append(True) or [],
+        apply_family_usage=lambda *args: None,
+    )
+
+    snapshot = build_snapshot(context, ports)
+
+    assert snapshot.session_id == "current"
+    assert snapshot.daily_limit_usd == 1.0
+    assert snapshot.weekly_limit_usd == 2.0
+    assert not summarize_calls
+    assert not active_work_calls
+
+
+def test_once_snapshot_does_not_defer_cold_budget_aggregation() -> None:
+    tracker = SimpleNamespace(
+        selection_seq=1,
+        selection_observed_at_ms=1,
+        title_for_session=lambda path, session_id: "current title",
+    )
+    summarize_calls: list[object] = []
+
+    class ColdCache:
+        def is_warm_for(self, *_args: object) -> bool:
+            return False
+
+        def summarize(
+            self, *_args: object, **_kwargs: object
+        ) -> tuple[UsageSummary, UsageSummary]:
+            summarize_calls.append(True)
+            summary = UsageSummary(tokens=10, cost_usd=1.0)
+            return summary, summary
+
+    context = SimpleNamespace(
+        reload_user_config=lambda: None,
+        renderer_mode=True,
+        defer_cold_renderer_budget=False,
+        active_session_tracker=tracker,
+        session_resolver=SimpleNamespace(
+            resolve=lambda: (Path("current.jsonl"), "renderer:current"),
+            session_id="current",
+        ),
+        session_snapshot_cache=SimpleNamespace(
+            snapshot_for=lambda path, session_id: ParsedSession(
+                session_id="current", status="parsed"
+            )
+        ),
+        visible_app_error_cache=SimpleNamespace(resolve=lambda snapshot, error: ""),
+        platform=SimpleNamespace(get_active_app_error=lambda: ""),
+        user_config=UserConfig.defaults(),
+        usage_cache=ColdCache(),
+        sessions_root=Path("."),
+        daily_budget_usd=1.0,
+        weekly_budget_usd=2.0,
+        budget_thresholds=[],
+        pre_send_estimator=None,
+        parser=SimpleNamespace(),
+        session_management_current_session_id="",
+        session_management_active_session_ids=set(),
+    )
+    ports = SnapshotBuilderPorts(
+        record_active_session_error=lambda *args: None,
+        provider_scope=lambda *args: None,
+        refresh_usage_insights=lambda *args: None,
+        active_work_items=lambda *args: [],
+        apply_family_usage=lambda *args: None,
+    )
+
+    snapshot = build_snapshot(context, ports)
+
+    assert summarize_calls == [True]
+    assert snapshot.today_tokens == 10
+    assert snapshot.week_tokens == 10
+
+
 def test_runtime_snapshot_builder_preserves_refresh_options() -> None:
     calls: list[tuple[object, dict[str, object]]] = []
 

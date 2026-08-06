@@ -16,6 +16,7 @@ from .core import (
     BaseEstimate,
     ParsedSession,
     ReadingActivity,
+    UsageSummary,
     detect_reading_activity,
 )
 from . import runtime_policies, runtime_usage
@@ -200,6 +201,36 @@ _BUDGET_FIELDS = (
 )
 
 
+def _should_defer_cold_renderer_budget(
+    context: object,
+    day_start: datetime,
+    week_start: datetime,
+) -> bool:
+    if not bool(getattr(context, "renderer_mode", False)):
+        return False
+    if not bool(getattr(context, "defer_cold_renderer_budget", True)):
+        return False
+    sessions_root = Path(getattr(context, "sessions_root"))
+    if not sessions_root.exists():
+        return False
+    is_warm_for = getattr(getattr(context, "usage_cache", None), "is_warm_for", None)
+    if not callable(is_warm_for):
+        return False
+    try:
+        return not bool(is_warm_for(sessions_root, day_start, week_start))
+    except Exception:
+        return False
+
+
+def _complete_summary_cost(summary: UsageSummary) -> float | None:
+    """Return a budget amount only when every known event has a price."""
+    total = max(0, int(getattr(summary, "total_event_count", 0) or 0))
+    priced = min(total, max(0, int(getattr(summary, "priced_event_count", 0) or 0)))
+    if total > 0 and priced < total:
+        return None
+    return round(float(summary.cost_usd or 0.0), 6)
+
+
 def _reuse_budget(
     context: object,
     snapshot: ParsedSession,
@@ -223,7 +254,7 @@ def _summarize_budget(
     refresh_budget_aggregate: bool | None,
     refresh_budget_paths: Iterable[Path],
     refresh_current_session_usage: bool,
-) -> None:
+) -> bool:
     day_start, week_start = runtime_policies.budget_windows(context.user_config)
     paths = tuple(Path(path) for path in refresh_budget_paths)
     if (
@@ -234,40 +265,51 @@ def _summarize_budget(
     ):
         paths = (session_path,)
     scope = ports.provider_scope(context, snapshot)
-    today_total, week_total = context.usage_cache.summarize(
-        context.sessions_root,
-        day_start,
-        week_start,
-        allow_stale=refresh_budget_aggregate is False,
-        force_rescan=refresh_budget_aggregate is True,
-        refresh_paths=paths,
-        included_providers=scope,
-    )
+    deferred = _should_defer_cold_renderer_budget(context, day_start, week_start)
+    if deferred:
+        # The first renderer frame must not parse every historical session.
+        today_total, week_total = UsageSummary(), UsageSummary()
+    else:
+        today_total, week_total = context.usage_cache.summarize(
+            context.sessions_root,
+            day_start,
+            week_start,
+            allow_stale=refresh_budget_aggregate is False,
+            force_rescan=refresh_budget_aggregate is True,
+            refresh_paths=paths,
+            included_providers=scope,
+        )
     adjustment = context.user_config.weekly_adjustment_for_scope(scope)
     snapshot.today_tokens = today_total.tokens
-    snapshot.today_cost_usd = today_total.cost_usd
+    today_cost = _complete_summary_cost(today_total)
+    week_cost = _complete_summary_cost(week_total)
+    snapshot.today_cost_usd = today_cost
     snapshot.week_tokens = week_total.tokens
-    snapshot.week_cost_usd = round(week_total.cost_usd + adjustment, 6)
+    snapshot.week_cost_usd = (
+        None if week_cost is None else round(week_cost + adjustment, 6)
+    )
     prior = runtime_usage.usage_before_today_in_week(
         week_total, today_total, day_start, week_start
     )
     snapshot.week_before_today_tokens = prior.tokens
-    snapshot.week_before_today_cost_usd = prior.cost_usd
+    snapshot.week_before_today_cost_usd = _complete_summary_cost(prior)
     snapshot.week_adjustment_usd = adjustment
     snapshot.daily_limit_usd = context.daily_budget_usd
     snapshot.weekly_limit_usd = context.weekly_budget_usd
     snapshot.day_start = day_start
     snapshot.week_start = week_start
     snapshot.budget_warnings = runtime_policies.budget_warning_messages(
-        today_total.cost_usd,
+        today_cost,
         snapshot.week_cost_usd,
         context.daily_budget_usd,
         context.weekly_budget_usd,
         context.budget_thresholds,
     )
     snapshot.budget_error = "" if context.sessions_root.exists() else snapshot.error
-    ports.refresh_usage_insights(context)
+    if not deferred:
+        ports.refresh_usage_insights(context)
     ports.apply_family_usage(context.usage_cache, snapshot, scope)
+    return not deferred
 
 
 def apply_pre_send_pricing(
@@ -383,10 +425,11 @@ def build_snapshot(
     )
     _apply_visible_app_error(snapshot, app_error)
     app_error_checked_at_ms = now_ms()
+    budget_ready = True
     if reuse_budget_from is not None:
         _reuse_budget(context, snapshot, reuse_budget_from, ports)
     else:
-        _summarize_budget(
+        budget_ready = _summarize_budget(
             context,
             snapshot,
             session_path,
@@ -396,7 +439,7 @@ def build_snapshot(
             refresh_current_session_usage=refresh_current_session_usage,
         )
     usage_summarized_at_ms = now_ms()
-    if refresh_active_work_items:
+    if refresh_active_work_items and budget_ready:
         snapshot.active_work_items = ports.active_work_items(
             context, snapshot, session_path
         )

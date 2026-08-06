@@ -2419,10 +2419,10 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-price-row,
           #${rootId} .codex-usage-hud-price-header {
             display: grid;
-            grid-template-columns: minmax(130px, 1.4fr) repeat(4, minmax(72px, 1fr));
+            grid-template-columns: minmax(130px, 1.4fr) repeat(5, minmax(72px, 1fr));
             gap: 6px;
             align-items: center;
-            min-width: 610px;
+            min-width: 680px;
           }
           #${rootId} .codex-usage-hud-price-advanced {
             display: none;
@@ -2439,6 +2439,131 @@ TEXT = r"""
             align-items: center;
             color: var(--codex-usage-hud-muted, #8492a6);
             font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-pricing-tools {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 72%, transparent);
+          }
+          #${rootId} .codex-usage-hud-pricing-tools .codex-usage-hud-settings-action {
+            min-width: 0;
+            width: 100%;
+            white-space: normal;
+          }
+          #${rootId} .codex-usage-hud-pricing-version-list {
+            min-width: 0;
+            display: grid;
+            gap: 4px;
+            margin-top: 7px;
+          }
+          #${rootId} .codex-usage-hud-pricing-version-item {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, auto);
+            gap: 8px;
+            align-items: center;
+            padding: 5px 7px;
+            border: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 82%, transparent);
+            border-radius: 5px;
+            background: color-mix(in srgb, var(--codex-usage-hud-panel-surface, #141b24) 78%, transparent);
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-pricing-version-item strong {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--codex-usage-hud-text, #e8eef7);
+          }
+          #${rootId} .codex-usage-hud-pricing-version-item span {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            font: 10px Consolas, "Cascadia Mono", ui-monospace, monospace;
+          }
+          #${rootId} .codex-usage-hud-pricing-version-empty {
+            margin-top: 7px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-pricing-field {
+            min-width: 0;
+            display: grid;
+            gap: 5px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 11px;
+            font-weight: 650;
+          }
+          #${rootId} .codex-usage-hud-pricing-field input,
+          #${rootId} .codex-usage-hud-pricing-field textarea {
+            min-width: 0;
+            box-sizing: border-box;
+            width: 100%;
+            border: 1px solid var(--codex-usage-hud-divider, #273241);
+            border-radius: 5px;
+            background: var(--codex-usage-hud-panel-surface, #141b24);
+            color: var(--codex-usage-hud-text, #e8eef7);
+            padding: 7px;
+            outline: none;
+            font: inherit;
+            font-weight: 400;
+          }
+          #${rootId} .codex-usage-hud-pricing-field textarea {
+            min-height: 132px;
+            resize: vertical;
+            font-family: Consolas, "Cascadia Mono", ui-monospace, monospace;
+            font-size: 10px;
+            line-height: 1.45;
+          }
+          #${rootId} .codex-usage-hud-pricing-field input:focus,
+          #${rootId} .codex-usage-hud-pricing-field textarea:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-pricing-field input[aria-invalid="true"] {
+            border-color: var(--codex-usage-hud-warning, #ffb86b);
+          }
+          #${rootId} .codex-usage-hud-pricing-dialog {
+            width: min(700px, calc(100% - 24px));
+          }
+          #${rootId} .codex-usage-hud-pricing-impact {
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 11px;
+            line-height: 1.55;
+            overflow-wrap: anywhere;
+          }
+          #${rootId} .codex-usage-hud-pricing-preview-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+          }
+          #${rootId} .codex-usage-hud-pricing-preview-grid > span {
+            min-width: 0;
+            display: grid;
+            gap: 3px;
+            padding: 8px;
+            border: 1px solid color-mix(in srgb, var(--codex-usage-hud-divider, #273241) 82%, transparent);
+            border-radius: 5px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-pricing-preview-grid strong {
+            color: var(--codex-usage-hud-text, #e8eef7);
+            font-size: 12px;
+            overflow-wrap: anywhere;
+          }
+          #${rootId} .codex-usage-hud-pricing-preview-list {
+            max-height: 112px;
+            overflow: auto;
+            display: grid;
+            gap: 4px;
+            padding: 7px;
+            border: 1px solid color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 36%, transparent);
+            border-radius: 5px;
+            color: var(--codex-usage-hud-warning, #ffb86b);
+            font-size: 10px;
           }
           #${rootId} .codex-usage-hud-settings-status {
             min-width: 0;
@@ -4134,6 +4259,12 @@ TEXT = r"""
             #${rootId} .codex-usage-hud-price-actions {
               grid-template-columns: auto minmax(0, 1fr) auto;
             }
+            #${rootId} .codex-usage-hud-pricing-tools {
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            #${rootId} .codex-usage-hud-pricing-preview-grid {
+              grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
             #${rootId} .codex-usage-hud-provider-context {
               align-items: center;
               flex-wrap: wrap;
@@ -4251,6 +4382,16 @@ TEXT = r"""
             }
             #${rootId} .codex-usage-hud-price-actions {
               grid-template-columns: minmax(0, 1fr);
+            }
+            #${rootId} .codex-usage-hud-pricing-tools,
+            #${rootId} .codex-usage-hud-pricing-preview-grid {
+              grid-template-columns: minmax(0, 1fr);
+            }
+            #${rootId} .codex-usage-hud-pricing-version-item {
+              grid-template-columns: minmax(0, 1fr) auto;
+            }
+            #${rootId} .codex-usage-hud-pricing-version-item time {
+              grid-column: 1 / -1;
             }
             #${rootId} .codex-usage-hud-provider-context {
               display: grid;

@@ -95,7 +95,11 @@ def apply_to_context(
     overrides = dict(getattr(context, "config_overrides", {}) or {})
     next_config = apply_cli_overrides(next_config, overrides)
     previous_config = getattr(context, "user_config", UserConfig.defaults())
-    prices_changed = next_config.price_table() != previous_config.price_table()
+    prices_changed = (
+        next_config.price_table() != previous_config.price_table()
+        or getattr(next_config, "pricing_versions", ())
+        != getattr(previous_config, "pricing_versions", ())
+    )
     sessions_root = getattr(context, "sessions_root", None)
     registry = None
     if isinstance(sessions_root, Path):
@@ -135,6 +139,7 @@ def apply_to_context(
         reconfigure(
             provider=str(getattr(context, "app_provider", "") or ""),
             price_table=next_config.price_table(),
+            pricing_versions=getattr(next_config, "pricing_versions", ()),
         )
     reminder = getattr(context, "rest_reminder", None)
     if reminder is not None:
