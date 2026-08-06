@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from codex_usage_hud.config import UserConfig
 from codex_usage_hud.core.pricing_snapshots import PricingSnapshotLedger
@@ -232,7 +235,52 @@ def test_generic_save_cannot_bypass_pricing_version_workflow() -> None:
     assert state["config"].to_dict() == before
 
 
-def test_export_template_and_recalculation_callbacks() -> None:
+def test_export_price_file_uses_current_prices_or_builtin_template(tmp_path: Path) -> None:
+    state = {"config": UserConfig.defaults()}
+    opened: list[Path] = []
+    ports = _ports(
+        state,
+        pricing_open_path=lambda path: opened.append(path),
+    )
+
+    with patch("codex_usage_hud.runtime_commands.hud_program_root", return_value=tmp_path):
+        exported = handle_general_command({"action": "pricingExport"}, ports)
+        exported_path = Path(str(exported["pricingPath"]))
+        opened_status = handle_general_command(
+            {"action": "pricingOpen", "filename": exported["filename"]}, ports
+        )
+
+    assert exported["pricingUsedTemplate"] is False
+    assert exported["filename"] == "codex-usage-hud-pricing.json"
+    assert exported_path == tmp_path / str(exported["filename"])
+    assert json.loads(exported_path.read_text(encoding="utf-8"))["prices"]
+    assert not opened_status["kind"]
+    assert opened == [exported_path]
+
+    state["config"] = replace(
+        UserConfig.defaults(),
+        model_prices={},
+        pricing_versions=(),
+        pricing_audit=(),
+    )
+    with patch("codex_usage_hud.runtime_commands.hud_program_root", return_value=tmp_path):
+        fallback = handle_general_command({"action": "pricingExport"}, ports)
+
+    fallback_path = Path(str(fallback["pricingPath"]))
+    fallback_prices = json.loads(fallback_path.read_text(encoding="utf-8"))["prices"]
+    assert fallback["pricingUsedTemplate"] is True
+    assert fallback_path == exported_path
+    assert len(list(tmp_path.glob("*.json"))) == 1
+    assert len(fallback_prices) == 1
+    assert fallback_prices[0]["model"] == "gpt-5.6-sol"
+    assert fallback_prices[0]["input"] == 5.0
+    assert fallback_prices[0]["cached_input"] == 0.5
+    assert fallback_prices[0]["cache_write"] == 6.25
+    assert fallback_prices[0]["output"] == 30.0
+    assert fallback_prices[0]["reasoning"] == 30.0
+
+
+def test_export_and_recalculation_callbacks() -> None:
     state = {"config": UserConfig.defaults()}
     scopes: list[tuple[str, dict[str, object]]] = []
     ports = _ports(
@@ -247,8 +295,6 @@ def test_export_template_and_recalculation_callbacks() -> None:
         ),
     )
 
-    exported = handle_general_command({"action": "pricingExport"}, ports)
-    template = handle_general_command({"action": "pricingTemplate"}, ports)
     preview = handle_general_command(
         {"action": "pricingRecalculationPreview", "provider": "custom"}, ports
     )
@@ -256,8 +302,6 @@ def test_export_template_and_recalculation_callbacks() -> None:
         {"action": "pricingRecalculationExecute", "provider": "custom"}, ports
     )
 
-    assert exported["pricingPayload"]["schema_version"] == 1
-    assert template["pricingPayload"]["prices"] == []
     assert preview["pricingRecalculationPreview"]["changedCount"] == 1
     assert executed["pricingRecalculationResult"]["changedCount"] == 1
     assert [kind for kind, _scope in scopes] == ["preview", "execute"]

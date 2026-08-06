@@ -120,6 +120,7 @@ def partial_domains_for_command(
         "pricingImportPreview",
         "pricingExport",
         "pricingTemplate",
+        "pricingOpen",
         "pricingRecalculationPreview",
         "pricingImpactPreview",
     }:

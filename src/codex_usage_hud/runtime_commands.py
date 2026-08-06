@@ -7,6 +7,10 @@ from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
+import os
+from pathlib import Path
+import subprocess
+import sys
 from threading import Event
 from types import SimpleNamespace
 from typing import Any
@@ -19,9 +23,11 @@ from .config import (
     ModelPrice,
     ProviderSettings,
     UserConfig,
+    default_model_prices,
     dismiss_warning_for_today,
     extract_model_prices,
     fetch_model_prices,
+    write_json_object,
 )
 from .core.calculator import UsageCalculator
 from .core.parser import CostEstimator
@@ -38,6 +44,7 @@ from .platforms import SessionSwitchController
 from .runtime_context import RuntimeContext, _build_usage_summary_cache
 from .runtime_snapshot_service import _apply_pre_send_pricing
 from .runtime_policies import budget_warning_messages
+from .runtime_paths import hud_program_root
 from .updater import AutoUpdateManager, check_for_update, download_update_asset, launch_installer
 
 
@@ -105,6 +112,7 @@ def refresh_latest_snapshot_for_partial_settings_command(
 
 _LOGGER = logging.getLogger(__name__)
 UNHANDLED = object()
+PRICING_EXPORT_FILENAME = "codex-usage-hud-pricing.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +152,7 @@ class GeneralCommandPorts:
     pricing_impact_preview: (
         Callable[[Mapping[str, object]], Mapping[str, object]] | None
     ) = None
+    pricing_open_path: Callable[[Path], None] | None = None
 
 
 def _status(message: str, *, kind: str = "") -> dict[str, object]:
@@ -302,6 +311,83 @@ def _pricing_payload_with_default_effective_at(
             for key, price in sorted(extracted.items())
         ],
     }
+
+
+def _pricing_template_payload(*, now: datetime) -> dict[str, object]:
+    fallback = default_model_prices().get("gpt-5.6-sol")
+    if fallback is None:
+        raise ValueError("内置模型价格中缺少 gpt-5.6-sol。")
+    timestamp = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    row = fallback.to_dict()
+    row.update(
+        {
+            "model": "gpt-5.6-sol",
+            "effective_at": timestamp,
+            "created_at": timestamp,
+            "created_by": "builtin_migration",
+            "source": "builtin",
+        }
+    )
+    payload = UserConfig.empty_pricing_template()
+    payload["prices"] = [row]
+    return payload
+
+
+def _pricing_export_payload(
+    config: UserConfig,
+    *,
+    now: datetime,
+) -> tuple[dict[str, object], bool]:
+    payload = config.export_pricing_payload()
+    prices = payload.get("prices")
+    if isinstance(prices, list) and prices:
+        return payload, False
+    return _pricing_template_payload(now=now), True
+
+
+def _pricing_export_path(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    return root / PRICING_EXPORT_FILENAME
+
+
+def _export_pricing_to_program_root(
+    config: UserConfig,
+) -> tuple[Path, bool]:
+    now = datetime.now(timezone.utc)
+    payload, used_template = _pricing_export_payload(config, now=now)
+    output_path = _pricing_export_path(hud_program_root())
+    write_json_object(output_path, payload)
+    return output_path.resolve(), used_template
+
+
+def _pricing_file_path(filename: object) -> Path:
+    raw_name = str(filename or "").strip()
+    name = Path(raw_name).name
+    if (
+        not raw_name
+        or name != raw_name
+        or name != PRICING_EXPORT_FILENAME
+    ):
+        raise ValueError("价格文件名无效。")
+    root = hud_program_root().resolve()
+    path = (root / name).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("价格文件必须位于 HUD 程序根目录。") from exc
+    if not path.is_file():
+        raise ValueError("价格文件不存在，请重新导出。")
+    return path
+
+
+def _open_system_path(path: Path) -> None:
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+        return
+    subprocess.Popen(["xdg-open", str(path)])
 
 
 def _sync_imported_current_prices(
@@ -1050,18 +1136,37 @@ def handle_general_command(
             status["pricingPayload"] = payload
             status["pricingUrl"] = url
             return status
-        if action == "pricingExport":
-            now = datetime.now().astimezone()
-            status = _status("当前价格 JSON 已生成。")
-            status["pricingPayload"] = ports.load_config().export_pricing_payload()
-            status["filename"] = f"codex-usage-hud-pricing-{now:%Y%m%d-%H%M}.json"
+        if action in {"pricingExport", "pricingTemplate"}:
+            try:
+                output_path, used_template = _export_pricing_to_program_root(
+                    ports.load_config()
+                )
+            except (OSError, ValueError) as exc:
+                return _status(f"价格 JSON 生成失败：{exc}", kind="error")
+            if used_template:
+                message = (
+                    "模型价格表为空，已使用 gpt-5.6-sol 内置价格模板生成："
+                    f"{output_path}"
+                )
+            else:
+                message = f"当前价格 JSON 已生成：{output_path}"
+            status = _status(message)
+            status["filename"] = output_path.name
+            status["pricingPath"] = str(output_path)
+            status["pricingDirectory"] = str(output_path.parent)
+            status["pricingUsedTemplate"] = used_template
             status["mimeType"] = "application/json"
             return status
-        if action == "pricingTemplate":
-            status = _status("空价格模板已生成。")
-            status["pricingPayload"] = UserConfig.empty_pricing_template()
-            status["filename"] = "codex-usage-hud-pricing-template.json"
-            status["mimeType"] = "application/json"
+        if action == "pricingOpen":
+            if ports.pricing_open_path is None:
+                return _status("当前系统不支持打开价格文件。", kind="error")
+            try:
+                path = _pricing_file_path(command.get("filename"))
+                ports.pricing_open_path(path)
+            except (OSError, ValueError) as exc:
+                return _status(f"价格文件打开失败：{exc}", kind="error")
+            status = _status(f"已请求打开价格 JSON：{path}")
+            status["pricingPath"] = str(path)
             return status
         if action == "pricingRecalculationPreview":
             if ports.pricing_recalculation_preview is None:
@@ -1580,12 +1685,14 @@ def _handle_renderer_settings_command(
         pricing_recalculation_preview=preview_recalculation,
         pricing_recalculation_execute=execute_recalculation,
         pricing_impact_preview=preview_pricing_impact,
+        pricing_open_path=_open_system_path,
     )
     return dispatch_command(command, command_ports, general_ports)
 
 __all__ = [
     "RuntimeCommandPorts",
     "GeneralCommandPorts",
+    "PRICING_EXPORT_FILENAME",
     "UNHANDLED",
     "actionable_session_ids",
     "correlate_status",

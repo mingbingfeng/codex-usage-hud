@@ -2376,7 +2376,7 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-price-actions {
             min-width: 0;
             display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto;
+            grid-template-columns: auto minmax(0, 1fr) auto repeat(2, 30px);
             gap: 8px;
             align-items: center;
             margin-top: 6px;
@@ -2384,6 +2384,16 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-price-actions > .codex-usage-hud-settings-action {
             justify-self: start;
             white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-price-actions > .codex-usage-hud-pricing-icon-action {
+            width: 30px;
+            min-width: 30px;
+            height: 30px;
+            padding: 0;
+            display: inline-grid;
+            place-items: center;
+            font-size: 18px;
+            line-height: 1;
           }
           #${rootId} .codex-usage-hud-price-actions input[data-setting-key="pricing_url"] {
             min-width: 0;

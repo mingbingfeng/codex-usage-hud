@@ -647,16 +647,25 @@ TEXT = r"""
         event.stopPropagation();
         submitSettingsCommand(
           { action: "pricingExport" },
-          "正在生成当前价格 JSON...",
+          "正在生成价格 JSON 到 HUD 程序根目录...",
         );
         return;
       }
-      if (action.dataset.action === "pricing-template") {
+      if (action.dataset.action === "pricing-open-cancel") {
         event.preventDefault();
         event.stopPropagation();
+        closeSettingsConfirm();
+        setSettingsStatus("价格 JSON 已保留在 HUD 程序根目录。", "");
+        return;
+      }
+      if (action.dataset.action === "pricing-open") {
+        event.preventDefault();
+        event.stopPropagation();
+        const prompt = action.closest('[data-pricing-export-prompt="true"]');
+        const filename = String(prompt?.dataset.pricingFilename || "").trim();
         submitSettingsCommand(
-          { action: "pricingTemplate" },
-          "正在生成空价格模板...",
+          { action: "pricingOpen", filename },
+          "正在打开价格 JSON...",
         );
         return;
       }

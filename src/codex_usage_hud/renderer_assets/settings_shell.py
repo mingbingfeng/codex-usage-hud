@@ -271,40 +271,6 @@ _TEXT_PREFIX = r"""
         return parsed.toISOString();
       }
 
-      function pricingVersionSummaryHtml(settings, provider) {
-        const activeProvider = String(provider || "").trim().toLowerCase();
-        const versions = Array.isArray(settings?.pricing_versions) ? settings.pricing_versions : [];
-        const now = Date.now();
-        const latest = new Map();
-        versions.forEach((version) => {
-          if (!version || typeof version !== "object") return;
-          const versionProvider = String(version.provider || "").trim().toLowerCase();
-          if (versionProvider && versionProvider !== activeProvider) return;
-          const effectiveMs = new Date(version.effective_at || version.effectiveAt || "").getTime();
-          if (!Number.isFinite(effectiveMs) || effectiveMs > now) return;
-          const pattern = String(version.model || version.model_pattern || "").trim();
-          const baseUrl = String(version.base_url || version.baseUrl || "").trim();
-          const key = `${baseUrl}\n${pattern}`;
-          const current = latest.get(key);
-          if (!current || effectiveMs > current.effectiveMs) latest.set(key, { version, effectiveMs, pattern });
-        });
-        const entries = Array.from(latest.values()).sort((left, right) => left.pattern.localeCompare(right.pattern));
-        if (!entries.length) {
-          return '<div class="codex-usage-hud-pricing-version-empty">当前价格尚无可展示的版本时间</div>';
-        }
-        return `
-          <div class="codex-usage-hud-pricing-version-list" aria-label="当前生效价格版本">
-            ${entries.slice(0, 8).map(({ version, pattern, effectiveMs }) => `
-              <div class="codex-usage-hud-pricing-version-item">
-                <strong>${escapeHtml(pattern || "未命名模型")}</strong>
-                <span title="${escapeHtml(String(version.version_id || ""))}">${escapeHtml(String(version.version_id || "当前版本").slice(0, 12))}</span>
-                <time datetime="${escapeHtml(String(version.effective_at || ""))}">${escapeHtml(new Date(effectiveMs).toLocaleString("zh-CN", { hour12: false }))}</time>
-              </div>
-            `).join("")}
-          </div>
-        `;
-      }
-
       function priceRowsHtml(settings) {
         const prices = settings.model_prices && typeof settings.model_prices === "object" ? settings.model_prices : {};
         const entries = Object.entries(prices);
@@ -500,18 +466,12 @@ _TEXT_PREFIX = r"""
             </div>
             <div data-price-rows="true">${priceRowsHtml(providerSettings)}</div>
             ${detectedPriceModelsHtml(providerSettings)}
-            ${pricingVersionSummaryHtml(settings, activeProvider)}
             <div class="codex-usage-hud-price-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model">添加模型</button>
               <input data-setting-key="pricing_url" value="${escapeHtml(providerSettings.pricing_url)}" placeholder="${escapeHtml(pricingUrlPlaceholder)}" aria-label="计费单价获取地址" title="${escapeHtml(pricingUrlPlaceholder)}">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取并预览</button>
-            </div>
-            <div class="codex-usage-hud-pricing-tools" aria-label="价格 JSON 与历史费用工具">
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-export">导出当前价格</button>
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-template">下载空价格模板</button>
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-import-open">导入价格 JSON</button>
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-copy-example">复制示例</button>
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-recalculate-open">按价格版本重算历史费用</button>
+              <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-pricing-icon-action" data-action="pricing-export" aria-label="导出价格 JSON" title="导出价格 JSON"><span aria-hidden="true">⇩</span></button>
+              <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-pricing-icon-action" data-action="pricing-import-open" aria-label="导入价格 JSON" title="导入价格 JSON"><span aria-hidden="true">⇧</span></button>
             </div>
           </div>
         `;
@@ -1016,15 +976,11 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           openPricingImportPreview(status.pricingPreview, status.pricingPayload);
         }
         if (
-          status.pricingPayload
-          && ["pricingExport", "pricingTemplate"].includes(action)
-          && !pricingArtifactSeen(status, "download")
+          status.pricingPath
+          && action === "pricingExport"
+          && !pricingArtifactSeen(status, "export")
         ) {
-          pricingDownload(
-            status.pricingPayload,
-            status.filename || "codex-usage-hud-pricing.json",
-            status.mimeType || "application/json",
-          );
+          openPricingExportPrompt(status);
         }
         if (
           status.pricingRecalculationPreview
@@ -1532,17 +1488,37 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         }
       }
 
-      function pricingDownload(payload, filename, mimeType = "application/json") {
-        const data = JSON.stringify(payload, null, 2);
-        const blob = new Blob([data], { type: mimeType });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = String(filename || "codex-usage-hud-pricing.json");
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        ctx.lifecycle.timeout("pricing_download", () => URL.revokeObjectURL(url), 1000);
+      function openPricingExportPrompt(status) {
+        const dialog = settingsDialogRoot();
+        if (!dialog) return;
+        const path = String(status?.pricingPath || "").trim();
+        const filename = String(
+          status?.filename || path.split(/[\\/]/).pop() || "codex-usage-hud-pricing.json",
+        ).trim();
+        if (!path || !filename) return;
+        closeSettingsConfirm();
+        const usedTemplate = status?.pricingUsedTemplate === true;
+        const body = usedTemplate
+          ? `当前模型价格表为空，已使用 gpt-5.6-sol 内置价格作为模板。\n\n文件已生成到：\n${path}\n\n是否打开这个文件？`
+          : `已按当前用户模型单价配置生成。\n\n文件已生成到：\n${path}\n\n是否打开这个文件？`;
+        const layer = document.createElement("div");
+        layer.className = "codex-usage-hud-settings-confirm-layer";
+        layer.dataset.settingsConfirm = "true";
+        layer.dataset.pricingExportPrompt = "true";
+        layer.dataset.pricingFilename = filename;
+        layer.innerHTML = `
+          <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="价格 JSON 已生成">
+            <div class="codex-usage-hud-settings-confirm-kicker">价格 JSON</div>
+            <div class="codex-usage-hud-settings-confirm-title">价格文件已生成</div>
+            <div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div>
+            <div class="codex-usage-hud-settings-confirm-actions">
+              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-open-cancel" data-variant="ghost">暂不打开</button>
+              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-open" data-primary="true">打开文件</button>
+            </div>
+          </div>
+        `;
+        dialog.appendChild(layer);
+        layer.querySelector('[data-action="pricing-open"]')?.focus?.();
       }
 
       function openPricingImportDialog() {

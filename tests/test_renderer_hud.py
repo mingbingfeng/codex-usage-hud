@@ -270,6 +270,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("请作者喝咖啡", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-fetch-prices", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-price-advanced", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("当前生效价格版本", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="provider"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="base_url"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="cache_write"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -277,10 +278,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-price-field="reasoning"', renderer_hud.RENDERER_HUD_SCRIPT)
         for action in (
             "pricing-export",
-            "pricing-template",
+            "pricing-open",
+            "pricing-open-cancel",
             "pricing-import-open",
-            "pricing-copy-example",
-            "pricing-recalculate-open",
             "pricing-effective-confirm",
             "pricing-import-preview",
             "pricing-import-commit",
@@ -288,6 +288,24 @@ class RendererHudPayloadTests(unittest.TestCase):
             "pricing-recalc-execute",
         ):
             self.assertIn(f'data-action="{action}"', renderer_hud.RENDERER_HUD_SCRIPT)
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+        self.assertLess(
+            script.index('data-action="settings-fetch-prices"'),
+            script.index('data-action="pricing-export"'),
+        )
+        self.assertLess(
+            script.index('data-action="pricing-export"'),
+            script.index('data-action="pricing-import-open"'),
+        )
+        self.assertIn("codex-usage-hud-pricing-icon-action", script)
+        self.assertIn("⇩", script)
+        self.assertIn("⇧", script)
+        self.assertNotIn('data-action="pricing-template"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn('data-action="pricing-copy-example"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn('data-action="pricing-recalculate-open"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("pricingPath", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("pricingUsedTemplate", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn("pricingDownload", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("applyPricingCommandStatus", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-pricing-import-file="true"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("unknownPriceModels", renderer_hud.RENDERER_HUD_SCRIPT)

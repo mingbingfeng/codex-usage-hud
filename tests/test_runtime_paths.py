@@ -11,6 +11,7 @@ from codex_usage_hud.runtime_paths import (
     crash_diagnostic_path,
     daemon_log_path,
     hud_lock_path,
+    hud_program_root,
     hud_runtime_dir,
     renderer_cdp_state_path,
     renderer_diagnostic_path,
@@ -58,6 +59,19 @@ def test_named_runtime_paths_share_the_explicit_runtime_root(tmp_path: Path) -> 
 def test_runtime_file_path_rejects_an_empty_name(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="must name one file"):
         runtime_file_path("", runtime_dir=tmp_path)
+
+
+def test_hud_program_root_uses_executable_or_source_project_root(tmp_path: Path) -> None:
+    assert hud_program_root(
+        frozen=True,
+        executable=Path("D:/Apps/codex-usage-hud.exe"),
+    ) == Path("D:/Apps").resolve()
+
+    project = tmp_path / "project"
+    module_file = project / "src" / "codex_usage_hud" / "runtime_paths.py"
+    module_file.parent.mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    assert hud_program_root(frozen=False, module_file=module_file) == project.resolve()
 
 
 def test_daemon_log_path_keeps_override_and_legacy_non_windows_root() -> None:
