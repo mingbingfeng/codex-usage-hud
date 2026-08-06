@@ -283,10 +283,9 @@ _TEXT_PREFIX = r"""
           <div class="codex-usage-hud-price-row" data-price-row="true" data-price-key="${escapeHtml(key)}" data-price-model="${escapeHtml(model)}" data-price-provider="${escapeHtml(provider)}" data-price-base-url="${escapeHtml(baseUrl)}">
             <input data-price-field="model" value="${escapeHtml(model)}" aria-label="模型">
             <input data-price-field="input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.input ?? 0)}" aria-label="输入单价">
-            <input data-price-field="output" type="number" min="0" step="0.000001" value="${escapeHtml(price?.output ?? 0)}" aria-label="输出单价">
             <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cached_input ?? 0)}" aria-label="缓存读取单价">
             <input data-price-field="cache_write" type="number" min="0" step="0.000001" value="${escapeHtml(price?.cache_write ?? 0)}" aria-label="缓存写入单价">
-            <input data-price-field="reasoning" type="number" min="0" step="0.000001" value="${escapeHtml(price?.reasoning ?? price?.output ?? 0)}" aria-label="推理输出单价">
+            <input data-price-field="output" type="number" min="0" step="0.000001" value="${escapeHtml(price?.output ?? 0)}" aria-label="输出单价">
             <input class="codex-usage-hud-price-advanced" data-price-field="provider" value="${escapeHtml(provider)}" aria-label="渠道">
             <input class="codex-usage-hud-price-advanced" data-price-field="base_url" value="${escapeHtml(baseUrl)}" aria-label="Base URL">
           </div>
@@ -462,7 +461,7 @@ _TEXT_PREFIX = r"""
           </div>
           <div class="codex-usage-hud-price-table">
             <div class="codex-usage-hud-price-header">
-              <div>模型</div><div>输入</div><div>输出</div><div>缓存读取</div><div>缓存写入</div><div>推理输出</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
+              <div>模型</div><div>输入</div><div>缓存读取</div><div>缓存写入</div><div>输出</div><div class="codex-usage-hud-price-advanced">渠道</div><div class="codex-usage-hud-price-advanced">Base URL</div>
             </div>
             <div data-price-rows="true">${priceRowsHtml(providerSettings)}</div>
             ${detectedPriceModelsHtml(providerSettings)}
@@ -526,13 +525,14 @@ _TEXT_PREFIX = r"""
           const key = sameScope
             ? originalKey
             : (provider ? `${provider}/${model}` : (baseUrl ? `${baseUrl}/${model}` : model));
+          const output = field("output");
           modelPrices[key] = {
             model,
             input: field("input"),
-            output: field("output"),
             cached_input: field("cached_input"),
             cache_write: field("cache_write"),
-            reasoning: field("reasoning"),
+            output,
+            reasoning: output,
           };
           if (provider) modelPrices[key].provider = provider;
           if (baseUrl) modelPrices[key].base_url = baseUrl;
@@ -1931,6 +1931,42 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         setSettingsStatus("已导出 JSON");
       }
 
+      function priceClipboardValues(text) {
+        const values = String(text ?? "").trim().split(/\s+/).filter(Boolean);
+        if (values.length !== 5 || !values[0]) return null;
+        const prices = values.slice(1).map((line) => {
+          const value = line.replace(/^\$\s*/, "").trim();
+          return /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) ? value : "";
+        });
+        if (prices.some((value) => !value)) return null;
+        return {
+          model: values[0],
+          input: prices[0],
+          cached_input: prices[1],
+          cache_write: prices[2],
+          output: prices[3],
+        };
+      }
+
+      function fillPriceRowFromClipboard(row, text) {
+        if (!row?.matches?.('[data-price-row="true"]')) return false;
+        const values = priceClipboardValues(text);
+        if (!values) return false;
+        const fields = [
+          "model",
+          "input",
+          "cached_input",
+          "cache_write",
+          "output",
+        ].map((name) => row.querySelector(`[data-price-field="${name}"]`));
+        if (fields.some((field) => !field)) return false;
+        const names = ["model", "input", "cached_input", "cache_write", "output"];
+        fields.forEach((field, index) => {
+          field.value = values[names[index]];
+        });
+        return true;
+      }
+
       function addModelPriceRow(initialModel = "") {
         const rows = document.querySelector(`#${settingsModalId} [data-price-rows="true"]`);
         if (!rows) return;
@@ -1940,9 +1976,9 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         row.innerHTML = `
           <input data-price-field="model" value="${escapeHtml(initialModel)}" aria-label="模型">
           <input data-price-field="input" type="number" min="0" step="0.000001" value="0" aria-label="输入单价">
-          <input data-price-field="output" type="number" min="0" step="0.000001" value="0" aria-label="输出单价">
           <input data-price-field="cached_input" type="number" min="0" step="0.000001" value="0" aria-label="缓存读取单价">
           <input data-price-field="cache_write" type="number" min="0" step="0.000001" value="0" aria-label="缓存写入单价">
+          <input data-price-field="output" type="number" min="0" step="0.000001" value="0" aria-label="输出单价">
           <input class="codex-usage-hud-price-advanced" data-price-field="provider" value="" aria-label="渠道">
           <input class="codex-usage-hud-price-advanced" data-price-field="base_url" value="" aria-label="Base URL">
         `;
@@ -2056,6 +2092,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       revealSettingsProviderTab,
       renderSettingsProviderTabs,
       captureSettingsProviderForm,
+      priceClipboardValues,
+      fillPriceRowFromClipboard,
       updateSettingsProviderDraftStatus,
       markSettingsProviderDirty,
       renderSettingsProviderEditor,
@@ -2152,12 +2190,14 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     settingsProviderTabBadge,
     settingsProviderMeta,
     settingsProviderTabsHtml,
-    settingsProviderEditorHtml,
-    revealSettingsProviderTab,
-    renderSettingsProviderTabs,
-    captureSettingsProviderForm,
-    updateSettingsProviderDraftStatus,
-    markSettingsProviderDirty,
+      settingsProviderEditorHtml,
+      revealSettingsProviderTab,
+      renderSettingsProviderTabs,
+      captureSettingsProviderForm,
+      priceClipboardValues,
+      fillPriceRowFromClipboard,
+      updateSettingsProviderDraftStatus,
+      markSettingsProviderDirty,
     renderSettingsProviderEditor,
     switchSettingsProvider,
     typedSettingsRequestId,

@@ -2429,7 +2429,7 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-price-row,
           #${rootId} .codex-usage-hud-price-header {
             display: grid;
-            grid-template-columns: minmax(130px, 1.4fr) repeat(5, minmax(72px, 1fr));
+            grid-template-columns: minmax(130px, 1.4fr) repeat(4, minmax(72px, 1fr));
             gap: 6px;
             align-items: center;
             min-width: 680px;

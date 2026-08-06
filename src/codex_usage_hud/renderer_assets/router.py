@@ -160,6 +160,16 @@ TEXT = r"""
       }
       markSettingsProviderDirty();
     });
+    rootScope.listen(document, "paste", (event) => {
+      const row = event.target?.closest?.('[data-price-row="true"]');
+      if (!row || !root.contains(row)) return;
+      const clipboard = event.clipboardData;
+      const text = clipboard?.getData("text/plain") || clipboard?.getData("text") || "";
+      if (!fillPriceRowFromClipboard(row, text)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      markSettingsProviderDirty();
+    }, true);
     rootScope.listen(root, "change", (event) => {
       const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
       if (restStartInput && root.contains(restStartInput)) {

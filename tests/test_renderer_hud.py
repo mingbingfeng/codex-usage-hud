@@ -275,7 +275,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-price-field="base_url"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="cache_write"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("缓存写入", renderer_hud.RENDERER_HUD_SCRIPT)
-        self.assertIn('data-price-field="reasoning"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn('data-price-field="reasoning"', renderer_hud.RENDERER_HUD_SCRIPT)
         for action in (
             "pricing-export",
             "pricing-open",
@@ -634,6 +634,29 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("data-advanced=", script)
         self.assertNotIn("price-table[data-advanced", script)
         self.assertNotIn("未保存的输入不会自动保留", script)
+
+    def test_model_price_columns_and_row_paste_follow_standard_order(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        header = script[script.index('class="codex-usage-hud-price-header"'):]
+        self.assertLess(header.index("模型"), header.index("输入"))
+        self.assertLess(header.index("输入"), header.index("缓存读取"))
+        self.assertLess(header.index("缓存读取"), header.index("缓存写入"))
+        self.assertLess(header.index("缓存写入"), header.index("输出"))
+        self.assertIn("function priceClipboardValues(text)", script)
+        self.assertIn(".split(/\\s+/).filter(Boolean)", script)
+        self.assertIn("function fillPriceRowFromClipboard(row, text)", script)
+        self.assertIn('const row = event.target?.closest?.(\'[data-price-row="true"]\')', script)
+        self.assertIn('rootScope.listen(document, "paste"', script)
+        settings_exports_start = script.index("const settingsShellDomain = ctx.domains.register")
+        settings_exports_end = script.index("function escapeHtml", settings_exports_start)
+        settings_exports = script[settings_exports_start:settings_exports_end]
+        self.assertIn(
+            "captureSettingsProviderForm,\n      priceClipboardValues,\n      fillPriceRowFromClipboard,\n      updateSettingsProviderDraftStatus",
+            settings_exports,
+        )
+        self.assertIn("}, true);", script)
+        self.assertNotIn("推理输出", script)
 
     def test_payload_from_renderer_new_session_clears_session_and_round_stats(self) -> None:
         snapshot = ParsedSession(
@@ -1521,7 +1544,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "50";', script)
+        self.assertIn('const version = "51";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)
