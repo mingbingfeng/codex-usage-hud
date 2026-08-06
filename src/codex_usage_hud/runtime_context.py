@@ -41,6 +41,7 @@ from .session_cleanup_runtime import SessionCleanupWorker
 from .session_snapshots import SessionSnapshotCache
 from .snapshot_builder import VisibleAppErrorCache
 from .usage_cache import UsageSummaryCache
+from .usage_summary_store import UsageSummaryStore
 from .usage_insights import (
     UsageInsightsWorker,
     _refresh_usage_after_session_delete,
@@ -54,6 +55,7 @@ DEFAULT_STATE_DB = "state_5.sqlite"
 DEFAULT_SESSION_INDEX = "session_index.jsonl"
 DELETED_SESSION_USAGE_FILENAME = "deleted_session_usage.json"
 PRICING_SNAPSHOT_DATABASE_FILENAME = "pricing-snapshots.sqlite3"
+USAGE_SUMMARY_DATABASE_FILENAME = "usage-summary.sqlite3"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -156,10 +158,11 @@ class RuntimeContext:
             try:
                 resource.close()
             except Exception:
-                _LOGGER.exception("runtime_context_close_failed resource=%s", field_name)
+                _LOGGER.exception(
+                    "runtime_context_close_failed resource=%s", field_name
+                )
             finally:
                 setattr(self, field_name, None)
-
 
 
 def _build_usage_summary_cache(parser: JsonlSessionParser) -> UsageSummaryCache:
@@ -167,6 +170,9 @@ def _build_usage_summary_cache(parser: JsonlSessionParser) -> UsageSummaryCache:
         parser,
         deleted_usage_ledger=DeletedUsageLedger(
             hud_runtime_dir() / DELETED_SESSION_USAGE_FILENAME
+        ),
+        summary_store=UsageSummaryStore(
+            hud_runtime_dir() / USAGE_SUMMARY_DATABASE_FILENAME
         ),
     )
 
@@ -286,9 +292,15 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         user_config=user_config,
         sessions_root=sessions_root,
     )
-    sqlite_log_path = runtime_config.discover_path(platform, args.sse_db, DEFAULT_SQLITE_LOG)
-    state_db_path = runtime_config.discover_path(platform, args.state_db, DEFAULT_STATE_DB)
-    session_index_path = runtime_config.discover_path(platform, None, DEFAULT_SESSION_INDEX)
+    sqlite_log_path = runtime_config.discover_path(
+        platform, args.sse_db, DEFAULT_SQLITE_LOG
+    )
+    state_db_path = runtime_config.discover_path(
+        platform, args.state_db, DEFAULT_STATE_DB
+    )
+    session_index_path = runtime_config.discover_path(
+        platform, None, DEFAULT_SESSION_INDEX
+    )
     runtime_display_mode = normalize_display_mode(
         getattr(args, "runtime_hud_mode", None)
         or getattr(args, "hud_mode", None)
@@ -318,7 +330,9 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         platform=platform,
         sessions_root=sessions_root,
         session_id=args.session_id,
-        session_file=Path(args.session_file).expanduser() if args.session_file else None,
+        session_file=Path(args.session_file).expanduser()
+        if args.session_file
+        else None,
         active_session_tracker=active_session_tracker,
         auto_switch_idle_seconds=args.auto_switch_idle_seconds,
     )
@@ -336,7 +350,9 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
     context = RuntimeContext(
         platform=platform,
         sessions_root=sessions_root,
-        session_file=Path(args.session_file).expanduser() if args.session_file else None,
+        session_file=Path(args.session_file).expanduser()
+        if args.session_file
+        else None,
         sqlite_log_path=sqlite_log_path,
         state_db_path=state_db_path,
         session_index_path=session_index_path,
@@ -392,5 +408,6 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         context.close()
         raise
     return context
+
 
 __all__ = ["RuntimeContext"]

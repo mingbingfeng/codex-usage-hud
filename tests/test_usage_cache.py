@@ -8,9 +8,12 @@ from codex_usage_hud.core import JsonlSessionParser
 from codex_usage_hud.core.parser import CostEstimator
 from codex_usage_hud.core.pricing_snapshots import PricingSnapshotLedger
 from codex_usage_hud.usage_cache import UsageSummaryCache
+from codex_usage_hud.usage_summary_store import UsageSummaryStore
 
 
-def _record(timestamp: str, record_type: str, payload: dict[str, object]) -> dict[str, object]:
+def _record(
+    timestamp: str, record_type: str, payload: dict[str, object]
+) -> dict[str, object]:
     return {"timestamp": timestamp, "type": record_type, "payload": payload}
 
 
@@ -163,9 +166,7 @@ def test_usage_cache_append_reuses_tail_state_and_matches_full_rebuild(
     assert second_state is first_state
     assert second_state.offset > first_offset
 
-    rebuilt, _ = UsageSummaryCache(JsonlSessionParser()).summarize(
-        sessions, day, week
-    )
+    rebuilt, _ = UsageSummaryCache(JsonlSessionParser()).summarize(sessions, day, week)
     assert first.tokens == 10
     assert incremental == rebuilt
     assert incremental.tokens == 25
@@ -238,3 +239,86 @@ def test_usage_cache_parser_version_change_resets_tail_state(tmp_path: Path) -> 
     assert entry.parser_version == "v2"
     assert entry.tail_state is not old_state
     assert entry.summary_day.tokens == 5
+
+
+def test_persisted_session_summaries_only_reparse_changed_jsonl(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    paths = [sessions / "first.jsonl", sessions / "second.jsonl"]
+    for index, path in enumerate(paths, 1):
+        path.write_text(
+            json.dumps(
+                _record(
+                    "2026-07-30T00:00:00Z",
+                    "session_meta",
+                    {"id": f"s{index}", "model_provider": "custom"},
+                )
+            )
+            + "\n"
+            + json.dumps(_token_count("2026-07-30T00:00:01Z", index * 10))
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    class CountingParser(JsonlSessionParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.read_paths: list[Path] = []
+
+        def load_records_incremental(self, path: Path, state=None):
+            self.read_paths.append(path.resolve())
+            return super().load_records_incremental(path, state)
+
+    day = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    week = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    database = tmp_path / "usage-summary.sqlite3"
+    first_parser = CountingParser()
+    first_cache = UsageSummaryCache(
+        first_parser,
+        summary_store=UsageSummaryStore(database),
+    )
+
+    first_total, _ = first_cache.summarize(sessions, day, week)
+
+    assert first_total.tokens == 30
+    assert set(first_parser.read_paths) == {path.resolve() for path in paths}
+
+    restarted_parser = CountingParser()
+    restarted_cache = UsageSummaryCache(
+        restarted_parser,
+        summary_store=UsageSummaryStore(database),
+    )
+    restored_total, _ = restarted_cache.summarize(sessions, day, week)
+
+    assert restored_total == first_total
+    assert restarted_parser.read_paths == []
+    assert all(entry.tail_state is None for entry in restarted_cache._entries.values())
+
+    rollover_parser = CountingParser()
+    rollover_cache = UsageSummaryCache(
+        rollover_parser,
+        summary_store=UsageSummaryStore(database),
+    )
+    rollover_day, rollover_week = rollover_cache.summarize(
+        sessions,
+        datetime(2026, 7, 31, tzinfo=timezone.utc),
+        week,
+    )
+
+    assert rollover_day.tokens == 0
+    assert rollover_week.tokens == first_total.tokens
+    assert rollover_parser.read_paths == []
+
+    _append_record(paths[0], _token_count("2026-07-30T00:00:02Z", 25))
+    changed_parser = CountingParser()
+    changed_cache = UsageSummaryCache(
+        changed_parser,
+        summary_store=UsageSummaryStore(database),
+    )
+    changed_total, _ = changed_cache.summarize(sessions, day, week)
+
+    assert changed_total.tokens == 45
+    assert changed_parser.read_paths == [paths[0].resolve()]

@@ -82,7 +82,9 @@ def message_text(payload: Mapping[str, Any]) -> str:
 
 def reasoning_text(payload: Mapping[str, Any]) -> str:
     """Extract readable text from a reasoning response item when available."""
-    direct = payload.get("text") or payload.get("reasoning") or payload.get("summary_text")
+    direct = (
+        payload.get("text") or payload.get("reasoning") or payload.get("summary_text")
+    )
     if direct:
         return str(direct)
 
@@ -134,7 +136,9 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _row_value(row: Mapping[str, Any] | sqlite3.Row, name: str, default: Any = None) -> Any:
+def _row_value(
+    row: Mapping[str, Any] | sqlite3.Row, name: str, default: Any = None
+) -> Any:
     if isinstance(row, Mapping):
         return row.get(name, default)
     try:
@@ -182,9 +186,7 @@ def event_label(record: Mapping[str, Any]) -> str:
     return f"{record_type}:{payload_type}"
 
 
-def classify_gap(
-    previous: Mapping[str, Any], current: Mapping[str, Any]
-) -> str:
+def classify_gap(previous: Mapping[str, Any], current: Mapping[str, Any]) -> str:
     """Classify a wait gap between adjacent JSONL records."""
     previous_payload = previous.get("payload") or {}
     current_payload = current.get("payload") or {}
@@ -699,7 +701,9 @@ def classify_session_client(originator: object, source: object) -> str:
     return "unknown"
 
 
-def extract_session_thread_identity(payload: Mapping[str, Any] | None) -> tuple[str, str, str, bool]:
+def extract_session_thread_identity(
+    payload: Mapping[str, Any] | None,
+) -> tuple[str, str, str, bool]:
     """Return thread_source, parent_thread_id, agent_nickname, is_subagent from session_meta."""
     if not isinstance(payload, Mapping):
         return "", "", "", False
@@ -775,7 +779,9 @@ class JsonlSessionParser:
             return snapshot, tail
 
         snapshot.last_file_mtime = tail.last_file_mtime
-        parsed = self.parse_records(tail.records, path, session_id, sse_tracker, snapshot)
+        parsed = self.parse_records(
+            tail.records, path, session_id, sse_tracker, snapshot
+        )
         tail.snapshot = parsed
         return parsed, tail
 
@@ -833,7 +839,9 @@ class JsonlSessionParser:
         if start:
             first_newline = chunk.find(b"\n")
             chunk = chunk[first_newline + 1 :] if first_newline >= 0 else b""
-        complete_length = len(chunk) if chunk.endswith(b"\n") else chunk.rfind(b"\n") + 1
+        complete_length = (
+            len(chunk) if chunk.endswith(b"\n") else chunk.rfind(b"\n") + 1
+        )
         records: list[dict[str, Any]] = []
         for line_number, raw_line in enumerate(chunk[:complete_length].splitlines(), 1):
             try:
@@ -901,7 +909,9 @@ class JsonlSessionParser:
         if not chunk:
             return
 
-        complete_length = len(chunk) if chunk.endswith(b"\n") else chunk.rfind(b"\n") + 1
+        complete_length = (
+            len(chunk) if chunk.endswith(b"\n") else chunk.rfind(b"\n") + 1
+        )
         if complete_length <= 0:
             return
         complete = chunk[:complete_length]
@@ -951,7 +961,9 @@ class JsonlSessionParser:
         parsed.cwd = self.session_cwd(records)
         parsed.model_provider = self.session_model_provider(records)
         parsed.originator = self.session_originator(records)
-        parsed.client_kind = classify_session_client(parsed.originator, self.session_source(records))
+        parsed.client_kind = classify_session_client(
+            parsed.originator, self.session_source(records)
+        )
         (
             parsed.thread_source,
             parsed.parent_thread_id,
@@ -1136,10 +1148,11 @@ class JsonlSessionParser:
                 text = compact_text(payload.get("message"), 260)
                 if text:
                     return text
-            if (
-                record.get("type") == "event_msg"
-                and payload.get("type") in {"task_complete", "turn_aborted", "task_started"}
-            ):
+            if record.get("type") == "event_msg" and payload.get("type") in {
+                "task_complete",
+                "turn_aborted",
+                "task_started",
+            }:
                 break
         return ""
 
@@ -1158,13 +1171,17 @@ class JsonlSessionParser:
             payload_type = payload.get("type")
             if payload_type == "task_started":
                 task_start_indices.append(index)
-            elif payload_type == "user_message" and compact_text(payload.get("message"), 8):
+            elif payload_type == "user_message" and compact_text(
+                payload.get("message"), 8
+            ):
                 user_message_indices.append(index)
 
         if task_start_indices:
             if task_started_index is None:
                 return len(task_start_indices), len(task_start_indices)
-            current = sum(1 for index in task_start_indices if index <= task_started_index)
+            current = sum(
+                1 for index in task_start_indices if index <= task_started_index
+            )
             return current, len(task_start_indices)
 
         if user_message_indices:
@@ -1243,10 +1260,7 @@ class JsonlSessionParser:
             payload = record.get("payload") or {}
             if record.get("type") == "compacted":
                 return index + 1
-            if (
-                record.get("type") == "event_msg"
-                and isinstance(payload, Mapping)
-            ):
+            if record.get("type") == "event_msg" and isinstance(payload, Mapping):
                 payload_type = payload.get("type")
                 if payload_type == "context_compacted":
                     return index + 1
@@ -1291,9 +1305,11 @@ class JsonlSessionParser:
                 payload.get("session_id") or payload.get("sessionId") or ""
             )
             source = payload.get("source")
-            carries_history_snapshot = bool(payload.get("forked_from_id")) or (
-                isinstance(source, Mapping) and "subagent" in source
-            ) or bool(session_id and thread_id and session_id != thread_id)
+            carries_history_snapshot = (
+                bool(payload.get("forked_from_id"))
+                or (isinstance(source, Mapping) and "subagent" in source)
+                or bool(session_id and thread_id and session_id != thread_id)
+            )
             break
         if not carries_history_snapshot:
             return None
@@ -1366,8 +1382,31 @@ class JsonlSessionParser:
         session_id = self.session_id_from_records(records)
         replay_start = self._history_replay_usage_start(records)
         previous_total: tuple[int, int, int, int, int] | None = None
+        ledger = self.cost_estimator.pricing_ledger
+        prefetch = getattr(ledger, "get_many", None)
+        can_prefetch = (
+            persist_price_snapshots
+            and ledger is not None
+            and callable(prefetch)
+            and session_id
+            and session_id != "n/a"
+        )
 
         for index, record in enumerate(records):
+            if can_prefetch and index % 256 == 0:
+                event_keys = [
+                    ledger.event_key(
+                        session_id,
+                        _as_int(candidate.get("_line")),
+                        candidate["_dt"],
+                    )
+                    for candidate in records[index : index + 256]
+                    if candidate.get("type") == "event_msg"
+                    and isinstance(candidate.get("_dt"), datetime)
+                    and isinstance(candidate.get("payload"), Mapping)
+                    and candidate["payload"].get("type") == "token_count"
+                ]
+                prefetch(event_keys)
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
                 continue
@@ -1379,7 +1418,10 @@ class JsonlSessionParser:
                     or current_model
                 )
                 continue
-            if record.get("type") != "event_msg" or payload.get("type") != "token_count":
+            if (
+                record.get("type") != "event_msg"
+                or payload.get("type") != "token_count"
+            ):
                 continue
 
             info = payload.get("info") or {}
@@ -1392,7 +1434,11 @@ class JsonlSessionParser:
                 or current_model
             )
             cumulative = info.get("total_token_usage")
-            usage = cumulative if isinstance(cumulative, Mapping) else info.get("last_token_usage")
+            usage = (
+                cumulative
+                if isinstance(cumulative, Mapping)
+                else info.get("last_token_usage")
+            )
             if not isinstance(usage, Mapping):
                 continue
 
@@ -1421,7 +1467,13 @@ class JsonlSessionParser:
             else:
                 delta = current
 
-            input_tokens, cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens = delta
+            (
+                input_tokens,
+                cached_tokens,
+                cache_write_tokens,
+                output_tokens,
+                reasoning_tokens,
+            ) = delta
             cached_tokens = min(cached_tokens, input_tokens)
             cache_write_tokens = min(
                 cache_write_tokens,
@@ -1435,7 +1487,6 @@ class JsonlSessionParser:
             occurred_at = record.get("_dt")
             event_line = _as_int(record.get("_line"))
             event_key = ""
-            ledger = self.cost_estimator.pricing_ledger
             if (
                 persist_price_snapshots
                 and ledger is not None
@@ -1454,7 +1505,9 @@ class JsonlSessionParser:
                     cache_write_tokens=cache_write_tokens,
                     provider=model_provider,
                     base_url=base_url,
-                    occurred_at=occurred_at if isinstance(occurred_at, datetime) else None,
+                    occurred_at=occurred_at
+                    if isinstance(occurred_at, datetime)
+                    else None,
                     event_key=event_key,
                     session_id=session_id,
                     event_line=event_line,
@@ -1493,7 +1546,9 @@ class JsonlSessionParser:
         """Apply confirmed per-request deltas and return the last event index."""
         ledger = self.cost_estimator.pricing_ledger
         batch = getattr(ledger, "batch", None)
-        context = batch() if persist_price_snapshots and callable(batch) else nullcontext()
+        context = (
+            batch() if persist_price_snapshots and callable(batch) else nullcontext()
+        )
         with context:
             indexed_events = self._usage_event_records(
                 records,
@@ -1601,7 +1656,10 @@ class JsonlSessionParser:
                 if value:
                     sources.append(f"tool-call~{value}")
                     contributed = True
-            elif record_type == "response_item" and payload_type == "function_call_output":
+            elif (
+                record_type == "response_item"
+                and payload_type == "function_call_output"
+            ):
                 value = estimate_tokens(payload.get("output"))
                 estimate.tool_tokens += value
                 if value:
@@ -1723,7 +1781,9 @@ class JsonlSessionParser:
             if round_started_at is None:
                 round_started_at = timestamp
             if record_type != "event_msg" or payload.get("type") != "token_count":
-                entry = self.round_activity_entry(record_type, payload.get("type"), payload)
+                entry = self.round_activity_entry(
+                    record_type, payload.get("type"), payload
+                )
                 if entry is not None:
                     round_activity_entries.append(entry)
                 continue
@@ -1818,16 +1878,23 @@ class JsonlSessionParser:
             timestamp = record.get("_dt")
 
             if record_type == "event_msg" and payload_type == "user_message":
-                return Activity("user", compact_text(payload.get("message"), 160), timestamp)
+                return Activity(
+                    "user", compact_text(payload.get("message"), 160), timestamp
+                )
             if record_type == "event_msg" and payload_type == "agent_message":
-                return Activity("agent", compact_text(payload.get("message"), 160), timestamp)
+                return Activity(
+                    "agent", compact_text(payload.get("message"), 160), timestamp
+                )
             if record_type == "response_item" and payload_type == "function_call":
                 return Activity(
                     "tool call",
                     f"{payload.get('name')} {compact_text(payload.get('arguments'), 140)}",
                     timestamp,
                 )
-            if record_type == "response_item" and payload_type == "function_call_output":
+            if (
+                record_type == "response_item"
+                and payload_type == "function_call_output"
+            ):
                 return Activity(
                     "tool output",
                     f"{payload.get('call_id')} {compact_text(payload.get('output'), 140)}",
@@ -1839,7 +1906,9 @@ class JsonlSessionParser:
                 role = response_message_role(payload)
                 if role and role != "assistant":
                     continue
-                return Activity("assistant", compact_text(message_text(payload), 160), timestamp)
+                return Activity(
+                    "assistant", compact_text(message_text(payload), 160), timestamp
+                )
             if record_type == "event_msg" and payload_type == "token_count":
                 return Activity("confirmed", "received token_count", timestamp)
         return Activity("idle", "no activity", None)
@@ -1896,10 +1965,7 @@ class JsonlSessionParser:
                 and isinstance(payload, Mapping)
                 and payload.get("type") in {"task_complete", "turn_aborted"}
             )
-            active_after_record.append(
-                task_active
-                and not is_task_terminal
-            )
+            active_after_record.append(task_active and not is_task_terminal)
             if is_task_terminal:
                 task_active = False
 
@@ -1912,12 +1978,16 @@ class JsonlSessionParser:
         for index, (previous, current) in enumerate(zip(records, records[1:])):
             previous_dt = previous.get("_dt")
             current_dt = current.get("_dt")
-            if not isinstance(previous_dt, datetime) or not isinstance(current_dt, datetime):
+            if not isinstance(previous_dt, datetime) or not isinstance(
+                current_dt, datetime
+            ):
                 continue
             duration = seconds_between(previous_dt, current_dt)
             category = classify_gap(previous, current)
             previous_is_active = (
-                active_after_record[index] if index < len(active_after_record) else False
+                active_after_record[index]
+                if index < len(active_after_record)
+                else False
             )
             if (
                 duration >= 5.0
@@ -1959,7 +2029,10 @@ class JsonlSessionParser:
                     start=timestamp,
                     start_line=_as_int(record.get("_line")),
                 )
-            elif record_type == "response_item" and payload_type == "function_call_output":
+            elif (
+                record_type == "response_item"
+                and payload_type == "function_call_output"
+            ):
                 call_id = str(payload.get("call_id") or "")
                 call = calls_by_id.get(call_id)
                 if call is None:
@@ -1984,7 +2057,9 @@ class JsonlSessionParser:
         gaps.sort(key=lambda item: item.duration_seconds, reverse=True)
 
         current_gap = "任务已结束"
-        currently_active = bool(active_after_record[-1]) if active_after_record else False
+        currently_active = (
+            bool(active_after_record[-1]) if active_after_record else False
+        )
         if last_event_time is not None and currently_active:
             current_gap = f"{seconds_between(last_event_time, datetime.now(last_event_time.tzinfo)):.1f}s"
 
@@ -2025,7 +2100,9 @@ class JsonlSessionParser:
     ) -> RequestTokens:
         history = list(jsonl_rounds)
         if sse_tracker is not None:
-            request, sse_history = sse_tracker.build(snapshot.session_id, task_started_at)
+            request, sse_history = sse_tracker.build(
+                snapshot.session_id, task_started_at
+            )
             if self.running_request_already_confirmed(request, history):
                 request = RequestTokens(status="waiting", source="sse")
             if not history:
@@ -2047,7 +2124,9 @@ class JsonlSessionParser:
                     and latest.total_tokens == request.total_tokens
                 )
                 if not same_as_latest:
-                    history.append(self.round_from_request(request, snapshot, latest_model))
+                    history.append(
+                        self.round_from_request(request, snapshot, latest_model)
+                    )
             history = self._history_after_task_abort(history, snapshot.task_aborted_at)
             snapshot.request_history = self.reindex_rounds(history)
             request = self.request_after_task_abort(snapshot, request, latest_model)
@@ -2147,7 +2226,9 @@ class JsonlSessionParser:
     ) -> RequestTokens:
         if snapshot.task_aborted_at is None or request.status != "running":
             return request
-        next_request = self.fallback_request_tokens(snapshot, request.model or latest_model)
+        next_request = self.fallback_request_tokens(
+            snapshot, request.model or latest_model
+        )
         next_request.source = request.source or next_request.source
         if next_request.started_at is None:
             next_request.started_at = snapshot.task_started_at or request.started_at
@@ -2217,7 +2298,9 @@ class JsonlSessionParser:
                     "tool call": "工具调用",
                     "tool output": "工具返回",
                 }.get(snapshot.activity.kind, "活动")
-                activity_summary = f"{activity_label}：{compact_text(snapshot.activity.detail, 92)}"
+                activity_summary = (
+                    f"{activity_label}：{compact_text(snapshot.activity.detail, 92)}"
+                )
                 copy_text = f"{activity_label}：\n{snapshot.activity.detail}"
 
         return RequestRound(
@@ -2624,7 +2707,9 @@ class SseRequestStateMachine:
             updated_at=timestamp,
         )
 
-    def request_from_sse_completed(self, event: Mapping[str, Any]) -> RequestTokens | None:
+    def request_from_sse_completed(
+        self, event: Mapping[str, Any]
+    ) -> RequestTokens | None:
         response = event.get("response") or {}
         if not isinstance(response, Mapping):
             return None

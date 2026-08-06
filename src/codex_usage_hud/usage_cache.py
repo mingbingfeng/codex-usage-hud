@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import re
+import sqlite3
 import time
 from typing import Any
 import uuid
@@ -31,7 +32,9 @@ from .runtime_usage import (
     workdir_leaf as _workdir_leaf,
 )
 from .usage_insights import UsageInsightsProjector
+from .usage_summary_store import UsageSummaryStore
 from .usage_contributions import (
+    DailyUsageContribution,
     FileUsageContribution as _UsageCacheEntry,
     UsageInsightAggregate as _UsageInsightAggregate,
     canonical_usage_path,
@@ -46,6 +49,7 @@ DEFAULT_USAGE_SUMMARY_TAIL_STATE_BYTES = 32 * 1024 * 1024
 PRICING_SNAPSHOT_BATCH_FILES = 64
 USAGE_INSIGHTS_TOP_SESSION_LIMIT = 10
 _LOGGER = logging.getLogger("codex_usage_hud.usage_cache")
+
 
 @dataclass
 class _UsageInsightSessionAggregate:
@@ -70,17 +74,23 @@ class UsageSummaryCache:
         min_rescan_seconds: float = DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS,
         max_tail_state_bytes: int = DEFAULT_USAGE_SUMMARY_TAIL_STATE_BYTES,
         deleted_usage_ledger: DeletedUsageLedger | None = None,
+        summary_store: UsageSummaryStore | None = None,
     ) -> None:
         self._parser = parser
         self._min_rescan_seconds = max(0.0, float(min_rescan_seconds))
         self._max_tail_state_bytes = max(0, int(max_tail_state_bytes))
         self._deleted_usage_ledger = deleted_usage_ledger
+        self._summary_store = summary_store
         self._deleted_usage_transactions = DeletedUsageTransactions(
             deleted_usage_ledger,
             parser,
             on_commit=self._touch_insights,
         )
         self._entries: dict[Path, _UsageCacheEntry] = {}
+        self._dirty_entries: set[Path] = set()
+        self._hydrated_scan_key: (
+            tuple[tuple[Path, ...], datetime, datetime, str] | None
+        ) = None
         self._deleted_entries: list[_UsageCacheEntry] = []
         self._last_scan_key: tuple[tuple[Path, ...], datetime, datetime] | None = None
         self._last_scan_at = 0.0
@@ -89,6 +99,54 @@ class UsageSummaryCache:
         self._insights_revision = 0
         self._insights_generated_at: datetime | None = None
         self._insights_projector = UsageInsightsProjector(self)
+
+    def _hydrate_persisted_entries(
+        self,
+        scan_roots: tuple[Path, ...],
+        day_start: datetime,
+        week_start: datetime,
+    ) -> None:
+        store = self._summary_store
+        parser_version = usage_parser_version(self._parser)
+        hydration_key = (scan_roots, day_start, week_start, parser_version)
+        if store is None or self._hydrated_scan_key == hydration_key:
+            return
+        try:
+            self._entries = store.load(
+                scan_roots,
+                day_start,
+                week_start,
+                parser_version,
+            )
+        except (OSError, sqlite3.Error, ValueError):
+            _LOGGER.exception("usage_summary_cache_hydration_failed")
+            self._entries = {}
+        self._dirty_entries.clear()
+        self._hydrated_scan_key = hydration_key
+
+    def _flush_persisted_entries(self) -> None:
+        store = self._summary_store
+        if store is None or not self._dirty_entries:
+            return
+        paths = tuple(self._dirty_entries)
+        try:
+            store.save_many(
+                (path, self._entries[path]) for path in paths if path in self._entries
+            )
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            _LOGGER.exception("usage_summary_cache_persist_failed")
+            return
+        self._dirty_entries.difference_update(paths)
+
+    def _delete_persisted_entries(self, paths: Iterable[Path]) -> None:
+        store = self._summary_store
+        path_tuple = tuple(paths)
+        if store is None or not path_tuple:
+            return
+        try:
+            store.delete_many(path_tuple)
+        except (OSError, sqlite3.Error):
+            _LOGGER.exception("usage_summary_cache_delete_failed")
 
     @staticmethod
     def _cache_path(path: Path) -> Path:
@@ -206,7 +264,9 @@ class UsageSummaryCache:
                         session_id=session.session_id,
                         session_key=(
                             "deleted-session-"
-                            + uuid.uuid5(uuid.NAMESPACE_URL, session.session_id).hex[:16]
+                            + uuid.uuid5(uuid.NAMESPACE_URL, session.session_id).hex[
+                                :16
+                            ]
                         ),
                         session_title=session.title,
                         workdir_name=session.workdir_name,
@@ -306,6 +366,55 @@ class UsageSummaryCache:
     ) -> tuple[dict[str, _UsageInsightAggregate], int, int, datetime | None]:
         return self._insights_projector._model_insights_for_window(events, start)
 
+    def _daily_usage_contributions(
+        self,
+        events: Sequence[object],
+        reference: datetime,
+    ) -> dict[str, DailyUsageContribution]:
+        grouped: dict[str, list[object]] = {}
+        for event in events:
+            timestamp = getattr(event, "timestamp", None)
+            if not isinstance(timestamp, datetime):
+                continue
+            if reference.tzinfo is None:
+                local_time = (
+                    timestamp.astimezone().replace(tzinfo=None)
+                    if timestamp.tzinfo is not None
+                    else timestamp
+                )
+            elif timestamp.tzinfo is None:
+                local_time = timestamp.replace(tzinfo=reference.tzinfo)
+            else:
+                local_time = timestamp.astimezone(reference.tzinfo)
+            grouped.setdefault(local_time.date().isoformat(), []).append(event)
+
+        contributions: dict[str, DailyUsageContribution] = {}
+        for date_key, daily_events in grouped.items():
+            year, month, day = (int(value) for value in date_key.split("-"))
+            bucket_start = reference.replace(
+                year=year,
+                month=month,
+                day=day,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            models, priced_count, total_count, latest_at = (
+                self._model_insights_for_window(daily_events, bucket_start)
+            )
+            contributions[date_key] = DailyUsageContribution(
+                summary=self._parser.summarize_usage_events(
+                    daily_events,
+                    bucket_start,
+                ),
+                models=models,
+                priced_event_count=priced_count,
+                total_event_count=total_count,
+                latest_event_at=latest_at,
+            )
+        return contributions
+
     def insights(
         self,
         sessions_root: Path,
@@ -323,15 +432,6 @@ class UsageSummaryCache:
             limit=limit,
         )
 
-
-
-
-
-
-
-
-
-
     def summarize(
         self,
         sessions_root: Path,
@@ -346,6 +446,7 @@ class UsageSummaryCache:
         now = time.monotonic()
         sessions_root = self._cache_path(sessions_root)
         scan_roots = self._scan_roots(sessions_root)
+        self._hydrate_persisted_entries(scan_roots, day_start, week_start)
         scan_key = (scan_roots, day_start, week_start)
         refresh_path_tuple = tuple(
             dict.fromkeys(self._cache_path(path) for path in refresh_paths)
@@ -386,7 +487,10 @@ class UsageSummaryCache:
         existing_roots = [root for root in scan_roots if root.exists()]
         if not existing_roots:
             had_entries = bool(self._entries)
+            removed_paths = tuple(self._entries)
             self._entries.clear()
+            self._dirty_entries.clear()
+            self._delete_persisted_entries(removed_paths)
             deleted_entries = self._deleted_usage_entries(day_start, week_start, set())
             self._deleted_entries = deleted_entries
             if deleted_entries != previous_deleted_entries:
@@ -431,10 +535,15 @@ class UsageSummaryCache:
                     _merge_usage(day_total, summary_day)
                     _merge_usage(week_total, summary_week)
 
+        removed_paths: list[Path] = []
         for cached_path in list(self._entries):
             if cached_path not in seen_paths:
                 del self._entries[cached_path]
+                self._dirty_entries.discard(cached_path)
+                removed_paths.append(cached_path)
                 self._touch_insights()
+        self._delete_persisted_entries(removed_paths)
+        self._flush_persisted_entries()
 
         live_session_ids = {
             entry.session_id for entry in self._entries.values() if entry.session_id
@@ -454,7 +563,10 @@ class UsageSummaryCache:
         self._last_scan_at = now
         self._last_day_total = replace(day_total)
         self._last_week_total = replace(week_total)
-        if previous_scan_key != scan_key and revision_before_scan == self._insights_revision:
+        if (
+            previous_scan_key != scan_key
+            and revision_before_scan == self._insights_revision
+        ):
             self._touch_insights()
         return self._totals_for_providers(
             scan_roots,
@@ -596,6 +708,8 @@ class UsageSummaryCache:
             else:
                 if self._entries.pop(path, None) is not None:
                     self._touch_insights()
+                self._dirty_entries.discard(path)
+                self._delete_persisted_entries((path,))
                 new_day = empty
                 new_week = empty
 
@@ -604,6 +718,7 @@ class UsageSummaryCache:
 
         self._last_day_total = day_total
         self._last_week_total = week_total
+        self._flush_persisted_entries()
 
     def _summaries_for_file(
         self,
@@ -625,7 +740,11 @@ class UsageSummaryCache:
         if (
             not force
             and entry is not None
-            and entry.mtime == stat.st_mtime
+            and (
+                entry.mtime_ns == int(stat.st_mtime_ns)
+                if entry.mtime_ns is not None
+                else entry.mtime == stat.st_mtime
+            )
             and entry.file_size == stat.st_size
             and entry.day_start == day_start
             and entry.week_start == week_start
@@ -662,6 +781,7 @@ class UsageSummaryCache:
             return UsageSummary(), UsageSummary(), UsageSummary()
 
         events = self._parser.usage_events(records)
+        daily_usage = self._daily_usage_contributions(events, day_start)
         provider_reader = getattr(self._parser, "session_model_provider", None)
         model_provider = (
             str(provider_reader(records) or "").strip().lower()
@@ -712,8 +832,10 @@ class UsageSummaryCache:
         )
         if parent_session_id == session_id:
             parent_session_id = ""
-        is_archived = bool(archived) if archived is not None else (
-            "archived_sessions" in {part.casefold() for part in path.parts}
+        is_archived = (
+            bool(archived)
+            if archived is not None
+            else ("archived_sessions" in {part.casefold() for part in path.parts})
         )
         self._entries[path] = _UsageCacheEntry(
             mtime=stat.st_mtime,
@@ -747,7 +869,11 @@ class UsageSummaryCache:
             month_latest_event_at=month_latest_event_at,
             parser_version=parser_version,
             tail_state=tail_state,
+            mtime_ns=int(stat.st_mtime_ns),
+            daily_usage=daily_usage,
+            daily_usage_complete=True,
         )
+        self._dirty_entries.add(path)
         self._trim_tail_states()
         self._touch_insights()
         return summary_day, summary_week, summary_month

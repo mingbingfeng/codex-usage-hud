@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
@@ -14,15 +15,15 @@ from threading import RLock
 import uuid
 
 
-PRICING_SNAPSHOT_SCHEMA_VERSION = 1
+PRICING_SNAPSHOT_SCHEMA_VERSION = 2
+DEFAULT_PRICING_SNAPSHOT_CACHE_SIZE = 4096
 _INSERT_SNAPSHOT_SQL = """
     INSERT OR IGNORE INTO usage_price_snapshots(
         event_key, session_id, event_line, occurred_at, provider, model,
         base_url, input_tokens, cached_input_tokens, cache_write_tokens,
         output_tokens, reasoning_tokens, cost_usd, status,
-        price_snapshot_json, original_cost_usd,
-        original_price_snapshot_json, created_at
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        version_id, created_at
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -97,11 +98,17 @@ class PricingRecalculationPreview:
 class PricingSnapshotLedger:
     """Persist the first confirmed price used for each JSONL token event."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        max_cache_entries: int = DEFAULT_PRICING_SNAPSHOT_CACHE_SIZE,
+    ) -> None:
         self.path = Path(path)
         self._cache_lock = RLock()
-        self._snapshot_cache: dict[str, StoredPriceSnapshot] = {}
-        self._snapshot_cache_loaded = False
+        self._max_cache_entries = max(0, int(max_cache_entries))
+        self._snapshot_cache: OrderedDict[str, StoredPriceSnapshot] = OrderedDict()
+        self._revision = 0
         self._batch_connection: ContextVar[sqlite3.Connection | None] = ContextVar(
             f"pricing_snapshot_batch_{id(self)}",
             default=None,
@@ -127,29 +134,6 @@ class PricingSnapshotLedger:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS usage_price_snapshots (
-                    event_key TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    event_line INTEGER NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    provider TEXT NOT NULL DEFAULT '',
-                    model TEXT NOT NULL DEFAULT '',
-                    base_url TEXT NOT NULL DEFAULT '',
-                    input_tokens INTEGER NOT NULL DEFAULT 0,
-                    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
-                    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-                    output_tokens INTEGER NOT NULL DEFAULT 0,
-                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-                    cost_usd REAL,
-                    status TEXT NOT NULL DEFAULT 'unavailable',
-                    price_snapshot_json TEXT NOT NULL DEFAULT '',
-                    original_cost_usd REAL,
-                    original_price_snapshot_json TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    recalculated_at TEXT NOT NULL DEFAULT ''
-                );
-                CREATE INDEX IF NOT EXISTS idx_usage_price_snapshots_scope
-                    ON usage_price_snapshots(provider, model, occurred_at);
                 CREATE TABLE IF NOT EXISTS pricing_recalculation_audit (
                     audit_id TEXT PRIMARY KEY,
                     executed_at TEXT NOT NULL,
@@ -163,19 +147,135 @@ class PricingSnapshotLedger:
                     next_total_usd REAL NOT NULL
                 );
                 INSERT OR IGNORE INTO metadata(key, value)
-                    VALUES('schema_version', '1');
+                    VALUES('pricing_revision', '0');
                 """
             )
+            self._ensure_snapshot_schema(connection)
+
+    @staticmethod
+    def _create_snapshot_table(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE usage_price_snapshots (
+                event_key TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                event_line INTEGER NOT NULL,
+                occurred_at TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                base_url TEXT NOT NULL DEFAULT '',
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL,
+                status TEXT NOT NULL DEFAULT 'unavailable',
+                version_id TEXT NOT NULL DEFAULT '',
+                original_cost_usd REAL,
+                original_version_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                recalculated_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX idx_usage_price_snapshots_scope
+                ON usage_price_snapshots(provider, model, occurred_at);
+            """
+        )
+
+    @staticmethod
+    def _snapshot_version_id(value: object) -> str:
+        if not isinstance(value, Mapping):
+            return ""
+        return str(value.get("version_id") or value.get("versionId") or "").strip()
+
+    @classmethod
+    def _version_id_from_json(cls, value: object) -> str:
+        return cls._snapshot_version_id(cls._decode_snapshot(value))
+
+    def _ensure_snapshot_schema(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(usage_price_snapshots)"
+            ).fetchall()
+        }
+        if not columns:
+            self._create_snapshot_table(connection)
+        elif "version_id" not in columns:
+            connection.execute(
+                "ALTER TABLE usage_price_snapshots RENAME TO usage_price_snapshots_v1"
+            )
+            connection.execute("DROP INDEX IF EXISTS idx_usage_price_snapshots_scope")
+            self._create_snapshot_table(connection)
+            cursor = connection.execute(
+                "SELECT * FROM usage_price_snapshots_v1 ORDER BY event_key"
+            )
+            while True:
+                rows = cursor.fetchmany(512)
+                if not rows:
+                    break
+                values = []
+                for row in rows:
+                    recalculated_at = str(row["recalculated_at"] or "")
+                    values.append(
+                        (
+                            row["event_key"],
+                            row["session_id"],
+                            row["event_line"],
+                            row["occurred_at"],
+                            row["provider"],
+                            row["model"],
+                            row["base_url"],
+                            row["input_tokens"],
+                            row["cached_input_tokens"],
+                            row["cache_write_tokens"],
+                            row["output_tokens"],
+                            row["reasoning_tokens"],
+                            row["cost_usd"],
+                            row["status"],
+                            self._version_id_from_json(row["price_snapshot_json"]),
+                            row["original_cost_usd"] if recalculated_at else None,
+                            (
+                                self._version_id_from_json(
+                                    row["original_price_snapshot_json"]
+                                )
+                                if recalculated_at
+                                else ""
+                            ),
+                            row["created_at"],
+                            recalculated_at,
+                        )
+                    )
+                connection.executemany(
+                    """
+                    INSERT INTO usage_price_snapshots VALUES(
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    values,
+                )
+            connection.execute("DROP TABLE usage_price_snapshots_v1")
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
+            (str(PRICING_SNAPSHOT_SCHEMA_VERSION),),
+        )
+        revision_row = connection.execute(
+            "SELECT value FROM metadata WHERE key='pricing_revision'"
+        ).fetchone()
+        self._revision = max(0, int(revision_row[0] if revision_row is not None else 0))
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     @contextmanager
     def batch(self):
-        """Cache lookups and flush new snapshots once for a parser batch."""
+        """Reuse one connection and flush new snapshots once for a parser batch."""
         existing = self._batch_connection.get()
         if existing is not None:
             yield
             return
         with self._cache_lock, closing(self._connect()) as connection, connection:
-            self._ensure_snapshot_cache(connection)
             pending: list[tuple[object, ...]] = []
             connection_token = self._batch_connection.set(connection)
             pending_token = self._batch_pending.set(pending)
@@ -197,7 +297,9 @@ class PricingSnapshotLedger:
             (
                 str(session_id or "n/a").strip() or "n/a",
                 str(max(0, int(line or 0))),
-                _utc_iso(occurred_at if isinstance(occurred_at, (datetime, str)) else None),
+                _utc_iso(
+                    occurred_at if isinstance(occurred_at, (datetime, str)) else None
+                ),
             )
         )
 
@@ -211,6 +313,8 @@ class PricingSnapshotLedger:
 
     @classmethod
     def _stored(cls, row: sqlite3.Row) -> StoredPriceSnapshot:
+        version_id = str(row["version_id"] or "")
+        original_version_id = str(row["original_version_id"] or "")
         return StoredPriceSnapshot(
             event_key=str(row["event_key"]),
             session_id=str(row["session_id"]),
@@ -226,39 +330,97 @@ class PricingSnapshotLedger:
             reasoning_tokens=int(row["reasoning_tokens"] or 0),
             cost_usd=(None if row["cost_usd"] is None else float(row["cost_usd"])),
             status=str(row["status"] or "unavailable"),
-            price_snapshot=cls._decode_snapshot(row["price_snapshot_json"]),
+            price_snapshot=({"version_id": version_id} if version_id else None),
             original_cost_usd=(
                 None
                 if row["original_cost_usd"] is None
                 else float(row["original_cost_usd"])
             ),
-            original_price_snapshot=cls._decode_snapshot(
-                row["original_price_snapshot_json"]
+            original_price_snapshot=(
+                {"version_id": original_version_id} if original_version_id else None
             ),
             recalculated_at=str(row["recalculated_at"] or ""),
         )
 
-    def _ensure_snapshot_cache(self, connection: sqlite3.Connection) -> None:
-        if self._snapshot_cache_loaded:
+    def _cache_put(self, stored: StoredPriceSnapshot) -> None:
+        if self._max_cache_entries <= 0:
             return
-        rows = connection.execute("SELECT * FROM usage_price_snapshots").fetchall()
-        self._snapshot_cache = {
-            str(row["event_key"]): self._stored(row)
-            for row in rows
-        }
-        self._snapshot_cache_loaded = True
+        self._snapshot_cache[stored.event_key] = stored
+        self._snapshot_cache.move_to_end(stored.event_key)
+        while len(self._snapshot_cache) > self._max_cache_entries:
+            self._snapshot_cache.popitem(last=False)
 
     def _invalidate_snapshot_cache(self) -> None:
         self._snapshot_cache.clear()
-        self._snapshot_cache_loaded = False
 
     def get(self, event_key: object) -> StoredPriceSnapshot | None:
         key = str(event_key or "")
+        if not key:
+            return None
         with self._cache_lock:
-            if not self._snapshot_cache_loaded:
-                with closing(self._connect()) as connection:
-                    self._ensure_snapshot_cache(connection)
-            return self._snapshot_cache.get(key)
+            cached = self._snapshot_cache.get(key)
+            if cached is not None:
+                self._snapshot_cache.move_to_end(key)
+                return cached
+            connection = self._batch_connection.get()
+            if connection is not None:
+                row = connection.execute(
+                    "SELECT * FROM usage_price_snapshots WHERE event_key=?",
+                    (key,),
+                ).fetchone()
+            else:
+                with closing(self._connect()) as standalone:
+                    row = standalone.execute(
+                        "SELECT * FROM usage_price_snapshots WHERE event_key=?",
+                        (key,),
+                    ).fetchone()
+            if row is None:
+                return None
+            stored = self._stored(row)
+            self._cache_put(stored)
+            return stored
+
+    def get_many(
+        self,
+        event_keys: list[str] | tuple[str, ...],
+    ) -> dict[str, StoredPriceSnapshot]:
+        """Fetch a bounded set in one query without ever hydrating the full ledger."""
+        keys = tuple(dict.fromkeys(str(key or "") for key in event_keys if key))
+        if not keys:
+            return {}
+        found: dict[str, StoredPriceSnapshot] = {}
+        missing: list[str] = []
+        with self._cache_lock:
+            for key in keys:
+                cached = self._snapshot_cache.get(key)
+                if cached is None:
+                    missing.append(key)
+                    continue
+                self._snapshot_cache.move_to_end(key)
+                found[key] = cached
+            if missing:
+                connection = self._batch_connection.get()
+                standalone = None
+                if connection is None:
+                    standalone = self._connect()
+                    connection = standalone
+                try:
+                    for offset in range(0, len(missing), 400):
+                        chunk = missing[offset : offset + 400]
+                        placeholders = ",".join("?" for _key in chunk)
+                        rows = connection.execute(
+                            "SELECT * FROM usage_price_snapshots "
+                            f"WHERE event_key IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                        for row in rows:
+                            stored = self._stored(row)
+                            found[stored.event_key] = stored
+                            self._cache_put(stored)
+                finally:
+                    if standalone is not None:
+                        standalone.close()
+        return found
 
     @staticmethod
     def _record_row(
@@ -277,9 +439,7 @@ class PricingSnapshotLedger:
         price_snapshot: Mapping[str, object] | None,
     ) -> StoredPriceSnapshot:
         cost_usd = None if values[12] is None else float(values[12])
-        normalized_snapshot = (
-            dict(price_snapshot) if isinstance(price_snapshot, Mapping) else None
-        )
+        del price_snapshot
         return StoredPriceSnapshot(
             event_key=str(values[0]),
             session_id=str(values[1]),
@@ -295,9 +455,11 @@ class PricingSnapshotLedger:
             reasoning_tokens=int(values[11]),
             cost_usd=cost_usd,
             status=str(values[13]),
-            price_snapshot=normalized_snapshot,
-            original_cost_usd=cost_usd,
-            original_price_snapshot=normalized_snapshot,
+            price_snapshot=(
+                {"version_id": str(values[14])} if str(values[14] or "") else None
+            ),
+            original_cost_usd=None,
+            original_price_snapshot=None,
             recalculated_at="",
         )
 
@@ -320,11 +482,7 @@ class PricingSnapshotLedger:
         status: str,
         price_snapshot: Mapping[str, object] | None,
     ) -> StoredPriceSnapshot:
-        snapshot_json = (
-            json.dumps(dict(price_snapshot), ensure_ascii=False, sort_keys=True)
-            if isinstance(price_snapshot, Mapping)
-            else ""
-        )
+        version_id = self._snapshot_version_id(price_snapshot)
         created_at = _utc_iso(None)
         values: tuple[object, ...] = (
             event_key,
@@ -341,9 +499,7 @@ class PricingSnapshotLedger:
             max(0, int(reasoning_tokens or 0)),
             cost_usd,
             str(status or "unavailable"),
-            snapshot_json,
-            cost_usd,
-            snapshot_json,
+            version_id,
             created_at,
         )
         existing = self.get(event_key)
@@ -352,7 +508,7 @@ class PricingSnapshotLedger:
         stored = self._stored_from_values(values, price_snapshot)
         pending = self._batch_pending.get()
         if pending is not None:
-            self._snapshot_cache[event_key] = stored
+            self._cache_put(stored)
             pending.append(values)
             return stored
         with self._cache_lock:
@@ -364,7 +520,7 @@ class PricingSnapshotLedger:
             if row is None:
                 raise RuntimeError("price snapshot could not be persisted")
             stored = self._stored(row)
-            self._snapshot_cache[event_key] = stored
+            self._cache_put(stored)
             return stored
 
     @staticmethod
@@ -389,7 +545,9 @@ class PricingSnapshotLedger:
 
     def preview_recalculation(
         self,
-        resolver: Callable[[StoredPriceSnapshot], tuple[float | None, str, Mapping[str, object] | None]],
+        resolver: Callable[
+            [StoredPriceSnapshot], tuple[float | None, str, Mapping[str, object] | None]
+        ],
         *,
         provider: str = "",
         model: str = "",
@@ -402,7 +560,9 @@ class PricingSnapshotLedger:
         )
         with self._cache_lock, closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM usage_price_snapshots" + where + " ORDER BY occurred_at, event_key",
+                "SELECT * FROM usage_price_snapshots"
+                + where
+                + " ORDER BY occurred_at, event_key",
                 values,
             ).fetchall()
         changes: list[dict[str, object]] = []
@@ -439,34 +599,25 @@ class PricingSnapshotLedger:
             if next_cost is None:
                 unavailable += 1
             if effective_at_utc:
-                period = (
-                    "before"
-                    if stored.occurred_at < effective_at_utc
-                    else "after"
-                )
+                period = "before" if stored.occurred_at < effective_at_utc else "after"
                 bucket = time_breakdown[period]
                 assert isinstance(bucket, dict)
                 bucket["recordCount"] = int(bucket["recordCount"]) + 1
-                bucket["previousCostUsd"] = float(
-                    bucket["previousCostUsd"]
-                ) + float(stored.cost_usd or 0.0)
+                bucket["previousCostUsd"] = float(bucket["previousCostUsd"]) + float(
+                    stored.cost_usd or 0.0
+                )
                 if next_cost is None:
-                    bucket["unavailableCount"] = int(
-                        bucket["unavailableCount"]
-                    ) + 1
+                    bucket["unavailableCount"] = int(bucket["unavailableCount"]) + 1
                 else:
                     bucket["pricedCount"] = int(bucket["pricedCount"]) + 1
                     next_value = float(next_cost)
                     bucket["costUsd"] = float(bucket["costUsd"]) + next_value
-                    bucket["nextCostUsd"] = float(
-                        bucket["nextCostUsd"]
-                    ) + next_value
+                    bucket["nextCostUsd"] = float(bucket["nextCostUsd"]) + next_value
             if (
                 stored.cost_usd != next_cost
                 or stored.status != str(next_status or "unavailable")
-                or stored.price_snapshot != (
-                    dict(next_snapshot) if isinstance(next_snapshot, Mapping) else None
-                )
+                or self._snapshot_version_id(stored.price_snapshot)
+                != self._snapshot_version_id(next_snapshot)
             ):
                 changes.append(
                     {
@@ -477,11 +628,7 @@ class PricingSnapshotLedger:
                         "previousCostUsd": stored.cost_usd,
                         "nextCostUsd": next_cost,
                         "nextStatus": str(next_status or "unavailable"),
-                        "nextPriceSnapshot": (
-                            dict(next_snapshot)
-                            if isinstance(next_snapshot, Mapping)
-                            else None
-                        ),
+                        "nextVersionId": self._snapshot_version_id(next_snapshot),
                     }
                 )
         if effective_at_utc:
@@ -505,27 +652,31 @@ class PricingSnapshotLedger:
             time_breakdown=time_breakdown,
         )
 
-    def apply_recalculation(self, preview: PricingRecalculationPreview) -> dict[str, object]:
+    def apply_recalculation(
+        self, preview: PricingRecalculationPreview
+    ) -> dict[str, object]:
         executed_at = _utc_iso(None)
         with self._cache_lock, closing(self._connect()) as connection, connection:
             changed = 0
             for change in preview.changes:
-                snapshot = change.get("nextPriceSnapshot")
-                snapshot_json = (
-                    json.dumps(dict(snapshot), ensure_ascii=False, sort_keys=True)
-                    if isinstance(snapshot, Mapping)
-                    else ""
-                )
                 cursor = connection.execute(
                     """
                     UPDATE usage_price_snapshots
-                    SET cost_usd=?, status=?, price_snapshot_json=?, recalculated_at=?
+                    SET original_cost_usd=CASE
+                            WHEN recalculated_at='' THEN cost_usd
+                            ELSE original_cost_usd
+                        END,
+                        original_version_id=CASE
+                            WHEN recalculated_at='' THEN version_id
+                            ELSE original_version_id
+                        END,
+                        cost_usd=?, status=?, version_id=?, recalculated_at=?
                     WHERE event_key=?
                     """,
                     (
                         change.get("nextCostUsd"),
                         str(change.get("nextStatus") or "unavailable"),
-                        snapshot_json,
+                        str(change.get("nextVersionId") or ""),
                         executed_at,
                         str(change.get("eventKey") or ""),
                     ),
@@ -551,6 +702,14 @@ class PricingSnapshotLedger:
                     preview.next_total_usd,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE metadata
+                SET value=CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+                WHERE key='pricing_revision'
+                """
+            )
+            self._revision += 1
             self._invalidate_snapshot_cache()
         return {
             "auditId": preview.preview_id,
@@ -563,6 +722,7 @@ class PricingSnapshotLedger:
 
 
 __all__ = [
+    "DEFAULT_PRICING_SNAPSHOT_CACHE_SIZE",
     "PRICING_SNAPSHOT_SCHEMA_VERSION",
     "PricingRecalculationPreview",
     "PricingSnapshotLedger",

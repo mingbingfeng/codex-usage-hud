@@ -24,6 +24,15 @@ class UsageInsightAggregate:
 
 
 @dataclass
+class DailyUsageContribution:
+    summary: UsageSummary = field(default_factory=UsageSummary)
+    models: dict[str, UsageInsightAggregate] = field(default_factory=dict)
+    priced_event_count: int = 0
+    total_event_count: int = 0
+    latest_event_at: datetime | None = None
+
+
+@dataclass
 class FileUsageContribution:
     mtime: float | None
     file_size: int | None
@@ -56,6 +65,9 @@ class FileUsageContribution:
     month_latest_event_at: datetime | None = None
     parser_version: str = ""
     tail_state: JsonlTailState | None = None
+    mtime_ns: int | None = None
+    daily_usage: dict[str, DailyUsageContribution] = field(default_factory=dict)
+    daily_usage_complete: bool = False
 
 
 def canonical_usage_path(path: Path) -> Path:
@@ -114,7 +126,11 @@ def usage_jsonl_stat_tokens(root: Path) -> list[tuple[Path, int, int]]:
                         ) and entry.name.casefold().endswith(".jsonl"):
                             stat = entry.stat(follow_symlinks=False)
                             found.append(
-                                (Path(entry.path), int(stat.st_mtime_ns), int(stat.st_size))
+                                (
+                                    Path(entry.path),
+                                    int(stat.st_mtime_ns),
+                                    int(stat.st_size),
+                                )
                             )
                     except OSError:
                         continue
@@ -136,7 +152,17 @@ def path_under_usage_roots(path: Path, scan_roots: Sequence[Path]) -> bool:
 
 def usage_parser_version(parser: object) -> str:
     custom = str(getattr(parser, "usage_contribution_version", "") or "").strip()
-    return custom or USAGE_CONTRIBUTION_PARSER_VERSION
+    base = custom or USAGE_CONTRIBUTION_PARSER_VERSION
+    estimator = getattr(parser, "cost_estimator", None)
+    ledger = getattr(estimator, "pricing_ledger", None)
+    if ledger is None:
+        return base
+    revision = getattr(ledger, "revision", 0)
+    try:
+        pricing_revision = max(0, int(revision))
+    except (TypeError, ValueError):
+        pricing_revision = 0
+    return f"{base}:pricing-{pricing_revision}"
 
 
 T = TypeVar("T")
