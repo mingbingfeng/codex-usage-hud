@@ -84,6 +84,7 @@ def create_renderer_session_base(
     args: object,
     *,
     services: RuntimeServices,
+    work_overlay: object | None = None,
 ) -> RendererSessionBase:
     """Create context and overlay while retaining partial-close ownership."""
 
@@ -94,11 +95,12 @@ def create_renderer_session_base(
             getattr(args, "hud_mode", None)
             or context.user_config.display_mode
         )
-        work_overlay = services.overlay_factory(context)
+        if work_overlay is None:
+            work_overlay = services.overlay_factory(context)
+        resources.overlay = work_overlay
     except BaseException:
         resources.close()
         raise
-    resources.overlay = work_overlay
     return RendererSessionBase(
         resources=resources,
         context=context,

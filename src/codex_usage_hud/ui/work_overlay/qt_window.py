@@ -162,6 +162,7 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self._card_hover_anchors: list[QWidget] = []
             self._completed_hover_anchors: list[QWidget] = []
             self._system_action: dict[str, object] | None = None
+            self._system_notice: dict[str, object] | None = None
             self._rest_reminder: dict[str, object] | None = None
             self._ready_system_action_ids: set[str] = set()
             self._requested_system_action_ids: set[str] = set()
@@ -472,6 +473,7 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self.render_items(
                 self._raw_items,
                 system_action=self._system_action or {},
+                system_notice=self._system_notice or {},
                 rest_reminder=self._rest_reminder,
             )
 
@@ -604,13 +606,18 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self._state_read_failed_at = 0.0
             should_close = bool(state.get("close"))
             system_action = _normalized_system_action(state.get("systemAction"))
+            system_notice = _normalized_system_notice(state.get("systemNotice"))
             rest_reminder = _normalized_rest_reminder(state.get("restReminder"))
             updated_at = float(state.get("updatedAt") or 0.0)
             file_stale = updated_at > 0 and (time.time() - updated_at) > self._stale_seconds
             if self._owner_pid is not None and not self._process_exists(self._owner_pid):
                 self.shutdown()
                 return True
-            if should_close or (file_stale and not bool(system_action and system_action.get("persistent"))):
+            persistent_sidecar = bool(
+                (system_action and system_action.get("persistent"))
+                or (system_notice and system_notice.get("persistent"))
+            )
+            if should_close or (file_stale and not persistent_sidecar):
                 self.shutdown()
                 return True
             raw_items = state.get("items") or []
@@ -639,6 +646,7 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             self.render_items(
                 items,
                 system_action=system_action or {},
+                system_notice=system_notice or {},
                 rest_reminder=rest_reminder or {},
             )
             if system_action is not None:

@@ -58,12 +58,15 @@ from .model import (
     _item_is_completed,
     _item_is_rest_reminder,
     _item_is_system_action,
+    _item_is_system_notice,
     _matched_overlay_item_records,
     _normalized_rest_reminder,
     _normalized_system_action,
+    _normalized_system_notice,
     _ordered_overlay_items,
     _rest_reminder_overlay_item,
     _system_action_overlay_item,
+    _system_notice_overlay_item,
     _visible_overlay_items,
     _work_overlay_header_text,
     _work_overlay_item_with_live_elapsed_text,
@@ -387,30 +390,45 @@ class OverlayRenderingMixin:
         record["item"] = dict(item)
         status = str(item.get("status") or "")
         system_action = _item_is_system_action(item)
+        system_notice = _item_is_system_notice(item)
         background_usage = _item_is_background_usage(item)
         rest_reminder = _item_is_rest_reminder(item)
+        # Renderer selection is a visual hint only; ordering is owned by the
+        # payload projection and must not be inferred from this flag.
+        current = bool(item.get("current")) and not (
+            system_action or system_notice or background_usage or rest_reminder
+        )
         accent, pill_bg, card_bg, border_color = _color_for(
             status,
             self._theme_tokens,
         )
+        current_border_color = (
+            _theme_mix(border_color, accent, 0.78, fallback=border_color)
+            if current
+            else border_color
+        )
         theme = self._theme_tokens
         elapsed_text = (
             ""
-            if system_action or background_usage or rest_reminder
+            if system_action or system_notice or background_usage or rest_reminder
             else str(item.get("elapsedText") or "").strip() or "已处理 --"
         )
         header_text = (
-            str(item.get("title") or "休息提醒")
-            if rest_reminder
+            str(item.get("title") or "Codex HUD")
+            if system_notice
             else (
-                str(item.get("statusLabel") or "Codex App 后台任务：未知后台任务")
-                if background_usage
-                else _work_overlay_header_text(
-                str(item.get("startedAt") or ""),
-                elapsed_text,
-                str(item.get("title") or "Codex 工作"),
-                title_limit=self._header_title_limit,
-            )
+                str(item.get("title") or "休息提醒")
+                if rest_reminder
+                else (
+                    str(item.get("statusLabel") or "Codex App 后台任务：未知后台任务")
+                    if background_usage
+                    else _work_overlay_header_text(
+                        str(item.get("startedAt") or ""),
+                        elapsed_text,
+                        str(item.get("title") or "Codex 工作"),
+                        title_limit=self._header_title_limit,
+                    )
+                )
             )
         )
 
@@ -419,6 +437,7 @@ class OverlayRenderingMixin:
             "QFrame {"
             f"background-color: {card_bg};"
             f"border: 1px solid {border_color};"
+            f"border-left: {2 if current else 1}px solid {current_border_color};"
             "border-radius: 10px;"
             "}"
         )
@@ -547,7 +566,9 @@ class OverlayRenderingMixin:
             status_label.setText(footer_status_text)
             status_label.setBaseColor(status_text_color)
             status_label.setShimmerEnabled(
-                not rest_reminder and status not in {"recent", "background_usage"}
+                not system_notice
+                and not rest_reminder
+                and status not in {"recent", "background_usage"}
             )
             status_label.setVisible(True)
         else:
@@ -628,11 +649,15 @@ class OverlayRenderingMixin:
                     action_item["action"] = str(action.get("action") or "")
                     action_item["actionLabel"] = str(action.get("label") or "")
                     self._rest_action_anchors.append((record[key], action_item))
-            else:
+            elif not system_notice:
                 self._close_anchors.append(
                     (record["close_anchor"], dict(item), card_bg, pill_bg, accent)
                 )
-            if not system_action and _workdir_external_link_for_item(item):
+            if (
+                not system_action
+                and not system_notice
+                and _workdir_external_link_for_item(item)
+            ):
                 self._workdir_anchors.append((record["workdir_label"], dict(item)))
         switch_overlay = record.get("switch_overlay")
         if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):
@@ -924,15 +949,65 @@ class OverlayRenderingMixin:
         # native window system so current anchors always get their HWNDs.
         QTimer.singleShot(48, self._reposition_interactive_windows_if_settled)
 
+    @staticmethod
+    def _system_notice_structure_change_only(
+        old_items: Sequence[Mapping[str, object]],
+        new_items: Sequence[Mapping[str, object]],
+    ) -> bool:
+        old_without_notice = [
+            item for item in old_items if not _item_is_system_notice(item)
+        ]
+        new_without_notice = [
+            item for item in new_items if not _item_is_system_notice(item)
+        ]
+        if [
+            (
+                str(item.get("id") or ""),
+                "completed" if _item_is_completed(item) else "card",
+            )
+            for item in old_without_notice
+        ] != [
+            (
+                str(item.get("id") or ""),
+                "completed" if _item_is_completed(item) else "card",
+            )
+            for item in new_without_notice
+        ]:
+            return False
+        old_notices = [item for item in old_items if _item_is_system_notice(item)]
+        new_notices = [item for item in new_items if _item_is_system_notice(item)]
+        if len(old_notices) > 1 or len(new_notices) > 1:
+            return False
+        if bool(old_notices) == bool(new_notices):
+            return False
+        return True
+
+    def _remove_system_notice_record(self, item_id: str) -> None:
+        record = self._record_for_item_kind(item_id, "card")
+        if record is None:
+            return
+        try:
+            self._item_widgets.remove(record)
+        except ValueError:
+            return
+        widget = record.get("card")
+        if not isinstance(widget, QWidget):
+            return
+        widget.hide()
+        widget.deleteLater()
+
     def render_items(
         self,
         items: Sequence[Mapping[str, object]],
         *,
         system_action: Mapping[str, object] | None = None,
+        system_notice: Mapping[str, object] | None = None,
         rest_reminder: Mapping[str, object] | None = None,
     ) -> None:
         if system_action is not None:
             self._system_action = _normalized_system_action(system_action)
+        if system_notice is not None:
+            self._system_notice = _normalized_system_notice(system_notice)
         if rest_reminder is not None:
             self._rest_reminder = _normalized_rest_reminder(rest_reminder)
         if self._rest_reminder is not None:
@@ -958,6 +1033,15 @@ class OverlayRenderingMixin:
                     item
                     for item in visible_items
                     if not _item_is_system_action(item)
+                ],
+            ]
+        if self._system_notice is not None:
+            visible_items = [
+                _system_notice_overlay_item(self._system_notice),
+                *[
+                    item
+                    for item in visible_items
+                    if not _item_is_system_notice(item)
                 ],
             ]
         if self._rest_reminder is not None:
@@ -1036,6 +1120,7 @@ class OverlayRenderingMixin:
                     transition_items,
                 )
                 return
+        previous_visible_items = list(self._previous_visible_items)
         self._previous_visible_items = list(visible_items)
         self._last_payload_signature = payload_signature
         self._layout_items = list(visible_items)
@@ -1054,6 +1139,32 @@ class OverlayRenderingMixin:
         )
         if not rebuild and len(record_items) != len(visible_items):
             rebuild = True
+        if rebuild and self._system_notice_structure_change_only(
+            previous_visible_items,
+            visible_items,
+        ):
+            old_notice = next(
+                (
+                    item
+                    for item in previous_visible_items
+                    if _item_is_system_notice(item)
+                ),
+                None,
+            )
+            new_notice = next(
+                (item for item in visible_items if _item_is_system_notice(item)),
+                None,
+            )
+            if old_notice is not None and new_notice is None:
+                self._remove_system_notice_record(_item_id(old_notice))
+            elif old_notice is None and new_notice is not None:
+                self._build_item_widget(new_notice)
+            self._last_structure_signature = structure_signature
+            rebuild = False
+            record_items = _matched_overlay_item_records(
+                self._item_widgets,
+                visible_items,
+            )
         self._close_anchors.clear()
         self._workdir_anchors.clear()
         self._completed_check_anchors.clear()

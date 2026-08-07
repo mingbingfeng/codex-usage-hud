@@ -29,6 +29,18 @@ class RendererSessionResources:
     active_work_pump: object | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
+    def release_overlay_for_handoff(self) -> object | None:
+        """Detach the desktop overlay before a daemon-triggered session swap.
+
+        The overlay helper is intentionally independent from the Renderer/CDP
+        session.  A Codex process replacement should therefore close the
+        renderer resources while allowing the existing work bubbles to remain
+        alive until the replacement session is attached.
+        """
+        overlay = self.overlay
+        self.overlay = None
+        return overlay
+
     def close(self) -> None:
         """Release optional resources in strict reverse construction order."""
         if self._closed:

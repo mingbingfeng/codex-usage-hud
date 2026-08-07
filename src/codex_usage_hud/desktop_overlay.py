@@ -40,9 +40,12 @@ WORK_OVERLAY_KEEPALIVE_SECONDS = 15.0
 WORK_OVERLAY_RESTART_BACKOFF_SECONDS = 60.0
 WORK_OVERLAY_HELPER_HEARTBEAT_TIMEOUT_SECONDS = 35.0
 WORK_OVERLAY_HELPER_MAX_USER_OBJECTS = 2_000
+WORK_OVERLAY_HELPER_READY_TIMEOUT_SECONDS = 5.0
+WORK_OVERLAY_HELPER_READY_POLL_SECONDS = 0.02
 WORK_OVERLAY_RESTART_ACTION = "restartCodex"
 WORK_OVERLAY_SYSTEM_ACTION_READY = "systemActionReady"
 WORK_OVERLAY_RESTART_ACTION_ID = "restart-codex-for-renderer"
+WORK_OVERLAY_SYSTEM_NOTICE_ID = "renderer-recovery-notice"
 WORK_OVERLAY_SYSTEM_ACTION_READY_TIMEOUT_SECONDS = 2.0
 
 _LOGGER = logging.getLogger("codex_usage_hud.desktop_overlay")
@@ -159,6 +162,7 @@ class DesktopWorkOverlay:
         self._last_payload_items: list[dict[str, object]] | None = None
         self._last_theme_payload: dict[str, object] = {}
         self._system_action: dict[str, object] | None = None
+        self._system_notice: dict[str, object] | None = None
         self._rest_reminder: dict[str, object] = {}
         self._system_action_unavailable_reason = ""
         self._last_state_signature: str | None = None
@@ -192,6 +196,7 @@ class DesktopWorkOverlay:
         if (
             not self.enabled
             and self._system_action is None
+            and self._system_notice is None
             and not self._rest_reminder
             and not self._closed
         ):
@@ -200,7 +205,12 @@ class DesktopWorkOverlay:
     def update(self, items: Sequence[WorkStatusItem]) -> None:
         if self._closed:
             return
-        if not self.enabled and self._system_action is None and not self._rest_reminder:
+        if (
+            not self.enabled
+            and self._system_action is None
+            and self._system_notice is None
+            and not self._rest_reminder
+        ):
             self._stop_runtime(permanent=False)
             return
         if not self.enabled:
@@ -224,6 +234,7 @@ class DesktopWorkOverlay:
         if (
             not payload_items
             and self._system_action is None
+            and self._system_notice is None
             and not self._rest_reminder
             and self._last_payload_items is None
         ):
@@ -268,7 +279,12 @@ class DesktopWorkOverlay:
                 self._start()
             return self._process is not None
         self._rest_reminder = next_payload
-        if not self._rest_reminder and not self.enabled and self._system_action is None:
+        if (
+            not self._rest_reminder
+            and not self.enabled
+            and self._system_action is None
+            and self._system_notice is None
+        ):
             self._stop_runtime(permanent=False)
             return False
         if not self._runtime_available():
@@ -290,13 +306,103 @@ class DesktopWorkOverlay:
             self._start()
         return self._process is not None
 
+    def show_system_notice(self, *, title: str, message: str) -> bool:
+        """Publish a non-interactive notice without replacing session bubbles."""
+        if self._closed:
+            return False
+        self._system_action = None
+        self._system_notice = {
+            "id": WORK_OVERLAY_SYSTEM_NOTICE_ID,
+            "title": str(title or "Codex HUD"),
+            "message": str(message or ""),
+            "status": "warning",
+            "persistent": True,
+        }
+        if not self._runtime_available():
+            self._report_unavailable_once(self._unavailable_reason)
+            return False
+        self._ensure_helper_healthy(self._clock.monotonic())
+        payload_items = list(self._last_payload_items or [])
+        theme_payload = self._theme_payload()
+        self._write_state(payload_items, theme=theme_payload, close=False)
+        self._last_payload_items = [dict(item) for item in payload_items]
+        self._last_theme_payload = dict(theme_payload)
+        process = self._process
+        if process is not None and process.poll() is not None:
+            self._last_helper_exit_code = int(process.returncode or 0)
+            self._process = None
+        started_now = self._process is None
+        if self._process is None:
+            self._start()
+        if self._process is None:
+            return False
+        if started_now and not self._wait_for_helper_ready():
+            self._system_action_unavailable_reason = (
+                "PySide6 desktop overlay helper did not become ready"
+            )
+            self._stop_runtime(permanent=False)
+            return False
+        return True
+
+    def clear_system_notice(self) -> bool:
+        """Remove the recovery notice while retaining the current session items."""
+        if self._closed or self._system_notice is None:
+            return False
+        self._system_notice = None
+        payload_items = list(self._last_payload_items or [])
+        if (
+            not payload_items
+            and not self.enabled
+            and self._system_action is None
+            and not self._rest_reminder
+        ):
+            self._stop_runtime(permanent=False)
+            return True
+        if not self._runtime_available():
+            self._report_unavailable_once(self._unavailable_reason)
+            return False
+        theme_payload = self._last_theme_payload or self._theme_payload()
+        self._write_state(payload_items, theme=theme_payload, close=False)
+        self._last_payload_items = [dict(item) for item in payload_items]
+        self._last_theme_payload = dict(theme_payload)
+        if self._process is None and self._clock.monotonic() >= self._restart_blocked_until:
+            self._start()
+        return self._process is not None
+
+    def clear_system_action(self) -> bool:
+        """Remove a restart action after the replacement renderer is attached."""
+        if self._closed or self._system_action is None:
+            return False
+        self._system_action = None
+        payload_items = list(self._last_payload_items or [])
+        if (
+            not payload_items
+            and not self.enabled
+            and self._system_notice is None
+            and not self._rest_reminder
+        ):
+            self._stop_runtime(permanent=False)
+            return True
+        if not self._runtime_available():
+            self._report_unavailable_once(self._unavailable_reason)
+            return False
+        theme_payload = self._last_theme_payload or self._theme_payload()
+        self._write_state(payload_items, theme=theme_payload, close=False)
+        self._last_payload_items = [dict(item) for item in payload_items]
+        self._last_theme_payload = dict(theme_payload)
+        if self._process is None and self._clock.monotonic() >= self._restart_blocked_until:
+            self._start()
+        return self._process is not None
+
     def offer_codex_restart(self, *, title: str, message: str) -> bool:
         """Show a persistent system action independently of session-bubble settings."""
         if self._closed:
             return False
         self._system_action_unavailable_reason = ""
+        notice_id = str((self._system_notice or {}).get("id") or "").strip()
+        self._system_notice = None
         self._system_action = {
-            "id": WORK_OVERLAY_RESTART_ACTION_ID,
+            "id": notice_id or WORK_OVERLAY_RESTART_ACTION_ID,
             "action": WORK_OVERLAY_RESTART_ACTION,
             "title": str(title or "需要重启 Codex"),
             "message": str(message or ""),
@@ -429,9 +535,22 @@ class DesktopWorkOverlay:
 
     def keep_alive(self) -> None:
         """Refresh the helper state file while renderer snapshots are unchanged."""
-        if self._closed or (not self.enabled and not self._rest_reminder):
+        if (
+            self._closed
+            or (
+                not self.enabled
+                and self._system_action is None
+                and self._system_notice is None
+                and not self._rest_reminder
+            )
+        ):
             return
-        if not self._last_payload_items and not self._rest_reminder:
+        if (
+            not self._last_payload_items
+            and self._system_action is None
+            and self._system_notice is None
+            and not self._rest_reminder
+        ):
             return
         now = self._clock.monotonic()
         self._ensure_helper_healthy(now)
@@ -508,6 +627,7 @@ class DesktopWorkOverlay:
             closed=self._closed,
             enabled=self.enabled,
             has_payload=bool(self._last_payload_items),
+            has_system_notice=self._system_notice is not None,
             has_rest_reminder=bool(self._rest_reminder),
             now_monotonic=self._clock.monotonic(),
             last_state_write_at=self._last_state_write_at,
@@ -602,6 +722,7 @@ class DesktopWorkOverlay:
         self._last_payload_items = None
         self._last_theme_payload = {}
         self._system_action = None
+        self._system_notice = None
         self._rest_reminder = {}
         self._last_state_signature = None
         self._last_state_write_at = 0.0
@@ -627,6 +748,31 @@ class DesktopWorkOverlay:
                 self._clock.monotonic() + WORK_OVERLAY_RESTART_BACKOFF_SECONDS
             )
             self._report_unavailable_once("unable to start PySide6 desktop overlay helper")
+
+    def _wait_for_helper_ready(self) -> bool:
+        """Wait until the freshly spawned helper has rendered one state."""
+        process = self._process
+        if process is None:
+            return False
+        # Unit-test fakes and alternate embedders do not own the real helper
+        # heartbeat.  The production path always stores a subprocess.Popen.
+        if not isinstance(process, subprocess.Popen):
+            return True
+        heartbeat_path = overlay_ipc.heartbeat_path(self._state_path)
+        deadline = (
+            self._clock.monotonic() + WORK_OVERLAY_HELPER_READY_TIMEOUT_SECONDS
+        )
+        while True:
+            try:
+                if process.poll() is not None:
+                    return False
+            except Exception:
+                return False
+            if heartbeat_path.exists():
+                return True
+            if self._clock.monotonic() >= deadline:
+                return False
+            time.sleep(WORK_OVERLAY_HELPER_READY_POLL_SECONDS)
 
     def _ensure_helper_healthy(self, now: float) -> None:
         """Restart a live-but-stuck helper before it can retain stale bubbles."""
@@ -768,6 +914,7 @@ class DesktopWorkOverlay:
                 producer_instance_id=self._producer_instance_id,
                 items=payload_items,
                 system_action=self._system_action,
+                system_notice=self._system_notice,
                 rest_reminder=self._rest_reminder,
                 theme=theme,
                 updated_at=self._clock.time(),
@@ -801,6 +948,7 @@ class DesktopWorkOverlay:
             command_path=self._command_path,
             items=items,
             system_action=self._system_action,
+            system_notice=self._system_notice,
             rest_reminder=self._rest_reminder,
             theme=theme,
             close=close,

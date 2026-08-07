@@ -58,6 +58,8 @@ RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS = 2.0
 DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS = 10.0
 RENDERER_RESTART_CDP_TIMEOUT_SECONDS = 1.5
 RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS = 30.0
+RENDERER_RESTART_READY_TIMEOUT_SECONDS = 30.0
+RENDERER_RESTART_READY_POLL_SECONDS = 0.25
 DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS = 15.0
 RENDERER_ACTIVE_SESSION_BOOTSTRAP_WAIT_SECONDS = 0.35
 RENDERER_STARTUP_STEP_MIN_VISIBLE_SECONDS = 0.45
@@ -112,7 +114,62 @@ _init_force_desktop_overlay_missing_from_env = _runtime_compat.resolve("_init_fo
 _attach_cli_logger_to_daemon_log = _runtime_diagnostics_owner.attach_cli_logger_to_daemon_log
 
 
-def _restart_codex_for_renderer() -> bool:
+def _wait_for_renderer_restart_ready(
+    port: int,
+    *,
+    source: str,
+    timeout_seconds: float = RENDERER_RESTART_READY_TIMEOUT_SECONDS,
+    poll_seconds: float = RENDERER_RESTART_READY_POLL_SECONDS,
+) -> bool:
+    """Wait until the replacement app exposes both its window and page target."""
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    candidate = _renderer_startup_owner.RendererCdpPortCandidate(
+        port=int(port),
+        source=f"restart-{source}",
+    )
+    window_ready = False
+    window_status = "not_checked"
+    window_reason = ""
+    window_hwnd = 0
+    cdp_ready = False
+    cdp_reason = "not_checked"
+    while True:
+        if not window_ready:
+            (
+                window_ready,
+                window_status,
+                window_reason,
+                window_hwnd,
+            ) = _wait_for_visible_codex_window(timeout_seconds=0.0)
+        cdp_ready, cdp_reason = _validate_renderer_cdp_candidate(candidate)
+        if window_ready and cdp_ready:
+            _append_renderer_diagnostic(
+                "renderer_restart_ready",
+                source=source,
+                port=port,
+                hwnd=window_hwnd,
+            )
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(max(0.01, float(poll_seconds)), remaining))
+    _append_renderer_diagnostic(
+        "renderer_restart_not_ready",
+        source=source,
+        port=port,
+        window_ready=window_ready,
+        window_status=window_status,
+        window_reason=window_reason,
+        hwnd=window_hwnd,
+        cdp_ready=cdp_ready,
+        cdp_reason=cdp_reason,
+        timeout_seconds=timeout_seconds,
+    )
+    return False
+
+
+def _restart_codex_for_renderer(*, source: str = "user") -> bool:
     if sys.platform.startswith("win") and not _stop_codex_processes():
         return False
     if sys.platform == "darwin" and not _stop_macos_codex_app():
@@ -125,10 +182,26 @@ def _restart_codex_for_renderer() -> bool:
         )
         return False
     _append_renderer_diagnostic(
-        "renderer_restart_requested_by_user",
+        (
+            "renderer_restart_requested_automatically"
+            if source == "automatic"
+            else "renderer_restart_requested_by_user"
+        ),
         action_id="restart-codex-for-renderer", port=port,
+        source=source,
     )
-    return launch_codex_app(debugger=True, cdp_port=port)
+    if not launch_codex_app(debugger=True, cdp_port=port):
+        _append_renderer_diagnostic(
+            "renderer_restart_launch_failed",
+            source=source,
+            port=port,
+        )
+        return False
+    return _wait_for_renderer_restart_ready(port, source=source)
+
+
+def _automatic_restart_codex_for_renderer() -> bool:
+    return _restart_codex_for_renderer(source="automatic")
 
 
 def run_renderer_hud_session(
@@ -139,6 +212,8 @@ def run_renderer_hud_session(
     launched_codex: bool = False,
     observed_codex_launch: bool = False,
     loading_feedback: object | None = None,
+    overlay_handoff: dict[str, object] | None = None,
+    seamless_recovery: bool = False,
     services: RuntimeServices | None = None,
 ) -> int:
     return renderer_runtime.run_renderer_hud_session(
@@ -148,6 +223,8 @@ def run_renderer_hud_session(
         launched_codex=launched_codex,
         observed_codex_launch=observed_codex_launch,
         loading_feedback=loading_feedback,
+        overlay_handoff=overlay_handoff,
+        seamless_recovery=seamless_recovery,
         services=services,
         ports=RendererSessionPorts.from_mapping(globals()),
     )
@@ -321,6 +398,7 @@ def run_daemon(args: argparse.Namespace) -> int:
         create_loading=loading_feedback._create_loading_feedback,
         run_renderer=run_renderer_hud_session, run_hud=run_hud_session,
         restart_codex=_restart_codex_for_renderer,
+        automatic_restart_codex=_automatic_restart_codex_for_renderer,
         select_launch_port=_select_launch_renderer_cdp_port, launch=launch_codex_app,
         append_diagnostic=_append_renderer_diagnostic,
     )

@@ -65,6 +65,7 @@ def next_keep_alive_seconds(
     enabled: bool,
     has_payload: bool,
     has_rest_reminder: bool,
+    has_system_notice: bool = False,
     now_monotonic: float,
     last_state_write_at: float,
     keepalive_seconds: float,
@@ -73,8 +74,8 @@ def next_keep_alive_seconds(
 
     if (
         closed
-        or (not enabled and not has_rest_reminder)
-        or (not has_payload and not has_rest_reminder)
+        or (not enabled and not has_rest_reminder and not has_system_notice)
+        or (not has_payload and not has_rest_reminder and not has_system_notice)
     ):
         return None
     elapsed = float(now_monotonic) - float(last_state_write_at)

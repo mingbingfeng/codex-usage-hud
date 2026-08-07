@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 DEFAULT_DAEMON_POLL_MS = 1000
+DEFAULT_DAEMON_REPLACEMENT_WAIT_SECONDS = 30.0
 MAX_DAEMON_POLL_MS = 5000
 MIN_DAEMON_POLL_MS = 100
 
@@ -502,6 +503,55 @@ class CodexDaemonManager:
                 return snapshot
             time.sleep(self.poll_seconds)
 
+    def wait_for_codex_replacement(
+        self,
+        previous_pid: int | None,
+        *,
+        timeout_seconds: float = DEFAULT_DAEMON_REPLACEMENT_WAIT_SECONDS,
+    ) -> bool:
+        """Wait until an explicit restart has produced a different process.
+
+        ``wait_for_codex`` only waits for *any* Codex process.  During a
+        desktop restart the old process can remain alive briefly after the new
+        CDP process is already launchable, so using that generic wait would
+        let the renderer attach to the old process and then make the daemon
+        report the expected replacement as an unexpected exit.  This bounded
+        wait establishes the new process as the daemon baseline before the
+        next renderer session starts.
+        """
+        try:
+            old_pid = int(previous_pid) if previous_pid is not None else None
+        except (TypeError, ValueError, OverflowError):
+            old_pid = None
+        timeout = max(0.0, float(timeout_seconds))
+        deadline = time.monotonic() + timeout
+        self.state = DaemonState.WAITING_FOR_CODEX
+        _logger.info(
+            "daemon_waiting_for_codex_replacement old_pid=%s poll_ms=%s",
+            old_pid,
+            self.poll_ms,
+        )
+        while True:
+            snapshot = self.snapshot()
+            if snapshot.found and (
+                old_pid is None or old_pid not in snapshot.pids
+            ):
+                self.state = DaemonState.HUD_RUNNING
+                _logger.info(
+                    "daemon_codex_replacement_ready old_pid=%s new_pid=%s",
+                    old_pid,
+                    snapshot.primary_pid,
+                )
+                return True
+            if time.monotonic() >= deadline:
+                _logger.warning(
+                    "daemon_codex_replacement_timeout old_pid=%s pids=%s",
+                    old_pid,
+                    ",".join(str(pid) for pid in snapshot.pids),
+                )
+                return False
+            time.sleep(self.poll_seconds)
+
     def codex_is_running(self) -> bool:
         """Return whether the watched Codex process family is still alive."""
         previous_pid = self.last_snapshot.primary_pid
@@ -572,6 +622,7 @@ __all__ = [
     "CodexDaemonManager",
     "DaemonState",
     "DEFAULT_DAEMON_POLL_MS",
+    "DEFAULT_DAEMON_REPLACEMENT_WAIT_SECONDS",
     "MAX_DAEMON_POLL_MS",
     "MacOSProcessListener",
     "ProcessListenerError",

@@ -81,6 +81,61 @@ from .updater import AutoUpdateManager
 
 _LOGGER = logging.getLogger(__name__)
 
+RENDERER_STARTUP_NOTICE_TITLE = "正在启动 Renderer"
+RENDERER_STARTUP_NOTICE_MESSAGE = "HUD 正在检查 Codex 的 CDP 连接，请稍候。"
+
+
+def _ensure_loading_feedback_started(
+    args: argparse.Namespace,
+    card: object | None,
+    *,
+    title: str,
+    message: str,
+) -> object:
+    if card is None:
+        card = loading_feedback._create_loading_feedback(
+            args,
+            title=title,
+            message=message,
+        )
+    start = getattr(card, "start", None)
+    if callable(start):
+        start()
+    update = getattr(card, "update", None)
+    if callable(update):
+        update(title=title, message=message)
+    return card
+
+
+def _prepare_renderer_startup_feedback(
+    args: argparse.Namespace,
+    work_overlay: DesktopWorkOverlay,
+    loading_card: object | None,
+) -> object | None:
+    """Prefer the PySide bubble for an already-running Codex startup check."""
+    show_notice = getattr(work_overlay, "show_system_notice", None)
+    if callable(show_notice):
+        try:
+            if bool(
+                show_notice(
+                    title=RENDERER_STARTUP_NOTICE_TITLE,
+                    message=RENDERER_STARTUP_NOTICE_MESSAGE,
+                )
+            ):
+                if loading_card is not None:
+                    close = getattr(loading_card, "close", None)
+                    if callable(close):
+                        close()
+                return None
+        except Exception:
+            _LOGGER.exception("renderer_startup_notice_failed")
+    return _ensure_loading_feedback_started(
+        args,
+        loading_card,
+        title="正在启动 Renderer HUD",
+        message="正在检查 Codex 的 CDP 连接…",
+    )
+
 
 def _wait_for_renderer_restart_request(
     args: argparse.Namespace,
@@ -105,10 +160,12 @@ def _wait_for_renderer_restart_request(
     )
     work_overlay.close()
     card = loading_card
-    if card is None:
-        card = loading_feedback._create_loading_feedback(
-            args, title=title, message=""
-        ).start()
+    card = _ensure_loading_feedback_started(
+        args,
+        card,
+        title="正在启动 Renderer HUD",
+        message="正在检查 Codex 的 CDP 连接…",
+    )
     if not card.offer_codex_restart(title=title, message=message):
         card.close()
         return False
@@ -188,12 +245,13 @@ def production_runtime_services() -> RuntimeServices:
     )
 
 
-def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: bool = False, daemon_manager: CodexDaemonManager | None = None, launched_codex: bool = False, observed_codex_launch: bool = False, loading_feedback: object | None = None, services: RuntimeServices | None = None, ports: RendererSessionPorts) -> int:
+def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: bool = False, daemon_manager: CodexDaemonManager | None = None, launched_codex: bool = False, observed_codex_launch: bool = False, loading_feedback: object | None = None, overlay_handoff: dict[str, object] | None = None, seamless_recovery: bool = False, services: RuntimeServices | None = None, ports: RendererSessionPorts) -> int:
     """Run the in-renderer HUD over CDP, or report that it is unavailable."""
     if services is None:
         services = ports._production_runtime_services()
     lock_context = nullcontext() if lock_already_held else ports.HudInstanceLock()
     resources: RendererSessionResources | None = None
+    session_exit_code: int | None = None
     try:
         with lock_context:
             local_loading = loading_feedback
@@ -206,12 +264,12 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                 return ports.RENDERER_HUD_UNAVAILABLE
             if startup_plan.scenario == ports.RENDERER_STARTUP_RELAUNCH_OBSERVED:
                 if local_loading is not None:
-                    local_loading.update(title='正在切换到 Renderer HUD', message='检测到普通 Codex 启动，正在改用调试/CDP 模式…')
+                    local_loading.close()
                 ports._append_renderer_diagnostic('renderer_observed_plain_launch_takeover', reason=startup_plan.reason)
                 return ports.HUD_AUTO_RESTART_CODEX
             codex_was_running = startup_plan.scenario in {ports.RENDERER_STARTUP_ATTACH, ports.RENDERER_STARTUP_RESTART_REQUIRED}
             if startup_plan.scenario == ports.RENDERER_STARTUP_LAUNCH:
-                if local_loading is not None:
+                if local_loading is not None and not seamless_recovery:
                     local_loading.update(title='正在启动 Renderer HUD', message='正在以调试/CDP 模式启动 Codex App...')
                 if not ports.launch_codex_app(debugger=True):
                     if local_loading is not None:
@@ -219,14 +277,38 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                     ports._append_renderer_diagnostic('renderer_cdp_launch_failed', port=startup_plan.port, source=startup_plan.port_source)
                     return ports.RENDERER_HUD_UNAVAILABLE
                 launched_codex = True
+            handoff_overlay = (
+                overlay_handoff.pop("overlay", None)
+                if overlay_handoff is not None
+                else None
+            )
             base = renderer_runtime_assembly.create_renderer_session_base(
                 args,
                 services=services,
+                work_overlay=handoff_overlay,
             )
             resources = base.resources
             context = base.context
             display_mode = base.display_mode
             work_overlay = base.work_overlay
+
+            if (
+                local_loading is not None
+                and startup_plan.scenario == ports.RENDERER_STARTUP_RESTART_REQUIRED
+            ):
+                local_loading = _prepare_renderer_startup_feedback(
+                    args,
+                    work_overlay,
+                    local_loading,
+                )
+
+            def release_overlay_for_handoff() -> None:
+                if overlay_handoff is None:
+                    return
+                retained_overlay = resources.release_overlay_for_handoff()
+                if retained_overlay is not None:
+                    overlay_handoff["overlay"] = retained_overlay
+
             if startup_plan.scenario == ports.RENDERER_STARTUP_RESTART_REQUIRED:
                 try:
                     requested = ports._wait_for_renderer_restart_request(args, work_overlay, local_loading)
@@ -236,6 +318,7 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                         local_loading.close()
                     return 130
                 finally:
+                    release_overlay_for_handoff()
                     resources.close()
             cold_start_attach = bool(launched_codex or startup_plan.scenario == ports.RENDERER_STARTUP_ATTACH_OBSERVED)
             renderer_cdp_timeout = ports.RENDERER_RESTART_CDP_TIMEOUT_SECONDS if cold_start_attach else ports.DAEMON_RENDERER_CDP_TIMEOUT_SECONDS if daemon_manager is not None and (not codex_was_running) else ports.RENDERER_CDP_TIMEOUT_SECONDS
@@ -269,13 +352,13 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
             try:
                 wait_for_window = cold_start_attach or (sys.platform.startswith('win') and (not codex_was_running))
                 launch_if_missing = False
-                if local_loading is not None:
+                if local_loading is not None and not seamless_recovery:
                     local_loading.update(title='正在切换到 Renderer HUD' if cold_start_attach else '正在启动 Renderer HUD', message='正在拉起 Codex 主窗口并切到前台，确保 Renderer 注入目标正确...')
                 window_prepared, window_status, window_reason, window_hwnd = ports._prepare_codex_window_for_renderer(timeout_seconds=ports.RENDERER_WINDOW_PREPARE_TIMEOUT_SECONDS, launch_if_missing=launch_if_missing)
                 if not window_prepared:
                     ports._LOGGER.info('renderer_hud_window_prepare_best_effort_failed status=%s hwnd=%s reason=%s', window_status, window_hwnd, window_reason)
                 if wait_for_window:
-                    if local_loading is not None:
+                    if local_loading is not None and not seamless_recovery:
                         local_loading.update(title='正在切换到 Renderer HUD' if cold_start_attach else '正在启动 Renderer HUD', message='正在等待 Codex 主窗口和调试端口准备完成...')
                     window_ready, window_status, window_reason, window_hwnd = ports._wait_for_visible_codex_window(timeout_seconds=ports.DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS)
                     if not window_ready:
@@ -285,9 +368,11 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                         ports._append_renderer_diagnostic('window_not_ready', status=window_status, reason=window_reason, hwnd=window_hwnd, display_mode=display_mode, daemon_mode=True, window_ready_timeout_seconds=ports.DAEMON_RENDERER_WINDOW_READY_TIMEOUT_SECONDS)
                         return ports.RENDERER_HUD_UNAVAILABLE
                 initial_timeout = ports.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS if cold_start_attach else ports.DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS if wait_for_window else ports.RENDERER_INITIAL_TIMEOUT_SECONDS
-                if local_loading is not None:
+                if local_loading is not None and not seamless_recovery:
                     local_loading.update(title='正在切换到 Renderer HUD' if cold_start_attach else '正在启动 Renderer HUD', message='正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...')
-                renderer_startup_visible = startup_feedback.update(step='第 1 步，共 4 步', detail='已连接 Codex，正在准备 HUD…', progress=18)
+                renderer_startup_visible = False
+                if not seamless_recovery:
+                    renderer_startup_visible = startup_feedback.update(step='第 1 步，共 4 步', detail='已连接 Codex，正在准备 HUD…', progress=18)
                 if renderer_startup_visible and local_loading is not None:
                     local_loading.close()
                     local_loading = None
@@ -325,6 +410,12 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                     return ports.RENDERER_HUD_UNAVAILABLE
                 else:
                     ports._remember_successful_renderer_cdp_port(getattr(client, 'port', None))
+                    clear_notice = getattr(work_overlay, 'clear_system_notice', None)
+                    if callable(clear_notice):
+                        clear_notice()
+                    clear_action = getattr(work_overlay, 'clear_system_action', None)
+                    if callable(clear_action):
+                        clear_action()
                 usage_insights_worker = getattr(context, 'usage_insights_worker', None)
                 request_usage_refresh = getattr(usage_insights_worker, 'request_refresh', None)
                 if callable(request_usage_refresh):
@@ -379,7 +470,8 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                 connection_manager.enable_light_push()
                 wait_planner = RendererWaitPlanner(loop_state, RendererWaitPorts(monotonic=services.clock.monotonic, base_delay=lambda snapshot, elapsed, force_fast: ports._renderer_refresh_delay_seconds(context, snapshot, elapsed, force_fast=force_fast), idle_wait_enabled=lambda snapshot, update_state, delay, force_fast: ports._renderer_event_idle_wait_enabled(file_events, snapshot, update_state, delay, force_fast=force_fast), reminder_in=lambda: getattr(getattr(context, 'rest_reminder', None), 'seconds_until_wake', lambda: None)(), keepalive_in=lambda: getattr(work_overlay, 'next_keep_alive_seconds', lambda: None)(), daemon_at=lambda: loop_state.next_daemon_check_at if daemon_manager is not None else None, failure_limit=lambda: ports._renderer_update_failure_limit(display_mode, client.last_error), background_response_pending=ports._has_pending_background_usage_response, probe_in=connection_health.seconds_until_probe, heal_in=connection_health.seconds_until_heal, idle_wait_seconds=ports.RENDERER_EVENT_IDLE_WAIT_SECONDS))
                 event_loop = RendererEventLoop(loop_state, RendererLoopExecutorPorts(sample_inputs=tick_sampler.sample, apply_inputs=pre_refresh_executor.apply, exit_requested=loop_controls.exit_requested, restart_requested=loop_controls.restart_requested, restart_result=loop_controls.restart_result, daemon_tick=loop_controls.daemon_tick, compute_force_fast=lambda inputs: bool(loop_state.latest_snapshot is None or inputs.event_refresh_request.force_fast), apply_refresh=refresh_executor.apply, current_snapshot=lambda: loop_state.latest_snapshot, apply_domain_update=refresh_executor.apply_domains, keep_alive=loop_controls.keep_overlay_alive, after_iteration=loop_controls.after_iteration, compute_wait_delay=wait_planner.compute, wait=command_refresh_requested.wait))
-                return event_loop.run()
+                session_exit_code = event_loop.run()
+                return session_exit_code
             except KeyboardInterrupt:
                 if local_loading is not None:
                     local_loading.close()
@@ -390,12 +482,17 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                         remove_renderer_hud_from_pages(port=startup_plan.port)
                     except Exception:
                         ports._LOGGER.debug('renderer_hud_exit_cleanup_failed', exc_info=True)
+                release_overlay_for_handoff()
                 resources.close()
     except ports.HudAlreadyRunningError as exc:
         ports._eprint(f'codex-usage-hud: {exc}')
         return 2
     finally:
         if resources is not None:
+            if overlay_handoff is not None:
+                retained_overlay = resources.release_overlay_for_handoff()
+                if retained_overlay is not None:
+                    overlay_handoff["overlay"] = retained_overlay
             resources.close()
 def _refresh_renderer_cdp_dependents(context: object) -> None:
     platform = getattr(context, "platform", None)

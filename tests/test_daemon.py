@@ -232,6 +232,23 @@ class DaemonStateMachineTests(unittest.TestCase):
         self.assertEqual(manager.last_snapshot.primary_pid, 456)
         self.assertEqual(manager.state, DaemonState.EXITING)
 
+    def test_wait_for_codex_replacement_waits_for_old_pid_to_disappear(self) -> None:
+        listener = _FakeListener(
+            [
+                ProcessSnapshot(found=True, pids=(123,)),
+                ProcessSnapshot(found=True, pids=(123,)),
+                ProcessSnapshot(found=True, pids=(456,)),
+            ]
+        )
+        manager = CodexDaemonManager(listener=listener, poll_ms=1)
+        manager.snapshot()
+
+        self.assertTrue(
+            manager.wait_for_codex_replacement(123, timeout_seconds=1.0)
+        )
+        self.assertEqual(manager.last_snapshot.primary_pid, 456)
+        self.assertEqual(manager.state, DaemonState.HUD_RUNNING)
+
 
 if __name__ == "__main__":
     unittest.main()

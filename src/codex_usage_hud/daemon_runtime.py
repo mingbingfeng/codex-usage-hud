@@ -30,6 +30,11 @@ HUD_SWITCH_TO_RENDERER = 31
 HUD_SWITCH_TO_RENDERER_RESTART_CODEX = 32
 HUD_AUTO_RESTART_CODEX = 33
 WORK_OVERLAY_RESTART_ACTION_ID = "restart-codex-for-renderer"
+DAEMON_RENDERER_RECOVERY_FAILURE_LIMIT = 3
+RENDERER_RECOVERY_NOTICE_TITLE = "检测到 Codex App 未启用 CDP"
+RENDERER_RECOVERY_NOTICE_MESSAGE = "正在以 CDP 模式重新启动，请稍候。"
+RENDERER_RESTART_NOTICE_TITLE = "正在重启 Codex"
+RENDERER_RESTART_NOTICE_MESSAGE = "正在以 CDP 模式重启 Codex App，请稍候。"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +58,7 @@ class DaemonServices:
     run_renderer: Callable[..., int] | None = None
     run_hud: Callable[..., int] | None = None
     restart_codex: Callable[[], bool] | None = None
+    automatic_restart_codex: Callable[[], bool] | None = None
     select_launch_port: Callable[[], int] | None = None
     launch: Callable[..., bool] = launch_codex_app
     append_diagnostic: Callable[..., object] = append_renderer_diagnostic
@@ -121,6 +127,36 @@ def _default_services() -> DaemonServices:
     )
 
 
+def _manager_primary_pid(manager: object) -> int | None:
+    """Read the daemon's current process baseline without assuming its type."""
+    snapshot = getattr(manager, "last_snapshot", None)
+    pid = getattr(snapshot, "primary_pid", None)
+    try:
+        value = int(pid)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value > 0 else None
+
+
+def _wait_for_codex_after_explicit_restart(
+    manager: object,
+    previous_pid: int | None,
+) -> bool:
+    """Make the daemon baseline the replacement process before rendering."""
+    wait_for_replacement = getattr(
+        manager,
+        "wait_for_codex_replacement",
+        None,
+    )
+    if callable(wait_for_replacement) and previous_pid is not None:
+        result = wait_for_replacement(previous_pid)
+        return result is not False
+    wait_for_codex = getattr(manager, "wait_for_codex", None)
+    if callable(wait_for_codex):
+        wait_for_codex()
+    return True
+
+
 def run_hud_session(
     args: argparse.Namespace,
     *,
@@ -130,6 +166,8 @@ def run_hud_session(
     loading_feedback_instance: object | None = None,
     launched_codex: bool = False,
     observed_codex_launch: bool = False,
+    seamless_recovery: bool = False,
+    overlay_handoff: dict[str, object] | None = None,
     run_renderer: Callable[..., int] | None = None,
     restart_codex: Callable[[], bool] | None = None,
 ) -> int:
@@ -146,10 +184,22 @@ def run_hud_session(
         daemon_manager=daemon_manager,
         launched_codex=launched_codex,
         observed_codex_launch=observed_codex_launch,
+        seamless_recovery=seamless_recovery,
+        overlay_handoff=overlay_handoff,
         loading_feedback=loading_feedback_instance,
     )
     if renderer_exit == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
+        previous_pid = _manager_primary_pid(daemon_manager)
         if not restart():
+            return RENDERER_HUD_UNAVAILABLE
+        if (
+            daemon_manager is not None
+            and previous_pid is not None
+            and not _wait_for_codex_after_explicit_restart(
+                daemon_manager,
+                previous_pid,
+            )
+        ):
             return RENDERER_HUD_UNAVAILABLE
         return renderer(
             clone_args_with_renderer_preference(args, True),
@@ -157,12 +207,101 @@ def run_hud_session(
             daemon_manager=daemon_manager,
             launched_codex=True,
             observed_codex_launch=False,
+            seamless_recovery=seamless_recovery,
+            overlay_handoff=overlay_handoff,
             loading_feedback=loading_feedback_instance,
         )
     if renderer_exit == HUD_SWITCH_TO_RENDERER:
         _LOGGER.info("renderer_hud_legacy_switch_ignored code=%s", renderer_exit)
         return RENDERER_HUD_UNAVAILABLE
     return renderer_exit
+
+
+def _close_overlay_handoff(overlay_handoff: dict[str, object]) -> None:
+    overlay = overlay_handoff.pop("overlay", None)
+    if overlay is None:
+        return
+    close = getattr(overlay, "close", None)
+    if callable(close):
+        close()
+
+
+def _show_renderer_system_notice(
+    overlay_handoff: dict[str, object],
+    *,
+    title: str,
+    message: str,
+) -> bool:
+    overlay = overlay_handoff.get("overlay")
+    show_notice = getattr(overlay, "show_system_notice", None)
+    if not callable(show_notice):
+        return False
+    try:
+        return bool(
+            show_notice(
+                title=title,
+                message=message,
+            )
+        )
+    except Exception:
+        _LOGGER.exception("renderer_system_notice_failed title=%s", title)
+        return False
+
+
+def _show_renderer_recovery_notice(overlay_handoff: dict[str, object]) -> bool:
+    return _show_renderer_system_notice(
+        overlay_handoff,
+        title=RENDERER_RECOVERY_NOTICE_TITLE,
+        message=RENDERER_RECOVERY_NOTICE_MESSAGE,
+    )
+
+
+def _wait_for_renderer_recovery_retry(
+    args: argparse.Namespace,
+    services: DaemonServices,
+    current_loading: object | None,
+) -> bool:
+    """Show a bounded recovery action after automatic attach has failed."""
+    if current_loading is not None:
+        close = getattr(current_loading, "close", None)
+        if callable(close):
+            close()
+    title = "Renderer HUD 恢复失败"
+    message = "Codex 主窗口或 CDP 调试端口未就绪。保存好当前工作后，点击重试。"
+    try:
+        card = services.create_loading(args, title=title, message=message).start()
+    except Exception as exc:
+        services.append_diagnostic(
+            "renderer_recovery_retry_unavailable",
+            reason=str(exc),
+        )
+        return False
+    try:
+        offer = getattr(card, "offer_codex_restart", None)
+        wait = getattr(card, "wait_for_codex_restart_request", None)
+        if not callable(offer) or not bool(
+            offer(title=title, message=message)
+        ):
+            services.append_diagnostic(
+                "renderer_recovery_retry_unavailable",
+                reason="loading feedback action unavailable",
+            )
+            return False
+        if not callable(wait) or not bool(wait()):
+            services.append_diagnostic(
+                "renderer_recovery_retry_cancelled",
+                reason="restart action was not requested",
+            )
+            return False
+        services.append_diagnostic(
+            "renderer_recovery_retry_requested",
+            action_id=WORK_OVERLAY_RESTART_ACTION_ID,
+        )
+        return True
+    finally:
+        close = getattr(card, "close", None)
+        if callable(close):
+            close()
 
 
 def legacy_hud_session_unavailable(surface: str) -> int:
@@ -257,6 +396,8 @@ def run_daemon(
 
         hud = default_hud
     restart = services.restart_codex or _default_restart_codex
+    automatic_restart = services.automatic_restart_codex or restart
+    overlay_handoff: dict[str, object] = {}
     try:
         with services.lock_factory():
             try:
@@ -265,13 +406,21 @@ def run_daemon(
                 return 130
             except ProcessListenerError as exc:
                 _LOGGER.exception("daemon_listener_failed fallback=%s", exc)
-                return hud(args, lock_already_held=True, hide_until_attached=True)
+                return hud(
+                    args,
+                    lock_already_held=True,
+                    hide_until_attached=True,
+                    overlay_handoff=overlay_handoff,
+                )
 
             if startup.mode == DEFAULT_DAEMON_STARTUP_CANCEL:
                 return 0
             startup_loading: Any | None = None
             launched_codex_for_renderer = False
             observed_codex_launch = False
+            renderer_recovery_failures = 0
+            seamless_recovery = False
+            pending_codex_replacement_pid: int | None = None
             if startup.mode == DEFAULT_DAEMON_STARTUP_WAIT:
                 startup_loading = services.create_loading(
                     args,
@@ -312,12 +461,30 @@ def run_daemon(
             force_renderer_retry = startup.mode == DEFAULT_DAEMON_STARTUP_RENDERER
             while True:
                 try:
-                    manager.wait_for_codex()
+                    if pending_codex_replacement_pid is not None:
+                        replacement_ready = _wait_for_codex_after_explicit_restart(
+                            manager,
+                            pending_codex_replacement_pid,
+                        )
+                        pending_codex_replacement_pid = None
+                        if not replacement_ready:
+                            _LOGGER.warning(
+                                "daemon_codex_replacement_not_ready"
+                            )
+                            _close_overlay_handoff(overlay_handoff)
+                            return RENDERER_HUD_UNAVAILABLE
+                    else:
+                        manager.wait_for_codex()
                 except KeyboardInterrupt:
                     return 130
                 except ProcessListenerError as exc:
                     _LOGGER.exception("daemon_listener_failed fallback=%s", exc)
-                    return hud(args, lock_already_held=True, hide_until_attached=True)
+                    return hud(
+                        args,
+                        lock_already_held=True,
+                        hide_until_attached=True,
+                        overlay_handoff=overlay_handoff,
+                    )
                 if force_renderer_retry:
                     exit_code = renderer(
                         clone_args_with_renderer_preference(args, True),
@@ -326,6 +493,8 @@ def run_daemon(
                         loading_feedback=startup_loading,
                         launched_codex=launched_codex_for_renderer,
                         observed_codex_launch=observed_codex_launch,
+                        overlay_handoff=overlay_handoff,
+                        seamless_recovery=seamless_recovery,
                     )
                 else:
                     exit_code = hud(
@@ -335,43 +504,80 @@ def run_daemon(
                         daemon_manager=manager,
                         loading_feedback=startup_loading,
                         observed_codex_launch=observed_codex_launch,
+                        overlay_handoff=overlay_handoff,
+                        seamless_recovery=seamless_recovery,
                     )
                 session_loading = startup_loading
                 startup_loading = None
                 observed_codex_launch = False
                 if exit_code == HUD_AUTO_RESTART_CODEX:
-                    startup_loading = session_loading
-                    if startup_loading is None:
+                    if session_loading is not None:
+                        session_loading.close()
+                    startup_loading = None
+                    if _show_renderer_recovery_notice(overlay_handoff):
+                        services.append_diagnostic(
+                            "renderer_recovery_notice_shown",
+                            notice_id="renderer-recovery-notice",
+                        )
+                    else:
+                        services.append_diagnostic(
+                            "renderer_recovery_notice_unavailable",
+                            reason="overlay handoff unavailable",
+                        )
+                    seamless_recovery = True
+                    previous_pid = _manager_primary_pid(manager)
+                    if not automatic_restart():
+                        if not _wait_for_renderer_recovery_retry(
+                            args,
+                            services,
+                            session_loading,
+                        ):
+                            _close_overlay_handoff(overlay_handoff)
+                            return RENDERER_HUD_UNAVAILABLE
                         startup_loading = services.create_loading(
                             args,
-                            title="正在切换到 Renderer HUD",
-                            message="检测到普通 Codex 启动，正在改用调试/CDP 模式…",
+                            title="正在重启 Codex",
+                            message="正在以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD...",
                         ).start()
-                    else:
-                        startup_loading.update(
-                            title="正在切换到 Renderer HUD",
-                            message="检测到普通 Codex 启动，正在改用调试/CDP 模式…",
-                        )
-                    if not restart():
-                        startup_loading.close()
-                        return RENDERER_HUD_UNAVAILABLE
+                        previous_pid = _manager_primary_pid(manager)
+                        if not restart():
+                            startup_loading.close()
+                            _close_overlay_handoff(overlay_handoff)
+                            return RENDERER_HUD_UNAVAILABLE
+                        seamless_recovery = False
                     launched_codex_for_renderer = True
+                    pending_codex_replacement_pid = previous_pid
                     force_renderer_retry = True
+                    renderer_recovery_failures = 0
                     continue
                 if exit_code == HUD_SWITCH_TO_RENDERER_RESTART_CODEX:
-                    startup_loading = services.create_loading(
-                        args,
-                        title="正在重启 Codex",
-                        message="正在以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD...",
-                    ).start()
+                    seamless_recovery = False
+                    if _show_renderer_system_notice(
+                        overlay_handoff,
+                        title=RENDERER_RESTART_NOTICE_TITLE,
+                        message=RENDERER_RESTART_NOTICE_MESSAGE,
+                    ):
+                        startup_loading = None
+                    else:
+                        startup_loading = services.create_loading(
+                            args,
+                            title=RENDERER_RESTART_NOTICE_TITLE,
+                            message="正在以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD...",
+                        ).start()
+                    previous_pid = _manager_primary_pid(manager)
                     if not restart():
-                        startup_loading.close()
+                        if startup_loading is not None:
+                            startup_loading.close()
+                        _close_overlay_handoff(overlay_handoff)
                         return RENDERER_HUD_UNAVAILABLE
                     launched_codex_for_renderer = True
+                    pending_codex_replacement_pid = previous_pid
                     force_renderer_retry = True
+                    renderer_recovery_failures = 0
                     continue
                 if exit_code == DAEMON_RESTART_REQUESTED:
                     launched_codex_for_renderer = False
+                    renderer_recovery_failures = 0
                     # The renderer session has already been running when this
                     # watchdog signal is emitted. A replacement Codex must be
                     # classified as an observed launch so a plain (non-CDP)
@@ -381,8 +587,31 @@ def run_daemon(
                     observed_codex_launch = True
                     continue
                 if force_renderer_retry and exit_code == RENDERER_HUD_UNAVAILABLE:
+                    renderer_recovery_failures += 1
+                    if renderer_recovery_failures >= DAEMON_RENDERER_RECOVERY_FAILURE_LIMIT:
+                        if not _wait_for_renderer_recovery_retry(
+                            args,
+                            services,
+                            session_loading,
+                        ):
+                            _close_overlay_handoff(overlay_handoff)
+                            return RENDERER_HUD_UNAVAILABLE
+                        startup_loading = services.create_loading(
+                            args,
+                            title="正在重启 Codex",
+                            message="正在以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD...",
+                        ).start()
+                        if not restart():
+                            startup_loading.close()
+                            _close_overlay_handoff(overlay_handoff)
+                            return RENDERER_HUD_UNAVAILABLE
+                        seamless_recovery = False
+                        launched_codex_for_renderer = True
+                        pending_codex_replacement_pid = previous_pid
+                        renderer_recovery_failures = 0
                     time.sleep(manager.poll_seconds)
                     continue
+                _close_overlay_handoff(overlay_handoff)
                 return exit_code
     except HudAlreadyRunningError as exc:
         print(f"codex-usage-hud: {exc}")

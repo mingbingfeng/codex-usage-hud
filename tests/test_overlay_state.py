@@ -12,6 +12,7 @@ def test_state_signature_is_canonical_and_ignores_close_only_fields() -> None:
         "command_path": Path("commands.jsonl"),
         "items": [{"id": "thread-1"}],
         "system_action": {"action": "restartCodex"},
+        "system_notice": {"id": "renderer-recovery-notice"},
         "rest_reminder": {"phase": "prompt"},
         "theme": {"variant": "dark"},
     }
@@ -24,8 +25,10 @@ def test_state_signature_is_canonical_and_ignores_close_only_fields() -> None:
     )
 
     assert open_signature["systemAction"] == {"action": "restartCodex"}
+    assert open_signature["systemNotice"] == {"id": "renderer-recovery-notice"}
     assert open_signature["restReminder"] == {"phase": "prompt"}
     assert close_signature["systemAction"] == {}
+    assert close_signature["systemNotice"] == {}
     assert close_signature["restReminder"] == {}
     assert close_signature["theme"] == {"variant": "dark"}
 
@@ -44,6 +47,7 @@ def test_build_state_message_preserves_v1_sidecar_and_flat_fields(
         producer_instance_id="producer-1",
         items=[{"id": "thread-1"}],
         system_action={"action": "restartCodex"},
+        system_notice={"id": "renderer-recovery-notice"},
         rest_reminder={"phase": "prompt"},
         theme={"variant": "dark"},
         updated_at=100.5,
@@ -57,6 +61,7 @@ def test_build_state_message_preserves_v1_sidecar_and_flat_fields(
     assert state["commandPath"] == str(command_path)
     assert state["ackPath"] == str(overlay_ipc.ack_path(state_path))
     assert state["systemAction"] == {"action": "restartCodex"}
+    assert state["systemNotice"] == {"id": "renderer-recovery-notice"}
     assert state["restReminder"] == {"phase": "prompt"}
     assert state["theme"] == {"variant": "dark"}
     assert state["updatedAt"] == 100.5

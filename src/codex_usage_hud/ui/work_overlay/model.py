@@ -58,6 +58,38 @@ def _system_action_overlay_item(action: Mapping[str, object]) -> dict[str, objec
 def _item_is_system_action(item: Mapping[str, object]) -> bool:
     return bool(item.get("systemAction")) and bool(str(item.get("action") or "").strip())
 
+def _normalized_system_notice(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    notice_id = str(value.get("id") or "").strip()
+    title = str(value.get("title") or "").strip()
+    message = str(value.get("message") or "").strip()
+    if not notice_id or not title or not message:
+        return None
+    status = str(value.get("status") or "warning").strip() or "warning"
+    return {
+        "id": notice_id,
+        "title": title,
+        "message": message,
+        "status": status,
+        "persistent": bool(value.get("persistent")),
+    }
+
+def _system_notice_overlay_item(notice: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "id": str(notice.get("id") or ""),
+        "title": str(notice.get("title") or ""),
+        "status": str(notice.get("status") or "warning"),
+        "statusLabel": "请稍候",
+        "statusText": "请稍候",
+        "lastText": str(notice.get("message") or ""),
+        "elapsedText": "",
+        "systemNotice": True,
+    }
+
+def _item_is_system_notice(item: Mapping[str, object]) -> bool:
+    return bool(item.get("systemNotice"))
+
 def _normalized_rest_reminder(value: object) -> dict[str, object] | None:
     if not isinstance(value, Mapping) or not bool(value.get("bubbleVisible")):
         return None
@@ -404,6 +436,7 @@ def _work_overlay_live_elapsed_text(
         or _item_is_background_usage(item)
         or _item_is_rest_reminder(item)
         or _item_is_system_action(item)
+        or _item_is_system_notice(item)
     ):
         return None
     started_at = parse_timestamp(
@@ -481,6 +514,9 @@ __all__ = [
     "_normalized_system_action",
     "_system_action_overlay_item",
     "_item_is_system_action",
+    "_normalized_system_notice",
+    "_system_notice_overlay_item",
+    "_item_is_system_notice",
     "_normalized_rest_reminder",
     "_item_is_rest_reminder",
     "_format_rest_duration",

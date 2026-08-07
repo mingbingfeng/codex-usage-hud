@@ -6379,29 +6379,35 @@ with tempfile.TemporaryDirectory() as temp_dir:
             ],
         )
 
-    def test_current_task_keeps_first_slot_ahead_of_background_usage(self) -> None:
-        background_usage = {
-            "id": "10000000-0000-4000-8000-000000000003",
-            "kind": "background_usage",
-            "status": "background_usage",
-            "updatedAt": "2026-07-20T10:00:00+08:00",
-        }
-        completed = {
-            "id": "session-completed",
-            "status": "recent",
-            "updatedAt": "2026-07-20T10:01:00+08:00",
-        }
-        active = {
-            "id": "session-active",
+    def test_current_flag_does_not_change_session_bubble_order(self) -> None:
+        app_session = {
+            "id": "app-session",
+            "clientKind": "app",
             "status": "running",
             "current": True,
             "sessionStartedAt": "2026-07-20T10:02:00+08:00",
         }
+        cli_session = {
+            "id": "cli-session",
+            "clientKind": "cli",
+            "status": "running",
+            "current": False,
+            "sessionStartedAt": "2026-07-20T10:07:00+08:00",
+        }
 
-        ordered = _ordered_overlay_items([active, completed, background_usage])
-        visible = _visible_overlay_items(ordered, {}, item_limit=1)
+        first = _ordered_overlay_items([app_session, cli_session])
+        app_selected = _ordered_overlay_items(
+            [
+                {**app_session, "current": False},
+                {**cli_session, "current": True},
+            ]
+        )
 
-        self.assertEqual([item["id"] for item in visible], [active["id"]])
+        self.assertEqual([item["id"] for item in first], ["cli-session", "app-session"])
+        self.assertEqual(
+            [item["id"] for item in app_selected],
+            ["cli-session", "app-session"],
+        )
 
     def test_active_cli_task_survives_live_like_six_item_limit(self) -> None:
         background_usage = [
@@ -6439,7 +6445,7 @@ with tempfile.TemporaryDirectory() as temp_dir:
         )
         visible = _visible_overlay_items(ordered, {}, item_limit=6)
 
-        self.assertEqual(ordered[0]["id"], current["id"])
+        self.assertEqual(ordered[0]["id"], other_active["id"])
         self.assertIn(current["id"], [item["id"] for item in visible])
         self.assertIn(other_active["id"], [item["id"] for item in visible])
 
@@ -14681,7 +14687,8 @@ class DaemonLifecycleTests(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, runtime_orchestration.HUD_AUTO_RESTART_CODEX)
-        loading.update.assert_called_once()
+        loading.close.assert_called_once()
+        loading.update.assert_not_called()
         self.assertEqual(factory_calls, [])
 
     def test_observed_cdp_launch_attaches_exact_port_without_restart_card(self) -> None:
@@ -14939,6 +14946,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             close=MagicMock(),
         )
         fake_work_overlay = MagicMock()
+        fake_work_overlay.show_system_notice.return_value = True
         fake_work_overlay.offer_codex_restart.return_value = True
         fake_work_overlay.wait_for_codex_restart_request.return_value = True
         loading = MagicMock()
@@ -14972,6 +14980,10 @@ class DaemonLifecycleTests(unittest.TestCase):
 
         self.assertEqual(exit_code, HUD_SWITCH_TO_RENDERER_RESTART_CODEX)
         self.assertEqual(factory_calls, ["context", "overlay"])
+        fake_work_overlay.show_system_notice.assert_called_once_with(
+            title=renderer_runtime.RENDERER_STARTUP_NOTICE_TITLE,
+            message=renderer_runtime.RENDERER_STARTUP_NOTICE_MESSAGE,
+        )
         fake_work_overlay.offer_codex_restart.assert_called_once()
         fake_work_overlay.wait_for_codex_restart_request.assert_called_once_with()
         loading.close.assert_called_once_with()
@@ -14985,6 +14997,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         )
         fake_work_overlay = MagicMock()
         fake_work_overlay.offer_codex_restart.return_value = False
+        fake_work_overlay.show_system_notice.return_value = False
         fake_work_overlay.system_action_unavailable_reason = "PySide6 is not installed"
         loading = MagicMock()
         loading.offer_codex_restart.return_value = True
@@ -15079,6 +15092,35 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(renderer_session.call_count, 2)
         self.assertFalse(renderer_session.call_args_list[0].kwargs["launched_codex"])
         self.assertTrue(renderer_session.call_args_list[1].kwargs["launched_codex"])
+
+    def test_run_hud_session_waits_for_replacement_before_retrying_renderer(self) -> None:
+        args = SimpleNamespace(renderer_hud=True)
+        manager = SimpleNamespace(
+            last_snapshot=SimpleNamespace(primary_pid=27172),
+            wait_for_codex_replacement=MagicMock(return_value=True),
+        )
+
+        with (
+            patch(
+                "codex_usage_hud.runtime_orchestration.run_renderer_hud_session",
+                side_effect=[HUD_SWITCH_TO_RENDERER_RESTART_CODEX, 0],
+            ) as renderer_session,
+            patch(
+                "codex_usage_hud.runtime_orchestration._restart_codex_for_renderer",
+                return_value=True,
+            ) as restart_codex,
+        ):
+            exit_code = run_hud_session(
+                args,
+                daemon_manager=manager,
+                run_renderer=renderer_session,
+                restart_codex=restart_codex,
+            )
+
+        self.assertEqual(exit_code, 0)
+        restart_codex.assert_called_once_with()
+        manager.wait_for_codex_replacement.assert_called_once_with(27172)
+        self.assertEqual(renderer_session.call_count, 2)
 
     def test_daemon_passes_its_own_codex_launch_to_renderer_attach(self) -> None:
         manager = SimpleNamespace(

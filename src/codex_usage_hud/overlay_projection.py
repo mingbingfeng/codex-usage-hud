@@ -319,19 +319,19 @@ def order_payload_items(
     is_completed: Callable[[Mapping[str, object]], bool],
     parse_timestamp: Callable[[str], datetime | None],
 ) -> list[Mapping[str, object]]:
-    current_active: list[Mapping[str, object]] = []
+    session_items: list[Mapping[str, object]] = []
     background: list[Mapping[str, object]] = []
     completed: list[Mapping[str, object]] = []
-    active: list[Mapping[str, object]] = []
     for item in items:
         if is_background(item):
             background.append(item)
         elif is_completed(item):
             completed.append(item)
-        elif bool(item.get("current")):
-            current_active.append(item)
         else:
-            active.append(item)
+            # ``current`` identifies the renderer-selected session. It is not
+            # a stable work-bubble ordering key when CLI and App sessions run
+            # concurrently, so keep all session cards in one order group.
+            session_items.append(item)
     background.sort(
         key=lambda item: payload_timestamp_seconds(
             item, "updatedAt", parse_timestamp=parse_timestamp
@@ -347,9 +347,9 @@ def order_payload_items(
             parse_timestamp=parse_timestamp,
         )
     )
-    for group in (current_active, active):
-        group.sort(
-            key=lambda item: payload_timestamp_seconds(
+    session_items.sort(
+        key=lambda item: (
+            payload_timestamp_seconds(
                 item,
                 "sessionStartedAt",
                 "taskStartedAt",
@@ -357,9 +357,11 @@ def order_payload_items(
                 "updatedAt",
                 parse_timestamp=parse_timestamp,
             ),
-            reverse=True,
-        )
-    return current_active + background + active + completed
+            str(item.get("id") or item.get("sessionId") or "").strip(),
+        ),
+        reverse=True,
+    )
+    return session_items + background + completed
 
 
 def visible_payload_items(
