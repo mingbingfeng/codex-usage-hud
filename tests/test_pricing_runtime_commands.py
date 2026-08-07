@@ -8,14 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_usage_hud.config import UserConfig
-from codex_usage_hud.core.pricing_snapshots import PricingSnapshotLedger
-from codex_usage_hud.runtime_commands import (
-    GeneralCommandPorts,
-    RuntimeCommandPorts,
-    _snapshot_pricing_impact,
-    dispatch_command,
-    handle_general_command,
-)
+from codex_usage_hud.runtime_commands import GeneralCommandPorts, handle_general_command
 
 
 def _ports(state: dict[str, UserConfig], **overrides: object) -> GeneralCommandPorts:
@@ -44,35 +37,41 @@ def _ports(state: dict[str, UserConfig], **overrides: object) -> GeneralCommandP
     return GeneralCommandPorts(**values)
 
 
-def test_save_pricing_requires_effective_time_and_creates_version() -> None:
+def test_save_pricing_starts_new_version_now_without_scanning_history() -> None:
     state = {"config": UserConfig.defaults()}
     payload = state["config"].to_dict()
     payload["model_prices"]["gpt-5.6-sol"]["input"] = 7.0
     ports = _ports(state)
 
-    rejected = handle_general_command(
-        {"action": "save", "settings": payload}, ports
-    )
-    assert rejected["kind"] == "error"
-    assert state["config"].model_prices["gpt-5.6-sol"].input == 5.0
-
+    before = datetime.now(timezone.utc)
     saved = handle_general_command(
-        {
-            "action": "savePricing",
-            "settings": payload,
-            "effectiveAt": "2026-08-01T00:00:00Z",
-        },
+        {"action": "savePricing", "settings": payload},
         ports,
     )
+    after = datetime.now(timezone.utc)
+
     assert not saved["kind"]
+    assert "已有记录不变" in saved["message"]
     assert state["config"].model_prices["gpt-5.6-sol"].input == 7.0
     version = next(
         version
         for version in state["config"].pricing_versions
         if version.match_pattern == "gpt-5.6-sol"
     )
+    assert before <= version.effective_at <= after
     assert version.input == 7
-    assert version.effective_at.isoformat() == "2026-08-01T00:00:00+00:00"
+
+
+def test_generic_save_cannot_bypass_pricing_version_workflow() -> None:
+    state = {"config": UserConfig.defaults()}
+    ports = _ports(state)
+    payload = state["config"].to_dict()
+    payload["model_prices"]["gpt-5.6-sol"]["input"] = 7.0
+
+    result = handle_general_command({"action": "save", "settings": payload}, ports)
+
+    assert result["kind"] == "error"
+    assert state["config"].model_prices["gpt-5.6-sol"].input == 5.0
 
 
 def test_import_preview_is_read_only_and_commit_is_atomic() -> None:
@@ -90,7 +89,6 @@ def test_import_preview_is_read_only_and_commit_is_atomic() -> None:
                 "cached_input": 0.1,
                 "cache_write": 1.25,
                 "reasoning": 2,
-                "effective_at": "2026-08-01T00:00:00Z",
             }
         ],
     }
@@ -124,32 +122,11 @@ def test_import_preview_is_read_only_and_commit_is_atomic() -> None:
                 "unit": "USD_per_1M_tokens",
                 "prices": [{"model": "broken", "input": -1, "output": 2}],
             },
-            "defaultEffectiveAt": "2026-08-01T00:00:00Z",
             "conflictPolicy": "overwrite",
         },
         ports,
     )
     assert invalid["kind"] == "error"
-    assert state["config"].to_dict() == before
-
-    missing_effective = {
-        **payload,
-        "prices": [{key: value for key, value in payload["prices"][0].items() if key != "effective_at"}],
-    }
-    rejected_missing_time = handle_general_command(
-        {"action": "pricingImportPreview", "payload": missing_effective}, ports
-    )
-    assert rejected_missing_time["kind"] == "error"
-    assert state["config"].to_dict() == before
-
-    mixed_rows = {
-        **payload,
-        "prices": [payload["prices"][0], "not-a-price-object"],
-    }
-    rejected_mixed_rows = handle_general_command(
-        {"action": "pricingImportPreview", "payload": mixed_rows}, ports
-    )
-    assert rejected_mixed_rows["kind"] == "error"
     assert state["config"].to_dict() == before
 
 
@@ -204,35 +181,23 @@ def test_import_of_an_older_version_keeps_the_editable_current_price() -> None:
     assert current.output == 4
 
 
-def test_generic_save_cannot_bypass_pricing_version_workflow() -> None:
+def test_historical_repricing_commands_are_removed() -> None:
     state = {"config": UserConfig.defaults()}
     ports = _ports(state)
-    versioned, _ = UserConfig.defaults().apply_price_updates(
-        {"gpt-test": {"input": 1, "output": 2}},
-        effective_at="2026-08-01T00:00:00Z",
-        created_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
-    )
-    payload = state["config"].to_dict()
-    payload["pricing_versions"] = [
-        version.to_dict() for version in versioned.pricing_versions
-    ]
-    before = state["config"].to_dict()
 
-    generic = handle_general_command(
-        {"action": "save", "settings": payload}, ports
+    preview = handle_general_command(
+        {"action": "pricingRecalculationPreview", "provider": "custom"}, ports
     )
-    pricing = handle_general_command(
-        {
-            "action": "savePricing",
-            "settings": payload,
-            "effectiveAt": "2026-08-02T00:00:00Z",
-        },
-        ports,
+    execute = handle_general_command(
+        {"action": "pricingRecalculationExecute", "provider": "custom"}, ports
+    )
+    impact = handle_general_command(
+        {"action": "pricingImpactPreview", "provider": "custom"}, ports
     )
 
-    assert generic["kind"] == "error"
-    assert pricing["kind"] == "error"
-    assert state["config"].to_dict() == before
+    assert preview["kind"] == "error"
+    assert execute["kind"] == "error"
+    assert impact["kind"] == "error"
 
 
 def test_export_price_file_uses_current_prices_or_builtin_template(tmp_path: Path) -> None:
@@ -278,114 +243,3 @@ def test_export_price_file_uses_current_prices_or_builtin_template(tmp_path: Pat
     assert fallback_prices[0]["cache_write"] == 6.25
     assert fallback_prices[0]["output"] == 30.0
     assert fallback_prices[0]["reasoning"] == 30.0
-
-
-def test_export_and_recalculation_callbacks() -> None:
-    state = {"config": UserConfig.defaults()}
-    scopes: list[tuple[str, dict[str, object]]] = []
-    ports = _ports(
-        state,
-        pricing_recalculation_preview=lambda scope: (
-            scopes.append(("preview", dict(scope)))
-            or {"matchedCount": 2, "changedCount": 1}
-        ),
-        pricing_recalculation_execute=lambda scope: (
-            scopes.append(("execute", dict(scope)))
-            or {"matchedCount": 2, "changedCount": 1}
-        ),
-    )
-
-    preview = handle_general_command(
-        {"action": "pricingRecalculationPreview", "provider": "custom"}, ports
-    )
-    executed = handle_general_command(
-        {"action": "pricingRecalculationExecute", "provider": "custom"}, ports
-    )
-
-    assert preview["pricingRecalculationPreview"]["changedCount"] == 1
-    assert executed["pricingRecalculationResult"]["changedCount"] == 1
-    assert [kind for kind, _scope in scopes] == ["preview", "execute"]
-
-
-def test_pricing_impact_preview_is_read_only_and_correlated() -> None:
-    state = {"config": UserConfig.defaults()}
-    received: list[dict[str, object]] = []
-
-    def preview(command: dict[str, object]) -> dict[str, object]:
-        received.append(dict(command))
-        return {
-            "effectiveAt": command["effectiveAt"],
-            "before": {"recordCount": 2, "costUsd": 1.0},
-            "after": {"recordCount": 3, "costUsd": 2.5},
-        }
-
-    ports = _ports(state, pricing_impact_preview=preview)
-    before = state["config"].to_dict()
-    result = dispatch_command(
-        {
-            "action": "pricingImpactPreview",
-            "requestId": "impact-1",
-            "settings": before,
-            "effectiveAt": "2026-08-04T12:00:00Z",
-        },
-        RuntimeCommandPorts(),
-        ports,
-    )
-
-    assert result["requestId"] == "impact-1"
-    assert result["action"] == "pricingImpactPreview"
-    assert result["pricingImpactPreview"]["after"]["costUsd"] == 2.5
-    assert received[0]["effectiveAt"] == "2026-08-04T12:00:00Z"
-    assert state["config"].to_dict() == before
-
-
-def test_snapshot_impact_preview_prices_each_row_only_once(tmp_path: Path) -> None:
-    ledger = PricingSnapshotLedger(tmp_path / "pricing.sqlite3")
-    occurred_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
-    ledger.record_if_absent(
-        event_key=ledger.event_key("session", 1, occurred_at),
-        session_id="session",
-        event_line=1,
-        occurred_at=occurred_at,
-        provider="custom",
-        model="gpt-test",
-        base_url="",
-        input_tokens=1,
-        cached_input_tokens=0,
-        cache_write_tokens=0,
-        output_tokens=0,
-        reasoning_tokens=0,
-        cost_usd=1.0,
-        status="versioned",
-        price_snapshot={"version_id": "old"},
-    )
-    calls = 0
-
-    def resolver(_stored: object):
-        nonlocal calls
-        calls += 1
-        return 2.0, "versioned", {"version_id": "new"}
-
-    impact = _snapshot_pricing_impact(
-        ledger,
-        resolver,
-        effective_at="2026-08-01T00:00:00Z",
-    )
-
-    assert calls == 1
-    assert impact["after"]["previousCostUsd"] == 1.0
-    assert impact["after"]["nextCostUsd"] == 2.0
-
-
-def test_pricing_impact_preview_without_callback_is_explicitly_unavailable() -> None:
-    state = {"config": UserConfig.defaults()}
-    result = handle_general_command(
-        {
-            "action": "pricingImpactPreview",
-            "effectiveAt": "2026-08-04T12:00:00Z",
-            "settings": state["config"].to_dict(),
-        },
-        _ports(state),
-    )
-    assert result["kind"] == "error"
-    assert "pricingImpactPreview" not in result

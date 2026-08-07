@@ -128,7 +128,6 @@ def apply_to_context(
         parser = getattr(context, "parser", None)
         if parser is not None:
             parser.cost_estimator = estimator
-            context.usage_cache = ports.usage_cache_factory(parser)
         tracker = getattr(context, "sse_tracker", None)
         if tracker is not None:
             tracker.cost_estimator = estimator

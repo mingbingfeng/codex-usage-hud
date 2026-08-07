@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import logging
@@ -12,7 +11,6 @@ from pathlib import Path
 import subprocess
 import sys
 from threading import Event
-from types import SimpleNamespace
 from typing import Any
 import uuid
 
@@ -29,8 +27,6 @@ from .config import (
     fetch_model_prices,
     write_json_object,
 )
-from .core.calculator import UsageCalculator
-from .core.parser import CostEstimator
 from .desktop_overlay import DesktopWorkOverlay
 from .desktop_overlay_setup import (
     _desktop_overlay_dependency_status,
@@ -41,7 +37,7 @@ from .desktop_overlay_setup import (
 from .overlay_runtime import _handle_work_overlay_command
 from .overlay_projection import _work_overlay_screen_max_items
 from .platforms import SessionSwitchController
-from .runtime_context import RuntimeContext, _build_usage_summary_cache
+from .runtime_context import RuntimeContext
 from .runtime_snapshot_service import _apply_pre_send_pricing
 from .runtime_policies import budget_warning_messages
 from .runtime_paths import hud_program_root
@@ -143,15 +139,6 @@ class GeneralCommandPorts:
     pyside_version: Callable[[], str]
     default_overlay_limit: Callable[[], int]
     dismiss_warnings_today: Callable[[], bool]
-    pricing_recalculation_preview: (
-        Callable[[Mapping[str, object]], Mapping[str, object]] | None
-    ) = None
-    pricing_recalculation_execute: (
-        Callable[[Mapping[str, object]], Mapping[str, object]] | None
-    ) = None
-    pricing_impact_preview: (
-        Callable[[Mapping[str, object]], Mapping[str, object]] | None
-    ) = None
     pricing_open_path: Callable[[Path], None] | None = None
 
 
@@ -227,9 +214,8 @@ def _prepare_versioned_price_changes(
 ) -> tuple[UserConfig, UserConfig, int]:
     """Build a versioned candidate without writing it.
 
-    The settings dialog uses the same preparation as ``savePricing`` for its
-    read-only impact preview.  Keeping this operation pure also prevents a
-    preview request from accidentally publishing a partial price table.
+    Keeping this operation pure lets import/validation flows inspect a
+    candidate without publishing a partial price table.
     """
     previous = ports.load_config()
     candidate = runtime_settings.config_from_payload(previous, settings_payload)
@@ -463,313 +449,8 @@ def _sync_imported_current_prices(
     return result
 
 
-def _pricing_effective_at(command: Mapping[str, object]) -> str:
-    return str(
-        command.get("effectiveAt")
-        or command.get("defaultEffectiveAt")
-        or command.get("effective_at")
-        or ""
-    ).strip()
-
-
-def _parse_pricing_datetime(value: object) -> datetime | None:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _empty_pricing_impact_bucket() -> dict[str, object]:
-    return {
-        "recordCount": 0,
-        "pricedCount": 0,
-        "unavailableCount": 0,
-        "costUsd": 0.0,
-        "previousCostUsd": 0.0,
-        "nextCostUsd": 0.0,
-    }
-
-
-def _round_pricing_impact_bucket(bucket: dict[str, object]) -> dict[str, object]:
-    for key in ("costUsd", "previousCostUsd", "nextCostUsd"):
-        bucket[key] = round(float(bucket.get(key) or 0.0), 6)
-    return bucket
-
-
-def _pricing_impact_bucket_payload(
-    *,
-    before: dict[str, object],
-    after: dict[str, object],
-    effective_at: str,
-) -> dict[str, object]:
-    return {
-        "effectiveAt": effective_at,
-        "before": _round_pricing_impact_bucket(before),
-        "after": _round_pricing_impact_bucket(after),
-    }
-
-
-def _candidate_config_for_pricing_command(
-    ports: GeneralCommandPorts,
-    command: Mapping[str, object],
-) -> tuple[UserConfig, UserConfig, str]:
-    """Return ``(previous, candidate, effective_at)`` without persistence."""
-    previous = ports.load_config()
-    effective_at = _pricing_effective_at(command)
-    payload = command.get("payload")
-    if payload is not None:
-        normalized = _pricing_payload_with_default_effective_at(
-            payload,
-            effective_at,
-        )
-        preview = previous.preview_pricing_import(normalized)
-        candidate, _result = previous.apply_pricing_import(
-            preview,
-            conflict_policy="overwrite",
-        )
-        return previous, _sync_imported_current_prices(candidate, preview), effective_at
-
-    settings_payload = command.get("settings")
-    if settings_payload is None and isinstance(command.get("candidate"), Mapping):
-        settings_payload = command.get("candidate")
-    if settings_payload is None and isinstance(command.get("prices"), Mapping):
-        settings_payload = {"model_prices": dict(command["prices"])}
-    candidate = runtime_settings.config_from_payload(previous, settings_payload)
-    if _pricing_version_state_changed(previous, candidate):
-        raise ValueError("价格版本只能通过保存价格或导入预览流程写入。")
-    if _price_updates(previous, candidate):
-        _previous, candidate, _changed_count = _prepare_versioned_price_changes(
-            ports,
-            settings_payload,
-            effective_at,
-        )
-    return previous, candidate, effective_at
-
-
-def _snapshot_pricing_impact(
-    ledger: object,
-    resolver: Callable[[object], tuple[float | None, str, Mapping[str, object] | None]],
-    *,
-    effective_at: str,
-    provider: object = "",
-    model: object = "",
-    start_at: object = "",
-    end_at: object = "",
-) -> dict[str, object]:
-    """Preview ordinary JSONL snapshots and split projected costs by time."""
-    preview_method = getattr(ledger, "preview_recalculation", None)
-    if not callable(preview_method):
-        return {
-            "matchedCount": 0,
-            "changedCount": 0,
-            "unavailableCount": 0,
-            "previousTotalUsd": 0.0,
-            "nextTotalUsd": 0.0,
-            **_pricing_impact_bucket_payload(
-                before=_empty_pricing_impact_bucket(),
-                after=_empty_pricing_impact_bucket(),
-                effective_at=effective_at,
-            ),
-        }
-    try:
-        raw = preview_method(
-            resolver,
-            provider=str(provider or "").strip().lower(),
-            model=str(model or "").strip(),
-            start_at=str(start_at or "").strip(),
-            end_at=str(end_at or "").strip(),
-            effective_at=effective_at,
-        )
-    except TypeError:
-        raw = preview_method(
-            resolver,
-            provider=str(provider or "").strip().lower(),
-            model=str(model or "").strip(),
-            start_at=str(start_at or "").strip(),
-            end_at=str(end_at or "").strip(),
-        )
-    payload = dict(raw.to_dict() if hasattr(raw, "to_dict") else raw)
-    before = _empty_pricing_impact_bucket()
-    after = _empty_pricing_impact_bucket()
-    effective_datetime = _parse_pricing_datetime(effective_at)
-    breakdown = payload.get("timeBreakdown")
-    connector = getattr(ledger, "_connect", None)
-    stored_decoder = getattr(ledger, "_stored", None)
-    scope_where = getattr(ledger, "_scope_where", None)
-    if isinstance(breakdown, Mapping):
-        before.update(dict(breakdown.get("before") or {}))
-        after.update(dict(breakdown.get("after") or {}))
-    elif (
-        effective_datetime is not None
-        and callable(connector)
-        and callable(stored_decoder)
-        and callable(scope_where)
-    ):
-        where, values = scope_where(
-            provider=str(provider or "").strip().lower(),
-            model=str(model or "").strip(),
-            start_at=str(start_at or "").strip(),
-            end_at=str(end_at or "").strip(),
-        )
-        with closing(connector()) as connection:
-            rows = connection.execute(
-                "SELECT * FROM usage_price_snapshots" + where
-                + " ORDER BY occurred_at, event_key",
-                values,
-            ).fetchall()
-        for row in rows:
-            stored = stored_decoder(row)
-            occurred = _parse_pricing_datetime(getattr(stored, "occurred_at", ""))
-            bucket = before if occurred is not None and occurred < effective_datetime else after
-            old_cost = getattr(stored, "cost_usd", None)
-            try:
-                next_cost, _next_status, _next_snapshot = resolver(stored)
-            except Exception:
-                next_cost = None
-            bucket["recordCount"] = int(bucket["recordCount"]) + 1
-            if old_cost is not None:
-                bucket["previousCostUsd"] = float(bucket["previousCostUsd"]) + float(old_cost)
-            if next_cost is None:
-                bucket["unavailableCount"] = int(bucket["unavailableCount"]) + 1
-            else:
-                bucket["pricedCount"] = int(bucket["pricedCount"]) + 1
-                bucket["nextCostUsd"] = float(bucket["nextCostUsd"]) + float(next_cost)
-                bucket["costUsd"] = float(bucket["costUsd"]) + float(next_cost)
-    payload.update(
-        _pricing_impact_bucket_payload(
-            before=before,
-            after=after,
-            effective_at=effective_at,
-        )
-    )
-    return payload
-
-
-def _background_pricing_impact(
-    runtime: object,
-    calculator: UsageCalculator,
-    *,
-    effective_at: str,
-    provider: object = "",
-    model: object = "",
-    start_at: object = "",
-    end_at: object = "",
-) -> dict[str, object]:
-    """Read-only background request preview using the existing audit store."""
-    scanner = getattr(runtime, "_scanner", None)
-    store = getattr(scanner, "store", None) or getattr(runtime, "store", None)
-    connect = getattr(store, "_connect", None)
-    rows_for_scope = getattr(store, "_recalculation_rows", None)
-    preview_rows = getattr(store, "_recalculation_preview", None)
-    if callable(connect) and callable(rows_for_scope) and callable(preview_rows):
-        with closing(connect()) as connection:
-            scope, rows = rows_for_scope(
-                connection,
-                provider=provider,
-                model=model,
-                start_at=start_at,
-                end_at=end_at,
-            )
-            raw, items = preview_rows(
-                calculator,
-                scope=scope,
-                rows=rows,
-            )
-        before = _empty_pricing_impact_bucket()
-        after = _empty_pricing_impact_bucket()
-        effective_datetime = _parse_pricing_datetime(effective_at)
-        items_by_id = {
-            str(item.get("requestId") or ""): item
-            for item in items
-            if isinstance(item, Mapping)
-        }
-        for row in rows:
-            occurred = datetime.fromtimestamp(
-                int(row["occurred_at"] or 0), tz=timezone.utc
-            )
-            bucket = (
-                before
-                if effective_datetime is not None and occurred < effective_datetime
-                else after
-            )
-            item = items_by_id.get(str(row["request_id"] or ""), {})
-            old_cost = row["estimated_cost_usd"]
-            next_cost = item.get("newCostUsd") if isinstance(item, Mapping) else None
-            bucket["recordCount"] = int(bucket["recordCount"]) + 1
-            if old_cost is not None:
-                bucket["previousCostUsd"] = float(bucket["previousCostUsd"]) + float(old_cost)
-            if next_cost is None:
-                bucket["unavailableCount"] = int(bucket["unavailableCount"]) + 1
-            else:
-                bucket["pricedCount"] = int(bucket["pricedCount"]) + 1
-                bucket["nextCostUsd"] = float(bucket["nextCostUsd"]) + float(next_cost)
-                bucket["costUsd"] = float(bucket["costUsd"]) + float(next_cost)
-        raw = dict(raw)
-        raw.update(
-            _pricing_impact_bucket_payload(
-                before=before,
-                after=after,
-                effective_at=effective_at,
-            )
-        )
-        return raw
-
-    preview_method = getattr(runtime, "preview_recalculation", None)
-    if not callable(preview_method):
-        return {
-            "requestCount": 0,
-            "changedCount": 0,
-            "beforeTotalUsd": 0.0,
-            "afterTotalUsd": 0.0,
-            "beforeUnavailableCount": 0,
-            "afterUnavailableCount": 0,
-            **_pricing_impact_bucket_payload(
-                before=_empty_pricing_impact_bucket(),
-                after=_empty_pricing_impact_bucket(),
-                effective_at=effective_at,
-            ),
-        }
-    try:
-        raw = preview_method(
-            provider=provider,
-            model=model,
-            start_at=start_at,
-            end_at=end_at,
-            effective_at=effective_at,
-            calculator=calculator,
-        )
-    except TypeError:
-        raw = preview_method(
-            provider=provider,
-            model=model,
-            start_at=start_at,
-            end_at=end_at,
-        )
-    payload = dict(raw if isinstance(raw, Mapping) else {})
-    breakdown = payload.get("timeBreakdown")
-    if isinstance(breakdown, Mapping):
-        before = dict(breakdown.get("before") or {})
-        after = dict(breakdown.get("after") or {})
-    else:
-        before = _empty_pricing_impact_bucket()
-        after = _empty_pricing_impact_bucket()
-    payload.update(
-        _pricing_impact_bucket_payload(
-            before=before,
-            after=after,
-            effective_at=effective_at,
-        )
-    )
-    return payload
+def _current_pricing_effective_at() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def correlate_status(
@@ -1036,21 +717,14 @@ def handle_general_command(
             _config, changed_count = _save_versioned_price_changes(
                 ports,
                 command.get("settings"),
-                command.get("effectiveAt"),
+                _current_pricing_effective_at(),
             )
-            return _status(f"已保存 {changed_count} 个新价格版本。")
-        if action == "pricingImpactPreview":
-            if ports.pricing_impact_preview is None:
-                return _status("价格影响预览当前不可用。", kind="error")
-            preview = dict(ports.pricing_impact_preview(command))
-            status = _status("价格影响预览已生成，尚未修改任何记录。")
-            status["pricingImpactPreview"] = preview
-            status["pricingImpactEffectiveAt"] = _pricing_effective_at(command)
-            return status
+            return _status(f"已保存 {changed_count} 个新价格版本；已有记录不变。")
         if action in {"pricingImportPreview", "pricingImportCommit"}:
+            default_effective_at = _current_pricing_effective_at()
             payload = _pricing_payload_with_default_effective_at(
                 command.get("payload"),
-                command.get("defaultEffectiveAt"),
+                default_effective_at,
             )
             config = ports.load_config()
             preview = config.preview_pricing_import(payload)
@@ -1112,7 +786,7 @@ def handle_general_command(
             }
             payload = _pricing_payload_with_default_effective_at(
                 legacy_payload,
-                command.get("defaultEffectiveAt"),
+                _current_pricing_effective_at(),
             )
             if provider:
                 payload["prices"] = [
@@ -1168,22 +842,6 @@ def handle_general_command(
             status = _status(f"已请求打开价格 JSON：{path}")
             status["pricingPath"] = str(path)
             return status
-        if action == "pricingRecalculationPreview":
-            if ports.pricing_recalculation_preview is None:
-                return _status("历史费用重算当前不可用。", kind="error")
-            preview = dict(ports.pricing_recalculation_preview(command))
-            status = _status("历史费用差异预览已生成，尚未修改任何记录。")
-            status["pricingRecalculationPreview"] = preview
-            return status
-        if action == "pricingRecalculationExecute":
-            if ports.pricing_recalculation_execute is None:
-                return _status("历史费用重算当前不可用。", kind="error")
-            result = dict(ports.pricing_recalculation_execute(command))
-            status = _status(
-                f"历史费用重算完成，共更新 {int(result.get('changedCount') or 0)} 条记录。"
-            )
-            status["pricingRecalculationResult"] = result
-            return status
         if action in {"save", "applyDisplayMode"}:
             settings_payload = command.get("settings")
             previous_config = ports.load_config()
@@ -1191,7 +849,7 @@ def handle_general_command(
             if _pricing_version_state_changed(previous_config, config):
                 raise ValueError("价格版本只能通过保存价格或导入预览流程写入。")
             if action == "save" and _price_updates(previous_config, config):
-                raise ValueError("价格有变更，请先设置新价格的生效时间。")
+                raise ValueError("价格有变更，请使用价格保存流程。")
             ports.save_config(config)
             if action == "applyDisplayMode":
                 return _status(
@@ -1261,7 +919,7 @@ def handle_general_command(
             )
         if action == "fetchPrices":
             return _status(
-                "旧版直接拉取已停用，请先预览价格并设置新价格的生效时间。",
+                "旧版直接拉取已停用，请先预览价格后确认导入。",
                 kind="error",
             )
         if action == "restart":
@@ -1458,205 +1116,6 @@ def _handle_renderer_settings_command(
         installer = download_update_asset(info)
         launch_installer(installer)
 
-    def recalculation_scope(command_payload: Mapping[str, object]) -> dict[str, str]:
-        return {
-            "provider": str(command_payload.get("provider") or "").strip().lower(),
-            "model": str(command_payload.get("model") or "").strip(),
-            "start_at": str(
-                command_payload.get("startAt") or command_payload.get("from") or ""
-            ).strip(),
-            "end_at": str(
-                command_payload.get("endAt") or command_payload.get("to") or ""
-            ).strip(),
-        }
-
-    def preview_recalculation(
-        command_payload: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        scope = recalculation_scope(command_payload)
-        estimator = getattr(getattr(context, "parser", None), "cost_estimator", None)
-        ledger = getattr(estimator, "pricing_ledger", None)
-        ordinary: dict[str, object] = {
-            "matchedCount": 0,
-            "changedCount": 0,
-            "unavailableCount": 0,
-            "previousTotalUsd": 0.0,
-            "nextTotalUsd": 0.0,
-        }
-        if ledger is not None and callable(getattr(estimator, "recalculate_snapshot", None)):
-            ordinary = ledger.preview_recalculation(
-                estimator.recalculate_snapshot,
-                **scope,
-            ).to_dict()
-        background: dict[str, object] = {
-            "matchedCount": 0,
-            "changedCount": 0,
-            "unavailableCount": 0,
-            "previousTotalUsd": 0.0,
-            "nextTotalUsd": 0.0,
-        }
-        background_runtime = getattr(context, "background_usage_runtime", None)
-        background_preview = getattr(background_runtime, "preview_recalculation", None)
-        if callable(background_preview):
-            raw_background = dict(background_preview(**scope))
-            background = {
-                **raw_background,
-                "matchedCount": int(raw_background.get("requestCount") or 0),
-                "unavailableCount": int(
-                    raw_background.get("afterUnavailableCount") or 0
-                ),
-                "previousTotalUsd": float(
-                    raw_background.get("beforeTotalUsd") or 0.0
-                ),
-                "nextTotalUsd": float(raw_background.get("afterTotalUsd") or 0.0),
-            }
-        context._pricing_recalculation_preview_scope = tuple(scope.items())
-        return {
-            **scope,
-            "matchedCount": int(ordinary.get("matchedCount") or 0)
-            + int(background.get("matchedCount") or 0),
-            "changedCount": int(ordinary.get("changedCount") or 0)
-            + int(background.get("changedCount") or 0),
-            "unavailableCount": int(ordinary.get("unavailableCount") or 0)
-            + int(background.get("unavailableCount") or 0),
-            "previousTotalUsd": round(
-                float(ordinary.get("previousTotalUsd") or 0.0)
-                + float(background.get("previousTotalUsd") or 0.0),
-                6,
-            ),
-            "nextTotalUsd": round(
-                float(ordinary.get("nextTotalUsd") or 0.0)
-                + float(background.get("nextTotalUsd") or 0.0),
-                6,
-            ),
-            "components": {"sessions": ordinary, "background": background},
-        }
-
-    def preview_pricing_impact(
-        command_payload: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        previous, candidate, effective_at = _candidate_config_for_pricing_command(
-            SimpleNamespace(load_config=load_config),
-            command_payload,
-        )
-        if not effective_at:
-            raise ValueError("预览价格影响前必须设置新价格的生效时间。")
-        del previous
-        calculator = UsageCalculator(
-            candidate.price_table(),
-            pricing_versions=getattr(candidate, "pricing_versions", ()),
-        )
-        estimator = CostEstimator(calculator)
-        scope = {
-            "provider": str(command_payload.get("provider") or "").strip().lower(),
-            "model": str(command_payload.get("model") or "").strip(),
-            "start_at": str(
-                command_payload.get("startAt") or command_payload.get("start_at") or ""
-            ).strip(),
-            "end_at": str(
-                command_payload.get("endAt") or command_payload.get("end_at") or ""
-            ).strip(),
-        }
-        parser = getattr(context, "parser", None)
-        current_estimator = getattr(parser, "cost_estimator", None)
-        ledger = getattr(current_estimator, "pricing_ledger", None)
-        ordinary = _snapshot_pricing_impact(
-            ledger,
-            estimator.recalculate_snapshot,
-            effective_at=effective_at,
-            **scope,
-        )
-        background_runtime = getattr(context, "background_usage_runtime", None)
-        background = _background_pricing_impact(
-            background_runtime,
-            calculator,
-            effective_at=effective_at,
-            **scope,
-        ) if background_runtime is not None else _background_pricing_impact(
-            SimpleNamespace(),
-            calculator,
-            effective_at=effective_at,
-            **scope,
-        )
-
-        def combine(period: str) -> dict[str, object]:
-            left = ordinary.get(period)
-            right = background.get(period)
-            left = left if isinstance(left, Mapping) else {}
-            right = right if isinstance(right, Mapping) else {}
-            return _round_pricing_impact_bucket(
-                {
-                    "recordCount": int(left.get("recordCount") or 0)
-                    + int(right.get("recordCount") or 0),
-                    "pricedCount": int(left.get("pricedCount") or 0)
-                    + int(right.get("pricedCount") or 0),
-                    "unavailableCount": int(left.get("unavailableCount") or 0)
-                    + int(right.get("unavailableCount") or 0),
-                    "costUsd": float(left.get("costUsd") or 0.0)
-                    + float(right.get("costUsd") or 0.0),
-                    "previousCostUsd": float(left.get("previousCostUsd") or 0.0)
-                    + float(right.get("previousCostUsd") or 0.0),
-                    "nextCostUsd": float(left.get("nextCostUsd") or 0.0)
-                    + float(right.get("nextCostUsd") or 0.0),
-                }
-            )
-
-        return {
-            "effectiveAt": effective_at,
-            "ordinary": ordinary,
-            "sessions": ordinary,
-            "background": background,
-            "components": {"sessions": ordinary, "background": background},
-            "before": combine("before"),
-            "after": combine("after"),
-        }
-
-    def execute_recalculation(
-        command_payload: Mapping[str, object],
-    ) -> Mapping[str, object]:
-        scope = recalculation_scope(command_payload)
-        if getattr(context, "_pricing_recalculation_preview_scope", None) != tuple(
-            scope.items()
-        ):
-            raise ValueError("请先预览同一范围的历史费用差异。")
-        estimator = getattr(getattr(context, "parser", None), "cost_estimator", None)
-        ledger = getattr(estimator, "pricing_ledger", None)
-        ordinary: dict[str, object] = {"matchedCount": 0, "changedCount": 0}
-        if ledger is not None and callable(getattr(estimator, "recalculate_snapshot", None)):
-            preview = ledger.preview_recalculation(
-                estimator.recalculate_snapshot,
-                **scope,
-            )
-            ordinary = dict(ledger.apply_recalculation(preview))
-        background: dict[str, object] = {"matchedCount": 0, "changedCount": 0}
-        background_runtime = getattr(context, "background_usage_runtime", None)
-        background_execute = getattr(background_runtime, "execute_recalculation", None)
-        if callable(background_execute):
-            raw_background = dict(background_execute(**scope))
-            background = {
-                **raw_background,
-                "matchedCount": int(raw_background.get("requestCount") or 0),
-            }
-        context._pricing_recalculation_preview_scope = None
-        context.current_session_tail_state = None
-        parser = getattr(context, "parser", None)
-        if parser is not None:
-            context.usage_cache = _build_usage_summary_cache(parser)
-        publish = getattr(getattr(context, "runtime_events", None), "publish", None)
-        if callable(publish):
-            publish(
-                "pricing_recalculated",
-                source="settings",
-                context={"scope": scope},
-            )
-        return {
-            "matchedCount": int(ordinary.get("matchedCount") or 0)
-            + int(background.get("matchedCount") or 0),
-            "changedCount": int(ordinary.get("changedCount") or 0)
-            + int(background.get("changedCount") or 0),
-            "components": {"sessions": ordinary, "background": background},
-        }
-
     general_ports = GeneralCommandPorts(
         load_config=load_config,
         save_config=save_config,
@@ -1682,9 +1141,6 @@ def _handle_renderer_settings_command(
         dismiss_warnings_today=lambda: bool(
             settings_path is not None and not dismiss_warning_for_today(settings_path)
         ),
-        pricing_recalculation_preview=preview_recalculation,
-        pricing_recalculation_execute=execute_recalculation,
-        pricing_impact_preview=preview_pricing_impact,
         pricing_open_path=_open_system_path,
     )
     return dispatch_command(command, command_ports, general_ports)

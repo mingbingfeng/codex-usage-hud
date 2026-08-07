@@ -110,48 +110,6 @@ class BackgroundUsageRuntime:
                 pricing_versions=pricing_versions,
                 app_process_ids=app_process_ids,
             )
-        self.request_scan()
-
-    def preview_recalculation(
-        self,
-        *,
-        provider: object = "",
-        model: object = "",
-        start_at: object = None,
-        end_at: object = None,
-        pricing_versions: Iterable[Any] | None = None,
-        effective_at: object = None,
-        effectiveAt: object = None,
-    ) -> dict[str, object]:
-        with self._scanner_lock:
-            return self._scanner.preview_recalculation(
-                provider=provider,
-                model=model,
-                start_at=start_at,
-                end_at=end_at,
-                pricing_versions=pricing_versions,
-                effective_at=effective_at,
-                effectiveAt=effectiveAt,
-            )
-
-    def execute_recalculation(
-        self,
-        *,
-        provider: object = "",
-        model: object = "",
-        start_at: object = None,
-        end_at: object = None,
-    ) -> dict[str, object]:
-        with self._scanner_lock:
-            result = self._scanner.execute_recalculation(
-                provider=provider,
-                model=model,
-                start_at=start_at,
-                end_at=end_at,
-                recalculated_at=self._clock(),
-            )
-        self._publish_changed(reason="historical_recalculation")
-        return result
 
     def confirm(self, event_id: object) -> bool:
         changed = self.store.confirm(event_id)

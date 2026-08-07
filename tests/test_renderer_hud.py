@@ -284,8 +284,6 @@ class RendererHudPayloadTests(unittest.TestCase):
             "pricing-effective-confirm",
             "pricing-import-preview",
             "pricing-import-commit",
-            "pricing-recalc-preview",
-            "pricing-recalc-execute",
         ):
             self.assertIn(f'data-action="{action}"', renderer_hud.RENDERER_HUD_SCRIPT)
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -303,6 +301,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn('data-action="pricing-template"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="pricing-copy-example"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn('data-action="pricing-recalculate-open"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn('data-action="pricing-recalc-preview"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertNotIn('data-action="pricing-recalc-execute"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("pricingPath", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("pricingUsedTemplate", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("pricingDownload", renderer_hud.RENDERER_HUD_SCRIPT)

@@ -6,17 +6,9 @@ _TEXT_PREFIX = r"""
   function createSettingsShellDomain(ctx, shared) {
       const pricingWorkflowState = {
         pendingSettings: null,
-        pendingChanges: [],
-        impactPreview: null,
-        impactEffectiveAt: "",
-        impactRequestId: "",
         importPayload: null,
         importSourcePayload: null,
-        importDefaultEffectiveAt: "",
         importPreview: null,
-        importMode: "paste",
-        recalculationScope: null,
-        recalculationPreview: null,
         handledArtifacts: new Map(),
       };
 
@@ -250,25 +242,6 @@ _TEXT_PREFIX = r"""
       function thresholdText(settings) {
         const items = Array.isArray(settings.budget_thresholds) ? settings.budget_thresholds : [];
         return items.map((value) => Number(value || 0)).filter((value) => value > 0).join(",");
-      }
-
-      function pricingLocalDateTimeValue(value = new Date()) {
-        const date = value instanceof Date ? value : new Date(value);
-        if (!Number.isFinite(date.getTime())) return "";
-        const pad = (part) => String(part).padStart(2, "0");
-        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-      }
-
-      function pricingEffectiveAtFromInput(input, { allowEmpty = false } = {}) {
-        const text = String(input?.value || "").trim();
-        if (!text && allowEmpty) return "";
-        const parsed = new Date(text);
-        const invalid = !text || !Number.isFinite(parsed.getTime());
-        const future = !invalid && parsed.getTime() > Date.now();
-        if (input) input.setAttribute("aria-invalid", String(invalid || future));
-        if (invalid) throw new Error("请选择有效的新价格生效时间。");
-        if (future) throw new Error("新价格生效时间不能晚于当前时间。");
-        return parsed.toISOString();
       }
 
       function priceRowsHtml(settings) {
@@ -953,22 +926,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         const action = String(status.action || "");
         if (String(status.kind || "") === "error") return;
         if (
-          status.pricingImpactPreview
-          && action === "pricingImpactPreview"
-          && (!pricingWorkflowState.impactRequestId
-            || !status.requestId
-            || String(status.requestId) === pricingWorkflowState.impactRequestId)
-        ) {
-          pricingWorkflowState.impactPreview = status.pricingImpactPreview;
-          pricingWorkflowState.impactEffectiveAt = String(
-            status.pricingImpactPreview.effectiveAt
-            || status.pricingImpactEffectiveAt
-            || pricingWorkflowState.impactEffectiveAt
-            || "",
-          );
-          renderPricingImpactPreview(status.pricingImpactPreview);
-        }
-        if (
           status.pricingPreview
           && ["pricingImportPreview", "fetchPricesPreview"].includes(action)
           && !pricingArtifactSeen(status, "preview")
@@ -981,13 +938,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           && !pricingArtifactSeen(status, "export")
         ) {
           openPricingExportPrompt(status);
-        }
-        if (
-          status.pricingRecalculationPreview
-          && action === "pricingRecalculationPreview"
-          && !pricingArtifactSeen(status, "recalculation-preview")
-        ) {
-          openPricingRecalculationPreview(status.pricingRecalculationPreview);
         }
         if (action === "savePricing") {
           settingsDirtyProviders.clear();
@@ -1264,117 +1214,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         return `输入 ${number(row.input)} / 输出 ${number(row.output)}`;
       }
 
-      function pricingImpactBucket(preview, period) {
-        const direct = preview?.[period];
-        if (direct && typeof direct === "object") return direct;
-        const components = preview?.components && typeof preview.components === "object"
-          ? preview.components
-          : {};
-        const sessions = components.sessions && typeof components.sessions === "object"
-          ? components.sessions
-          : {};
-        const background = components.background && typeof components.background === "object"
-          ? components.background
-          : {};
-        const left = sessions[period] && typeof sessions[period] === "object" ? sessions[period] : {};
-        const right = background[period] && typeof background[period] === "object" ? background[period] : {};
-        return {
-          recordCount: Number(left.recordCount || 0) + Number(right.recordCount || 0),
-          pricedCount: Number(left.pricedCount || 0) + Number(right.pricedCount || 0),
-          unavailableCount: Number(left.unavailableCount || 0) + Number(right.unavailableCount || 0),
-          costUsd: Number(left.costUsd || 0) + Number(right.costUsd || 0),
-        };
-      }
-
-      function pricingImpactMoney(value) {
-        const number = Number(value);
-        return Number.isFinite(number) ? `$${number.toFixed(6)}` : "暂无";
-      }
-
-      function pricingImpactPreviewHtml(preview) {
-        if (!preview || typeof preview !== "object") {
-          return '<div class="codex-usage-hud-pricing-impact">正在估算已知历史用量...</div>';
-        }
-        const before = pricingImpactBucket(preview, "before");
-        const after = pricingImpactBucket(preview, "after");
-        const component = (label, value) => {
-          const bucket = value && typeof value === "object" ? value : {};
-          return `<span>${escapeHtml(label)}<strong>${Number(bucket.recordCount || 0)} 条 · ${pricingImpactMoney(bucket.costUsd)}</strong></span>`;
-        };
-        return `
-          <div class="codex-usage-hud-pricing-impact-title">已知用量影响预览</div>
-          <div class="codex-usage-hud-pricing-preview-grid">
-            ${component("生效前", before)}
-            ${component("生效后", after)}
-          </div>
-          <div class="codex-usage-hud-pricing-impact-components">
-            ${component("普通会话生效前", preview?.ordinary?.before || preview?.sessions?.before)}
-            ${component("后台请求生效前", preview?.background?.before)}
-            ${component("普通会话生效后", preview?.ordinary?.after || preview?.sessions?.after)}
-            ${component("后台请求生效后", preview?.background?.after)}
-          </div>
-        `;
-      }
-
-      function renderPricingImpactPreview(preview = pricingWorkflowState.impactPreview) {
-        const node = document.querySelector(`#${settingsModalId} [data-pricing-impact-preview="true"]`);
-        if (!node) return;
-        node.innerHTML = pricingImpactPreviewHtml(preview);
-        const confirm = document.querySelector(`#${settingsModalId} [data-action="pricing-effective-confirm"], #${settingsModalId} [data-action="pricing-import-commit"]`);
-        if (confirm) {
-          const mode = String(pricingWorkflowState.pendingMode || "");
-          confirm.disabled = mode !== "fetch" && !pricingWorkflowState.impactPreview;
-        }
-      }
-
-      function pricingImportPayloadForEffectiveAt(effectiveAt) {
-        const source = pricingWorkflowState.importSourcePayload || pricingWorkflowState.importPayload;
-        if (!source || typeof source !== "object") return source;
-        if (!Array.isArray(source.prices)) return source;
-        return {
-          ...source,
-          prices: source.prices.map((row) => (
-            row && typeof row === "object" && !String(row.effective_at || row.effectiveAt || "").trim()
-              ? { ...row, effective_at: effectiveAt }
-              : row
-          )),
-        };
-      }
-
-      function refreshPricingImpactPreview({ mode = "save", input = null } = {}) {
-        const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
-        if (!layer || !pricingWorkflowState.pendingSettings && mode === "save" && !pricingWorkflowState.importPayload) return false;
-        let effectiveAt;
-        try {
-          effectiveAt = pricingEffectiveAtFromInput(
-            input || layer.querySelector('[data-pricing-effective-at="true"]') || layer.querySelector('[data-pricing-import-effective-at="true"]'),
-          );
-        } catch (error) {
-          pricingWorkflowState.impactPreview = null;
-          renderPricingImpactPreview(null);
-          setSettingsStatus(error?.message || String(error), "error");
-          return false;
-        }
-        pricingWorkflowState.impactPreview = null;
-        pricingWorkflowState.impactEffectiveAt = effectiveAt;
-        renderPricingImpactPreview(null);
-        const command = {
-          action: "pricingImpactPreview",
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          effectiveAt,
-          ...(mode === "import"
-            ? { payload: pricingImportPayloadForEffectiveAt(effectiveAt) }
-            : { settings: pricingWorkflowState.pendingSettings || collectSettingsForm() }),
-        };
-        const submitted = submitSettingsCommand(
-          command,
-          "正在估算价格变更对已知用量的影响...",
-          { preserveOverlay: true },
-        );
-        if (submitted) pricingWorkflowState.impactRequestId = String(command.id || "");
-        return submitted;
-      }
-
       function pricingChangeSummaryHtml(previous, candidate) {
         const beforeTables = pricingTablesByScope(previous);
         const afterTables = pricingTablesByScope(candidate);
@@ -1412,9 +1251,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         pricingWorkflowState.pendingMode = String(mode || "save");
         pricingWorkflowState.pendingProvider = String(provider || "").trim().toLowerCase();
         pricingWorkflowState.pendingUrl = String(url || "").trim();
-        pricingWorkflowState.impactPreview = null;
-        pricingWorkflowState.impactEffectiveAt = "";
-        pricingWorkflowState.impactRequestId = "";
         const changeSummary = mode === "save"
           ? pricingChangeSummaryHtml(hudSettingsFromPayload(), settings)
           : "";
@@ -1424,13 +1260,10 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         layer.innerHTML = `
           <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="设置新价格的生效时间">
             <div class="codex-usage-hud-settings-confirm-kicker">价格版本</div>
-            <div class="codex-usage-hud-settings-confirm-title">设置新价格的生效时间</div>
-            <div class="codex-usage-hud-settings-confirm-body">发生在此时间之前的用量继续按旧价格计算；此时间及之后的用量按新价格计算。</div>
-            <label class="codex-usage-hud-pricing-field">新价格生效时间
-              <input type="datetime-local" data-pricing-effective-at="true" value="${escapeHtml(pricingLocalDateTimeValue())}" max="${escapeHtml(pricingLocalDateTimeValue())}">
-            </label>
+            <div class="codex-usage-hud-settings-confirm-title">保存新价格</div>
+            <div class="codex-usage-hud-settings-confirm-body">新价格从确认保存时起对后续请求生效；已有记录保持原来的统计结果，不进行历史重算。</div>
             ${changeSummary}
-            <div class="codex-usage-hud-pricing-impact" data-pricing-impact-preview="true">${mode === "save" ? "正在估算已知历史用量..." : "拉取结果会先进入导入预览，不会立即写入。"}</div>
+            ${mode === "fetch" ? '<div class="codex-usage-hud-pricing-impact">拉取结果会先进入导入预览，不会立即写入。</div>' : ""}
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-effective-cancel" data-variant="ghost">取消</button>
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-effective-confirm" data-primary="true">${mode === "save" ? "确认并保存" : "拉取并预览"}</button>
@@ -1438,54 +1271,23 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           </div>
         `;
         dialog.appendChild(layer);
-        const effectiveInput = layer.querySelector('[data-pricing-effective-at="true"]');
-        if (effectiveInput && mode === "save") {
-          let refreshTimer = 0;
-          const refresh = () => {
-            if (refreshTimer) clearTimeout(refreshTimer);
-            refreshTimer = window.setTimeout(() => {
-              refreshPricingImpactPreview({ mode: "save", input: effectiveInput });
-            }, 120);
-          };
-          effectiveInput.addEventListener("input", refresh);
-          effectiveInput.addEventListener("change", refresh);
-          refreshPricingImpactPreview({ mode: "save", input: effectiveInput });
-        }
-        layer.querySelector('[data-pricing-effective-at="true"]')?.focus?.();
+        layer.querySelector('[data-action="pricing-effective-confirm"]')?.focus?.();
       }
 
       function confirmPricingEffectiveAt() {
-        const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
-        const input = layer?.querySelector('[data-pricing-effective-at="true"]');
-        try {
-          const effectiveAt = pricingEffectiveAtFromInput(input);
-          const mode = String(pricingWorkflowState.pendingMode || "save");
-          if (
-            mode === "save"
-            && (!pricingWorkflowState.impactPreview
-              || pricingWorkflowState.impactEffectiveAt !== effectiveAt)
-          ) {
-            refreshPricingImpactPreview({ mode: "save", input });
-            setSettingsStatus("正在刷新价格影响预览，请稍后确认。", "info");
-            return;
-          }
-          if (mode === "fetch") {
-            submitSettingsCommand({
-              action: "fetchPricesPreview",
-              provider: pricingWorkflowState.pendingProvider,
-              url: pricingWorkflowState.pendingUrl,
-              defaultEffectiveAt: effectiveAt,
-            }, "正在拉取并校验价格 JSON...");
-            return;
-          }
+        const mode = String(pricingWorkflowState.pendingMode || "save");
+        if (mode === "fetch") {
           submitSettingsCommand({
-            action: "savePricing",
-            settings: pricingWorkflowState.pendingSettings || collectSettingsForm(),
-            effectiveAt,
-          }, "正在保存新的价格版本...");
-        } catch (error) {
-          setSettingsStatus(error?.message || String(error), "error");
+            action: "fetchPricesPreview",
+            provider: pricingWorkflowState.pendingProvider,
+            url: pricingWorkflowState.pendingUrl,
+          }, "正在拉取并校验价格 JSON...");
+          return;
         }
+        submitSettingsCommand({
+          action: "savePricing",
+          settings: pricingWorkflowState.pendingSettings || collectSettingsForm(),
+        }, "正在保存新的价格版本...");
       }
 
       function openPricingExportPrompt(status) {
@@ -1528,9 +1330,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         pricingWorkflowState.importPayload = null;
         pricingWorkflowState.importSourcePayload = null;
         pricingWorkflowState.importPreview = null;
-        pricingWorkflowState.impactPreview = null;
-        pricingWorkflowState.impactEffectiveAt = "";
-        pricingWorkflowState.impactRequestId = "";
         const layer = document.createElement("div");
         layer.className = "codex-usage-hud-settings-confirm-layer";
         layer.dataset.settingsConfirm = "true";
@@ -1544,9 +1343,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
             <label class="codex-usage-hud-pricing-field">或粘贴 JSON
               <textarea data-pricing-import-text="true" spellcheck="false" placeholder="{ &quot;schema_version&quot;: 1, &quot;unit&quot;: &quot;USD_per_1M_tokens&quot;, &quot;prices&quot;: [] }"></textarea>
             </label>
-            <label class="codex-usage-hud-pricing-field">缺省的新价格生效时间
-              <input type="datetime-local" data-pricing-import-effective-at="true" value="${escapeHtml(pricingLocalDateTimeValue())}" max="${escapeHtml(pricingLocalDateTimeValue())}">
-            </label>
+            <div class="codex-usage-hud-pricing-impact">导入的新增价格从确认导入时起对后续请求生效；已有记录不变。</div>
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-import-cancel" data-variant="ghost">取消</button>
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-import-preview" data-primary="true">校验并预览</button>
@@ -1575,17 +1372,13 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       function previewPricingImport() {
         const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
         const textarea = layer?.querySelector('[data-pricing-import-text="true"]');
-        const effectiveInput = layer?.querySelector('[data-pricing-import-effective-at="true"]');
         try {
           const payload = JSON.parse(String(textarea?.value || ""));
-          const defaultEffectiveAt = pricingEffectiveAtFromInput(effectiveInput);
           pricingWorkflowState.importSourcePayload = payload;
           pricingWorkflowState.importPayload = payload;
-          pricingWorkflowState.importDefaultEffectiveAt = defaultEffectiveAt;
           submitSettingsCommand({
             action: "pricingImportPreview",
             payload,
-            defaultEffectiveAt,
           }, "正在校验价格 JSON 并生成导入预览...");
         } catch (error) {
           setSettingsStatus(`价格 JSON 无法预览：${error?.message || error}`, "error");
@@ -1598,9 +1391,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         closeSettingsConfirm();
         pricingWorkflowState.pendingMode = "import";
         pricingWorkflowState.importPreview = preview;
-        pricingWorkflowState.impactPreview = null;
-        pricingWorkflowState.impactEffectiveAt = "";
-        pricingWorkflowState.impactRequestId = "";
         pricingWorkflowState.importSourcePayload = pricingWorkflowState.importSourcePayload || payload || null;
         pricingWorkflowState.importPayload = payload || pricingWorkflowState.importPayload;
         const added = Number(preview?.addedCount ?? preview?.added ?? 0);
@@ -1618,10 +1408,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
             <div class="codex-usage-hud-pricing-preview-grid"><span>冲突<strong>${conflicts.length}</strong></span><span>兼容提示<strong>${warnings.length}</strong></span></div>
             ${conflicts.length ? `<div class="codex-usage-hud-pricing-preview-list">${conflicts.slice(0, 8).map((item) => `<div>${escapeHtml(String(item.provider || "全局"))} · ${escapeHtml(String(item.model_pattern || item.model || "模型"))} · ${escapeHtml(String(item.effective_at || ""))}</div>`).join("")}</div>` : ""}
             ${warnings.length ? `<div class="codex-usage-hud-pricing-impact">${warnings.map((item) => escapeHtml(String(item))).join("<br>")}</div>` : ""}
-            <label class="codex-usage-hud-pricing-field">缺省的新价格生效时间
-              <input type="datetime-local" data-pricing-import-effective-at="true" value="${escapeHtml(pricingLocalDateTimeValue(pricingWorkflowState.importDefaultEffectiveAt || new Date()))}" max="${escapeHtml(pricingLocalDateTimeValue())}">
-            </label>
-            <div class="codex-usage-hud-settings-confirm-impact" data-pricing-impact-preview="true">正在估算已知历史用量...</div>
+            <div class="codex-usage-hud-pricing-impact">确认导入后，新增价格立即用于后续请求；已有记录不进行历史重算。</div>
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-import-cancel" data-variant="ghost">取消</button>
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-import-commit" data-primary="true" disabled>${conflicts.length ? "覆盖冲突并导入" : "确认导入"}</button>
@@ -1629,44 +1416,14 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           </div>
         `;
         dialog.appendChild(layer);
-        const effectiveInput = layer.querySelector('[data-pricing-import-effective-at="true"]');
-        if (effectiveInput) {
-          let refreshTimer = 0;
-          const refresh = () => {
-            if (refreshTimer) clearTimeout(refreshTimer);
-            refreshTimer = window.setTimeout(() => {
-              refreshPricingImpactPreview({ mode: "import", input: effectiveInput });
-            }, 120);
-          };
-          effectiveInput.addEventListener("input", refresh);
-          effectiveInput.addEventListener("change", refresh);
-          refreshPricingImpactPreview({ mode: "import", input: effectiveInput });
-        }
       }
 
       function commitPricingImport() {
-        const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
-        const input = layer?.querySelector('[data-pricing-import-effective-at="true"]');
-        try {
-          const effectiveAt = pricingEffectiveAtFromInput(input);
-          if (
-            !pricingWorkflowState.impactPreview
-            || pricingWorkflowState.impactEffectiveAt !== effectiveAt
-          ) {
-            refreshPricingImpactPreview({ mode: "import", input });
-            setSettingsStatus("正在刷新价格影响预览，请稍后确认。", "info");
-            return;
-          }
-          pricingWorkflowState.importDefaultEffectiveAt = effectiveAt;
-          submitSettingsCommand({
-            action: "pricingImportCommit",
-            payload: pricingImportPayloadForEffectiveAt(effectiveAt),
-            defaultEffectiveAt: effectiveAt,
-            conflictPolicy: "overwrite",
-          }, "正在原子写入价格版本...");
-        } catch (error) {
-          setSettingsStatus(error?.message || String(error), "error");
-        }
+        submitSettingsCommand({
+          action: "pricingImportCommit",
+          payload: pricingWorkflowState.importSourcePayload || pricingWorkflowState.importPayload,
+          conflictPolicy: "overwrite",
+        }, "正在原子写入价格版本...");
       }
 
       function copyPricingExample() {
@@ -1685,87 +1442,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           () => setSettingsStatus("已复制最小合法价格示例。"),
           (error) => setSettingsStatus(`复制示例失败：${error?.message || error}`, "error"),
         );
-      }
-
-      function openPricingRecalculationDialog() {
-        const dialog = settingsDialogRoot();
-        if (!dialog) return;
-        closeSettingsConfirm();
-        const provider = String(settingsProviderDraft?.activeProvider || "").trim().toLowerCase();
-        const layer = document.createElement("div");
-        layer.className = "codex-usage-hud-settings-confirm-layer";
-        layer.dataset.settingsConfirm = "true";
-        layer.innerHTML = `
-          <div class="codex-usage-hud-settings-confirm-card codex-usage-hud-pricing-dialog" role="dialog" aria-modal="true" aria-label="按价格版本重算历史费用">
-            <div class="codex-usage-hud-settings-confirm-kicker">显式历史操作</div>
-            <div class="codex-usage-hud-settings-confirm-title">按价格版本重算历史费用</div>
-            <div class="codex-usage-hud-pricing-scope-grid">
-              <label class="codex-usage-hud-pricing-field">Provider<input data-pricing-recalc-provider="true" value="${escapeHtml(provider)}"></label>
-              <label class="codex-usage-hud-pricing-field">模型<input data-pricing-recalc-model="true" placeholder="全部模型"></label>
-              <label class="codex-usage-hud-pricing-field">开始时间<input type="datetime-local" data-pricing-recalc-start="true"></label>
-              <label class="codex-usage-hud-pricing-field">结束时间<input type="datetime-local" data-pricing-recalc-end="true" max="${escapeHtml(pricingLocalDateTimeValue())}"></label>
-            </div>
-            <div class="codex-usage-hud-pricing-impact">先生成差异预览。执行后保留原始 token、费用与价格快照审计。</div>
-            <div class="codex-usage-hud-settings-confirm-actions">
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-recalc-cancel" data-variant="ghost">取消</button>
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-recalc-preview" data-primary="true">预览差异</button>
-            </div>
-          </div>
-        `;
-        dialog.appendChild(layer);
-      }
-
-      function previewPricingRecalculation() {
-        const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
-        try {
-          const startAt = pricingEffectiveAtFromInput(layer?.querySelector('[data-pricing-recalc-start="true"]'), { allowEmpty: true });
-          const endAt = pricingEffectiveAtFromInput(layer?.querySelector('[data-pricing-recalc-end="true"]'), { allowEmpty: true });
-          const scope = {
-            provider: String(layer?.querySelector('[data-pricing-recalc-provider="true"]')?.value || "").trim().toLowerCase(),
-            model: String(layer?.querySelector('[data-pricing-recalc-model="true"]')?.value || "").trim(),
-            startAt,
-            endAt,
-          };
-          if (startAt && endAt && new Date(startAt).getTime() > new Date(endAt).getTime()) throw new Error("开始时间不能晚于结束时间。");
-          pricingWorkflowState.recalculationScope = scope;
-          submitSettingsCommand({ action: "pricingRecalculationPreview", ...scope }, "正在生成历史费用差异预览...");
-        } catch (error) {
-          setSettingsStatus(error?.message || String(error), "error");
-        }
-      }
-
-      function openPricingRecalculationPreview(preview) {
-        const dialog = settingsDialogRoot();
-        if (!dialog) return;
-        closeSettingsConfirm();
-        pricingWorkflowState.recalculationPreview = preview;
-        const matched = Number(preview?.matchedCount || 0);
-        const changed = Number(preview?.changedCount || 0);
-        const before = Number(preview?.previousTotalUsd || 0);
-        const after = Number(preview?.nextTotalUsd || 0);
-        const unavailable = Number(preview?.unavailableCount || 0);
-        const layer = document.createElement("div");
-        layer.className = "codex-usage-hud-settings-confirm-layer";
-        layer.dataset.settingsConfirm = "true";
-        layer.innerHTML = `
-          <div class="codex-usage-hud-settings-confirm-card" role="alertdialog" aria-modal="true" aria-label="确认历史费用重算">
-            <div class="codex-usage-hud-settings-confirm-kicker">差异预览</div>
-            <div class="codex-usage-hud-settings-confirm-title">${matched} 条记录中 ${changed} 条费用会变化</div>
-            <div class="codex-usage-hud-pricing-preview-grid"><span>重算前<strong>$${before.toFixed(6)}</strong></span><span>重算后<strong>$${after.toFixed(6)}</strong></span><span>不可计价<strong>${unavailable}</strong></span></div>
-            <div class="codex-usage-hud-settings-confirm-actions">
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-recalc-cancel" data-variant="ghost">取消</button>
-              <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-recalc-execute" data-primary="true" ${changed ? "" : "disabled"}>确认重算</button>
-            </div>
-          </div>
-        `;
-        dialog.appendChild(layer);
-      }
-
-      function executePricingRecalculation() {
-        submitSettingsCommand({
-          action: "pricingRecalculationExecute",
-          ...(pricingWorkflowState.recalculationScope || {}),
-        }, "正在按价格版本重算所选历史费用...");
       }
 
       function saveSettingsFromModal({ section = "" } = {}) {
@@ -2076,9 +1752,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       updateActionGlyph,
       renderUpdateButtons,
       thresholdText,
-      pricingImpactPreviewHtml,
-      renderPricingImpactPreview,
-      refreshPricingImpactPreview,
       priceRowsHtml,
       detectedPriceModelsHtml,
       settingsProviderNames,
@@ -2131,9 +1804,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       previewPricingImport,
       commitPricingImport,
       copyPricingExample,
-      openPricingRecalculationDialog,
-      previewPricingRecalculation,
-      executePricingRecalculation,
       restartHudFromModal,
       installDesktopOverlayFromModal,
       enableDesktopOverlayFromModal,
@@ -2178,9 +1848,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     updateActionGlyph,
     renderUpdateButtons,
     thresholdText,
-    pricingImpactPreviewHtml,
-    renderPricingImpactPreview,
-    refreshPricingImpactPreview,
     priceRowsHtml,
     detectedPriceModelsHtml,
     settingsProviderNames,
@@ -2233,9 +1900,6 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     previewPricingImport,
     commitPricingImport,
     copyPricingExample,
-    openPricingRecalculationDialog,
-    previewPricingRecalculation,
-    executePricingRecalculation,
     restartHudFromModal,
     installDesktopOverlayFromModal,
     enableDesktopOverlayFromModal,

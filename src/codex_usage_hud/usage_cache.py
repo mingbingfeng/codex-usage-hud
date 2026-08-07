@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import logging
@@ -46,7 +45,6 @@ from .usage_contributions import (
 
 DEFAULT_USAGE_SUMMARY_RESCAN_SECONDS = 2.0
 DEFAULT_USAGE_SUMMARY_TAIL_STATE_BYTES = 32 * 1024 * 1024
-PRICING_SNAPSHOT_BATCH_FILES = 64
 USAGE_INSIGHTS_TOP_SESSION_LIMIT = 10
 _LOGGER = logging.getLogger("codex_usage_hud.usage_cache")
 
@@ -190,12 +188,6 @@ class UsageSummaryCache:
                 entry.tail_state = None
                 continue
             retained_bytes += file_size
-
-    def _pricing_snapshot_batch(self):
-        estimator = getattr(self._parser, "cost_estimator", None)
-        ledger = getattr(estimator, "pricing_ledger", None)
-        batch = getattr(ledger, "batch", None)
-        return batch() if callable(batch) else nullcontext()
 
     def prepare_deleted_session_usage(self, item: object) -> str:
         return self._deleted_usage_transactions.prepare(item)
@@ -519,21 +511,15 @@ class UsageSummaryCache:
                 path = self._cache_path(path)
                 seen_paths.add(path)
                 scan_items.append((path, archived))
-        for offset in range(0, len(scan_items), PRICING_SNAPSHOT_BATCH_FILES):
-            with self._pricing_snapshot_batch():
-                for path, archived in scan_items[
-                    offset : offset + PRICING_SNAPSHOT_BATCH_FILES
-                ]:
-                    summary_day, summary_week, _summary_month = (
-                        self._summaries_for_file(
-                            path,
-                            day_start,
-                            week_start,
-                            archived=archived,
-                        )
-                    )
-                    _merge_usage(day_total, summary_day)
-                    _merge_usage(week_total, summary_week)
+        for path, archived in scan_items:
+            summary_day, summary_week, _summary_month = self._summaries_for_file(
+                path,
+                day_start,
+                week_start,
+                archived=archived,
+            )
+            _merge_usage(day_total, summary_day)
+            _merge_usage(week_total, summary_week)
 
         removed_paths: list[Path] = []
         for cached_path in list(self._entries):

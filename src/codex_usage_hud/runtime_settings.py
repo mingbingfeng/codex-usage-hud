@@ -112,7 +112,6 @@ def partial_domains_for_command(
         "fetchPrices",
         "savePricing",
         "pricingImportCommit",
-        "pricingRecalculationExecute",
     }:
         return {"currentSession", "settings"}
     if action in {
@@ -121,8 +120,6 @@ def partial_domains_for_command(
         "pricingExport",
         "pricingTemplate",
         "pricingOpen",
-        "pricingRecalculationPreview",
-        "pricingImpactPreview",
     }:
         return {"settings"}
     if action in {

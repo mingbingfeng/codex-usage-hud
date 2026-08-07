@@ -710,31 +710,6 @@ TEXT = r"""
         commitPricingImport();
         return;
       }
-      if (action.dataset.action === "pricing-recalculate-open") {
-        event.preventDefault();
-        event.stopPropagation();
-        openPricingRecalculationDialog();
-        return;
-      }
-      if (action.dataset.action === "pricing-recalc-cancel") {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsConfirm();
-        setSettingsStatus("已取消历史费用重算。");
-        return;
-      }
-      if (action.dataset.action === "pricing-recalc-preview") {
-        event.preventDefault();
-        event.stopPropagation();
-        previewPricingRecalculation();
-        return;
-      }
-      if (action.dataset.action === "pricing-recalc-execute") {
-        event.preventDefault();
-        event.stopPropagation();
-        executePricingRecalculation();
-        return;
-      }
       if (action.dataset.action === "pricing-effective-cancel") {
         event.preventDefault();
         event.stopPropagation();

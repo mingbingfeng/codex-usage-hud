@@ -7,14 +7,12 @@ import os
 import re
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .calculator import UsageCalculator, estimate_tokens
-from .pricing_snapshots import PricingSnapshotLedger, StoredPriceSnapshot
 from .pre_send_estimator import BaseEstimate
 from .activity_monitor import ReadingActivity
 
@@ -314,7 +312,7 @@ class RequestRound:
 
 @dataclass
 class UsageEvent:
-    """One confirmed token_count event with computed cost metadata."""
+    """One confirmed token_count event with a computed cost."""
 
     timestamp: datetime | None
     model: str
@@ -327,8 +325,6 @@ class UsageEvent:
     model_provider: str = "unknown"
     cache_write_tokens: int = 0
     line: int = 0
-    price_status: str = "unavailable"
-    price_snapshot: dict[str, object] | None = None
 
 
 @dataclass
@@ -538,92 +534,9 @@ class CostEstimator:
         self,
         calculator: UsageCalculator | None = None,
         default_model: str = DEFAULT_MODEL,
-        pricing_ledger: PricingSnapshotLedger | None = None,
     ) -> None:
         self._calculator = calculator or UsageCalculator()
         self._default_model = default_model
-        self.pricing_ledger = pricing_ledger
-
-    @staticmethod
-    def _stored_result(
-        stored: StoredPriceSnapshot,
-    ) -> tuple[float | None, str, dict[str, object] | None]:
-        return stored.cost_usd, stored.status, stored.price_snapshot
-
-    def calculate_with_snapshot(
-        self,
-        model: str,
-        input_tokens: int | None,
-        cached_tokens: int | None,
-        output_tokens: int | None,
-        reasoning_tokens: int | None = 0,
-        *,
-        cache_write_tokens: int | None = 0,
-        provider: str = "",
-        base_url: str = "",
-        occurred_at: datetime | None = None,
-        event_key: str = "",
-        session_id: str = "",
-        event_line: int = 0,
-    ) -> tuple[float | None, str, dict[str, object] | None]:
-        """Resolve one price and optionally freeze it for a confirmed JSONL event."""
-        if input_tokens is None or output_tokens is None:
-            return None, "unavailable", None
-        ledger = self.pricing_ledger
-        if ledger is not None and event_key:
-            stored = ledger.get(event_key)
-            if stored is not None:
-                return self._stored_result(stored)
-        try:
-            snapshot = self._calculator.price_snapshot(
-                model or self._default_model,
-                provider=provider,
-                base_url=base_url,
-                occurred_at=occurred_at,
-            )
-            status = (
-                str(snapshot.get("status") or "configured")
-                if isinstance(snapshot, Mapping)
-                else "unavailable"
-            )
-            cost = (
-                self._calculator.calculate_cost_usd(
-                    model_name=model or self._default_model,
-                    input_tokens=input_tokens,
-                    cached_input_tokens=cached_tokens or 0,
-                    output_tokens=output_tokens,
-                    reasoning_tokens=reasoning_tokens or 0,
-                    cache_write_tokens=cache_write_tokens or 0,
-                    provider=provider,
-                    base_url=base_url,
-                    occurred_at=occurred_at,
-                )
-                if snapshot is not None
-                else None
-            )
-        except (TypeError, ValueError):
-            return None, "unavailable", None
-        normalized_snapshot = dict(snapshot) if isinstance(snapshot, Mapping) else None
-        if ledger is None or not event_key or occurred_at is None:
-            return cost, status, normalized_snapshot
-        stored = ledger.record_if_absent(
-            event_key=event_key,
-            session_id=session_id,
-            event_line=event_line,
-            occurred_at=occurred_at,
-            provider=provider,
-            model=model or self._default_model,
-            base_url=base_url,
-            input_tokens=input_tokens,
-            cached_input_tokens=cached_tokens or 0,
-            cache_write_tokens=cache_write_tokens or 0,
-            output_tokens=output_tokens,
-            reasoning_tokens=reasoning_tokens or 0,
-            cost_usd=cost,
-            status=status,
-            price_snapshot=normalized_snapshot,
-        )
-        return self._stored_result(stored)
 
     def calculate(
         self,
@@ -638,47 +551,22 @@ class CostEstimator:
         base_url: str = "",
         occurred_at: datetime | None = None,
     ) -> float | None:
-        cost, _status, _snapshot = self.calculate_with_snapshot(
-            model,
-            input_tokens,
-            cached_tokens,
-            output_tokens,
-            reasoning_tokens,
-            cache_write_tokens=cache_write_tokens,
-            provider=provider,
-            base_url=base_url,
-            occurred_at=occurred_at,
-        )
-        return cost
-
-    def recalculate_snapshot(
-        self, stored: StoredPriceSnapshot
-    ) -> tuple[float | None, str, dict[str, object] | None]:
+        if input_tokens is None or output_tokens is None:
+            return None
         try:
-            occurred_at = parse_timestamp(stored.occurred_at)
-            snapshot = self._calculator.price_snapshot(
-                stored.model,
-                provider=stored.provider,
-                base_url=stored.base_url,
+            return self._calculator.calculate_cost_usd(
+                model_name=model or self._default_model,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_tokens or 0,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens or 0,
+                cache_write_tokens=cache_write_tokens or 0,
+                provider=provider,
+                base_url=base_url,
                 occurred_at=occurred_at,
             )
-            if snapshot is None:
-                return None, "unavailable", None
-            cost = self._calculator.calculate_cost_usd(
-                stored.model,
-                input_tokens=stored.input_tokens,
-                cached_input_tokens=stored.cached_input_tokens,
-                cache_write_tokens=stored.cache_write_tokens,
-                output_tokens=stored.output_tokens,
-                reasoning_tokens=stored.reasoning_tokens,
-                provider=stored.provider,
-                base_url=stored.base_url,
-                occurred_at=occurred_at,
-            )
-            normalized = dict(snapshot)
-            return cost, str(normalized.get("status") or "configured"), normalized
         except (TypeError, ValueError):
-            return None, "unavailable", None
+            return None
 
 
 def classify_session_client(originator: object, source: object) -> str:
@@ -860,7 +748,6 @@ class JsonlSessionParser:
             path,
             session_id,
             snapshot=snapshot,
-            persist_price_snapshots=False,
         )
         if start:
             # A bounded tail can price only the rounds inside its byte window,
@@ -943,8 +830,6 @@ class JsonlSessionParser:
         session_id: str | None = None,
         sse_tracker: SseRequestStateMachine | None = None,
         snapshot: ParsedSession | None = None,
-        *,
-        persist_price_snapshots: bool = True,
     ) -> ParsedSession:
         """Parse already loaded Codex JSONL records."""
         parsed = snapshot or ParsedSession(session_path=path)
@@ -974,11 +859,7 @@ class JsonlSessionParser:
         parsed.activity = self.latest_activity(records)
         parsed.last_output = self.latest_output(records)
         parsed.slow = self.slow_summary(records, parsed.last_event_time)
-        token_index = self.apply_confirmed_tokens(
-            parsed,
-            records,
-            persist_price_snapshots=persist_price_snapshots,
-        )
+        token_index = self.apply_confirmed_tokens(parsed, records)
         if self.estimate_enabled:
             parsed.estimate = self.estimate_since_last_token(records, token_index)
 
@@ -1371,42 +1252,16 @@ class JsonlSessionParser:
     def _usage_event_records(
         self,
         records: Sequence[Mapping[str, Any]],
-        *,
-        persist_price_snapshots: bool = True,
     ) -> list[tuple[int, UsageEvent]]:
         """Return per-request deltas, excluding replayed parent-thread history."""
         events: list[tuple[int, UsageEvent]] = []
         current_model = ""
         model_provider = self.session_model_provider(records)
         base_url = self.session_base_url(records)
-        session_id = self.session_id_from_records(records)
         replay_start = self._history_replay_usage_start(records)
         previous_total: tuple[int, int, int, int, int] | None = None
-        ledger = self.cost_estimator.pricing_ledger
-        prefetch = getattr(ledger, "get_many", None)
-        can_prefetch = (
-            persist_price_snapshots
-            and ledger is not None
-            and callable(prefetch)
-            and session_id
-            and session_id != "n/a"
-        )
 
         for index, record in enumerate(records):
-            if can_prefetch and index % 256 == 0:
-                event_keys = [
-                    ledger.event_key(
-                        session_id,
-                        _as_int(candidate.get("_line")),
-                        candidate["_dt"],
-                    )
-                    for candidate in records[index : index + 256]
-                    if candidate.get("type") == "event_msg"
-                    and isinstance(candidate.get("_dt"), datetime)
-                    and isinstance(candidate.get("payload"), Mapping)
-                    and candidate["payload"].get("type") == "token_count"
-                ]
-                prefetch(event_keys)
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
                 continue
@@ -1486,32 +1341,18 @@ class JsonlSessionParser:
 
             occurred_at = record.get("_dt")
             event_line = _as_int(record.get("_line"))
-            event_key = ""
-            if (
-                persist_price_snapshots
-                and ledger is not None
-                and session_id
-                and session_id != "n/a"
-                and isinstance(occurred_at, datetime)
-            ):
-                event_key = ledger.event_key(session_id, event_line, occurred_at)
-            cost_usd, price_status, price_snapshot = (
-                self.cost_estimator.calculate_with_snapshot(
-                    current_model,
-                    input_tokens,
-                    cached_tokens,
-                    output_tokens,
-                    reasoning_tokens,
-                    cache_write_tokens=cache_write_tokens,
-                    provider=model_provider,
-                    base_url=base_url,
-                    occurred_at=occurred_at
-                    if isinstance(occurred_at, datetime)
-                    else None,
-                    event_key=event_key,
-                    session_id=session_id,
-                    event_line=event_line,
-                )
+            cost_usd = self.cost_estimator.calculate(
+                current_model,
+                input_tokens,
+                cached_tokens,
+                output_tokens,
+                reasoning_tokens,
+                cache_write_tokens=cache_write_tokens,
+                provider=model_provider,
+                base_url=base_url,
+                occurred_at=occurred_at
+                if isinstance(occurred_at, datetime)
+                else None,
             )
 
             events.append(
@@ -1529,8 +1370,6 @@ class JsonlSessionParser:
                         model_provider=model_provider,
                         cache_write_tokens=cache_write_tokens,
                         line=event_line,
-                        price_status=price_status,
-                        price_snapshot=price_snapshot,
                     ),
                 )
             )
@@ -1540,20 +1379,9 @@ class JsonlSessionParser:
         self,
         snapshot: ParsedSession,
         records: Sequence[Mapping[str, Any]],
-        *,
-        persist_price_snapshots: bool = True,
     ) -> int:
         """Apply confirmed per-request deltas and return the last event index."""
-        ledger = self.cost_estimator.pricing_ledger
-        batch = getattr(ledger, "batch", None)
-        context = (
-            batch() if persist_price_snapshots and callable(batch) else nullcontext()
-        )
-        with context:
-            indexed_events = self._usage_event_records(
-                records,
-                persist_price_snapshots=persist_price_snapshots,
-            )
+        indexed_events = self._usage_event_records(records)
         if not indexed_events:
             return -1
 
@@ -1587,11 +1415,7 @@ class JsonlSessionParser:
 
     def usage_events(self, records: Sequence[Mapping[str, Any]]) -> list[UsageEvent]:
         """Return confirmed per-request deltas across a session."""
-        ledger = self.cost_estimator.pricing_ledger
-        batch = getattr(ledger, "batch", None)
-        context = batch() if callable(batch) else nullcontext()
-        with context:
-            return [event for _index, event in self._usage_event_records(records)]
+        return [event for _index, event in self._usage_event_records(records)]
 
     def summarize_usage_events(
         self,

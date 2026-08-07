@@ -25,7 +25,6 @@ from .core import (
     SseRequestStateMachine,
     UsageCalculator,
 )
-from .core.pricing_snapshots import PricingSnapshotLedger
 from .core.deleted_usage import DeletedUsageLedger
 from .core.rest_reminder import RestReminderPresenter
 from .core.runtime_errors import RuntimeErrorRegistry
@@ -54,7 +53,6 @@ DEFAULT_SQLITE_LOG = "logs_2.sqlite"
 DEFAULT_STATE_DB = "state_5.sqlite"
 DEFAULT_SESSION_INDEX = "session_index.jsonl"
 DELETED_SESSION_USAGE_FILENAME = "deleted_session_usage.json"
-PRICING_SNAPSHOT_DATABASE_FILENAME = "pricing-snapshots.sqlite3"
 USAGE_SUMMARY_DATABASE_FILENAME = "usage-summary.sqlite3"
 
 _LOGGER = logging.getLogger(__name__)
@@ -241,10 +239,7 @@ def _cost_estimator_from_config(config: UserConfig) -> CostEstimator:
         UsageCalculator(
             config.price_table(),
             pricing_versions=getattr(config, "pricing_versions", ()),
-        ),
-        pricing_ledger=PricingSnapshotLedger(
-            hud_runtime_dir() / PRICING_SNAPSHOT_DATABASE_FILENAME
-        ),
+        )
     )
 
 

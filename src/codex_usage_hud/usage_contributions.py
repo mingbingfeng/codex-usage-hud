@@ -152,17 +152,7 @@ def path_under_usage_roots(path: Path, scan_roots: Sequence[Path]) -> bool:
 
 def usage_parser_version(parser: object) -> str:
     custom = str(getattr(parser, "usage_contribution_version", "") or "").strip()
-    base = custom or USAGE_CONTRIBUTION_PARSER_VERSION
-    estimator = getattr(parser, "cost_estimator", None)
-    ledger = getattr(estimator, "pricing_ledger", None)
-    if ledger is None:
-        return base
-    revision = getattr(ledger, "revision", 0)
-    try:
-        pricing_revision = max(0, int(revision))
-    except (TypeError, ValueError):
-        pricing_revision = 0
-    return f"{base}:pricing-{pricing_revision}"
+    return custom or USAGE_CONTRIBUTION_PARSER_VERSION
 
 
 T = TypeVar("T")

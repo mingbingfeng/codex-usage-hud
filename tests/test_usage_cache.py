@@ -5,8 +5,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from codex_usage_hud.core import JsonlSessionParser
-from codex_usage_hud.core.parser import CostEstimator
-from codex_usage_hud.core.pricing_snapshots import PricingSnapshotLedger
 from codex_usage_hud.usage_cache import UsageSummaryCache
 from codex_usage_hud.usage_summary_store import UsageSummaryStore
 
@@ -83,45 +81,6 @@ def test_usage_cache_bounds_retained_raw_tail_records(tmp_path: Path) -> None:
     cache.summarize(sessions, day, week)
 
     assert all(entry.tail_state is None for entry in cache._entries.values())
-
-
-def test_cold_usage_scan_batches_price_snapshot_transactions(tmp_path: Path) -> None:
-    class CountingLedger(PricingSnapshotLedger):
-        def __init__(self, path: Path) -> None:
-            self.connection_count = 0
-            super().__init__(path)
-
-        def _connect(self):
-            self.connection_count += 1
-            return super()._connect()
-
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    for index in range(3):
-        (sessions / f"session-{index}.jsonl").write_text(
-            json.dumps(
-                _record(
-                    "2026-07-30T00:00:00Z",
-                    "session_meta",
-                    {"id": f"s{index}", "model_provider": "custom"},
-                )
-            )
-            + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
-    ledger = CountingLedger(tmp_path / "pricing.sqlite3")
-    ledger.connection_count = 0
-    parser = JsonlSessionParser(cost_estimator=CostEstimator(pricing_ledger=ledger))
-    cache = UsageSummaryCache(parser)
-
-    cache.summarize(
-        sessions,
-        datetime(2026, 7, 30, tzinfo=timezone.utc),
-        datetime(2026, 7, 27, tzinfo=timezone.utc),
-    )
-
-    assert ledger.connection_count == 1
 
 
 def test_usage_cache_append_reuses_tail_state_and_matches_full_rebuild(
