@@ -2569,6 +2569,7 @@ TEXT = r"""
             overflow: auto;
             display: grid;
             gap: 4px;
+            margin-inline: 18px;
             padding: 7px;
             border: 1px solid color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 36%, transparent);
             border-radius: 5px;
@@ -3348,6 +3349,25 @@ TEXT = r"""
             padding: 9px 12px;
             border-top: 1px solid var(--codex-usage-hud-divider, #393b40);
             background: #292a2d;
+          }
+          #${rootId} .codex-usage-hud-pricing-apply-all {
+            min-width: 0;
+            max-width: 55%;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            margin-right: auto;
+            color: #c9cbd0;
+            font-size: 11px;
+            line-height: 1.35;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-pricing-apply-all input {
+            width: 15px;
+            height: 15px;
+            flex: 0 0 15px;
+            margin: 0;
+            accent-color: var(--codex-usage-hud-accent, #f3d27a);
           }
           #${rootId} .codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action {
             min-height: 34px;

@@ -181,6 +181,11 @@ TEXT = r"""
         void readPricingImportFile(pricingImportFile);
         return;
       }
+      const pricingApplyAll = event.target?.closest?.('[data-pricing-apply-all="true"]');
+      if (pricingApplyAll && root.contains(pricingApplyAll)) {
+        updatePricingApplyAllPreview(!!pricingApplyAll.checked);
+        return;
+      }
       const sessionFilter = event.target?.closest?.("[data-session-cleanup-filter]");
       if (sessionFilter && root.contains(sessionFilter)) {
         const key = String(sessionFilter.dataset.sessionCleanupFilter || "");

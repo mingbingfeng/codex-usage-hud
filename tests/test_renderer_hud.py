@@ -270,6 +270,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("请作者喝咖啡", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("settings-fetch-prices", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-price-advanced", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-pricing-apply-all="true"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("应用于所有 providers", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("applyPricingToAllProviders", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("updatePricingApplyAllPreview", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-pricing-change-summary="true"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("codex-usage-hud-pricing-apply-all", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("margin-inline: 18px;", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("当前生效价格版本", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="provider"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-price-field="base_url"', renderer_hud.RENDERER_HUD_SCRIPT)
@@ -1544,7 +1551,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "51";', script)
+        self.assertIn('const version = "52";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)

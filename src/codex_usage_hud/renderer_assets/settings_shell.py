@@ -6,6 +6,8 @@ _TEXT_PREFIX = r"""
   function createSettingsShellDomain(ctx, shared) {
       const pricingWorkflowState = {
         pendingSettings: null,
+        pendingSettingsBase: null,
+        pendingApplyAll: false,
         importPayload: null,
         importSourcePayload: null,
         importPreview: null,
@@ -1214,6 +1216,123 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         return `输入 ${number(row.input)} / 输出 ${number(row.output)}`;
       }
 
+      function pricingModelName(row, fallback = "") {
+        return String(row?.model || fallback || "").trim();
+      }
+
+      function pricingModelsMatch(left, right) {
+        const leftModel = pricingModelName(null, left);
+        const rightModel = pricingModelName(null, right);
+        if (!leftModel || !rightModel) return false;
+        const normalizedLeft = normalizePriceModel(leftModel);
+        const normalizedRight = normalizePriceModel(rightModel);
+        const leftIsPattern = normalizedLeft.includes("*") || normalizedLeft.includes("?");
+        const rightIsPattern = normalizedRight.includes("*") || normalizedRight.includes("?");
+        return normalizedLeft === normalizedRight
+          || (leftIsPattern && priceModelPatternMatches(normalizedLeft, normalizedRight))
+          || (rightIsPattern && priceModelPatternMatches(normalizedRight, normalizedLeft));
+      }
+
+      function pricingNumber(value) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+      }
+
+      function pricingPriceFields(row, fallbackModel = "") {
+        const output = pricingNumber(row?.output);
+        return {
+          model: pricingModelName(row, fallbackModel),
+          input: pricingNumber(row?.input),
+          cached_input: pricingNumber(row?.cached_input),
+          cache_write: pricingNumber(row?.cache_write),
+          output,
+          reasoning: pricingNumber(row?.reasoning ?? output),
+        };
+      }
+
+      function clonePricingSettings(settings) {
+        const source = settings && typeof settings === "object" ? settings : {};
+        const providerSettings = source.provider_settings && typeof source.provider_settings === "object"
+          ? Object.fromEntries(Object.entries(source.provider_settings).map(([provider, value]) => [
+            provider,
+            {
+              ...(value && typeof value === "object" ? value : {}),
+              model_prices: cloneSettingsPriceTable(value?.model_prices),
+            },
+          ]))
+          : {};
+        return {
+          ...source,
+          model_prices: cloneSettingsPriceTable(source.model_prices),
+          provider_settings: providerSettings,
+        };
+      }
+
+      function pricingTableForProvider(settings, provider) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (!normalizedProvider) {
+          return settings?.model_prices && typeof settings.model_prices === "object"
+            ? settings.model_prices
+            : {};
+        }
+        const entry = settings?.provider_settings?.[normalizedProvider];
+        return entry?.model_prices && typeof entry.model_prices === "object"
+          ? entry.model_prices
+          : {};
+      }
+
+      function pricingChangedRows(previous, candidate, provider) {
+        const before = pricingTableForProvider(previous, provider);
+        const after = pricingTableForProvider(candidate, provider);
+        return Object.entries(after).filter(([key, row]) => (
+          pricingRowFingerprint(before[key], key) !== pricingRowFingerprint(row, key)
+        ));
+      }
+
+      function applyPricingToAllProviders(previous, candidate, provider = "") {
+        const changedRows = pricingChangedRows(previous, candidate, provider);
+        if (!changedRows.length) return candidate;
+        const result = clonePricingSettings(candidate);
+        const providers = settingsProviderNames(result);
+        if (!providers.length) {
+          result.model_prices = cloneSettingsPriceTable(result.model_prices);
+          changedRows.forEach(([key, sourceRow]) => {
+            result.model_prices[key] = pricingPriceFields(sourceRow, key);
+          });
+          return result;
+        }
+        providers.forEach((targetProvider) => {
+          const currentSettings = result.provider_settings?.[targetProvider] || {};
+          const table = cloneSettingsPriceTable(currentSettings.model_prices);
+          changedRows.forEach(([sourceKey, sourceRow]) => {
+            const model = pricingModelName(sourceRow, sourceKey);
+            const matchingKeys = Object.keys(table).filter((key) => (
+              pricingModelsMatch(pricingModelName(table[key], key), model)
+            ));
+            if (matchingKeys.length) {
+              matchingKeys.forEach((key) => {
+                const targetRow = table[key] && typeof table[key] === "object" ? table[key] : {};
+                table[key] = {
+                  ...targetRow,
+                  ...pricingPriceFields(sourceRow, model),
+                  model: pricingModelName(targetRow, key) || model,
+                };
+              });
+              return;
+            }
+            table[model] = {
+              ...pricingPriceFields(sourceRow, model),
+              provider: targetProvider,
+            };
+          });
+          result.provider_settings[targetProvider] = {
+            ...currentSettings,
+            model_prices: table,
+          };
+        });
+        return result;
+      }
+
       function pricingChangeSummaryHtml(previous, candidate) {
         const beforeTables = pricingTablesByScope(previous);
         const afterTables = pricingTablesByScope(candidate);
@@ -1240,7 +1359,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           <div><strong>${escapeHtml(change.provider)}</strong> · ${escapeHtml(change.model)}<br><span>${escapeHtml(pricingShortPrice(change.oldRow))} -> ${escapeHtml(pricingShortPrice(change.newRow))}</span></div>
         `).join("");
         const more = changes.length > 6 ? `<div>另有 ${changes.length - 6} 个模型价格变更</div>` : "";
-        return `<div class="codex-usage-hud-pricing-preview-list" aria-label="价格变更摘要">${rows}${more}</div>`;
+        return `<div class="codex-usage-hud-pricing-preview-list" data-pricing-change-summary="true" aria-label="价格变更摘要">${rows}${more}</div>`;
       }
 
       function openPricingEffectiveDialog({ mode, settings = null, provider = "", url = "" }) {
@@ -1248,6 +1367,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         if (!dialog) return;
         closeSettingsConfirm();
         pricingWorkflowState.pendingSettings = settings;
+        pricingWorkflowState.pendingSettingsBase = settings;
+        pricingWorkflowState.pendingApplyAll = false;
         pricingWorkflowState.pendingMode = String(mode || "save");
         pricingWorkflowState.pendingProvider = String(provider || "").trim().toLowerCase();
         pricingWorkflowState.pendingUrl = String(url || "").trim();
@@ -1265,6 +1386,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
             ${changeSummary}
             ${mode === "fetch" ? '<div class="codex-usage-hud-pricing-impact">拉取结果会先进入导入预览，不会立即写入。</div>' : ""}
             <div class="codex-usage-hud-settings-confirm-actions">
+              ${mode === "save" ? '<label class="codex-usage-hud-pricing-apply-all"><input type="checkbox" data-pricing-apply-all="true"><span>应用于所有 providers</span></label>' : ""}
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-effective-cancel" data-variant="ghost">取消</button>
               <button type="button" class="codex-usage-hud-settings-action" data-action="pricing-effective-confirm" data-primary="true">${mode === "save" ? "确认并保存" : "拉取并预览"}</button>
             </div>
@@ -1272,6 +1394,33 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         `;
         dialog.appendChild(layer);
         layer.querySelector('[data-action="pricing-effective-confirm"]')?.focus?.();
+      }
+
+      function updatePricingApplyAllPreview(enabled) {
+        if (String(pricingWorkflowState.pendingMode || "") !== "save") return;
+        const base = pricingWorkflowState.pendingSettingsBase || pricingWorkflowState.pendingSettings;
+        if (!base) return;
+        pricingWorkflowState.pendingApplyAll = !!enabled;
+        pricingWorkflowState.pendingSettings = enabled
+          ? applyPricingToAllProviders(
+            hudSettingsFromPayload(),
+            base,
+            pricingWorkflowState.pendingProvider,
+          )
+          : base;
+        const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
+        if (!layer) return;
+        const current = layer.querySelector('[data-pricing-change-summary="true"]');
+        const next = pricingChangeSummaryHtml(
+          hudSettingsFromPayload(),
+          pricingWorkflowState.pendingSettings,
+        );
+        if (current) {
+          if (next) current.outerHTML = next;
+          else current.remove();
+        } else if (next) {
+          layer.querySelector(".codex-usage-hud-settings-confirm-body")?.insertAdjacentHTML("afterend", next);
+        }
       }
 
       function confirmPricingEffectiveAt() {
@@ -1284,6 +1433,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           }, "正在拉取并校验价格 JSON...");
           return;
         }
+        const applyAllNode = document.querySelector(`#${settingsModalId} [data-pricing-apply-all="true"]`);
+        if (applyAllNode) updatePricingApplyAllPreview(!!applyAllNode.checked);
         submitSettingsCommand({
           action: "savePricing",
           settings: pricingWorkflowState.pendingSettings || collectSettingsForm(),
@@ -1447,7 +1598,11 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       function saveSettingsFromModal({ section = "" } = {}) {
         const settings = collectSettingsForm();
         if (!section && pricingChanged(settings)) {
-          openPricingEffectiveDialog({ mode: "save", settings });
+          openPricingEffectiveDialog({
+            mode: "save",
+            settings,
+            provider: String(settingsProviderDraft?.activeProvider || "").trim().toLowerCase(),
+          });
           return;
         }
         const submitted = submitSettingsCommand(
@@ -1762,6 +1917,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       settingsProviderMeta,
       settingsProviderTabsHtml,
       settingsProviderEditorHtml,
+      applyPricingToAllProviders,
       revealSettingsProviderTab,
       renderSettingsProviderTabs,
       captureSettingsProviderForm,
@@ -1799,6 +1955,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       saveSettingsFromModal,
       fetchPricesFromModal,
       confirmPricingEffectiveAt,
+      updatePricingApplyAllPreview,
       openPricingImportDialog,
       readPricingImportFile,
       previewPricingImport,
@@ -1858,6 +2015,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     settingsProviderMeta,
     settingsProviderTabsHtml,
       settingsProviderEditorHtml,
+      applyPricingToAllProviders,
       revealSettingsProviderTab,
       renderSettingsProviderTabs,
       captureSettingsProviderForm,
@@ -1895,6 +2053,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     saveSettingsFromModal,
     fetchPricesFromModal,
     confirmPricingEffectiveAt,
+    updatePricingApplyAllPreview,
     openPricingImportDialog,
     readPricingImportFile,
     previewPricingImport,
