@@ -47,8 +47,16 @@ def test_request_owner_preserves_order_limit_totals_and_builder_wrappers() -> No
 
     display_rows, _widths = projection.display_request_rows(snapshot, context=context)
     assert [item.index for item in display_rows] == list(range(31, 1, -1))
+    expanded_rows, _expanded_widths = projection.display_request_rows(
+        snapshot,
+        context=context,
+        limit=60,
+    )
+    assert [item.index for item in expanded_rows] == list(range(31, 0, -1))
     assert projection.request_rows(snapshot, context=context) == builder._request_rows(snapshot)
     assert projection.request_row_details(snapshot, context=context) == builder._request_row_details(snapshot)
+    assert len(builder._request_rows(snapshot, limit=60)) == 31
+    assert builder._request_rows_total(snapshot) == 31
 
     input_tokens, cached_tokens, output_tokens, reasoning_tokens, total_tokens, cost, estimated = projection.task_total(
         snapshot,

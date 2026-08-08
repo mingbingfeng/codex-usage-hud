@@ -201,7 +201,7 @@ def test_request_presenter_preserves_round_order_and_dynamic_widths() -> None:
         cost_estimator=estimator,
     )
 
-    assert entry.startswith("#33 $0.094 20:36:26 ↑194k")
+    assert entry.startswith("#33 $0.094 20:36:26 ↑101k")
     assert "◎48%" in entry
     assert entry.endswith("↻93k ∑295k")
     assert widths.index == 2

@@ -23,8 +23,8 @@ from .platforms.cdp_probe import (
 )
 from .platforms.codex_theme import CodexThemeProbe, CodexThemeSnapshot
 from .renderer_catalog import (
-    RENDERER_HUD_SCRIPT,
-    model_catalog_payload as _renderer_model_catalog_payload,
+    RENDERER_HUD_SCRIPT,  # noqa: F401 - compatibility export
+    model_catalog_payload as _renderer_model_catalog_payload,  # noqa: F401 - compatibility export
     renderer_hud_script_with_model_catalog as _renderer_hud_script_with_model_catalog,
 )
 from .renderer_cdp import RendererTargetDiscovery as _RendererTargetDiscovery
@@ -361,6 +361,7 @@ class RendererHudClient:
         usage_insights: dict[str, object] | None = None,
         session_cleanup: dict[str, object] | None = None,
         connection_health: dict[str, object] | ConnectionHealth | None = None,
+        request_rows_limit: int = 30,
     ) -> bool:
         started = time.perf_counter()
         support_images = [] if self._support_images_sent else support_qr_payload()
@@ -393,6 +394,7 @@ class RendererHudClient:
             usage_insights=usage_insights,
             session_cleanup=session_cleanup,
             connection_health=connection_health,
+            request_rows_limit=request_rows_limit,
         ).to_json()
         update_ok = self.update_payload(payload)
         metrics = dict(self.last_update_metrics)

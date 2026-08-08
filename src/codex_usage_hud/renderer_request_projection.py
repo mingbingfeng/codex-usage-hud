@@ -31,6 +31,7 @@ RateValueFn = Callable[[float | None, bool], str]
 MoneyFn = Callable[[float | None, bool], str]
 FixedTotalFn = Callable[[int | None], str]
 ShortNumberFn = Callable[[int | None], str]
+REQUEST_ROWS_PAGE_SIZE = 30
 
 
 @dataclass(frozen=True)
@@ -296,10 +297,11 @@ def display_request_rows(
     snapshot: ParsedSession,
     *,
     context: RequestProjectionContext,
+    limit: int = REQUEST_ROWS_PAGE_SIZE,
 ) -> tuple[list[RequestRound], renderer_request.RoundColumnWidths]:
     if context.is_new_session(snapshot) or context.is_pending_session(snapshot):
         return [], renderer_request.RoundColumnWidths()
-    rows = task_rows(snapshot, context=context)[-30:]
+    rows = task_rows(snapshot, context=context)[-max(1, int(limit or 1)):]
     if not rows:
         rows = [round_from_snapshot(snapshot, context=context)]
     display_rows = list(reversed(rows))
@@ -315,8 +317,13 @@ def request_rows(
     snapshot: ParsedSession,
     *,
     context: RequestProjectionContext,
+    limit: int = REQUEST_ROWS_PAGE_SIZE,
 ) -> list[str]:
-    display_rows, widths = display_request_rows(snapshot, context=context)
+    display_rows, widths = display_request_rows(
+        snapshot,
+        context=context,
+        limit=limit,
+    )
     return [
         round_entry(
             item,
@@ -332,8 +339,13 @@ def request_row_details(
     snapshot: ParsedSession,
     *,
     context: RequestProjectionContext,
+    limit: int = REQUEST_ROWS_PAGE_SIZE,
 ) -> list[dict[str, object]]:
-    display_rows, widths = display_request_rows(snapshot, context=context)
+    display_rows, widths = display_request_rows(
+        snapshot,
+        context=context,
+        limit=limit,
+    )
     details: list[dict[str, object]] = []
     for item in display_rows:
         parts = round_entry_parts(
@@ -362,6 +374,7 @@ RoundColumnWidths = renderer_request.RoundColumnWidths
 __all__ = [
     "RequestProjectionContext",
     "RoundColumnWidths",
+    "REQUEST_ROWS_PAGE_SIZE",
     "display_request_rows",
     "request_cost",
     "request_row_details",

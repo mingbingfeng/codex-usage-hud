@@ -111,6 +111,7 @@ def payload_from_snapshot(
     usage_insights: dict[str, object] | None = None,
     session_cleanup: dict[str, object] | None = None,
     connection_health: dict[str, object] | ConnectionHealth | None = None,
+    request_rows_limit: int = renderer_request_projection.REQUEST_ROWS_PAGE_SIZE,
 ) -> RendererHudPayload:
     new_session = _is_new_session_snapshot(snapshot)
     pending_session = _is_pending_session_snapshot(snapshot)
@@ -193,8 +194,9 @@ def payload_from_snapshot(
         top_details=top_details,
         top_progress=top_progress,
         top_copies=_top_copy_texts(snapshot),
-        request_rows=_request_rows(snapshot),
-        request_row_details=_request_row_details(snapshot),
+        request_rows=_request_rows(snapshot, limit=request_rows_limit),
+        request_row_details=_request_row_details(snapshot, limit=request_rows_limit),
+        request_rows_total=_request_rows_total(snapshot),
         observed_models=_observed_models(snapshot),
         settings=settings_payload,
         active_display_mode=str(active_display_mode or "renderer"),
@@ -950,26 +952,48 @@ def _round_entry_widths(
     )
 
 
-def _request_rows(snapshot: ParsedSession) -> list[str]:
+def _request_rows(
+    snapshot: ParsedSession,
+    *,
+    limit: int = renderer_request_projection.REQUEST_ROWS_PAGE_SIZE,
+) -> list[str]:
     return renderer_request_projection.request_rows(
         snapshot,
         context=_request_projection_context(),
+        limit=limit,
     )
 
 
 def _display_request_rows(
     snapshot: ParsedSession,
+    *,
+    limit: int = renderer_request_projection.REQUEST_ROWS_PAGE_SIZE,
 ) -> tuple[list[RequestRound], _RoundColumnWidths]:
     return renderer_request_projection.display_request_rows(
         snapshot,
         context=_request_projection_context(),
+        limit=limit,
     )
 
 
-def _request_row_details(snapshot: ParsedSession) -> list[dict[str, object]]:
+def _request_row_details(
+    snapshot: ParsedSession,
+    *,
+    limit: int = renderer_request_projection.REQUEST_ROWS_PAGE_SIZE,
+) -> list[dict[str, object]]:
     return renderer_request_projection.request_row_details(
         snapshot,
         context=_request_projection_context(),
+        limit=limit,
+    )
+
+
+def _request_rows_total(snapshot: ParsedSession) -> int:
+    return len(
+        renderer_request_projection.task_rows(
+            snapshot,
+            context=_request_projection_context(),
+        )
     )
 
 

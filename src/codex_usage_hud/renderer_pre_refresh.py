@@ -50,6 +50,8 @@ class RendererPreRefreshExecutor:
             "backgroundUsageDetail",
         }
     )
+    _REQUEST_ROWS_LOAD_MORE_ACTION = "loadMoreRequestRows"
+    _REQUEST_ROWS_PAGE_SIZE = 30
 
     def __init__(
         self,
@@ -77,6 +79,10 @@ class RendererPreRefreshExecutor:
             return
         previous_config = self.ports.current_config()
         action = str(inputs.command.get("action") or "").strip()
+        if action == self._REQUEST_ROWS_LOAD_MORE_ACTION:
+            self.state.request_rows_limit += self._REQUEST_ROWS_PAGE_SIZE
+            self.state.settings_command_status = {}
+            return
         if action in self._BACKGROUND_QUERY_ACTIONS:
             self.ports.reset_background_retry()
         self.state.settings_command_status = self.ports.execute_command(inputs.command)

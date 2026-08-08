@@ -33,6 +33,7 @@ class RendererHudPayload:
     top_copies: dict[str, str] = field(default_factory=dict)
     request_rows: list[str] = field(default_factory=list)
     request_row_details: list[dict[str, object]] = field(default_factory=list)
+    request_rows_total: int = 0
     observed_models: list[str] = field(default_factory=list)
     settings: dict[str, object] = field(default_factory=dict)
     active_display_mode: str = "renderer"
@@ -90,6 +91,7 @@ class RendererHudPayload:
             "topCopies": dict(self.top_copies),
             "requestRows": list(self.request_rows),
             "requestRowDetails": [dict(item) for item in self.request_row_details],
+            "requestRowsTotal": max(0, int(self.request_rows_total or 0)),
             "observedModels": list(self.observed_models),
             "settings": dict(self.settings),
             "activeDisplayMode": self.active_display_mode,
@@ -168,7 +170,7 @@ def payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
         "newSession", "pendingSession", "selectionSeq", "sessionId",
         "rendererSessionId", "cachedPreview", "selectionObservedAt",
         "followState", "followReason", "followElapsedMs", "topDetails",
-        "topCopies", "requestRows", "requestRowDetails", "observedModels",
+        "topCopies", "requestRows", "requestRowDetails", "requestRowsTotal", "observedModels",
         "preSendEstimate", "preSendBaseTokens", "preSendBreakdown",
         "preSendInputPrice", "preSendTotalCost", "preSendHasPrices",
         "activityWarning", "activityReadingFile", "backgroundUsageNotification",

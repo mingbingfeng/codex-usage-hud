@@ -216,6 +216,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("topCopies", payload)
         self.assertIn("requestRows", payload)
         self.assertIn("requestRowDetails", payload)
+        self.assertEqual(payload["requestRowsTotal"], 1)
         self.assertIn("settings", payload)
         self.assertIn("activeDisplayMode", payload)
         self.assertIn("settingsPath", payload)
@@ -599,11 +600,34 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("requestCost", top_details)
         self.assertTrue(payload["requestRows"])
         request_row = str(payload["requestRows"][0])
-        self.assertLess(request_row.index("↑1,200"), request_row.index("◎~67%"))
+        self.assertLess(request_row.index("↑400"), request_row.index("◎~67%"))
         self.assertLess(request_row.index("↻800"), request_row.index("∑1,290"))
         request_row_details = payload["requestRowDetails"]
         self.assertIsInstance(request_row_details, list)
         self.assertEqual(request_row, request_row_details[0]["text"])
+
+    def test_request_rows_can_expand_beyond_the_default_page(self) -> None:
+        snapshot = ParsedSession(status="parsed")
+        snapshot.request_history = [
+            RequestRound(
+                index=index,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=100,
+                cached_tokens=20,
+                output_tokens=10,
+                reasoning_tokens=0,
+                total_tokens=110,
+                estimated=False,
+            )
+            for index in range(1, 32)
+        ]
+
+        payload = payload_from_snapshot(snapshot, request_rows_limit=60).to_json()
+
+        self.assertEqual(payload["requestRowsTotal"], 31)
+        self.assertEqual(len(payload["requestRows"]), 31)
+        self.assertEqual(len(payload["requestRowDetails"]), 31)
 
     def test_provider_settings_use_tabs_with_modal_drafts(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
@@ -2012,6 +2036,8 @@ class RendererHudPayloadTests(unittest.TestCase):
                 error="exceeded retry limit, last status: 429 Too Many Requests",
             )
         )
+        self.assertIn('action: "loadMoreRequestRows"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('list.addEventListener("scroll"', renderer_hud.RENDERER_HUD_SCRIPT)
 
         payload = payload_from_snapshot(snapshot).to_json()
 

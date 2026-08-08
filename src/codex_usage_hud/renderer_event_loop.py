@@ -65,6 +65,8 @@ class RendererLoopState:
     background_usage_response_retry_not_before: float = 0.0
     soft_reinstall_pending: bool = False
     activity_wake_pending: str = ""
+    request_rows_limit: int = 30
+    request_rows_session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +461,7 @@ class RendererRefreshExecutor:
             self.ports.retry_active_session_update()
             return latest
         self._merge_active_work(fresh, latest, decision)
+        self._reset_request_rows_page_for_session(fresh)
         self.ports.update_snapshot_activity(fresh)
         self.state.latest_snapshot = fresh
         self.state.latest_budget_signature = self.ports.budget_signature()
@@ -490,6 +493,15 @@ class RendererRefreshExecutor:
         else:
             self._record_failure()
         return fresh
+
+    def _reset_request_rows_page_for_session(self, snapshot: ParsedSession) -> None:
+        session_id = str(
+            snapshot.renderer_session_id or snapshot.session_id or ""
+        ).strip()
+        if not session_id or session_id == self.state.request_rows_session_id:
+            return
+        self.state.request_rows_session_id = session_id
+        self.state.request_rows_limit = 30
 
     def apply_domains(self, inputs: RendererTickInputs) -> bool:
         snapshot = self.state.latest_snapshot

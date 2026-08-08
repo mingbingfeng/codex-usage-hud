@@ -692,6 +692,25 @@ def test_pre_refresh_command_replaces_full_snapshot_with_partial_domains() -> No
     )
 
 
+def test_pre_refresh_request_rows_command_advances_only_the_page_limit() -> None:
+    executed = MagicMock()
+    state = RendererLoopState(request_rows_limit=30)
+    executor = RendererPreRefreshExecutor(
+        state,
+        _pre_refresh_ports(execute_command=executed),
+    )
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        command={"action": "loadMoreRequestRows"},
+    )
+
+    executor.apply_settings_command(inputs)
+
+    assert state.request_rows_limit == 60
+    assert state.settings_command_status == {}
+    executed.assert_not_called()
+
+
 def test_pre_refresh_background_event_updates_overlay_without_snapshot() -> None:
     refreshed = MagicMock()
     configured = MagicMock()

@@ -34,6 +34,14 @@ ShortNumberFn = Callable[[int | None], str]
 FixedTokenTotalFn = Callable[[int | None], str]
 
 
+def round_uncached_input_tokens(item: RequestRound) -> int:
+    """Return the non-cached portion of a round's input tokens for display."""
+
+    input_tokens = max(0, int(item.input_tokens or 0))
+    cached_tokens = max(0, min(int(item.cached_tokens or 0), input_tokens))
+    return input_tokens - cached_tokens
+
+
 def round_cache_hit_rate_value(
     item: RequestRound,
     *,
@@ -127,7 +135,7 @@ def round_entry_parts(
     index_text = str(item.index)
     money_text = fixed_money(cost, estimated)
     total_text = fixed_total(item.total_tokens)
-    input_text = short_number(item.input_tokens)
+    input_text = short_number(round_uncached_input_tokens(item))
     rate_text = cache_rate_value(item)
     output_text = short_number(item.output_tokens)
     reasoning_text = short_number(item.reasoning_tokens)
@@ -184,7 +192,10 @@ def round_entry_widths(
             )
         money_width = max(money_width, len(fixed_money(cost, estimated)))
         total_width = max(total_width, len(fixed_total(item.total_tokens)))
-        input_width = max(input_width, len(short_number(item.input_tokens)))
+        input_width = max(
+            input_width,
+            len(short_number(round_uncached_input_tokens(item))),
+        )
         rate_width = max(rate_width, len(cache_rate_value(item)))
         output_width = max(output_width, len(short_number(item.output_tokens)))
         reasoning_width = max(reasoning_width, len(short_number(item.reasoning_tokens)))
@@ -211,4 +222,5 @@ __all__ = [
     "round_is_running",
     "round_time_iso",
     "round_time_text",
+    "round_uncached_input_tokens",
 ]

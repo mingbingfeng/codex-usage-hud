@@ -320,17 +320,62 @@ TEXT = r"""
     list.appendChild(row);
   }
 
-  function renderRequestRows(root, rows, rowDetails, newSession = false) {
+  function requestMoreRequestRows(list) {
+    const total = Math.max(0, Number(list.dataset.requestRowsTotal || 0));
+    const rendered = Math.max(0, Number(list.dataset.requestRowsRendered || 0));
+    if (
+      !total
+      || rendered >= total
+      || list.dataset.requestRowsLoading === "true"
+      || !ctx.bindings.available(settingsCommandBindingName)
+    ) return;
+    list.dataset.requestRowsLoading = "true";
+    try {
+      ctx.bindings.send(settingsCommandBindingName, {
+        id: `request-rows-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        createdAt: Date.now(),
+        action: "loadMoreRequestRows",
+        sessionId: String(list.dataset.requestRowsSessionId || ""),
+      });
+    } catch (_) {
+      list.dataset.requestRowsLoading = "false";
+    }
+  }
+
+  function bindRequestRowsPagination(list) {
+    if (list.dataset.requestRowsPaginationBound === "true") return;
+    list.dataset.requestRowsPaginationBound = "true";
+    list.addEventListener("scroll", () => {
+      if (list.scrollTop + list.clientHeight >= list.scrollHeight - 2) {
+        requestMoreRequestRows(list);
+      }
+    }, { passive: true });
+  }
+
+  function renderRequestRows(root, rows, rowDetails, newSession = false, totalRows = 0, sessionId = "") {
     const list = root.querySelector('[data-field="requestRows"]');
     if (!list) return;
+    const currentSessionId = String(sessionId || "");
+    const previousScrollTop = list.dataset.requestRowsSessionId === currentSessionId
+      ? list.scrollTop
+      : 0;
     list.textContent = "";
+    list.dataset.requestRowsSessionId = currentSessionId;
+    list.dataset.requestRowsTotal = String(Math.max(0, Number(totalRows) || 0));
+    list.dataset.requestRowsLoading = "false";
     const details = Array.isArray(rowDetails) && rowDetails.length ? rowDetails : [];
     if (details.length) {
       details.forEach((item, index) => appendStructuredRequestRow(list, item, index));
+      list.dataset.requestRowsRendered = String(details.length);
+      list.scrollTop = previousScrollTop;
+      bindRequestRowsPagination(list);
       syncRunningRowsTimer(root);
       return;
     }
     if (newSession && (!Array.isArray(rows) || !rows.length)) {
+      list.dataset.requestRowsRendered = "0";
+      list.scrollTop = previousScrollTop;
+      bindRequestRowsPagination(list);
       syncRunningRowsTimer(root);
       return;
     }
@@ -341,6 +386,9 @@ TEXT = r"""
       row.textContent = String(item || "");
       list.appendChild(row);
     }
+    list.dataset.requestRowsRendered = String(items.length);
+    list.scrollTop = previousScrollTop;
+    bindRequestRowsPagination(list);
     syncRunningRowsTimer(root);
   }
   function renderHeavyRounds(root, details) {
@@ -539,7 +587,14 @@ TEXT = r"""
       node.classList.toggle(errorClass, payload?.requestStatus === "error");
     });
     renderTopDetails(root, payload || {});
-    renderRequestRows(root, payload?.requestRows || [], payload?.requestRowDetails || [], !!(payload?.newSession || payload?.pendingSession));
+    renderRequestRows(
+      root,
+      payload?.requestRows || [],
+      payload?.requestRowDetails || [],
+      !!(payload?.newSession || payload?.pendingSession),
+      payload?.requestRowsTotal || 0,
+      payload?.rendererSessionId || payload?.sessionId || "",
+    );
     renderBackgroundUsageNotification(root, payload || {});
     diagnosticsDomain.applyConnectionHealth(root, payload || {});
     applyActiveSessionSequence(payload);
