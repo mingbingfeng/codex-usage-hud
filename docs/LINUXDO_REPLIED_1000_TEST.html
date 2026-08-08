@@ -1,0 +1,1342 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>回帖足迹 · 1000 条回复静态测试台</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --page: #f3f6f7;
+            --surface: #fff;
+            --surface-soft: #f8fafb;
+            --ink: #1f2a31;
+            --muted: #71808a;
+            --line: #dce4e8;
+            --line-strong: #c6d1d6;
+            --teal: #0f766e;
+            --teal-deep: #115e59;
+            --teal-soft: #e5f5f2;
+            --violet: #6b5ce7;
+            --violet-deep: #5143c9;
+            --violet-soft: #eeeaff;
+            --cyan: #2d9fbd;
+            --amber: #c98526;
+            --shadow: 0 18px 46px rgba(35, 53, 61, .09);
+            font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+        }
+
+        * { box-sizing: border-box; }
+
+        html { min-width: 320px; background: var(--page); }
+
+        body {
+            min-height: 100vh;
+            margin: 0;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 88% 0%, rgba(45, 159, 189, .1), transparent 26rem),
+                var(--page);
+            font-size: 14px;
+        }
+
+        button, input { font: inherit; }
+        button { cursor: pointer; }
+
+        .app-shell {
+            width: min(1380px, calc(100% - 40px));
+            min-height: 100vh;
+            margin: 0 auto;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            min-height: 66px;
+            padding: 0 30px;
+            border-bottom: 1px solid var(--line);
+            background: rgba(255, 255, 255, .94);
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            backdrop-filter: blur(14px);
+        }
+
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 220px;
+            color: var(--ink);
+            font-size: 15px;
+            font-weight: 850;
+            letter-spacing: .04em;
+            white-space: nowrap;
+        }
+
+        .brand-mark {
+            display: grid;
+            width: 27px;
+            height: 27px;
+            place-items: center;
+            border-radius: 8px;
+            color: #fff;
+            background: linear-gradient(145deg, var(--teal), var(--cyan));
+            box-shadow: 0 3px 8px rgba(15, 118, 110, .22);
+            font-size: 10px;
+            letter-spacing: -.04em;
+        }
+
+        .top-context {
+            flex: 1 1 auto;
+            min-width: 0;
+            color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .top-context strong { color: var(--ink); }
+
+        .top-state {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--teal-deep);
+            font-size: 12px;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+
+        .top-state::before {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #35a879;
+            box-shadow: 0 0 0 4px rgba(53, 168, 121, .12);
+            content: "";
+        }
+
+        .content {
+            padding: 30px 34px 72px;
+        }
+
+        .testbar {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 20px;
+            padding-bottom: 22px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .eyebrow {
+            margin: 0 0 8px;
+            color: var(--teal);
+            font-size: 11px;
+            font-weight: 900;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+        }
+
+        h1, h2, h3, p { margin-top: 0; }
+
+        h1 {
+            margin-bottom: 8px;
+            font-size: clamp(24px, 3vw, 36px);
+            line-height: 1.12;
+            letter-spacing: -.04em;
+        }
+
+        .testbar-copy p {
+            max-width: 700px;
+            margin-bottom: 0;
+            color: var(--muted);
+            line-height: 1.65;
+        }
+
+        .view-switch {
+            display: inline-flex;
+            flex: 0 0 auto;
+            padding: 4px;
+            border: 1px solid var(--line-strong);
+            border-radius: 8px;
+            background: var(--surface-soft);
+        }
+
+        .view-switch button {
+            min-height: 34px;
+            padding: 0 13px;
+            border: 0;
+            border-radius: 5px;
+            color: var(--muted);
+            background: transparent;
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        .view-switch button[aria-selected="true"] {
+            color: var(--ink);
+            background: #fff;
+            box-shadow: 0 2px 8px rgba(37, 54, 61, .1);
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0;
+            margin: 22px 0 30px;
+            border-top: 1px solid var(--line);
+            border-bottom: 1px solid var(--line);
+        }
+
+        .metric {
+            min-height: 76px;
+            padding: 15px 18px;
+            border-right: 1px solid var(--line);
+        }
+
+        .metric:last-child { border-right: 0; }
+
+        .metric-label {
+            display: block;
+            margin-bottom: 7px;
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .metric strong {
+            display: block;
+            color: var(--ink);
+            font-size: 20px;
+            line-height: 1;
+            letter-spacing: -.04em;
+        }
+
+        .metric small {
+            display: block;
+            margin-top: 6px;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .view[hidden] { display: none; }
+
+        .section-head {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 17px;
+        }
+
+        .section-head h2 {
+            margin-bottom: 5px;
+            font-size: 19px;
+            letter-spacing: -.025em;
+        }
+
+        .section-head p {
+            margin-bottom: 0;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .section-count {
+            display: flex;
+            align-items: baseline;
+            gap: 5px;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        .section-count strong {
+            color: var(--violet-deep);
+            font-size: 22px;
+            letter-spacing: -.04em;
+        }
+
+        .topic-list {
+            border-top: 2px solid var(--ink);
+        }
+
+        .topic-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 146px 190px;
+            align-items: center;
+            gap: 20px;
+            min-height: 119px;
+            padding: 22px 0;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .topic-row.is-focus {
+            margin: 0 -16px;
+            padding-right: 16px;
+            padding-left: 16px;
+            background: linear-gradient(90deg, rgba(229, 245, 242, .78), transparent 74%);
+        }
+
+        .topic-main { min-width: 0; }
+
+        .topic-title {
+            display: block;
+            max-width: 680px;
+            margin-bottom: 9px;
+            color: var(--ink);
+            font-size: 16px;
+            font-weight: 820;
+            line-height: 1.35;
+            text-decoration: none;
+        }
+
+        .topic-title:hover { color: var(--teal); }
+
+        .topic-subline {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .topic-subline strong { color: var(--ink); }
+
+        .topic-chip {
+            padding: 3px 7px;
+            border-radius: 4px;
+            color: var(--teal-deep);
+            background: var(--teal-soft);
+            font-weight: 800;
+        }
+
+        .topic-stat { color: var(--muted); }
+
+        .topic-stat strong {
+            display: block;
+            margin-bottom: 5px;
+            color: var(--ink);
+            font-size: 13px;
+        }
+
+        .topic-stat span {
+            display: block;
+            font-size: 11px;
+        }
+
+        .topic-tags {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 7px;
+            min-height: 30px;
+        }
+
+        .topic-tags-label {
+            display: block;
+            margin-bottom: 7px;
+            color: var(--muted);
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+
+        .reply-tag {
+            position: relative;
+            z-index: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 120px;
+            height: 26.4px;
+            padding: 3px 9px;
+            border: 1px solid var(--teal);
+            border-radius: 4px;
+            color: #fff;
+            background: var(--teal);
+            box-shadow: 0 1px 2px rgba(15, 118, 110, .24);
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 800;
+            line-height: 1;
+            text-decoration: none;
+            transition: background-color .15s ease, border-color .15s ease, transform .15s ease;
+        }
+
+        .reply-tag:hover,
+        .reply-tag:focus-visible {
+            z-index: 10;
+            border-color: var(--teal-deep);
+            color: #fff;
+            background: var(--teal-deep);
+            outline: 2px solid rgba(17, 94, 89, .2);
+            outline-offset: 2px;
+            text-decoration: none;
+            transform: translateY(-1px);
+        }
+
+        .reply-tag__label { white-space: nowrap; }
+
+        .reply-tag__actions {
+            position: absolute;
+            top: calc(100% - 2px);
+            left: 50%;
+            z-index: 30;
+            display: flex;
+            gap: 1px;
+            width: 100%;
+            height: 30px;
+            padding: 3px 3px 4px;
+            overflow: hidden;
+            border: 1px solid var(--teal-deep);
+            border-radius: 6px;
+            background: var(--teal-deep);
+            box-shadow: 0 8px 16px rgba(15, 64, 61, .28);
+            opacity: 0;
+            pointer-events: none;
+            transform: translate(-50%, -6px) scaleY(.9);
+            transform-origin: top center;
+            transition: opacity .16s ease, transform .22s cubic-bezier(.22, 1, .36, 1);
+        }
+
+        .reply-tag:hover .reply-tag__actions,
+        .reply-tag:focus-visible .reply-tag__actions {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translate(-50%, 0) scaleY(1);
+        }
+
+        .reply-action {
+            display: grid;
+            flex: 1 1 0;
+            min-width: 0;
+            place-items: center;
+            color: rgba(255, 255, 255, .96);
+            background: rgba(0, 0, 0, .1);
+            font-family: "Segoe UI Symbol", "Noto Sans Symbols 2", sans-serif;
+            font-size: 16px;
+            font-weight: 900;
+            line-height: 1;
+            user-select: none;
+            transform: translateX(-110%);
+            transition: background-color .15s ease, transform .24s cubic-bezier(.22, 1, .36, 1);
+        }
+
+        .reply-action + .reply-action {
+            border-left: 1px solid rgba(255, 255, 255, .28);
+            transform: translateX(110%);
+        }
+
+        .reply-tag:hover .reply-action,
+        .reply-tag:focus-visible .reply-action { transform: translateX(0); }
+
+        .reply-action:hover { background: rgba(255, 255, 255, .16); }
+
+        .test-note {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin-top: 22px;
+            padding: 12px 14px;
+            border-left: 3px solid var(--violet);
+            color: #5c5a76;
+            background: var(--violet-soft);
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .detail-head-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+        }
+
+        .plain-button {
+            min-height: 33px;
+            padding: 0 11px;
+            border: 1px solid var(--line-strong);
+            border-radius: 5px;
+            color: var(--ink);
+            background: #fff;
+            font-size: 12px;
+            font-weight: 800;
+        }
+
+        .plain-button:hover,
+        .plain-button:focus-visible {
+            border-color: var(--violet);
+            color: var(--violet-deep);
+            background: var(--violet-soft);
+            outline: none;
+        }
+
+        .detail-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 360px;
+            gap: 32px;
+            align-items: start;
+        }
+
+        .thread-pane {
+            min-width: 0;
+            padding-right: 14px;
+        }
+
+        .thread-kicker {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .thread-kicker strong { color: var(--ink); }
+
+        .thread-title {
+            max-width: 760px;
+            margin-bottom: 15px;
+            font-size: clamp(22px, 3vw, 34px);
+            line-height: 1.15;
+            letter-spacing: -.04em;
+        }
+
+        .thread-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 27px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .thread-meta strong { color: var(--ink); }
+
+        .post-block {
+            padding: 22px 0;
+            border-top: 1px solid var(--line);
+        }
+
+        .post-block.is-current {
+            border-top-color: rgba(107, 92, 231, .46);
+            background: linear-gradient(90deg, rgba(238, 234, 255, .55), transparent 70%);
+        }
+
+        .post-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .post-header strong { color: var(--ink); font-size: 13px; }
+
+        .post-copy {
+            max-width: 700px;
+            color: #46535b;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+
+        .post-copy p:last-child { margin-bottom: 0; }
+
+        .timeline-pane {
+            position: relative;
+            min-width: 0;
+            padding-left: 25px;
+            border-left: 1px solid var(--line);
+        }
+
+        .timeline-pane-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .timeline-pane-head h3 {
+            margin-bottom: 5px;
+            font-size: 16px;
+        }
+
+        .timeline-pane-head p {
+            margin-bottom: 0;
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.5;
+        }
+
+        .timeline-wrapper {
+            position: relative;
+            min-height: 570px;
+            padding: 17px 18px 18px 47px;
+            border: 1px solid #d8d3ff;
+            border-radius: 10px;
+            background: #fff;
+        }
+
+        .timeline-scrollarea {
+            position: relative;
+            height: 492px;
+        }
+
+        .timeline-track {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 4px;
+            width: 4px;
+            border-radius: 999px;
+            background: #d1d9dd;
+        }
+
+        .timeline-read-handle {
+            position: absolute;
+            left: -10px;
+            z-index: 2;
+            width: 28px;
+            height: 44px;
+            border-radius: 7px;
+            background: var(--cyan);
+            box-shadow: 0 3px 10px rgba(45, 159, 189, .25);
+            transform: translateY(-50%);
+            transition: top .24s ease;
+        }
+
+        .timeline-marker-layer { position: absolute; inset: 0; }
+
+        .timeline-marker {
+            position: absolute;
+            left: -10px;
+            z-index: 4;
+            display: grid;
+            width: 29px;
+            height: 29px;
+            padding: 0;
+            place-items: center;
+            border: 0;
+            border-radius: 50%;
+            color: inherit;
+            background: transparent;
+            cursor: pointer;
+            transform: translateY(-50%);
+        }
+
+        .timeline-marker__dot {
+            display: block;
+            width: 10px;
+            height: 10px;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            background: var(--violet);
+            box-shadow: 0 0 0 3px rgba(107, 92, 231, .18), 0 2px 5px rgba(61, 49, 153, .3);
+            transition: width .16s ease, height .16s ease, background-color .16s ease, box-shadow .16s ease;
+        }
+
+        .timeline-marker.is-cluster .timeline-marker__dot {
+            width: 13px;
+            height: 13px;
+            background: var(--violet-deep);
+        }
+
+        .timeline-marker__count {
+            position: absolute;
+            top: -3px;
+            left: 16px;
+            z-index: 2;
+            display: grid;
+            min-width: 18px;
+            height: 15px;
+            padding: 0 3px;
+            place-items: center;
+            border: 1px solid #fff;
+            border-radius: 999px;
+            color: #fff;
+            background: var(--violet-deep);
+            box-shadow: 0 1px 3px rgba(61, 49, 153, .36);
+            font-size: 8px;
+            font-weight: 900;
+            line-height: 1;
+        }
+
+        .timeline-marker:hover .timeline-marker__dot,
+        .timeline-marker:focus-visible .timeline-marker__dot,
+        .timeline-marker.is-current .timeline-marker__dot {
+            width: 16px;
+            height: 16px;
+            background: var(--violet-deep);
+            box-shadow: 0 0 0 5px rgba(107, 92, 231, .2), 0 3px 8px rgba(61, 49, 153, .34);
+        }
+
+        .timeline-marker:focus-visible {
+            outline: 2px solid #e2a23b;
+            outline-offset: 2px;
+        }
+
+        .timeline-marker__popover {
+            position: absolute;
+            top: 50%;
+            left: 29px;
+            min-width: 164px;
+            padding: 8px 10px;
+            border: 1px solid rgba(255, 255, 255, .12);
+            border-radius: 8px;
+            color: #fff;
+            background: #2e3440;
+            box-shadow: 0 10px 24px rgba(30, 38, 49, .22);
+            opacity: 0;
+            pointer-events: none;
+            text-align: left;
+            transform: translate(-4px, -50%);
+            transition: opacity .16s ease, transform .16s ease;
+            white-space: nowrap;
+        }
+
+        .timeline-marker__post,
+        .timeline-marker__date { position: relative; z-index: 1; display: block; }
+        .timeline-marker__post { font-size: 11px; font-weight: 850; }
+        .timeline-marker__date { margin-top: 4px; color: #cbd3da; font-size: 10px; }
+
+        .timeline-marker:hover .timeline-marker__popover,
+        .timeline-marker:focus-visible .timeline-marker__popover,
+        .timeline-marker.is-current .timeline-marker__popover {
+            opacity: 1;
+            transform: translate(0, -50%);
+        }
+
+        .timeline-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .timeline-footer strong { color: var(--ink); }
+
+        .timeline-legend {
+            position: absolute;
+            top: 14px;
+            right: 14px;
+            z-index: 8;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 27px;
+            padding: 0 8px;
+            border: 1px solid rgba(107, 92, 231, .25);
+            border-radius: 6px;
+            color: var(--violet-deep);
+            background: var(--violet-soft);
+            font-size: 11px;
+            font-weight: 850;
+        }
+
+        .timeline-legend::before {
+            width: 7px;
+            height: 7px;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            background: var(--violet);
+            box-shadow: 0 0 0 2px rgba(107, 92, 231, .18);
+            content: "";
+        }
+
+        .timeline-legend::after {
+            color: #756bc8;
+            content: "⌄";
+            font-size: 14px;
+            line-height: .7;
+        }
+
+        .timeline-legend:hover,
+        .timeline-legend:focus-visible,
+        .timeline-legend[aria-expanded="true"] {
+            border-color: rgba(107, 92, 231, .5);
+            background: #e4dfff;
+            outline: none;
+        }
+
+        .timeline-menu {
+            position: absolute;
+            top: 51px;
+            right: 14px;
+            z-index: 12;
+            display: grid;
+            width: min(292px, calc(100% - 28px));
+            max-height: 388px;
+            padding: 7px;
+            overflow-y: auto;
+            border: 1px solid #d8d3ff;
+            border-radius: 10px;
+            background: #fff;
+            box-shadow: 0 16px 34px rgba(34, 30, 82, .22);
+        }
+
+        .timeline-menu[hidden] { display: none; }
+
+        .timeline-menu__head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 6px 8px 8px;
+            border-bottom: 1px solid #eceaf8;
+            color: var(--violet-deep);
+            font-size: 11px;
+            font-weight: 850;
+        }
+
+        .timeline-menu__head span { color: #8b879f; font-size: 10px; font-weight: 650; }
+
+        .timeline-menu__search {
+            width: calc(100% - 16px);
+            min-height: 30px;
+            margin: 8px;
+            padding: 5px 7px;
+            border: 1px solid #d8d3ff;
+            border-radius: 6px;
+            color: var(--ink);
+            background: #fbfaff;
+            font-size: 11px;
+        }
+
+        .timeline-menu__search:focus-visible {
+            border-color: #8d83eb;
+            outline: 2px solid rgba(107, 92, 231, .22);
+            outline-offset: 1px;
+        }
+
+        .timeline-menu__results { display: grid; min-height: 30px; }
+
+        .timeline-menu__item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            width: 100%;
+            min-height: 31px;
+            padding: 5px 8px;
+            border: 0;
+            border-radius: 5px;
+            color: var(--ink);
+            background: transparent;
+            text-align: left;
+            font-size: 11px;
+        }
+
+        .timeline-menu__item:hover,
+        .timeline-menu__item:focus-visible {
+            color: var(--violet-deep);
+            background: var(--violet-soft);
+            outline: none;
+        }
+
+        .timeline-menu__item span:first-child { font-weight: 850; }
+        .timeline-menu__item span:last-child { color: #8b879f; font-size: 10px; }
+
+        .timeline-menu__empty {
+            padding: 16px 8px;
+            color: #8b879f;
+            font-size: 11px;
+            text-align: center;
+        }
+
+        .timeline-menu__footer {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-top: 4px;
+            padding: 7px 8px 1px;
+            border-top: 1px solid #eceaf8;
+        }
+
+        .timeline-menu__page {
+            flex: 1 1 auto;
+            color: #8b879f;
+            font-size: 10px;
+            text-align: center;
+            white-space: nowrap;
+        }
+
+        .timeline-menu__button {
+            min-height: 25px;
+            padding: 2px 5px;
+            border: 1px solid #d8d3ff;
+            border-radius: 5px;
+            color: var(--violet-deep);
+            background: #fff;
+            font-size: 10px;
+            font-weight: 800;
+        }
+
+        .timeline-menu__button:hover,
+        .timeline-menu__button:focus-visible {
+            border-color: #a49cf1;
+            background: var(--violet-soft);
+            outline: none;
+        }
+
+        .timeline-menu__button:disabled {
+            color: #c3bfd4;
+            background: #fbfaff;
+            cursor: default;
+        }
+
+        .toast {
+            position: fixed;
+            right: 24px;
+            bottom: 24px;
+            z-index: 50;
+            max-width: min(380px, calc(100vw - 48px));
+            padding: 11px 14px;
+            border: 1px solid rgba(15, 118, 110, .3);
+            border-radius: 7px;
+            color: #fff;
+            background: #27383d;
+            box-shadow: 0 10px 25px rgba(35, 53, 61, .2);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(8px);
+            transition: opacity .18s ease, transform .18s ease;
+        }
+
+        .toast.is-visible { opacity: 1; transform: translateY(0); }
+
+        @media (max-width: 980px) {
+            .app-shell { width: 100%; }
+            .topbar { padding: 0 20px; }
+            .content { padding: 24px 22px 58px; }
+            .brand { min-width: 0; }
+            .top-context { display: none; }
+            .topic-row { grid-template-columns: minmax(0, 1fr) 130px; }
+            .topic-tags-wrap { grid-column: 1 / -1; }
+            .detail-layout { grid-template-columns: 1fr; }
+            .timeline-pane { padding-top: 18px; padding-left: 0; border-top: 1px solid var(--line); border-left: 0; }
+        }
+
+        @media (max-width: 640px) {
+            .topbar { min-height: 58px; padding: 0 14px; }
+            .top-state { font-size: 10px; }
+            .content { padding: 20px 14px 44px; }
+            .testbar, .section-head { align-items: flex-start; flex-direction: column; }
+            .view-switch { width: 100%; }
+            .view-switch button { flex: 1 1 0; }
+            .metrics { grid-template-columns: repeat(2, 1fr); }
+            .metric:nth-child(2) { border-right: 0; }
+            .metric:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+            .topic-row { grid-template-columns: 1fr; gap: 13px; }
+            .topic-stat { display: flex; align-items: baseline; gap: 8px; }
+            .topic-stat strong { margin-bottom: 0; }
+            .topic-tags-wrap { grid-column: auto; }
+            .timeline-wrapper { padding-left: 39px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <header class="topbar">
+            <div class="brand"><span class="brand-mark">LD</span><span>REPLIED TRACE LAB</span></div>
+            <div class="top-context">静态夹具 / <strong>1000 条本人回复压力场景</strong></div>
+            <div class="top-state">本地数据 · 不请求真实站点</div>
+        </header>
+
+        <main class="content">
+            <section class="testbar">
+                <div class="testbar-copy">
+                    <p class="eyebrow">LINUX.DO · IDCFLARE / STATIC QA</p>
+                    <h1>1000 条回复，集中测试一遍</h1>
+                    <p>首页只保留一个聚合标签；详情页用有限数量的紫色区间点，再通过搜索和分页定位任意楼层。</p>
+                </div>
+                <nav class="view-switch" aria-label="测试场景">
+                    <button type="button" data-view="list" aria-selected="true">帖子列表</button>
+                    <button type="button" data-view="detail" aria-selected="false">帖子详情</button>
+                </nav>
+            </section>
+
+            <section class="metrics" aria-label="当前夹具指标">
+                <div class="metric"><span class="metric-label">预置回复</span><strong>1,000</strong><small>楼层 #1–#1000</small></div>
+                <div class="metric"><span class="metric-label">列表标签</span><strong id="listTagMetric">0</strong><small>目标帖子实际 DOM 数</small></div>
+                <div class="metric"><span class="metric-label">时间线紫点</span><strong id="markerMetric">0</strong><small>聚合后实际 DOM 数</small></div>
+                <div class="metric"><span class="metric-label">菜单挂载</span><strong id="menuMetric">0</strong><small id="menuMetricHint">当前页 / 全部</small></div>
+            </section>
+
+            <section id="listView" class="view" aria-labelledby="listHeading">
+                <div class="section-head">
+                    <div>
+                        <p class="eyebrow">HOME / TOPIC LIST</p>
+                        <h2 id="listHeading">帖子列表</h2>
+                        <p>悬浮绿色标签，观察左右图标浮窗；左侧进入详情，右侧模拟打开新标签页。</p>
+                    </div>
+                    <div class="section-count"><strong>4</strong><span>个样例主题</span></div>
+                </div>
+
+                <div class="topic-list">
+                    <article class="topic-row is-focus">
+                        <div class="topic-main">
+                            <a class="topic-title" href="#detail" data-open-detail="500">「粥.Pro」全网首发“号池可见”且“重置同享”的 GPT 纯 Pro 中转站</a>
+                            <div class="topic-subline"><strong>PeytonZhou</strong><span>5 天前</span><span class="topic-chip">重点测试</span></div>
+                        </div>
+                        <div class="topic-stat"><strong>1,200</strong><span>个回应</span></div>
+                        <div class="topic-tags-wrap"><span class="topic-tags-label">本人回复</span><div class="topic-tags" data-count="1000" data-floor-start="1" data-floor-end="1000"></div></div>
+                    </article>
+
+                    <article class="topic-row">
+                        <div class="topic-main">
+                            <a class="topic-title" href="#detail" data-open-detail="128">一个只有少量回复的普通帖子</a>
+                            <div class="topic-subline"><strong>fixtureUser</strong><span>昨天</span><span class="topic-chip">正常密度</span></div>
+                        </div>
+                        <div class="topic-stat"><strong>680</strong><span>个回应</span></div>
+                        <div class="topic-tags-wrap"><span class="topic-tags-label">本人回复</span><div class="topic-tags" data-count="4" data-floor-list="128,256,512,640"></div></div>
+                    </article>
+
+                    <article class="topic-row">
+                        <div class="topic-main">
+                            <a class="topic-title" href="#detail" data-open-detail="760">中等数量回复，用于对比聚合阈值</a>
+                            <div class="topic-subline"><strong>fixtureUser</strong><span>2 天前</span><span class="topic-chip">阈值对比</span></div>
+                        </div>
+                        <div class="topic-stat"><strong>940</strong><span>个回应</span></div>
+                        <div class="topic-tags-wrap"><span class="topic-tags-label">本人回复</span><div class="topic-tags" data-count="12" data-floor-start="12" data-floor-end="900"></div></div>
+                    </article>
+
+                    <article class="topic-row">
+                        <div class="topic-main">
+                            <a class="topic-title" href="#detail" data-open-detail="1">还没有本人回复的帖子</a>
+                            <div class="topic-subline"><strong>fixtureUser</strong><span>刚刚</span><span class="topic-chip">空状态</span></div>
+                        </div>
+                        <div class="topic-stat"><strong>73</strong><span>个回应</span></div>
+                        <div class="topic-tags-wrap"><span class="topic-tags-label">本人回复</span><div class="topic-tags" data-count="0"></div></div>
+                    </article>
+                </div>
+
+                <div class="test-note"><span aria-hidden="true">◎</span><span>目标帖的 1,000 条回复只产生一个“已回复 1000 条”标签。把鼠标移到标签上，观察浮窗两侧图标从左右合拢；点击浮窗左侧会进入详情，点击右侧只做“新标签页”动作提示。</span></div>
+            </section>
+
+            <section id="detailView" class="view" hidden aria-labelledby="detailHeading">
+                <div class="section-head">
+                    <div>
+                        <p class="eyebrow">TOPIC / TIMELINE DETAIL</p>
+                        <h2 id="detailHeading">帖子详情页</h2>
+                        <p>紫点显示区间概览；带数字的点可打开该区间的精确楼层清单。</p>
+                    </div>
+                    <div class="detail-head-actions"><span class="section-count"><strong>1,000</strong><span>条本人回复</span></span><button type="button" class="plain-button" data-view="list">返回帖子列表</button></div>
+                </div>
+
+                <div class="detail-layout">
+                    <article class="thread-pane">
+                        <div class="thread-kicker"><span class="topic-chip">福利羊毛</span><span>话题 / 讨论</span></div>
+                        <h3 class="thread-title">「粥.Pro」全网首发“号池可见”且“重置同享”的 GPT 纯 Pro 中转站</h3>
+                        <div class="thread-meta"><strong>PeytonZhou</strong><span>5 天前</span><span>1,200 个回应</span><span id="floorStatus">当前查看第 500 楼</span></div>
+                        <div class="post-block">
+                            <div class="post-header"><strong>主题楼 · PeytonZhou</strong><span>#1 · 8月 2日</span></div>
+                            <div class="post-copy"><p>这是静态测试夹具中的主题内容。右侧时间线预置了从 #1 到 #1000 的 1,000 条本人回复，用来验证高密度场景下的聚合和定位。</p><p>你可以从紫色区间点进入一段楼层，也可以打开右上角“我的回复 1000”后直接搜索精确楼层。</p></div>
+                        </div>
+                        <div class="post-block is-current" id="currentPost">
+                            <div class="post-header"><strong>fixtureUser · 我的回复</strong><span id="currentPostLabel">#500 · 当前定位</span></div>
+                            <div class="post-copy"><p id="currentPostCopy">当前选中的楼层会在这里显示。点击任意菜单项即可模拟跳转，并同步移动蓝色阅读手柄。</p></div>
+                        </div>
+                    </article>
+
+                    <aside class="timeline-pane" aria-label="本人回复时间线">
+                        <div class="timeline-pane-head"><div><h3>我的回复时间线</h3><p>最多 24 个聚合位置 · 完整清单按需挂载</p></div></div>
+                        <div class="timeline-wrapper">
+                            <button type="button" class="timeline-legend" id="timelineLegend" aria-haspopup="dialog" aria-expanded="false">我的回复 1000</button>
+                            <div class="timeline-menu" id="timelineMenu" role="dialog" aria-label="本人回复楼层清单" hidden>
+                                <div class="timeline-menu__head"><strong id="menuTitle">我的回复楼层</strong><span id="menuCount">1000 个</span></div>
+                                <input class="timeline-menu__search" id="menuSearch" type="search" placeholder="搜索楼层号，例如 999" aria-label="搜索本人回复楼层号">
+                                <div class="timeline-menu__results" id="menuResults"></div>
+                                <div class="timeline-menu__footer"><button class="timeline-menu__button" id="menuPrev" type="button">上一页</button><span class="timeline-menu__page" id="menuPage">0 个结果</span><button class="timeline-menu__button" id="menuNext" type="button">下一页</button><button class="timeline-menu__button" id="menuReset" type="button">全部</button></div>
+                            </div>
+                            <div class="timeline-scrollarea" id="timelineScrollarea">
+                                <div class="timeline-track"></div>
+                                <div class="timeline-read-handle" id="timelineReadHandle" aria-hidden="true"></div>
+                                <div class="timeline-marker-layer" id="timelineMarkerLayer"></div>
+                            </div>
+                            <div class="timeline-footer"><span>帖子范围 <strong>#1–#1200</strong></span><span>紫点概览 <strong id="markerFooterCount">0</strong></span></div>
+                        </div>
+                    </aside>
+                </div>
+                <div class="test-note"><span aria-hidden="true">◆</span><span>1,000 条记录被压缩为少量区间点，避免时间线和 DOM 堆满。打开清单后默认每页 40 条；搜索 999、翻页或点击带数字的紫点，都可以继续定位到具体楼层。</span></div>
+            </section>
+        </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script>
+        (() => {
+            const REPLY_COUNT = 1000;
+            const TOPIC_TOTAL = 1200;
+            const MAX_MARKERS = 24;
+            const PAGE_SIZE = 40;
+            const records = Array.from({ length: REPLY_COUNT }, (_, index) => ({
+                postNumber: index + 1,
+                date: "8月 " + (2 + Math.floor(index / 220)) + "日"
+            }));
+            const $ = (selector) => document.querySelector(selector);
+            const $$ = (selector) => [...document.querySelectorAll(selector)];
+            const toast = $("#toast");
+            let toastTimer = 0;
+            let currentFloor = 500;
+            let scopeRecords = records;
+            let scopeLabel = "我的回复楼层";
+            let menuPage = 0;
+
+            const showToast = (message) => {
+                toast.textContent = message;
+                toast.classList.add("is-visible");
+                window.clearTimeout(toastTimer);
+                toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 2600);
+            };
+
+            const clampFloor = (value) => Math.min(REPLY_COUNT, Math.max(1, Number(value) || 1));
+
+            const switchView = (viewName) => {
+                $("#listView").hidden = viewName !== "list";
+                $("#detailView").hidden = viewName !== "detail";
+                $$('[data-view]').forEach((button) => {
+                    if (button.tagName === "BUTTON" && button.closest(".view-switch")) {
+                        button.setAttribute("aria-selected", String(button.dataset.view === viewName));
+                    }
+                });
+                window.scrollTo({ top: 0, behavior: "smooth" });
+            };
+
+            const updateCurrentFloor = (floor, message = "") => {
+                currentFloor = clampFloor(floor);
+                $("#floorStatus").textContent = "当前查看第 " + currentFloor + " 楼";
+                $("#currentPostLabel").textContent = "#" + currentFloor + " · 当前定位";
+                $("#currentPostCopy").textContent = message || (
+                    "已模拟定位到第 " + currentFloor + " 楼。真实插件会沿用当前页跳转，并保留右侧时间线位置。"
+                );
+                $("#timelineReadHandle").style.top = ((currentFloor - 1) / (TOPIC_TOTAL - 1) * 100) + "%";
+                $$(".timeline-marker.is-current").forEach((marker) => marker.classList.remove("is-current"));
+                $$(".timeline-marker").forEach((marker) => {
+                    const start = Number(marker.dataset.start) || 0;
+                    const end = Number(marker.dataset.end) || start;
+                    if (currentFloor >= start && currentFloor <= end) marker.classList.add("is-current");
+                });
+            };
+
+            const createReplyTag = ({ floor, count = 1, start = floor, end = floor }) => {
+                const summary = count > 1;
+                const tag = document.createElement("a");
+                const range = start === end ? "第 " + floor + " 楼" : "第 " + start + "–" + end + " 楼";
+                tag.className = "reply-tag";
+                tag.href = "#post-" + floor;
+                tag.innerHTML = `<span class="reply-tag__label">${summary ? "已回复 " + count + " 条" : "已回复 #" + floor}</span><span class="reply-tag__actions" aria-hidden="true"><span class="reply-action" title="进入当前页">↪</span><span class="reply-action" title="打开新标签页">↗</span></span>`;
+                tag.title = summary
+                    ? `本帖已回复 ${count} 条（${range}）。左侧进入最近回复第 ${floor} 楼，右侧打开新标签页；详情页可搜索任意楼层`
+                    : `左侧进入当前页，右侧打开新标签页：${range}`;
+                tag.setAttribute("aria-label", summary
+                    ? `本帖已回复 ${count} 条，范围 ${range}；左侧进入最近回复第 ${floor} 楼，右侧打开新标签页`
+                    : `已回复第 ${floor} 楼；左侧进入当前页，右侧打开新标签页`);
+                tag.addEventListener("click", (event) => {
+                    if (event.button !== 0) return;
+                    event.preventDefault();
+                    const rect = tag.getBoundingClientRect();
+                    const isRight = event.detail > 0 && event.clientX > rect.left + rect.width / 2;
+                    if (isRight) {
+                        showToast("模拟打开新标签页 · /t/demo/42/" + floor);
+                        return;
+                    }
+                    switchView("detail");
+                    updateCurrentFloor(floor, "从首页标签进入了最近回复第 " + floor + " 楼。你可以继续用右侧时间线精确查找。");
+                });
+                return tag;
+            };
+
+            const renderListTags = () => {
+                $$(".topic-tags").forEach((box) => {
+                    box.replaceChildren();
+                    const count = Number(box.dataset.count) || 0;
+                    if (!count) {
+                        const empty = document.createElement("span");
+                        empty.textContent = "暂无本人回复";
+                        empty.style.color = "#9aa6ac";
+                        empty.style.fontSize = "12px";
+                        box.appendChild(empty);
+                        return;
+                    }
+                    if (box.dataset.floorList) {
+                        box.dataset.floorList.split(",").map(Number).forEach((floor) => box.appendChild(createReplyTag({ floor })));
+                        return;
+                    }
+                    const start = Number(box.dataset.floorStart) || 1;
+                    const end = Number(box.dataset.floorEnd) || count;
+                    box.appendChild(createReplyTag({ floor: end, count, start, end }));
+                });
+                $("#listTagMetric").textContent = $(".topic-row.is-focus .reply-tag")
+                    ? $(".topic-row.is-focus .reply-tag").length
+                    : 0;
+            };
+
+            const groupRecords = () => {
+                if (records.length <= MAX_MARKERS) return records.map((record) => [record]);
+                const groups = new Map();
+                const denominator = Math.max(1, TOPIC_TOTAL - 1);
+                records.forEach((record) => {
+                    const ratio = Math.min(1, Math.max(0, (record.postNumber - 1) / denominator));
+                    const slot = Math.min(MAX_MARKERS - 1, Math.floor(ratio * MAX_MARKERS));
+                    const group = groups.get(slot) || [];
+                    group.push(record);
+                    groups.set(slot, group);
+                });
+                return [...groups.entries()].sort(([a], [b]) => a - b).map(([, group]) => group);
+            };
+
+            const createMarker = (group) => {
+                const first = group[0].postNumber;
+                const last = group[group.length - 1].postNumber;
+                const middle = Math.round((first + last) / 2);
+                const marker = document.createElement("button");
+                const dot = document.createElement("span");
+                const popover = document.createElement("span");
+                const post = document.createElement("span");
+                const date = document.createElement("span");
+                const range = first === last ? "#" + first : "#" + first + "–#" + last;
+                marker.type = "button";
+                marker.className = "timeline-marker" + (group.length > 1 ? " is-cluster" : "");
+                marker.dataset.start = String(first);
+                marker.dataset.end = String(last);
+                marker.style.top = ((middle - 1) / (TOPIC_TOTAL - 1) * 100) + "%";
+                marker.title = group.length > 1 ? `本人回复 ${range}，共 ${group.length} 条；点击查看该段楼层` : `本人回复第 ${first} 楼；点击定位`;
+                marker.setAttribute("aria-label", group.length > 1 ? `本人回复 ${range}，共 ${group.length} 条，点击查看该段楼层` : `本人回复第 ${first} 楼，点击定位`);
+                dot.className = "timeline-marker__dot";
+                post.className = "timeline-marker__post";
+                date.className = "timeline-marker__date";
+                post.textContent = group.length > 1 ? "我的回复 · " + range : "我的回复 · #" + first;
+                date.textContent = group.length > 1 ? group.length + " 条 · 点击查看楼层" : group[0].date + " · 点击定位";
+                popover.className = "timeline-marker__popover";
+                popover.append(post, date);
+                marker.append(dot);
+                if (group.length > 1) {
+                    const count = document.createElement("span");
+                    count.className = "timeline-marker__count";
+                    count.textContent = group.length > 99 ? "99+" : String(group.length);
+                    count.setAttribute("aria-hidden", "true");
+                    marker.append(count);
+                }
+                marker.append(popover);
+                marker.addEventListener("click", () => {
+                    if (group.length > 1) {
+                        openMenu(group, "回复区间 " + range);
+                        return;
+                    }
+                    updateCurrentFloor(first, "已模拟定位到第 " + first + " 楼。");
+                });
+                return marker;
+            };
+
+            const renderMarkers = () => {
+                const groups = groupRecords();
+                const layer = $("#timelineMarkerLayer");
+                layer.replaceChildren(...groups.map(createMarker));
+                $("#markerMetric").textContent = groups.length;
+                $("#markerFooterCount").textContent = groups.length;
+                updateCurrentFloor(currentFloor);
+            };
+
+            const renderMenu = () => {
+                const query = $("#menuSearch").value.trim().replace(/^#/, "");
+                const filtered = query ? scopeRecords.filter((record) => String(record.postNumber).includes(query)) : scopeRecords;
+                const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+                menuPage = Math.min(menuPage, pageCount - 1);
+                const start = menuPage * PAGE_SIZE;
+                const visible = filtered.slice(start, start + PAGE_SIZE);
+                const results = $("#menuResults");
+                results.replaceChildren();
+                if (!visible.length) {
+                    const empty = document.createElement("div");
+                    empty.className = "timeline-menu__empty";
+                    empty.textContent = "没有匹配的楼层";
+                    results.appendChild(empty);
+                } else {
+                    visible.forEach((record) => {
+                        const item = document.createElement("button");
+                        const floor = document.createElement("span");
+                        const date = document.createElement("span");
+                        item.type = "button";
+                        item.className = "timeline-menu__item";
+                        floor.textContent = "本人回复 · #" + record.postNumber;
+                        date.textContent = record.date;
+                        item.append(floor, date);
+                        item.addEventListener("click", () => {
+                            closeMenu();
+                            updateCurrentFloor(record.postNumber, "已从楼层清单定位到第 " + record.postNumber + " 楼。");
+                        });
+                        results.appendChild(item);
+                    });
+                }
+                $("#menuTitle").textContent = scopeLabel;
+                $("#menuCount").textContent = query ? `${filtered.length} / ${scopeRecords.length} 个` : `${scopeRecords.length} 个`;
+                $("#menuPage").textContent = filtered.length ? `${start + 1}–${Math.min(start + PAGE_SIZE, filtered.length)} / ${filtered.length}` : "0 个结果";
+                $("#menuPrev").disabled = menuPage <= 0;
+                $("#menuNext").disabled = menuPage >= pageCount - 1;
+                $("#menuReset").hidden = scopeRecords === records;
+                $("#menuMetric").textContent = visible.length;
+                $("#menuMetricHint").textContent = (query ? "筛选结果" : "当前页") + " / " + scopeRecords.length;
+            };
+
+            const openMenu = (nextRecords = records, nextLabel = "我的回复楼层") => {
+                scopeRecords = nextRecords;
+                scopeLabel = nextLabel;
+                menuPage = 0;
+                $("#menuSearch").value = "";
+                $("#timelineMenu").hidden = false;
+                $("#timelineLegend").setAttribute("aria-expanded", "true");
+                renderMenu();
+                $("#menuSearch").focus({ preventScroll: true });
+            };
+
+            const closeMenu = () => {
+                $("#timelineMenu").hidden = true;
+                $("#timelineLegend").setAttribute("aria-expanded", "false");
+            };
+
+            $$("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+            $$('[data-open-detail]').forEach((link) => link.addEventListener("click", (event) => {
+                event.preventDefault();
+                switchView("detail");
+                updateCurrentFloor(link.dataset.openDetail);
+            }));
+            $("#timelineLegend").addEventListener("click", (event) => {
+                event.stopPropagation();
+                if ($("#timelineMenu").hidden) openMenu();
+                else closeMenu();
+            });
+            $("#menuSearch").addEventListener("input", () => { menuPage = 0; renderMenu(); });
+            $("#menuPrev").addEventListener("click", () => { if (!$("#menuPrev").disabled) { menuPage--; renderMenu(); } });
+            $("#menuNext").addEventListener("click", () => { if (!$("#menuNext").disabled) { menuPage++; renderMenu(); } });
+            $("#menuReset").addEventListener("click", () => openMenu());
+            document.addEventListener("pointerdown", (event) => {
+                if (!$("#timelineMenu").hidden && !$("#timelineMenu").contains(event.target) && event.target !== $("#timelineLegend")) closeMenu();
+            });
+            document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeMenu(); });
+
+            renderListTags();
+            renderMarkers();
+            renderMenu();
+            switchView("list");
+        })();
+    </script>
+</body>
+</html>
