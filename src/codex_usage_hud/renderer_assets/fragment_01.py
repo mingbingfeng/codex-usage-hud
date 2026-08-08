@@ -146,8 +146,10 @@ scanStartedAt: 0,
     detailLoading: false,
     error: "",
     loadedRevision: -1,
+    loadedFilterKey: "",
     promptExpanded: false,
     queryRequestId: "",
+    queryFilterKey: "",
     detailRequestId: "",
   };
   let cachedHeaderNode = null;

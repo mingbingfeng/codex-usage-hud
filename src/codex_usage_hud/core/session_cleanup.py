@@ -274,6 +274,32 @@ class SessionCleanupManager:
             "operation": dict(self._operation),
         }
 
+    def workdir_for_item(self, item_id: object, revision: object) -> Path | None:
+        """Resolve one current inventory item without exposing its path in the payload."""
+        normalized_id = str(item_id or "").strip()
+        normalized_revision = str(revision or "").strip()
+        if not normalized_id or not normalized_revision or normalized_revision != self._revision:
+            return None
+        item = self._items.get(normalized_id)
+        if item is None or not item._session_id:
+            return None
+        records, _parents, _edge_states, _unsafe_ids, _unresolved = self._load_state()
+        # A completed scan can replace the opaque inventory while the state DB is read.
+        if (
+            normalized_revision != self._revision
+            or self._items.get(normalized_id) is not item
+        ):
+            return None
+        record = records.get(item._session_id)
+        raw_path = str(record.cwd or "").strip() if record is not None else ""
+        if not raw_path or "\x00" in raw_path:
+            return None
+        try:
+            path = Path(raw_path)
+            return path if path.is_absolute() and path.is_dir() else None
+        except OSError:
+            return None
+
     def mark_operation(
         self,
         *,

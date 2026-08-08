@@ -104,13 +104,13 @@ TEXT = r"""
             && !!sessionId
             && sessionAction !== "usage-insights-session";
           const opensSession = actionable && sessionAction === "usage-insights-session";
-          const tag = selectable || opensSession ? "button" : "div";
+          const tag = opensSession ? "button" : "div";
           const action = selectable || opensSession ? sessionAction : "";
           const actionAttrs = action
-            ? ` type="button" data-action="${escapeHtml(action)}" data-usage-session-id="${escapeHtml(sessionId)}" data-selected="${String(sessionId === selectedSessionId)}" aria-label="${escapeHtml(selectable ? `查看会话 ${label}` : `打开会话 ${label}`)}"`
+            ? `${opensSession ? ' type="button"' : ' role="button" tabindex="0"'} data-action="${escapeHtml(action)}" data-usage-session-id="${escapeHtml(sessionId)}" data-selected="${String(sessionId === selectedSessionId)}" aria-label="${escapeHtml(selectable ? `查看会话 ${label}` : `打开会话 ${label}`)}"`
             : "";
-          const provider = String(item?.provider || "").trim();
           const workdir = String(item?.workdirName || "").trim();
+          const workdirPath = String(item?.workdir || "").trim();
           const modelText = usageInsightsSessionModelSummary(item);
           const cache = usageInsightsFormatRatio(item?.cacheRatio);
           const coverage = item?.costCoverage && typeof item.costCoverage === "object"
@@ -122,36 +122,30 @@ TEXT = r"""
             ? (hasEstimatedCost ? "费用部分可估" : "费用不可估")
             : "";
           const latestEventAt = String(item?.latestEventAt || "");
-          const meta = [
-            `工作目录 ${workdir || "--"}`,
-            `模型 ${modelText}`,
-            provider,
-            latestEventAt ? backgroundUsageTime(latestEventAt, { compact: true }) : "",
-            costCoverageNote,
-          ].filter(Boolean).join(" · ");
+          const timestamp = latestEventAt ? backgroundUsageTime(latestEventAt, { compact: true }) : "--";
           const tokens = `${usageInsightsFormatTokens(item?.tokens ?? item?.totalTokens)} tokens`;
           const cost = usageInsightsFormatCost(item?.costUsd);
           const cacheText = cache === "--" ? "缓存 --" : `缓存 ${cache}`;
           const rankLabel = metric === "cost" ? "金额排名" : "用量排名";
+          const workdirHtml = workdirPath
+            ? `<button type="button" class="codex-usage-hud-session-ranking-workdir" data-action="usage-insights-open-workdir" data-usage-session-id="${escapeHtml(sessionId)}" aria-label="打开工作目录 ${escapeHtml(workdir)}" title="${escapeHtml(workdirPath)}">/${escapeHtml(workdir || "目录")}</button>`
+            : `<span class="codex-usage-hud-session-ranking-workdir" title="未记录工作目录">/${escapeHtml(workdir || "--")}</span>`;
           return `
-            <${tag}${actionAttrs} class="codex-usage-hud-background-event codex-usage-hud-session-ranking-row">
-              <span class="codex-usage-hud-background-event-head">
+            <div class="codex-usage-hud-session-ranking-row" data-selected="${String(sessionId === selectedSessionId)}">
+              <${tag}${actionAttrs} class="codex-usage-hud-background-event codex-usage-hud-session-ranking-select">
                 <span class="codex-usage-hud-background-event-title" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
-                <span class="codex-usage-hud-background-status" title="${escapeHtml(rankLabel)}">#${index + 1}</span>
-              </span>
-              <span class="codex-usage-hud-background-event-meta" title="${escapeHtml(meta)}">${escapeHtml(meta)}</span>
-              <span class="codex-usage-hud-background-event-totals">
-                <strong title="${escapeHtml(tokens)}">${escapeHtml(tokens)}</strong>
-                <span title="${escapeHtml(cacheText)}">${escapeHtml(cacheText)}</span>
-                <span title="${escapeHtml(cost)}">${escapeHtml(cost)}</span>
-              </span>
-            </${tag}>
+                <span class="codex-usage-hud-session-ranking-cost" title="${escapeHtml(`${rankLabel} #${index + 1} ${cost}`)}">#${index + 1} ${escapeHtml(cost)}</span>
+                <span class="codex-usage-hud-session-ranking-meta">${workdirHtml}<span class="codex-usage-hud-session-ranking-time" title="${escapeHtml(timestamp)}">${escapeHtml(timestamp)}</span></span>
+                <span class="codex-usage-hud-session-ranking-model" title="${escapeHtml(modelText)}">${escapeHtml(modelText)}${costCoverageNote ? ` · ${escapeHtml(costCoverageNote)}` : ""}</span>
+                <span class="codex-usage-hud-background-event-totals"><strong title="${escapeHtml(tokens)}">${escapeHtml(tokens)}</strong><span title="${escapeHtml(cacheText)}">${escapeHtml(cacheText)}</span></span>
+              </${tag}>
+            </div>
           `;
         }).join("");
       }
 
       function requestUsageInsightsRefresh({ force = false } = {}) {
-        if (usageInsightsState.refreshRequestId && !force) return false;
+        if (usageInsightsState.refreshRequestId) return false;
         const requestId = typedSettingsRequestId("usage-insights");
         usageInsightsState.refreshRequestId = requestId;
         usageInsightsState.error = "";

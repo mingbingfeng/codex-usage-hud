@@ -33,6 +33,7 @@ class _UsageInsightSessionAggregate:
     title: str
     provider: str
     workdir_name: str
+    workdir: str
     archived: bool
     can_activate: bool
     models: dict[tuple[str, str], _UsageInsightAggregate] = field(default_factory=dict)
@@ -488,6 +489,7 @@ class UsageInsightsProjector:
                         workdir_name=(
                             metadata_entry.workdir_name or entry.workdir_name
                         ),
+                        workdir=(metadata_entry.workdir or entry.workdir),
                         archived=bool(metadata_entry.archived),
                         can_activate=bool(
                             root_entry is not None and root_entry.can_activate
@@ -522,6 +524,7 @@ class UsageInsightsProjector:
                 "title": group.title,
                 "provider": group.provider,
                 "workdirName": group.workdir_name,
+                "workdir": group.workdir,
                 "archived": group.archived,
                 "canActivate": group.can_activate,
                 "models": [

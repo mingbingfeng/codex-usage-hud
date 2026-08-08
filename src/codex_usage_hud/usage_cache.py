@@ -839,6 +839,7 @@ class UsageSummaryCache:
             session_key=path.stem,
             session_title=session_title,
             workdir_name=_workdir_leaf(session_meta.get("cwd")),
+            workdir=str(session_meta.get("cwd") or "").strip(),
             archived=is_archived,
             can_activate=bool(session_id) and not is_archived,
             models_day=models_day,

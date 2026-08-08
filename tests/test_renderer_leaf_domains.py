@@ -6,6 +6,7 @@ from pathlib import Path
 from codex_usage_hud.renderer_assets import manifest
 from codex_usage_hud.renderer_assets.budget import TEXT as BUDGET
 from codex_usage_hud.renderer_assets.active_session import TEXT as ACTIVE_SESSION
+from codex_usage_hud.renderer_assets.background_usage import TEXT as BACKGROUND_USAGE
 from codex_usage_hud.renderer_assets.diagnostics import TEXT as DIAGNOSTICS
 from codex_usage_hud.renderer_assets.kernel import TEXT as KERNEL
 from codex_usage_hud.renderer_assets.layout import TEXT as LAYOUT
@@ -230,6 +231,99 @@ console.log("active-session-canonical-identity-ok");
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
     assert "active-session-canonical-identity-ok" in completed.stdout
+
+
+def test_background_usage_range_change_bypasses_same_revision_cache() -> None:
+    background_usage_factory = BACKGROUND_USAGE.split(
+        "  const backgroundUsageDomain = ctx.domains.register(", 1
+    )[0]
+    script = f"""
+const assert = require("node:assert/strict");
+global.window = {{}};
+global.document = {{ getElementById: () => null }};
+global.location = {{ href: "app://-/index.html" }};
+const settingsCommandBindingName = "codexUsageHudSettings";
+const settingsModalId = "codex-usage-hud-settings";
+let settingsActiveTab = "backgroundUsage";
+const currentPayload = () => ({{
+  backgroundUsageRevision: 7,
+  backgroundUsageBridgeUrl: "",
+}});
+let backgroundUsageFetchSeq = 0;
+let backgroundUsageDetailSeq = 0;
+let backgroundUsageQueryTimeoutId = 0;
+let backgroundUsageDetailTimeoutId = 0;
+const backgroundUsageRequestTimeoutMs = 5000;
+const backgroundUsageBodyScrollTops = new Map();
+const backgroundUsageHistoryScrollTops = new Map();
+const backgroundUsageDetailScrollTops = new Map();
+const backgroundUsageState = {{
+  range: "7d",
+  feature: "",
+  model: "",
+  selectedEventId: "",
+  selectedSessionId: "",
+  data: {{ summary: {{}} }},
+  detail: null,
+  loading: false,
+  detailLoading: false,
+  error: "",
+  loadedRevision: 7,
+  loadedFilterKey: JSON.stringify(["today", "", ""]),
+  promptExpanded: false,
+  queryRequestId: "",
+  queryFilterKey: "",
+  detailRequestId: "",
+}};
+const sent = [];
+const ctx = {{
+  bindings: {{
+    available: () => true,
+    send: (_name, payload) => {{ sent.push(payload); return true; }},
+  }},
+  lifecycle: {{
+    active: () => true,
+    clearTimeout: () => {{}},
+    timeout: () => 1,
+    frame: () => 1,
+  }},
+  teardown: {{ add: () => () => {{}} }},
+}};
+const shared = {{}};
+{background_usage_factory}
+const domain = createBackgroundUsageDomain(ctx, shared);
+
+(async () => {{
+  await domain.loadBackgroundUsage();
+  assert.equal(sent.length, 1);
+  assert.equal(backgroundUsageState.loading, true);
+  assert.equal(
+    backgroundUsageState.queryFilterKey,
+    JSON.stringify(["7d", "", ""]),
+  );
+  assert.equal(sent[0].action, "backgroundUsageQuery");
+  assert.deepEqual(sent[0].filters, {{
+    range: "7d",
+    feature: "",
+    model: "",
+    eventId: "",
+  }});
+  console.log("background-usage-filter-cache-ok");
+}})().catch((error) => {{
+  console.error(error.stack || error);
+  process.exitCode = 1;
+}});
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "background-usage-filter-cache-ok" in completed.stdout
 
 
 def test_router_is_registry_first_and_no_continuous_legacy_asset_remains() -> None:

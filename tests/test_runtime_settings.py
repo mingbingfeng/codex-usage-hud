@@ -32,3 +32,23 @@ def test_partial_domains_follow_changed_settings() -> None:
         previous_config=previous,
         current_config=current,
     ) == {"settings", "currentSession", "budget"}
+
+
+def test_background_usage_workdir_uses_settings_partial_domain() -> None:
+    current = UserConfig.defaults()
+
+    assert partial_domains_for_command(
+        {"action": "openBackgroundUsageWorkdir"},
+        previous_config=current,
+        current_config=current,
+    ) == {"settings"}
+
+
+def test_session_cleanup_workdir_uses_settings_partial_domain() -> None:
+    current = UserConfig.defaults()
+
+    assert partial_domains_for_command(
+        {"action": "openSessionCleanupWorkdir"},
+        previous_config=current,
+        current_config=current,
+    ) == {"settings"}

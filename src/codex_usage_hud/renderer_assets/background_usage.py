@@ -123,27 +123,35 @@ TEXT = r"""
       }
 
       function backgroundUsageEventHtml(event) {
+        const eventId = String(event?.eventId || "").trim();
         const selected = String(event?.eventId || "") === backgroundUsageState.selectedEventId;
         const unread = event?.unread === true;
         const models = Array.isArray(event?.models) ? event.models.filter(Boolean) : [];
         const modelText = models.join(" + ") || "未知模型";
         const eventTime = backgroundUsageTime(event?.lastSeenAt, { compact: true });
         const eventTimeTitle = backgroundUsageTime(event?.lastSeenAt);
+        const workdir = String(event?.cwd || "").trim();
+        const workdirHtml = workdir && eventId
+          ? `<button type="button" class="codex-usage-hud-background-workdir-link codex-usage-hud-background-event-workdir-link" data-action="background-usage-open-workdir" data-event-id="${escapeHtml(eventId)}" aria-label="打开工作目录 ${escapeHtml(workdir)}" title="${escapeHtml(workdir)}">${escapeHtml(workdir)}</button>`
+          : "";
         return `
-          <button type="button" class="codex-usage-hud-background-event"
-            data-action="background-usage-select" data-event-id="${escapeHtml(event?.eventId || "")}" data-selected="${selected}" data-unread="${unread}">
-            ${unread ? '<span class="codex-usage-hud-background-unread-dot" aria-label="未查看"></span>' : ""}
-            <span class="codex-usage-hud-background-event-head">
-              <span class="codex-usage-hud-background-event-title">${escapeHtml(event?.featureLabel || "未知后台任务")}</span>
-              <span class="codex-usage-hud-background-status" title="${escapeHtml(eventTimeTitle)}">${escapeHtml(eventTime)}</span>
-            </span>
-            <span class="codex-usage-hud-background-event-meta">${escapeHtml(modelText)}</span>
-            <span class="codex-usage-hud-background-event-totals">
-              <strong>${escapeHtml(humanizeTokens(event?.totalTokens || 0))} tokens</strong>
-              <span>${Number(event?.requestCount || 0).toLocaleString()} 次请求</span>
-              <span>${escapeHtml(backgroundUsageFormatCost(event?.estimatedCostUsd))}</span>
-            </span>
-          </button>
+          <div class="codex-usage-hud-background-event-row" data-selected="${selected}">
+            <button type="button" class="codex-usage-hud-background-event"
+              data-action="background-usage-select" data-event-id="${escapeHtml(eventId)}" data-selected="${selected}" data-unread="${unread}">
+              ${unread ? '<span class="codex-usage-hud-background-unread-dot" aria-label="未查看"></span>' : ""}
+              <span class="codex-usage-hud-background-event-head">
+                <span class="codex-usage-hud-background-event-title">${escapeHtml(event?.featureLabel || "未知后台任务")}</span>
+                <span class="codex-usage-hud-background-status" title="${escapeHtml(eventTimeTitle)}">${escapeHtml(eventTime)}</span>
+              </span>
+              <span class="codex-usage-hud-background-event-meta">${escapeHtml(modelText)}</span>
+              <span class="codex-usage-hud-background-event-totals">
+                <strong>${escapeHtml(humanizeTokens(event?.totalTokens || 0))} tokens</strong>
+                <span>${Number(event?.requestCount || 0).toLocaleString()} 次请求</span>
+                <span>${escapeHtml(backgroundUsageFormatCost(event?.estimatedCostUsd))}</span>
+              </span>
+            </button>
+            ${workdirHtml}
+          </div>
         `;
       }
 
@@ -175,6 +183,11 @@ TEXT = r"""
         `).join("");
         const processText = String(detail.processUuid || "");
         const threadText = String(detail.threadId || detail.eventId || "");
+        const eventId = String(detail.eventId || "").trim();
+        const workdir = String(detail.cwd || "").trim();
+        const workdirHtml = workdir && eventId
+          ? `<button type="button" class="codex-usage-hud-background-workdir-link" data-action="background-usage-open-workdir" data-event-id="${escapeHtml(eventId)}" aria-label="打开工作目录 ${escapeHtml(workdir)}" title="${escapeHtml(workdir)}">${escapeHtml(workdir)}</button>`
+          : `<strong>${escapeHtml(workdir || "--")}</strong>`;
         return `
           <div class="codex-usage-hud-background-detail-head">
             <div>
@@ -189,7 +202,7 @@ TEXT = r"""
             <div title="${escapeHtml(threadText)}"><span>线程</span><strong>${escapeHtml(threadText ? `…${threadText.slice(-12)}` : "--")}</strong></div>
             <div title="${escapeHtml(processText)}"><span>进程</span><strong>${escapeHtml(processText.split(":").slice(0, 2).join(":") || "--")}</strong></div>
             <div class="codex-usage-hud-background-detail-wide"><span>时段</span><strong>${escapeHtml(backgroundUsageTime(detail.firstSeenAt))} - ${escapeHtml(backgroundUsageTime(detail.lastSeenAt))}</strong></div>
-            <div class="codex-usage-hud-background-detail-wide" title="${escapeHtml(detail.cwd || "")}"><span>工作目录</span><strong>${escapeHtml(detail.cwd || "--")}</strong></div>
+            <div class="codex-usage-hud-background-detail-wide" title="${escapeHtml(workdir)}"><span>工作目录</span>${workdirHtml}</div>
           </div>
           <section class="codex-usage-hud-background-requests">
             <div class="codex-usage-hud-background-section-title">请求明细 <span>${requests.length}</span></div>
@@ -238,6 +251,11 @@ TEXT = r"""
         const title = usageInsightsRankLabel(session, "sessions");
         const latestEventAt = String(session?.latestEventAt || "");
         const workdir = String(session?.workdirName || "").trim();
+        const workdirPath = String(session?.workdir || "").trim();
+        const workdirText = workdir || workdirPath || "--";
+        const workdirHtml = workdirPath && sessionId
+          ? `<button type="button" class="codex-usage-hud-background-workdir-link" data-action="usage-insights-open-workdir" data-usage-session-id="${escapeHtml(sessionId)}" aria-label="打开工作目录 ${escapeHtml(workdirPath)}" title="${escapeHtml(workdirPath)}">${escapeHtml(workdirText)}</button>`
+          : `<strong>${escapeHtml(workdirText)}</strong>`;
         const modelNames = usageInsightsSessionModelNames(session);
         const modelText = modelNames.join("、") || "未知模型";
         const costText = usageInsightsFormatCost(session?.costUsd);
@@ -260,7 +278,7 @@ TEXT = r"""
             <div><span>已计价请求</span><strong>${Math.min(pricedEvents, totalEvents).toLocaleString()} / ${totalEvents.toLocaleString()}</strong></div>
             <div><span>最近活动</span><strong>${escapeHtml(latestEventAt ? backgroundUsageTime(latestEventAt, { compact: true }) : "--")}</strong></div>
             <div class="codex-usage-hud-background-detail-full" title="${escapeHtml(modelText)}"><span>使用模型${modelNames.length > 1 ? `（${modelNames.length} 个）` : ""}</span><strong>${escapeHtml(modelText)}</strong></div>
-            <div class="codex-usage-hud-background-detail-full" title="${escapeHtml(workdir)}"><span>工作目录</span><strong>${escapeHtml(workdir || "--")}</strong></div>
+            <div class="codex-usage-hud-background-detail-full" title="${escapeHtml(workdirPath || workdir)}"><span>工作目录</span>${workdirHtml}</div>
           </div>
           <section class="codex-usage-hud-background-requests">
             <div class="codex-usage-hud-background-section-title"><span>${escapeHtml(mode === "cost" ? "金额排名" : "用量排名")}</span><span>${escapeHtml(mode === "cost" ? costText : `${usageInsightsFormatTokens(session?.tokens ?? session?.totalTokens)} tokens`)}</span></div>
@@ -638,7 +656,7 @@ TEXT = r"""
           backgroundUsageState.detailLoading = false;
           const insights = usageInsightsFromPayload();
           const state = String(insights?.state || insights?.status || "").toLowerCase();
-          if (force || !insights || state === "idle" || state === "failed" || state === "error") {
+          if (force || !insights || state === "idle") {
             requestUsageInsightsRefresh({ force });
           }
           syncBackgroundUsagePanel();
@@ -646,8 +664,14 @@ TEXT = r"""
         }
         const url = backgroundUsageEndpoint();
         const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
+        const filterKey = backgroundUsageFilterKey();
         const requestedEventId = String(eventId || backgroundUsageState.selectedEventId || "").trim();
-        if (!force && backgroundUsageState.data && backgroundUsageState.loadedRevision === revision) {
+        if (
+          !force
+          && backgroundUsageState.data
+          && backgroundUsageState.loadedRevision === revision
+          && backgroundUsageState.loadedFilterKey === filterKey
+        ) {
           if (requestedEventId && requestedEventId !== backgroundUsageState.selectedEventId) {
             backgroundUsageState.selectedEventId = requestedEventId;
             backgroundUsageState.detail = null;
@@ -661,6 +685,7 @@ TEXT = r"""
         backgroundUsageState.error = "";
         clearBackgroundUsageRequestTimeout("query");
         backgroundUsageState.queryRequestId = "";
+        backgroundUsageState.queryFilterKey = filterKey;
         syncBackgroundUsagePanel();
         const bindingRequestId = submitBackgroundUsageCommand(
           "backgroundUsageQuery",
@@ -697,6 +722,7 @@ TEXT = r"""
           if (requestSeq !== backgroundUsageFetchSeq) return;
           backgroundUsageState.data = payload.backgroundUsage || null;
           backgroundUsageState.loadedRevision = revision;
+          backgroundUsageState.loadedFilterKey = filterKey;
           backgroundUsageState.selectedEventId = String(
             payload?.backgroundUsage?.selectedEventId || requestedEventId || ""
           );
@@ -748,6 +774,9 @@ TEXT = r"""
               0,
               Number(response?.payload?.revision ?? payload?.backgroundUsageRevision ?? 0),
             );
+            backgroundUsageState.loadedFilterKey = responseError
+              ? ""
+              : backgroundUsageState.queryFilterKey;
             backgroundUsageState.selectedEventId = String(
               response?.payload?.selectedEventId || backgroundUsageState.selectedEventId || "",
             );
@@ -795,6 +824,9 @@ TEXT = r"""
               0,
               Number(response?.payload?.revision ?? payload?.backgroundUsageRevision ?? 0),
             );
+            backgroundUsageState.loadedFilterKey = responseError
+              ? ""
+              : backgroundUsageFilterKey();
             backgroundUsageState.selectedEventId = String(
               response?.payload?.selectedEventId
               || response.eventId
@@ -846,6 +878,14 @@ TEXT = r"""
         }
         const modal = document.getElementById(settingsModalId);
         if (!modal || modal.hidden || settingsActiveTab !== "backgroundUsage") return;
+        if (backgroundUsageSessionRankingMode()) {
+          const insights = usageInsightsFromPayload();
+          const state = String(insights?.state || insights?.status || "").toLowerCase();
+          if (!insights || state === "idle") {
+            void loadBackgroundUsage();
+          }
+          return;
+        }
         const revision = Math.max(0, Number(payload?.backgroundUsageRevision || 0));
         if (!backgroundUsageState.data || backgroundUsageState.loadedRevision !== revision) {
           void loadBackgroundUsage({ force: true });

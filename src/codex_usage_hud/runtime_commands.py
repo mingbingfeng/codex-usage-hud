@@ -27,6 +27,7 @@ from .config import (
     fetch_model_prices,
     write_json_object,
 )
+from .core.background_usage import valid_background_event_id
 from .desktop_overlay import DesktopWorkOverlay
 from .desktop_overlay_setup import (
     _desktop_overlay_dependency_status,
@@ -115,6 +116,7 @@ PRICING_EXPORT_FILENAME = "codex-usage-hud-pricing.json"
 class RuntimeCommandPorts:
     background_usage: object | None = None
     cleanup_worker: object | None = None
+    cleanup_manager: object | None = None
     insights_worker: object | None = None
     insights_payload: Mapping[str, object] | None = None
     activate_session: Callable[[Mapping[str, object]], object | None] | None = None
@@ -518,6 +520,27 @@ def _query_with_preview(
     return payload
 
 
+def background_usage_workdir(runtime: object | None, event_id: object) -> Path | None:
+    """Resolve one audited background event to an existing absolute directory."""
+    normalized_event_id = valid_background_event_id(event_id)
+    if not normalized_event_id:
+        return None
+    detail = getattr(runtime, "detail", None)
+    if not callable(detail):
+        return None
+    payload = detail(normalized_event_id)
+    if not isinstance(payload, Mapping):
+        return None
+    payload_event_id = valid_background_event_id(payload.get("eventId"))
+    if payload_event_id.casefold() != normalized_event_id.casefold():
+        return None
+    raw_path = str(payload.get("cwd") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    return path if path.is_absolute() and path.is_dir() else None
+
+
 def handle_background_command(
     command: Mapping[str, Any], ports: RuntimeCommandPorts
 ) -> dict[str, object] | object:
@@ -527,6 +550,7 @@ def handle_background_command(
         "backgroundUsageDetail",
         "openBackgroundUsage",
         "openBackgroundUsageFromInsights",
+        "openBackgroundUsageWorkdir",
     }:
         return UNHANDLED
     request_id = str(command.get("requestId") or command.get("id") or "").strip()
@@ -546,6 +570,18 @@ def handle_background_command(
                 "query", request_id, payload=payload
             )
         event_id = str(command.get("eventId") or "").strip()
+        if action == "openBackgroundUsageWorkdir":
+            try:
+                workdir = background_usage_workdir(runtime, event_id)
+            except Exception as exc:
+                return _status(f"无法读取后台任务工作目录：{exc}", kind="error")
+            if workdir is None:
+                return _status("该后台任务没有可打开的工作目录。", kind="error")
+            try:
+                _open_system_path(workdir)
+            except OSError as exc:
+                return _status(f"无法打开工作目录：{exc}", kind="error")
+            return _status("已打开工作目录。")
         if action == "backgroundUsageDetail":
             detail = getattr(runtime, "detail", None)
             if not callable(detail):
@@ -604,6 +640,32 @@ def handle_cleanup_command(
     command: Mapping[str, Any], ports: RuntimeCommandPorts
 ) -> dict[str, object] | object:
     action = str(command.get("action") or "").strip()
+    if action == "openSessionCleanupWorkdir":
+        workdir_for_item = getattr(ports.cleanup_manager, "workdir_for_item", None)
+        if not callable(workdir_for_item):
+            return _status("会话管理当前不可用。", kind="error")
+        try:
+            workdir = workdir_for_item(
+                str(command.get("itemId") or "").strip(),
+                str(command.get("inventoryRevision") or "").strip(),
+            )
+        except Exception as exc:
+            return _status(f"无法读取会话工作目录：{exc}", kind="error")
+        try:
+            valid_workdir = (
+                isinstance(workdir, Path)
+                and workdir.is_absolute()
+                and workdir.is_dir()
+            )
+        except OSError:
+            valid_workdir = False
+        if not valid_workdir:
+            return _status("该会话没有可打开的工作目录。", kind="error")
+        try:
+            _open_system_path(workdir)
+        except OSError as exc:
+            return _status(f"无法打开工作目录：{exc}", kind="error")
+        return _status("已打开工作目录。")
     if action not in runtime_settings.SESSION_CLEANUP_COMMANDS:
         return UNHANDLED
     request_id = str(command.get("requestId") or command.get("id") or "")
@@ -660,11 +722,39 @@ def actionable_session_ids(payload: Mapping[str, object] | None) -> set[str]:
     return result
 
 
+def usage_insights_workdir(
+    payload: Mapping[str, object] | None, session_id: str
+) -> Path | None:
+    if not isinstance(payload, Mapping):
+        return None
+    for window_name in ("today", "week", "month"):
+        window = payload.get(window_name)
+        if not isinstance(window, Mapping):
+            continue
+        for collection_name in ("sessions", "topSessionsByUsage", "topSessionsByCost"):
+            sessions = window.get(collection_name)
+            if not isinstance(sessions, list):
+                continue
+            for item in sessions:
+                if not isinstance(item, Mapping):
+                    continue
+                candidate_id = str(item.get("id") or item.get("sessionId") or "").strip().casefold()
+                if candidate_id != session_id:
+                    continue
+                raw_path = str(item.get("workdir") or "").strip()
+                if not raw_path:
+                    continue
+                path = Path(raw_path)
+                if path.is_absolute() and path.is_dir():
+                    return path
+    return None
+
+
 def handle_insights_command(
     command: Mapping[str, Any], ports: RuntimeCommandPorts
 ) -> dict[str, object] | object:
     action = str(command.get("action") or "").strip()
-    if action not in {"usageInsightsRefresh", "openUsageInsightsSession"}:
+    if action not in {"usageInsightsRefresh", "openUsageInsightsSession", "openUsageInsightsWorkdir"}:
         return UNHANDLED
     request_id = str(command.get("requestId") or command.get("id") or "")
     if action == "usageInsightsRefresh":
@@ -676,6 +766,15 @@ def handle_insights_command(
         status["usageInsightsRequestId"] = request_id
         return status
     session_id = str(command.get("sessionId") or "").strip().casefold()
+    if action == "openUsageInsightsWorkdir":
+        workdir = usage_insights_workdir(ports.insights_payload, session_id)
+        if workdir is None:
+            return _status("该会话没有可打开的工作目录。", kind="error")
+        try:
+            _open_system_path(workdir)
+        except OSError as exc:
+            return _status(f"无法打开工作目录：{exc}", kind="error")
+        return _status("已打开工作目录。")
     if session_id not in actionable_session_ids(ports.insights_payload):
         return _status(
             "该会话已归档、标识不完整或不在当前洞察结果中，未执行跳转。",
@@ -1033,7 +1132,8 @@ def _handle_renderer_session_cleanup_command(
     result = handle_cleanup_command(
         command,
         RuntimeCommandPorts(
-            cleanup_worker=getattr(context, "session_cleanup_worker", None)
+            cleanup_worker=getattr(context, "session_cleanup_worker", None),
+            cleanup_manager=getattr(context, "session_cleanup_manager", None),
         ),
     )
     if result is UNHANDLED:
@@ -1085,6 +1185,7 @@ def _handle_renderer_settings_command(
     command_ports = RuntimeCommandPorts(
         background_usage=getattr(context, "background_usage_runtime", None),
         cleanup_worker=getattr(context, "session_cleanup_worker", None),
+        cleanup_manager=getattr(context, "session_cleanup_manager", None),
         insights_worker=getattr(context, "usage_insights_worker", None),
         insights_payload=getattr(context, "usage_insights_payload", None),
         activate_session=(

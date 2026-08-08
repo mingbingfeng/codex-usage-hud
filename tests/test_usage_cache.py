@@ -212,7 +212,11 @@ def test_persisted_session_summaries_only_reparse_changed_jsonl(
                 _record(
                     "2026-07-30T00:00:00Z",
                     "session_meta",
-                    {"id": f"s{index}", "model_provider": "custom"},
+                    {
+                        "id": f"s{index}",
+                        "model_provider": "custom",
+                        "cwd": str(tmp_path / f"project-{index}"),
+                    },
                 )
             )
             + "\n"
@@ -255,6 +259,9 @@ def test_persisted_session_summaries_only_reparse_changed_jsonl(
     assert restored_total == first_total
     assert restarted_parser.read_paths == []
     assert all(entry.tail_state is None for entry in restarted_cache._entries.values())
+    assert restarted_cache._entries[paths[0].resolve()].workdir == str(
+        tmp_path / "project-1"
+    )
 
     rollover_parser = CountingParser()
     rollover_cache = UsageSummaryCache(

@@ -246,7 +246,7 @@ TEXT = r"""
       backgroundUsageState.selectedSessionId = "";
       backgroundUsageState.detail = null;
       backgroundUsageState.error = "";
-      void loadBackgroundUsage({ force: true });
+      void loadBackgroundUsage();
     });
     rootScope.listen(root, "keydown", (event) => {
       if (event.key === "Escape") {
@@ -259,6 +259,16 @@ TEXT = r"""
           else closeSettingsModal();
           return;
         }
+      }
+      const workdirButton = event.target?.closest?.('[data-action="usage-insights-open-workdir"]');
+      if (workdirButton && root.contains(workdirButton) && (event.key === "Enter" || event.key === " ")) {
+        return;
+      }
+      const sessionRankingRow = event.target?.closest?.('[data-action="background-usage-session-select"]');
+      if (sessionRankingRow && root.contains(sessionRankingRow) && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        sessionRankingRow.click();
+        return;
       }
       const tab = event.target?.closest?.('[data-provider-tab="true"]');
       if (!tab || !root.contains(tab) || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
@@ -286,6 +296,18 @@ TEXT = r"""
           flashCopyState(copyNode, ok);
         });
         return;
+      }
+      const sessionCleanupRow = event.target?.closest?.(".codex-usage-hud-session-row");
+      if (sessionCleanupRow && root.contains(sessionCleanupRow)) {
+        const interactiveTarget = event.target?.closest?.("input, button, select, textarea, a, label");
+        if (!interactiveTarget) {
+          const checkbox = sessionCleanupRow.querySelector('[data-session-cleanup-id]');
+          if (checkbox && !checkbox.disabled) {
+            event.preventDefault();
+            checkbox.click();
+          }
+          return;
+        }
       }
       const action = event.target?.closest?.("[data-action]");
       if (!action || !root.contains(action)) return;
@@ -435,7 +457,7 @@ TEXT = r"""
         backgroundUsageState.selectedEventId = "";
         backgroundUsageState.selectedSessionId = "";
         backgroundUsageState.detail = null;
-        void loadBackgroundUsage({ force: true });
+        void loadBackgroundUsage();
         return;
       }
       if (action.dataset.action === "background-usage-session-select") {
@@ -443,6 +465,18 @@ TEXT = r"""
         event.stopPropagation();
         backgroundUsageState.selectedSessionId = String(action.dataset.usageSessionId || "").trim();
         syncBackgroundUsagePanel();
+        return;
+      }
+      if (action.dataset.action === "background-usage-open-workdir") {
+        event.preventDefault();
+        event.stopPropagation();
+        const eventId = String(action.dataset.eventId || "").trim();
+        if (!eventId) return;
+        submitSettingsCommand(
+          { action: "openBackgroundUsageWorkdir", eventId },
+          "正在打开工作目录...",
+          { preserveOverlay: true },
+        );
         return;
       }
       if (action.dataset.action === "background-usage-select") {
@@ -496,6 +530,31 @@ TEXT = r"""
           { preserveOverlay: true },
         );
         if (submitted) closeSettingsModal();
+        return;
+      }
+      if (action.dataset.action === "usage-insights-open-workdir") {
+        event.preventDefault();
+        event.stopPropagation();
+        const sessionId = String(action.dataset.usageSessionId || "").trim();
+        if (!sessionId) return;
+        submitSettingsCommand(
+          { action: "openUsageInsightsWorkdir", sessionId },
+          "正在打开工作目录...",
+          { preserveOverlay: true },
+        );
+        return;
+      }
+      if (action.dataset.action === "session-cleanup-open-workdir") {
+        event.preventDefault();
+        event.stopPropagation();
+        const itemId = String(action.dataset.sessionCleanupWorkdirId || "").trim();
+        const inventoryRevision = String(action.dataset.sessionCleanupInventoryRevision || "").trim();
+        if (!itemId || !inventoryRevision) return;
+        submitSettingsCommand(
+          { action: "openSessionCleanupWorkdir", itemId, inventoryRevision },
+          "正在打开工作目录...",
+          { preserveOverlay: true },
+        );
         return;
       }
       if (action.dataset.action === "session-cleanup-cancel") {

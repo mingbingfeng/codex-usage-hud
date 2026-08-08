@@ -1904,6 +1904,12 @@ TEXT = r"""
             gap: 7px;
             margin-top: 7px;
           }
+          #${rootId} .codex-usage-hud-background-event-row {
+            min-width: 0;
+            overflow: hidden;
+            border: 1px solid var(--codex-usage-hud-divider, #273241);
+            border-radius: 6px;
+          }
           #${rootId} .codex-usage-hud-background-event {
             position: relative;
             min-width: 0;
@@ -1917,6 +1923,10 @@ TEXT = r"""
             color: inherit;
             text-align: left;
             cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-background-event-row > .codex-usage-hud-background-event {
+            border: 0;
+            border-radius: 0;
           }
           #${rootId} .codex-usage-hud-background-unread-dot {
             position: absolute;
@@ -1937,6 +1947,16 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-background-event[data-selected="true"] {
             border-color: var(--codex-usage-hud-warning, #ffb86b);
             background: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 8%, var(--codex-usage-hud-panel-surface, #141b24));
+          }
+          #${rootId} .codex-usage-hud-background-event-row:hover,
+          #${rootId} .codex-usage-hud-background-event-row[data-selected="true"] {
+            border-color: var(--codex-usage-hud-warning, #ffb86b);
+            background: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 8%, var(--codex-usage-hud-panel-surface, #141b24));
+          }
+          #${rootId} .codex-usage-hud-background-event-row > .codex-usage-hud-background-event:hover,
+          #${rootId} .codex-usage-hud-background-event-row > .codex-usage-hud-background-event[data-selected="true"] {
+            border-color: transparent;
+            background: transparent;
           }
           #${rootId} .codex-usage-hud-background-event-head,
           #${rootId} .codex-usage-hud-background-event-totals {
@@ -1980,6 +2000,40 @@ TEXT = r"""
             text-overflow: ellipsis;
             white-space: nowrap;
           }
+          #${rootId} .codex-usage-hud-session-ranking-row {
+            border: 1px solid var(--codex-usage-hud-divider, #273241);
+            border-radius: 6px;
+          }
+          #${rootId} .codex-usage-hud-session-ranking-row:hover,
+          #${rootId} .codex-usage-hud-session-ranking-row[data-selected="true"] {
+            border-color: var(--codex-usage-hud-warning, #ffb86b);
+            background: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 8%, var(--codex-usage-hud-panel-surface, #141b24));
+          }
+          #${rootId} .codex-usage-hud-session-ranking-select {
+            width: 100%;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            grid-template-areas: "title cost" "meta model" "totals totals";
+            gap: 4px 8px;
+            padding: 9px 10px;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            text-align: left;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-session-ranking-row:hover .codex-usage-hud-session-ranking-select,
+          #${rootId} .codex-usage-hud-session-ranking-row[data-selected="true"] .codex-usage-hud-session-ranking-select {
+            background: transparent;
+          }
+          #${rootId} .codex-usage-hud-session-ranking-select > .codex-usage-hud-background-event-title { grid-area: title; }
+          #${rootId} .codex-usage-hud-session-ranking-cost { grid-area: cost; justify-self: end; color: var(--codex-usage-hud-warning, #ffb86b); font-size: 10px; text-align: right; white-space: nowrap; }
+          #${rootId} .codex-usage-hud-session-ranking-meta { grid-area: meta; min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--codex-usage-hud-muted, #8492a6); font-size: 10px; }
+          #${rootId} .codex-usage-hud-session-ranking-workdir { min-width: 0; overflow: hidden; padding: 0; border: 0; background: transparent; color: var(--codex-usage-hud-text, #e8eef7); font: inherit; text-overflow: ellipsis; white-space: nowrap; }
+          #${rootId} button.codex-usage-hud-session-ranking-workdir { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+          #${rootId} .codex-usage-hud-session-ranking-time { flex: 0 0 auto; white-space: nowrap; }
+          #${rootId} .codex-usage-hud-session-ranking-model { grid-area: model; min-width: 0; overflow: hidden; color: var(--codex-usage-hud-muted, #8492a6); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+          #${rootId} .codex-usage-hud-session-ranking-select > .codex-usage-hud-background-event-totals { grid-area: totals; }
           #${rootId} .codex-usage-hud-background-status {
             flex: 0 0 auto;
             padding: 2px 7px;
@@ -2040,6 +2094,34 @@ TEXT = r"""
             font-size: 10px;
             text-overflow: ellipsis;
             white-space: nowrap;
+          }
+          #${rootId} button.codex-usage-hud-background-workdir-link {
+            display: block;
+            min-width: 0;
+            max-width: 100%;
+            overflow: hidden;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+            font: inherit;
+            font-size: 10px;
+            font-weight: 700;
+            text-align: left;
+            text-decoration: underline;
+            text-decoration-thickness: 1px;
+            text-underline-offset: 2px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          #${rootId} button.codex-usage-hud-background-event-workdir-link {
+            width: 100%;
+            max-width: none;
+            padding: 5px 10px 7px;
+            border-top: 1px solid var(--codex-usage-hud-divider, #273241);
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-weight: 600;
           }
           #${rootId} .codex-usage-hud-background-detail-grid .codex-usage-hud-background-detail-wide {
             grid-column: span 2;
@@ -3137,12 +3219,16 @@ TEXT = r"""
             margin: 0;
             accent-color: #3b8eea;
           }
+          #${rootId} .codex-usage-hud-session-select {
+            display: flex;
+            align-items: center;
+          }
           #${rootId} .codex-usage-hud-session-title {
             min-width: 0;
           }
           #${rootId} .codex-usage-hud-session-title strong,
           #${rootId} .codex-usage-hud-session-workdir,
-          #${rootId} .codex-usage-hud-session-title span {
+          #${rootId} .codex-usage-hud-session-title > span {
             display: block;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -3166,6 +3252,40 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-session-workdir {
             color: #c4c7cc;
             font-size: 10px;
+          }
+          #${rootId} button.codex-usage-hud-session-workdir {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+            max-width: 100%;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: #c4c7cc;
+            cursor: pointer;
+            font: inherit;
+            text-align: left;
+          }
+          #${rootId} button.codex-usage-hud-session-workdir:hover {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            text-decoration: underline;
+            text-underline-offset: 2px;
+          }
+          #${rootId} button.codex-usage-hud-session-workdir:focus-visible {
+            outline: 1px solid var(--codex-usage-hud-accent, #f3d27a);
+            outline-offset: 2px;
+          }
+          #${rootId} button.codex-usage-hud-session-workdir > .codex-usage-hud-cleanup-icon {
+            flex: 0 0 auto;
+            width: 12px;
+            height: 12px;
+          }
+          #${rootId} button.codex-usage-hud-session-workdir > span {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
           }
           #${rootId} .codex-usage-hud-session-cell {
             color: var(--codex-usage-hud-muted, #9da1a8);
@@ -4507,7 +4627,7 @@ TEXT = r"""
               padding-top: 8px;
               padding-bottom: 8px;
             }
-            #${rootId} .codex-usage-hud-session-workdir,
+            #${rootId} .codex-usage-hud-session-row > .codex-usage-hud-session-workdir,
             #${rootId} .codex-usage-hud-session-cell {
               display: none;
             }

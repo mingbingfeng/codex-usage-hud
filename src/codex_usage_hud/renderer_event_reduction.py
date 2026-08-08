@@ -129,6 +129,9 @@ def reduce_event(
             "restReminderFinish",
             "restReminderTestNotification",
             "openUsageInsightsSession",
+            "openUsageInsightsWorkdir",
+            "openSessionCleanupWorkdir",
+            "openBackgroundUsageWorkdir",
         }:
             plan.request_domains("settings", force_fast=True)
         elif action in {"installDesktopOverlay", "enableDesktopOverlay"}:

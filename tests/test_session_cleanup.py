@@ -141,6 +141,31 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertNotIn(CHILD_ID, serialized)
         self.assertNotIn(str(root), serialized)
 
+    def test_workdir_for_item_rechecks_current_inventory_directory(self) -> None:
+        fixture = self._fixture()
+        temporary, root, state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        project = root / "project-a"
+        project.mkdir()
+
+        payload = manager.scan()
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+
+        self.assertEqual(
+            manager.workdir_for_item(root_row["id"], payload["revision"]), project
+        )
+        self.assertIsNone(manager.workdir_for_item("unknown", payload["revision"]))
+        self.assertIsNone(manager.workdir_for_item(root_row["id"], "stale-revision"))
+
+        with closing(sqlite3.connect(state)) as connection, connection:
+            connection.execute(
+                "UPDATE threads SET cwd = ? WHERE id = ?",
+                ("relative-workdir", ROOT_ID),
+            )
+        self.assertIsNone(
+            manager.workdir_for_item(root_row["id"], payload["revision"])
+        )
+
     def test_scan_reports_the_protection_phase_and_progress(self) -> None:
         fixture = self._fixture()
         temporary, _root, _state, _index, _rollouts, manager = fixture

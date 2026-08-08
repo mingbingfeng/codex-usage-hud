@@ -934,6 +934,22 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function backgroundUsageSessionRankingMode", script)
         self.assertIn("function backgroundUsageSessionRankingPanelHtml", script)
         self.assertIn("function backgroundUsageSessionRankingDetailHtml", script)
+        self.assertIn(
+            'const workdirPath = String(session?.workdir || "").trim();',
+            script,
+        )
+        self.assertIn(
+            'const workdirHtml = workdirPath && sessionId',
+            script,
+        )
+        self.assertIn("codex-usage-hud-background-workdir-link", script)
+        self.assertIn("codex-usage-hud-background-event-row", script)
+        self.assertIn('data-action="background-usage-open-workdir"', script)
+        self.assertIn('action: "openBackgroundUsageWorkdir", eventId', script)
+        self.assertIn(
+            'const workdirButton = event.target?.closest?.(\'[data-action="usage-insights-open-workdir"]\');',
+            script,
+        )
         self.assertIn('sessionAction: "background-usage-session-select"', script)
         self.assertIn('data-session-ranking-detail="true"', script)
         self.assertIn('"background-usage-session-select"', script)
@@ -947,11 +963,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('backgroundUsageState.range === "30d") return "month"', script)
         self.assertIn('[["today", "今天"], ["7d", "近 7 天"], ["30d", "近 30 天"]]', script)
         self.assertIn("usageInsightsRankingRowsHtml", script)
-        self.assertIn(
-            'class="codex-usage-hud-background-event '
-            'codex-usage-hud-session-ranking-row"',
-            script,
-        )
+        self.assertIn('class="codex-usage-hud-session-ranking-row"', script)
+        self.assertIn('codex-usage-hud-session-ranking-select', script)
         self.assertIn(
             'codex-usage-hud-background-event-list '
             'codex-usage-hud-session-ranking-list',
@@ -961,8 +974,11 @@ class RendererHudPayloadTests(unittest.TestCase):
             'const workdir = String(item?.workdirName || "").trim();',
             script,
         )
-        self.assertIn('`工作目录 ${workdir || "--"}`', script)
-        self.assertIn('`模型 ${modelText}`', script)
+        self.assertIn('data-action="usage-insights-open-workdir"', script)
+        self.assertIn('codex-usage-hud-session-ranking-workdir', script)
+        self.assertIn('codex-usage-hud-session-ranking-model', script)
+        self.assertIn('#${index + 1} ${escapeHtml(cost)}', script)
+        self.assertIn('role="button" tabindex="0"', script)
         self.assertIn("function usageInsightsSessionModelNames", script)
         self.assertIn("使用模型${modelNames.length > 1", script)
         self.assertIn('data-target-title="', script)
@@ -1053,8 +1069,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         ranking_start = script.index("async function loadBackgroundUsage(")
         ranking_end = script.index("function renderSettingsModal", ranking_start)
         ranking_contract = script[ranking_start:ranking_end]
-        self.assertIn("if (force || !insights", ranking_contract)
+        self.assertIn('if (force || !insights || state === "idle")', ranking_contract)
         self.assertIn("requestUsageInsightsRefresh({ force });", ranking_contract)
+        self.assertIn("if (usageInsightsState.refreshRequestId) return false;", script)
+        self.assertIn("if (backgroundUsageSessionRankingMode()) {\n          const insights = usageInsightsFromPayload();", script)
         self.assertIn(
             "const incompleteCost = coverage?.hasCompleteCost === false;",
             script,
@@ -1130,6 +1148,20 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-tab="storage" data-active="${activeTab === "storage"}">会话管理</button>', script)
         self.assertIn("function storagePanelHtml()", script)
         self.assertIn("${sessionCleanupPanelHtml()}", script)
+        self.assertIn('data-action="session-cleanup-open-workdir"', script)
+        self.assertIn(
+            'action: "openSessionCleanupWorkdir", itemId, inventoryRevision',
+            script,
+        )
+        self.assertIn('const secondaryWorkdir = workdirButton("secondary");', script)
+        self.assertIn(
+            ".codex-usage-hud-session-row > .codex-usage-hud-session-workdir",
+            script,
+        )
+        self.assertIn(
+            'const sessionCleanupRow = event.target?.closest?.(".codex-usage-hud-session-row");',
+            script,
+        )
         self.assertNotIn("safeCleanup", script)
         self.assertNotIn("safe-cleanup", script)
         self.assertNotIn("垃圾清理", script)

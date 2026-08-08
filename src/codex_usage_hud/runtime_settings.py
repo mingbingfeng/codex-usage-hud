@@ -92,7 +92,13 @@ def partial_domains_for_command(
         return {"settings", "sessionCleanup"}
     if action == "usageInsightsRefresh":
         return {"settings", "usageInsights"}
-    if action in {"openUsageInsightsSession", "applyDisplayMode"}:
+    if action in {
+        "openUsageInsightsSession",
+        "openUsageInsightsWorkdir",
+        "openSessionCleanupWorkdir",
+        "openBackgroundUsageWorkdir",
+        "applyDisplayMode",
+    }:
         return {"settings"}
     if action == "openBackgroundUsageFromInsights":
         return {"backgroundUsage"}

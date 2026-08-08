@@ -627,13 +627,17 @@ _TEXT_PREFIX = r"""
         }
         if (activeTab === "backgroundUsage") {
           restoreBackgroundUsageScrollPositions();
-          const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
-          if (!backgroundUsageState.data || backgroundUsageState.loadedRevision !== revision) {
-            void loadBackgroundUsage({ force: true });
-          } else if (backgroundUsageState.selectedEventId && !backgroundUsageState.detail) {
-            // Keep default markViewed=false here: explicit list click and the open
-            // notification path pass markViewed:true themselves.
-            void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
+          if (backgroundUsageSessionRankingMode()) {
+            void loadBackgroundUsage();
+          } else {
+            const revision = Math.max(0, Number(currentPayload()?.backgroundUsageRevision || 0));
+            if (!backgroundUsageState.data || backgroundUsageState.loadedRevision !== revision) {
+              void loadBackgroundUsage({ force: true });
+            } else if (backgroundUsageState.selectedEventId && !backgroundUsageState.detail) {
+              // Keep default markViewed=false here: explicit list click and the open
+              // notification path pass markViewed:true themselves.
+              void loadBackgroundUsageDetail(backgroundUsageState.selectedEventId);
+            }
           }
         }
       }

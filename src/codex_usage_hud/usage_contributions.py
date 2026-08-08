@@ -12,7 +12,7 @@ from typing import Generic, TypeVar
 from .core import JsonlTailState, UsageSummary
 
 
-USAGE_CONTRIBUTION_PARSER_VERSION = "usage-events-v1"
+USAGE_CONTRIBUTION_PARSER_VERSION = "usage-events-v2"
 
 
 @dataclass
@@ -49,6 +49,7 @@ class FileUsageContribution:
     session_key: str = ""
     session_title: str = ""
     workdir_name: str = ""
+    workdir: str = ""
     archived: bool = False
     can_activate: bool = False
     models_day: dict[str, UsageInsightAggregate] = field(default_factory=dict)

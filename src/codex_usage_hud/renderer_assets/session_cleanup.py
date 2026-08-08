@@ -320,6 +320,7 @@ TEXT = r"""
         const capability = data?.capability && typeof data.capability === "object" ? data.capability : {};
         const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
         const rows = sessionCleanupRows(data);
+        const inventoryRevision = String(data?.revision || "");
         const visibleSelectable = rows.filter((item) => item?.selectable === true && String(item?.id || ""));
         const allVisibleSelected = visibleSelectable.length > 0
           && visibleSelectable.every((item) => sessionCleanupState.selectedIds.has(String(item.id)));
@@ -331,18 +332,25 @@ TEXT = r"""
           const updatedAt = item?.updatedAt ? backgroundUsageTime(item.updatedAt, { compact: true }) : "--";
           const client = sessionCleanupClientLabel(item?.clientKind);
           const provider = String(item?.modelProvider || "unknown");
-          const secondary = [
-            String(item?.workdirName || ""),
+          const workdirName = String(item?.workdirName || "").trim();
+          const workdirButton = (position) => workdirName && id && inventoryRevision
+            ? `<button type="button" class="codex-usage-hud-session-workdir" data-action="session-cleanup-open-workdir" data-session-cleanup-workdir-id="${escapeHtml(id)}" data-session-cleanup-inventory-revision="${escapeHtml(inventoryRevision)}" data-session-cleanup-workdir-position="${escapeHtml(position)}" aria-label="打开工作目录 ${escapeHtml(workdirName)}" title="打开工作目录：${escapeHtml(workdirName)}">${cleanupIconSvg("folder")}<span>${escapeHtml(workdirName)}</span></button>`
+            : "";
+          const secondaryMeta = [
             updatedAt,
             `${client} · ${provider}`,
             descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务",
           ].filter(Boolean).join(" · ");
+          const secondaryWorkdir = workdirButton("secondary");
+          const secondary = `${secondaryWorkdir}${secondaryWorkdir && secondaryMeta ? " · " : ""}${escapeHtml(secondaryMeta)}`;
           const related = [client, provider, descendants ? `含 ${descendants} 个关联子任务` : "无关联子任务"].join(" · ");
           const status = String(item?.status || "idle");
           const archivedBadge = item?.archived === true && status !== "archived"
             ? `<span class="codex-usage-hud-session-badge" data-state="archived">已归档</span>`
             : "";
-          return `<label class="codex-usage-hud-session-row" data-selectable="${selectable}" data-selected="${checked}"><input type="checkbox" data-session-cleanup-id="${escapeHtml(id)}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}><div class="codex-usage-hud-session-title"><strong title="${escapeHtml(item?.title || "未命名会话")}">${escapeHtml(item?.title || "未命名会话")}</strong><span>${escapeHtml(related)}</span><span data-secondary="true">${escapeHtml(secondary)}</span>${item?.blockedReason ? `<span data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(item.blockedReason))}</span>` : ""}</div><span class="codex-usage-hud-session-workdir" title="${escapeHtml(item?.workdirName || "")}">${escapeHtml(item?.workdirName || "--")}</span><span class="codex-usage-hud-session-cell">${escapeHtml(updatedAt)}</span><span class="codex-usage-hud-session-status-cell"><span class="codex-usage-hud-session-badge" data-state="${escapeHtml(status)}">${escapeHtml(sessionCleanupStatusLabel(item))}</span>${archivedBadge}</span><span class="codex-usage-hud-session-size">${storageFormatBytes(item?.bytes)}</span></label>`;
+          const workdirColumn = workdirButton("column")
+            || `<span class="codex-usage-hud-session-workdir" title="未记录工作目录">--</span>`;
+          return `<div class="codex-usage-hud-session-row" data-selectable="${selectable}" data-selected="${checked}"><label class="codex-usage-hud-session-select"><input type="checkbox" data-session-cleanup-id="${escapeHtml(id)}" aria-label="选择会话 ${escapeHtml(item?.title || "未命名会话")}" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"}></label><div class="codex-usage-hud-session-title"><strong title="${escapeHtml(item?.title || "未命名会话")}">${escapeHtml(item?.title || "未命名会话")}</strong><span>${escapeHtml(related)}</span><span data-secondary="true">${secondary}</span>${item?.blockedReason ? `<span data-kind="warning">${escapeHtml(sessionCleanupReasonLabel(item.blockedReason))}</span>` : ""}</div>${workdirColumn}<span class="codex-usage-hud-session-cell">${escapeHtml(updatedAt)}</span><span class="codex-usage-hud-session-status-cell"><span class="codex-usage-hud-session-badge" data-state="${escapeHtml(status)}">${escapeHtml(sessionCleanupStatusLabel(item))}</span>${archivedBadge}</span><span class="codex-usage-hud-session-size">${storageFormatBytes(item?.bytes)}</span></div>`;
         }).join("");
         const results = Array.isArray(operation?.results) ? operation.results : [];
         const showResultDetails = results.length > 0 && state !== "completed";
