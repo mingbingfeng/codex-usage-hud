@@ -119,6 +119,27 @@ TEXT = r"""
         top: event.deltaY,
       });
     }, { capture: true, passive: false });
+    const commitSessionCleanupSearch = (sessionSearch) => {
+      if (!sessionSearch || !root.contains(sessionSearch)) return false;
+      const search = String(sessionSearch.value || "");
+      if (search === sessionCleanupState.search) return false;
+      sessionCleanupState.search = search;
+      sessionCleanupState.selectedIds.clear();
+      renderSettingsModal("storage");
+      return true;
+    };
+    rootScope.listen(root, "keydown", (event) => {
+      const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
+      if (!sessionSearch || root.contains(sessionSearch) === false) return;
+      if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      commitSessionCleanupSearch(sessionSearch);
+    });
+    rootScope.listen(root, "focusout", (event) => {
+      const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
+      if (!sessionSearch || root.contains(sessionSearch) === false) return;
+      commitSessionCleanupSearch(sessionSearch);
+    });
     rootScope.listen(root, "input", (event) => {
       const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
       if (restStartInput && root.contains(restStartInput)) {
@@ -137,13 +158,8 @@ TEXT = r"""
       }
       const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
       if (sessionSearch && root.contains(sessionSearch)) {
-        const selection = Number(sessionSearch.selectionStart || 0);
-        sessionCleanupState.search = String(sessionSearch.value || "");
-        sessionCleanupState.selectedIds.clear();
-        renderSettingsModal("storage");
-        const next = root.querySelector('[data-session-cleanup-search="true"]');
-        next?.focus?.();
-        next?.setSelectionRange?.(selection, selection);
+        // IME composition emits input events before the final text is committed.
+        // Re-rendering here replaces the input and aborts Chinese composition.
         return;
       }
       const editor = event.target?.closest?.('[data-provider-editor="true"]');

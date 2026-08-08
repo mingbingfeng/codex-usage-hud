@@ -1156,6 +1156,20 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
 
+    def test_session_search_commits_on_enter_or_focusout_without_interrupting_ime(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn("const commitSessionCleanupSearch = (sessionSearch) => {", script)
+        self.assertIn('rootScope.listen(root, "keydown", (event) => {', script)
+        self.assertIn('event.key !== "Enter" || event.isComposing || event.keyCode === 229', script)
+        self.assertIn('rootScope.listen(root, "focusout", (event) => {', script)
+        self.assertIn("commitSessionCleanupSearch(sessionSearch);", script)
+        input_start = script.index('rootScope.listen(root, "input", (event) => {')
+        input_end = script.index('rootScope.listen(document, "paste", (event) => {', input_start)
+        input_script = script[input_start:input_end]
+        self.assertNotIn('renderSettingsModal("storage");', input_script)
+        self.assertIn("IME composition emits input events before the final text is committed.", input_script)
+
     def test_session_cleanup_confirm_survives_same_token_repaint(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
