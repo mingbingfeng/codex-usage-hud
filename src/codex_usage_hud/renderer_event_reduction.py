@@ -21,6 +21,7 @@ class RefreshPlan:
     active_session: bool = False
     diagnostics: bool = False
     background_usage: bool = False
+    usage_insights_refresh: bool = False
     domains: set[str] = field(default_factory=set)
     theme_payload: dict[str, object] | None = None
 
@@ -41,6 +42,9 @@ class RefreshPlan:
         self.background_usage = True
         self.force_fast = True
 
+    def request_usage_insights_refresh(self) -> None:
+        self.usage_insights_refresh = True
+
     def request_domains(
         self,
         *domain_names: str,
@@ -58,6 +62,9 @@ class RefreshPlan:
         self.active_session = self.active_session or other.active_session
         self.diagnostics = self.diagnostics or other.diagnostics
         self.background_usage = self.background_usage or other.background_usage
+        self.usage_insights_refresh = (
+            self.usage_insights_refresh or other.usage_insights_refresh
+        )
         self.domains.update(other.domains)
         if other.theme_payload is not None:
             self.theme_payload = dict(other.theme_payload)
@@ -80,10 +87,12 @@ def reduce_event(
 
     if event_type in {"session_file_changed"}:
         plan.request_snapshot()
+    elif event_type == "budget_window_changed":
+        plan.request_snapshot(force_fast=True)
+        plan.request_usage_insights_refresh()
     elif event_type in {
         "settings_changed",
         "session_snapshot_hydrated",
-        "budget_window_changed",
         "active_work_refresh_requested",
     }:
         plan.request_snapshot(force_fast=True)

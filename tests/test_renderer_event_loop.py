@@ -131,6 +131,14 @@ def test_settings_command_reducer_preserves_partial_domain_mapping(
     assert plan.force_fast
 
 
+def test_budget_window_event_requests_usage_insights_refresh() -> None:
+    _, plan = reduce_event(RendererLoopState(), _event("budget_window_changed"))
+
+    assert plan.snapshot
+    assert plan.force_fast
+    assert plan.usage_insights_refresh
+
+
 def test_event_reducer_coalesces_without_layout_only_work() -> None:
     state = RendererLoopState()
     next_state, plan = reduce_events(
@@ -615,6 +623,7 @@ def _pre_refresh_ports(**overrides: object) -> RendererPreRefreshPorts:
         "reset_background_retry": lambda: None,
         "renderer_only_status": lambda message: {"message": message},
         "partial_domains_for_command": lambda command, previous, current: None,
+        "request_usage_insights_refresh": lambda: None,
         "refresh_latest_snapshot": lambda command, snapshot, previous, current: None,
         "refresh_usage_insights": lambda: None,
         "overlay_configure": lambda: None,
@@ -627,6 +636,22 @@ def _pre_refresh_ports(**overrides: object) -> RendererPreRefreshPorts:
     }
     values.update(overrides)
     return RendererPreRefreshPorts(**values)  # type: ignore[arg-type]
+
+
+def test_pre_refresh_budget_event_requests_usage_insights_worker() -> None:
+    requested = MagicMock()
+    executor = RendererPreRefreshExecutor(
+        RendererLoopState(),
+        _pre_refresh_ports(request_usage_insights_refresh=requested),
+    )
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True, usage_insights_refresh=True),
+        events=[_event("budget_window_changed")],
+    )
+
+    executor.apply(inputs)
+
+    requested.assert_called_once_with()
 
 
 def test_pre_refresh_command_replaces_full_snapshot_with_partial_domains() -> None:

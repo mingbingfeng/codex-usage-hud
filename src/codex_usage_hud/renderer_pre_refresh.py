@@ -36,6 +36,7 @@ class RendererPreRefreshPorts:
     apply_config: Callable[[object, object], None]
     changed_config_keys: Callable[[object, object], set[str]]
     partial_domains_for_changes: Callable[[set[str]], set[str] | None]
+    request_usage_insights_refresh: Callable[[], None] | None = None
 
 
 class RendererPreRefreshExecutor:
@@ -59,9 +60,17 @@ class RendererPreRefreshExecutor:
         self.ports = ports
 
     def apply(self, inputs: RendererTickInputs) -> None:
+        self.apply_usage_insights_refresh(inputs)
         self.apply_settings_command(inputs)
         self.apply_background_usage_change(inputs)
         self.apply_partial_settings_file_change(inputs)
+
+    def apply_usage_insights_refresh(self, inputs: RendererTickInputs) -> None:
+        if not inputs.event_refresh_request.usage_insights_refresh:
+            return
+        request = self.ports.request_usage_insights_refresh
+        if callable(request):
+            request()
 
     def apply_settings_command(self, inputs: RendererTickInputs) -> None:
         if not inputs.command:
