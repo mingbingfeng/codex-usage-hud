@@ -1043,6 +1043,7 @@ TEXT = r"""
     observedHeaderNode = null;
     observedComposerNode = null;
     restReminderCountdownTimer = 0;
+    sessionCleanupElapsedTimer = 0;
     storageRefreshRaf = 0;
     storageRefreshTimer = 0;
     delete window[mutationObserverName];

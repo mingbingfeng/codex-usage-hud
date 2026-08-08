@@ -61,7 +61,7 @@ def test_session_cleanup_worker_refreshes_usage_after_verified_delete() -> None:
         assert worker.close()
 
 
-def test_session_cleanup_worker_publishes_matching_terminal_state_after_refresh() -> None:
+def test_session_cleanup_worker_publishes_matching_terminal_state_before_refresh() -> None:
     events: list[str] = []
     manager = MagicMock()
     manager.mark_operation.side_effect = lambda **values: _operation(
@@ -103,10 +103,13 @@ def test_session_cleanup_worker_publishes_matching_terminal_state_after_refresh(
         while "published:request-2:completed" not in events:
             assert time.monotonic() < deadline
             time.sleep(0.01)
+        while "refresh:request-2" not in events:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
 
         assert events.index("execute") < events.index("refresh:request-2")
-        assert events.index("refresh:request-2") < events.index(
-            "published:request-2:completed"
+        assert events.index("published:request-2:completed") < events.index(
+            "refresh:request-2"
         )
     finally:
         assert worker.close()

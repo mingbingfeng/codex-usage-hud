@@ -254,6 +254,49 @@ TEXT = r"""
         return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
       }
 
+      function sessionCleanupScanActive() {
+        const data = sessionCleanupFromPayload();
+        const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
+        return new Set(["scan", "sessionCleanupScan"]).has(String(operation?.action || ""))
+          && new Set(["scanning", "accepted", "running"]).has(String(operation?.state || ""));
+      }
+
+      function stopSessionCleanupElapsedTicker() {
+        if (sessionCleanupElapsedTimer) {
+          ctx.lifecycle.clearInterval(sessionCleanupElapsedTimer);
+          sessionCleanupElapsedTimer = 0;
+        }
+      }
+
+      function syncSessionCleanupElapsed() {
+        const modal = document.getElementById(settingsModalId);
+        if (
+          !modal
+          || modal.hidden
+          || settingsActiveTab !== "storage"
+          || !sessionCleanupState.scanStartedAt
+          || !sessionCleanupScanActive()
+        ) {
+          stopSessionCleanupElapsedTicker();
+          return false;
+        }
+        const node = modal.querySelector('[data-session-cleanup-elapsed="true"]');
+        if (node) node.textContent = formatSessionCleanupElapsed(sessionCleanupState.scanStartedAt);
+        return true;
+      }
+
+      function ensureSessionCleanupElapsedTicker() {
+        if (!syncSessionCleanupElapsed()) return false;
+        if (!sessionCleanupElapsedTimer) {
+          sessionCleanupElapsedTimer = ctx.lifecycle.interval(
+            "session_cleanup_elapsed",
+            syncSessionCleanupElapsed,
+            1000,
+          );
+        }
+        return true;
+      }
+
       function sessionCleanupPanelHtml() {
         const data = sessionCleanupFromPayload();
         const scanned = !!String(data?.revision || "");
@@ -269,7 +312,7 @@ TEXT = r"""
           const phaseIndex = Math.max(1, Number(operation?.phaseIndex || 1));
           const phaseCount = Math.max(phaseIndex, Number(operation?.phaseCount || 3));
           const elapsed = formatSessionCleanupElapsed(sessionCleanupState.scanStartedAt);
-          return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理" aria-busy="true"><div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描本地会话</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 ${escapeHtml(elapsed)}</div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${progress <= 0}" style="width:${Math.max(progress, 8)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel || "读取会话索引")}</strong></span><span>筛选与删除在完成后解锁</span></div></div><div class="codex-usage-hud-cleanup-empty-state" style="min-height:180px"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话归并本地记录与关联子任务</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-cancel">取消扫描</button></div></section>`;
+          return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理" aria-busy="true"><div class="codex-usage-hud-cleanup-scan-strip" aria-live="polite"><div class="codex-usage-hud-cleanup-scan-strip-top"><div class="codex-usage-hud-cleanup-scan-strip-title"><span class="codex-usage-hud-cleanup-mini-spinner"></span>扫描本地会话</div><div class="codex-usage-hud-cleanup-scan-strip-meta">第 ${phaseIndex}/${phaseCount} 步 · 约 ${progress || 1}% · 已用时 <span data-session-cleanup-elapsed="true">${escapeHtml(elapsed)}</span></div></div><div class="codex-usage-hud-cleanup-scan-track"><div class="codex-usage-hud-cleanup-scan-fill" data-indeterminate="${progress <= 0}" style="width:${Math.max(progress, 8)}%"></div></div><div class="codex-usage-hud-cleanup-scan-stage"><span>当前：<strong>${escapeHtml(phaseLabel || "读取会话索引")}</strong></span><span>筛选与删除在完成后解锁</span></div></div><div class="codex-usage-hud-cleanup-empty-state" style="min-height:180px"><div class="codex-usage-hud-cleanup-scan-mark" data-live="true">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">正在扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话归并本地记录与关联子任务</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-cancel">取消扫描</button></div></section>`;
         }
         if (!data || !scanned) {
           return `<section class="codex-usage-hud-session-cleanup" aria-label="会话管理"><div class="codex-usage-hud-cleanup-empty-state"><div class="codex-usage-hud-cleanup-scan-mark">${cleanupIconSvg("trash", "codex-usage-hud-cleanup-icon-lg")}</div><h2 class="codex-usage-hud-cleanup-empty-title">尚未扫描会话</h2><p class="codex-usage-hud-cleanup-empty-meta">按主会话整理本地记录，关联子任务会随主会话一起永久删除。</p><button type="button" class="codex-usage-hud-settings-action" data-action="session-cleanup-scan" data-primary="true" data-size="large" ${busy ? "disabled" : ""}>${busy ? "正在扫描..." : `${cleanupIconSvg("search")}扫描会话`}</button></div></section>`;
@@ -441,6 +484,7 @@ TEXT = r"""
         if (submitted) {
           sessionCleanupState.pendingRequestId = "";
           sessionCleanupState.scanStartedAt = 0;
+          stopSessionCleanupElapsedTicker();
         }
         return submitted;
       }
@@ -463,6 +507,8 @@ TEXT = r"""
         );
         if (!submitted) {
           sessionCleanupState.pendingRequestId = "";
+          sessionCleanupState.scanStartedAt = 0;
+          stopSessionCleanupElapsedTicker();
           refreshStoragePanelIfVisible();
         }
         return submitted;
@@ -587,6 +633,9 @@ TEXT = r"""
           && (!pendingRequestId || responseRequestId === pendingRequestId)
         ) {
           sessionCleanupState.pendingRequestId = "";
+          if (new Set(["scan", "sessionCleanupScan"]).has(String(operation?.action || ""))) {
+            sessionCleanupState.scanStartedAt = 0;
+          }
         }
         rerenderUsageInsightsIfVisible();
         const loadingLayer = document.querySelector(
@@ -608,6 +657,7 @@ TEXT = r"""
           sessionCleanupState.previewTokenShown = token;
           restoreSessionCleanupConfirm(token);
         }
+        ensureSessionCleanupElapsedTicker();
       }
 
     function install() {
@@ -619,6 +669,7 @@ TEXT = r"""
     }
 
     function dispose() {
+      stopSessionCleanupElapsedTicker();
       return true;
     }
 
@@ -645,6 +696,10 @@ TEXT = r"""
       sessionCleanupReasonLabel,
       sessionCleanupPhaseLabel,
       formatSessionCleanupElapsed,
+      sessionCleanupScanActive,
+      stopSessionCleanupElapsedTicker,
+      syncSessionCleanupElapsed,
+      ensureSessionCleanupElapsedTicker,
       sessionCleanupPanelHtml,
       captureStorageUiState,
       restoreStorageUiState,
@@ -687,6 +742,10 @@ TEXT = r"""
     sessionCleanupReasonLabel,
     sessionCleanupPhaseLabel,
     formatSessionCleanupElapsed,
+    sessionCleanupScanActive,
+    stopSessionCleanupElapsedTicker,
+    syncSessionCleanupElapsed,
+    ensureSessionCleanupElapsedTicker,
     sessionCleanupPanelHtml,
     captureStorageUiState,
     restoreStorageUiState,

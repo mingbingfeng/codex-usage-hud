@@ -366,8 +366,11 @@ class SessionCleanupManager:
         )
         unresolved += unresolved_roots
         allowed_roots = self._allowed_rollout_roots()
+        report("protect", "Checking deletion protection", 3, 60)
         items: list[SessionCleanupItem] = []
-        for root_id in roots:
+        total_roots = len(roots)
+        progress_interval = max(1, total_roots // 32)
+        for root_index, root_id in enumerate(roots, 1):
             descendants = self._descendants(root_id, records, parents)
             family = (root_id, *descendants)
             family_records = [records[session_id] for session_id in family]
@@ -433,6 +436,13 @@ class SessionCleanupManager:
                     _rollout_paths=rollout_paths,
                 )
             )
+            if root_index == total_roots or root_index % progress_interval == 0:
+                report(
+                    "protect",
+                    "Checking deletion protection",
+                    3,
+                    60 + round(39 * root_index / max(1, total_roots)),
+                )
         self._revision_counter += 1
         self._revision = f"{self._revision_counter}-{self.token_factory()}"
         self._generated_at = float(self.clock())

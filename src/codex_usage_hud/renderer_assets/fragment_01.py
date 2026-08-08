@@ -105,6 +105,7 @@ SHARED_HEAD = r"""
   let storageRefreshRaf = 0;
   let storageRefreshTimer = 0;
   let storageRefreshLastAt = 0;
+  let sessionCleanupElapsedTimer = 0;
   let restReminderCountdownTimer = 0;
   let restReminderSavedRequestId = "";
 const sessionCleanupState = {

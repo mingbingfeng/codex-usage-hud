@@ -4,7 +4,10 @@ import time
 from types import SimpleNamespace
 
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
-from codex_usage_hud.usage_insights import UsageInsightsWorker
+from codex_usage_hud.usage_insights import (
+    UsageInsightsWorker,
+    _refresh_usage_after_session_delete,
+)
 
 
 def test_usage_insights_worker_publishes_ready_payload_and_closes() -> None:
@@ -59,3 +62,18 @@ def test_usage_insights_worker_projects_refresh_failure() -> None:
         assert context.usage_insights_payload["error"] == "refresh failed"
     finally:
         worker.close()
+
+
+def test_deleted_session_refresh_uses_the_existing_background_worker() -> None:
+    requests: list[str] = []
+
+    class Worker:
+        def request_refresh(self, *, request_id: str = "") -> bool:
+            requests.append(request_id)
+            return True
+
+    context = SimpleNamespace(usage_insights_worker=Worker())
+
+    _refresh_usage_after_session_delete(context, "delete-1")
+
+    assert requests == ["session-delete:delete-1"]

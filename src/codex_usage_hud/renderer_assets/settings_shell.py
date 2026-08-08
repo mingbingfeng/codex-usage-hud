@@ -619,6 +619,7 @@ _TEXT_PREFIX = r"""
         `;
         modal.hidden = false;
         ensureRestReminderCountdownTicker();
+        ensureSessionCleanupElapsedTicker();
         updateAboutActionButtons(currentUpdateState());
         if (activeTab === "storage") {
           restoreStorageUiState();
@@ -1857,6 +1858,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         modal.hidden = true;
         writeSettingsUiState(false, settingsActiveTab);
         ensureRestReminderCountdownTicker();
+        stopSessionCleanupElapsedTicker();
         settingsProviderDraft = null;
         settingsDirtyProviders.clear();
       }

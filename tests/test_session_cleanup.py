@@ -141,6 +141,27 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertNotIn(CHILD_ID, serialized)
         self.assertNotIn(str(root), serialized)
 
+    def test_scan_reports_the_protection_phase_and_progress(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        operations: list[dict[str, object]] = []
+        manager.progress_publisher = lambda payload: operations.append(
+            dict(payload["operation"])
+        )
+
+        manager.scan(request_id="scan-progress")
+
+        phase_three = [
+            operation
+            for operation in operations
+            if operation.get("phaseIndex") == 3
+        ]
+        self.assertTrue(phase_three)
+        self.assertEqual(phase_three[0]["phaseLabel"], "Checking deletion protection")
+        self.assertEqual(phase_three[0]["progress"], 60)
+        self.assertEqual(phase_three[-1]["progress"], 99)
+
     def test_current_and_running_session_trees_are_blocked(self) -> None:
         fixture = self._fixture(child_status="running")
         temporary, _root, state, index, _rollouts, _manager = fixture

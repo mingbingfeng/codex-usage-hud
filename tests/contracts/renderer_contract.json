@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "e5950488eae223356ab2b8aadd98ea2b10a467489ed84a24a1b72fecb7bc803e",
-    "byteLength": 654909
+    "sha256": "c5f5db8e0d6af217aeafc65e3da0abeb0f3a892cf484795ee402144f543c8f5a",
+    "byteLength": 665292
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -38,7 +38,7 @@
   "lifecycleCounts": {
     "mutationObservers": 6,
     "resizeObservers": 1,
-    "setIntervals": 3,
+    "setIntervals": 4,
     "setTimeouts": 21,
     "kernelSetIntervals": 1,
     "kernelSetTimeouts": 1
@@ -125,7 +125,8 @@
     {"kind": "ResizeObserver", "owner": "layout", "creation": "ctx.observers.set(\"layout_resize\", new ResizeObserver", "startCondition": "ResizeObserver exists and a layout anchor is available", "cleanup": "ctx.observers.clear(\"layout_resize\")"},
     {"kind": "setInterval", "owner": "rest_reminder_settings", "creation": "ctx.lifecycle.interval(", "startCondition": "rest-reminder settings countdown is visible", "cleanup": "ctx.lifecycle.clearInterval(restReminderCountdownTimer)"},
     {"kind": "setInterval", "owner": "session_view", "creation": "ctx.lifecycle.interval(\"session_view\"", "startCondition": "at least one rendered session row is running", "cleanup": "ctx.lifecycle.clearInterval(window[runningTimerName])"},
-    {"kind": "setInterval", "owner": "rest_reminder_overlay", "creation": "ctx.lifecycle.interval(", "startCondition": "rest-reminder overlay countdown is visible", "cleanup": "ctx.lifecycle.clearInterval(restReminderOverlayTimer)"}
+    {"kind": "setInterval", "owner": "rest_reminder_overlay", "creation": "ctx.lifecycle.interval(", "startCondition": "rest-reminder overlay countdown is visible", "cleanup": "ctx.lifecycle.clearInterval(restReminderOverlayTimer)"},
+    {"kind": "setInterval", "owner": "session_cleanup_elapsed", "creation": "ctx.lifecycle.interval(\n            \"session_cleanup_elapsed\"", "startCondition": "session cleanup scan is visible", "cleanup": "ctx.lifecycle.clearInterval(sessionCleanupElapsedTimer)"}
   ],
   "currentTimeoutOwners": [
     "model_picker", "theme", "active_session", "active_session", "active_session",

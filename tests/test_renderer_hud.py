@@ -1137,6 +1137,14 @@ class RendererHudPayloadTests(unittest.TestCase):
             "const elapsed = formatSessionCleanupElapsed(sessionCleanupState.scanStartedAt);",
             script,
         )
+        self.assertIn("function sessionCleanupScanActive()", script)
+        self.assertIn("function ensureSessionCleanupElapsedTicker()", script)
+        self.assertIn(
+            'ctx.lifecycle.interval(\n            "session_cleanup_elapsed"',
+            script,
+        )
+        self.assertIn('data-session-cleanup-elapsed="true"', script)
+        self.assertIn("stopSessionCleanupElapsedTicker();", script)
         self.assertNotIn("formatCleanupElapsed(", script)
         session_payload_start = script.index("function applySessionCleanupPayload")
         session_payload_end = script.index("function applyPayloadDomains", session_payload_start)

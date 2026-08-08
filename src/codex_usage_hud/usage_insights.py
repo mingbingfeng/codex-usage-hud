@@ -787,6 +787,14 @@ def _refresh_usage_insights_payload(context: object) -> dict[str, object]:
 
 
 def _refresh_usage_after_session_delete(context: object, request_id: str) -> None:
+    worker = getattr(context, "usage_insights_worker", None)
+    request_refresh = getattr(worker, "request_refresh", None)
+    if callable(request_refresh):
+        try:
+            if request_refresh(request_id=f"session-delete:{request_id}"):
+                return
+        except Exception as exc:
+            _LOGGER.debug("deleted_session_usage_queue_failed error=%s", exc)
     try:
         day_start, week_start = current_budget_windows(
             getattr(context, "user_config", UserConfig.defaults())

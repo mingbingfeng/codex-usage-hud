@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import logging
 import queue
 from pathlib import Path
 from threading import Event, Thread, current_thread
@@ -13,6 +14,9 @@ from .core.session_cleanup import (
     SessionCleanupManager,
 )
 from .core.deleted_usage import DeletedUsageLedger, DeletedUsageLedgerError
+
+
+_LOGGER = logging.getLogger("codex_usage_hud.session_cleanup_runtime")
 
 
 class DeletedUsageTransactions:
@@ -131,6 +135,7 @@ class SessionCleanupWorker:
                 return
             action = str(command.get("action") or "")
             request_id = str(command.get("requestId") or "")
+            refresh_after_delete = False
             try:
                 if action == "sessionCleanupScan":
                     previous_publisher = getattr(self.manager, "progress_publisher", None)
@@ -156,7 +161,7 @@ class SessionCleanupWorker:
                     if isinstance(operation, Mapping) and int(
                         operation.get("deletedCount") or 0
                     ) > 0:
-                        self._on_deleted(self._context, request_id)
+                        refresh_after_delete = True
             except Exception as exc:
                 snapshot = self.manager.mark_operation(
                     request_id=request_id,
@@ -166,6 +171,19 @@ class SessionCleanupWorker:
                     error=str(exc) or type(exc).__name__,
                 )
             self._publish(snapshot)
+            if refresh_after_delete:
+                Thread(
+                    target=self._refresh_deleted_usage,
+                    args=(request_id,),
+                    name="codex-usage-hud-deleted-usage-refresh",
+                    daemon=True,
+                ).start()
+
+    def _refresh_deleted_usage(self, request_id: str) -> None:
+        try:
+            self._on_deleted(self._context, request_id)
+        except Exception:
+            _LOGGER.exception("deleted_session_usage_refresh_callback_failed")
 
     def _publish(self, payload: Mapping[str, object]) -> None:
         snapshot = dict(payload)
