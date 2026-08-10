@@ -39,6 +39,8 @@ const settingsModalId = `codex-usage-hud-settings-modal-${version}`;
 const settingsProviderName = "__codexUsageHudSettingsProvider";
   const settingsUiStateName = "__codexUsageHudSettingsUiState";
   const settingsUiStorageKey = "codexUsageHudSettingsUiState:v1";
+  const sessionCleanupFiltersStateName = "__codexUsageHudSessionCleanupFilters";
+  const sessionCleanupFiltersStorageKey = "codexUsageHudSessionCleanupFilters:v1";
   const activeSessionObserverName = "__codexUsageHudActiveSessionObserver";
   const activeSessionBootstrapObserverName = "__codexUsageHudActiveSessionBootstrapObserver";
   const activeSessionBootstrapTimerName = "__codexUsageHudActiveSessionBootstrapTimer";
@@ -92,6 +94,55 @@ SHARED_HEAD = r"""
     return state;
   }
 
+  function readSessionCleanupFilters() {
+    const defaults = {
+      search: "",
+      dateStart: "",
+      dateEnd: "",
+      archive: "all",
+      availability: "all",
+      clientKind: "all",
+      modelProvider: "all",
+      sort: "recommended",
+    };
+    let value = window[sessionCleanupFiltersStateName];
+    if (!value || typeof value !== "object") {
+      try {
+        value = JSON.parse(ctx.storage.read(sessionStorage, sessionCleanupFiltersStorageKey, "null"));
+      } catch (_) {
+        value = null;
+      }
+    }
+    if (!value || typeof value !== "object") return defaults;
+    const valid = (candidate, values, fallback) => values.includes(candidate) ? candidate : fallback;
+    return {
+      search: String(value.search || ""),
+      dateStart: String(value.dateStart || ""),
+      dateEnd: String(value.dateEnd || ""),
+      archive: valid(String(value.archive || ""), ["all", "archived", "unarchived"], "all"),
+      availability: valid(String(value.availability || ""), ["all", "selectable", "protected", "current", "running", "unresolved", "unavailable"], "all"),
+      clientKind: valid(String(value.clientKind || ""), ["all", "app", "cli", "unknown"], "all"),
+      modelProvider: String(value.modelProvider || "all"),
+      sort: valid(String(value.sort || ""), ["recommended", "oldest", "recent", "largest"], "recommended"),
+    };
+  }
+
+  function persistSessionCleanupFilters() {
+    const state = {
+      search: String(sessionCleanupState.search || ""),
+      dateStart: String(sessionCleanupState.dateStart || ""),
+      dateEnd: String(sessionCleanupState.dateEnd || ""),
+      archive: String(sessionCleanupState.archive || "all"),
+      availability: String(sessionCleanupState.availability || "all"),
+      clientKind: String(sessionCleanupState.clientKind || "all"),
+      modelProvider: String(sessionCleanupState.modelProvider || "all"),
+      sort: String(sessionCleanupState.sort || "recommended"),
+    };
+    window[sessionCleanupFiltersStateName] = state;
+    ctx.storage.write(sessionStorage, sessionCleanupFiltersStorageKey, JSON.stringify(state));
+    return state;
+  }
+
   window[settingsUiStateName] = readSettingsUiState();
   let settingsActiveTab = String(window[settingsUiStateName]?.tab || "settings");
   let storageBodyScrollTop = 0;
@@ -125,6 +176,7 @@ modelProvider: "all",
 sort: "recommended",
 previewTokenShown: "",
 scanStartedAt: 0,
+...readSessionCleanupFilters(),
 };
   let backgroundUsageFetchSeq = 0;
   let backgroundUsageDetailSeq = 0;

@@ -125,6 +125,7 @@ TEXT = r"""
       if (search === sessionCleanupState.search) return false;
       sessionCleanupState.search = search;
       sessionCleanupState.selectedIds.clear();
+      persistSessionCleanupFilters();
       renderSettingsModal("storage");
       return true;
     };
@@ -208,6 +209,7 @@ TEXT = r"""
         if (!new Set(["archive", "availability", "clientKind", "modelProvider", "sort"]).has(key)) return;
         sessionCleanupState[key] = String(sessionFilter.value || "all");
         if (key !== "sort") sessionCleanupState.selectedIds.clear();
+        persistSessionCleanupFilters();
         renderSettingsModal("storage");
         return;
       }
@@ -414,6 +416,7 @@ TEXT = r"""
         sessionCleanupState.dateDraftEnd = "";
         sessionCleanupState.datePickerOpen = false;
         sessionCleanupState.selectedIds.clear();
+        persistSessionCleanupFilters();
         renderSettingsModal("storage");
         return;
       }
@@ -428,6 +431,7 @@ TEXT = r"""
         sessionCleanupState.dateEnd = sessionCleanupState.dateDraftEnd;
         sessionCleanupState.datePickerOpen = false;
         sessionCleanupState.selectedIds.clear();
+        persistSessionCleanupFilters();
         renderSettingsModal("storage");
         return;
       }
@@ -445,6 +449,7 @@ TEXT = r"""
         sessionCleanupState.clientKind = "all";
         sessionCleanupState.modelProvider = "all";
         sessionCleanupState.selectedIds.clear();
+        persistSessionCleanupFilters();
         renderSettingsModal("storage");
         return;
       }

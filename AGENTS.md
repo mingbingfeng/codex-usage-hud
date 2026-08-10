@@ -19,20 +19,14 @@ be retired whenever a reliable listener exists.
 See `docs/RENDERER_MODE_STRATEGY.md` before changing renderer injection,
 session tracking, refresh scheduling, or platform integration.
 
-## Optional codebase graph memory
+## Codebase graph memory
 
-When a cross-file architecture or call-graph question benefits from indexed
-evidence, optionally use `codebase-memory-mcp` before broad manual tracing:
-
-```text
-codebase-memory-mcp cli list_projects '{}'
-codebase-memory-mcp cli index_status '{"project":"<name>"}'
-codebase-memory-mcp cli get_architecture '{"project":"<name>"}'
-codebase-memory-mcp cli search_code '{"project":"<name>","pattern":"<regex>"}'
-```
-
-Use the index as a navigation aid only; verify file paths, lines, and behavior
-against the current workspace. Do not enable automatic indexing by default.
+For every project-related task, first run
+`codebase-memory-mcp cli index_status '{"project":"E-Project-codex-usage-hud"}'`,
+then use `search_graph` first (or `search_code`) with the task terms before
+manual tracing. Skip this for non-project tasks. The index is navigation only:
+verify paths, lines, and behavior in the current workspace. Do not automatically
+reindex.
 
 ## Verbose build output
 

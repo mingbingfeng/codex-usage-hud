@@ -102,11 +102,24 @@ def _session_title(context: object, session_id: str) -> str:
     return f"会话 {normalized[:8]}"
 
 
+def _usage_insights_windows(
+    config: UserConfig,
+    *,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime, datetime]:
+    """Keep the Top10 seven-day range independent of configurable budgets."""
+    current = now or datetime.now().astimezone()
+    day_start, budget_week_start = current_budget_windows(config, now=current)
+    local_today = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_start, budget_week_start, local_today - timedelta(days=6)
+
+
 def build_usage_insights_payload(
     context: object,
     *,
     day_start: datetime,
     week_start: datetime,
+    rolling_week_start: datetime | None = None,
     included_providers: Iterable[str] | None,
 ) -> dict[str, object]:
     usage_cache = getattr(context, "usage_cache")
@@ -115,6 +128,7 @@ def build_usage_insights_payload(
             Path(getattr(context, "sessions_root")),
             day_start,
             week_start,
+            rolling_week_start=rolling_week_start,
             included_providers=included_providers,
         )
     )
@@ -428,6 +442,14 @@ class UsageInsightsProjector:
                 priced_event_count = entry.day_priced_event_count
                 total_event_count = entry.day_total_event_count
                 latest_event_at = entry.day_latest_event_at
+            elif window == "rolling_week":
+                (
+                    summary,
+                    models,
+                    priced_event_count,
+                    total_event_count,
+                    latest_event_at,
+                ) = self._rolling_window_values(entry, start_at)
             elif window == "week":
                 summary = entry.summary_week
                 models = entry.models_week
@@ -604,12 +626,53 @@ class UsageInsightsProjector:
             "providers": provider_rows[:limit],
         }
 
+    def _rolling_window_values(
+        self,
+        entry: _UsageCacheEntry,
+        start_at: datetime,
+    ) -> tuple[
+        UsageSummary,
+        dict[str, _UsageInsightAggregate],
+        int,
+        int,
+        datetime | None,
+    ]:
+        """Aggregate cached local-day contributions for a rolling UI range."""
+        summary = UsageSummary()
+        models: dict[str, _UsageInsightAggregate] = {}
+        priced_event_count = 0
+        total_event_count = 0
+        latest_event_at: datetime | None = None
+        start_date = start_at.date().isoformat()
+        for date_key, contribution in entry.daily_usage.items():
+            if date_key < start_date:
+                continue
+            _merge_usage(summary, contribution.summary)
+            priced_event_count += contribution.priced_event_count
+            total_event_count += contribution.total_event_count
+            if contribution.latest_event_at is not None and (
+                latest_event_at is None
+                or contribution.latest_event_at > latest_event_at
+            ):
+                latest_event_at = contribution.latest_event_at
+            for model, model_aggregate in contribution.models.items():
+                target = models.setdefault(model, _UsageInsightAggregate())
+                self._merge_insight_aggregate(
+                    target,
+                    model_aggregate.summary,
+                    priced_event_count=model_aggregate.priced_event_count,
+                    total_event_count=model_aggregate.total_event_count,
+                    latest_event_at=model_aggregate.latest_event_at,
+                )
+        return summary, models, priced_event_count, total_event_count, latest_event_at
+
     def insights(
         self,
         sessions_root: Path,
         day_start: datetime,
         week_start: datetime,
         *,
+        rolling_week_start: datetime | None = None,
         included_providers: Iterable[str] | None = None,
         limit: int = 8,
     ) -> dict[str, object]:
@@ -645,6 +708,7 @@ class UsageInsightsProjector:
             ]
         entries.extend(deleted_entries)
         row_limit = max(1, min(100, int(limit)))
+        insights_week_start = rolling_week_start or week_start
         return {
             "ready": ready,
             "revision": int(self._state._insights_revision),
@@ -662,8 +726,8 @@ class UsageInsightsProjector:
             ),
             "week": self._window_insights(
                 entries,
-                window="week",
-                start_at=week_start,
+                window=("rolling_week" if rolling_week_start is not None else "week"),
+                start_at=insights_week_start,
                 limit=row_limit,
             ),
             "month": self._window_insights(
@@ -769,13 +833,14 @@ class UsageInsightsWorker:
 
 def _refresh_usage_insights_payload(context: object) -> dict[str, object]:
     try:
-        day_start, week_start = current_budget_windows(
+        day_start, week_start, rolling_week_start = _usage_insights_windows(
             getattr(context, "user_config", UserConfig.defaults())
         )
         payload = build_usage_insights_payload(
             context,
             day_start=day_start,
             week_start=week_start,
+            rolling_week_start=rolling_week_start,
             included_providers=_effective_provider_scope(context),
         )
     except Exception as exc:
@@ -831,7 +896,7 @@ def _run_usage_insights_refresh(
     context: object,
     request_id: str,
 ) -> Mapping[str, object]:
-    day_start, week_start = current_budget_windows(
+    day_start, week_start, rolling_week_start = _usage_insights_windows(
         getattr(context, "user_config", UserConfig.defaults())
     )
     usage_cache = getattr(context, "usage_cache")
@@ -846,6 +911,7 @@ def _run_usage_insights_refresh(
         context,
         day_start=day_start,
         week_start=week_start,
+        rolling_week_start=rolling_week_start,
         included_providers=_effective_provider_scope(context),
     )
     payload["state"] = "ready" if payload.get("ready") else "idle"

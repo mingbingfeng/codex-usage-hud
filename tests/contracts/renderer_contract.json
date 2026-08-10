@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "f5ce1f164e2588fb7be2c849de9627ed5687336da7ae0673dec5f43366949113",
-    "byteLength": 681178
+    "sha256": "a21a2c55cfe2993eeae4abdddedf7c8c241d5547c31d3a3377542bbaf324a542",
+    "byteLength": 687584
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -28,6 +28,7 @@
   "multiplexedSettingsActions": ["backgroundUsage", "sessionCleanup", "audit"],
   "storageKeys": [
     "codexUsageHudPanelState:v5",
+    "codexUsageHudSessionCleanupFilters:v1",
     "codexUsageHudSettingsUiState:v1",
     "codexUsageHudSupportImages:v1"
   ],

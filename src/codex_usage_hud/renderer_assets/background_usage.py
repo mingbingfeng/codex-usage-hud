@@ -122,6 +122,15 @@ TEXT = r"""
           .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]");
       }
 
+      function backgroundUsageWorkdirAssociationText(value) {
+        const normalized = String(value || "").trim();
+        return normalized === "verified_session"
+          ? "已验证关联会话"
+          : normalized === "log_observed"
+          ? "仅日志观察"
+          : "未记录";
+      }
+
       function backgroundUsageEventHtml(event) {
         const eventId = String(event?.eventId || "").trim();
         const selected = String(event?.eventId || "") === backgroundUsageState.selectedEventId;
@@ -130,10 +139,6 @@ TEXT = r"""
         const modelText = models.join(" + ") || "未知模型";
         const eventTime = backgroundUsageTime(event?.lastSeenAt, { compact: true });
         const eventTimeTitle = backgroundUsageTime(event?.lastSeenAt);
-        const workdir = String(event?.cwd || "").trim();
-        const workdirHtml = workdir && eventId
-          ? `<button type="button" class="codex-usage-hud-background-workdir-link codex-usage-hud-background-event-workdir-link" data-action="background-usage-open-workdir" data-event-id="${escapeHtml(eventId)}" aria-label="打开工作目录 ${escapeHtml(workdir)}" title="${escapeHtml(workdir)}">${escapeHtml(workdir)}</button>`
-          : "";
         return `
           <div class="codex-usage-hud-background-event-row" data-selected="${selected}">
             <button type="button" class="codex-usage-hud-background-event"
@@ -150,7 +155,6 @@ TEXT = r"""
                 <span>${escapeHtml(backgroundUsageFormatCost(event?.estimatedCostUsd))}</span>
               </span>
             </button>
-            ${workdirHtml}
           </div>
         `;
       }
@@ -185,9 +189,11 @@ TEXT = r"""
         const threadText = String(detail.threadId || detail.eventId || "");
         const eventId = String(detail.eventId || "").trim();
         const workdir = String(detail.cwd || "").trim();
-        const workdirHtml = workdir && eventId
-          ? `<button type="button" class="codex-usage-hud-background-workdir-link" data-action="background-usage-open-workdir" data-event-id="${escapeHtml(eventId)}" aria-label="打开工作目录 ${escapeHtml(workdir)}" title="${escapeHtml(workdir)}">${escapeHtml(workdir)}</button>`
-          : `<strong>${escapeHtml(workdir || "--")}</strong>`;
+        const workdirAvailable = detail?.workdirAvailable === true;
+        const workdirAssociation = backgroundUsageWorkdirAssociationText(detail?.workdirAssociation);
+        const workdirHtml = workdir && eventId && workdirAvailable
+          ? `<button type="button" class="codex-usage-hud-background-workdir-link" data-action="background-usage-open-workdir" data-event-id="${escapeHtml(eventId)}" aria-label="打开记录时运行目录 ${escapeHtml(workdir)}" title="记录时运行目录 · ${escapeHtml(workdirAssociation)} · ${escapeHtml(workdir)}">${escapeHtml(workdir)}</button>`
+          : `<strong title="${workdir ? `记录时运行目录 · ${escapeHtml(workdirAssociation)} · 当前目录不可用` : "未记录运行目录"}">${escapeHtml(workdir || "--")}</strong>`;
         return `
           <div class="codex-usage-hud-background-detail-head">
             <div>
@@ -202,7 +208,7 @@ TEXT = r"""
             <div title="${escapeHtml(threadText)}"><span>线程</span><strong>${escapeHtml(threadText ? `…${threadText.slice(-12)}` : "--")}</strong></div>
             <div title="${escapeHtml(processText)}"><span>进程</span><strong>${escapeHtml(processText.split(":").slice(0, 2).join(":") || "--")}</strong></div>
             <div class="codex-usage-hud-background-detail-wide"><span>时段</span><strong>${escapeHtml(backgroundUsageTime(detail.firstSeenAt))} - ${escapeHtml(backgroundUsageTime(detail.lastSeenAt))}</strong></div>
-            <div class="codex-usage-hud-background-detail-wide" title="${escapeHtml(workdir)}"><span>工作目录</span>${workdirHtml}</div>
+            <div class="codex-usage-hud-background-detail-wide" title="${escapeHtml(workdir)}"><span>记录时运行目录 · ${escapeHtml(workdirAssociation)}</span>${workdirHtml}</div>
           </div>
           <section class="codex-usage-hud-background-requests">
             <div class="codex-usage-hud-background-section-title">请求明细 <span>${requests.length}</span></div>

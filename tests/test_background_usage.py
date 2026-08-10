@@ -294,6 +294,8 @@ class BackgroundUsageScannerTests(unittest.TestCase):
             state_path = root / "state_5.sqlite"
             base_ts = 1_900_000_000
             source_prompt = "Optimize the usage overview without changing other HUDs."
+            workdir = root / "workspace"
+            workdir.mkdir()
             _create_logs(
                 logs_path,
                 [
@@ -312,6 +314,15 @@ class BackgroundUsageScannerTests(unittest.TestCase):
                     (
                         2,
                         base_ts + 1,
+                        "feedback_tags",
+                        "codex_feedback",
+                        _feedback_body(BACKGROUND_ID, "gpt-test", str(workdir)),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        3,
+                        base_ts + 2,
                         "codex_core::session::turn",
                         "codex_core::session::turn",
                         _turn_body(BACKGROUND_ID, "gpt-test", 30, 20),
@@ -351,6 +362,11 @@ class BackgroundUsageScannerTests(unittest.TestCase):
             )
             payload = store.query(range_key="all", now=now)
             self.assertTrue(payload["events"][0]["unread"])
+            self.assertTrue(payload["events"][0]["workdirAvailable"])
+            self.assertEqual(
+                payload["events"][0]["workdirAssociation"],
+                "verified_session",
+            )
             later = datetime.fromtimestamp(base_ts + (8 * 86400)).astimezone()
             self.assertEqual(store.range_for_event(BACKGROUND_ID, now=later), "30d")
 
@@ -675,6 +691,8 @@ class BackgroundUsageScannerTests(unittest.TestCase):
             self.assertNotIn(VISIBLE_ID, by_id)
             self.assertNotIn(CHILD_ID, by_id)
             self.assertEqual(by_id[BACKGROUND_ID]["requestCount"], 2)
+            self.assertFalse(by_id[BACKGROUND_ID]["workdirAvailable"])
+            self.assertEqual(by_id[BACKGROUND_ID]["workdirAssociation"], "log_observed")
             self.assertEqual(by_id[BACKGROUND_ID]["featureLabel"], "任务标题与描述")
             self.assertIn(
                 {"key": "title_description", "label": "任务标题与描述"},

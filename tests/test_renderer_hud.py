@@ -643,6 +643,10 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("const sameScope = originalKey", script)
         self.assertIn("? originalKey", script)
         self.assertIn("function switchSettingsProvider", script)
+        self.assertIn("provider_order is the persisted append-only order", script)
+        self.assertIn("function canonicalSettingsPriceTable", script)
+        self.assertIn("const isNewProvider", script)
+        self.assertIn('settings.provider_scope_mode === "custom"', script)
         self.assertIn("settingsDirtyProviders.add(activeProvider)", script)
         self.assertIn("${count} 个 Provider 有未保存修改", script)
         self.assertIn('data-action="settings-discard-confirm"', script)
@@ -652,6 +656,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn("notification_only_providers: notificationOnlyProviders", script)
+        self.assertIn("provider_order: draft.order", script)
         self.assertIn("if (counterpart) counterpart.checked = false", script)
         self.assertIn('pricing_url: String(settings.pricing_url || "").trim()', script)
         self.assertIn("weekly_adjustment_usd: settings.weekly_adjustment_usd", script)
@@ -944,6 +949,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         )
         self.assertIn("codex-usage-hud-background-workdir-link", script)
         self.assertIn("codex-usage-hud-background-event-row", script)
+        self.assertIn("function backgroundUsageWorkdirAssociationText", script)
+        self.assertIn("记录时运行目录", script)
+        self.assertIn("当前目录不可用", script)
+        event_source = script.split(
+            "function backgroundUsageEventHtml", 1
+        )[1].split("function backgroundUsageDetailHtml", 1)[0]
+        self.assertNotIn("workdir", event_source)
         self.assertIn('data-action="background-usage-open-workdir"', script)
         self.assertIn('action: "openBackgroundUsageWorkdir", eventId', script)
         self.assertIn(
@@ -1225,6 +1237,22 @@ class RendererHudPayloadTests(unittest.TestCase):
         input_script = script[input_start:input_end]
         self.assertNotIn('renderSettingsModal("storage");', input_script)
         self.assertIn("IME composition emits input events before the final text is committed.", input_script)
+
+    def test_session_cleanup_filters_survive_renderer_reinject(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn(
+            'sessionCleanupFiltersStorageKey = "codexUsageHudSessionCleanupFilters:v1"',
+            script,
+        )
+        self.assertIn("function readSessionCleanupFilters()", script)
+        self.assertIn("function persistSessionCleanupFilters()", script)
+        self.assertIn("...readSessionCleanupFilters(),", script)
+        self.assertIn(
+            "ctx.storage.write(sessionStorage, sessionCleanupFiltersStorageKey, JSON.stringify(state));",
+            script,
+        )
+        self.assertGreaterEqual(script.count("persistSessionCleanupFilters();"), 5)
 
     def test_session_cleanup_confirm_survives_same_token_repaint(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT

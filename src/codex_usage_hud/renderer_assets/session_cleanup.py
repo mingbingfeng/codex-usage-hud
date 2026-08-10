@@ -631,6 +631,7 @@ TEXT = r"""
         const providers = new Set(sessions.map((item) => String(item?.modelProvider || "unknown")));
         if (sessionCleanupState.modelProvider !== "all" && !providers.has(sessionCleanupState.modelProvider)) {
           sessionCleanupState.modelProvider = "all";
+          persistSessionCleanupFilters();
         }
         const operation = data?.operation && typeof data.operation === "object" ? data.operation : {};
         const state = String(operation?.state || "").toLowerCase();

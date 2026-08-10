@@ -254,6 +254,17 @@ def _timestamp_iso(value: object) -> str:
         return ""
 
 
+def _workdir_available(value: object) -> bool:
+    """Return whether a logged CWD is currently an existing directory."""
+    raw_path = str(value or "").strip()
+    if not raw_path:
+        return False
+    try:
+        return Path(raw_path).is_dir()
+    except (OSError, ValueError):
+        return False
+
+
 def _today_start_timestamp(now: datetime | None = None) -> int:
     current = (now or datetime.now().astimezone()).astimezone()
     return int(current.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -875,6 +886,15 @@ class BackgroundUsageStore:
         else:
             status = "history"
         cost_available = bool(row["cost_available"])
+        cwd = str(row["cwd"] or "").strip()
+        association_kind = str(row["association_kind"] or "").strip()
+        workdir_association = (
+            "verified_session"
+            if association_kind == "exact_first_user_message"
+            else "log_observed"
+            if cwd
+            else ""
+        )
         return {
             "eventId": str(row["event_id"]),
             "threadId": str(row["thread_id"]),
@@ -883,7 +903,9 @@ class BackgroundUsageStore:
             "featureLabel": background_feature_label(
                 row["feature_key"], row["feature_label"]
             ),
-            "cwd": str(row["cwd"] or ""),
+            "cwd": cwd,
+            "workdirAvailable": _workdir_available(cwd),
+            "workdirAssociation": workdir_association,
             "endpoint": str(row["endpoint"] or ""),
             "provider": str(row["provider"] or ""),
             "firstSeenAt": _timestamp_iso(row["first_seen_at"]),

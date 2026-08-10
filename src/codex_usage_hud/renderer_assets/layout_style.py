@@ -2115,14 +2115,6 @@ TEXT = r"""
             text-overflow: ellipsis;
             white-space: nowrap;
           }
-          #${rootId} button.codex-usage-hud-background-event-workdir-link {
-            width: 100%;
-            max-width: none;
-            padding: 5px 10px 7px;
-            border-top: 1px solid var(--codex-usage-hud-divider, #273241);
-            color: var(--codex-usage-hud-muted, #8492a6);
-            font-weight: 600;
-          }
           #${rootId} .codex-usage-hud-background-detail-grid .codex-usage-hud-background-detail-wide {
             grid-column: span 2;
           }

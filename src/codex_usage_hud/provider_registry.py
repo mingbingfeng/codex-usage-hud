@@ -47,7 +47,10 @@ class ProviderRegistry:
     app_provider: str = ""
 
     def providers(self) -> tuple[str, ...]:
-        return tuple(sorted(self.entries))
+        # ``entries`` is built in discovery order.  Preserve it so callers
+        # can append newly discovered providers after already materialized
+        # settings instead of re-sorting tabs alphabetically.
+        return tuple(self.entries)
 
 
 def discover_provider_registry(

@@ -422,6 +422,92 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(prices["gpt-5.6-sol"].input, 5.0)
         self.assertEqual(prices["gpt-5.6-sol"].provider, "custom")
 
+    def test_provider_settings_collapse_duplicate_models_for_new_provider(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "provider_settings": {
+                    "cunai": {
+                        "model_prices": {
+                            "custom/gpt-5.6-sol": {
+                                "model": "gpt-5.6-sol",
+                                "provider": "custom",
+                                "input": 5,
+                                "cached_input": 0.5,
+                                "output": 30,
+                                "reasoning": 30,
+                            },
+                            "gpt-5.6-sol": {
+                                "model": "gpt-5.6-sol",
+                                "input": 1,
+                                "cached_input": 0.1,
+                                "output": 6,
+                                "reasoning": 6,
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+        prices = config.provider_settings["cunai"].model_prices
+
+        self.assertEqual(list(prices).count("gpt-5.6-sol"), 1)
+        self.assertNotIn("custom/gpt-5.6-sol", prices)
+        self.assertEqual(prices["gpt-5.6-sol"].input, 1.0)
+
+    def test_new_provider_gets_clean_defaults_and_notification_only_scope(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "provider_scope_mode": "custom",
+                "selected_providers": ["custom"],
+                "provider_settings": {
+                    "custom": {"weekly_adjustment_usd": 3.5},
+                    "muyuan": {"weekly_adjustment_usd": 0.0},
+                },
+            }
+        )
+
+        migrated = config.migrate_legacy_provider_settings(
+            ["custom", "muyuan", "cunai"], app_provider="custom"
+        )
+
+        self.assertEqual(list(migrated.provider_settings), ["custom", "muyuan", "cunai"])
+        self.assertEqual(migrated.provider_order, ["custom", "muyuan", "cunai"])
+        self.assertEqual(
+            set(migrated.provider_settings["cunai"].model_prices),
+            {"gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"},
+        )
+        self.assertEqual(migrated.provider_settings["cunai"].pricing_url, "")
+        self.assertEqual(migrated.provider_settings["cunai"].weekly_adjustment_usd, 0.0)
+        self.assertEqual(migrated.notification_only_providers, ["cunai"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = UserConfigStore(Path(temp_dir) / "hud_settings.json")
+            store.save(migrated)
+            self.assertEqual(store.load().provider_order, ["custom", "muyuan", "cunai"])
+
+    def test_legacy_custom_scope_marks_unselected_provider_notification_only(self) -> None:
+        config = UserConfig.from_dict(
+            {
+                "provider_scope_mode": "custom",
+                "selected_providers": ["custom"],
+                "model_prices": {
+                    "gpt-5.6-sol": {
+                        "input": 5,
+                        "cached_input": 0.5,
+                        "output": 30,
+                        "reasoning": 30,
+                    }
+                },
+            }
+        )
+
+        migrated = config.migrate_legacy_provider_settings(
+            ["custom", "cunai"], app_provider="custom"
+        )
+
+        self.assertEqual(migrated.notification_only_providers, ["cunai"])
+
     def test_legacy_prices_migrate_per_discovered_provider_without_copying_adjustment(self) -> None:
         config = UserConfig.from_dict(
             {

@@ -61,6 +61,7 @@ _TEXT_PREFIX = r"""
           budget_thresholds: [0.5, 0.8, 0.9, 1.0],
           weekly_adjustment_usd: 0,
           provider_settings: {},
+          provider_order: [],
           provider_scope_mode: "all",
           selected_providers: [],
           notification_only_providers: [],
@@ -283,9 +284,30 @@ _TEXT_PREFIX = r"""
         const registry = settings.provider_registry && typeof settings.provider_registry === "object" ? settings.provider_registry : {};
         const providerSettings = settings.provider_settings && typeof settings.provider_settings === "object" ? settings.provider_settings : {};
         const appProvider = String(settings.app_provider || "").trim().toLowerCase();
-        const names = new Set([...Object.keys(registry), ...Object.keys(providerSettings)]);
-        if (appProvider) names.add(appProvider);
-        return Array.from(names).map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean).sort();
+        const providerOrder = Array.isArray(settings.provider_order) ? settings.provider_order : [];
+        const available = new Set(
+          [...Object.keys(providerSettings), ...Object.keys(registry), appProvider]
+            .map((provider) => String(provider || "").trim().toLowerCase())
+            .filter(Boolean),
+        );
+        const names = [];
+        const seen = new Set();
+        const append = (values) => values.forEach((value) => {
+          const provider = String(value || "").trim().toLowerCase();
+          if (!provider || seen.has(provider)) return;
+          seen.add(provider);
+          names.push(provider);
+        });
+        // provider_order is the persisted append-only order. Older settings
+        // may not have it, so provider_settings remains the first fallback;
+        // registry-only providers are appended after both sources.
+        append(providerOrder.filter((provider) => available.has(String(provider || "").trim().toLowerCase())));
+        append(Object.keys(providerSettings));
+        append(Object.keys(registry));
+        append(appProvider ? [appProvider] : []);
+        return appProvider
+          ? [appProvider, ...names.filter((provider) => provider !== appProvider)]
+          : names;
       }
 
       function cloneSettingsPriceTable(value) {
@@ -294,6 +316,49 @@ _TEXT_PREFIX = r"""
           key,
           price && typeof price === "object" ? { ...price } : {},
         ]));
+      }
+
+      function canonicalSettingsPriceTable(value, provider = "") {
+        const prices = value && typeof value === "object" ? value : {};
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        const result = {};
+        const identities = new Map();
+        const priorities = new Map();
+        Object.entries(prices).forEach(([key, rawPrice]) => {
+          const price = rawPrice && typeof rawPrice === "object" ? { ...rawPrice } : {};
+          const model = String(price.model || key || "").trim();
+          if (!model) return;
+          const explicitProvider = String(price.provider || "").trim().toLowerCase();
+          const baseUrl = String(price.base_url || price.baseUrl || "").trim().replace(/\/+$/, "");
+          const scopedKey = `${normalizedProvider}/${model}`;
+          const isCurrentProviderRow = !!normalizedProvider && (
+            explicitProvider === normalizedProvider
+            || (!explicitProvider && String(key || "").toLowerCase() === scopedKey.toLowerCase())
+          );
+          const identity = `${normalizePriceModel(model)}\u0000${baseUrl.toLowerCase()}`;
+          // Preserve the key for Base URL-specific rows; only unscoped rows
+          // collapse to their model identity.
+          let canonicalKey = baseUrl ? key : model;
+          const existingIdentity = identities.get(canonicalKey);
+          if (existingIdentity && existingIdentity !== identity) {
+            canonicalKey = `${baseUrl ? `${baseUrl}/` : ""}${model}`;
+          }
+          const priority = explicitProvider === normalizedProvider
+            ? 3
+            : isCurrentProviderRow
+              ? 2
+              : !explicitProvider
+                ? 1
+                : 0;
+          const previousKey = identities.get(identity);
+          const previousPriority = priorities.get(identity) ?? -1;
+          if (previousKey && priority < previousPriority) return;
+          if (previousKey && previousKey !== canonicalKey) delete result[previousKey];
+          result[canonicalKey] = price;
+          identities.set(identity, canonicalKey);
+          priorities.set(identity, priority);
+        });
+        return result;
       }
 
       function providerDraftFromSettings(settings, provider, enabled, notificationOnly) {
@@ -306,7 +371,7 @@ _TEXT_PREFIX = r"""
           notificationOnly: !!notificationOnly && !enabled,
           settings: {
             ...source,
-            model_prices: cloneSettingsPriceTable(modelPrices),
+            model_prices: canonicalSettingsPriceTable(modelPrices, provider),
             pricing_url: String(source.pricing_url ?? settings.pricing_url ?? ""),
             weekly_adjustment_usd: Number(source.weekly_adjustment_usd ?? settings.weekly_adjustment_usd ?? 0),
           },
@@ -317,6 +382,9 @@ _TEXT_PREFIX = r"""
         if (settingsProviderDraft && !reset) return settingsProviderDraft;
         const order = settingsProviderNames(settings);
         const appProvider = String(settings.app_provider || "").trim().toLowerCase();
+        const providerSettings = settings.provider_settings && typeof settings.provider_settings === "object"
+          ? settings.provider_settings
+          : {};
         const selected = settings.provider_scope_mode === "custom"
           ? new Set((settings.selected_providers || []).map((provider) => String(provider || "").trim().toLowerCase()).filter(Boolean))
           : new Set(order);
@@ -332,15 +400,22 @@ _TEXT_PREFIX = r"""
           activeProvider,
           appProvider,
           order,
-          providers: Object.fromEntries(order.map((provider) => [
-            provider,
-            providerDraftFromSettings(
+          providers: Object.fromEntries(order.map((provider) => {
+            // A payload received before runtime migration can still expose a
+            // registry-only provider. Give it the same safe notification-only
+            // default while its clean default price table is materialized.
+            const isNewProvider = !Object.prototype.hasOwnProperty.call(providerSettings, provider);
+            return [provider, providerDraftFromSettings(
               settings,
               provider,
               selected.has(provider) || provider === appProvider,
-              notificationOnly.has(provider) && !selected.has(provider) && provider !== appProvider,
-            ),
-          ])),
+              (notificationOnly.has(provider) || (
+                isNewProvider
+                && settings.provider_scope_mode === "custom"
+                && !selected.has(provider)
+              )) && !selected.has(provider) && provider !== appProvider,
+            )];
+          })),
         };
         settingsDirtyProviders.clear();
         window[settingsProviderName] = activeProvider;
@@ -1100,6 +1175,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           ),
           pricing_url: String(settings.pricing_url || "").trim(),
           provider_settings: providerSettings,
+          provider_order: draft.order,
           provider_scope_mode: allProvidersSelected ? "all" : "custom",
           selected_providers: selectedProviders,
           notification_only_providers: notificationOnlyProviders,

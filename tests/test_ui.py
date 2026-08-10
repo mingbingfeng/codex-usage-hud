@@ -1164,6 +1164,67 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertFalse(session["archived"])
         self.assertEqual(insights, cached_again)
 
+    def test_usage_insights_rolling_seven_days_is_independent_of_budget_week(self) -> None:
+        parser = _InsightsUsageParser()
+        cache = UsageSummaryCache(parser, min_rescan_seconds=60.0)  # type: ignore[arg-type]
+        day_start = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        budget_week_start = day_start
+        rolling_week_start = day_start - timedelta(days=6)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_root = Path(temp_dir) / "sessions"
+            _write_usage_insight_session(
+                sessions_root / "rollout-saturday.jsonl",
+                session_id="10000000-0000-4000-8000-000000000013",
+                provider="custom",
+                events=[
+                    {
+                        "timestamp": "2026-08-08T08:00:00+00:00",
+                        "model": "gpt-saturday",
+                        "tokens": 900,
+                        "inputTokens": 720,
+                        "cachedTokens": 180,
+                        "costUsd": 9.0,
+                    }
+                ],
+            )
+            _write_usage_insight_session(
+                sessions_root / "rollout-monday.jsonl",
+                session_id="10000000-0000-4000-8000-000000000014",
+                provider="custom",
+                events=[
+                    {
+                        "timestamp": "2026-08-10T08:00:00+00:00",
+                        "model": "gpt-monday",
+                        "tokens": 100,
+                        "inputTokens": 80,
+                        "cachedTokens": 20,
+                        "costUsd": 1.0,
+                    }
+                ],
+            )
+
+            day_total, budget_week_total = cache.summarize(
+                sessions_root,
+                day_start,
+                budget_week_start,
+            )
+            insights = cache.insights(
+                sessions_root,
+                day_start,
+                budget_week_start,
+                rolling_week_start=rolling_week_start,
+                included_providers={"custom"},
+            )
+
+        self.assertEqual(day_total.tokens, 100)
+        self.assertEqual(budget_week_total.tokens, 100)
+        self.assertEqual(insights["week"]["startAt"], "2026-08-04T00:00:00+00:00")
+        self.assertEqual(insights["week"]["totals"]["tokens"], 1_000)
+        self.assertEqual(
+            insights["week"]["topSessionsByUsage"][0]["sessionId"],
+            "10000000-0000-4000-8000-000000000013",
+        )
+
     def test_usage_insights_exposes_top_ten_sessions_by_usage_and_cost(self) -> None:
         parser = _InsightsUsageParser()
         cache = UsageSummaryCache(parser, min_rescan_seconds=60.0)  # type: ignore[arg-type]

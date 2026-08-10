@@ -1,13 +1,34 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timezone
 import time
 from types import SimpleNamespace
 
+from codex_usage_hud.config import UserConfig
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
 from codex_usage_hud.usage_insights import (
     UsageInsightsWorker,
     _refresh_usage_after_session_delete,
+    _usage_insights_windows,
 )
+
+
+def test_usage_insights_seven_day_window_uses_local_calendar_days() -> None:
+    config = replace(
+        UserConfig.defaults(),
+        weekly_reset_weekday=0,
+        weekly_reset_time="00:00",
+    )
+
+    day_start, budget_week_start, rolling_week_start = _usage_insights_windows(
+        config,
+        now=datetime(2026, 8, 10, 15, 30, tzinfo=timezone.utc),
+    )
+
+    assert day_start == datetime(2026, 8, 10, 10, tzinfo=timezone.utc)
+    assert budget_week_start == datetime(2026, 8, 10, tzinfo=timezone.utc)
+    assert rolling_week_start == datetime(2026, 8, 4, tzinfo=timezone.utc)
 
 
 def test_usage_insights_worker_publishes_ready_payload_and_closes() -> None:

@@ -234,6 +234,7 @@ class UserConfig:
     )
     weekly_adjustment_usd: float = 0.0
     provider_settings: dict[str, ProviderSettings] = field(default_factory=dict)
+    provider_order: list[str] = field(default_factory=list)
     provider_scope_mode: str = "all"
     selected_providers: list[str] = field(default_factory=list)
     notification_only_providers: list[str] = field(default_factory=list)
@@ -336,6 +337,7 @@ class UserConfig:
                 else defaults.weekly_adjustment_usd,
             ),
             provider_settings=provider_settings,
+            provider_order=normalize_provider_order(value.get("provider_order")),
             provider_scope_mode=scope_mode,
             selected_providers=selected_providers,
             notification_only_providers=notification_only_providers,
@@ -401,8 +403,9 @@ class UserConfig:
             "weekly_adjustment_usd": float(self.weekly_adjustment_usd),
             "provider_settings": {
                 provider: settings.to_dict()
-                for provider, settings in sorted(self.provider_settings.items())
+                for provider, settings in self.provider_settings.items()
             },
+            "provider_order": list(self.provider_order),
             "provider_scope_mode": self.provider_scope_mode,
             "selected_providers": list(self.selected_providers),
             "notification_only_providers": list(self.notification_only_providers),
@@ -636,37 +639,104 @@ class UserConfig:
         *,
         app_provider: str = "",
     ) -> "UserConfig":
-        """Materialize legacy global pricing once the available providers are known."""
-        if self.provider_settings:
-            return self
-        targets = [
-            provider
-            for provider in normalize_provider_names(providers)
-            if provider != "unknown"
-        ]
+        """Materialize provider tables and defaults once providers are known.
+
+        Older settings only had one global price table.  Keep that migration
+        path for configurations with no provider tables, but append a clean
+        default table whenever a provider appears after the first migration.
+        This keeps newly discovered providers independent from legacy global
+        rows that may contain provider-prefixed compatibility entries.
+        """
+        targets: list[str] = []
+        seen: set[str] = set()
+        for item in providers:
+            provider = normalize_provider(item)
+            if not provider or provider == "unknown" or provider in seen:
+                continue
+            seen.add(provider)
+            targets.append(provider)
         if not targets:
             return self
-        scoped: dict[str, dict[str, ModelPrice]] = {provider: {} for provider in targets}
-        for name, price in self.model_prices.items():
-            explicit_provider = normalize_provider(price.provider)
-            if explicit_provider:
-                if explicit_provider in scoped:
-                    scoped[explicit_provider][name] = replace(price, provider=explicit_provider)
-                continue
-            for provider in targets:
-                scoped[provider][name] = replace(price, provider=provider)
         required_provider = normalize_provider(app_provider)
-        settings = {
-            provider: ProviderSettings(
-                model_prices=prices or default_model_prices(),
-                pricing_url=self.pricing_url,
-                weekly_adjustment_usd=(
-                    self.weekly_adjustment_usd if provider == required_provider else 0.0
-                ),
+        provider_order: list[str] = []
+        order_seen: set[str] = set()
+
+        def append_provider_order(values: Iterable[str]) -> None:
+            for item in values:
+                provider = normalize_provider(item)
+                if not provider or provider in order_seen:
+                    continue
+                order_seen.add(provider)
+                provider_order.append(provider)
+
+        append_provider_order(self.provider_order)
+        append_provider_order(self.provider_settings)
+        append_provider_order(targets)
+        if not self.provider_settings:
+            scoped: dict[str, dict[str, ModelPrice]] = {
+                provider: {} for provider in targets
+            }
+            for name, price in self.model_prices.items():
+                explicit_provider = normalize_provider(price.provider)
+                if explicit_provider:
+                    if explicit_provider in scoped:
+                        scoped[explicit_provider][name] = replace(
+                            price, provider=explicit_provider
+                        )
+                    continue
+                for provider in targets:
+                    scoped[provider][name] = replace(price, provider=provider)
+            settings = {
+                provider: ProviderSettings(
+                    model_prices=prices or default_model_prices(),
+                    pricing_url=self.pricing_url,
+                    weekly_adjustment_usd=(
+                        self.weekly_adjustment_usd
+                        if provider == required_provider
+                        else 0.0
+                    ),
+                )
+                for provider, prices in scoped.items()
+            }
+            notification_only = list(self.notification_only_providers)
+            if self.provider_scope_mode == "custom":
+                selected = set(normalize_provider_names(self.selected_providers))
+                notification_only.extend(
+                    provider
+                    for provider in targets
+                    if provider != required_provider and provider not in selected
+                )
+            return replace(
+                self,
+                provider_settings=settings,
+                provider_order=provider_order,
+                notification_only_providers=normalize_provider_names(notification_only),
             )
-            for provider, prices in scoped.items()
-        }
-        return replace(self, provider_settings=settings)
+
+        settings = dict(self.provider_settings)
+        added: list[str] = []
+        for provider in targets:
+            if provider in settings:
+                continue
+            settings[provider] = ProviderSettings()
+            added.append(provider)
+        if not added and provider_order == self.provider_order:
+            return self
+
+        notification_only = list(self.notification_only_providers)
+        if added and self.provider_scope_mode == "custom":
+            selected = set(normalize_provider_names(self.selected_providers))
+            notification_only.extend(
+                provider
+                for provider in added
+                if provider != required_provider and provider not in selected
+            )
+        return replace(
+            self,
+            provider_settings=settings,
+            provider_order=provider_order,
+            notification_only_providers=normalize_provider_names(notification_only),
+        )
 
     def with_price_updates(
         self,
@@ -884,6 +954,21 @@ def normalize_provider_names(value: Any) -> list[str]:
     return sorted({provider for item in value if (provider := normalize_provider(item))})
 
 
+def normalize_provider_order(value: Any) -> list[str]:
+    """Normalize a persisted provider order while preserving first occurrence."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        provider = normalize_provider(item)
+        if not provider or provider in seen:
+            continue
+        seen.add(provider)
+        ordered.append(provider)
+    return ordered
+
+
 def normalize_provider_settings(value: Any) -> dict[str, ProviderSettings]:
     if not isinstance(value, Mapping):
         return {}
@@ -900,26 +985,58 @@ def _normalize_provider_model_prices(
     prices: Mapping[str, ModelPrice],
     provider: str,
 ) -> dict[str, ModelPrice]:
-    """Collapse legacy provider-prefixed rows inside one provider table."""
+    """Collapse duplicate model rows inside one provider table.
+
+    A legacy global table can contain both ``model`` and
+    ``provider/model`` keys for the same model.  Once a table is scoped to one
+    provider, those rows must compete for one model identity; otherwise a new
+    provider inherits two visible rows for every model.
+    """
     normalized_provider = normalize_provider(provider)
     if not normalized_provider:
         return dict(prices)
 
     normalized: dict[str, ModelPrice] = {}
-    priorities: dict[str, int] = {}
+    priorities: dict[tuple[str, str], int] = {}
+    identity_keys: dict[tuple[str, str], str] = {}
     for key, price in prices.items():
         model = str(price.model or "").strip()
+        if not model:
+            normalized[key] = price
+            continue
         explicit_provider = normalize_provider(price.provider)
-        scoped_key = f"{normalized_provider}/{model}" if model else ""
-        is_current_provider_row = bool(model) and (
+        scoped_key = f"{normalized_provider}/{model}"
+        is_current_provider_row = (
             explicit_provider == normalized_provider
-            or (not explicit_provider and key == scoped_key)
+            or (not explicit_provider and key.casefold() == scoped_key.casefold())
         )
-        canonical_key = model if is_current_provider_row and key == scoped_key else key
-        priority = 1 if is_current_provider_row else 0
-        if priority >= priorities.get(canonical_key, -1):
-            normalized[canonical_key] = price
-            priorities[canonical_key] = priority
+        base_url = normalize_base_url(price.base_url)
+        identity = (model.casefold(), base_url)
+        if base_url:
+            # Keep the scope-bearing key for Base URL-specific rows.  A
+            # provider/model row and an unscoped model row may legitimately
+            # share the model name while targeting different endpoints.
+            canonical_key = key
+        else:
+            canonical_key = model
+        priority = (
+            3
+            if explicit_provider == normalized_provider
+            else 2
+            if is_current_provider_row
+            else 1
+            if not explicit_provider
+            else 0
+        )
+        previous_key = identity_keys.get(identity)
+        previous_priority = priorities.get(identity, -1)
+        if previous_key is not None and priority < previous_priority:
+            continue
+        if previous_key is not None and previous_key != canonical_key:
+            normalized.pop(previous_key, None)
+        normalized[canonical_key] = price
+        priorities[identity] = priority
+        identity_keys[identity] = canonical_key
     return normalized
 
 
@@ -1262,6 +1379,7 @@ __all__ = [
     "normalize_model_prices",
     "normalize_price_versions",
     "normalize_provider_names",
+    "normalize_provider_order",
     "normalize_provider_settings",
     "save_rest_reminder_state",
     "normalize_work_overlay_max_items",

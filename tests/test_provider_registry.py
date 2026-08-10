@@ -74,6 +74,10 @@ model_provider = "custom"
             )
 
         self.assertEqual(registry.app_provider, "custom")
+        self.assertEqual(
+            registry.providers(),
+            ("custom", "muyuan", "saved-only", "history-only"),
+        )
         self.assertEqual(registry.entries["muyuan"].profile_names, ("muyuan",))
         self.assertEqual(registry.entries["custom"].profile_names, ("shared",))
         self.assertTrue(registry.entries["history-only"].historical_only)

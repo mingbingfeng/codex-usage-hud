@@ -221,6 +221,7 @@ class UsageSummaryCache:
             for event in session.events:
                 providers.setdefault(event.provider, []).append(event)
             for provider, events in providers.items():
+                daily_usage = self._daily_usage_contributions(events, day_start)
                 summary_day = self._parser.summarize_usage_events(events, day_start)
                 summary_week = self._parser.summarize_usage_events(events, week_start)
                 summary_month = self._parser.summarize_usage_events(events, month_start)
@@ -276,6 +277,8 @@ class UsageSummaryCache:
                         day_latest_event_at=day_latest_event_at,
                         week_latest_event_at=week_latest_event_at,
                         month_latest_event_at=month_latest_event_at,
+                        daily_usage=daily_usage,
+                        daily_usage_complete=True,
                     )
                 )
         return entries
@@ -413,6 +416,7 @@ class UsageSummaryCache:
         day_start: datetime,
         week_start: datetime,
         *,
+        rolling_week_start: datetime | None = None,
         included_providers: Iterable[str] | None = None,
         limit: int = 8,
     ) -> dict[str, object]:
@@ -420,6 +424,7 @@ class UsageSummaryCache:
             sessions_root,
             day_start,
             week_start,
+            rolling_week_start=rolling_week_start,
             included_providers=included_providers,
             limit=limit,
         )
