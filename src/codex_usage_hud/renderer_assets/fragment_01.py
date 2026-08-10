@@ -203,6 +203,11 @@ scanStartedAt: 0,
     queryRequestId: "",
     queryFilterKey: "",
     detailRequestId: "",
+    policy: null,
+    policyRequestId: "",
+    policyPending: false,
+    policyLoading: false,
+    policyError: "",
   };
   let cachedHeaderNode = null;
   let cachedComposerNode = null;

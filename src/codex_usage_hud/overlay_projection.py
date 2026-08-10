@@ -51,6 +51,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "source": item.source,
         "workdir": item.workdir,
         "modelProvider": item.model_provider,
+        "profileName": item.profile_name,
         "clientKind": item.client_kind,
         "sessionStartedAt": _iso_or_empty(item.session_started_at),
         "taskStartedAt": _iso_or_empty(item.task_started_at),
@@ -371,12 +372,38 @@ def visible_payload_items(
     item_limit: int,
     dismiss_key: Callable[[Mapping[str, object]], str],
 ) -> list[Mapping[str, object]]:
+    """Choose newest completed items without changing their display order.
+
+    ``order_payload_items`` intentionally puts completed items oldest first so
+    the newest badge sits at the right edge.  Applying the shared item limit
+    directly to that order instead retained the oldest completed sessions when
+    active cards consumed the available slots.  Select the newest completed
+    tail first, then return it in the original visual order.
+    """
+    limit = max(0, int(item_limit))
+    non_completed_indexes = [
+        index
+        for index, item in enumerate(items)
+        if payload_status(item) != "recent"
+    ]
+    selected_indexes = set(non_completed_indexes[:limit])
+    remaining = max(0, limit - len(selected_indexes))
+    if remaining:
+        completed_indexes = [
+            index
+            for index, item in enumerate(items)
+            if payload_status(item) == "recent"
+        ]
+        selected_indexes.update(completed_indexes[-remaining:])
+
     visible: list[Mapping[str, object]] = []
     live_ids: set[str] = set()
-    for item in items[:item_limit]:
+    for index, item in enumerate(items):
         item_id = str(item.get("id") or "")
         if item_id:
             live_ids.add(item_id)
+        if index not in selected_indexes:
+            continue
         key = dismiss_key(item)
         if item_id and dismissed_instances.get(item_id) == key:
             continue

@@ -846,6 +846,32 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         return [hours, minutes, remainder].map((value) => String(value).padStart(2, "0")).join(":");
       }
 
+      function restReminderSummarySeconds(timing, now = Date.now()) {
+        const completed = Math.max(0, Number(timing?.completedTodaySeconds) || 0);
+        const saved = Math.max(0, Number(timing?.todayRestedSeconds) || 0);
+        const state = String(timing?.state || "");
+        if (state !== "resting" && state !== "break") return Math.max(saved, completed);
+        const started = Number(timing?.restStartedAtMs) || 0;
+        const ends = Number(timing?.restEndsAtMs || timing?.breakEndsAtMs) || 0;
+        const elapsed = started > 0
+          ? Math.max(0, (Math.min(now, ends || now) - started) / 1000)
+          : Math.max(0, Number(timing?.currentRestElapsedSeconds) || 0);
+        return Math.max(saved, completed + elapsed);
+      }
+
+      function restReminderSummaryCount(timing) {
+        const saved = Math.max(0, Math.round(Number(timing?.todayRestedCount) || 0));
+        const completed = Math.max(0, Math.round(Number(timing?.completedTodayCount) || 0));
+        const state = String(timing?.state || "");
+        const active = (state === "resting" || state === "break")
+          && Number(timing?.restStartedAtMs) > 0;
+        return Math.max(saved, completed + (active ? 1 : 0));
+      }
+
+      function restReminderSummaryText(timing, now = Date.now()) {
+        return `今日已休息 ${formatRestReminderRemaining(restReminderSummarySeconds(timing, now))} 共${restReminderSummaryCount(timing)}次`;
+      }
+
       function syncRestReminderCountdown() {
         const modal = document.getElementById(settingsModalId);
         if (!modal || modal.hidden || settingsActiveTab !== "support") return;
@@ -856,9 +882,15 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         const statusBox = modal.querySelector('.codex-usage-hud-rest-reminder-status');
         const statusTitle = modal.querySelector('[data-rest-reminder-status-title="true"]');
         const remaining = modal.querySelector('[data-rest-reminder-remaining="true"]');
+        const summary = modal.querySelector('[data-rest-reminder-summary="true"]');
         const startInput = modal.querySelector('[data-rest-reminder-start-time="true"]');
         if (statusBox) statusBox.dataset.state = state;
         if (statusTitle) statusTitle.textContent = restReminderStatusTitle(state, configEnabled);
+        if (summary) {
+          const summaryText = restReminderSummaryText(timing);
+          summary.textContent = summaryText;
+          summary.title = summaryText;
+        }
         if (startInput && startInput.dataset.userEdited !== "true") {
           const nextStart = formatRestReminderInputTime(Number(timing?.timerStartedAtMs));
           if (startInput.value !== nextStart) startInput.value = nextStart;

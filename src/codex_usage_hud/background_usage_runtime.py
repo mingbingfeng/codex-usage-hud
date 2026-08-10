@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Any
 
+from .background_control import BackgroundControlService
 from .core.background_usage import BackgroundUsageScanner, BackgroundUsageStore
 from .core.runtime_errors import RuntimeErrorRegistry
 from .core.runtime_events import RuntimeEventBus
@@ -43,6 +44,7 @@ class BackgroundUsageRuntime:
         self.logs_path = Path(logs_path)
         self.state_path = Path(state_path)
         self.store = BackgroundUsageStore(database_path)
+        self.control = BackgroundControlService(Path(database_path).parent)
         self.event_bus = event_bus
         self.runtime_errors = runtime_errors
         self._clock = clock or time.time
@@ -129,6 +131,25 @@ class BackgroundUsageRuntime:
 
     def detail(self, event_id: object) -> dict[str, object] | None:
         return self.store.detail(event_id)
+
+    def policy_query(self, feature_key: object, event_id: object = "") -> dict[str, object]:
+        return self.control.query(feature_key, event_id)
+
+    def policy_set(
+        self,
+        feature_key: object,
+        desired_state: object,
+        expected_policy_revision: object = None,
+        event_id: object = "",
+        source: object = "usage_detail",
+    ) -> dict[str, object]:
+        return self.control.set(
+            feature_key,
+            desired_state,
+            expected_policy_revision,
+            event_id,
+            source,
+        )
 
     def pending_today(self) -> list[dict[str, object]]:
         return self.store.pending_today()

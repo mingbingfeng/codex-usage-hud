@@ -495,6 +495,7 @@ def _work_item_from_snapshot(
         workdir=str(snapshot.cwd or "").strip(),
         workdir_name=_compact_work_text(_workdir_leaf(snapshot.cwd), 32),
         model_provider=snapshot.model_provider,
+        profile_name=str(getattr(snapshot, "profile_name", "") or "").strip(),
         client_kind=snapshot.client_kind,
         # The overlay treats a promoted Desktop delegation as a normal visible
         # session. Keep the internal-subagent marker only for folded agents so

@@ -367,6 +367,19 @@ TEXT = r"""
         }
         return;
       }
+      if (action.dataset.action === "background-usage-policy") {
+        event.preventDefault(); event.stopPropagation();
+        backgroundUsagePolicyConfirm(backgroundUsageState.detail);
+        return;
+      }
+      if (action.dataset.action === "background-usage-policy-cancel") {
+        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm(); return;
+      }
+      if (action.dataset.action === "background-usage-policy-confirm") {
+        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm();
+        applyBackgroundUsagePolicy(String(action.dataset.featureKey || ""), String(action.dataset.eventId || ""), String(action.dataset.desiredState || "disabled"));
+        return;
+      }
       if (action.dataset.action === "settings-open") {
         event.preventDefault();
         event.stopPropagation();

@@ -193,6 +193,8 @@ from codex_usage_hud.ui.work_overlay_qt import (
     _workdir_link_opacity_for_item,
     _workdir_external_link_for_item,
     _workdir_clickable_for_item,
+    _profile_display_name,
+    _workdir_footer_display_name,
     _workdir_link_pending_for_item,
     _work_overlay_header_text,
     _refresh_overlay_state_from_event,
@@ -3057,6 +3059,7 @@ class BudgetHelperTests(unittest.TestCase):
             source="activity",
             workdir="E:\\Project\\codex-usage-hud",
             model_provider="muyuan",
+            profile_name="muyuan",
             client_kind="cli",
             session_started_at=datetime(2026, 6, 16, 9, 55, 0).astimezone(),
             task_started_at=datetime(2026, 6, 16, 10, 0, 0).astimezone(),
@@ -3080,6 +3083,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(payload["workdirName"], "codex-usage-hud")
         self.assertEqual(payload["workdir"], "E:\\Project\\codex-usage-hud")
         self.assertEqual(payload["modelProvider"], "muyuan")
+        self.assertEqual(payload["profileName"], "muyuan")
         self.assertEqual(payload["clientKind"], "cli")
         self.assertTrue(
             str(payload["sessionStartedAt"]).startswith("2026-06-16T09:55:00")
@@ -3302,6 +3306,7 @@ class BudgetHelperTests(unittest.TestCase):
         snapshot = ParsedSession(
             session_id="session-running",
             session_title="Focus current round",
+            profile_name="muyuan",
             request=RequestTokens(
                 status="running",
                 round_index=3,
@@ -3323,6 +3328,7 @@ class BudgetHelperTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].round_index, 3)
         self.assertEqual(items[0].model_name, "gpt-5.5")
+        self.assertEqual(items[0].profile_name, "muyuan")
         self.assertEqual(items[0].status_text, "gpt-5.5 正在思考")
 
     def test_rest_reminder_card_copy_covers_prompt_postpone_and_resting_actions(self) -> None:
@@ -6510,6 +6516,39 @@ with tempfile.TemporaryDirectory() as temp_dir:
         self.assertIn(current["id"], [item["id"] for item in visible])
         self.assertIn(other_active["id"], [item["id"] for item in visible])
 
+    def test_completed_badge_limit_prefers_latest_completion(self) -> None:
+        active = [
+            {
+                "id": f"active-{index}",
+                "status": "running",
+                "sessionStartedAt": f"2026-07-20T10:0{index}:00+08:00",
+            }
+            for index in range(4)
+        ]
+        completed = [
+            {
+                "id": item_id,
+                "status": "recent",
+                "updatedAt": updated_at,
+            }
+            for item_id, updated_at in (
+                ("old-cli", "2026-07-20T10:04:00+08:00"),
+                ("middle", "2026-07-20T10:05:00+08:00"),
+                ("latest-desktop", "2026-07-20T10:06:00+08:00"),
+            )
+        ]
+
+        visible = _visible_overlay_items(
+            _ordered_overlay_items([*active, *completed]),
+            {},
+            item_limit=5,
+        )
+
+        self.assertEqual(
+            [item["id"] for item in visible],
+            ["active-3", "active-2", "active-1", "active-0", "latest-desktop"],
+        )
+
     def test_completed_badge_hover_ignores_bounding_box_corner(self) -> None:
         self.assertFalse(
             _point_in_inscribed_circle(
@@ -7293,6 +7332,25 @@ class WorkOverlayTransitionTests(unittest.TestCase):
         item = {"id": "a", "status": "tool", "workdirName": r"Alpha\app"}
 
         self.assertEqual(_workdir_display_name(item), "app")
+
+    def test_cli_profile_prefix_is_hidden_for_desktop_bubbles(self) -> None:
+        cli_item = {
+            "id": "cli",
+            "status": "tool",
+            "clientKind": "cli",
+            "modelProvider": "muyuan",
+            "workdir": r"E:\Project\app",
+        }
+        desktop_item = {
+            **cli_item,
+            "id": "desktop",
+            "clientKind": "app",
+        }
+
+        self.assertEqual(_profile_display_name(cli_item), "muyuan")
+        self.assertEqual(_workdir_footer_display_name(cli_item), "[muyuan] app")
+        self.assertEqual(_profile_display_name(desktop_item), "")
+        self.assertEqual(_workdir_footer_display_name(desktop_item), "app")
 
     def test_round_badge_palette_uses_status_color_and_contrast_text(self) -> None:
         light_theme = self._light_overlay_theme()

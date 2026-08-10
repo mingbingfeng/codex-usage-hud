@@ -25,6 +25,7 @@ from codex_usage_hud.core.background_usage import (
     decode_request_evidence,
     decode_submission_prompt,
     resolve_request_token_split,
+    visible_session_source_prompt,
 )
 from codex_usage_hud.background_usage_runtime import BackgroundUsageRuntime
 from codex_usage_hud.core.runtime_events import RuntimeEventBus
@@ -182,6 +183,16 @@ def _title_description_prompt(source_prompt: str) -> str:
     )
 
 
+def _vscode_first_user_message(source_prompt: str) -> str:
+    return (
+        "# Files mentioned by the user:\n\n"
+        "## Replace-OpenCvSharpFallback.V2.ps1: E:/Work/scan_project/artifacts/"
+        "Replace-OpenCvSharpFallback.V2.ps1\n\n"
+        "## My request:\n"
+        f"{source_prompt}"
+    )
+
+
 def _prices() -> dict[str, dict[str, object]]:
     return {
         "custom/gpt-test": {
@@ -285,6 +296,90 @@ class BackgroundUsageDecoderTests(unittest.TestCase):
 
 
 class BackgroundUsageScannerTests(unittest.TestCase):
+    def test_visible_session_source_prompt_unwraps_vscode_request(self) -> None:
+        source_prompt = "Build the OpenCV fallback into the scanner."
+        self.assertEqual(
+            visible_session_source_prompt(_vscode_first_user_message(source_prompt)),
+            source_prompt,
+        )
+        self.assertEqual(
+            visible_session_source_prompt(
+                f"<codex_delegation><input>{source_prompt}</input></codex_delegation>"
+            ),
+            source_prompt,
+        )
+
+    def test_exact_title_prompt_association_unwraps_vscode_first_user_message(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            logs_path = root / "logs_2.sqlite"
+            state_path = root / "state_5.sqlite"
+            base_ts = 1_900_000_000
+            source_prompt = "Design the OpenCV automatic fallback plan."
+            _create_logs(
+                logs_path,
+                [
+                    (
+                        1,
+                        base_ts,
+                        "codex_core::session::handlers",
+                        "codex_core::session::handlers",
+                        _submission_body(
+                            BACKGROUND_ID,
+                            _title_description_prompt(source_prompt),
+                        ),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                    (
+                        2,
+                        base_ts + 1,
+                        "codex_core::session::turn",
+                        "codex_core::session::turn",
+                        _turn_body(BACKGROUND_ID, "gpt-test", 30, 20),
+                        BACKGROUND_ID,
+                        WORKER_PROCESS,
+                    ),
+                ],
+            )
+            _create_state_with_sessions(
+                state_path,
+                [
+                    (
+                        RELATED_SESSION_ID,
+                        _vscode_first_user_message(source_prompt),
+                        base_ts - 10,
+                    )
+                ],
+            )
+            store = BackgroundUsageStore(root / "audit.sqlite3")
+            scanner = BackgroundUsageScanner(
+                logs_path=logs_path,
+                state_path=state_path,
+                store=store,
+                provider="custom",
+                price_table=_prices(),
+                grace_seconds=0,
+                now=lambda: float(base_ts + 30),
+            )
+
+            scanner.scan()
+
+            now = datetime.fromtimestamp(base_ts + 30).astimezone()
+            self.assertEqual(store.pending_today(now=now), [])
+            self.assertEqual(
+                store.notification_index(now=now),
+                {
+                    RELATED_SESSION_ID: {
+                        "count": 1,
+                        "eventId": BACKGROUND_ID,
+                        "range": "today",
+                    }
+                },
+            )
+
     def test_exact_title_prompt_association_uses_session_badge_and_unread_range(
         self,
     ) -> None:

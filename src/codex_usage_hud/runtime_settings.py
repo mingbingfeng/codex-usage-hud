@@ -132,6 +132,8 @@ def partial_domains_for_command(
         "openBackgroundUsage",
         "backgroundUsageQuery",
         "backgroundUsageDetail",
+        "backgroundUsagePolicyQuery",
+        "backgroundUsagePolicySet",
     }:
         return {"backgroundUsage"}
     return None
@@ -196,5 +198,5 @@ def has_pending_background_usage_response(status: Mapping[str, object]) -> bool:
         return False
     return bool(
         str(response.get("requestId") or "").strip()
-        and str(response.get("kind") or "").strip() in {"query", "detail", "open"}
+        and str(response.get("kind") or "").strip() in {"query", "detail", "open", "policyQuery", "policyApply"}
     )

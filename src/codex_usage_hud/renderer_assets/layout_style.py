@@ -1720,6 +1720,54 @@ TEXT = r"""
             cursor: not-allowed;
             opacity: .52;
           }
+          #${rootId} .codex-usage-hud-background-policy-switch {
+            display: inline-flex;
+            flex: 0 0 auto;
+            align-items: center;
+            gap: 7px;
+            min-height: 28px;
+            border: 0;
+            padding: 2px 0;
+            background: transparent;
+            color: var(--codex-usage-hud-text, #dde7f2);
+            cursor: pointer;
+            font: inherit;
+            font-size: 10px;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-background-policy-switch-track {
+            position: relative;
+            display: inline-block;
+            width: 34px;
+            height: 20px;
+            flex: 0 0 34px;
+            border-radius: 10px;
+            background: var(--codex-usage-hud-divider, #273241);
+            transition: background .16s ease;
+          }
+          #${rootId} .codex-usage-hud-background-policy-switch[aria-checked="true"] .codex-usage-hud-background-policy-switch-track {
+            background: var(--codex-usage-hud-success, #62c993);
+          }
+          #${rootId} .codex-usage-hud-background-policy-switch-thumb {
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #ffffff;
+            transition: transform .16s ease;
+          }
+          #${rootId} .codex-usage-hud-background-policy-switch[aria-checked="false"] .codex-usage-hud-background-policy-switch-track {
+            background: var(--codex-usage-hud-error, #ff6b6b);
+          }
+          #${rootId} .codex-usage-hud-background-policy-switch[aria-checked="true"] .codex-usage-hud-background-policy-switch-thumb {
+            transform: translateX(14px);
+          }
+          #${rootId} .codex-usage-hud-background-policy-switch:focus-visible {
+            outline: 2px solid var(--codex-usage-hud-accent, #f3d27a);
+            outline-offset: 2px;
+          }
           #${rootId} .codex-usage-hud-settings-link {
             min-height: 0;
             border: 0;
@@ -2066,7 +2114,15 @@ TEXT = r"""
           }
           #${rootId} .codex-usage-hud-background-detail-head > .codex-usage-hud-settings-action {
             flex: 0 0 auto;
+            min-width: 120px;
+            min-height: 28px;
             white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-background-policy-message {
+            margin-top: 9px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            line-height: 1.45;
           }
           #${rootId} .codex-usage-hud-background-detail-sub {
             color: var(--codex-usage-hud-info, #9ccbff);

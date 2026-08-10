@@ -52,7 +52,6 @@ from .geometry import (
 )
 from .model import (
     _compact_work_text,
-    _compact_workdir_text,
     _item_id,
     _item_is_background_usage,
     _item_is_completed,
@@ -74,6 +73,7 @@ from .model import (
     _workdir_clickable_for_item,
     _workdir_display_name,
     _workdir_external_link_for_item,
+    _workdir_footer_display_name,
 )
 from .qt_visuals import (
     CardSwitchPendingOverlayWidget,
@@ -531,6 +531,7 @@ class OverlayRenderingMixin:
         )
 
         workdir_text = _workdir_display_name(item)
+        workdir_footer_text = _workdir_footer_display_name(item)
         full_workdir = str(item.get("workdir") or "").strip()
         workdir_clickable = _workdir_clickable_for_item(item)
         status_text = (
@@ -550,7 +551,7 @@ class OverlayRenderingMixin:
             else str(item.get("statusText") or item.get("statusLabel") or "").strip()
         )
         footer_container = record["footer_container"]
-        footer_container.setVisible(bool(status_text or workdir_text))
+        footer_container.setVisible(bool(status_text or workdir_footer_text))
 
         status_label = record["status_label"]
         if status_text:
@@ -561,7 +562,7 @@ class OverlayRenderingMixin:
             )
             footer_status_text = _compact_work_text(
                 status_text,
-                48 if workdir_text else 80,
+                48 if workdir_footer_text else 80,
             )
             status_label.setText(footer_status_text)
             status_label.setBaseColor(status_text_color)
@@ -618,8 +619,8 @@ class OverlayRenderingMixin:
             label.setVisible(True)
 
         workdir_label = record["workdir_label"]
-        if workdir_text:
-            workdir_label.setText(_compact_workdir_text(workdir_text, 40))
+        if workdir_footer_text:
+            workdir_label.setText(workdir_footer_text)
             workdir_label.setToolTip((full_workdir or workdir_text) if workdir_clickable else "")
             workdir_label.setStyleSheet(
                 "QLabel {"

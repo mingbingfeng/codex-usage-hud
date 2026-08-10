@@ -29,6 +29,10 @@ DELEGATION_INPUT_RE = re.compile(
     r"<codex_delegation(?:\s[^>]*)?>.*?<input>\s*(.*?)\s*</input>",
     re.IGNORECASE | re.DOTALL,
 )
+VSCODE_REQUEST_RE = re.compile(
+    r"(?:^|\r?\n)## My request:\s*(?P<request>.*)\Z",
+    re.DOTALL,
+)
 RELATED_SESSION_MAX_LAG_SECONDS = 300
 RELATED_SESSION_CLOCK_SKEW_SECONDS = 5
 
@@ -140,10 +144,13 @@ def title_description_source_prompt(prompt: object) -> str:
 
 
 def visible_session_source_prompt(prompt: object) -> str:
-    """Unwrap a Desktop delegation to the prompt used by title generation."""
+    """Unwrap the prompt wrappers used by visible Codex sessions."""
     text = str(prompt or "").strip()
     match = DELEGATION_INPUT_RE.search(text)
-    return match.group(1).strip() if match else text
+    if match:
+        text = match.group(1).strip()
+    match = VSCODE_REQUEST_RE.search(text)
+    return match.group("request").strip() if match else text
 
 
 def decode_request_evidence(

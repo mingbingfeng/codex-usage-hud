@@ -191,6 +191,19 @@ TEXT = r"""
         const workdir = String(detail.cwd || "").trim();
         const workdirAvailable = detail?.workdirAvailable === true;
         const workdirAssociation = backgroundUsageWorkdirAssociationText(detail?.workdirAssociation);
+        const policy = backgroundUsageState.policy && typeof backgroundUsageState.policy === "object" ? backgroundUsageState.policy : null;
+        const capability = String(policy?.capability || "");
+        const verification = String(policy?.verificationState || "");
+        const canDisable = policy?.canDisable === true;
+        const disabled = capability === "unsupported" || capability === "unknown";
+        const isDisabled = policy?.desiredState === "disabled" && ["verified", "configured_unverified"].includes(verification);
+        const label = backgroundUsageState.policyPending ? "正在提交..." : isDisabled ? "启用此类任务" : "禁止此类任务";
+        const policyButton = policy && !disabled && (canDisable || policy?.canEnable === true)
+          ? `<button type="button" class="codex-usage-hud-background-policy-switch" role="switch" aria-checked="${isDisabled ? "false" : "true"}" aria-label="${escapeHtml(label)}" data-action="background-usage-policy" data-feature-key="${escapeHtml(String(detail.featureKey || "unknown"))}" data-event-id="${escapeHtml(eventId)}" title="${escapeHtml(String(policy?.message || ""))}" ${backgroundUsageState.policyPending ? "disabled" : ""}><span class="codex-usage-hud-background-policy-switch-track" aria-hidden="true"><span class="codex-usage-hud-background-policy-switch-thumb"></span></span><span class="codex-usage-hud-background-policy-switch-label">${escapeHtml(label)}</span></button>`
+          : "";
+        const policyMessage = backgroundUsageState.policyLoading
+          ? "正在读取后台任务控制能力..."
+          : backgroundUsageState.policyError || String(policy?.message || "");
         const workdirHtml = workdir && eventId && workdirAvailable
           ? `<button type="button" class="codex-usage-hud-background-workdir-link" data-action="background-usage-open-workdir" data-event-id="${escapeHtml(eventId)}" aria-label="打开记录时运行目录 ${escapeHtml(workdir)}" title="记录时运行目录 · ${escapeHtml(workdirAssociation)} · ${escapeHtml(workdir)}">${escapeHtml(workdir)}</button>`
           : `<strong title="${workdir ? `记录时运行目录 · ${escapeHtml(workdirAssociation)} · 当前目录不可用` : "未记录运行目录"}">${escapeHtml(workdir || "--")}</strong>`;
@@ -200,7 +213,7 @@ TEXT = r"""
               <h3>${escapeHtml(detail.featureLabel || "未知后台任务")}</h3>
               <span class="codex-usage-hud-background-detail-sub">Codex App 后台用量 · 本地记录</span>
             </div>
-            <span class="codex-usage-hud-background-status" title="${escapeHtml(detailTimeTitle)}">${escapeHtml(detailTime)}</span>
+            ${policyButton}
           </div>
           <div class="codex-usage-hud-background-detail-grid">
             <div><span>模型</span><strong>${escapeHtml(models.join(" + ") || "未知")}</strong></div>
@@ -210,6 +223,7 @@ TEXT = r"""
             <div class="codex-usage-hud-background-detail-wide"><span>时段</span><strong>${escapeHtml(backgroundUsageTime(detail.firstSeenAt))} - ${escapeHtml(backgroundUsageTime(detail.lastSeenAt))}</strong></div>
             <div class="codex-usage-hud-background-detail-wide" title="${escapeHtml(workdir)}"><span>记录时运行目录 · ${escapeHtml(workdirAssociation)}</span>${workdirHtml}</div>
           </div>
+          ${policyMessage ? `<div class="codex-usage-hud-background-policy-message" role="status">${escapeHtml(policyMessage)}</div>` : ""}
           <section class="codex-usage-hud-background-requests">
             <div class="codex-usage-hud-background-section-title">请求明细 <span>${requests.length}</span></div>
             <div class="codex-usage-hud-background-request-list">${requestRows || '<div class="codex-usage-hud-background-empty">没有可用请求明细。</div>'}</div>
@@ -637,6 +651,7 @@ TEXT = r"""
           }
           if (requestSeq !== backgroundUsageDetailSeq || backgroundUsageState.selectedEventId !== normalized) return;
           backgroundUsageState.detail = payload.backgroundUsageDetail || null;
+          void loadBackgroundUsagePolicy(backgroundUsageState.detail);
           if (markViewed && backgroundUsageState.detail?.unread === false) {
             markBackgroundUsageEventViewed(normalized);
           }
@@ -652,6 +667,63 @@ TEXT = r"""
             syncBackgroundUsagePanel();
           }
         }
+      }
+
+      function loadBackgroundUsagePolicy(detail) {
+        const featureKey = String(detail?.featureKey || "").trim();
+        const eventId = String(detail?.eventId || "").trim();
+        if (!featureKey || !eventId) return;
+        backgroundUsageState.policy = null;
+        backgroundUsageState.policyError = "";
+        backgroundUsageState.policyLoading = true;
+        syncBackgroundUsagePanel();
+        const requestId = submitBackgroundUsageCommand("backgroundUsagePolicyQuery", { featureKey, eventId });
+        if (requestId) { backgroundUsageState.policyRequestId = requestId; return; }
+        const url = backgroundUsageEndpoint("/policy");
+        if (!url) {
+          backgroundUsageState.policyLoading = false;
+          backgroundUsageState.policyError = "后台任务控制能力当前不可用。";
+          syncBackgroundUsagePanel();
+          return;
+        }
+        url.searchParams.set("feature", featureKey); url.searchParams.set("eventId", eventId);
+        void fetchBackgroundUsageWithTimeout(url.toString()).then((response) => response.json().then((payload) => ({ response, payload }))).then(({response, payload}) => {
+          backgroundUsageState.policyLoading = false;
+          if (response.ok && payload?.status === "ok") backgroundUsageState.policy = payload.backgroundUsagePolicy || null;
+          else backgroundUsageState.policyError = payload?.message || "后台任务控制能力读取失败。";
+          syncBackgroundUsagePanel();
+        }).catch((error) => {
+          backgroundUsageState.policyLoading = false;
+          backgroundUsageState.policyError = `后台任务控制能力读取失败：${error?.message || error}`;
+          syncBackgroundUsagePanel();
+        });
+      }
+
+      function backgroundUsagePolicyConfirm(detail) {
+        const policy = backgroundUsageState.policy || {};
+        const featureKey = String(detail?.featureKey || "");
+        const disabling = String(policy.desiredState || "enabled") !== "disabled";
+        const linked = featureKey === "suggestion_safety";
+        const title = disabling ? `禁止“${String(detail?.featureLabel || "后台任务")}”` : `允许“${String(detail?.featureLabel || "后台任务")}”`;
+        const body = linked ? "“建议安全检查”没有独立公开开关。继续操作会同时变更上下文建议。" : featureKey === "memory_consolidation" ? "将更新 Codex 的 Memories 总开关；历史后台用量和请求明细会保留。" : "将打开 Codex 设置以变更 Suggested prompts，完成后需要返回此处验证。";
+        const dialog = settingsDialogRoot(); if (!dialog) return;
+        closeSettingsConfirm();
+        const layer = document.createElement("div"); layer.className = "codex-usage-hud-settings-confirm-layer"; layer.dataset.settingsConfirm = "true";
+        layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card"><div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="background-usage-policy-cancel">取消</button><button type="button" class="codex-usage-hud-settings-action" data-primary="true" data-action="background-usage-policy-confirm" data-feature-key="${escapeHtml(featureKey)}" data-event-id="${escapeHtml(String(detail?.eventId || ""))}" data-desired-state="${disabling ? "disabled" : "enabled"}">${disabling ? "确认禁止" : "确认允许"}</button></div></div>`;
+        dialog.appendChild(layer);
+      }
+
+      function applyBackgroundUsagePolicy(featureKey, eventId, desiredState) {
+        backgroundUsageState.policyPending = true;
+        backgroundUsageState.policyError = desiredState === "disabled"
+          ? "正在写入 Codex 设置..."
+          : "正在恢复 Codex 设置...";
+        syncBackgroundUsagePanel();
+        const command = { featureKey, eventId, desiredState, expectedPolicyRevision: backgroundUsageState.policy?.policyRevision, source: "usage_detail" };
+        const requestId = submitBackgroundUsageCommand("backgroundUsagePolicySet", command);
+        if (requestId) { backgroundUsageState.policyRequestId = requestId; return; }
+        const url = backgroundUsageEndpoint("/policy"); if (!url) { backgroundUsageState.policyPending = false; backgroundUsageState.policyError = "后台任务控制桥接未连接。"; syncBackgroundUsagePanel(); return; }
+        void fetchBackgroundUsageWithTimeout(url.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(command) }).then((response) => response.json().then((payload) => ({response, payload}))).then(({response, payload}) => { backgroundUsageState.policyPending = false; if (response.ok && payload?.status === "ok") { backgroundUsageState.policy = payload.backgroundUsagePolicy || null; backgroundUsageState.policyError = String(payload?.backgroundUsagePolicy?.message || ""); } else backgroundUsageState.policyError = payload?.message || "后台任务控制失败。"; syncBackgroundUsagePanel(); }).catch((error) => { backgroundUsageState.policyPending = false; backgroundUsageState.policyError = `后台任务控制失败：${error?.message || error}`; syncBackgroundUsagePanel(); });
       }
 
       async function loadBackgroundUsage({ eventId = "", force = false } = {}) {
@@ -803,10 +875,20 @@ TEXT = r"""
             clearBackgroundUsageRequestTimeout("detail");
             backgroundUsageState.detailLoading = false;
             backgroundUsageState.detail = response.payload || null;
+            void loadBackgroundUsagePolicy(backgroundUsageState.detail);
             if (backgroundUsageState.detail?.unread === false) {
               markBackgroundUsageEventViewed(response.eventId);
             }
             backgroundUsageState.error = responseError;
+            syncBackgroundUsagePanel();
+            return;
+          }
+          if (kind === "policyQuery" || kind === "policyApply") {
+            if (requestId !== backgroundUsageState.policyRequestId) return;
+            backgroundUsageState.policyPending = false;
+            backgroundUsageState.policyLoading = false;
+            backgroundUsageState.policy = response.payload || null;
+            backgroundUsageState.policyError = responseError;
             syncBackgroundUsagePanel();
             return;
           }
@@ -939,6 +1021,9 @@ TEXT = r"""
       fetchBackgroundUsageWithTimeout,
       syncBackgroundUsagePanel,
       loadBackgroundUsageDetail,
+      loadBackgroundUsagePolicy,
+      backgroundUsagePolicyConfirm,
+      applyBackgroundUsagePolicy,
       loadBackgroundUsage,
       backgroundUsageSelectedDetail,
       applyBackgroundUsagePayload,
@@ -975,6 +1060,9 @@ TEXT = r"""
     fetchBackgroundUsageWithTimeout,
     syncBackgroundUsagePanel,
     loadBackgroundUsageDetail,
+    loadBackgroundUsagePolicy,
+    backgroundUsagePolicyConfirm,
+    applyBackgroundUsagePolicy,
     loadBackgroundUsage,
     backgroundUsageSelectedDetail,
     applyBackgroundUsagePayload,

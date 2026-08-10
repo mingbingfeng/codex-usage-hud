@@ -45,16 +45,3 @@ In Bash-compatible shells:
 python tools/build_exe.py > build_exe.log 2>&1
 tail -n 80 build_exe.log
 ```
-
-## GitHub network fallback
-
-If GitHub `git push` or `git pull` fails because of network or HTTP transport
-issues, retry through the local `v2rayN` HTTP proxy on `127.0.0.1:10808` and
-force Git to use HTTP/1.1 for that retry.
-
-Preferred retry pattern:
-
-```powershell
-git -c http.proxy=http://127.0.0.1:10808 -c http.version=HTTP/1.1 pull
-git -c http.proxy=http://127.0.0.1:10808 -c http.version=HTTP/1.1 push
-```

@@ -357,6 +357,36 @@ def _workdir_link_pending_for_item(
 def _item_is_cli(item: Mapping[str, object]) -> bool:
     return str(item.get("clientKind") or "").strip().lower() == "cli"
 
+def _profile_display_name(item: Mapping[str, object]) -> str:
+    """Return the profile label only for CLI session bubbles."""
+    if not _item_is_cli(item):
+        return ""
+    profile = _compact_work_text(
+        item.get("profileName")
+        or item.get("profile_name")
+        or item.get("modelProvider"),
+        24,
+    )
+    if profile.lower() in {"unknown", "n/a"}:
+        return ""
+    return profile
+
+def _workdir_footer_display_name(
+    item: Mapping[str, object],
+    *,
+    limit: int = 40,
+) -> str:
+    """Return the existing footer workdir text with a CLI profile prefix."""
+    workdir = _workdir_display_name(item)
+    profile = _profile_display_name(item)
+    if not profile:
+        return _compact_workdir_text(workdir, limit)
+    profile_label = f"[{profile}]"
+    if not workdir:
+        return profile_label
+    remaining = max(8, limit - len(profile_label) - 1)
+    return f"{profile_label} {_compact_workdir_text(workdir, remaining)}"
+
 def _workdir_clickable_for_item(item: Mapping[str, object]) -> bool:
     if _item_is_cli(item):
         return False
@@ -534,6 +564,8 @@ __all__ = [
     "_interactive_hotspot_opacity",
     "_workdir_link_pending_for_item",
     "_item_is_cli",
+    "_profile_display_name",
+    "_workdir_footer_display_name",
     "_workdir_clickable_for_item",
     "_workdir_link_hover_visible_for_item",
     "_workdir_external_link_for_item",

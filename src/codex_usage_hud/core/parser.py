@@ -379,6 +379,7 @@ class WorkStatusItem:
     source: str = ""
     workdir: str = ""
     model_provider: str = "unknown"
+    profile_name: str = ""
     client_kind: str = "unknown"
     is_subagent: bool = False
     agent_nickname: str = ""
@@ -457,6 +458,7 @@ class ParsedSession:
     task_count: int = 0
     cwd: str = ""
     model_provider: str = "unknown"
+    profile_name: str = ""
     originator: str = ""
     client_kind: str = "unknown"
     thread_source: str = ""
@@ -845,6 +847,7 @@ class JsonlSessionParser:
         parsed.session_started_at = self.session_started_at(records)
         parsed.cwd = self.session_cwd(records)
         parsed.model_provider = self.session_model_provider(records)
+        parsed.profile_name = self.session_profile_name(records)
         parsed.originator = self.session_originator(records)
         parsed.client_kind = classify_session_client(
             parsed.originator, self.session_source(records)
@@ -951,6 +954,23 @@ class JsonlSessionParser:
         """Return the stable billing channel from session metadata."""
         payload = self.session_meta_payload(records)
         return str(payload.get("model_provider") or "").strip().lower() or "unknown"
+
+    def session_profile_name(self, records: Sequence[Mapping[str, Any]]) -> str:
+        """Return the CLI profile label recorded for this session.
+
+        Older session metadata does not persist the command-line profile name
+        separately. In that format the selected model provider is the only
+        stable session-level label available, so retain it as a compatibility
+        fallback for the overlay.
+        """
+        payload = self.session_meta_payload(records)
+        for key in ("profile", "profile_name", "profileName"):
+            profile = str(payload.get(key) or "").strip()
+            if profile:
+                return profile
+        if payload.get("model_provider"):
+            return self.session_model_provider(records)
+        return ""
 
     def session_base_url(self, records: Sequence[Mapping[str, Any]]) -> str:
         """Return an explicit API base URL when Codex recorded one in metadata."""

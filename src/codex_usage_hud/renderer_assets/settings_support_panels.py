@@ -16,7 +16,12 @@ TEXT = r"""      function supportPanelHtml(settings, path) {
           ? currentPayload().restReminder : {};
         const startTime = formatRestReminderInputTime(Number(reminder.timerStartedAtMs));
         const todayRestedSeconds = Math.max(0, Number(reminder.todayRestedSeconds) || 0);
-        const restSummary = `今日已休息 ${formatRestReminderRemaining(todayRestedSeconds)}`;
+        const todayRestedCount = Math.max(
+          0,
+          Math.round(Number(reminder.todayRestedCount) || 0),
+          Math.round(Number(reminder.completedTodayCount) || 0),
+        );
+        const restSummary = `今日已休息 ${formatRestReminderRemaining(todayRestedSeconds)} 共${todayRestedCount}次`;
         const qrItems = images.map((item) => `
           <div class="codex-usage-hud-support-qr">
             <div class="codex-usage-hud-support-qr-title">

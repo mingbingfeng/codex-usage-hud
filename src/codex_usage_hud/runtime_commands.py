@@ -551,11 +551,25 @@ def handle_background_command(
         "openBackgroundUsage",
         "openBackgroundUsageFromInsights",
         "openBackgroundUsageWorkdir",
+        "backgroundUsagePolicyQuery",
+        "backgroundUsagePolicySet",
     }:
         return UNHANDLED
     request_id = str(command.get("requestId") or command.get("id") or "").strip()
     runtime = ports.background_usage
     try:
+        if action == "backgroundUsagePolicyQuery":
+            query = getattr(runtime, "policy_query", None)
+            if not callable(query):
+                return runtime_settings.background_usage_response_status("policyQuery", request_id, error="后台任务控制当前不可用。")
+            payload = query(command.get("featureKey"), command.get("eventId", ""))
+            return runtime_settings.background_usage_response_status("policyQuery", request_id, payload=payload, event_id=str(command.get("eventId") or ""))
+        if action == "backgroundUsagePolicySet":
+            apply = getattr(runtime, "policy_set", None)
+            if not callable(apply):
+                return runtime_settings.background_usage_response_status("policyApply", request_id, error="后台任务控制当前不可用。")
+            payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
+            return runtime_settings.background_usage_response_status("policyApply", request_id, payload=payload, event_id=str(command.get("eventId") or ""), error=str(payload.get("message") or "") if isinstance(payload, Mapping) and payload.get("error") else "")
         if action == "backgroundUsageQuery":
             raw_filters = command.get("filters")
             filters = raw_filters if isinstance(raw_filters, Mapping) else {}
@@ -627,6 +641,8 @@ def handle_background_command(
         kind = {
             "backgroundUsageQuery": "query",
             "backgroundUsageDetail": "detail",
+            "backgroundUsagePolicyQuery": "policyQuery",
+            "backgroundUsagePolicySet": "policyApply",
         }.get(action, "open")
         return runtime_settings.background_usage_response_status(
             kind,

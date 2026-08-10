@@ -236,6 +236,7 @@ class RestReminderScheduler:
         self._idle_break_active = False
         self._daily_date = ""
         self._daily_rested_seconds = 0.0
+        self._daily_rested_count = 0
         self._last_rest_duration_seconds = 0.0
         self._pending_transition: dict[str, object] | None = None
         self.configure(self._config, force_reset=True)
@@ -302,6 +303,11 @@ class RestReminderScheduler:
         return max(0.0, self._daily_rested_seconds)
 
     @property
+    def completed_today_count(self) -> int:
+        self._refresh_daily_date(float(self._wall_clock()))
+        return max(0, int(self._daily_rested_count))
+
+    @property
     def today_rested_seconds(self) -> float:
         wall_now = float(self._wall_clock())
         self._refresh_daily_date(wall_now)
@@ -314,6 +320,21 @@ class RestReminderScheduler:
                 - max(self._rest_started_wall, day_start),
             )
         return max(0.0, self._daily_rested_seconds + active)
+
+    @property
+    def today_rested_count(self) -> int:
+        wall_now = float(self._wall_clock())
+        self._refresh_daily_date(wall_now)
+        active = 0
+        if self.resting:
+            day_start = self._day_start_timestamp(wall_now)
+            active = int(
+                self._rest_started_wall > 0
+                and self._rest_started_wall <= wall_now
+                and self._rest_until_wall > max(self._rest_started_wall, day_start)
+                and self._rest_until_wall > day_start
+            )
+        return max(0, int(self._daily_rested_count) + active)
 
     @property
     def last_rest_duration_seconds(self) -> float:
@@ -409,7 +430,7 @@ class RestReminderScheduler:
         self._schedule_waiting = False
 
     def export_wall_state(self) -> dict[str, Any] | None:
-        """Return wall-clock phase timing and today's completed rest total."""
+        """Return wall-clock phase timing and today's rest accounting."""
         if not self._config.enabled:
             return None
         wall_now = float(self._wall_clock())
@@ -432,6 +453,7 @@ class RestReminderScheduler:
             "scheduleWaiting": bool(self._schedule_waiting),
             "dailyDate": self._daily_date,
             "dailyRestedSeconds": int(round(self._daily_rested_seconds)),
+            "dailyRestedCount": int(self._daily_rested_count),
             "reminderMessage": self._active_message,
         }
         if self.showing:
@@ -448,6 +470,26 @@ class RestReminderScheduler:
         """Restore future prompt/postpone/rest timing from one wall snapshot."""
         if not self._config.enabled or not isinstance(state, Mapping):
             return False
+
+        # Daily accounting is independent from the current timing settings.
+        # Load it before validating the saved interval/break/schedule so a
+        # harmless settings change cannot make today's completed rest vanish.
+        wall_now = float(self._wall_clock())
+        self._daily_date = str(state.get("dailyDate") or "")
+        try:
+            self._daily_rested_seconds = max(
+                0.0, float(state.get("dailyRestedSeconds") or 0.0)
+            )
+        except (TypeError, ValueError):
+            self._daily_rested_seconds = 0.0
+        try:
+            self._daily_rested_count = max(
+                0, int(float(state.get("dailyRestedCount") or 0.0))
+            )
+        except (TypeError, ValueError, OverflowError):
+            self._daily_rested_count = 0
+        self._refresh_daily_date(wall_now)
+
         try:
             saved_interval = int(state.get("intervalMinutes"))
             saved_break = int(state.get("breakMinutes", self._config.break_minutes))
@@ -475,16 +517,7 @@ class RestReminderScheduler:
         ):
             return False
 
-        wall_now = float(self._wall_clock())
         current = float(self._clock())
-        self._daily_date = str(state.get("dailyDate") or "")
-        try:
-            self._daily_rested_seconds = max(
-                0.0, float(state.get("dailyRestedSeconds") or 0.0)
-            )
-        except (TypeError, ValueError):
-            self._daily_rested_seconds = 0.0
-        self._refresh_daily_date(wall_now)
         self._postpone_used = bool(state.get("postponeUsed"))
         self._active_message = str(state.get("reminderMessage") or "")
         self._idle_break_active = False
@@ -816,6 +849,7 @@ class RestReminderScheduler:
             "kind": str(kind),
             "restDurationSeconds": int(round(max(0.0, duration))),
             "todayRestedSeconds": int(round(self.today_rested_seconds)),
+            "todayRestedCount": int(self.today_rested_count),
         }
 
     def _clear_prompt(self) -> None:
@@ -874,6 +908,7 @@ class RestReminderScheduler:
         if self._daily_date != date_key:
             self._daily_date = date_key
             self._daily_rested_seconds = 0.0
+            self._daily_rested_count = 0
 
     def _day_start_timestamp(self, wall_now: float) -> float:
         local = datetime.fromtimestamp(wall_now)
@@ -887,7 +922,11 @@ class RestReminderScheduler:
         if self._daily_date != end_date:
             return
         day_start = self._day_start_timestamp(ended_wall)
-        self._daily_rested_seconds += max(0.0, ended_wall - max(started_wall, day_start))
+        credited = max(0.0, ended_wall - max(started_wall, day_start))
+        if credited <= 0:
+            return
+        self._daily_rested_seconds += credited
+        self._daily_rested_count += 1
 
     def _schedule_state(self, wall_now: float) -> tuple[str, float | None]:
         local = datetime.fromtimestamp(wall_now)
@@ -1020,6 +1059,8 @@ class RestReminderPresenter:
             float(self.scheduler.showing_until),
             float(self.scheduler.rest_started_at_wall),
             float(self.scheduler.rest_ends_at_wall),
+            float(self.scheduler.completed_today_seconds),
+            int(self.scheduler.completed_today_count),
             float(self._preview_until),
             float(self._completion_until),
         )
@@ -1151,6 +1192,8 @@ class RestReminderPresenter:
             "postponeMinutes": int(config.postpone_minutes),
             "todayRestedSeconds": int(round(self.scheduler.today_rested_seconds)),
             "completedTodaySeconds": int(round(self.scheduler.completed_today_seconds)),
+            "todayRestedCount": int(self.scheduler.today_rested_count),
+            "completedTodayCount": int(self.scheduler.completed_today_count),
             "currentRestElapsedSeconds": int(
                 round(self.scheduler.current_rest_elapsed_seconds())
             ),
@@ -1187,6 +1230,8 @@ class RestReminderPresenter:
             "restEndsAtMs",
             "todayRestedSeconds",
             "completedTodaySeconds",
+            "todayRestedCount",
+            "completedTodayCount",
             "lastRestDurationSeconds",
             "completionEndsAtMs",
         )

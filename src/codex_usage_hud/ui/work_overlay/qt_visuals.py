@@ -46,7 +46,12 @@ from .geometry import (
     _completed_pending_particle_state,
     _ease_out_cubic,
 )
-from .model import _clamp01, _compact_work_text, _workdir_display_name
+from .model import (
+    _clamp01,
+    _compact_work_text,
+    _profile_display_name,
+    _workdir_display_name,
+)
 from .theme import _completed_badge_palette, _resolved_overlay_theme
 
 widget_attrs = Qt.WidgetAttribute
@@ -797,6 +802,7 @@ class CompletedBadgeWidget(QWidget):
         painter.drawEllipse(end_rect.adjusted(17.0, 17.0, -17.0, -17.0))
 
         title = str(self._item.get("title") or "Codex 工作").strip()
+        profile = _profile_display_name(self._item)
         workdir = _workdir_display_name(self._item)
         self._draw_arc_text(
             painter,
@@ -866,6 +872,15 @@ class CompletedBadgeWidget(QWidget):
             painter.setPen(QColor(palette["statLabel"]))
             painter.setFont(QFont("Microsoft YaHei UI", 5))
             painter.drawText(box.adjusted(1.0, 13.0, -1.0, -1.0), alignment.AlignCenter, label)
+
+        if profile:
+            painter.setPen(QColor(palette["workdirText"]))
+            painter.setFont(QFont("Microsoft YaHei UI", 7, QFont.Weight.DemiBold))
+            painter.drawText(
+                QRectF(center.x() - 60.0, center.y() + 41.0, 120.0, 14.0),
+                alignment.AlignCenter,
+                f"[{profile}]",
+            )
 
         painter.restore()
         if self._switch_pending:

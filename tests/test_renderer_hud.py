@@ -1056,6 +1056,18 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("restoreBackgroundUsageScrollPositions", script)
         self.assertIn("backgroundUsageHistoryScrollTops", script)
         self.assertIn("backgroundUsageDetailScrollTops", script)
+        self.assertIn("const policyButton = policy && !disabled", script)
+        self.assertIn('禁止此类任务', script)
+        self.assertIn('启用此类任务', script)
+        self.assertNotIn('禁止此后台任务', script)
+        self.assertIn("backgroundUsagePolicyConfirm(backgroundUsageState.detail)", script)
+        self.assertIn("applyBackgroundUsagePolicy,", script)
+        self.assertIn('role="switch"', script)
+        self.assertIn('aria-checked="${isDisabled ? "false" : "true"}"', script)
+        self.assertIn('data-desired-state="${disabling ? "disabled" : "enabled"}"', script)
+        self.assertIn('backgroundUsageState.policyLoading = true', script)
+        self.assertIn("后台任务控制能力当前不可用。", script)
+        self.assertIn("policy && !disabled", script)
         self.assertIn("backgroundUsageDetailLoaded", script)
         self.assertIn('data-action="background-usage-open-notification"', script)
         self.assertIn("backgroundUsageNotificationCount", script)
@@ -1836,7 +1848,12 @@ class RendererHudPayloadTests(unittest.TestCase):
             "grid-template-columns: repeat(4, minmax(0, 1fr));",
             script,
         )
-        self.assertIn("今日已休息 ${formatRestReminderRemaining(todayRestedSeconds)}", script)
+        self.assertIn(
+            "今日已休息 ${formatRestReminderRemaining(todayRestedSeconds)} 共${todayRestedCount}次",
+            script,
+        )
+        self.assertIn("restReminderSummaryText", script)
+        self.assertIn("todayRestedCount", script)
         self.assertIn('data-rest-reminder-summary="true"', script)
         self.assertNotIn('notification.status === "sent" ? "通知 OK" : "待测试"', script)
         self.assertIn("rest_reminder_work_start_time", script)

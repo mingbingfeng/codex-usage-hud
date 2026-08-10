@@ -104,6 +104,7 @@ class JsonlSessionParserTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot.model_provider, "muyuan")
+        self.assertEqual(snapshot.profile_name, "muyuan")
         self.assertEqual(snapshot.originator, "codex-tui")
         self.assertEqual(snapshot.client_kind, "cli")
 

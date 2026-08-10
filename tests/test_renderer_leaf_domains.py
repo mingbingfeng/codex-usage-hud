@@ -326,6 +326,60 @@ const domain = createBackgroundUsageDomain(ctx, shared);
     assert "background-usage-filter-cache-ok" in completed.stdout
 
 
+def test_background_usage_policy_action_is_exported_and_sends_command() -> None:
+    background_usage_factory = BACKGROUND_USAGE.split(
+        "  const backgroundUsageDomain = ctx.domains.register(", 1
+    )[0]
+    script = f"""
+const assert = require("node:assert/strict");
+global.window = {{ location: {{ href: "app://-/index.html" }} }};
+global.document = {{ getElementById: () => null }};
+global.location = window.location;
+const settingsCommandBindingName = "codexUsageHudSettingsCommand";
+const settingsModalId = "codex-usage-hud-settings";
+const backgroundUsageState = {{
+  policy: {{ desiredState: "enabled", policyRevision: 3 }},
+  policyPending: false,
+  policyError: "",
+  detail: {{ featureKey: "memory_consolidation", eventId: "event-1" }},
+}};
+const sent = [];
+const ctx = {{
+  bindings: {{
+    available: () => true,
+    send: (name, payload) => sent.push({{ name, payload }}),
+  }},
+  lifecycle: {{ active: () => true }},
+}};
+const shared = {{}};
+{background_usage_factory}
+const domain = createBackgroundUsageDomain(ctx, shared);
+assert.equal(typeof domain.backgroundUsagePolicyConfirm, "function");
+assert.equal(typeof domain.applyBackgroundUsagePolicy, "function");
+domain.applyBackgroundUsagePolicy(
+  "memory_consolidation", "event-1", "disabled",
+);
+assert.equal(sent.length, 1);
+assert.equal(sent[0].name, settingsCommandBindingName);
+assert.equal(sent[0].payload.action, "backgroundUsagePolicySet");
+assert.equal(sent[0].payload.featureKey, "memory_consolidation");
+assert.equal(sent[0].payload.desiredState, "disabled");
+assert.equal(sent[0].payload.expectedPolicyRevision, 3);
+assert.ok(backgroundUsageState.policyRequestId);
+console.log("background-usage-policy-command-ok");
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "background-usage-policy-command-ok" in completed.stdout
+
+
 def test_router_is_registry_first_and_no_continuous_legacy_asset_remains() -> None:
     assert manifest.ASSET_ORDER[-1] == "15_router"
     assert not Path(manifest.__file__).with_name("legacy.py").exists()

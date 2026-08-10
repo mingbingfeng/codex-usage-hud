@@ -33,6 +33,8 @@ class SettingsBridgeServer:
             Callable[[str], dict[str, object] | None] | None
         ) = None,
         background_usage_confirm_callback: Callable[[str], bool] | None = None,
+        background_usage_policy_query_callback: Callable[[str, str], dict[str, object]] | None = None,
+        background_usage_policy_set_callback: Callable[[str, str, object, str, str], dict[str, object]] | None = None,
     ) -> None:
         self.store = store
         self.host = host
@@ -44,6 +46,8 @@ class SettingsBridgeServer:
         self.background_usage_query_callback = background_usage_query_callback
         self.background_usage_detail_callback = background_usage_detail_callback
         self.background_usage_confirm_callback = background_usage_confirm_callback
+        self.background_usage_policy_query_callback = background_usage_policy_query_callback
+        self.background_usage_policy_set_callback = background_usage_policy_set_callback
         self.background_usage_access_token = secrets.token_urlsafe(24)
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
@@ -104,6 +108,8 @@ class SettingsBridgeServer:
         background_usage_query_callback = self.background_usage_query_callback
         background_usage_detail_callback = self.background_usage_detail_callback
         background_usage_confirm_callback = self.background_usage_confirm_callback
+        background_usage_policy_query_callback = self.background_usage_policy_query_callback
+        background_usage_policy_set_callback = self.background_usage_policy_set_callback
         background_usage_access_token = self.background_usage_access_token
 
         class Handler(BaseHTTPRequestHandler):
@@ -126,6 +132,9 @@ class SettingsBridgeServer:
                     return
                 if parsed.path == "/background-usage/detail":
                     self._background_usage_detail(parsed)
+                    return
+                if parsed.path == "/background-usage/policy":
+                    self._background_usage_policy_query(parsed)
                     return
                 if parsed.path != "/settings":
                     self._send_json({"status": "failed", "message": "not found"}, 404)
@@ -153,6 +162,9 @@ class SettingsBridgeServer:
                     return
                 if path == "/background-usage/confirm":
                     self._background_usage_confirm(urlparse(self.path))
+                    return
+                if path == "/background-usage/policy":
+                    self._background_usage_policy_set(urlparse(self.path))
                     return
                 self._send_json({"status": "failed", "message": "not found"}, 404)
 
@@ -255,6 +267,34 @@ class SettingsBridgeServer:
                         "changed": changed,
                     }
                 )
+
+            def _background_usage_policy_query(self, parsed: Any) -> None:
+                if not self._background_usage_authorized(parsed):
+                    return
+                if background_usage_policy_query_callback is None:
+                    self._send_json({"status": "failed", "message": "background policy is unavailable"}, 503)
+                    return
+                query = parse_qs(str(parsed.query or ""))
+                try:
+                    payload = background_usage_policy_query_callback(str(query.get("feature", [""])[0]), str(query.get("eventId", [""])[0]))
+                except Exception as exc:
+                    self._send_json({"status": "failed", "message": f"background policy query failed: {exc}"}, 500)
+                    return
+                self._send_json({"status": "ok", "backgroundUsagePolicy": payload})
+
+            def _background_usage_policy_set(self, parsed: Any) -> None:
+                if not self._background_usage_authorized(parsed):
+                    return
+                if background_usage_policy_set_callback is None:
+                    self._send_json({"status": "failed", "message": "background policy is unavailable"}, 503)
+                    return
+                body = self._read_json()
+                try:
+                    payload = background_usage_policy_set_callback(str(body.get("featureKey") or ""), str(body.get("desiredState") or ""), body.get("expectedPolicyRevision"), str(body.get("eventId") or ""), str(body.get("source") or "usage_detail"))
+                except Exception as exc:
+                    self._send_json({"status": "failed", "message": f"background policy update failed: {exc}"}, 500)
+                    return
+                self._send_json({"status": "ok", "backgroundUsagePolicy": payload})
 
             def _save_settings(self) -> None:
                 body = self._read_json()
