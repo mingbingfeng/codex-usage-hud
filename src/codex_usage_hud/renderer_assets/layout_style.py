@@ -2475,6 +2475,35 @@ TEXT = r"""
             text-align: right;
             overflow-wrap: anywhere;
           }
+          #${rootId} .codex-usage-hud-provider-meta-row {
+            min-width: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 6px;
+            flex: 0 1 auto;
+          }
+          #${rootId} .codex-usage-hud-settings-icon-action {
+            width: 28px;
+            height: 28px;
+            flex: 0 0 28px;
+            display: inline-grid;
+            place-items: center;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            background: transparent;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            cursor: pointer;
+            font-size: 15px;
+            line-height: 1;
+          }
+          #${rootId} .codex-usage-hud-settings-icon-action:hover,
+          #${rootId} .codex-usage-hud-settings-icon-action:focus-visible {
+            border-color: var(--codex-usage-hud-divider, #273241);
+            background: var(--codex-usage-hud-header-surface, #202833);
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            outline: none;
+          }
           #${rootId} .codex-usage-hud-provider-meta[data-tone="required"] {
             color: var(--codex-usage-hud-success, #8fe3a1);
             font-weight: 700;
@@ -2506,7 +2535,7 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-price-actions {
             min-width: 0;
             display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto repeat(2, 30px);
+            grid-template-columns: auto minmax(0, 1fr) auto repeat(3, 30px);
             gap: 8px;
             align-items: center;
             margin-top: 6px;
@@ -2548,6 +2577,19 @@ TEXT = r"""
             color: var(--codex-usage-hud-muted, #8492a6);
             font-size: 10px;
             white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-price-unit-wrap {
+            min-width: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 7px;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-provider-add-action {
+            min-height: 26px;
+            padding: 3px 8px;
+            font-size: 10px;
           }
           #${rootId} .codex-usage-hud-price-table {
             grid-column: 1 / -1;
@@ -3461,6 +3503,112 @@ TEXT = r"""
             font-size: 11px;
             line-height: 1.6;
             white-space: pre-wrap;
+          }
+          #${rootId} .codex-usage-hud-provider-config-card {
+            width: min(680px, calc(100% - 28px));
+          }
+          #${rootId} .codex-usage-hud-provider-config-grid {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            padding: 0 18px;
+          }
+          #${rootId} .codex-usage-hud-provider-config-grid > label {
+            min-width: 0;
+            display: grid;
+            gap: 4px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-provider-config-grid > label input,
+          #${rootId} .codex-usage-hud-provider-config-grid > label select {
+            min-width: 0;
+            box-sizing: border-box;
+            width: 100%;
+            min-height: 31px;
+            padding: 5px 7px;
+            border: 1px solid #47494f;
+            border-radius: 5px;
+            background: #14171b;
+            color: #f1f3f5;
+            outline: none;
+            font: inherit;
+            font-weight: 400;
+          }
+          #${rootId} .codex-usage-hud-provider-config-grid > label input:focus,
+          #${rootId} .codex-usage-hud-provider-config-grid > label select:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-config-grid > label input[readonly] {
+            opacity: .7;
+            cursor: not-allowed;
+          }
+          #${rootId} .codex-usage-hud-provider-config-section {
+            min-width: 0;
+            display: grid;
+            gap: 5px;
+            padding: 0 18px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-provider-config-section textarea {
+            box-sizing: border-box;
+            width: 100%;
+            min-height: 150px;
+            resize: vertical;
+            padding: 8px;
+            border: 1px solid #47494f;
+            border-radius: 5px;
+            background: #14171b;
+            color: #f1f3f5;
+            outline: none;
+            font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+            font-weight: 400;
+            white-space: pre;
+          }
+          #${rootId} .codex-usage-hud-provider-config-section textarea:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-config-section span {
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 400;
+            line-height: 1.4;
+          }
+          #${rootId} .codex-usage-hud-provider-config-scope {
+            min-width: 0;
+            grid-column: 1 / -1;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 16px;
+            margin: 0;
+            padding: 8px 9px;
+            border: 1px solid #47494f;
+            border-radius: 5px;
+            color: #c9cbd0;
+            font-size: 10px;
+            font-weight: 400;
+          }
+          #${rootId} .codex-usage-hud-provider-config-scope legend {
+            padding: 0 4px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-provider-config-scope label {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-provider-config-scope input {
+            width: 15px;
+            height: 15px;
+            margin: 0;
+            accent-color: var(--codex-usage-hud-accent, #f3d27a);
           }
           #${rootId} .codex-usage-hud-settings-confirm-main .codex-usage-hud-settings-confirm-body {
             margin: 8px 0 0;

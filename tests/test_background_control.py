@@ -81,3 +81,70 @@ class BackgroundControlServiceTests(unittest.TestCase):
             self.assertEqual(opened, [True])
             self.assertFalse((root / "config.toml").exists())
             self.assertEqual(service.query("context_suggestions")["desiredState"], "disabled")
+
+    def test_memories_reports_restart_required_until_restart_is_verified(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            restart_calls: list[bool] = []
+            service = BackgroundControlService(
+                root,
+                codex_config_path=root / "config.toml",
+                restart_probe=lambda: {
+                    "required": True,
+                    "available": True,
+                    "message": "当前 Codex 进程仍在使用旧配置。",
+                },
+                restart_codex=lambda: restart_calls.append(True)
+                or {"ok": True, "verified": True},
+            )
+
+            configured = service.set("memory_consolidation", "disabled", 0)
+
+            self.assertEqual(configured["verificationState"], "configured_unverified")
+            self.assertTrue(configured["requiresRestart"])
+            self.assertTrue(configured["restartAvailable"])
+            self.assertEqual(configured["effectiveState"], "enabled")
+
+            verified = service.set(
+                "memory_consolidation",
+                "disabled",
+                configured["policyRevision"],
+                "event-1",
+                "usage_detail",
+                True,
+            )
+
+            self.assertEqual(restart_calls, [True])
+            self.assertEqual(verified["verificationState"], "verified")
+            self.assertEqual(verified["effectiveState"], "disabled")
+            self.assertFalse(verified["requiresRestart"])
+
+    def test_restart_unavailable_never_claims_verified(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            service = BackgroundControlService(
+                root,
+                codex_config_path=root / "config.toml",
+                restart_probe=lambda: {
+                    "required": True,
+                    "available": False,
+                    "code": "standalone_cli_running",
+                    "message": "检测到运行中的 Codex CLI，HUD 不会强制终止。",
+                },
+                restart_codex=lambda: {"ok": False, "verified": False},
+            )
+
+            configured = service.set("memory_consolidation", "disabled", 0)
+            result = service.set(
+                "memory_consolidation",
+                "disabled",
+                configured["policyRevision"],
+                "event-1",
+                "usage_detail",
+                True,
+            )
+
+            self.assertEqual(result["verificationState"], "configured_unverified")
+            self.assertNotEqual(result["effectiveState"], "disabled")
+            self.assertTrue(result["requiresRestart"])
+            self.assertEqual(result["error"]["code"], "restart_unavailable")

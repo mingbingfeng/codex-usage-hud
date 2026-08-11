@@ -16,6 +16,7 @@ import uuid
 
 from . import runtime_settings
 from . import __version__
+from .codex_provider_config import save_provider_configs
 from .config import (
     DEFAULT_WORK_OVERLAY_MAX_ITEMS,
     ModelPrice,
@@ -142,6 +143,7 @@ class GeneralCommandPorts:
     default_overlay_limit: Callable[[], int]
     dismiss_warnings_today: Callable[[], bool]
     pricing_open_path: Callable[[Path], None] | None = None
+    save_codex_providers: Callable[[object], Mapping[str, object]] | None = None
 
 
 def _status(message: str, *, kind: str = "") -> dict[str, object]:
@@ -568,7 +570,18 @@ def handle_background_command(
             apply = getattr(runtime, "policy_set", None)
             if not callable(apply):
                 return runtime_settings.background_usage_response_status("policyApply", request_id, error="后台任务控制当前不可用。")
-            payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
+            restart_now = bool(command.get("restartNow"))
+            if restart_now:
+                restart = getattr(runtime, "policy_restart", None)
+                if callable(restart):
+                    payload = restart(command.get("featureKey"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
+                else:
+                    try:
+                        payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"), True)
+                    except TypeError:
+                        payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
+            else:
+                payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
             return runtime_settings.background_usage_response_status("policyApply", request_id, payload=payload, event_id=str(command.get("eventId") or ""), error=str(payload.get("message") or "") if isinstance(payload, Mapping) and payload.get("error") else "")
         if action == "backgroundUsageQuery":
             raw_filters = command.get("filters")
@@ -829,12 +842,29 @@ def handle_general_command(
     action = str(command.get("action") or "").strip()
     try:
         if action == "savePricing":
+            codex_provider_result: Mapping[str, object] | None = None
+            codex_updates = command.get("codexProviders")
+            if codex_updates:
+                if ports.save_codex_providers is None:
+                    raise RuntimeError("Codex provider 配置写入当前不可用。")
+                codex_provider_result = ports.save_codex_providers(codex_updates)
             _config, changed_count = _save_versioned_price_changes(
                 ports,
                 command.get("settings"),
                 _current_pricing_effective_at(),
             )
-            return _status(f"已保存 {changed_count} 个新价格版本；已有记录不变。")
+            provider_suffix = ""
+            if codex_provider_result:
+                provider_ids = [
+                    str(item or "")
+                    for item in codex_provider_result.get("providerIds", [])
+                    if str(item or "")
+                ]
+                if provider_ids:
+                    provider_suffix = f"；Codex provider 已更新：{', '.join(provider_ids)}"
+            return _status(
+                f"已保存 {changed_count} 个新价格版本；已有记录不变{provider_suffix}。"
+            )
         if action in {"pricingImportPreview", "pricingImportCommit"}:
             default_effective_at = _current_pricing_effective_at()
             payload = _pricing_payload_with_default_effective_at(
@@ -965,6 +995,12 @@ def handle_general_command(
                 raise ValueError("价格版本只能通过保存价格或导入预览流程写入。")
             if action == "save" and _price_updates(previous_config, config):
                 raise ValueError("价格有变更，请使用价格保存流程。")
+            codex_provider_result: Mapping[str, object] | None = None
+            codex_updates = command.get("codexProviders")
+            if action == "save" and codex_updates:
+                if ports.save_codex_providers is None:
+                    raise RuntimeError("Codex provider 配置写入当前不可用。")
+                codex_provider_result = ports.save_codex_providers(codex_updates)
             ports.save_config(config)
             if action == "applyDisplayMode":
                 return _status(
@@ -986,6 +1022,14 @@ def handle_general_command(
                     command.get("requestId") or command.get("id") or ""
                 )
                 return status
+            if codex_provider_result:
+                provider_ids = [
+                    str(item or "")
+                    for item in codex_provider_result.get("providerIds", [])
+                    if str(item or "")
+                ]
+                suffix = f"；Codex provider 已更新：{', '.join(provider_ids)}" if provider_ids else ""
+                return _status(f"设置已保存，相关显示会自动刷新{suffix}。")
             return _status("设置已保存，相关显示会自动刷新。")
         if action.startswith("restReminder"):
             reminder = ports.rest_reminder
@@ -1259,6 +1303,7 @@ def _handle_renderer_settings_command(
             settings_path is not None and not dismiss_warning_for_today(settings_path)
         ),
         pricing_open_path=_open_system_path,
+        save_codex_providers=lambda updates: save_provider_configs(updates),
     )
     return dispatch_command(command, command_ports, general_ports)
 

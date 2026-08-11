@@ -13,6 +13,8 @@ _TEXT_PREFIX = r"""
         importPreview: null,
         handledArtifacts: new Map(),
       };
+      const codexProviderDrafts = new Map();
+      const codexProviderDirty = new Set();
 
       function settingsChromeMarkup() {
         return `
@@ -79,6 +81,7 @@ _TEXT_PREFIX = r"""
           rest_reminder_lunch_start_time: "12:00",
           rest_reminder_lunch_end_time: "13:30",
           model_prices: {},
+          default_model_prices: {},
           pricing_versions: [],
           pricing_audit: [],
         };
@@ -318,6 +321,107 @@ _TEXT_PREFIX = r"""
         ]));
       }
 
+      function suggestedProviderEnvironmentKey(provider) {
+        const normalized = String(provider || "")
+          .trim()
+          .replace(/[^A-Za-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "")
+          .toUpperCase();
+        return `${normalized || "PROVIDER"}_API_KEY`;
+      }
+
+      function tomlBasicStringEscape(value) {
+        return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      }
+
+      function defaultProviderSectionText(provider, baseUrl, envKey) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase() || "provider-id";
+        return [
+          "[model_providers." + normalizedProvider + "]",
+          "name = \"" + tomlBasicStringEscape(normalizedProvider) + "\"",
+          "base_url = \"" + tomlBasicStringEscape(baseUrl) + "\"",
+          "env_key = \"" + tomlBasicStringEscape(envKey) + "\"",
+          "wire_api = \"responses\"",
+        ].join("\n");
+      }
+
+      function providerSectionBasicString(text, key) {
+        const escapedKey = String(key || "").replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&");
+        const match = String(text || "").match(new RegExp("^[\t ]*" + escapedKey + "[\t ]*=[\t ]*\"((?:\\.|[^\"\\\r\n])*)\"", "m"));
+        if (!match) return "";
+        return match[1].replace(/\\(["\\])/g, "$1");
+      }
+
+      function setProviderSectionBasicString(text, key, value) {
+        const escapedKey = String(key || "").replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&");
+        const escapedValue = tomlBasicStringEscape(value);
+        const pattern = new RegExp("^([\t ]*" + escapedKey + "[\t ]*=[\t ]*)\"(?:\\.|[^\"\\\r\n])*\"([\t ]*(?:#.*)?)$", "m");
+        if (pattern.test(String(text || ""))) {
+          return String(text || "").replace(pattern, "$1\"" + escapedValue + "\"$2");
+        }
+        const newline = String(text || "").includes("\r\n") ? "\r\n" : "\n";
+        const suffix = String(text || "").endsWith("\n") || String(text || "").endsWith("\r") ? "" : newline;
+        return String(text || "") + suffix + key + " = \"" + escapedValue + "\"";
+      }
+
+      function setProviderSectionHeader(text, provider) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        const header = "[model_providers." + normalizedProvider + "]";
+        const pattern = /^[\t ]*\[model_providers\.[A-Za-z0-9_-]+\][\t ]*(?:#.*)?/;
+        if (pattern.test(String(text || ""))) return String(text || "").replace(pattern, header);
+        return defaultProviderSectionText(normalizedProvider, "", suggestedProviderEnvironmentKey(normalizedProvider));
+      }
+
+      function syncProviderSectionFromFields(layer) {
+        const idNode = layer?.querySelector('[data-provider-config-field="provider_id"]');
+        const baseUrlNode = layer?.querySelector('[data-provider-config-field="base_url"]');
+        const envNode = layer?.querySelector('[data-provider-config-field="env_key"]');
+        const sectionNode = layer?.querySelector('[data-provider-config-field="section_text"]');
+        if (!sectionNode) return;
+        let text = setProviderSectionHeader(sectionNode.value, idNode?.value || "provider-id");
+        text = setProviderSectionBasicString(text, "base_url", baseUrlNode?.value || "");
+        text = setProviderSectionBasicString(text, "env_key", envNode?.value || "");
+        sectionNode.value = text;
+      }
+
+      function syncProviderFieldsFromSection(layer) {
+        const baseUrlNode = layer?.querySelector('[data-provider-config-field="base_url"]');
+        const envNode = layer?.querySelector('[data-provider-config-field="env_key"]');
+        const sectionNode = layer?.querySelector('[data-provider-config-field="section_text"]');
+        if (!sectionNode) return;
+        const baseUrl = providerSectionBasicString(sectionNode.value, "base_url");
+        const envKey = providerSectionBasicString(sectionNode.value, "env_key");
+        if (baseUrlNode && baseUrl) baseUrlNode.value = baseUrl;
+        if (envNode && envKey) envNode.value = envKey;
+      }
+
+      function codexProviderDraftFromSettings(settings, provider) {
+        const detail = settings.provider_registry?.[provider] || {};
+        const defined = detail.defined === true;
+        return {
+          providerId: provider,
+          baseUrl: String(detail.baseUrl || ""),
+          envKey: String(detail.envKey || (defined ? "" : suggestedProviderEnvironmentKey(provider))),
+          configText: String(detail.configText || ""),
+          apiKey: "",
+          isNew: !defined,
+          hasApiKey: detail.hasApiKey === true,
+          originalEnvKey: String(detail.envKey || ""),
+        };
+      }
+
+      function ensureCodexProviderDraft(settings, provider) {
+        const normalized = String(provider || "").trim().toLowerCase();
+        if (!normalized) return null;
+        if (!codexProviderDrafts.has(normalized)) {
+          codexProviderDrafts.set(
+            normalized,
+            codexProviderDraftFromSettings(settings, normalized),
+          );
+        }
+        return codexProviderDrafts.get(normalized);
+      }
+
       function canonicalSettingsPriceTable(value, provider = "") {
         const prices = value && typeof value === "object" ? value : {};
         const normalizedProvider = String(provider || "").trim().toLowerCase();
@@ -379,6 +483,10 @@ _TEXT_PREFIX = r"""
       }
 
       function ensureSettingsProviderDraft(settings, reset = false) {
+        if (reset) {
+          codexProviderDrafts.clear();
+          codexProviderDirty.clear();
+        }
         if (settingsProviderDraft && !reset) return settingsProviderDraft;
         const order = settingsProviderNames(settings);
         const appProvider = String(settings.app_provider || "").trim().toLowerCase();
@@ -401,6 +509,7 @@ _TEXT_PREFIX = r"""
           appProvider,
           order,
           providers: Object.fromEntries(order.map((provider) => {
+            ensureCodexProviderDraft(settings, provider);
             // A payload received before runtime migration can still expose a
             // registry-only provider. Give it the same safe notification-only
             // default while its clean default price table is materialized.
@@ -476,7 +585,10 @@ _TEXT_PREFIX = r"""
             <div class="codex-usage-hud-provider-tabs" data-provider-tabs="true" role="tablist" aria-label="Provider">
               ${settingsProviderTabsHtml(settings)}
             </div>
-            <div class="codex-usage-hud-price-unit">USD / 1M tokens</div>
+            <div class="codex-usage-hud-price-unit-wrap">
+              <div class="codex-usage-hud-price-unit">USD / 1M tokens</div>
+              <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-provider-add-action" data-action="settings-add-provider">新增供应商</button>
+            </div>
           </div>
         `;
         const entry = draft.providers[activeProvider];
@@ -507,7 +619,10 @@ _TEXT_PREFIX = r"""
                 <input data-setting-key="weekly_adjustment_usd" type="number" min="0" step="0.01" value="${escapeHtml(weeklyAdjustmentValue)}" placeholder="本周补充额度 USD" aria-label="本周补充额度 USD" title="本周补充额度 USD">
               </div>
             </div>
-            <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
+            <div class="codex-usage-hud-provider-meta-row">
+              <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
+              ${required ? "" : '<button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-edit-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="编辑 ' + escapeHtml(activeProvider) + ' 供应商配置" title="编辑供应商配置">✎</button>'}
+            </div>
           </div>
           <div class="codex-usage-hud-price-table">
             <div class="codex-usage-hud-price-header">
@@ -519,6 +634,7 @@ _TEXT_PREFIX = r"""
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-add-model">添加模型</button>
               <input data-setting-key="pricing_url" value="${escapeHtml(providerSettings.pricing_url)}" placeholder="${escapeHtml(pricingUrlPlaceholder)}" aria-label="计费单价获取地址" title="${escapeHtml(pricingUrlPlaceholder)}">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-fetch-prices">拉取并预览</button>
+              <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-pricing-icon-action" data-action="settings-sync-provider-prices" aria-label="同步当前 Provider 单价到其它 Provider" title="同步当前 Provider 的模型单价到其它 Provider"><span aria-hidden="true">⇄</span></button>
               <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-pricing-icon-action" data-action="pricing-export" aria-label="导出价格 JSON" title="导出价格 JSON"><span aria-hidden="true">⇩</span></button>
               <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-pricing-icon-action" data-action="pricing-import-open" aria-label="导入价格 JSON" title="导入价格 JSON"><span aria-hidden="true">⇧</span></button>
             </div>
@@ -634,6 +750,193 @@ _TEXT_PREFIX = r"""
         settingsProviderDraft.activeProvider = nextProvider;
         window[settingsProviderName] = nextProvider;
         renderSettingsProviderEditor({ focusTab });
+      }
+
+      function cloneProviderModelPrices(value, provider) {
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        const prices = cloneSettingsPriceTable(value);
+        return Object.fromEntries(Object.entries(prices).map(([key, price]) => [
+          key,
+          {
+            ...price,
+            model: String(price?.model || key || ""),
+            provider: normalizedProvider,
+          },
+        ]));
+      }
+
+      function openProviderConfigDialog(provider = "", { isNew = false } = {}) {
+        const dialog = settingsDialogRoot();
+        if (!dialog) return;
+        const settings = hudSettingsFromPayload();
+        ensureSettingsProviderDraft(settings);
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        const target = isNew ? null : ensureCodexProviderDraft(settings, normalizedProvider);
+        const targetEnvKey = target?.envKey || (isNew ? suggestedProviderEnvironmentKey(normalizedProvider) : "");
+        const initialConfigText = String(
+          target?.configText
+            || defaultProviderSectionText(normalizedProvider, target?.baseUrl || "", targetEnvKey),
+        );
+        const sourceProvider = "";
+        const sourceOptions = settingsProviderDraft.order.map((item) => `
+          <option value="${escapeHtml(item)}" ${item === sourceProvider ? "selected" : ""}>${escapeHtml(item)}</option>
+        `).join("");
+        closeSettingsConfirm();
+        const layer = document.createElement("div");
+        layer.className = "codex-usage-hud-settings-confirm-layer";
+        layer.dataset.settingsConfirm = "true";
+        layer.dataset.providerConfigDialog = "true";
+        layer.dataset.providerConfigMode = isNew ? "new" : "edit";
+        layer.dataset.providerConfigProvider = normalizedProvider;
+        layer.innerHTML = `
+          <div class="codex-usage-hud-settings-confirm-card codex-usage-hud-provider-config-card" role="dialog" aria-modal="true" aria-label="${isNew ? "新增供应商" : "编辑供应商配置"}">
+            <div class="codex-usage-hud-settings-confirm-kicker">Codex model provider</div>
+            <div class="codex-usage-hud-settings-confirm-title">${isNew ? "新增供应商" : `编辑 ${escapeHtml(normalizedProvider)} 供应商`}</div>
+            <div class="codex-usage-hud-provider-config-grid">
+              <label>Provider ID
+                <input data-provider-config-field="provider_id" value="${escapeHtml(normalizedProvider)}" ${isNew ? "" : "readonly"} autocomplete="off">
+              </label>
+              ${isNew ? `<label>复制模型列表 / 单价配置
+                <select data-provider-config-field="source_provider">
+                  <option value="">不复制，使用当前默认价格</option>
+                  ${sourceOptions}
+                </select>
+              </label>` : ""}
+              <label>Base URL
+                <input data-provider-config-field="base_url" value="${escapeHtml(target?.baseUrl || "")}" placeholder="https://api.example.com/v1" autocomplete="url">
+              </label>
+              <label>用户环境变量名称
+                <input data-provider-config-field="env_key" value="${escapeHtml(target?.envKey || (isNew ? suggestedProviderEnvironmentKey(normalizedProvider) : ""))}" autocomplete="off">
+              </label>
+              <label>API key
+                <input data-provider-config-field="api_key" type="password" value="" placeholder="${isNew ? "请输入 API key" : (target?.hasApiKey ? "留空保持当前密钥" : "请输入 API key")}" autocomplete="new-password">
+              </label>
+              ${isNew ? `<fieldset class="codex-usage-hud-provider-config-scope">
+                <legend>统计范围</legend>
+                <label><input type="radio" name="codex-provider-scope" value="notification" checked> 仅气泡通知不统计</label>
+                <label><input type="radio" name="codex-provider-scope" value="included"> 纳入统计</label>
+              </fieldset>` : ""}
+            </div>
+            <label class="codex-usage-hud-provider-config-section">config.toml 配置（[model_providers.${escapeHtml(normalizedProvider || "xxxx")}]）
+              <textarea data-provider-config-field="section_text" rows="8" spellcheck="false">${escapeHtml(initialConfigText)}</textarea>
+              <span>此处内容会写回用户 config.toml；Base URL 和环境变量名会与上面的字段同步。</span>
+            </label>
+            <div class="codex-usage-hud-settings-confirm-body">保存设置后会更新用户的 config.toml；API key 只写入用户环境变量，不会保存到 HUD 配置或回显到页面。</div>
+            <div class="codex-usage-hud-settings-confirm-actions">
+              <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-cancel" data-variant="ghost">取消</button>
+              <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-apply" data-primary="true">${isNew ? "添加" : "应用"}</button>
+            </div>
+          </div>
+        `;
+        dialog.appendChild(layer);
+        const idNode = layer.querySelector('[data-provider-config-field="provider_id"]');
+        const envNode = layer.querySelector('[data-provider-config-field="env_key"]');
+        const sectionNode = layer.querySelector('[data-provider-config-field="section_text"]');
+        const baseUrlNode = layer.querySelector('[data-provider-config-field="base_url"]');
+        if (isNew && idNode && envNode) {
+          let generated = suggestedProviderEnvironmentKey(idNode.value);
+          idNode.addEventListener("input", () => {
+            if (envNode.value === generated || !envNode.value) {
+              generated = suggestedProviderEnvironmentKey(idNode.value);
+              envNode.value = generated;
+            }
+            syncProviderSectionFromFields(layer);
+          });
+        }
+        [baseUrlNode, envNode].forEach((node) => {
+          node?.addEventListener("input", () => syncProviderSectionFromFields(layer));
+        });
+        sectionNode?.addEventListener("input", () => syncProviderFieldsFromSection(layer));
+        idNode?.focus?.();
+        idNode?.select?.();
+      }
+
+      function applyProviderConfigDialog() {
+        const layer = document.querySelector(`#${settingsModalId} [data-provider-config-dialog="true"]`);
+        if (!layer || !settingsProviderDraft) return false;
+        const isNew = layer.dataset.providerConfigMode === "new";
+        const idNode = layer.querySelector('[data-provider-config-field="provider_id"]');
+        const sourceNode = layer.querySelector('[data-provider-config-field="source_provider"]');
+        const baseUrlNode = layer.querySelector('[data-provider-config-field="base_url"]');
+        const envNode = layer.querySelector('[data-provider-config-field="env_key"]');
+        const apiKeyNode = layer.querySelector('[data-provider-config-field="api_key"]');
+        const sectionNode = layer.querySelector('[data-provider-config-field="section_text"]');
+        const provider = String(idNode?.value || "").trim().toLowerCase();
+        const sectionText = String(sectionNode?.value || "");
+        const baseUrl = sectionNode
+          ? providerSectionBasicString(sectionText, "base_url").trim().replace(/\/+$/, "")
+          : String(baseUrlNode?.value || "").trim().replace(/\/+$/, "");
+        const envKey = sectionNode
+          ? providerSectionBasicString(sectionText, "env_key").trim()
+          : String(envNode?.value || "").trim();
+        const apiKey = String(apiKeyNode?.value || "");
+        if (!/^[A-Za-z0-9_-]+$/.test(provider) || (isNew && provider === "custom")) {
+          setSettingsStatus("Provider ID 只能使用字母、数字、连字符或下划线，且不能是 custom。", "error");
+          return false;
+        }
+        if (!baseUrl || /[\r\n]/.test(baseUrl)) {
+          setSettingsStatus("Base URL 不能为空且必须是单行文本。", "error");
+          return false;
+        }
+        const existingCodex = codexProviderDrafts.get(provider);
+        if (envKey && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey)) {
+          setSettingsStatus("请输入有效的用户环境变量名称。", "error");
+          return false;
+        }
+        if (!envKey && (isNew || existingCodex?.originalEnvKey)) {
+          setSettingsStatus("请输入有效的用户环境变量名称。", "error");
+          return false;
+        }
+        const existing = settingsProviderDraft.providers[provider];
+        if (isNew && existing) {
+          setSettingsStatus(`Provider ${provider} 已存在。`, "error");
+          return false;
+        }
+        if (!apiKey && isNew && !existingCodex?.hasApiKey) {
+          setSettingsStatus("新增供应商时请输入 API key。", "error");
+          return false;
+        }
+        const settings = hudSettingsFromPayload();
+        if (isNew) {
+          const sourceProvider = String(sourceNode?.value || "").trim().toLowerCase();
+          const sourceEntry = settingsProviderDraft.providers[sourceProvider];
+          const sourceTable = sourceEntry?.settings?.model_prices
+            || settings.default_model_prices
+            || settings.model_prices;
+          const includeInStats = layer.querySelector('input[name="codex-provider-scope"]:checked')?.value === "included";
+          settingsProviderDraft.order.push(provider);
+          settingsProviderDraft.providers[provider] = {
+            enabled: includeInStats,
+            notificationOnly: !includeInStats,
+            settings: {
+              model_prices: cloneProviderModelPrices(sourceTable, provider),
+              pricing_url: "",
+              weekly_adjustment_usd: 0,
+            },
+          };
+          settingsProviderDraft.activeProvider = provider;
+          window[settingsProviderName] = provider;
+        } else if (!existing) {
+          setSettingsStatus(`Provider ${provider} 当前没有可编辑的价格草稿。`, "error");
+          return false;
+        }
+        codexProviderDrafts.set(provider, {
+          providerId: provider,
+          baseUrl,
+          envKey,
+          configText: sectionText,
+          apiKey,
+          isNew: isNew || existingCodex?.isNew === true,
+          hasApiKey: !!apiKey || existingCodex?.hasApiKey === true,
+          originalEnvKey: existingCodex?.originalEnvKey || "",
+        });
+        codexProviderDirty.add(provider);
+        settingsDirtyProviders.add(provider);
+        closeSettingsConfirm();
+        renderSettingsProviderEditor();
+        renderSettingsProviderTabs();
+        setSettingsStatus(isNew ? "供应商已加入草稿；点击保存后写入 config.toml。" : "供应商配置已加入保存草稿。", "");
+        return true;
       }
 
       function typedSettingsRequestId(prefix) {
@@ -1055,6 +1358,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         }
         if (action === "savePricing") {
           settingsDirtyProviders.clear();
+          codexProviderDirty.clear();
           renderSettingsProviderTabs();
         }
       }
@@ -1270,6 +1574,20 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         return next;
       }
 
+      function collectCodexProviderUpdates() {
+        return Array.from(codexProviderDirty).map((provider) => {
+          const draft = codexProviderDrafts.get(provider) || {};
+          return {
+            provider_id: String(draft.providerId || provider).trim().toLowerCase(),
+            base_url: String(draft.baseUrl || "").trim(),
+            env_key: String(draft.envKey || "").trim(),
+            api_key: String(draft.apiKey || ""),
+            section_text: String(draft.configText || ""),
+            is_new: draft.isNew === true,
+          };
+        });
+      }
+
       function pricingTableFingerprint(settings) {
         const providers = settings?.provider_settings && typeof settings.provider_settings === "object"
           ? settings.provider_settings
@@ -1446,6 +1764,83 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         return result;
       }
 
+      function syncCurrentProviderPricesToOthers() {
+        const sourceProvider = captureSettingsProviderForm();
+        const draft = settingsProviderDraft;
+        const sourceEntry = draft?.providers?.[sourceProvider];
+        const sourceTable = sourceEntry?.settings?.model_prices && typeof sourceEntry.settings.model_prices === "object"
+          ? sourceEntry.settings.model_prices
+          : {};
+        const sourceRows = Object.entries(sourceTable).filter(([key, row]) => pricingModelName(row, key));
+        if (!draft || !sourceProvider || !sourceRows.length) {
+          setSettingsStatus("当前 Provider 没有可同步的模型单价。", "error");
+          return;
+        }
+        let providerCount = 0;
+        let addedCount = 0;
+        let updatedCount = 0;
+        draft.order.forEach((targetProvider) => {
+          if (targetProvider === sourceProvider) return;
+          const targetEntry = draft.providers?.[targetProvider];
+          if (!targetEntry) return;
+          const currentSettings = targetEntry.settings || {};
+          const table = cloneSettingsPriceTable(currentSettings.model_prices);
+          let providerTouched = false;
+          sourceRows.forEach(([sourceKey, sourceRow]) => {
+            const model = pricingModelName(sourceRow, sourceKey);
+            if (!model) return;
+            const matchingKeys = Object.keys(table).filter((key) => (
+              pricingModelsMatch(pricingModelName(table[key], key), model)
+            ));
+            if (matchingKeys.length) {
+              matchingKeys.forEach((key) => {
+                const targetRow = table[key] && typeof table[key] === "object" ? table[key] : {};
+                const nextRow = {
+                  ...targetRow,
+                  ...pricingPriceFields(sourceRow, model),
+                  model: pricingModelName(targetRow, key) || model,
+                };
+                if (pricingRowFingerprint(targetRow, key) !== pricingRowFingerprint(nextRow, key)) {
+                  updatedCount += 1;
+                  providerTouched = true;
+                }
+                table[key] = nextRow;
+              });
+              return;
+            }
+            table[model] = {
+              ...pricingPriceFields(sourceRow, model),
+              provider: targetProvider,
+            };
+            addedCount += 1;
+            providerTouched = true;
+          });
+          if (!providerTouched) return;
+          targetEntry.settings = {
+            ...currentSettings,
+            model_prices: canonicalSettingsPriceTable(table, targetProvider),
+          };
+          settingsDirtyProviders.add(targetProvider);
+          providerCount += 1;
+        });
+        renderSettingsProviderTabs();
+        if (!providerCount) {
+          setSettingsStatus("其它 Provider 的模型单价已是最新。");
+          return;
+        }
+        setSettingsStatus(
+          "已同步 "
+          + sourceRows.length
+          + " 个模型到 "
+          + providerCount
+          + " 个 Provider：新增 "
+          + addedCount
+          + "，更新 "
+          + updatedCount
+          + "。保存后生效。"
+        );
+      }
+
       function pricingChangeSummaryHtml(previous, candidate) {
         const beforeTables = pricingTablesByScope(previous);
         const afterTables = pricingTablesByScope(candidate);
@@ -1551,6 +1946,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         submitSettingsCommand({
           action: "savePricing",
           settings: pricingWorkflowState.pendingSettings || collectSettingsForm(),
+          codexProviders: collectCodexProviderUpdates(),
         }, "正在保存新的价格版本...");
       }
 
@@ -1718,12 +2114,14 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           });
           return;
         }
+        const codexProviders = collectCodexProviderUpdates();
         const submitted = submitSettingsCommand(
-          { action: "save", settings, ...(section ? { section } : {}) },
+          { action: "save", settings, ...(section ? { section } : {}), ...(codexProviders.length ? { codexProviders } : {}) },
           section === "restReminder" ? "正在保存提醒设置..." : "正在保存设置..."
         );
         if (submitted) {
           settingsDirtyProviders.clear();
+          codexProviderDirty.clear();
           renderSettingsProviderTabs();
         }
       }
@@ -1973,6 +2371,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         stopSessionCleanupElapsedTicker();
         settingsProviderDraft = null;
         settingsDirtyProviders.clear();
+        codexProviderDrafts.clear();
+        codexProviderDirty.clear();
       }
 
       function applySettingsPayload(root, payload) {
@@ -2025,6 +2425,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       detectedPriceModelsHtml,
       settingsProviderNames,
       cloneSettingsPriceTable,
+      suggestedProviderEnvironmentKey,
+      ensureCodexProviderDraft,
       providerDraftFromSettings,
       ensureSettingsProviderDraft,
       settingsProviderTabBadge,
@@ -2032,6 +2434,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       settingsProviderTabsHtml,
       settingsProviderEditorHtml,
       applyPricingToAllProviders,
+      syncCurrentProviderPricesToOthers,
       revealSettingsProviderTab,
       renderSettingsProviderTabs,
       captureSettingsProviderForm,
@@ -2041,6 +2444,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       markSettingsProviderDirty,
       renderSettingsProviderEditor,
       switchSettingsProvider,
+      openProviderConfigDialog,
+      applyProviderConfigDialog,
       typedSettingsRequestId,
       renderSettingsModal,
       restoreOpenSettingsModal,
@@ -2066,6 +2471,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       closeSettingsConfirm,
       openSettingsLoading,
       collectSettingsForm,
+      collectCodexProviderUpdates,
       saveSettingsFromModal,
       fetchPricesFromModal,
       confirmPricingEffectiveAt,
@@ -2123,6 +2529,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     detectedPriceModelsHtml,
     settingsProviderNames,
     cloneSettingsPriceTable,
+    suggestedProviderEnvironmentKey,
+    ensureCodexProviderDraft,
     providerDraftFromSettings,
     ensureSettingsProviderDraft,
     settingsProviderTabBadge,
@@ -2130,6 +2538,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     settingsProviderTabsHtml,
       settingsProviderEditorHtml,
       applyPricingToAllProviders,
+      syncCurrentProviderPricesToOthers,
       revealSettingsProviderTab,
       renderSettingsProviderTabs,
       captureSettingsProviderForm,
@@ -2139,6 +2548,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       markSettingsProviderDirty,
     renderSettingsProviderEditor,
     switchSettingsProvider,
+    openProviderConfigDialog,
+    applyProviderConfigDialog,
     typedSettingsRequestId,
     renderSettingsModal,
     restoreOpenSettingsModal,
@@ -2164,6 +2575,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     closeSettingsConfirm,
     openSettingsLoading,
     collectSettingsForm,
+    collectCodexProviderUpdates,
     saveSettingsFromModal,
     fetchPricesFromModal,
     confirmPricingEffectiveAt,

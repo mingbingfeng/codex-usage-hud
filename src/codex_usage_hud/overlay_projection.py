@@ -51,7 +51,7 @@ def work_item_to_overlay_dict(item: WorkStatusItem) -> dict[str, object]:
         "source": item.source,
         "workdir": item.workdir,
         "modelProvider": item.model_provider,
-        "profileName": item.profile_name,
+        "profileName": getattr(item, "profile_name", ""),
         "clientKind": item.client_kind,
         "sessionStartedAt": _iso_or_empty(item.session_started_at),
         "taskStartedAt": _iso_or_empty(item.task_started_at),

@@ -380,6 +380,14 @@ console.log("background-usage-policy-command-ok");
     assert "background-usage-policy-command-ok" in completed.stdout
 
 
+def test_background_usage_restart_confirmation_is_explicit_and_unverified_is_not_disabled() -> None:
+    assert "backgroundUsagePolicyRestartConfirm" in BACKGROUND_USAGE
+    assert "重启 Codex 以完成禁用" in BACKGROUND_USAGE
+    assert "立即重启 Codex" in BACKGROUND_USAGE
+    assert 'verification === "verified"' in BACKGROUND_USAGE
+    assert '["verified", "configured_unverified"].includes(verification)' not in BACKGROUND_USAGE
+
+
 def test_router_is_registry_first_and_no_continuous_legacy_asset_remains() -> None:
     assert manifest.ASSET_ORDER[-1] == "15_router"
     assert not Path(manifest.__file__).with_name("legacy.py").exists()

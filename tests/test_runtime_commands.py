@@ -56,6 +56,41 @@ def test_background_exception_keeps_request_and_response_kind() -> None:
     assert "boom" in response["error"]
 
 
+def test_background_policy_restart_uses_explicit_restart_path() -> None:
+    runtime = SimpleNamespace(
+        policy_set=MagicMock(),
+        policy_restart=MagicMock(
+            return_value={
+                "featureKey": "memory_consolidation",
+                "verificationState": "verified",
+                "effectiveState": "disabled",
+                "restartAttempted": True,
+            }
+        ),
+    )
+
+    status = handle_background_command(
+        {
+            "action": "backgroundUsagePolicySet",
+            "requestId": "policy-restart-1",
+            "featureKey": "memory_consolidation",
+            "desiredState": "disabled",
+            "expectedPolicyRevision": 4,
+            "restartNow": True,
+        },
+        RuntimeCommandPorts(background_usage=runtime),
+    )
+
+    runtime.policy_restart.assert_called_once_with(
+        "memory_consolidation", 4, "", "usage_detail"
+    )
+    runtime.policy_set.assert_not_called()
+    response = status["backgroundUsageResponse"]
+    assert response["requestId"] == "policy-restart-1"
+    assert response["kind"] == "policyApply"
+    assert response["payload"]["verificationState"] == "verified"
+
+
 def test_usage_insights_workdir_opens_only_payload_directory(tmp_path: Path) -> None:
     session_id = "10000000-0000-4000-8000-000000000001"
     payload = {

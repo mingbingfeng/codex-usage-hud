@@ -275,6 +275,11 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("应用于所有 providers", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("applyPricingToAllProviders", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("updatePricingApplyAllPreview", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-action="settings-sync-provider-prices"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("syncCurrentProviderPricesToOthers", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("同步当前 Provider 的模型单价到其它 Provider", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("保存后生效", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("repeat(3, 30px)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-pricing-change-summary="true"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-pricing-apply-all", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("margin-inline: 18px;", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -634,6 +639,17 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         self.assertIn('data-action="settings-provider-tab"', script)
         self.assertIn('data-provider-tab="true"', script)
+        self.assertIn('data-action="settings-add-provider"', script)
+        self.assertIn('data-action="settings-edit-provider"', script)
+        self.assertIn("function openProviderConfigDialog", script)
+        self.assertIn("function applyProviderConfigDialog", script)
+        self.assertIn('data-provider-config-field="section_text"', script)
+        self.assertIn("defaultProviderSectionText", script)
+        self.assertIn("section_text: String(draft.configText || \"\")", script)
+        self.assertIn('required ? "" : \'<button type="button"', script)
+        self.assertIn("suggestedProviderEnvironmentKey", script)
+        self.assertIn("仅气泡通知不统计", script)
+        self.assertIn("codexProviders: collectCodexProviderUpdates()", script)
         self.assertIn('data-provider-enabled="true"', script)
         self.assertIn('data-provider-notification-only="true"', script)
         self.assertIn("仅气泡通知不统计", script)
@@ -645,6 +661,9 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function switchSettingsProvider", script)
         self.assertIn("provider_order is the persisted append-only order", script)
         self.assertIn("function canonicalSettingsPriceTable", script)
+        self.assertIn("default_model_prices", script)
+        self.assertIn("settings.default_model_prices", script)
+        self.assertIn('<option value="">不复制，使用当前默认价格</option>', script)
         self.assertIn("const isNewProvider", script)
         self.assertIn('settings.provider_scope_mode === "custom"', script)
         self.assertIn("settingsDirtyProviders.add(activeProvider)", script)
@@ -670,6 +689,24 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("data-advanced=", script)
         self.assertNotIn("price-table[data-advanced", script)
         self.assertNotIn("未保存的输入不会自动保留", script)
+
+    def test_renderer_payload_exposes_default_prices_for_new_providers(self) -> None:
+        payload = payload_from_snapshot(ParsedSession(status="waiting")).to_json()
+        defaults = payload["settings"]["default_model_prices"]
+
+        self.assertEqual(
+            set(defaults),
+            {
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.5",
+                "gpt-5.6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+            },
+        )
+        self.assertEqual(defaults["gpt-5.6-luna"]["input"], 0.2)
+        self.assertEqual(defaults["gpt-5.6-terra"]["output"], 12.0)
 
     def test_model_price_columns_and_row_paste_follow_standard_order(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT

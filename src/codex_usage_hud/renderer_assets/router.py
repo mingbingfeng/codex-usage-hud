@@ -375,9 +375,20 @@ TEXT = r"""
       if (action.dataset.action === "background-usage-policy-cancel") {
         event.preventDefault(); event.stopPropagation(); closeSettingsConfirm(); return;
       }
+      if (action.dataset.action === "background-usage-policy-restart-cancel") {
+        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm(); return;
+      }
+      if (action.dataset.action === "background-usage-policy-restart-unavailable") {
+        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm(); return;
+      }
       if (action.dataset.action === "background-usage-policy-confirm") {
         event.preventDefault(); event.stopPropagation(); closeSettingsConfirm();
         applyBackgroundUsagePolicy(String(action.dataset.featureKey || ""), String(action.dataset.eventId || ""), String(action.dataset.desiredState || "disabled"));
+        return;
+      }
+      if (action.dataset.action === "background-usage-policy-restart-confirm") {
+        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm();
+        applyBackgroundUsagePolicy(String(action.dataset.featureKey || "memory_consolidation"), String(action.dataset.eventId || ""), String(action.dataset.desiredState || "disabled"), true);
         return;
       }
       if (action.dataset.action === "settings-open") {
@@ -616,6 +627,30 @@ TEXT = r"""
         switchSettingsProvider(action.dataset.provider || "");
         return;
       }
+      if (action.dataset.action === "settings-add-provider") {
+        event.preventDefault();
+        event.stopPropagation();
+        openProviderConfigDialog("", { isNew: true });
+        return;
+      }
+      if (action.dataset.action === "settings-edit-provider") {
+        event.preventDefault();
+        event.stopPropagation();
+        openProviderConfigDialog(action.dataset.provider || "", { isNew: false });
+        return;
+      }
+      if (action.dataset.action === "settings-provider-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        return;
+      }
+      if (action.dataset.action === "settings-provider-apply") {
+        event.preventDefault();
+        event.stopPropagation();
+        applyProviderConfigDialog();
+        return;
+      }
       if (action.dataset.action === "settings-add-model") {
         event.preventDefault();
         event.stopPropagation();
@@ -748,6 +783,12 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         void fetchPricesFromModal();
+        return;
+      }
+      if (action.dataset.action === "settings-sync-provider-prices") {
+        event.preventDefault();
+        event.stopPropagation();
+        syncCurrentProviderPricesToOthers();
         return;
       }
       if (action.dataset.action === "pricing-export") {

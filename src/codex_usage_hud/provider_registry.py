@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from .codex_provider_config import read_provider_definitions
 from .config import UserConfig, normalize_provider
 from .platforms.codex_theme import read_codex_config
 
@@ -23,6 +24,11 @@ UNKNOWN_PROVIDER = "unknown"
 class ProviderRegistryEntry:
     provider: str
     profile_names: tuple[str, ...] = ()
+    base_url: str = ""
+    env_key: str = ""
+    wire_api: str = "responses"
+    has_api_key: bool = False
+    config_text: str = ""
     from_base_config: bool = False
     from_profile: bool = False
     from_provider_definition: bool = False
@@ -62,6 +68,7 @@ def discover_provider_registry(
 ) -> ProviderRegistry:
     """Collect provider keys from Codex config, saved HUD settings, and recent JSONL."""
     raw_config = read_codex_config(config_path)
+    provider_definitions = read_provider_definitions(config_path)
     entries: dict[str, dict[str, object]] = {}
 
     def include(provider_value: object, **source: bool) -> None:
@@ -80,6 +87,18 @@ def discover_provider_registry(
     if isinstance(model_providers, Mapping):
         for provider in model_providers:
             include(provider, from_provider_definition=True)
+            normalized_provider = normalize_provider(provider)
+            definition = provider_definitions.get(normalized_provider)
+            if definition is not None and normalized_provider in entries:
+                entries[normalized_provider].update(
+                    {
+                        "base_url": definition.base_url,
+                        "env_key": definition.env_key,
+                        "wire_api": definition.wire_api,
+                        "has_api_key": definition.has_api_key,
+                        "config_text": definition.section_text,
+                    }
+                )
 
     profiles = raw_config.get("profiles")
     if isinstance(profiles, Mapping):
@@ -107,6 +126,11 @@ def discover_provider_registry(
         provider: ProviderRegistryEntry(
             provider=provider,
             profile_names=tuple(sorted(state.get("profiles", set()))),
+            base_url=str(state.get("base_url") or ""),
+            env_key=str(state.get("env_key") or ""),
+            wire_api=str(state.get("wire_api") or "responses"),
+            has_api_key=bool(state.get("has_api_key")),
+            config_text=str(state.get("config_text") or ""),
             from_base_config=bool(state.get("from_base_config")),
             from_profile=bool(state.get("from_profile")),
             from_provider_definition=bool(state.get("from_provider_definition")),

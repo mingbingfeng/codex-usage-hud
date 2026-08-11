@@ -15,7 +15,7 @@ from typing import Any
 
 from . import __version__
 from .config import DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED
-from .config import UserConfig, warning_dismissed_today
+from .config import UserConfig, default_model_prices, warning_dismissed_today
 from .core.connection_health import ConnectionHealth
 from .core.parser import (
     CostEstimator,
@@ -164,6 +164,9 @@ def payload_from_snapshot(
         activity_warning = bool(snapshot.reading_activity.active)
         activity_reading_file = snapshot.reading_activity.warning_label()
     settings_payload = (settings or UserConfig.defaults()).to_dict()
+    settings_payload["default_model_prices"] = {
+        name: price.to_dict() for name, price in default_model_prices().items()
+    }
     settings_payload["provider_registry"] = dict(provider_registry or {})
     settings_payload["app_provider"] = str(app_provider or "")
     return RendererHudPayload(

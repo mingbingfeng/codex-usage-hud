@@ -205,6 +205,41 @@ class UserConfigStoreTests(unittest.TestCase):
             )
         )
 
+    def test_new_users_start_with_the_current_default_model_prices(self) -> None:
+        prices = UserConfig.defaults().model_prices
+
+        self.assertEqual(
+            set(prices),
+            {
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.5",
+                "gpt-5.6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+            },
+        )
+        self.assertEqual(
+            (
+                prices["gpt-5.6-terra"].input,
+                prices["gpt-5.6-terra"].cached_input,
+                prices["gpt-5.6-terra"].cache_write,
+                prices["gpt-5.6-terra"].output,
+                prices["gpt-5.6-terra"].reasoning,
+            ),
+            (2.0, 0.2, 2.5, 12.0, 12.0),
+        )
+        self.assertEqual(
+            (
+                prices["gpt-5.6-luna"].input,
+                prices["gpt-5.6-luna"].cached_input,
+                prices["gpt-5.6-luna"].cache_write,
+                prices["gpt-5.6-luna"].output,
+                prices["gpt-5.6-luna"].reasoning,
+            ),
+            (0.2, 0.02, 0.25, 1.2, 1.2),
+        )
+
     def test_empty_template_and_minimal_example_are_unambiguous(self) -> None:
         template = empty_pricing_template()
         self.assertEqual(template["prices"], [])
@@ -476,6 +511,14 @@ class UserConfigStoreTests(unittest.TestCase):
         self.assertEqual(
             set(migrated.provider_settings["cunai"].model_prices),
             {"gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"},
+        )
+        self.assertEqual(
+            migrated.provider_settings["cunai"].model_prices["gpt-5.6-terra"],
+            UserConfig.defaults().model_prices["gpt-5.6-terra"],
+        )
+        self.assertEqual(
+            migrated.provider_settings["cunai"].model_prices["gpt-5.6-luna"],
+            UserConfig.defaults().model_prices["gpt-5.6-luna"],
         )
         self.assertEqual(migrated.provider_settings["cunai"].pricing_url, "")
         self.assertEqual(migrated.provider_settings["cunai"].weekly_adjustment_usd, 0.0)

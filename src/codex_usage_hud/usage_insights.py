@@ -924,10 +924,21 @@ def _provider_registry_payload(context: object) -> dict[str, object]:
     entries = getattr(registry, "entries", {})
     if not isinstance(entries, Mapping):
         return {}
+    app_provider = str(getattr(registry, "app_provider", "") or "").strip().lower()
     return {
         provider: {
             "profiles": list(getattr(entry, "profile_names", ())),
             "historicalOnly": bool(getattr(entry, "historical_only", False)),
+            "defined": bool(getattr(entry, "from_provider_definition", False)),
+            "baseUrl": str(getattr(entry, "base_url", "") or ""),
+            "envKey": str(getattr(entry, "env_key", "") or ""),
+            "wireApi": str(getattr(entry, "wire_api", "responses") or "responses"),
+            "hasApiKey": bool(getattr(entry, "has_api_key", False)),
+            "configText": (
+                ""
+                if str(provider or "").strip().lower() == app_provider
+                else str(getattr(entry, "config_text", "") or "")
+            ),
         }
         for provider, entry in entries.items()
     }

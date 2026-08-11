@@ -223,6 +223,9 @@ def assemble_renderer_session(
         background_usage_policy_set_callback=(
             getattr(background_usage_runtime, "policy_set", None)
         ),
+        background_usage_policy_restart_callback=(
+            getattr(background_usage_runtime, "policy_restart", None)
+        ),
     )
     resources.bridge = bridge
     bridge_url = bridge.start()
