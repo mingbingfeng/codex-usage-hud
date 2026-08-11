@@ -33,6 +33,7 @@ from .core.runtime_events import RuntimeEventBus
 from .platforms import ActiveSessionTracker, SessionPathResolver, get_current_platform
 from .platforms.base import BasePlatform
 from .provider_registry import ProviderRegistry, discover_provider_registry
+from .provider_cleanup import delete_provider_for_context
 from .runtime_diagnostics import ensure_runtime_error_diagnostics
 from .runtime_paths import hud_runtime_dir
 from . import runtime_config
@@ -209,6 +210,7 @@ def _initialize_runtime_context_resources(context: RuntimeContext) -> None:
             context,
             context.session_cleanup_manager,
             on_deleted=_refresh_usage_after_session_delete,
+            provider_delete_callback=delete_provider_for_context,
         )
 
 

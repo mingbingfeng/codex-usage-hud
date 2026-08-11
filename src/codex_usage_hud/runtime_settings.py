@@ -100,6 +100,8 @@ def partial_domains_for_command(
         "applyDisplayMode",
     }:
         return {"settings"}
+    if action == "deleteProvider":
+        return {"settings", "sessionCleanup"}
     if action == "openBackgroundUsageFromInsights":
         return {"backgroundUsage"}
     if action in {

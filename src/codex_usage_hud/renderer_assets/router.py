@@ -639,10 +639,28 @@ TEXT = r"""
         openProviderConfigDialog(action.dataset.provider || "", { isNew: false });
         return;
       }
+      if (action.dataset.action === "settings-delete-provider") {
+        event.preventDefault();
+        event.stopPropagation();
+        openProviderDeleteDialog(action.dataset.provider || "");
+        return;
+      }
       if (action.dataset.action === "settings-provider-cancel") {
         event.preventDefault();
         event.stopPropagation();
         closeSettingsConfirm();
+        return;
+      }
+      if (action.dataset.action === "settings-provider-delete-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsConfirm();
+        return;
+      }
+      if (action.dataset.action === "settings-provider-delete-confirm") {
+        event.preventDefault();
+        event.stopPropagation();
+        confirmProviderDeleteDialog();
         return;
       }
       if (action.dataset.action === "settings-provider-apply") {

@@ -12,12 +12,61 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.codex_provider_config import (
+    delete_provider_config,
     read_provider_definitions,
     save_provider_configs,
 )
 
 
 class CodexProviderConfigTests(unittest.TestCase):
+    def test_default_provider_cannot_be_deleted(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.toml"
+            path.write_text(config_text, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "默认 Codex App Provider"):
+                delete_provider_config("custom", config_path=path)
+            self.assertEqual(path.read_text(encoding="utf-8"), config_text)
+
+    def test_delete_provider_removes_related_tables_and_profile(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers]\n"
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n\n'
+            "[model_providers.muyuan]\n"
+            'name = "Muyuan"\n'
+            'base_url = "https://muyuan.example/v1"\n\n'
+            "[model_providers.muyuan.headers]\n"
+            'x-tenant = "one"\n\n'
+            "[profiles.muyuan]\n"
+            'model_provider = "muyuan"\n'
+            'model = "gpt-5"\n\n'
+            "[features]\n"
+            "memories = true\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "config.toml"
+            path.write_text(config_text, encoding="utf-8")
+            profile = root / "muyuan.config.toml"
+            profile.write_text('model_provider = "muyuan"\n', encoding="utf-8")
+
+            result = delete_provider_config("muyuan", config_path=path)
+            updated = path.read_text(encoding="utf-8")
+
+        self.assertTrue(result["changed"])
+        self.assertNotIn("[model_providers.muyuan]", updated)
+        self.assertNotIn("[profiles.muyuan]", updated)
+        self.assertIn('model_provider = "custom"', updated)
+        self.assertIn("[features]\nmemories = true", updated)
+        self.assertFalse(profile.exists())
+
     def test_default_custom_provider_cannot_be_edited(self) -> None:
         config_text = (
             'model_provider = "custom"\n\n'

@@ -323,3 +323,44 @@ def test_general_command_status_keeps_request_and_action() -> None:
 
     assert status["requestId"] == "settings-1"
     assert status["action"] == "dismissWarningsToday"
+
+
+def test_general_command_dispatches_provider_delete() -> None:
+    deleted: list[dict[str, object]] = []
+    config = UserConfig.defaults()
+    ports = GeneralCommandPorts(
+        load_config=lambda: config,
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        delete_provider=lambda command: deleted.append(dict(command)) or {
+            "status": "ok",
+            "providerId": "muyuan",
+        },
+    )
+
+    status = dispatch_command(
+        {"action": "deleteProvider", "provider": "muyuan", "requestId": "delete-1"},
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert deleted == [
+        {"action": "deleteProvider", "provider": "muyuan", "requestId": "delete-1"}
+    ]
+    assert status["status"] == "ok"
+    assert status["providerId"] == "muyuan"
+    assert status["requestId"] == "delete-1"

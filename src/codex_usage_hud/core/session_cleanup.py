@@ -486,6 +486,114 @@ class SessionCleanupManager:
         }
         return self.snapshot()
 
+    def delete_provider_history(
+        self,
+        provider: str,
+        *,
+        request_id: str = "",
+    ) -> dict[str, object]:
+        """Delete every safe session tree whose root belongs to one provider.
+
+        The provider-delete dialog is already an explicit user confirmation, so
+        this method performs the same scan/preview/execute safety gates as the
+        session-management screen without exposing session paths to the
+        renderer.
+        """
+        normalized_provider = str(provider or "").strip().casefold()
+        if not normalized_provider:
+            raise SessionCleanupError("Provider history deletion requires a provider.")
+        inventory = self.scan(request_id=request_id)
+        capability = inventory.get("capability")
+        if not isinstance(capability, Mapping) or not bool(capability.get("available")):
+            reason = str(
+                capability.get("reason")
+                if isinstance(capability, Mapping)
+                else "Codex local session store is unavailable."
+            )
+            raise SessionCleanupError(
+                f"无法删除 Provider {normalized_provider} 的会话历史：{reason}"
+            )
+        matching = [
+            item
+            for item in self._items.values()
+            if item.model_provider.casefold() == normalized_provider
+        ]
+        blocked = [item for item in matching if not item.selectable]
+        if blocked:
+            reasons = sorted(
+                {
+                    str(item.blocked_reason or "").strip()
+                    for item in blocked
+                    if str(item.blocked_reason or "").strip()
+                }
+            )
+            detail = "；".join(reasons[:2]) or "存在受保护的会话"
+            raise SessionCleanupError(
+                f"Provider {normalized_provider} 仍有 {len(blocked)} 个受保护会话，未执行历史删除：{detail}"
+            )
+        if not matching:
+            return self.mark_operation(
+                request_id=request_id,
+                action="providerHistoryDelete",
+                state="completed",
+                progress=100,
+                provider=normalized_provider,
+                selectedIds=[],
+                sessionCount=0,
+                deletedCount=0,
+                failedCount=0,
+            )
+        item_ids = [item.id for item in matching]
+        preview = self.preview(
+            item_ids,
+            self._revision,
+            request_id=request_id,
+        )
+        operation = preview.get("operation") if isinstance(preview, Mapping) else {}
+        confirmation_token = str(
+            operation.get("confirmationToken") if isinstance(operation, Mapping) else ""
+        )
+        if not confirmation_token:
+            raise SessionCleanupError("Provider 会话删除确认令牌生成失败。")
+        result = self.execute(
+            item_ids,
+            self._revision,
+            confirmation_token,
+            request_id=request_id,
+        )
+        executed = result.get("operation") if isinstance(result, Mapping) else {}
+        deleted_count = int(
+            executed.get("deletedCount") or 0
+            if isinstance(executed, Mapping)
+            else 0
+        )
+        actual_bytes = int(
+            executed.get("actualBytes") or 0
+            if isinstance(executed, Mapping)
+            else 0
+        )
+        if (
+            not isinstance(executed, Mapping)
+            or str(executed.get("state") or "") != "completed"
+            or deleted_count != len(matching)
+        ):
+            raise SessionCleanupError(
+                f"Provider {normalized_provider} 会话历史删除未完成："
+                f"成功 {deleted_count}/{len(matching)}。"
+            )
+        return self.mark_operation(
+            request_id=request_id,
+            action="providerHistoryDelete",
+            state="completed",
+            progress=100,
+            provider=normalized_provider,
+            selectedIds=item_ids,
+            sessionCount=len(matching),
+            deletedCount=deleted_count,
+            failedCount=0,
+            actualBytes=actual_bytes,
+        )
+
     def preview(
         self,
         item_ids: Sequence[str],

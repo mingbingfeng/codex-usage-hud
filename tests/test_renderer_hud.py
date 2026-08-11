@@ -641,9 +641,18 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('data-provider-tab="true"', script)
         self.assertIn('data-action="settings-add-provider"', script)
         self.assertIn('data-action="settings-edit-provider"', script)
+        self.assertIn('data-action="settings-delete-provider"', script)
         self.assertIn("function openProviderConfigDialog", script)
         self.assertIn("function applyProviderConfigDialog", script)
+        self.assertIn("function openProviderDeleteDialog", script)
+        self.assertIn("function confirmProviderDeleteDialog", script)
         self.assertIn('data-provider-config-field="section_text"', script)
+        self.assertIn('<details class="codex-usage-hud-provider-config-preview">', script)
+        self.assertIn('data-provider-delete-model-prices="true"', script)
+        self.assertIn('data-provider-delete-session-history="true"', script)
+        self.assertIn("删除供应商：", script)
+        self.assertIn("padding: 10px 18px;", script)
+        self.assertIn("默认 Codex App Provider 不支持删除。", script)
         self.assertIn("defaultProviderSectionText", script)
         self.assertIn("section_text: String(draft.configText || \"\")", script)
         self.assertIn('required ? "" : \'<button type="button"', script)
@@ -1330,6 +1339,29 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn(
             '.codex-usage-hud-settings-confirm-actions .codex-usage-hud-settings-action[data-danger="true"]',
             script,
+        )
+
+    def test_provider_delete_uses_correlated_session_cleanup_loading(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+
+        self.assertIn("function openProviderDeleteLoading(requestId, provider, deleteSessionHistory = false)", script)
+        self.assertIn('mode: "provider-delete"', script)
+        self.assertIn('layer.dataset.providerDeleteLoading = "true";', script)
+        self.assertIn('layer.dataset.providerDeleteRequestId = String(requestId || "");', script)
+        self.assertIn('layer.dataset.providerDeleteProvider = String(provider || "").trim().toLowerCase();', script)
+        self.assertIn("openProviderDeleteLoading(requestId, provider, deleteSessionHistory);", script)
+        self.assertIn('data-provider-delete-loading="true"', script)
+        self.assertIn("function clearProviderDeleteWorkflow()", script)
+        self.assertIn("providerDeleteHasSessionHistory", script)
+        self.assertIn("clearProviderDeleteWorkflow();\n          closeSettingsConfirm();", script)
+        self.assertIn(
+            ".codex-usage-hud-provider-delete-card > .codex-usage-hud-settings-confirm-title",
+            script,
+        )
+        self.assertIn("padding: 14px 18px 12px;", script)
+        self.assertLess(
+            script.index("pricingWorkflowState.providerDeleteRequestId = requestId;"),
+            script.index("openProviderDeleteLoading(requestId, provider, deleteSessionHistory);"),
         )
 
     def test_renderer_payload_can_emit_domain_only_update(self) -> None:

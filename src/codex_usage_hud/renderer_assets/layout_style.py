@@ -2504,6 +2504,11 @@ TEXT = r"""
             color: var(--codex-usage-hud-accent, #f3d27a);
             outline: none;
           }
+          #${rootId} .codex-usage-hud-provider-delete-action:hover,
+          #${rootId} .codex-usage-hud-provider-delete-action:focus-visible {
+            border-color: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 56%, transparent);
+            color: var(--codex-usage-hud-warning, #ffb86b);
+          }
           #${rootId} .codex-usage-hud-provider-meta[data-tone="required"] {
             color: var(--codex-usage-hud-success, #8fe3a1);
             font-weight: 700;
@@ -3507,6 +3512,25 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-provider-config-card {
             width: min(680px, calc(100% - 28px));
           }
+          #${rootId} .codex-usage-hud-provider-config-preview {
+            min-width: 0;
+            display: grid;
+            gap: 8px;
+            padding: 0 18px;
+          }
+          #${rootId} .codex-usage-hud-provider-config-preview > summary {
+            width: fit-content;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            cursor: pointer;
+            font-size: 10px;
+            font-weight: 700;
+            list-style-position: inside;
+          }
+          #${rootId} .codex-usage-hud-provider-config-preview > summary:hover,
+          #${rootId} .codex-usage-hud-provider-config-preview > summary:focus-visible {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            outline: none;
+          }
           #${rootId} .codex-usage-hud-provider-config-grid {
             min-width: 0;
             display: grid;
@@ -3609,6 +3633,31 @@ TEXT = r"""
             height: 15px;
             margin: 0;
             accent-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-delete-card {
+            width: min(520px, calc(100% - 28px));
+          }
+          #${rootId} .codex-usage-hud-provider-delete-card > .codex-usage-hud-settings-confirm-title {
+            padding: 14px 18px 12px;
+          }
+          #${rootId} .codex-usage-hud-provider-delete-options {
+            display: grid;
+            gap: 9px;
+            padding: 10px 18px;
+            color: #e3e6eb;
+            font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-provider-delete-options label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-provider-delete-options input {
+            width: 15px;
+            height: 15px;
+            margin: 0;
+            accent-color: var(--codex-usage-hud-warning, #ffb86b);
           }
           #${rootId} .codex-usage-hud-settings-confirm-main .codex-usage-hud-settings-confirm-body {
             margin: 8px 0 0;

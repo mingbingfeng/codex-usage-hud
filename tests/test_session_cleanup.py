@@ -218,6 +218,36 @@ class SessionCleanupManagerTests(unittest.TestCase):
         self.assertEqual(root_row["status"], "idle")
         self.assertTrue(root_row["selectable"])
 
+    def test_provider_history_delete_removes_matching_session_tree(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+        expected_bytes = sum(
+            rollouts[session_id].stat().st_size
+            for session_id in (ROOT_ID, CHILD_ID)
+        )
+
+        result = manager.delete_provider_history("OPENAI-CUSTOM", request_id="provider-1")
+
+        self.assertEqual(result["operation"]["state"], "completed")
+        self.assertEqual(result["operation"]["provider"], "openai-custom")
+        self.assertEqual(result["operation"]["sessionCount"], 1)
+        self.assertEqual(result["operation"]["deletedCount"], 1)
+        self.assertEqual(result["operation"]["actualBytes"], expected_bytes)
+        self.assertFalse(rollouts[ROOT_ID].exists())
+        self.assertFalse(rollouts[CHILD_ID].exists())
+        self.assertFalse((state.parent / ".hud-session-delete-staging").exists())
+        with closing(sqlite3.connect(state)) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1)
+
+    def test_provider_history_delete_refuses_protected_matching_tree(self) -> None:
+        fixture = self._fixture(child_status="running")
+        temporary, _root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        with self.assertRaisesRegex(SessionCleanupError, "受保护会话"):
+            manager.delete_provider_history("openai-custom")
+
     def test_ambiguous_spawn_relation_blocks_every_affected_root(self) -> None:
         fixture = self._fixture()
         temporary, _root, state, _index, _rollouts, manager = fixture

@@ -29,6 +29,7 @@ from .config import (
     write_json_object,
 )
 from .core.background_usage import valid_background_event_id
+from .provider_cleanup import delete_provider_for_context
 from .desktop_overlay import DesktopWorkOverlay
 from .desktop_overlay_setup import (
     _desktop_overlay_dependency_status,
@@ -144,6 +145,7 @@ class GeneralCommandPorts:
     dismiss_warnings_today: Callable[[], bool]
     pricing_open_path: Callable[[Path], None] | None = None
     save_codex_providers: Callable[[object], Mapping[str, object]] | None = None
+    delete_provider: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
 
 
 def _status(message: str, *, kind: str = "") -> dict[str, object]:
@@ -841,6 +843,11 @@ def handle_general_command(
 ) -> dict[str, object]:
     action = str(command.get("action") or "").strip()
     try:
+        if action == "deleteProvider":
+            if ports.delete_provider is None:
+                return _status("供应商删除当前不可用。", kind="error")
+            result = ports.delete_provider(command)
+            return dict(result)
         if action == "savePricing":
             codex_provider_result: Mapping[str, object] | None = None
             codex_updates = command.get("codexProviders")
@@ -1277,6 +1284,28 @@ def _handle_renderer_settings_command(
         installer = download_update_asset(info)
         launch_installer(installer)
 
+    def delete_provider(command: Mapping[str, object]) -> Mapping[str, object]:
+        if bool(command.get("deleteSessionHistory")):
+            worker = getattr(context, "session_cleanup_worker", None)
+            enqueue = getattr(worker, "enqueue", None)
+            if not callable(enqueue):
+                raise RuntimeError("会话历史删除当前不可用。")
+            provider_delete_command = dict(command)
+            provider_delete_command["action"] = "providerDelete"
+            accepted = enqueue(provider_delete_command)
+            request_id = str(
+                accepted.get("requestId")
+                if isinstance(accepted, Mapping)
+                else command.get("requestId") or command.get("id") or ""
+            )
+            return {
+                **_status(
+                    "供应商删除请求已提交，正在安全清理会话历史；完成后会移除 config.toml 配置。"
+                ),
+                "providerDeleteRequestId": request_id,
+            }
+        return delete_provider_for_context(context, command)
+
     general_ports = GeneralCommandPorts(
         load_config=load_config,
         save_config=save_config,
@@ -1304,6 +1333,7 @@ def _handle_renderer_settings_command(
         ),
         pricing_open_path=_open_system_path,
         save_codex_providers=lambda updates: save_provider_configs(updates),
+        delete_provider=delete_provider,
     )
     return dispatch_command(command, command_ports, general_ports)
 

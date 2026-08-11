@@ -115,6 +115,107 @@ def test_session_cleanup_worker_publishes_matching_terminal_state_before_refresh
         assert worker.close()
 
 
+def test_session_cleanup_worker_deletes_provider_history_before_provider_config() -> None:
+    manager = MagicMock()
+    manager.mark_operation.side_effect = lambda **values: _operation(
+        str(values["request_id"]), str(values["action"]), str(values["state"])
+    )
+    manager.delete_provider_history.return_value = _operation(
+        "provider-request",
+        "providerHistoryDelete",
+        "completed",
+        deletedCount=2,
+        actualBytes=1234,
+    )
+    provider_delete = MagicMock(
+        return_value={"status": "ok", "providerId": "muyuan", "message": "done"}
+    )
+    context = SimpleNamespace(
+        session_cleanup_payload={}, runtime_events=RuntimeEventBus()
+    )
+    worker = SessionCleanupWorker(
+        context,
+        manager,
+        on_deleted=lambda *_args: None,
+        provider_delete_callback=provider_delete,
+    )
+    try:
+        worker.enqueue(
+            {
+                "action": "providerDelete",
+                "requestId": "provider-request",
+                "provider": "muyuan",
+                "deleteSessionHistory": True,
+            }
+        )
+        deadline = time.monotonic() + 2
+        while context.session_cleanup_payload.get("operation", {}).get("state") != "completed":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        manager.delete_provider_history.assert_called_once_with(
+            "muyuan", request_id="provider-request"
+        )
+        provider_delete.assert_called_once_with(
+            context,
+            {
+                "action": "providerDelete",
+                "requestId": "provider-request",
+                "provider": "muyuan",
+                "deleteSessionHistory": True,
+            },
+        )
+        final_operation = manager.mark_operation.call_args_list[-1].kwargs
+        assert final_operation["actualBytes"] == 1234
+    finally:
+        assert worker.close()
+
+
+def test_session_cleanup_worker_accepts_renderer_provider_delete_alias() -> None:
+    manager = MagicMock()
+    manager.mark_operation.side_effect = lambda **values: _operation(
+        str(values["request_id"]), str(values["action"]), str(values["state"])
+    )
+    provider_delete = MagicMock(
+        return_value={"status": "ok", "providerId": "muyuan", "message": "done"}
+    )
+    context = SimpleNamespace(
+        app_provider="codex",
+        session_cleanup_payload={},
+        runtime_events=RuntimeEventBus(),
+    )
+    worker = SessionCleanupWorker(
+        context,
+        manager,
+        on_deleted=lambda *_args: None,
+        provider_delete_callback=provider_delete,
+    )
+    command = {
+        "action": "deleteProvider",
+        "requestId": "provider-alias-1",
+        "provider": "muyuan",
+        "deleteSessionHistory": False,
+    }
+    try:
+        result = worker.enqueue(command)
+        assert result["status"] == "accepted"
+        deadline = time.monotonic() + 2
+        while context.session_cleanup_payload.get("operation", {}).get("state") != "completed":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        provider_delete.assert_called_once_with(
+            context,
+            {
+                **command,
+                "action": "providerDelete",
+            },
+        )
+        assert context.session_cleanup_payload["operation"]["action"] == "providerDelete"
+    finally:
+        assert worker.close()
+
+
 def test_session_cleanup_worker_rejects_unknown_action_and_closed_enqueue() -> None:
     manager = MagicMock()
     context = SimpleNamespace(

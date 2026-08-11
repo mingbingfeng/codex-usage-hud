@@ -19,6 +19,10 @@ PROVIDER_SECTION_PATTERN = re.compile(
 TABLE_HEADER_PATTERN = re.compile(
     r"(?m)^[\t ]*\[\[?[^\r\n]+\]\]?\s*(?:#.*)?$"
 )
+TOML_TABLE_HEADER_PATTERN = re.compile(
+    r"(?m)^[\t ]*(?P<header>\[\[?[^\r\n]+\]\]?)[\t ]*"
+    r"(?:#.*)?(?:\r?\n|$)"
+)
 QUOTED_STRING_PATTERN = re.compile(
     r"(?m)^[\t ]*(?P<key>[A-Za-z0-9_-]+)[\t ]*=[\t ]*"
     r"\"(?P<value>(?:\\.|[^\"\\\r\n])*)\"[\t ]*(?:#.*)?\r?$"
@@ -163,7 +167,90 @@ def _get_quoted_value(body: str, key: str) -> str:
     for match in QUOTED_STRING_PATTERN.finditer(body):
         if match.group("key") == key:
             return match.group("value")
+    single_quoted = re.search(
+        r"(?m)^[\t ]*"
+        + re.escape(key)
+        + r"[\t ]*=[\t ]*'(?P<value>[^'\r\n]*)'",
+        body,
+    )
+    if single_quoted:
+        return str(single_quoted.group("value") or "")
     return ""
+
+
+def _toml_table_ranges(
+    text: str,
+) -> list[tuple[int, int, str, str]]:
+    matches = list(TOML_TABLE_HEADER_PATTERN.finditer(text))
+    return [
+        (
+            match.start(),
+            matches[index + 1].start() if index + 1 < len(matches) else len(text),
+            str(match.group("header") or "").strip(),
+            text[match.end() : (
+                matches[index + 1].start()
+                if index + 1 < len(matches)
+                else len(text)
+            )],
+        )
+        for index, match in enumerate(matches)
+    ]
+
+
+def _toml_table_name(header: str) -> str:
+    value = str(header or "").strip()
+    if value.startswith("[[") and value.endswith("]]"):
+        return value[2:-2].strip()
+    if value.startswith("[") and value.endswith("]"):
+        return value[1:-1].strip()
+    return ""
+
+
+def _provider_related_table(
+    header: str,
+    provider_id: str,
+) -> bool:
+    name = _toml_table_name(header).casefold()
+    prefix = f"model_providers.{str(provider_id or '').strip()}".casefold()
+    return name == prefix or name.startswith(f"{prefix}.")
+
+
+def _provider_profile_tables(
+    ranges: Sequence[tuple[int, int, str, str]],
+    provider_id: str,
+) -> set[str]:
+    target = str(provider_id or "").strip().casefold()
+    roots: set[str] = set()
+    for _start, _end, header, body in ranges:
+        name = _toml_table_name(header)
+        parts = name.split(".")
+        if len(parts) != 2 or parts[0].casefold() != "profiles":
+            continue
+        if _get_quoted_value(body, "model_provider").strip().casefold() == target:
+            roots.add(name.casefold())
+    return roots
+
+
+def _remove_provider_tables(text: str, provider_id: str) -> tuple[str, list[str]]:
+    ranges = _toml_table_ranges(text)
+    profile_roots = _provider_profile_tables(ranges, provider_id)
+    remove: list[tuple[int, int]] = []
+    removed_headers: list[str] = []
+    for start, end, header, _body in ranges:
+        name = _toml_table_name(header)
+        folded_name = name.casefold()
+        if _provider_related_table(header, provider_id) or any(
+            folded_name.startswith(f"{root}.") or folded_name == root
+            for root in profile_roots
+        ):
+            remove.append((start, end))
+            removed_headers.append(header)
+    if not remove:
+        return text, removed_headers
+    result = text
+    for start, end in reversed(remove):
+        result = result[:start] + result[end:]
+    return result, removed_headers
 
 
 def _set_quoted_value(body: str, key: str, value: str, newline: str) -> str:
@@ -533,9 +620,111 @@ def save_provider_configs(
     }
 
 
+def delete_provider_config(
+    provider_id: str,
+    *,
+    config_path: str | Path | None = None,
+) -> dict[str, object]:
+    """Remove one non-default provider from Codex TOML configuration.
+
+    The provider table, nested tables, and profiles that explicitly select the
+    provider are removed from 'config.toml'. HUD-created profile files are
+    removed only when their 'model_provider' value matches the target. API key
+    environment variables are intentionally preserved because they are
+    user-owned secrets and are not part of the TOML deletion request.
+    """
+    provider = str(provider_id or "").strip()
+    if not PROVIDER_ID_PATTERN.fullmatch(provider):
+        raise ValueError("Provider ID 只能使用字母、数字、连字符或下划线。")
+    normalized_provider = provider.casefold()
+    path = (
+        Path(config_path).expanduser()
+        if config_path is not None
+        else default_codex_config_path()
+    )
+    if not path.exists():
+        return {
+            "changed": False,
+            "providerId": normalized_provider,
+            "configPath": str(path),
+            "removedTables": [],
+            "profilePaths": [],
+        }
+    original_text = _read_text_exact(path)
+    parsed_config = _parse_toml_mapping(original_text)
+    default_provider = str(parsed_config.get("model_provider") or "").strip().casefold()
+    if default_provider == normalized_provider:
+        raise ValueError("默认 Codex App Provider 不支持删除供应商配置。")
+
+    candidate_text, removed_tables = _remove_provider_tables(
+        original_text,
+        provider,
+    )
+    profile_backups: list[tuple[Path, str]] = []
+    if path.parent.is_dir():
+        for profile_path in path.parent.glob("*.config.toml"):
+            try:
+                profile_text = _read_text_exact(profile_path)
+                profile_config = _parse_toml_mapping(profile_text)
+            except OSError:
+                continue
+            if (
+                str(profile_config.get("model_provider") or "").strip().casefold()
+                == normalized_provider
+            ):
+                profile_backups.append((profile_path, profile_text))
+
+    config_changed = candidate_text != original_text
+    if config_changed:
+        _validate_toml(candidate_text)
+    deleted_profiles: list[Path] = []
+    config_written = False
+    try:
+        if config_changed:
+            _write_text_atomically(path, candidate_text, original_text)
+            config_written = True
+        for profile_path, _profile_text in profile_backups:
+            profile_path.unlink()
+            deleted_profiles.append(profile_path)
+        if config_written and _read_text_exact(path) != candidate_text:
+            raise RuntimeError("Codex config 删除后校验失败。")
+        if any(profile_path.exists() for profile_path in deleted_profiles):
+            raise RuntimeError("Codex provider profile 删除后校验失败。")
+    except Exception:
+        rollback_failed = False
+        if config_written:
+            try:
+                _write_text_atomically(path, original_text, candidate_text)
+            except Exception:
+                rollback_failed = True
+        deleted_set = set(deleted_profiles)
+        for profile_path, profile_text in profile_backups:
+            if profile_path not in deleted_set:
+                continue
+            try:
+                _write_text_exact(profile_path, profile_text)
+            except Exception:
+                rollback_failed = True
+        if rollback_failed:
+            raise RuntimeError(
+                "Provider 删除失败，且之前的部分值无法完全恢复，请检查 config.toml 和 Provider profile。"
+            ) from None
+        raise
+
+    changed = bool(config_changed or deleted_profiles)
+    return {
+        "changed": changed,
+        "providerId": normalized_provider,
+        "configPath": str(path),
+        "removedTables": removed_tables,
+        "profilePaths": [str(item) for item in deleted_profiles],
+    }
+
+
 __all__ = [
     "CodexProviderDefinition",
     "default_codex_config_path",
+    "delete_provider_config",
     "read_provider_definitions",
     "save_provider_configs",
 ]

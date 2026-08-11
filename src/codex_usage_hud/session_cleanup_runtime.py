@@ -75,6 +75,7 @@ class SessionCleanupWorker:
         "sessionCleanupPreview",
         "sessionCleanupExecute",
         "sessionCleanupCancel",
+        "providerDelete",
     }
 
     def __init__(
@@ -83,10 +84,15 @@ class SessionCleanupWorker:
         manager: SessionCleanupManager,
         *,
         on_deleted: Callable[[object, str], None],
+        provider_delete_callback: Callable[
+            [object, Mapping[str, object]], Mapping[str, object]
+        ]
+        | None = None,
     ) -> None:
         self._context = context
         self.manager = manager
         self._on_deleted = on_deleted
+        self._provider_delete_callback = provider_delete_callback
         self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
         self._closed = Event()
         self._worker = Thread(
@@ -98,12 +104,15 @@ class SessionCleanupWorker:
 
     def enqueue(self, command: Mapping[str, object]) -> dict[str, object]:
         action = str(command.get("action") or "").strip()
+        if action == "deleteProvider":
+            action = "providerDelete"
         if action not in self._ACTIONS:
             raise SessionCleanupError("unsupported session-cleanup command")
         if self._closed.is_set():
             raise SessionCleanupError("session cleanup worker is closed")
         request_id = str(command.get("requestId") or "").strip() or uuid.uuid4().hex
         payload = dict(command)
+        payload["action"] = action
         payload["requestId"] = request_id
         if action == "sessionCleanupCancel":
             self._publish(self.manager.cancel(request_id=request_id))
@@ -150,6 +159,59 @@ class SessionCleanupWorker:
                         str(command.get("inventoryRevision") or ""),
                         request_id=request_id,
                     )
+                elif action == "providerDelete":
+                    provider_id = str(
+                        command.get("provider") or command.get("providerId") or ""
+                    ).strip().casefold()
+                    app_provider = str(
+                        getattr(self._context, "app_provider", "") or ""
+                    ).strip().casefold()
+                    if provider_id and provider_id == app_provider:
+                        raise SessionCleanupError(
+                            "默认 Codex App Provider 不支持删除供应商配置。"
+                        )
+                    history_snapshot: Mapping[str, object] | None = None
+                    if bool(command.get("deleteSessionHistory")):
+                        history_snapshot = self.manager.delete_provider_history(
+                            provider_id,
+                            request_id=request_id,
+                        )
+                    if self._provider_delete_callback is None:
+                        raise SessionCleanupError(
+                            "provider deletion callback is unavailable"
+                        )
+                    provider_result = self._provider_delete_callback(
+                        self._context,
+                        command,
+                    )
+                    history_operation = (
+                        history_snapshot.get("operation")
+                        if isinstance(history_snapshot, Mapping)
+                        else {}
+                    )
+                    history_deleted = int(
+                        history_operation.get("deletedCount") or 0
+                        if isinstance(history_operation, Mapping)
+                        else 0
+                    )
+                    history_actual_bytes = int(
+                        history_operation.get("actualBytes") or 0
+                        if isinstance(history_operation, Mapping)
+                        else 0
+                    )
+                    snapshot = self.manager.mark_operation(
+                        request_id=request_id,
+                        action=action,
+                        state="completed",
+                        progress=100,
+                        provider=provider_id,
+                        providerResult=dict(provider_result),
+                        historyDeletedCount=history_deleted,
+                        deletedCount=history_deleted,
+                        actualBytes=history_actual_bytes,
+                        failedCount=0,
+                    )
+                    refresh_after_delete = history_deleted > 0
                 else:
                     snapshot = self.manager.execute(
                         cleanup_string_list(command.get("itemIds") or command.get("sessionIds")),
@@ -163,12 +225,18 @@ class SessionCleanupWorker:
                     ) > 0:
                         refresh_after_delete = True
             except Exception as exc:
+                failure_values: dict[str, object] = {}
+                if action == "providerDelete":
+                    failure_values["provider"] = str(
+                        command.get("provider") or command.get("providerId") or ""
+                    ).strip().lower()
                 snapshot = self.manager.mark_operation(
                     request_id=request_id,
                     action=action,
                     state="failed",
                     progress=100,
                     error=str(exc) or type(exc).__name__,
+                    **failure_values,
                 )
             self._publish(snapshot)
             if refresh_after_delete:

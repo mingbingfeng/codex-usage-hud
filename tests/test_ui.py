@@ -13492,6 +13492,40 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertIn("扫描", status["message"])
         worker.enqueue.assert_called_once_with(command)
 
+    def test_renderer_provider_delete_history_uses_provider_cleanup_worker_action(self) -> None:
+        worker = SimpleNamespace(
+            enqueue=MagicMock(
+                return_value={
+                    "status": "accepted",
+                    "requestId": "provider-delete-1",
+                }
+            )
+        )
+        context = SimpleNamespace(session_cleanup_worker=worker)
+        command = {
+            "action": "deleteProvider",
+            "requestId": "provider-delete-1",
+            "provider": "muyuan",
+            "deleteSessionHistory": True,
+            "deleteModelPrices": False,
+        }
+
+        status = _handle_renderer_settings_command(
+            command,
+            context,
+            MagicMock(),
+            MagicMock(),
+        )
+
+        self.assertEqual(status["providerDeleteRequestId"], "provider-delete-1")
+        self.assertEqual(status["action"], "deleteProvider")
+        worker.enqueue.assert_called_once_with(
+            {
+                **command,
+                "action": "providerDelete",
+            }
+        )
+
     def test_session_cleanup_manager_uses_local_store_without_cli_lookup(self) -> None:
         context = SimpleNamespace(
             state_db_path=Path("state_5.sqlite"),

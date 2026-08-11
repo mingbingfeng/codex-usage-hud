@@ -12,6 +12,9 @@ _TEXT_PREFIX = r"""
         importSourcePayload: null,
         importPreview: null,
         handledArtifacts: new Map(),
+        providerDeleteRequestId: "",
+        providerDeleteProvider: "",
+        providerDeleteHasSessionHistory: false,
       };
       const codexProviderDrafts = new Map();
       const codexProviderDirty = new Set();
@@ -621,7 +624,7 @@ _TEXT_PREFIX = r"""
             </div>
             <div class="codex-usage-hud-provider-meta-row">
               <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
-              ${required ? "" : '<button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-edit-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="编辑 ' + escapeHtml(activeProvider) + ' 供应商配置" title="编辑供应商配置">✎</button>'}
+              ${required ? "" : '<button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-edit-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="编辑 ' + escapeHtml(activeProvider) + ' 供应商配置" title="编辑供应商配置">✎</button>' + '<button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-provider-delete-action" data-action="settings-delete-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="删除 ' + escapeHtml(activeProvider) + ' 供应商" title="删除供应商"><span aria-hidden="true">⌫</span></button>'}
             </div>
           </div>
           <div class="codex-usage-hud-price-table">
@@ -817,10 +820,13 @@ _TEXT_PREFIX = r"""
                 <label><input type="radio" name="codex-provider-scope" value="included"> 纳入统计</label>
               </fieldset>` : ""}
             </div>
-            <label class="codex-usage-hud-provider-config-section">config.toml 配置（[model_providers.${escapeHtml(normalizedProvider || "xxxx")}]）
-              <textarea data-provider-config-field="section_text" rows="8" spellcheck="false">${escapeHtml(initialConfigText)}</textarea>
-              <span>此处内容会写回用户 config.toml；Base URL 和环境变量名会与上面的字段同步。</span>
-            </label>
+            <details class="codex-usage-hud-provider-config-preview">
+              <summary>展开 config.toml 多行配置预览</summary>
+              <label class="codex-usage-hud-provider-config-section">config.toml 配置（[model_providers.${escapeHtml(normalizedProvider || "xxxx")}]）
+                <textarea data-provider-config-field="section_text" rows="8" spellcheck="false">${escapeHtml(initialConfigText)}</textarea>
+                <span>此处内容会写回用户 config.toml；Base URL 和环境变量名会与上面的字段同步。</span>
+              </label>
+            </details>
             <div class="codex-usage-hud-settings-confirm-body">保存设置后会更新用户的 config.toml；API key 只写入用户环境变量，不会保存到 HUD 配置或回显到页面。</div>
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-cancel" data-variant="ghost">取消</button>
@@ -937,6 +943,82 @@ _TEXT_PREFIX = r"""
         renderSettingsProviderTabs();
         setSettingsStatus(isNew ? "供应商已加入草稿；点击保存后写入 config.toml。" : "供应商配置已加入保存草稿。", "");
         return true;
+      }
+
+      function openProviderDeleteDialog(provider = "") {
+        const dialog = settingsDialogRoot();
+        if (!dialog || !settingsProviderDraft) return;
+        const settings = hudSettingsFromPayload();
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        if (!normalizedProvider || normalizedProvider === settingsProviderDraft.appProvider) {
+          setSettingsStatus("默认 Codex App Provider 不支持删除。", "error");
+          return;
+        }
+        if (!settingsProviderDraft.providers?.[normalizedProvider]) {
+          setSettingsStatus("找不到要删除的供应商。", "error");
+          return;
+        }
+        closeSettingsConfirm();
+        const layer = document.createElement("div");
+        layer.className = "codex-usage-hud-settings-confirm-layer";
+        layer.dataset.settingsConfirm = "true";
+        layer.dataset.providerDeleteDialog = "true";
+        layer.dataset.providerDeleteProvider = normalizedProvider;
+        layer.innerHTML = `
+          <div class="codex-usage-hud-settings-confirm-card codex-usage-hud-provider-delete-card" data-tone="danger" role="alertdialog" aria-modal="true" aria-label="删除供应商">
+            <div class="codex-usage-hud-settings-confirm-title">删除供应商：${escapeHtml(normalizedProvider)}？</div>
+            <div class="codex-usage-hud-settings-confirm-body">默认会删除 config.toml 中该供应商的相关配置，以及引用它的 Provider profile。API key 用户环境变量会保留。下面两项为可选删除内容，默认不勾选。</div>
+            <div class="codex-usage-hud-provider-delete-options">
+              <label><input type="checkbox" data-provider-delete-model-prices="true"><span>同时删除模型单价配置</span></label>
+              <label><input type="checkbox" data-provider-delete-session-history="true"><span>同时删除会话历史记录</span></label>
+            </div>
+            <div class="codex-usage-hud-settings-confirm-actions">
+              <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-delete-cancel" data-variant="ghost">取消</button>
+              <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-delete-confirm" data-primary="true" data-danger="true">删除供应商</button>
+            </div>
+          </div>
+        `;
+        dialog.appendChild(layer);
+        layer.querySelector('[data-action="settings-provider-delete-confirm"]')?.focus?.();
+      }
+
+      function confirmProviderDeleteDialog() {
+        const layer = document.querySelector(`#${settingsModalId} [data-provider-delete-dialog="true"]`);
+        if (!layer) return false;
+        const provider = String(layer.dataset.providerDeleteProvider || "").trim().toLowerCase();
+        if (!provider || provider === settingsProviderDraft?.appProvider) {
+          setSettingsStatus("默认 Codex App Provider 不支持删除。", "error");
+          return false;
+        }
+        const deleteModelPrices = !!layer.querySelector('[data-provider-delete-model-prices="true"]')?.checked;
+        const deleteSessionHistory = !!layer.querySelector('[data-provider-delete-session-history="true"]')?.checked;
+        const requestId = typedSettingsRequestId("provider-delete");
+        pricingWorkflowState.providerDeleteRequestId = requestId;
+        pricingWorkflowState.providerDeleteProvider = provider;
+        pricingWorkflowState.providerDeleteHasSessionHistory = deleteSessionHistory;
+        openProviderDeleteLoading(requestId, provider, deleteSessionHistory);
+        const submitted = submitSettingsCommand(
+          {
+            action: "deleteProvider",
+            requestId,
+            provider,
+            deleteModelPrices,
+            deleteSessionHistory,
+          },
+          deleteSessionHistory
+            ? "正在删除供应商并安全清理会话历史..."
+            : "正在删除供应商 config.toml 配置...",
+          { preserveOverlay: true },
+        );
+        if (submitted) {
+          settingsDirtyProviders.delete(provider);
+          codexProviderDirty.delete(provider);
+          renderSettingsProviderTabs();
+        } else {
+          clearProviderDeleteWorkflow();
+          closeSettingsConfirm();
+        }
+        return submitted;
       }
 
       function typedSettingsRequestId(prefix) {
@@ -1370,9 +1452,102 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         updateAboutActionButtons(state);
         syncDesktopOverlayDependency();
         syncSettingsUpdateLoading(payload);
+        let providerDeleteTerminalHandled = false;
+        const cleanupOperation = payload?.sessionCleanup?.operation;
+        if (cleanupOperation && typeof cleanupOperation === "object"
+          && String(cleanupOperation.action || "") === "providerDelete") {
+          const operationRequestId = String(cleanupOperation.requestId || "");
+          const operationProvider = String(
+            cleanupOperation.provider
+              || cleanupOperation.providerResult?.providerId
+              || "",
+          ).trim().toLowerCase();
+          const expectedRequestId = String(pricingWorkflowState.providerDeleteRequestId || "");
+          const expectedProvider = String(pricingWorkflowState.providerDeleteProvider || "").trim().toLowerCase();
+          const requestMatches = !expectedRequestId || operationRequestId === expectedRequestId;
+          const providerMatches = !expectedProvider || operationProvider === expectedProvider;
+          const terminal = ["completed", "partial", "failed"].includes(String(cleanupOperation.state || ""));
+          if (expectedProvider && requestMatches && providerMatches && terminal) {
+            const loadingLayer = modal.querySelector('[data-provider-delete-loading="true"]');
+            const loadingRequestId = String(loadingLayer?.dataset.providerDeleteRequestId || "");
+            const loadingProvider = String(loadingLayer?.dataset.providerDeleteProvider || "").trim().toLowerCase();
+            if (
+              loadingLayer
+              && (!loadingRequestId || loadingRequestId === operationRequestId)
+              && (!loadingProvider || loadingProvider === operationProvider)
+            ) {
+              closeSettingsConfirm();
+            }
+            if (String(cleanupOperation.state || "") === "failed") {
+              setSettingsStatus(
+                `供应商 ${expectedProvider} 删除失败：${String(cleanupOperation.error || "未知错误")}`,
+                "error",
+              );
+              providerDeleteTerminalHandled = true;
+            } else {
+              const providerResult = cleanupOperation.providerResult;
+              const message = String(
+                providerResult?.message || `供应商 ${expectedProvider} 已删除。`,
+              );
+              setSettingsStatus(message, "");
+              const settings = hudSettingsFromPayload();
+              if (settingsProviderDraft && !settingsProviderNames(settings).includes(expectedProvider)) {
+                delete settingsProviderDraft.providers?.[expectedProvider];
+                settingsProviderDraft.order = settingsProviderDraft.order.filter(
+                  (item) => item !== expectedProvider,
+                );
+                codexProviderDrafts.delete(expectedProvider);
+                codexProviderDirty.delete(expectedProvider);
+                settingsDirtyProviders.delete(expectedProvider);
+                if (settingsProviderDraft.activeProvider === expectedProvider) {
+                  settingsProviderDraft.activeProvider = settingsProviderDraft.order.includes(
+                    settingsProviderDraft.appProvider,
+                  )
+                    ? settingsProviderDraft.appProvider
+                    : (settingsProviderDraft.order[0] || "");
+                  window[settingsProviderName] = settingsProviderDraft.activeProvider;
+                }
+                renderSettingsProviderEditor();
+                renderSettingsProviderTabs();
+              }
+              providerDeleteTerminalHandled = true;
+            }
+            clearProviderDeleteWorkflow();
+          }
+        }
         const status = payload?.settingsCommandStatus;
         if (status && typeof status === "object" && String(status.message || "")) {
-          setSettingsStatus(status.message || "", status.kind || "");
+          if (String(status.action || "") === "deleteProvider" && !providerDeleteTerminalHandled) {
+            const expectedRequestId = String(pricingWorkflowState.providerDeleteRequestId || "");
+            const statusRequestId = String(
+              status.requestId || status.providerDeleteRequestId || "",
+            );
+            if (!expectedRequestId || !statusRequestId || statusRequestId === expectedRequestId) {
+              pricingWorkflowState.providerDeleteRequestId = String(
+                status.providerDeleteRequestId || pricingWorkflowState.providerDeleteRequestId || "",
+              );
+              pricingWorkflowState.providerDeleteProvider = String(
+                status.provider || pricingWorkflowState.providerDeleteProvider || "",
+              ).trim().toLowerCase();
+              const hasSessionHistory = pricingWorkflowState.providerDeleteHasSessionHistory === true;
+              const acceptedRequestId = String(status.providerDeleteRequestId || "");
+              const terminalError = String(status.kind || "") === "error";
+              if (!hasSessionHistory || terminalError || !acceptedRequestId) {
+                const loadingLayer = modal.querySelector('[data-provider-delete-loading="true"]');
+                const loadingRequestId = String(loadingLayer?.dataset.providerDeleteRequestId || "");
+                if (
+                  loadingLayer
+                  && (!loadingRequestId || !statusRequestId || loadingRequestId === statusRequestId)
+                ) {
+                  closeSettingsConfirm();
+                }
+                clearProviderDeleteWorkflow();
+              }
+            }
+          }
+          if (!providerDeleteTerminalHandled) {
+            setSettingsStatus(status.message || "", status.kind || "");
+          }
           setSettingsRestartVisible(!!status.restartVisible);
           applyPricingCommandStatus(status);
           const restSaveRequestId = String(status.restReminderSaveRequestId || "");
@@ -1408,7 +1583,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
             try {
               ctx.bindings.send(settingsCommandBindingName, payload);
             } catch (error) {
-              setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
+              handleSettingsCommandSubmissionError(error, command);
               return false;
             }
           } else {
@@ -1418,14 +1593,20 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
             body: JSON.stringify(payload),
             keepalive: true,
           }).catch((error) => {
-            setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
+            handleSettingsCommandSubmissionError(error, command);
           });
           }
         } catch (error) {
-          setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
+          handleSettingsCommandSubmissionError(error, command);
           return false;
         }
-        setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
+        const providerDeleteRequestId = String(command?.requestId || command?.id || "");
+        const providerDeleteHandledSynchronously = String(command?.action || "") === "deleteProvider"
+          && Boolean(providerDeleteRequestId)
+          && !String(pricingWorkflowState.providerDeleteRequestId || "");
+        if (!providerDeleteHandledSynchronously) {
+          setSettingsStatus(pendingMessage || "设置命令已提交，等待 HUD daemon 写入本地配置...");
+        }
         setSettingsRestartVisible(false);
         if (!preserveOverlay) closeSettingsConfirm();
         return true;
@@ -1438,6 +1619,28 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       function closeSettingsConfirm() {
         const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
         if (layer) layer.remove();
+      }
+
+      function clearProviderDeleteWorkflow() {
+        pricingWorkflowState.providerDeleteRequestId = "";
+        pricingWorkflowState.providerDeleteProvider = "";
+        pricingWorkflowState.providerDeleteHasSessionHistory = false;
+      }
+
+      function handleSettingsCommandSubmissionError(error, command = {}) {
+        setSettingsStatus(`设置命令提交失败：${error?.message || error}`, "error");
+        if (String(command?.action || "") !== "deleteProvider") return;
+        const requestId = String(command?.requestId || command?.id || "");
+        const expectedRequestId = String(pricingWorkflowState.providerDeleteRequestId || "");
+        if (expectedRequestId && requestId && expectedRequestId !== requestId) return;
+        const loadingLayer = document.querySelector(
+          `#${settingsModalId} [data-provider-delete-loading="true"]`,
+        );
+        const loadingRequestId = String(loadingLayer?.dataset.providerDeleteRequestId || "");
+        if (loadingLayer && (!loadingRequestId || !requestId || loadingRequestId === requestId)) {
+          closeSettingsConfirm();
+        }
+        clearProviderDeleteWorkflow();
       }
 
       function openSettingsLoading({ kicker = "正在处理", title = "", body = "", mode = "" } = {}) {
@@ -1460,6 +1663,23 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           </div>
         `;
         dialog.appendChild(layer);
+      }
+
+      function openProviderDeleteLoading(requestId, provider, deleteSessionHistory = false) {
+        openSettingsLoading({
+          kicker: "正在删除",
+          title: "正在删除供应商",
+          body: deleteSessionHistory
+            ? "正在更新 config.toml、模型单价和会话列表，请勿关闭此窗口。"
+            : "正在更新 config.toml 和模型单价配置，请勿关闭此窗口。",
+          mode: "provider-delete",
+        });
+        const layer = document.querySelector(`#${settingsModalId} [data-settings-confirm="true"]`);
+        if (!layer) return false;
+        layer.dataset.providerDeleteLoading = "true";
+        layer.dataset.providerDeleteRequestId = String(requestId || "");
+        layer.dataset.providerDeleteProvider = String(provider || "").trim().toLowerCase();
+        return true;
       }
 
       function collectSettingsForm() {
@@ -2446,6 +2666,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       switchSettingsProvider,
       openProviderConfigDialog,
       applyProviderConfigDialog,
+      openProviderDeleteDialog,
+      confirmProviderDeleteDialog,
       typedSettingsRequestId,
       renderSettingsModal,
       restoreOpenSettingsModal,
@@ -2550,6 +2772,8 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     switchSettingsProvider,
     openProviderConfigDialog,
     applyProviderConfigDialog,
+    openProviderDeleteDialog,
+    confirmProviderDeleteDialog,
     typedSettingsRequestId,
     renderSettingsModal,
     restoreOpenSettingsModal,
