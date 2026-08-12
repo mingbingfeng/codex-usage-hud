@@ -1002,13 +1002,27 @@ _TEXT_PREFIX = r"""
         return defaultProviderSectionText(normalizedProvider, "", suggestedProviderEnvironmentKey(normalizedProvider));
       }
 
+      function providerSectionHeaderId(text) {
+        const match = String(text || "").match(/^[\t ]*\[model_providers\.([A-Za-z0-9_-]+)\][\t ]*(?:#.*)?/m) || "";
+        return (match && match[1]) ? match[1].toLowerCase() : "";
+      }
+
       function syncProviderSectionFromFields(layer) {
         const idNode = layer?.querySelector('[data-provider-config-field="provider_id"]');
         const baseUrlNode = layer?.querySelector('[data-provider-config-field="base_url"]');
         const envNode = layer?.querySelector('[data-provider-config-field="env_key"]');
         const sectionNode = layer?.querySelector('[data-provider-config-field="section_text"]');
         if (!sectionNode) return;
-        let text = setProviderSectionHeader(sectionNode.value, idNode?.value || "provider-id");
+        const id = String(idNode?.value || "provider-id").trim().toLowerCase();
+        const previous = String(sectionNode.value);
+        const previousHeaderId = providerSectionHeaderId(previous);
+        const previousName = providerSectionBasicString(previous, "name");
+        let text = setProviderSectionHeader(previous, id);
+        // name 仅在仍等于原 Provider ID（即未手动自定义过）时跟随联动同步，
+        // 避免覆盖用户自行填写的供应商显示名称。
+        if (previousName === previousHeaderId && previousName !== id) {
+          text = setProviderSectionBasicString(text, "name", id);
+        }
         text = setProviderSectionBasicString(text, "base_url", baseUrlNode?.value || "");
         text = setProviderSectionBasicString(text, "env_key", envNode?.value || "");
         sectionNode.value = text;
@@ -1499,9 +1513,9 @@ _TEXT_PREFIX = r"""
             modelsNode.hidden = false;
             const unique = [...new Set(modelList)];
             modelsNode.innerHTML = `
-              <div class="codex-usage-hud-provider-config-models-title">可用模型（${unique.length}）</div>
-              <ul class="codex-usage-hud-provider-config-models-list">${unique.map((model) =>
-                `<li title="${escapeHtml(model)}">${escapeHtml(model)}</li>`).join("")}</ul>
+              <option value="" selected disabled>可用模型（${unique.length}）</option>
+              ${unique.map((model) =>
+                `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join("")}
             `;
           } else {
             modelsNode.hidden = true;
@@ -1560,11 +1574,11 @@ _TEXT_PREFIX = r"""
                   <span class="codex-usage-hud-provider-config-apikey-field">
                     <input data-provider-config-field="api_key" type="password" value="${escapeHtml(isNew ? "" : (target?.currentApiKey || ""))}" placeholder="${isNew ? "请输入 API key" : (target?.hasApiKey ? "已填充当前密钥，可修改" : "请输入 API key")}" autocomplete="new-password">
                     <button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-provider-config-eye" data-action="settings-provider-toggle-api-key" aria-label="显示明文" title="显示明文"><span aria-hidden="true">👁</span></button>
+                    <select class="codex-usage-hud-provider-config-models" data-provider-config-models="" hidden aria-label="可用模型"></select>
                     <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-provider-config-fetch" data-action="settings-provider-test-connectivity">测试连通性</button>
                   </span>
                 </label>
                 <div class="codex-usage-hud-provider-config-fetch-status" data-provider-config-connectivity-status="" aria-live="polite"></div>
-                <div class="codex-usage-hud-provider-config-models" data-provider-config-models="" hidden></div>
               </div>
               ${isNew ? `<fieldset class="codex-usage-hud-provider-config-scope">
                 <legend>统计范围</legend>

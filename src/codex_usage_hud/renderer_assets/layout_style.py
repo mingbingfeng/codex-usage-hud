@@ -3926,6 +3926,27 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-provider-config-fetch {
             flex: 0 0 auto;
           }
+          #${rootId} .codex-usage-hud-provider-config-models {
+            flex: 0 1 auto;
+            min-width: 130px;
+            max-width: 220px;
+            box-sizing: border-box;
+            min-height: 31px;
+            padding: 4px 6px;
+            border: 1px solid #47494f;
+            border-radius: 5px;
+            background: #14171b;
+            color: #f1f3f5;
+            outline: none;
+            font: inherit;
+            font-weight: 400;
+          }
+          #${rootId} .codex-usage-hud-provider-config-models:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-config-models[hidden] {
+            display: none;
+          }
           #${rootId} .codex-usage-hud-provider-config-fetch-status {
             min-height: 14px;
             color: var(--codex-usage-hud-muted, #8492a6);
@@ -3935,41 +3956,6 @@ TEXT = r"""
           }
           #${rootId} .codex-usage-hud-provider-config-fetch-status-error {
             color: #f27878;
-          }
-          #${rootId} .codex-usage-hud-provider-config-models {
-            margin-top: 10px;
-            max-height: 200px;
-            overflow-y: auto;
-            border: 1px solid #47494f;
-            border-radius: 6px;
-            background: #20232a;
-            padding: 8px 10px;
-          }
-          #${rootId} .codex-usage-hud-provider-config-models-title {
-            color: #e3e6eb;
-            font-size: 11px;
-            font-weight: 600;
-            margin-bottom: 6px;
-          }
-          #${rootId} .codex-usage-hud-provider-config-models-list {
-            margin: 0;
-            padding: 0;
-            list-style: none;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 5px;
-          }
-          #${rootId} .codex-usage-hud-provider-config-models-list li {
-            padding: 3px 8px;
-            border-radius: 4px;
-            background: #2b2e36;
-            color: #c8cdd6;
-            font-size: 10px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 100%;
           }
           #${rootId} .codex-usage-hud-provider-delete-card {
             width: min(520px, calc(100% - 28px));
