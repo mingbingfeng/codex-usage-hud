@@ -677,32 +677,39 @@ class RestReminderSchedulerTests(unittest.TestCase):
             clock=lambda: clock["now"],
             wall_clock=lambda: wall["now"],
         )
-        presenter = RestReminderPresenter(
-            scheduler,
-            wall_clock=lambda: wall["now"],
-            persist_enabled=True,
-        )
-        config = RestReminderConfig(
-            enabled=True,
-            interval_minutes=45,
-            idle_reset_minutes=0,
-            work_start_time="09:00",
-            work_end_time="18:00",
-            lunch_enabled=False,
-        )
+        with tempfile.NamedTemporaryFile(suffix=".json") as state_file:
+            presenter = RestReminderPresenter(
+                scheduler,
+                wall_clock=lambda: wall["now"],
+                persist_enabled=True,
+                state_path=Path(state_file.name),
+            )
+            config = RestReminderConfig(
+                enabled=True,
+                interval_minutes=45,
+                idle_reset_minutes=0,
+                work_start_time="09:00",
+                work_end_time="18:00",
+                lunch_enabled=False,
+            )
 
-        with patch.object(
-            config_module,
-            "save_rest_reminder_state",
-            wraps=config_module.save_rest_reminder_state,
-        ) as save_state:
-            presenter.configure(config, force_reset=True)
-            presenter.tick()
-            clock["now"] += 10.0
-            wall["now"] += 10.0
-            presenter.tick()
+            with patch.object(
+                config_module,
+                "save_rest_reminder_state",
+                wraps=config_module.save_rest_reminder_state,
+            ) as save_state:
+                presenter.configure(config, force_reset=True)
+                presenter.tick()
+                clock["now"] += 10.0
+                wall["now"] += 10.0
+                presenter.tick()
 
-        self.assertEqual(save_state.call_count, 2)
+            written = [
+                call.args[0] for call in save_state.call_args_list if call.args[0]
+            ]
+            self.assertGreaterEqual(len(written), 2)
+            self.assertIn(False, {item.get("scheduleWaiting") for item in written})
+            self.assertIn(True, {item.get("scheduleWaiting") for item in written})
 
     def test_lunch_boundary_closes_visible_break_and_defers_next_round(self) -> None:
         clock = {"now": 0.0}
