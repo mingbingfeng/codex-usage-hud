@@ -138,6 +138,36 @@ def test_settings_support_panels_are_a_static_subdomain_fragment() -> None:
     )
 
 
+def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> None:
+    form_start = SETTINGS_SHELL.index("function codexCliFormHtml()")
+    form_end = SETTINGS_SHELL.index("function renderCodexCliDialog()", form_start)
+    form = SETTINGS_SHELL[form_start:form_end]
+    launch_start = SETTINGS_SHELL.index("function launchCodexCliFromDialog()")
+    launch_end = SETTINGS_SHELL.index("function applyCodexCliCommandStatus", launch_start)
+    launch = SETTINGS_SHELL[launch_start:launch_end]
+
+    assert "codexCliLaunchStorageKey" in renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+    assert "function codexCliLaunchStateKey()" in SETTINGS_SHELL
+    assert "profile:" in SETTINGS_SHELL
+    assert "|provider:" in SETTINGS_SHELL
+    assert "applyCodexCliPersistedLaunchState(codexCliPersistedLaunchState());" in SETTINGS_SHELL
+    assert "codexCliState.useProxy = false;" in SETTINGS_SHELL
+    assert 'data-codex-cli-proxy-port="true"' in form
+    assert 'proxyPort.hidden = codexCliState.useProxy !== true;' in SETTINGS_SHELL
+    assert "function codexCliLaunchTitle" in SETTINGS_SHELL
+    assert 'return ["启动 Codex", ...args].join(" ");' in SETTINGS_SHELL
+    assert '<strong>${escapeHtml(codexCliLaunchTitle())}</strong>' in SETTINGS_SHELL
+    assert 'data-codex-cli-field="resume"' in form
+    assert form.index('data-codex-cli-field="resume"') < form.index("启动终端")
+    assert "codex-usage-hud-codex-cli-check codex-usage-hud-codex-cli-wide" not in form
+    assert "codexCliPersistLaunchState(command);" in launch
+    assert launch.index("codexCliPersistLaunchState(command);") < launch.index(
+        "submitSettingsCommand("
+    )
+    assert "codex-usage-hud-codex-cli-proxy {" in LAYOUT_STYLE
+    assert "width: 76px;" in LAYOUT_STYLE
+
+
 def test_renderer_reinject_captures_active_session_sequences_before_remove() -> None:
     script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
     selection_capture = script.index("const previousActiveSessionSelectionSeq")

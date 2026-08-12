@@ -9,6 +9,7 @@ from codex_usage_hud.runtime_commands import (
     GeneralCommandPorts,
     RuntimeCommandPorts,
     handle_background_command,
+    handle_active_session_command,
     handle_cleanup_command,
     handle_insights_command,
     dispatch_command,
@@ -40,6 +41,27 @@ def test_command_errors_keep_request_correlation(
 
     assert status[field] == command["requestId"]
     assert status["kind"] == "error"
+
+
+def test_active_session_candidate_command_binds_exact_id() -> None:
+    received: list[dict[str, object]] = []
+
+    status = handle_active_session_command(
+        {
+            "action": "resolveActiveSession",
+            "sessionId": "thread-2",
+            "selectionSeq": 9,
+            "requestId": "candidate-1",
+        },
+        RuntimeCommandPorts(
+            resolve_active_session=lambda command: received.append(dict(command))
+            or True
+        ),
+    )
+
+    assert received[0]["sessionId"] == "thread-2"
+    assert received[0]["selectionSeq"] == 9
+    assert status["message"] == "已按你的选择匹配当前未归档会话。"
 
 
 def test_background_exception_keeps_request_and_response_kind() -> None:
@@ -364,3 +386,76 @@ def test_general_command_dispatches_provider_delete() -> None:
     assert status["status"] == "ok"
     assert status["providerId"] == "muyuan"
     assert status["requestId"] == "delete-1"
+
+
+def test_general_command_dispatches_fetch_provider_models() -> None:
+    calls: list[tuple[str, str]] = []
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        verify_provider_connectivity=lambda base, key: calls.append((base, key)) or True,
+    )
+
+    status = dispatch_command(
+        {
+            "action": "fetchProviderModels",
+            "baseUrl": "https://api.example.com/v1",
+            "apiKey": "sk-secret",
+            "requestId": "models-1",
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert calls == [("https://api.example.com/v1", "sk-secret")]
+    assert status["providerConnected"] is True
+    assert status["requestId"] == "models-1"
+
+
+def test_general_command_fetch_provider_models_surfaces_errors() -> None:
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        verify_provider_connectivity=lambda base, key: (_ for _ in ()).throw(
+            ValueError("API key 不能为空。")
+        ),
+    )
+
+    status = dispatch_command(
+        {"action": "fetchProviderModels", "baseUrl": "https://x.example/v1", "apiKey": ""},
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert status["kind"] == "error"
+    assert status["message"] == "API key 不能为空。"

@@ -28,6 +28,7 @@ class RendererHudPayload:
     follow_reason: str = ""
     follow_elapsed_ms: int = 0
     follow_timing: dict[str, int] = field(default_factory=dict)
+    match_candidates: list[dict[str, object]] = field(default_factory=list)
     top_details: dict[str, object] = field(default_factory=dict)
     top_progress: dict[str, object] = field(default_factory=dict)
     top_copies: dict[str, str] = field(default_factory=dict)
@@ -86,6 +87,7 @@ class RendererHudPayload:
             "followReason": self.follow_reason,
             "followElapsedMs": int(self.follow_elapsed_ms),
             "followTiming": dict(self.follow_timing),
+            "matchCandidates": [dict(item) for item in self.match_candidates],
             "topDetails": dict(self.top_details),
             "topProgress": dict(self.top_progress),
             "topCopies": dict(self.top_copies),
@@ -162,6 +164,7 @@ def payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
         "newSession", "pendingSession", "selectionSeq", "sessionId",
         "rendererSessionId", "cachedPreview", "selectionObservedAt",
         "followState", "followReason", "followElapsedMs", "followTiming",
+        "matchCandidates",
         "backgroundUsageNotification", "connectionHealth",
     )
     current_session_keys = (
@@ -170,6 +173,7 @@ def payload_domains(payload: dict[str, object]) -> dict[str, dict[str, object]]:
         "newSession", "pendingSession", "selectionSeq", "sessionId",
         "rendererSessionId", "cachedPreview", "selectionObservedAt",
         "followState", "followReason", "followElapsedMs", "topDetails",
+        "matchCandidates",
         "topCopies", "requestRows", "requestRowDetails", "requestRowsTotal", "observedModels",
         "preSendEstimate", "preSendBaseTokens", "preSendBreakdown",
         "preSendInputPrice", "preSendTotalCost", "preSendHasPrices",

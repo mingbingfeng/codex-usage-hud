@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import ctypes
+import json
 import os
 from pathlib import Path
 import re
 from typing import Any
+from urllib.error import URLError, HTTPError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 
 PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -78,6 +82,27 @@ def _set_user_environment_value(name: str, value: str) -> None:
 
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, "Environment") as handle:
         winreg.SetValueEx(handle, key, 0, winreg.REG_SZ, str(value))
+    _broadcast_environment_change()
+
+
+def _delete_user_environment_value(name: str) -> None:
+    """Remove one persisted user environment variable, if present."""
+    key = str(name or "").strip()
+    if not key:
+        return
+    if os.name != "nt":
+        # No persistent user environment variable to remove on Unix.
+        return
+    import winreg
+
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, "Environment") as handle:
+            winreg.DeleteValue(handle, key)
+    except FileNotFoundError:
+        # Not present; idempotent success.
+        return
+    except OSError:
+        return
     _broadcast_environment_change()
 
 
@@ -426,7 +451,9 @@ def read_provider_definitions(
     return result
 
 
-def _validate_request(update: Mapping[str, Any]) -> tuple[str, str, str, str, bool]:
+def _validate_request(
+    update: Mapping[str, Any],
+) -> tuple[str, str, str, str, bool]:
     provider_id = str(update.get("provider_id") or update.get("providerId") or "").strip()
     base_url = str(update.get("base_url") or update.get("baseUrl") or "").strip()
     env_key = str(update.get("env_key") or update.get("envKey") or "").strip()
@@ -532,9 +559,8 @@ def save_provider_configs(
                 )
             profile_path = path.parent / f"{provider_id}.config.toml"
             newline = _preferred_newline(candidate_text)
-            profiles_to_create.append(
-                (profile_path, f'model_provider = "{_toml_string(provider_id)}"{newline}')
-            )
+            profile_text = f'model_provider = "{_toml_string(provider_id)}"{newline}'
+            profiles_to_create.append((profile_path, profile_text))
         else:
             _start, _end, body = section
             if section_body is not None:
@@ -620,6 +646,124 @@ def save_provider_configs(
     }
 
 
+MAX_PROVIDER_MODELS_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+def _request_provider_models(
+    base_url: str,
+    api_key: str,
+    timeout_seconds: float = 8.0,
+) -> str:
+    """Request ``GET {base_url}/models`` and return the raw response body.
+
+    ``base_url`` typically ends in ``/v1``; the models endpoint is appended
+    directly.  Returns the (possibly empty) response text on a successful HTTP
+    status and raises ``ValueError`` for network, timeout, HTTP, or malformed
+    responses so the caller can surface a user-facing message.
+    """
+    target = str(base_url or "").strip().rstrip("/")
+    if not target:
+        raise ValueError("base_url 不能为空。")
+    parsed_target = urlsplit(target)
+    if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+        raise ValueError("base_url 必须使用 HTTP(S)。")
+    key = str(api_key or "").strip()
+    if not key:
+        raise ValueError("API key 不能为空。")
+    models_url = f"{target}/models"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {key}",
+        "User-Agent": "codex-usage-hud",
+    }
+    try:
+        request = Request(models_url, headers=headers)
+        with urlopen(request, timeout=max(1.0, timeout_seconds)) as response:
+            raw = response.read(MAX_PROVIDER_MODELS_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        raise ValueError(f"连通性测试失败（HTTP {exc.code}）。") from exc
+    except (
+        OSError,
+        URLError,
+        UnicodeDecodeError,
+        ValueError,
+    ) as exc:
+        raise ValueError(f"连通性测试失败：{exc}") from exc
+    if len(raw) > MAX_PROVIDER_MODELS_RESPONSE_BYTES:
+        raise ValueError("模型列表响应体过大，已中止解析。")
+    return raw.decode("utf-8", errors="replace")
+
+
+def _parse_model_ids(body: str) -> list[str]:
+    """Extract model identifiers from a Codex-compatible ``/models`` response.
+
+    Accepts an OpenAI-style ``{"data": [{"id": "..."}]}`` payload as well as a
+    bare JSON array.  Unknown, truncated, or caretaker objects are ignored.
+    """
+    text = str(body or "").strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return []
+
+    def candidate_id(item: object) -> str:
+        if isinstance(item, Mapping):
+            value = item.get("id") or item.get("name") or item.get("model")
+            return str(value or "").strip() if value else ""
+        if isinstance(item, str):
+            return item.strip()
+        return ""
+
+    raw_items: list[object] = []
+    if isinstance(payload, list):
+        raw_items = payload
+    elif isinstance(payload, Mapping):
+        data = payload.get("data")
+        raw_items = data if isinstance(data, list) else []
+    model_ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        model_id = candidate_id(item)
+        if not model_id or model_id.casefold() in seen:
+            continue
+        seen.add(model_id.casefold())
+        model_ids.append(model_id)
+    return model_ids
+
+
+def fetch_provider_models(
+    base_url: str,
+    api_key: str,
+    timeout_seconds: float = 8.0,
+) -> list[str]:
+    """Query ``GET {base_url}/models`` and return the available model IDs.
+
+    This is the primary endpoint used for both connectivity testing and model
+    listing.  Returns ``[]`` when the endpoint answers successfully but the
+    body contains no recognizable model entries; raises ``ValueError`` with a
+    user-facing message on network, timeout, HTTP, or malformed responses.
+    """
+    body = _request_provider_models(base_url, api_key, timeout_seconds)
+    return _parse_model_ids(body)
+
+
+def verify_provider_connectivity(
+    base_url: str,
+    api_key: str,
+    timeout_seconds: float = 8.0,
+) -> bool:
+    """Probe ``GET {base_url}/models`` as a pure connectivity test.
+
+    Backward-compatible wrapper around :func:`fetch_provider_models`: returns
+    ``True`` whenever the models endpoint answers with a successful HTTP status
+    for the given API key, regardless of whether the body contains models.
+    """
+    _request_provider_models(base_url, api_key, timeout_seconds)
+    return True
+
+
 def delete_provider_config(
     provider_id: str,
     *,
@@ -629,9 +773,9 @@ def delete_provider_config(
 
     The provider table, nested tables, and profiles that explicitly select the
     provider are removed from 'config.toml'. HUD-created profile files are
-    removed only when their 'model_provider' value matches the target. API key
-    environment variables are intentionally preserved because they are
-    user-owned secrets and are not part of the TOML deletion request.
+    removed only when their 'model_provider' value matches the target. When the
+    provider declares an ``env_key``, the matching user environment variable is
+    also removed so credentials do not accumulate after deletion.
     """
     provider = str(provider_id or "").strip()
     if not PROVIDER_ID_PATTERN.fullmatch(provider):
@@ -649,12 +793,20 @@ def delete_provider_config(
             "configPath": str(path),
             "removedTables": [],
             "profilePaths": [],
+            "environmentKeys": [],
         }
     original_text = _read_text_exact(path)
     parsed_config = _parse_toml_mapping(original_text)
     default_provider = str(parsed_config.get("model_provider") or "").strip().casefold()
     if default_provider == normalized_provider:
         raise ValueError("默认 Codex App Provider 不支持删除供应商配置。")
+
+    raw_providers = parsed_config.get("model_providers")
+    provider_env_key = ""
+    if isinstance(raw_providers, Mapping):
+        raw_entry = raw_providers.get(provider)
+        if isinstance(raw_entry, Mapping):
+            provider_env_key = str(raw_entry.get("env_key") or "").strip()
 
     candidate_text, removed_tables = _remove_provider_tables(
         original_text,
@@ -679,6 +831,7 @@ def delete_provider_config(
         _validate_toml(candidate_text)
     deleted_profiles: list[Path] = []
     config_written = False
+    env_deleted: list[str] = []
     try:
         if config_changed:
             _write_text_atomically(path, candidate_text, original_text)
@@ -686,6 +839,9 @@ def delete_provider_config(
         for profile_path, _profile_text in profile_backups:
             profile_path.unlink()
             deleted_profiles.append(profile_path)
+        if provider_env_key:
+            _delete_user_environment_value(provider_env_key)
+            env_deleted.append(provider_env_key)
         if config_written and _read_text_exact(path) != candidate_text:
             raise RuntimeError("Codex config 删除后校验失败。")
         if any(profile_path.exists() for profile_path in deleted_profiles):
@@ -711,13 +867,55 @@ def delete_provider_config(
             ) from None
         raise
 
-    changed = bool(config_changed or deleted_profiles)
+    changed = bool(config_changed or deleted_profiles or env_deleted)
     return {
         "changed": changed,
         "providerId": normalized_provider,
         "configPath": str(path),
         "removedTables": removed_tables,
         "profilePaths": [str(item) for item in deleted_profiles],
+        "environmentKeys": env_deleted,
+    }
+
+
+def fetch_provider_models_for_cli(
+    provider_id: str,
+    *,
+    config_path: str | Path | None = None,
+    timeout_seconds: float = 8.0,
+) -> dict[str, object]:
+    """Resolve a provider's model list from its stored Codex configuration.
+
+    Reads the ``[model_providers.<id>]`` section from ``config.toml`` to obtain
+    ``base_url`` and ``env_key``, reads the API key from the matching user
+    environment variable (never from HUD config), and queries ``/models``.
+    Returns ``{"provider", "baseUrl", "envKey", "models": [...]}`` on success
+    and raises ``ValueError`` with a user-facing message otherwise.
+    """
+    provider = str(provider_id or "").strip()
+    if not provider or not PROVIDER_ID_PATTERN.fullmatch(provider):
+        raise ValueError("Provider ID 无效。")
+    definitions = read_provider_definitions(config_path)
+    definition = definitions.get(provider.casefold())
+    if definition is None:
+        raise ValueError(f"未在 config.toml 中找到 Provider {provider} 的配置。")
+    base_url = definition.base_url
+    env_key = definition.env_key
+    if not base_url:
+        raise ValueError(f"Provider {provider} 未配置 base_url。")
+    if not env_key:
+        raise ValueError(f"Provider {provider} 未配置用户环境变量名称。")
+    api_key = _user_environment_value(env_key)
+    if not api_key:
+        raise ValueError(
+            f"用户环境变量 {env_key} 中没有可用的 API key，请先在新增/编辑供应商中保存。"
+        )
+    models = fetch_provider_models(base_url, api_key, timeout_seconds)
+    return {
+        "provider": provider,
+        "baseUrl": base_url,
+        "envKey": env_key,
+        "models": models,
     }
 
 
@@ -725,6 +923,9 @@ __all__ = [
     "CodexProviderDefinition",
     "default_codex_config_path",
     "delete_provider_config",
+    "fetch_provider_models",
+    "fetch_provider_models_for_cli",
     "read_provider_definitions",
     "save_provider_configs",
+    "verify_provider_connectivity",
 ]

@@ -171,6 +171,10 @@ def _enrich_tracker(
     snapshot.selection_observed_at_ms = selection_observed_at_ms
     snapshot.follow_state = str(getattr(tracker, "follow_state", "") or "")
     snapshot.follow_reason = str(getattr(tracker, "follow_reason", "") or "")
+    candidates = getattr(tracker, "match_candidates", [])
+    snapshot.match_candidates = [
+        dict(item) for item in candidates if isinstance(item, dict)
+    ]
     snapshot.follow_timing = {
         "observedAt": int(getattr(tracker, "selection_observed_at_ms", 0) or 0),
         "receivedAt": int(getattr(tracker, "selection_received_at_ms", 0) or 0),

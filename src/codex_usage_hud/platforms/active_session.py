@@ -82,10 +82,10 @@ def is_new_session_source(source: str) -> bool:
 def is_pending_session_source(source: str) -> bool:
     """Return whether renderer authority has a session whose data is not ready yet.
 
-    This is deliberately distinct from an unmatched session.  Renderer mode
+    This is deliberately distinct from an unmatched session. Renderer mode
     receives the selected row immediately, while Codex may publish its exact
-    local rollout mapping a moment later.  The HUD must wait for that exact
-    mapping instead of guessing by title or selecting a different JSONL file.
+    local rollout mapping a moment later. A controlled exact-title fallback may
+    use one unarchived persisted candidate; ambiguity remains pending.
     """
     return str(source or "").strip().startswith(
         ("renderer-pending-session", "renderer-pending-map")
@@ -112,6 +112,50 @@ def _is_new_session_title(title: str) -> bool:
         "新会话",
         "新聊天",
     }
+
+
+def _path_archive_state(path: Path | None, sessions_root: Path) -> bool | None:
+    """Infer archive state from the canonical local rollout roots when possible."""
+    if path is None:
+        return None
+    try:
+        path_key = path.expanduser().resolve(strict=False)
+        active_root = sessions_root.expanduser().resolve(strict=False)
+        archived_root = (sessions_root.parent / "archived_sessions").resolve(
+            strict=False
+        )
+        try:
+            path_key.relative_to(archived_root)
+        except ValueError:
+            pass
+        else:
+            return True
+        try:
+            path_key.relative_to(active_root)
+        except ValueError:
+            return None
+        return False
+    except OSError:
+        return None
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _archive_flag(value: object) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"", "0", "false", "no", "off"}:
+            return False
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
 
 
 def find_session_file(session_id: str, sessions_root: Path) -> Path | None:
@@ -359,6 +403,8 @@ class ActiveSessionTracker:
         self._renderer_path: Path | None = None
         self._renderer_new_session = False
         self._renderer_pending_session = False
+        self._renderer_match_candidates: list[dict[str, object]] = []
+        self._renderer_manual_candidate_id = ""
         self._selection_seq = 0
         self._selection_observed_at_ms = 0
         self._selection_received_at_ms = 0
@@ -427,6 +473,12 @@ class ActiveSessionTracker:
         with self._lock:
             return bool(self._renderer_new_session)
 
+    @property
+    def match_candidates(self) -> list[dict[str, object]]:
+        """Return safe, unarchived candidates for a pending renderer match."""
+        with self._lock:
+            return [dict(item) for item in self._renderer_match_candidates]
+
     def follow_snapshot(self) -> dict[str, object]:
         """Compact follow diagnostics for heal progress checks."""
         with self._lock:
@@ -439,6 +491,9 @@ class ActiveSessionTracker:
                 "rendererSessionId": self._renderer_raw_session_id,
                 "title": self._renderer_title,
                 "path": str(self._renderer_path) if self._renderer_path is not None else "",
+                "matchCandidates": [
+                    dict(item) for item in self._renderer_match_candidates
+                ],
                 "stuckSinceMs": int(self._follow_stuck_since_ms or 0),
                 "stuckElapsedMs": (
                     max(0, int(time.time() * 1000) - int(self._follow_stuck_since_ms or 0))
@@ -703,6 +758,7 @@ class ActiveSessionTracker:
             incoming_seq = max(0, int(selection_seq or 0))
         except (TypeError, ValueError):
             incoming_seq = 0
+        has_incoming_seq = incoming_seq > 0
         try:
             incoming_observed_at_ms = max(0, int(observed_at_ms or 0))
         except (TypeError, ValueError):
@@ -722,13 +778,39 @@ class ActiveSessionTracker:
         if not incoming_seq:
             incoming_seq = current_seq + 1 if identity != current_identity else current_seq
         follow_reason = ""
+        match_candidates: list[dict[str, object]] = []
+        manual_candidate_id = ""
         if provisional_renderer_id and title:
-            resolved_id, resolved_path, follow_reason = (
-                self._resolve_provisional_renderer_ref_details(
+            with self._lock:
+                if (
+                    renderer_session_id == self._renderer_raw_session_id
+                    and title == self._renderer_title
+                    and (not has_incoming_seq or incoming_seq == current_seq)
+                ):
+                    candidate_id = self._renderer_manual_candidate_id
+                    candidate_path = self.path_from_renderer_thread_id(candidate_id)
+                    if candidate_path is not None:
+                        candidate_record = self._renderer_candidate_record(
+                            candidate_id,
+                            candidate_path,
+                            title,
+                        )
+                        if candidate_record.get("archived") is False:
+                            manual_candidate_id = candidate_id
+            if manual_candidate_id:
+                resolved_id = manual_candidate_id
+                resolved_path = self.path_from_renderer_thread_id(resolved_id)
+                follow_reason = "manual-selection" if resolved_path is not None else ""
+            else:
+                (
+                    resolved_id,
+                    resolved_path,
+                    follow_reason,
+                    match_candidates,
+                ) = self._resolve_provisional_renderer_ref_details(
                     renderer_session_id,
                     title,
                 )
-            )
             if resolved_id and resolved_path is not None:
                 session_id = resolved_id
                 pending_session = False
@@ -747,8 +829,8 @@ class ActiveSessionTracker:
         detected = detected_at if detected_at is not None else time.monotonic()
 
         # Renderer is the authority. A canonical renderer id may only map via
-        # its exact state-db record; title matching and recursive file searches
-        # can select a different conversation after a sidebar change.
+        # its exact state-db record. Provisional rows use only the controlled
+        # unique-unarchived title fallback; ambiguity never picks a substitute.
         path = self.path_from_renderer_thread_id(session_id) if session_id else None
         # Title-only refs (common when DOM exposes the chrome title but no
         # thread id yet) still need an exact title map or they stick forever on
@@ -825,6 +907,9 @@ class ActiveSessionTracker:
             previous_renderer_path = self._renderer_path
             previous_renderer_new_session = self._renderer_new_session
             previous_renderer_pending_session = self._renderer_pending_session
+            previous_match_candidates = [
+                dict(item) for item in self._renderer_match_candidates
+            ]
             previous_selection_seq = self._selection_seq
             previous_follow_state = self._follow_state
             previous_follow_reason = self._follow_reason
@@ -911,6 +996,20 @@ class ActiveSessionTracker:
             self._renderer_path = path
             self._renderer_new_session = new_session
             self._renderer_pending_session = pending_session
+            self._renderer_match_candidates = (
+                []
+                if new_session or path is not None or not provisional_renderer_id
+                else [dict(item) for item in match_candidates]
+            )
+            if manual_candidate_id:
+                self._renderer_manual_candidate_id = manual_candidate_id
+            elif (
+                not provisional_renderer_id
+                or incoming_seq != current_seq
+                or renderer_session_id != previous_renderer_session_id
+                or display_title != previous_renderer_title
+            ):
+                self._renderer_manual_candidate_id = ""
             self._selection_seq = incoming_seq
             self._selection_observed_at_ms = observed_at_to_store
             self._selection_received_at_ms = incoming_received_at_ms
@@ -936,6 +1035,7 @@ class ActiveSessionTracker:
             or path != previous_renderer_path
             or new_session != previous_renderer_new_session
             or pending_session != previous_renderer_pending_session
+            or self._renderer_match_candidates != previous_match_candidates
             or incoming_seq != previous_selection_seq
             or self._follow_state != previous_follow_state
             or follow_reason != previous_follow_reason
@@ -969,52 +1069,69 @@ class ActiveSessionTracker:
             con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
             try:
                 con.row_factory = sqlite3.Row
-                row = con.execute(
-                    """
-                    select rollout_path
-                    from threads
-                    where title = ?
-                    order by archived asc, updated_at_ms desc, updated_at desc
-                    limit 1
-                    """,
+                columns = {
+                    str(row[1] or "").strip()
+                    for row in con.execute("pragma table_info(threads)")
+                }
+                archive_column = ", archived" if "archived" in columns else ""
+
+                def active_paths(sql: str, params: tuple[object, ...]) -> list[Path]:
+                    rows = con.execute(sql, params).fetchall()
+                    paths: dict[str, Path] = {}
+                    for item in rows:
+                        candidate = self._normalize_rollout_path(
+                            str(item["rollout_path"] or "")
+                        )
+                        if candidate is None:
+                            continue
+                        archived = _path_archive_state(candidate, self.sessions_root)
+                        if "archived" in columns and item["archived"] is not None:
+                            archived = _archive_flag(item["archived"])
+                        if archived is not False:
+                            continue
+                        paths[self._path_key(candidate)] = candidate
+                    return list(paths.values())
+
+                exact_paths = active_paths(
+                    f"select rollout_path{archive_column} from threads where title = ?",
                     (title,),
-                ).fetchone()
-                if row is None:
-                    title_prefix = _title_prefix(title)
-                    row = None
-                    if len(title_prefix) >= _TITLE_PREFIX_MATCH_MIN_CHARS:
-                        row = con.execute(
-                            """
-                            select rollout_path, title
+                )
+                if len(exact_paths) == 1:
+                    return exact_paths[0]
+                if len(exact_paths) > 1:
+                    return None
+
+                title_prefix = _title_prefix(title)
+                prefix_paths: list[Path] = []
+                if len(title_prefix) >= _TITLE_PREFIX_MATCH_MIN_CHARS:
+                    prefix_paths.extend(
+                        active_paths(
+                            f"""
+                            select rollout_path{archive_column}
                             from threads
                             where length(title) >= ?
                               and title like ? || '%'
-                            order by archived asc, length(title) desc, updated_at_ms desc, updated_at desc
-                            limit 1
                             """,
                             (_TITLE_PREFIX_MATCH_MIN_CHARS, title_prefix),
-                        ).fetchone()
-                    if row is None:
-                        row = con.execute(
-                            """
-                            select rollout_path, title
+                        )
+                    )
+                if not prefix_paths:
+                    prefix_paths.extend(
+                        active_paths(
+                            f"""
+                            select rollout_path{archive_column}
                             from threads
                             where length(title) >= ?
                               and ? like title || '%'
-                            order by archived asc, length(title) desc, updated_at_ms desc, updated_at desc
-                            limit 1
                             """,
                             (_TITLE_PREFIX_MATCH_MIN_CHARS, title),
-                        ).fetchone()
+                        )
+                    )
             finally:
                 con.close()
         except sqlite3.Error:
             return None
-
-        if row is None:
-            return None
-        path_text = str(row["rollout_path"] or "")
-        return self._normalize_rollout_path(path_text)
+        return prefix_paths[0] if len(prefix_paths) == 1 else None
 
     def title_for_session(
         self,
@@ -1049,7 +1166,7 @@ class ActiveSessionTracker:
         if not self.session_index_path.exists():
             return None
 
-        best_id = ""
+        candidate_ids: list[str] = []
         try:
             with self.session_index_path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -1059,13 +1176,25 @@ class ActiveSessionTracker:
                         continue
                     name = str(item.get("thread_name") or "")
                     if _title_matches(name, title):
-                        best_id = str(item.get("id") or best_id)
+                        candidate_id = str(item.get("id") or "").strip()
+                        if candidate_id and candidate_id not in candidate_ids:
+                            candidate_ids.append(candidate_id)
         except OSError:
             return None
 
-        if not best_id:
+        active_paths: dict[str, Path] = {}
+        for candidate_id in candidate_ids:
+            path = self.path_from_renderer_thread_id(candidate_id)
+            if path is None:
+                path = find_session_file(candidate_id, self.sessions_root)
+            if path is None:
+                continue
+            record = self._renderer_candidate_record(candidate_id, path, title)
+            if record.get("archived") is False:
+                active_paths[self._path_key(path)] = path
+        if len(active_paths) != 1:
             return None
-        return find_session_file(best_id, self.sessions_root)
+        return next(iter(active_paths.values()))
 
     def title_from_session_index_id(self, session_id: str) -> str:
         """Look up the visible thread title for a known session id."""
@@ -1096,24 +1225,75 @@ class ActiveSessionTracker:
         """Resolve a temporary sidebar id when it represents a persisted thread.
 
         Codex can keep ``client-new-thread:*`` in a task row after persistence.
-        Accept only an exact, unique title from session_index.jsonl whose
-        canonical rollout path already exists; otherwise remain pending.
+        Accept only an exact, unique unarchived title candidate from
+        session_index.jsonl whose canonical rollout path already exists;
+        otherwise remain pending.
         """
-        resolved_id, path, _reason = self._resolve_provisional_renderer_ref_details(
-            session_id,
-            title,
+        resolved_id, path, _reason, _candidates = (
+            self._resolve_provisional_renderer_ref_details(
+                session_id,
+                title,
+            )
         )
         return resolved_id, path
+
+    def _renderer_candidate_record(
+        self,
+        session_id: str,
+        path: Path,
+        title: str,
+    ) -> dict[str, object]:
+        """Read archive metadata for one exact renderer candidate."""
+        archived = _path_archive_state(path, self.sessions_root)
+        candidate_title = str(title or "").strip()
+        updated_at_ms = 0
+        try:
+            if self.state_db.exists():
+                con = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+                try:
+                    columns = {
+                        str(row[1] or "").strip()
+                        for row in con.execute("pragma table_info(threads)")
+                    }
+                    selected = ["id"]
+                    for column in ("title", "archived", "updated_at_ms"):
+                        if column in columns:
+                            selected.append(column)
+                    row = con.execute(
+                        f"select {', '.join(selected)} from threads where id = ? limit 1",
+                        (session_id,),
+                    ).fetchone()
+                finally:
+                    con.close()
+                if row is not None:
+                    values = dict(zip(selected, row))
+                    db_title = str(values.get("title") or "").strip()
+                    if db_title:
+                        candidate_title = db_title
+                    if "archived" in values and values.get("archived") is not None:
+                        archived = _archive_flag(values.get("archived"))
+                    updated_at_ms = _safe_int(values.get("updated_at_ms"))
+        except sqlite3.Error:
+            pass
+        return {
+            "sessionId": str(session_id or "").strip(),
+            "title": candidate_title,
+            "archived": archived,
+            "updatedAtMs": updated_at_ms,
+            "rolloutName": path.name,
+        }
 
     def _resolve_provisional_renderer_ref_details(
         self,
         session_id: str,
         title: str,
-    ) -> tuple[str, Path | None, str]:
-        """Resolve a provisional row and retain a stable pending reason."""
+    ) -> tuple[str, Path | None, str, list[dict[str, object]]]:
+        """Resolve a provisional row using only persisted unarchived candidates."""
         if not is_provisional_renderer_session_id(session_id) or not title:
-            return "", None, "awaiting-canonical-id"
-        candidates: dict[str, Path] = {}
+            return "", None, "awaiting-canonical-id", []
+        candidates: dict[str, tuple[Path, dict[str, object]]] = {}
+        matched_candidate_ids = 0
+        resolved_records: list[dict[str, object]] = []
         try:
             with self.session_index_path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -1126,20 +1306,99 @@ class ActiveSessionTracker:
                     candidate_id = str(item.get("id") or "").strip()
                     if not candidate_id or is_provisional_renderer_session_id(candidate_id):
                         continue
+                    matched_candidate_ids += 1
                     path = self.path_from_renderer_thread_id(candidate_id)
                     if path is not None:
-                        candidates[candidate_id] = path
+                        record = self._renderer_candidate_record(candidate_id, path, title)
+                        resolved_records.append(record)
+                        if record.get("archived") is False:
+                            candidates[candidate_id] = (path, record)
         except OSError:
-            return "", None, "awaiting-persistence"
+            return "", None, "awaiting-persistence", []
         if len(candidates) != 1:
             reason = (
                 "ambiguous-persisted-identity"
                 if len(candidates) > 1
-                else "awaiting-persistence"
+                else (
+                    "no-unarchived-candidate"
+                    if matched_candidate_ids
+                    and len(resolved_records) == matched_candidate_ids
+                    and resolved_records
+                    and all(item.get("archived") is True for item in resolved_records)
+                    else "awaiting-persistence"
+                )
             )
-            return "", None, reason
-        candidate_id, path = next(iter(candidates.items()))
-        return candidate_id, path, "confirmed"
+            payload_candidates = [
+                dict(record)
+                for _path, record in sorted(
+                    candidates.values(),
+                    key=lambda item: (
+                        -_safe_int(item[1].get("updatedAtMs")),
+                        str(item[1].get("sessionId") or ""),
+                    ),
+                )
+            ]
+            return "", None, reason, payload_candidates
+        candidate_id, (path, _record) = next(iter(candidates.items()))
+        return candidate_id, path, "confirmed", []
+
+    def resolve_renderer_candidate(
+        self,
+        session_id: str,
+        *,
+        selection_seq: int = 0,
+    ) -> bool:
+        """Bind the current provisional row to one displayed unarchived candidate."""
+        if not self.enabled:
+            return False
+        candidate_id = str(session_id or "").strip()
+        try:
+            requested_seq = max(0, int(selection_seq or 0))
+        except (TypeError, ValueError):
+            requested_seq = 0
+        with self._lock:
+            raw_id = str(self._renderer_raw_session_id or "").strip()
+            title = str(self._renderer_title or self.latest_title or "").strip()
+            current_seq = int(self._selection_seq or 0)
+            candidates = {
+                str(item.get("sessionId") or "").strip(): dict(item)
+                for item in self._renderer_match_candidates
+            }
+        if not is_provisional_renderer_session_id(raw_id) or not candidate_id:
+            return False
+        if requested_seq and requested_seq != current_seq:
+            return False
+        candidate = candidates.get(candidate_id)
+        if candidate is None or candidate.get("archived") is not False:
+            return False
+        path = self.path_from_renderer_thread_id(candidate_id)
+        if path is None:
+            return False
+        record = self._renderer_candidate_record(candidate_id, path, title)
+        if record.get("archived") is not False:
+            return False
+        with self._lock:
+            if (
+                self._renderer_raw_session_id != raw_id
+                or self._renderer_title != title
+                or self._selection_seq != current_seq
+            ):
+                return False
+            self._renderer_manual_candidate_id = candidate_id
+        self.observe_conversation_ref(
+            candidate_id,
+            title,
+            source="renderer",
+            renderer_session_id=raw_id,
+            selection_seq=current_seq,
+            observed_at_ms=self.selection_observed_at_ms,
+        )
+        with self._lock:
+            return bool(
+                self._renderer_session_id == candidate_id
+                and self._renderer_path is not None
+                and self._follow_state == "confirmed"
+            )
 
     def path_from_renderer_thread_id(
         self,
@@ -1518,7 +1777,7 @@ class ActiveSessionTracker:
                 selection_seq = 0
                 observed_at_ms = 0
         if raw_session_id and is_provisional_renderer_session_id(raw_session_id):
-            resolved_id, resolved_path, reason = (
+            resolved_id, resolved_path, reason, match_candidates = (
                 self._resolve_provisional_renderer_ref_details(raw_session_id, title)
             )
             if resolved_id and resolved_path is not None:
@@ -1540,6 +1799,9 @@ class ActiveSessionTracker:
                 self.latest_event_source = "renderer"
                 self._follow_state = "pending"
                 self._follow_reason = reason
+                self._renderer_match_candidates = [
+                    dict(item) for item in match_candidates
+                ]
                 if self._follow_stuck_since_ms <= 0:
                     self._follow_stuck_since_ms = (
                         int(self._selection_observed_at_ms or 0)

@@ -188,6 +188,9 @@ def payload_from_snapshot(
         follow_reason=str(snapshot.follow_reason or ""),
         follow_elapsed_ms=_follow_elapsed_ms(snapshot),
         follow_timing=dict(snapshot.follow_timing or {}),
+        match_candidates=[
+            dict(item) for item in getattr(snapshot, "match_candidates", []) or []
+        ],
         warning=bool(
             snapshot.error
             or snapshot.request.error
@@ -284,6 +287,9 @@ def session_switch_payload_from_snapshot(
         "followReason": str(snapshot.follow_reason or ""),
         "followElapsedMs": _follow_elapsed_ms(snapshot),
         "followTiming": dict(snapshot.follow_timing or {}),
+        "matchCandidates": [
+            dict(item) for item in getattr(snapshot, "match_candidates", []) or []
+        ],
         "backgroundUsageNotification": dict(background_usage_notification or {}),
         "connectionHealth": _connection_health_payload(connection_health),
     }

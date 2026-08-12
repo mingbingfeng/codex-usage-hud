@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -12,13 +12,29 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from codex_usage_hud.codex_provider_config import (
+    _delete_user_environment_value,
     delete_provider_config,
     read_provider_definitions,
     save_provider_configs,
+    verify_provider_connectivity,
 )
 
 
 class CodexProviderConfigTests(unittest.TestCase):
+    def test_delete_user_environment_value_uses_winreg_signature(self) -> None:
+        fake_winreg = MagicMock()
+        handle = object()
+        fake_winreg.CreateKeyEx.return_value.__enter__.return_value = handle
+
+        with patch.object(
+            sys.modules["os"], "name", "nt"
+        ), patch.dict(sys.modules, {"winreg": fake_winreg}), patch(
+            "codex_usage_hud.codex_provider_config._broadcast_environment_change"
+        ):
+            _delete_user_environment_value("MUYUAN_API_KEY")
+
+        fake_winreg.DeleteValue.assert_called_once_with(handle, "MUYUAN_API_KEY")
+
     def test_default_provider_cannot_be_deleted(self) -> None:
         config_text = (
             'model_provider = "custom"\n\n'
@@ -388,6 +404,128 @@ class CodexProviderConfigTests(unittest.TestCase):
                     )
             self.assertEqual(path.read_text(encoding="utf-8"), config_text)
             self.assertFalse((root / "broken.config.toml").exists())
+
+    def test_delete_provider_removes_user_environment_variable(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n\n'
+            "[model_providers.muyuan]\n"
+            'name = "Muyuan"\n'
+            'base_url = "https://muyuan.example/v1"\n'
+            'env_key = "MUYUAN_API_KEY"\n'
+        )
+        deleted = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.toml"
+            path.write_text(config_text, encoding="utf-8")
+            with patch(
+                "codex_usage_hud.codex_provider_config._delete_user_environment_value",
+                side_effect=lambda name: deleted.append(name),
+            ):
+                result = delete_provider_config("muyuan", config_path=path)
+
+        self.assertEqual(deleted, ["MUYUAN_API_KEY"])
+        self.assertIn("environmentKeys", result)
+        self.assertEqual(result["environmentKeys"], ["MUYUAN_API_KEY"])
+
+    def test_delete_provider_without_env_key_does_not_touch_environment(self) -> None:
+        config_text = (
+            'model_provider = "custom"\n\n'
+            "[model_providers.custom]\n"
+            'name = "OpenAI"\n\n'
+            "[model_providers.muyuan]\n"
+            'name = "Muyuan"\n'
+            'base_url = "https://muyuan.example/v1"\n'
+        )
+        deleted = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.toml"
+            path.write_text(config_text, encoding="utf-8")
+            with patch(
+                "codex_usage_hud.codex_provider_config._delete_user_environment_value",
+                side_effect=lambda name: deleted.append(name),
+            ):
+                result = delete_provider_config("muyuan", config_path=path)
+
+        self.assertEqual(deleted, [])
+        self.assertEqual(result["environmentKeys"], [])
+
+
+class VerifyProviderConnectivityTests(unittest.TestCase):
+    def test_verify_provider_connectivity_calls_models_endpoint_with_bearer(self) -> None:
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self, length: int = -1) -> bytes:
+                del length
+                return b'{"data": [{"id": "gpt-4o"}]}'
+
+        def fake_urlopen(request, timeout: float = 8.0):
+            captured["url"] = request.full_url
+            captured["authorization"] = request.get_header("Authorization")
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            connected = verify_provider_connectivity(
+                "https://api.example.com/v1/", "sk-test-secret"
+            )
+
+        self.assertEqual(captured["url"], "https://api.example.com/v1/models")
+        self.assertEqual(captured["authorization"], "Bearer sk-test-secret")
+        self.assertTrue(connected)
+
+    def test_verify_provider_connectivity_accepts_response_without_data_list(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self, length: int = -1) -> bytes:
+                del length
+                return b'{"object": "list", "data": []}'
+
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=lambda request, timeout: FakeResponse(),
+        ):
+            self.assertTrue(
+                verify_provider_connectivity(
+                    "https://api.example.com/v1", "key"
+                )
+            )
+
+    def test_verify_provider_connectivity_rejects_missing_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "base_url"):
+            verify_provider_connectivity("", "key")
+        with self.assertRaisesRegex(ValueError, "API key"):
+            verify_provider_connectivity("https://api.example.com/v1", "")
+
+    def test_verify_provider_connectivity_surfaces_http_error(self) -> None:
+        from urllib.error import HTTPError
+
+        def fake_urlopen(request, timeout: float = 8.0):
+            del request, timeout
+            raise HTTPError("https://api.example.com/v1/models", 401, "Unauthorized", None, None)
+
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            with self.assertRaisesRegex(ValueError, "HTTP 401"):
+                verify_provider_connectivity("https://api.example.com/v1", "key")
 
 
 if __name__ == "__main__":

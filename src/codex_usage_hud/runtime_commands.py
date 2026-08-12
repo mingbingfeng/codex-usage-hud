@@ -16,7 +16,13 @@ import uuid
 
 from . import runtime_settings
 from . import __version__
-from .codex_provider_config import save_provider_configs
+from .codex_provider_config import (
+    fetch_provider_models,
+    fetch_provider_models_for_cli,
+    save_provider_configs,
+    verify_provider_connectivity,
+)
+from .codex_cli_launcher import discover_codex_cli_options, launch_codex_cli
 from .config import (
     DEFAULT_WORK_OVERLAY_MAX_ITEMS,
     ModelPrice,
@@ -122,6 +128,7 @@ class RuntimeCommandPorts:
     insights_worker: object | None = None
     insights_payload: Mapping[str, object] | None = None
     activate_session: Callable[[Mapping[str, object]], object | None] | None = None
+    resolve_active_session: Callable[[Mapping[str, object]], object | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +153,10 @@ class GeneralCommandPorts:
     pricing_open_path: Callable[[Path], None] | None = None
     save_codex_providers: Callable[[object], Mapping[str, object]] | None = None
     delete_provider: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
+    fetch_provider_models: Callable[[str, str], list[str]] | None = None
+    fetch_cli_provider_models: Callable[[str], Mapping[str, object]] | None = None
+    codex_cli_discover: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
+    codex_cli_launch: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
 
 
 def _status(message: str, *, kind: str = "") -> dict[str, object]:
@@ -473,6 +484,7 @@ def dispatch_command(
     general_ports: GeneralCommandPorts,
 ) -> dict[str, object]:
     for handler in (
+        handle_active_session_command,
         handle_cleanup_command,
         handle_insights_command,
         handle_background_command,
@@ -481,6 +493,29 @@ def dispatch_command(
         if handled is not UNHANDLED:
             return correlate_status(handled, command)
     return correlate_status(handle_general_command(command, general_ports), command)
+
+
+def handle_active_session_command(
+    command: Mapping[str, Any], ports: RuntimeCommandPorts
+) -> dict[str, object] | object:
+    """Handle a user-confirmed renderer candidate binding."""
+    action = str(command.get("action") or "").strip()
+    if action != "resolveActiveSession":
+        return UNHANDLED
+    resolver = ports.resolve_active_session
+    if resolver is None:
+        return _status("当前会话候选匹配不可用。", kind="error")
+    try:
+        accepted = resolver(command)
+    except Exception as exc:
+        _LOGGER.debug("renderer_active_session_candidate_failed error=%s", exc)
+        return _status(f"会话候选匹配失败：{exc}", kind="error")
+    if not bool(accepted):
+        return _status(
+            "会话候选已失效，请重新选择当前列表中的未归档会话。",
+            kind="error",
+        )
+    return _status("已按你的选择匹配当前未归档会话。")
 
 
 def _query_with_preview(
@@ -843,11 +878,54 @@ def handle_general_command(
 ) -> dict[str, object]:
     action = str(command.get("action") or "").strip()
     try:
+        if action == "codexCliDiscover":
+            if ports.codex_cli_discover is None:
+                return _status("Codex CLI 启动器当前不可用。", kind="error")
+            payload = ports.codex_cli_discover(command)
+            status = _status("终端和 Codex Desktop 工作目录已刷新。")
+            status["codexCli"] = dict(payload)
+            return status
+        if action == "codexCliLaunch":
+            if ports.codex_cli_launch is None:
+                return _status("Codex CLI 启动器当前不可用。", kind="error")
+            result = ports.codex_cli_launch(command)
+            launch_mode = "新标签页" if bool(result.get("openedAsTab")) else "新终端窗口"
+            status = _status(
+                f"已在 {str(result.get('terminal') or '所选终端')} 的{launch_mode}中启动 Codex CLI。"
+            )
+            status["codexCliLaunch"] = dict(result)
+            return status
         if action == "deleteProvider":
             if ports.delete_provider is None:
                 return _status("供应商删除当前不可用。", kind="error")
             result = ports.delete_provider(command)
             return dict(result)
+        if action == "fetchProviderModels":
+            if ports.fetch_provider_models is None:
+                return _status("模型列表获取当前不可用。", kind="error")
+            base_url = str(command.get("baseUrl") or command.get("base_url") or "").strip()
+            api_key = str(command.get("apiKey") or command.get("api_key") or "").strip()
+            try:
+                models = ports.fetch_provider_models(base_url, api_key)
+            except ValueError as exc:
+                return _status(str(exc), kind="error")
+            status = _status(f"已获取 {len(models)} 个模型。")
+            status["providerConnected"] = True
+            status["models"] = list(models)
+            return status
+        if action == "codexCliFetchModels":
+            if ports.fetch_cli_provider_models is None:
+                return _status("模型列表获取当前不可用。", kind="error")
+            provider = str(command.get("provider") or "").strip()
+            try:
+                payload = ports.fetch_cli_provider_models(provider)
+            except ValueError as exc:
+                return _status(str(exc), kind="error")
+            status = _status(
+                f"已获取 {len([item for item in payload.get('models', [])])} 个模型。"
+            )
+            status["codexCliModels"] = dict(payload)
+            return status
         if action == "savePricing":
             codex_provider_result: Mapping[str, object] | None = None
             codex_updates = command.get("codexProviders")
@@ -1240,6 +1318,26 @@ def _handle_renderer_usage_insights_command(
     return result
 
 
+def _resolve_renderer_active_session_candidate(
+    context: object,
+    command: Mapping[str, object],
+) -> bool:
+    tracker = getattr(context, "active_session_tracker", None)
+    resolver = getattr(tracker, "resolve_renderer_candidate", None)
+    if not callable(resolver):
+        return False
+    try:
+        selection_seq = int(command.get("selectionSeq") or 0)
+    except (TypeError, ValueError):
+        selection_seq = 0
+    return bool(
+        resolver(
+            str(command.get("sessionId") or "").strip(),
+            selection_seq=selection_seq,
+        )
+    )
+
+
 def _handle_renderer_settings_command(
     command: Mapping[str, Any],
     context: RuntimeContext,
@@ -1255,6 +1353,9 @@ def _handle_renderer_settings_command(
         cleanup_manager=getattr(context, "session_cleanup_manager", None),
         insights_worker=getattr(context, "usage_insights_worker", None),
         insights_payload=getattr(context, "usage_insights_payload", None),
+        resolve_active_session=lambda candidate: _resolve_renderer_active_session_candidate(
+            context, candidate
+        ),
         activate_session=(
             lambda activation: _handle_work_overlay_command(
                 activation,
@@ -1283,6 +1384,29 @@ def _handle_renderer_settings_command(
     def install_update(info: object) -> None:
         installer = download_update_asset(info)
         launch_installer(installer)
+
+    def discover_cli(command: Mapping[str, object]) -> Mapping[str, object]:
+        provider = str(
+            command.get("provider")
+            or getattr(context, "app_provider", "")
+            or ""
+        ).strip().lower()
+        return discover_codex_cli_options(
+            provider=provider,
+            sessions_root=getattr(context, "sessions_root", None),
+            state_db_path=getattr(context, "state_db_path", None),
+            current_workdir=Path.cwd(),
+        )
+
+    def launch_cli(command: Mapping[str, object]) -> Mapping[str, object]:
+        return launch_codex_cli(
+            terminal_id=str(command.get("terminalId") or "").strip(),
+            command=str(command.get("command") or ""),
+            workdir=str(command.get("workdir") or "").strip(),
+        )
+
+    def fetch_cli_provider_models(provider: str) -> Mapping[str, object]:
+        return fetch_provider_models_for_cli(provider)
 
     def delete_provider(command: Mapping[str, object]) -> Mapping[str, object]:
         if bool(command.get("deleteSessionHistory")):
@@ -1334,6 +1458,10 @@ def _handle_renderer_settings_command(
         pricing_open_path=_open_system_path,
         save_codex_providers=lambda updates: save_provider_configs(updates),
         delete_provider=delete_provider,
+        fetch_provider_models=lambda base_url, api_key: fetch_provider_models(base_url, api_key),
+        fetch_cli_provider_models=fetch_cli_provider_models,
+        codex_cli_discover=discover_cli,
+        codex_cli_launch=launch_cli,
     )
     return dispatch_command(command, command_ports, general_ports)
 
@@ -1346,6 +1474,7 @@ __all__ = [
     "correlate_status",
     "dispatch_command",
     "handle_background_command",
+    "handle_active_session_command",
     "handle_cleanup_command",
     "handle_insights_command",
     "handle_general_command",

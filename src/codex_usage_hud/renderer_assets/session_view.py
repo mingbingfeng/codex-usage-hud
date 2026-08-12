@@ -391,6 +391,61 @@ TEXT = r"""
     bindRequestRowsPagination(list);
     syncRunningRowsTimer(root);
   }
+
+  function renderActiveSessionCandidates(root, payload) {
+    const candidates = Array.isArray(payload?.matchCandidates)
+      ? payload.matchCandidates.filter((item) => item && typeof item === "object")
+      : [];
+    const visible = payload?.followReason === "ambiguous-persisted-identity" && candidates.length > 1;
+    root.querySelectorAll('[data-field="activeSessionCandidates"]').forEach((container) => {
+      container.hidden = !visible;
+      container.replaceChildren();
+      if (!visible) return;
+
+      const heading = document.createElement("div");
+      heading.className = "codex-usage-hud-active-session-candidates-title";
+      heading.textContent = "检测到多个未归档同名会话，请选择：";
+      container.appendChild(heading);
+
+      const detail = document.createElement("div");
+      detail.className = "codex-usage-hud-active-session-candidates-detail";
+      detail.textContent = "这些候选都来自当前会话列表；选择后将按精确会话 ID 绑定。";
+      container.appendChild(detail);
+
+      const list = document.createElement("div");
+      list.className = "codex-usage-hud-active-session-candidates-list";
+      candidates.forEach((candidate, index) => {
+        const sessionId = String(candidate.sessionId || "").trim();
+        if (!sessionId) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "codex-usage-hud-active-session-candidate";
+        button.dataset.action = "active-session-candidate";
+        button.dataset.sessionId = sessionId;
+        button.dataset.selectionSeq = String(Number(payload?.selectionSeq || 0));
+        const shortId = sessionId.length > 16
+          ? `${sessionId.slice(0, 8)}…${sessionId.slice(-6)}`
+          : sessionId;
+        const name = String(candidate.rolloutName || "").trim();
+        const updatedAtMs = Number(candidate.updatedAtMs || 0);
+        const updated = updatedAtMs > 0
+          ? new Date(updatedAtMs).toLocaleString()
+          : "时间未知";
+        button.title = `${shortId}${name ? `\n${name}` : ""}`;
+
+        const label = document.createElement("span");
+        label.className = "codex-usage-hud-active-session-candidate-label";
+        label.textContent = `候选 ${index + 1} · ${shortId}`;
+        const meta = document.createElement("span");
+        meta.className = "codex-usage-hud-active-session-candidate-meta";
+        meta.textContent = `${name || "本地会话文件未知"} · 更新于 ${updated}`;
+        button.append(label, meta);
+        list.append(button);
+      });
+      container.appendChild(list);
+    });
+  }
+
   function renderHeavyRounds(root, details) {
     const list = root.querySelector('[data-field="topHeavyRounds"]');
     if (!list) return;
@@ -595,6 +650,7 @@ TEXT = r"""
       payload?.requestRowsTotal || 0,
       payload?.rendererSessionId || payload?.sessionId || "",
     );
+    renderActiveSessionCandidates(root, payload || {});
     renderBackgroundUsageNotification(root, payload || {});
     diagnosticsDomain.applyConnectionHealth(root, payload || {});
     applyActiveSessionSequence(payload);
@@ -626,6 +682,7 @@ TEXT = r"""
     root.querySelectorAll('[data-field="requestLine"], [data-field="requestLineExpanded"]').forEach((node) => {
       node.classList.toggle(errorClass, payload?.requestStatus === "error");
     });
+    renderActiveSessionCandidates(root, payload || {});
     renderBackgroundUsageNotification(root, payload || {});
     diagnosticsDomain.applyConnectionHealth(root, payload || {});
     applyActiveSessionSequence(payload);

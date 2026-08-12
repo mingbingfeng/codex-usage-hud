@@ -26,12 +26,23 @@ not as a product vision or optional strategy.
 
 ### Strict renderer session contract
 
-- The selected renderer row's canonical thread UUID is the only mapping key.
-  Do not title-match, recursively scan session files, or select a newest-file
-  substitute when that UUID is not yet in the local state database.
+- The selected renderer row's canonical thread UUID remains the first and
+  preferred mapping key. Do not select a newest-file substitute or use an
+  archived rollout as a fallback.
+- Codex's visible active-session list contains unarchived rows only. When a
+  `client-new-thread:*` provisional alias has a title but no canonical UUID,
+  the controlled fallback may inspect exact persisted title candidates and
+  filter them to `archived=0` (or the active `sessions` rollout root when the
+  local schema has no archive column). Auto-bind only when exactly one
+  unarchived candidate remains.
+- If multiple unarchived candidates remain, keep the switch pending and expose
+  their exact IDs for an explicit user choice. If no unarchived candidate is
+  available, keep the switch pending. Never auto-select an archived or
+  otherwise unknown candidate.
 - `client-new-thread:*` is a provisional new-session alias, not an unmatched
   conversation. Render an explicit pending state until Codex publishes the
-  canonical UUID and exact rollout mapping.
+  canonical UUID, an exact unique unarchived mapping is confirmed, or the user
+  chooses one of the displayed unarchived candidates.
 - A state/session-map file event must re-resolve the already selected UUID
   immediately. It must not wait for another click, title event, or poll.
 - Renderer bootstrap starts with the configured or last successful CDP port.

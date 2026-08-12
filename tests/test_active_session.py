@@ -990,7 +990,104 @@ class ActiveSessionTrackerTests(unittest.TestCase):
 
             self.assertEqual(resolver.resolve(), (None, "renderer-pending-session"))
             self.assertEqual(tracker.follow_reason, "ambiguous-persisted-identity")
+            self.assertEqual(
+                [item["sessionId"] for item in tracker.match_candidates],
+                ["thread-1", "thread-2"],
+            )
             self.assertEqual(platform.detect_calls, 0)
+
+            self.assertTrue(
+                tracker.resolve_renderer_candidate("thread-2", selection_seq=3)
+            )
+            self.assertEqual(resolver.resolve(), (paths[1], "renderer:Duplicate Title"))
+            self.assertEqual(tracker.latest_session_id, "thread-2")
+            self.assertEqual(tracker.follow_reason, "confirmed")
+            self.assertEqual(tracker.match_candidates, [])
+            tracker.observe_conversation_ref(
+                "",
+                "Duplicate Title",
+                renderer_session_id="local:client-new-thread:pending-uuid",
+                pending_session=True,
+                selection_seq=3,
+            )
+            self.assertEqual(tracker.latest_session_id, "thread-2")
+            self.assertEqual(tracker.latest_path, paths[1])
+            self.assertEqual(tracker.follow_state, "confirmed")
+
+    def test_renderer_provisional_title_ignores_archived_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sessions_root = root / "sessions"
+            archived_root = root / "archived_sessions" / "2026" / "08"
+            sessions_root.mkdir()
+            archived_root.mkdir(parents=True)
+            active_path = sessions_root / "rollout-active.jsonl"
+            archived_path = archived_root / "rollout-archived.jsonl"
+            active_path.write_text("{}\n", encoding="utf-8")
+            archived_path.write_text("{}\n", encoding="utf-8")
+            state_db = root / "state_5.sqlite"
+            con = sqlite3.connect(state_db)
+            try:
+                con.execute(
+                    "create table threads ("
+                    "id text primary key, rollout_path text, title text, "
+                    "archived integer, updated_at_ms integer, updated_at integer)"
+                )
+                con.executemany(
+                    "insert into threads values (?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            "active-thread",
+                            str(active_path),
+                            "Duplicate Title",
+                            0,
+                            20,
+                            20,
+                        ),
+                        (
+                            "archived-thread",
+                            str(archived_path),
+                            "Duplicate Title",
+                            1,
+                            30,
+                            30,
+                        ),
+                    ],
+                )
+                con.commit()
+            finally:
+                con.close()
+            (root / "session_index.jsonl").write_text(
+                "\n".join(
+                    json.dumps({"id": thread_id, "thread_name": "Duplicate Title"})
+                    for thread_id in ("active-thread", "archived-thread")
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            tracker = ActiveSessionTracker(
+                platform=FakePlatform(),
+                state_db=state_db,
+                sessions_root=sessions_root,
+                session_index_path=root / "session_index.jsonl",
+                poll_ms=250,
+                enabled=True,
+                start_background_watcher=False,
+            )
+
+            tracker.observe_conversation_ref(
+                "",
+                "Duplicate Title",
+                renderer_session_id="local:client-new-thread:pending-uuid",
+                pending_session=True,
+                selection_seq=4,
+            )
+
+            self.assertEqual(tracker.latest_session_id, "active-thread")
+            self.assertEqual(tracker.latest_path, active_path)
+            self.assertEqual(tracker.follow_reason, "confirmed")
+            self.assertEqual(tracker.match_candidates, [])
+            self.assertEqual(tracker.path_for_title("Duplicate Title"), active_path)
 
     def test_renderer_ignores_stale_selection_sequence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -197,6 +197,7 @@ TEXT = r"""
           <div class="codex-usage-hud-expanded-shell">
             <div class="codex-usage-hud-request-subhead"><span>轮次流水</span><span>最新在上</span></div>
             <div class="codex-usage-hud-request-list" data-field="requestRows"></div>
+            <div class="codex-usage-hud-active-session-candidates" data-field="activeSessionCandidates" hidden></div>
             <div class="codex-usage-hud-panel-header" data-action="toggle">
               <div class="codex-usage-hud-left-controls">
                 <button class="codex-usage-hud-handle" data-action="move" title="移动" aria-label="移动">⋮⋮</button>

@@ -1513,6 +1513,67 @@ TEXT = r"""
             scrollbar-width: thin;
             scrollbar-color: #273241 #101821;
           }
+          #${rootId} .codex-usage-hud-active-session-candidates {
+            margin-top: 6px;
+            padding: 7px;
+            border: 1px solid rgba(243, 210, 122, .28);
+            border-radius: 5px;
+            background: rgba(243, 210, 122, .06);
+          }
+          #${rootId} .codex-usage-hud-active-session-candidates[hidden] {
+            display: none !important;
+          }
+          #${rootId} .codex-usage-hud-active-session-candidates-title {
+            color: #f3d27a;
+            font-size: 11px;
+            font-weight: 700;
+            line-height: 16px;
+          }
+          #${rootId} .codex-usage-hud-active-session-candidates-detail {
+            margin-top: 2px;
+            color: #9aaabd;
+            font-size: 10px;
+            line-height: 14px;
+          }
+          #${rootId} .codex-usage-hud-active-session-candidates-list {
+            display: grid;
+            gap: 4px;
+            margin-top: 6px;
+          }
+          #${rootId} .codex-usage-hud-active-session-candidate {
+            display: grid;
+            gap: 1px;
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid #354250;
+            border-radius: 4px;
+            padding: 5px 7px;
+            background: #17212c;
+            color: #dce7f2;
+            cursor: pointer;
+            text-align: left;
+          }
+          #${rootId} .codex-usage-hud-active-session-candidate:hover,
+          #${rootId} .codex-usage-hud-active-session-candidate:focus-visible {
+            border-color: #f3d27a;
+            background: #202c38;
+            outline: none;
+          }
+          #${rootId} .codex-usage-hud-active-session-candidate-label {
+            overflow: hidden;
+            color: #dce7f2;
+            font: 11px/15px Consolas, "Cascadia Mono", ui-monospace, monospace;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-active-session-candidate-meta {
+            overflow: hidden;
+            color: #9aaabd;
+            font-size: 10px;
+            line-height: 14px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
           #${rootId} .codex-usage-hud-row {
             white-space: pre;
             color: #dce7f2;
@@ -2503,6 +2564,185 @@ TEXT = r"""
             background: var(--codex-usage-hud-header-surface, #202833);
             color: var(--codex-usage-hud-accent, #f3d27a);
             outline: none;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-launch-action {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            font: 700 11px Consolas, "Cascadia Mono", ui-monospace, monospace;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-layer {
+            position: absolute;
+            inset: 0;
+            z-index: 4;
+            display: grid;
+            place-items: center;
+            padding: 18px;
+            background: rgba(7, 8, 9, .78);
+            backdrop-filter: blur(5px);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-dialog {
+            width: min(680px, calc(100% - 12px));
+            max-height: 100%;
+            display: grid;
+            gap: 12px;
+            padding: 16px;
+            border: 1px solid color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 36%, var(--codex-usage-hud-divider, #273241));
+            border-radius: 8px;
+            background: var(--codex-usage-hud-surface, #10161d);
+            box-shadow: 0 24px 70px rgba(0, 0, 0, .56);
+            overflow: auto;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-head,
+          #${rootId} .codex-usage-hud-codex-cli-actions,
+          #${rootId} .codex-usage-hud-codex-cli-command-head,
+          #${rootId} .codex-usage-hud-codex-cli-context {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-head > div {
+            min-width: 0;
+            display: grid;
+            gap: 3px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-head strong {
+            color: var(--codex-usage-hud-text, #e8eef7);
+            font-size: 15px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-kicker {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            font: 800 9px Consolas, "Cascadia Mono", ui-monospace, monospace;
+            letter-spacing: .14em;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-loading,
+          #${rootId} .codex-usage-hud-codex-cli-meta,
+          #${rootId} .codex-usage-hud-codex-cli-notice,
+          #${rootId} .codex-usage-hud-codex-cli-danger {
+            color: var(--codex-usage-hud-muted, #a9bcd2);
+            font-size: 11px;
+            line-height: 1.55;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-context {
+            justify-content: flex-start;
+            min-height: 30px;
+            padding: 0;
+            border: 0;
+            background: transparent;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-context span {
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-context strong {
+            min-width: 0;
+            overflow-wrap: anywhere;
+            color: var(--codex-usage-hud-text, #e8eef7);
+            font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-grid {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px 10px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-proxy {
+            min-width: 0;
+            min-height: 30px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-proxy-port {
+            display: block;
+            width: 76px;
+            flex: 0 0 76px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-proxy-port input {
+            min-height: 30px;
+            padding: 5px 7px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-field,
+          #${rootId} .codex-usage-hud-codex-cli-check {
+            min-width: 0;
+            display: grid;
+            align-content: start;
+            gap: 5px;
+            color: var(--codex-usage-hud-muted, #a9bcd2);
+            font-size: 10px;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-wide {
+            grid-column: 1 / -1;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-check {
+            min-height: 30px;
+            display: flex;
+            align-items: center;
+            gap: 7px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-check input {
+            width: 15px;
+            height: 15px;
+            margin: 0;
+            accent-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-field input,
+          #${rootId} .codex-usage-hud-codex-cli-field select,
+          #${rootId} .codex-usage-hud-codex-cli-command {
+            box-sizing: border-box;
+            width: 100%;
+            min-width: 0;
+            border: 1px solid var(--codex-usage-hud-divider, #273241);
+            border-radius: 5px;
+            background: var(--codex-usage-hud-panel-surface, #141b24);
+            color: var(--codex-usage-hud-text, #e8eef7);
+            outline: none;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-field input,
+          #${rootId} .codex-usage-hud-codex-cli-field select {
+            min-height: 30px;
+            padding: 5px 7px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-field input:focus,
+          #${rootId} .codex-usage-hud-codex-cli-field select:focus,
+          #${rootId} .codex-usage-hud-codex-cli-command:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-command-head {
+            color: var(--codex-usage-hud-text, #e8eef7);
+            font-size: 11px;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-command {
+            min-height: 116px;
+            resize: vertical;
+            padding: 9px;
+            font: 11px/1.55 Consolas, "Cascadia Mono", ui-monospace, monospace;
+            white-space: pre;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-notice {
+            padding: 7px 9px;
+            border-left: 2px solid var(--codex-usage-hud-warning, #ffb86b);
+            background: color-mix(in srgb, var(--codex-usage-hud-warning, #ffb86b) 8%, transparent);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-notice a {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-danger {
+            padding: 7px 9px;
+            border-left: 2px solid var(--codex-usage-hud-error, #ff7b86);
+            background: color-mix(in srgb, var(--codex-usage-hud-error, #ff7b86) 8%, transparent);
+            color: var(--codex-usage-hud-error, #ff7b86);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-actions {
+            flex-wrap: wrap;
+            justify-content: flex-end;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-status {
+            min-width: 0;
+            margin-right: auto;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
           }
           #${rootId} .codex-usage-hud-provider-delete-action:hover,
           #${rootId} .codex-usage-hud-provider-delete-action:focus-visible {
@@ -3634,6 +3874,62 @@ TEXT = r"""
             margin: 0;
             accent-color: var(--codex-usage-hud-accent, #f3d27a);
           }
+          #${rootId} .codex-usage-hud-provider-config-apikey {
+            grid-column: 1 / -1;
+            min-width: 0;
+            display: grid;
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-provider-config-apikey label {
+            min-width: 0;
+            display: grid;
+            gap: 4px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-provider-config-apikey-field {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+          }
+          #${rootId} .codex-usage-hud-provider-config-apikey-field input {
+            min-width: 0;
+            box-sizing: border-box;
+            flex: 1 1 auto;
+            min-height: 31px;
+            padding: 5px 7px;
+            border: 1px solid #47494f;
+            border-radius: 5px;
+            background: #14171b;
+            color: #f1f3f5;
+            outline: none;
+            font: inherit;
+            font-weight: 400;
+          }
+          #${rootId} .codex-usage-hud-provider-config-apikey-field input:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-config-eye {
+            flex: 0 0 auto;
+            min-height: 31px;
+            padding: 0 8px;
+            line-height: 1;
+          }
+          #${rootId} .codex-usage-hud-provider-config-fetch {
+            flex: 0 0 auto;
+          }
+          #${rootId} .codex-usage-hud-provider-config-fetch-status {
+            min-height: 14px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 400;
+            line-height: 1.4;
+          }
+          #${rootId} .codex-usage-hud-provider-config-fetch-status-error {
+            color: #f27878;
+          }
           #${rootId} .codex-usage-hud-provider-delete-card {
             width: min(520px, calc(100% - 28px));
           }
@@ -4632,6 +4928,18 @@ TEXT = r"""
             }
             #${rootId} .codex-usage-hud-settings-grid {
               grid-template-columns: minmax(0, 1fr);
+            }
+            #${rootId} .codex-usage-hud-codex-cli-grid {
+              grid-template-columns: minmax(0, 1fr);
+            }
+            #${rootId} .codex-usage-hud-codex-cli-wide {
+              grid-column: 1;
+            }
+            #${rootId} .codex-usage-hud-codex-cli-layer {
+              padding: 8px;
+            }
+            #${rootId} .codex-usage-hud-codex-cli-dialog {
+              padding: 12px;
             }
             #${rootId} .codex-usage-hud-settings-compact-row {
               grid-template-columns: minmax(0, 1fr);

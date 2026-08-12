@@ -142,6 +142,11 @@ TEXT = r"""
       commitSessionCleanupSearch(sessionSearch);
     });
     rootScope.listen(root, "input", (event) => {
+      const codexCliField = event.target?.closest?.("[data-codex-cli-field]");
+      if (codexCliField && root.contains(codexCliField)) {
+        codexCliFieldInput(String(codexCliField.dataset.codexCliField || ""));
+        return;
+      }
       const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
       if (restStartInput && root.contains(restStartInput)) {
         restStartInput.dataset.userEdited = "true";
@@ -188,6 +193,11 @@ TEXT = r"""
       markSettingsProviderDirty();
     }, true);
     rootScope.listen(root, "change", (event) => {
+      const codexCliField = event.target?.closest?.("[data-codex-cli-field]");
+      if (codexCliField && root.contains(codexCliField)) {
+        codexCliFieldChange(String(codexCliField.dataset.codexCliField || ""));
+        return;
+      }
       const restStartInput = event.target?.closest?.('[data-rest-reminder-start-time="true"]');
       if (restStartInput && root.contains(restStartInput)) {
         restStartInput.dataset.userEdited = "true";
@@ -254,10 +264,12 @@ TEXT = r"""
       if (event.key === "Escape") {
         const modal = document.getElementById(settingsModalId);
         if (modal && !modal.hidden) {
+          const codexCli = modal.querySelector('[data-codex-cli-dialog="true"]');
           const confirm = modal.querySelector('[data-settings-confirm="true"]');
           event.preventDefault();
           event.stopPropagation();
-          if (confirm) closeSettingsConfirm();
+          if (codexCli) closeCodexCliDialog();
+          else if (confirm) closeSettingsConfirm();
           else closeSettingsModal();
           return;
         }
@@ -313,6 +325,52 @@ TEXT = r"""
       }
       const action = event.target?.closest?.("[data-action]");
       if (!action || !root.contains(action)) return;
+      if (action.dataset.action === "active-session-candidate") {
+        event.preventDefault();
+        event.stopPropagation();
+        const sessionId = String(action.dataset.sessionId || "").trim();
+        if (!sessionId) return;
+        submitSettingsCommand(
+          {
+            action: "resolveActiveSession",
+            sessionId,
+            selectionSeq: Number(action.dataset.selectionSeq || 0),
+          },
+          "正在按你的选择匹配未归档会话...",
+          { preserveOverlay: true },
+        );
+        return;
+      }
+      if (action.dataset.action === "settings-codex-cli-open") {
+        event.preventDefault();
+        event.stopPropagation();
+        openCodexCliDialog(action.dataset.provider || "");
+        return;
+      }
+      if (action.dataset.action === "codex-cli-close") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeCodexCliDialog();
+        return;
+      }
+      if (action.dataset.action === "codex-cli-refresh") {
+        event.preventDefault();
+        event.stopPropagation();
+        refreshCodexCliDialog();
+        return;
+      }
+      if (action.dataset.action === "codex-cli-copy") {
+        event.preventDefault();
+        event.stopPropagation();
+        codexCliCopyCommand();
+        return;
+      }
+      if (action.dataset.action === "codex-cli-launch") {
+        event.preventDefault();
+        event.stopPropagation();
+        launchCodexCliFromDialog();
+        return;
+      }
       if (action.dataset.action === "runtime-errors-toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -667,6 +725,18 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         applyProviderConfigDialog();
+        return;
+      }
+      if (action.dataset.action === "settings-provider-toggle-api-key") {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleProviderApiKeyVisibility();
+        return;
+      }
+      if (action.dataset.action === "settings-provider-test-connectivity") {
+        event.preventDefault();
+        event.stopPropagation();
+        testProviderConnectivityFromDialog();
         return;
       }
       if (action.dataset.action === "settings-add-model") {

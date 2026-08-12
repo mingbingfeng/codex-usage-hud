@@ -50,7 +50,8 @@ def follow_feedback(snapshot: ParsedSession) -> str:
         "awaiting-canonical-id": "会话切换中：等待 Codex 提供正式会话 ID",
         "awaiting-persistence": "会话切换中：等待 Codex 写入会话映射",
         "awaiting-exact-mapping": "会话切换中：正式 ID 已收到，等待本地映射",
-        "ambiguous-persisted-identity": "会话切换暂停：存在同名历史会话，未自动匹配",
+        "ambiguous-persisted-identity": "会话切换暂停：存在多个未归档同名会话，请展开请求面板选择",
+        "no-unarchived-candidate": "会话切换暂停：当前列表没有可匹配的未归档会话",
         "renderer-channel-unavailable": "会话切换暂停：renderer 事件通道不可用",
     }
     return labels.get(reason, "会话切换中：正在确认当前会话")

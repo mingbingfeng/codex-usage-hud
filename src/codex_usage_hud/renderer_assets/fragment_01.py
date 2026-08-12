@@ -35,6 +35,7 @@ HEAD = r"""
   const staleTimerName = "__codexUsageHudStaleTimer";
   const storageKey = "codexUsageHudPanelState:v5";
   const supportImagesStorageKey = "codexUsageHudSupportImages:v1";
+  const codexCliLaunchStorageKey = "codexUsageHudCodexCliLaunches:v1";
 const settingsModalId = `codex-usage-hud-settings-modal-${version}`;
 const settingsProviderName = "__codexUsageHudSettingsProvider";
   const settingsUiStateName = "__codexUsageHudSettingsUiState";

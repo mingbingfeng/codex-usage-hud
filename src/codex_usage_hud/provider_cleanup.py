@@ -166,9 +166,16 @@ def delete_provider_for_context(
     profile_count = len(config_result.get("profilePaths", []))
     price_count = int(pricing_result.get("modelPrices", 0))
     version_count = int(pricing_result.get("pricingVersions", 0))
+    env_deleted = [
+        str(item or "")
+        for item in config_result.get("environmentKeys", [])
+        if str(item or "")
+    ]
     message = f"供应商 {provider} 已删除：已移除 config.toml 相关配置"
     if profile_count:
         message += f"和 {profile_count} 个 Provider profile"
+    if env_deleted:
+        message += f"；已删除用户环境变量 {', '.join(env_deleted)}"
     if bool(command.get("deleteModelPrices")):
         message += f"；模型单价配置已删除（{price_count} 条价格、{version_count} 个版本）"
     return {

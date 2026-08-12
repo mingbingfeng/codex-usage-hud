@@ -72,6 +72,7 @@ def _record_active_session_runtime_error(
         "awaiting-persistence": "awaiting_persistence",
         "awaiting-exact-mapping": "awaiting_exact_mapping",
         "ambiguous-persisted-identity": "ambiguous_persisted_identity",
+        "no-unarchived-candidate": "no_unarchived_candidate",
         "renderer-channel-unavailable": "renderer_channel_unavailable",
     }
     tracker = getattr(context, "active_session_tracker", None)
@@ -83,7 +84,11 @@ def _record_active_session_runtime_error(
             severity=(
                 "error"
                 if follow_reason
-                in {"ambiguous-persisted-identity", "renderer-channel-unavailable"}
+                in {
+                    "ambiguous-persisted-identity",
+                    "no-unarchived-candidate",
+                    "renderer-channel-unavailable",
+                }
                 else "warning"
             ),
             code=code,

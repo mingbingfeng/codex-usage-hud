@@ -108,6 +108,7 @@ def clone_cached_snapshot(snapshot: ParsedSession) -> ParsedSession:
     cloned.budget_warnings = list(snapshot.budget_warnings)
     cloned.active_work_items = list(snapshot.active_work_items)
     cloned.follow_timing = dict(snapshot.follow_timing)
+    cloned.match_candidates = [dict(item) for item in snapshot.match_candidates]
     return cloned
 
 

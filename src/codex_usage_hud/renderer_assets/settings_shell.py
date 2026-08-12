@@ -15,9 +15,541 @@ _TEXT_PREFIX = r"""
         providerDeleteRequestId: "",
         providerDeleteProvider: "",
         providerDeleteHasSessionHistory: false,
+        providerModelsFetching: false,
       };
       const codexProviderDrafts = new Map();
       const codexProviderDirty = new Set();
+      const codexCliState = {
+        open: false,
+        provider: "",
+        requestId: "",
+        options: null,
+        terminalId: "",
+        useProxy: false,
+        proxyPort: "7897",
+        permission: "full",
+        resume: false,
+        workdir: "",
+        workdirCustom: false,
+        model: "",
+        commandEdited: false,
+        commandText: "",
+      };
+
+      function codexCliLaunchStateKey() {
+        const options = codexCliState.options || {};
+        const profile = String(options.profile || "").trim();
+        const provider = String(options.provider || codexCliState.provider || "").trim().toLowerCase();
+        return "profile:" + (profile || "default") + "|provider:" + (provider || "default");
+      }
+
+      function codexCliStoredLaunchStates() {
+        try {
+          const states = JSON.parse(ctx.storage.read(localStorage, codexCliLaunchStorageKey, "{}"));
+          return states && typeof states === "object" && !Array.isArray(states) ? states : {};
+        } catch (_) {
+          return {};
+        }
+      }
+
+      function codexCliPersistedLaunchState() {
+        const saved = codexCliStoredLaunchStates()[codexCliLaunchStateKey()];
+        return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+      }
+
+      function codexCliPersistLaunchState(command) {
+        try {
+          const states = codexCliStoredLaunchStates();
+          states[codexCliLaunchStateKey()] = {
+            terminalId: codexCliState.terminalId,
+            useProxy: codexCliState.useProxy === true,
+            proxyPort: codexCliState.proxyPort,
+            permission: codexCliState.permission,
+            resume: codexCliState.resume === true,
+            workdir: codexCliState.workdir,
+            workdirCustom: codexCliState.workdirCustom === true,
+            model: String(codexCliState.model || "").trim(),
+            command: String(command || ""),
+            commandEdited: codexCliState.commandEdited === true
+              || String(command || "") !== codexCliCommandText(),
+          };
+          ctx.storage.write(localStorage, codexCliLaunchStorageKey, JSON.stringify(states));
+        } catch (_) {}
+      }
+
+      function applyCodexCliPersistedLaunchState(saved) {
+        if (!saved || typeof saved !== "object") return;
+        const terminals = Array.isArray(codexCliState.options?.terminals)
+          ? codexCliState.options.terminals
+          : [];
+        const terminalId = String(saved.terminalId || "").trim();
+        if (terminals.some((item) => String(item?.id || "") === terminalId)) {
+          codexCliState.terminalId = terminalId;
+        }
+        const permissions = Array.isArray(codexCliState.options?.permissions)
+          ? codexCliState.options.permissions
+          : [];
+        const permission = String(saved.permission || "").trim();
+        if (permissions.some((item) => String(item?.id || "") === permission)) {
+          codexCliState.permission = permission;
+        }
+        const proxyPort = Number.parseInt(String(saved.proxyPort || ""), 10);
+        if (Number.isInteger(proxyPort) && proxyPort >= 1 && proxyPort <= 65535) {
+          codexCliState.proxyPort = String(proxyPort);
+        }
+        codexCliState.useProxy = saved.useProxy === true;
+        codexCliState.resume = saved.resume === true;
+        const workdir = String(saved.workdir || "").trim();
+        if (workdir) {
+          codexCliState.workdir = workdir;
+          const knownWorkdir = (Array.isArray(codexCliState.options?.workdirs)
+            ? codexCliState.options.workdirs
+            : []).some((item) => String(item?.path || "") === workdir);
+          codexCliState.workdirCustom = saved.workdirCustom === true || !knownWorkdir;
+        }
+        codexCliState.model = String(saved.model || "").trim();
+        const command = String(saved.command || "");
+        codexCliState.commandText = command;
+        codexCliState.commandEdited = saved.commandEdited === true && command.trim() !== "";
+      }
+
+      function codexCliDialogLayer() {
+        return document.querySelector(`#${settingsModalId} [data-codex-cli-dialog="true"]`);
+      }
+
+      function codexCliTerminal() {
+        const terminals = Array.isArray(codexCliState.options?.terminals)
+          ? codexCliState.options.terminals
+          : [];
+        return terminals.find((item) => String(item?.id || "") === codexCliState.terminalId)
+          || terminals[0]
+          || {};
+      }
+
+      function codexCliShell() {
+        const shell = String(codexCliTerminal()?.shell || "powershell").toLowerCase();
+        return ["powershell", "cmd", "bash", "zsh"].includes(shell) ? shell : "powershell";
+      }
+
+      function codexCliLaunchTitle(options = codexCliState.options || {}) {
+        const provider = String(options.provider || codexCliState.provider || "").trim().toLowerCase();
+        const profile = String(options.profile || "").trim();
+        const defaultProvider = String(options.defaultProvider || "").trim().toLowerCase();
+        const args = [];
+        if (profile) {
+          args.push("--profile", profile);
+        } else if (provider && provider !== defaultProvider && /^[A-Za-z0-9_-]+$/.test(provider)) {
+          args.push("--config", `model_provider=${provider}`);
+        }
+        return ["启动 Codex", ...args].join(" ");
+      }
+
+      function codexCliQuote(value, shell) {
+        const text = String(value ?? "");
+        if (!text.includes("://") && /^[A-Za-z0-9_./:@%+=,-]+$/.test(text)) return text;
+        if (shell === "powershell") return `'${text.replace(/'/g, "''")}'`;
+        if (shell === "cmd") return `"${text.replace(/"/g, '\\"')}"`;
+        return `'${text.replace(/'/g, "'\\''")}'`;
+      }
+
+      function codexCliPermissionArgs(permission) {
+        if (String(permission || "") === "read-only") {
+          return ["--sandbox", "read-only", "--ask-for-approval", "on-request"];
+        }
+        if (String(permission || "") === "workspace-write") {
+          return ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"];
+        }
+        return ["--dangerously-bypass-approvals-and-sandbox"];
+      }
+
+      function codexCliCommandText() {
+        const options = codexCliState.options || {};
+        const shell = codexCliShell();
+        const provider = String(options.provider || codexCliState.provider || "").trim().toLowerCase();
+        const profile = String(options.profile || "").trim();
+        const defaultProvider = String(options.defaultProvider || "").trim().toLowerCase();
+        const args = [];
+        const model = String(codexCliState.model || "").trim();
+        if (profile) {
+          args.push("--profile", profile);
+        } else if (provider && provider !== defaultProvider && /^[A-Za-z0-9_-]+$/.test(provider)) {
+          args.push("--config", `model_provider=${provider}`);
+        }
+        if (model) {
+          // 用 -c model= 覆盖 profile/顶层 model，不改任何文件，仅本次启动生效。
+          args.push("--config", `model=${model}`);
+        }
+        args.push(...codexCliPermissionArgs(codexCliState.permission));
+        if (codexCliState.resume) args.push("resume");
+        const executable = String(options?.codex?.command || "codex");
+        const command = [executable, ...args]
+          .map((value, index) => index === 0 ? value : codexCliQuote(value, shell))
+          .join(" ");
+        const lines = [];
+        const port = Math.max(1, Math.min(65535, Number.parseInt(codexCliState.proxyPort, 10) || 7897));
+        if (codexCliState.useProxy) {
+          const proxy = `http://127.0.0.1:${port}`;
+          if (shell === "powershell") {
+            lines.push(`$env:HTTP_PROXY = ${codexCliQuote(proxy, shell)}`);
+            lines.push(`$env:HTTPS_PROXY = ${codexCliQuote(proxy, shell)}`);
+          } else if (shell === "cmd") {
+            lines.push(`set "HTTP_PROXY=${proxy}"`);
+            lines.push(`set "HTTPS_PROXY=${proxy}"`);
+          } else {
+            const quoted = codexCliQuote(proxy, shell);
+            lines.push(`export HTTP_PROXY=${quoted} HTTPS_PROXY=${quoted}`);
+          }
+        }
+        const workdir = String(codexCliState.workdir || "").trim();
+        if (workdir) {
+          const quoted = codexCliQuote(workdir, shell);
+          lines.push(
+            shell === "powershell"
+              ? `Set-Location -LiteralPath ${quoted}`
+              : shell === "cmd"
+                ? `cd /d ${quoted}`
+                : `cd -- ${quoted}`,
+          );
+        }
+        lines.push(command);
+        return lines.join("\n");
+      }
+
+      function codexCliDisplayedCommandText() {
+        return codexCliState.commandEdited === true && codexCliState.commandText
+          ? codexCliState.commandText
+          : codexCliCommandText();
+      }
+
+      function codexCliSyncControls({ syncCommand = codexCliState.commandEdited !== true } = {}) {
+        const layer = codexCliDialogLayer();
+        if (!layer) return;
+        const setValue = (selector, value) => {
+          const node = layer.querySelector(selector);
+          if (node) node.value = String(value ?? "");
+        };
+        const proxy = layer.querySelector('[data-codex-cli-field="useProxy"]');
+        if (proxy) proxy.checked = codexCliState.useProxy === true;
+        setValue('[data-codex-cli-field="proxyPort"]', codexCliState.proxyPort);
+        const proxyPort = layer.querySelector('[data-codex-cli-proxy-port="true"]');
+        if (proxyPort) proxyPort.hidden = codexCliState.useProxy !== true;
+        setValue('[data-codex-cli-field="terminal"]', codexCliState.terminalId);
+        setValue('[data-codex-cli-field="permission"]', codexCliState.permission);
+        setValue('[data-codex-cli-field="model"]', codexCliState.model);
+        const resume = layer.querySelector('[data-codex-cli-field="resume"]');
+        if (resume) resume.checked = codexCliState.resume === true;
+        const workdirSelect = layer.querySelector('[data-codex-cli-field="workdirSelect"]');
+        const workdirInput = layer.querySelector('[data-codex-cli-field="workdirInput"]');
+        if (workdirSelect) {
+          const known = !codexCliState.workdirCustom && Array.from(workdirSelect.options).some(
+            (option) => option.value === codexCliState.workdir,
+          );
+          workdirSelect.value = codexCliState.workdirCustom
+            ? "__custom__"
+            : (known ? codexCliState.workdir : "__custom__");
+        }
+        if (workdirInput) {
+          workdirInput.value = codexCliState.workdir;
+          workdirInput.hidden = codexCliState.workdirCustom !== true;
+        }
+        const command = layer.querySelector('[data-codex-cli-field="command"]');
+        if (syncCommand && command && command.value !== codexCliDisplayedCommandText()) {
+          command.value = codexCliDisplayedCommandText();
+        }
+        const launch = layer.querySelector('[data-action="codex-cli-launch"]');
+        if (launch) launch.disabled = !codexCliTerminal().id || !String(codexCliState.workdir || "").trim();
+      }
+
+      function codexCliReadControls() {
+        const layer = codexCliDialogLayer();
+        if (!layer) return;
+        const value = (selector) => String(layer.querySelector(selector)?.value || "").trim();
+        const proxy = layer.querySelector('[data-codex-cli-field="useProxy"]');
+        codexCliState.useProxy = proxy?.checked === true;
+        codexCliState.proxyPort = value('[data-codex-cli-field="proxyPort"]') || "7897";
+        codexCliState.terminalId = value('[data-codex-cli-field="terminal"]');
+        codexCliState.permission = value('[data-codex-cli-field="permission"]') || "full";
+        codexCliState.model = value('[data-codex-cli-field="model"]');
+        codexCliState.resume = layer.querySelector('[data-codex-cli-field="resume"]')?.checked === true;
+        const workdirSelect = value('[data-codex-cli-field="workdirSelect"]');
+        codexCliState.workdirCustom = workdirSelect === "__custom__";
+        codexCliState.workdir = codexCliState.workdirCustom
+          ? value('[data-codex-cli-field="workdirInput"]')
+          : workdirSelect;
+      }
+
+      function codexCliSyncOptionsFromCommand(text) {
+        const command = String(text || "");
+        const port = command.match(/127\.0\.0\.1:(\d{1,5})/);
+        codexCliState.useProxy = /HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy/.test(command);
+        if (port) codexCliState.proxyPort = port[1];
+        codexCliState.permission = command.includes("--dangerously-bypass-approvals-and-sandbox")
+          ? "full"
+          : command.includes("--sandbox read-only")
+            ? "read-only"
+            : command.includes("--sandbox workspace-write")
+              ? "workspace-write"
+              : codexCliState.permission;
+        codexCliState.resume = /(^|\s)resume(\s|$)/.test(command);
+        const location = command.match(/Set-Location\s+-LiteralPath\s+'((?:''|[^'])*)'/i)
+          || command.match(/cd\s+\/d\s+"([^"]+)"/i)
+          || command.match(/cd\s+--\s+'((?:'\\''|[^'])*)'/i);
+        if (location) codexCliState.workdir = String(location[1] || "").replace(/''/g, "'");
+        const workdirKnown = (Array.isArray(codexCliState.options?.workdirs) ? codexCliState.options.workdirs : [])
+          .some((item) => String(item?.path || "") === codexCliState.workdir);
+        codexCliState.workdirCustom = !!codexCliState.workdir && !workdirKnown;
+        codexCliState.commandText = command;
+        codexCliState.commandEdited = true;
+        codexCliSyncControls({ syncCommand: false });
+      }
+
+      function codexCliRenderCommand() {
+        const command = codexCliDialogLayer()?.querySelector('[data-codex-cli-field="command"]');
+        if (command) {
+          command.value = codexCliCommandText();
+          codexCliState.commandText = "";
+          codexCliState.commandEdited = false;
+        }
+        codexCliSyncControls();
+      }
+
+      function codexCliFormHtml() {
+        const options = codexCliState.options || {};
+        const terminals = Array.isArray(options.terminals) ? options.terminals : [];
+        const permissions = Array.isArray(options.permissions) ? options.permissions : [];
+        const workdirs = Array.isArray(options.workdirs) ? options.workdirs : [];
+        const terminalOptions = terminals.map((item) => `
+          <option value="${escapeHtml(item.id)}" ${item.id === codexCliState.terminalId ? "selected" : ""}>
+            ${escapeHtml(item.label)}${item.recommended ? " · 推荐" : ""}
+          </option>
+        `).join("");
+        const permissionOptions = permissions.map((item) => `
+          <option value="${escapeHtml(item.id)}" ${item.id === codexCliState.permission ? "selected" : ""}>
+            ${escapeHtml(item.label)}
+          </option>
+        `).join("");
+        const workdirOptions = workdirs.map((item) => `
+          <option value="${escapeHtml(item.path)}" ${item.path === codexCliState.workdir ? "selected" : ""}>
+            ${escapeHtml(item.label)} · ${escapeHtml(item.path)}
+          </option>
+        `).join("");
+        const powershell7 = options.powershell7 || {};
+        const powershellNotice = options.platform === "windows" && powershell7.available !== true
+          ? `<div class="codex-usage-hud-codex-cli-notice" data-tone="warning">
+              未检测到 PowerShell 7。Windows PowerShell 仍可使用；建议从
+              <a href="${escapeHtml(powershell7.installUrl || "https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows")}" target="_blank" rel="noreferrer">微软官方安装说明</a>
+              安装后重新打开此列表。
+            </div>`
+          : "";
+        return `
+          <div class="codex-usage-hud-codex-cli-grid">
+            <div class="codex-usage-hud-codex-cli-context">
+              <label class="codex-usage-hud-codex-cli-check">
+                <input type="checkbox" data-codex-cli-field="resume" ${codexCliState.resume ? "checked" : ""}>
+                <span>启动时打开历史会话选择器（resume）</span>
+              </label>
+            </div>
+            <div class="codex-usage-hud-codex-cli-proxy">
+              <label class="codex-usage-hud-codex-cli-check">
+                <input type="checkbox" data-codex-cli-field="useProxy" ${codexCliState.useProxy ? "checked" : ""}>
+                <span>使用本机代理</span>
+              </label>
+              <label class="codex-usage-hud-codex-cli-field codex-usage-hud-codex-cli-proxy-port" data-codex-cli-proxy-port="true" ${codexCliState.useProxy ? "" : "hidden"}>
+                <input data-codex-cli-field="proxyPort" inputmode="numeric" pattern="[0-9]*" value="${escapeHtml(codexCliState.proxyPort)}" aria-label="代理端口">
+              </label>
+            </div>
+            <label class="codex-usage-hud-codex-cli-field">
+              <span>启动终端</span>
+              <select data-codex-cli-field="terminal">${terminalOptions || '<option value="">未发现可用终端</option>'}</select>
+            </label>
+            <label class="codex-usage-hud-codex-cli-field">
+              <span>Agent 访问权限</span>
+              <select data-codex-cli-field="permission">${permissionOptions}</select>
+            </label>
+            <label class="codex-usage-hud-codex-cli-field" title="启动参数覆盖为 -c model=；留空则用 profile 或默认模型">
+              <span>模型（可选）</span>
+              <input data-codex-cli-field="model" value="${escapeHtml(codexCliState.model)}" placeholder="如 gpt-5，留空用默认" autocomplete="off">
+            </label>
+            <label class="codex-usage-hud-codex-cli-field codex-usage-hud-codex-cli-wide">
+              <span>工作目录</span>
+              <select data-codex-cli-field="workdirSelect">
+                <option value="__custom__">自定义路径…</option>
+                ${workdirOptions}
+              </select>
+              <input data-codex-cli-field="workdirInput" value="${escapeHtml(codexCliState.workdir)}" placeholder="输入目录绝对路径" aria-label="工作目录路径">
+            </label>
+          </div>
+          <div class="codex-usage-hud-codex-cli-meta">调整上方选项会重新生成命令；直接编辑命令后，选项会尽量同步。</div>
+          ${powershellNotice}
+          ${options.codex?.available === false ? '<div class="codex-usage-hud-codex-cli-notice" data-tone="warning">当前 PATH 中未检测到 codex 命令，但仍可先编辑并启动命令。</div>' : ""}
+          <div class="codex-usage-hud-codex-cli-command-head">
+            <span>最终命令</span>
+            <button type="button" class="codex-usage-hud-settings-icon-action" data-action="codex-cli-copy" aria-label="复制最终命令" title="复制最终命令">⧉</button>
+          </div>
+          <textarea class="codex-usage-hud-codex-cli-command" data-codex-cli-field="command" spellcheck="false" rows="6" aria-label="最终 Codex CLI 命令">${escapeHtml(codexCliDisplayedCommandText())}</textarea>
+          ${codexCliState.permission === "full" ? '<div class="codex-usage-hud-codex-cli-danger">完全访问会跳过 Codex CLI 的审批与沙箱限制，请确认命令和工作目录后再启动。</div>' : ""}
+          <div class="codex-usage-hud-codex-cli-actions">
+            <button type="button" class="codex-usage-hud-settings-action" data-action="codex-cli-refresh">刷新终端和工作目录</button>
+            <span class="codex-usage-hud-codex-cli-status" data-codex-cli-status="true"></span>
+            <button type="button" class="codex-usage-hud-settings-action" data-action="codex-cli-close">取消</button>
+            <button type="button" class="codex-usage-hud-settings-action" data-action="codex-cli-launch" data-primary="true">启动 Codex CLI</button>
+          </div>
+        `;
+      }
+
+      function renderCodexCliDialog() {
+        const layer = codexCliDialogLayer();
+        if (!layer) return;
+        if (!codexCliState.options) {
+          layer.innerHTML = `
+            <div class="codex-usage-hud-codex-cli-dialog" role="dialog" aria-modal="true" aria-label="启动 Codex CLI">
+              <div class="codex-usage-hud-codex-cli-head"><div><span class="codex-usage-hud-codex-cli-kicker">CODEX CLI</span><strong>正在读取本机终端</strong></div><button type="button" class="codex-usage-hud-settings-close" data-action="codex-cli-close" aria-label="关闭">×</button></div>
+              <div class="codex-usage-hud-codex-cli-loading">正在检测终端、PowerShell 7 和 Codex Desktop 工作目录…</div>
+            </div>
+          `;
+          return;
+        }
+        layer.innerHTML = `
+          <div class="codex-usage-hud-codex-cli-dialog" role="dialog" aria-modal="true" aria-label="启动 Codex CLI">
+            <div class="codex-usage-hud-codex-cli-head"><div><span class="codex-usage-hud-codex-cli-kicker">CODEX CLI</span><strong>${escapeHtml(codexCliLaunchTitle())}</strong></div><button type="button" class="codex-usage-hud-settings-close" data-action="codex-cli-close" aria-label="关闭">×</button></div>
+            ${codexCliFormHtml()}
+          </div>
+        `;
+        codexCliSyncControls();
+      }
+
+      function requestCodexCliDiscovery() {
+        const requestId = typedSettingsRequestId("codex-cli");
+        codexCliState.requestId = requestId;
+        submitSettingsCommand(
+          { action: "codexCliDiscover", provider: codexCliState.provider, requestId },
+          "正在读取本机终端和 Codex Desktop 工作目录...",
+          { preserveOverlay: true },
+        );
+      }
+
+      function openCodexCliDialog(provider = "") {
+        const dialog = settingsDialogRoot();
+        if (!dialog) return;
+        closeCodexCliDialog();
+        codexCliState.open = true;
+        codexCliState.provider = String(provider || settingsProviderDraft?.appProvider || "").trim().toLowerCase();
+        codexCliState.options = null;
+        codexCliState.commandEdited = false;
+        codexCliState.commandText = "";
+        const layer = document.createElement("div");
+        layer.className = "codex-usage-hud-codex-cli-layer";
+        layer.dataset.codexCliDialog = "true";
+        dialog.appendChild(layer);
+        renderCodexCliDialog();
+        requestCodexCliDiscovery();
+      }
+
+      function closeCodexCliDialog() {
+        codexCliDialogLayer()?.remove();
+        codexCliState.open = false;
+        codexCliState.requestId = "";
+        codexCliState.options = null;
+        codexCliState.commandEdited = false;
+        codexCliState.commandText = "";
+      }
+
+      function refreshCodexCliDialog() {
+        if (!codexCliState.open) return;
+        codexCliState.options = null;
+        renderCodexCliDialog();
+        requestCodexCliDiscovery();
+      }
+
+      function codexCliCopyCommand() {
+        const command = String(codexCliDialogLayer()?.querySelector('[data-codex-cli-field="command"]')?.value || "");
+        void copyHudText(command).then((ok) => {
+          const node = codexCliDialogLayer()?.querySelector('[data-codex-cli-status="true"]');
+          if (node) node.textContent = ok ? "已复制命令" : "复制失败";
+        });
+      }
+
+      function codexCliFieldInput(field) {
+        if (!codexCliDialogLayer()) return;
+        if (field === "command") {
+          const command = codexCliDialogLayer().querySelector('[data-codex-cli-field="command"]');
+          codexCliSyncOptionsFromCommand(command?.value || "");
+          return;
+        }
+        codexCliReadControls();
+        codexCliRenderCommand();
+      }
+
+      function codexCliFieldChange(field) {
+        codexCliFieldInput(field);
+      }
+
+      function launchCodexCliFromDialog() {
+        const layer = codexCliDialogLayer();
+        if (!layer) return;
+        codexCliReadControls();
+        const command = String(layer.querySelector('[data-codex-cli-field="command"]')?.value || "");
+        const status = layer.querySelector('[data-codex-cli-status="true"]');
+        if (!command.trim()) {
+          if (status) status.textContent = "请先填写命令";
+          return;
+        }
+        if (!codexCliState.terminalId || !codexCliState.workdir) {
+          if (status) status.textContent = "请选择或输入有效工作目录";
+          return;
+        }
+        codexCliPersistLaunchState(command);
+        const launch = layer.querySelector('[data-action="codex-cli-launch"]');
+        if (launch) launch.disabled = true;
+        submitSettingsCommand(
+          {
+            action: "codexCliLaunch",
+            provider: codexCliState.provider,
+            profile: String(codexCliState.options?.profile || ""),
+            terminalId: codexCliState.terminalId,
+            useProxy: codexCliState.useProxy === true,
+            proxyPort: codexCliState.proxyPort,
+            permission: codexCliState.permission,
+            resume: codexCliState.resume === true,
+            command,
+            workdir: codexCliState.workdir,
+            workdirCustom: codexCliState.workdirCustom === true,
+          },
+          "正在打开终端并启动 Codex CLI...",
+          { preserveOverlay: true },
+        );
+      }
+
+      function applyCodexCliCommandStatus(status) {
+        if (!status || typeof status !== "object") return;
+        const action = String(status.action || "");
+        if (action === "codexCliDiscover" && status.codexCli && codexCliState.open) {
+          const expected = String(codexCliState.requestId || "");
+          const received = String(status.requestId || "");
+          if (expected && received && expected !== received) return;
+          codexCliState.options = status.codexCli;
+          const proxy = status.codexCli.proxy || {};
+          codexCliState.terminalId = String(status.codexCli.defaultTerminal || "");
+          codexCliState.useProxy = false;
+          codexCliState.proxyPort = String(proxy.port || "7897");
+          codexCliState.permission = String(status.codexCli.defaultPermission || "full");
+          codexCliState.resume = false;
+          codexCliState.workdir = String(status.codexCli.defaultWorkdir || "");
+          codexCliState.workdirCustom = false;
+          codexCliState.commandText = "";
+          codexCliState.commandEdited = false;
+          applyCodexCliPersistedLaunchState(codexCliPersistedLaunchState());
+          renderCodexCliDialog();
+          return;
+        }
+        if (action === "codexCliLaunch" && codexCliState.open) {
+          const launch = codexCliDialogLayer()?.querySelector('[data-action="codex-cli-launch"]');
+          if (launch) launch.disabled = false;
+          if (String(status.kind || "") !== "error" && status.codexCliLaunch) {
+            closeCodexCliDialog();
+          }
+        }
+      }
 
       function settingsChromeMarkup() {
         return `
@@ -333,6 +865,31 @@ _TEXT_PREFIX = r"""
         return `${normalized || "PROVIDER"}_API_KEY`;
       }
 
+      function suggestedProviderIdFromBaseUrl(baseUrl) {
+        const raw = String(baseUrl || "").trim();
+        if (!raw) return "";
+        let hostname = "";
+        try {
+          const candidate = /^[A-Za-z][A-Za-z\d+.-]*:\/\//.test(raw)
+            ? raw
+            : `https://${raw}`;
+          hostname = new URL(candidate).hostname;
+        } catch {
+          hostname = raw
+            .replace(/^[A-Za-z][A-Za-z\d+.-]*:\/\//, "")
+            .split(/[/?#]/, 1)[0]
+            .replace(/:\d+$/, "");
+        }
+        const parts = hostname
+          .replace(/^\[|\]$/g, "")
+          .split(".")
+          .map((part) => part.trim().toLowerCase())
+          .filter(Boolean);
+        if (parts.length < 2) return "";
+        const provider = parts[parts.length - 2];
+        return /^[a-z0-9_-]+$/.test(provider) ? provider : "";
+      }
+
       function tomlBasicStringEscape(value) {
         return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
       }
@@ -407,6 +964,7 @@ _TEXT_PREFIX = r"""
           envKey: String(detail.envKey || (defined ? "" : suggestedProviderEnvironmentKey(provider))),
           configText: String(detail.configText || ""),
           apiKey: "",
+          currentApiKey: String(detail.apiKey || ""),
           isNew: !defined,
           hasApiKey: detail.hasApiKey === true,
           originalEnvKey: String(detail.envKey || ""),
@@ -624,6 +1182,7 @@ _TEXT_PREFIX = r"""
             </div>
             <div class="codex-usage-hud-provider-meta-row">
               <div class="codex-usage-hud-provider-meta" data-tone="${escapeHtml(meta.tone)}">${escapeHtml(meta.text)}</div>
+              <button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-codex-cli-launch-action" data-action="settings-codex-cli-open" data-provider="${escapeHtml(activeProvider)}" aria-label="以当前 Provider 启动 Codex CLI" title="以当前 Provider 启动 Codex CLI"><span aria-hidden="true">&gt;_</span></button>
               ${required ? "" : '<button type="button" class="codex-usage-hud-settings-icon-action" data-action="settings-edit-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="编辑 ' + escapeHtml(activeProvider) + ' 供应商配置" title="编辑供应商配置">✎</button>' + '<button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-provider-delete-action" data-action="settings-delete-provider" data-provider="' + escapeHtml(activeProvider) + '" aria-label="删除 ' + escapeHtml(activeProvider) + ' 供应商" title="删除供应商"><span aria-hidden="true">⌫</span></button>'}
             </div>
           </div>
@@ -768,6 +1327,98 @@ _TEXT_PREFIX = r"""
         ]));
       }
 
+      function providerConfigDialogLayer() {
+        return document.querySelector(`#${settingsModalId} [data-provider-config-dialog="true"]`);
+      }
+
+      function toggleProviderApiKeyVisibility() {
+        const layer = providerConfigDialogLayer();
+        const input = layer?.querySelector('[data-provider-config-field="api_key"]');
+        const button = layer?.querySelector('[data-action="settings-provider-toggle-api-key"]');
+        if (!input || !button) return;
+        const reveal = input.type === "password";
+        input.type = reveal ? "text" : "password";
+        button.setAttribute("aria-label", reveal ? "隐藏明文" : "显示明文");
+        button.setAttribute("title", reveal ? "隐藏明文" : "显示明文");
+        if (button.firstElementChild) {
+          button.firstElementChild.textContent = reveal ? "🙈" : "👁";
+        }
+      }
+
+      function testProviderConnectivityFromDialog() {
+        const layer = providerConfigDialogLayer();
+        if (!layer) return false;
+        const baseUrl = String(
+          layer.querySelector('[data-provider-config-field="base_url"]')?.value || "",
+        ).trim();
+        const apiKey = String(
+          layer.querySelector('[data-provider-config-field="api_key"]')?.value || "",
+        ).trim();
+        const statusNode = layer.querySelector('[data-provider-config-connectivity-status=""]');
+        if (statusNode) {
+          statusNode.textContent = "";
+          statusNode.classList.remove("codex-usage-hud-provider-config-fetch-status-error");
+        }
+        if (!baseUrl) {
+          const message = "请先填写 Base URL。";
+          setSettingsStatus(message, "error");
+          if (statusNode) {
+            statusNode.textContent = message;
+            statusNode.classList.add("codex-usage-hud-provider-config-fetch-status-error");
+          }
+          return false;
+        }
+        const activeApiKey = apiKey || "";
+        if (!activeApiKey) {
+          const message = "请先填写 API key（或输入已保存的密钥）。";
+          setSettingsStatus(message, "error");
+          if (statusNode) {
+            statusNode.textContent = message;
+            statusNode.classList.add("codex-usage-hud-provider-config-fetch-status-error");
+          }
+          return false;
+        }
+        pricingWorkflowState.providerModelsFetching = true;
+        if (statusNode) {
+          statusNode.textContent = "正在测试连通性...";
+        }
+        const testButton = layer.querySelector('[data-action="settings-provider-test-connectivity"]');
+        if (testButton) testButton.disabled = true;
+        return submitSettingsCommand(
+          {
+            action: "fetchProviderModels",
+            requestId: typedSettingsRequestId("provider-models"),
+            baseUrl,
+            apiKey: activeApiKey,
+          },
+          "正在测试连通性...",
+          { preserveOverlay: true },
+        );
+      }
+
+      function applyProviderConnectivityStatus(status) {
+        const isError = String(status.kind || "") === "error";
+        if (!pricingWorkflowState.providerModelsFetching) return;
+        const connected = status?.providerConnected;
+        if (connected !== true && !isError) return;
+        const layer = providerConfigDialogLayer();
+        const statusNode = layer?.querySelector('[data-provider-config-connectivity-status=""]');
+        pricingWorkflowState.providerModelsFetching = false;
+        const testButton = layer?.querySelector('[data-action="settings-provider-test-connectivity"]');
+        if (testButton) testButton.disabled = false;
+        if (isError || connected !== true) {
+          if (statusNode) {
+            statusNode.textContent = status?.message && isError ? status.message : "连通性测试失败。";
+            statusNode.classList.add("codex-usage-hud-provider-config-fetch-status-error");
+          }
+          return;
+        }
+        if (statusNode) {
+          statusNode.textContent = "连通性测试成功。";
+          statusNode.classList.remove("codex-usage-hud-provider-config-fetch-status-error");
+        }
+      }
+
       function openProviderConfigDialog(provider = "", { isNew = false } = {}) {
         const dialog = settingsDialogRoot();
         if (!dialog) return;
@@ -780,7 +1431,9 @@ _TEXT_PREFIX = r"""
           target?.configText
             || defaultProviderSectionText(normalizedProvider, target?.baseUrl || "", targetEnvKey),
         );
-        const sourceProvider = "";
+        const sourceProvider = isNew
+          ? String(settingsProviderDraft.appProvider || "").trim().toLowerCase()
+          : "";
         const sourceOptions = settingsProviderDraft.order.map((item) => `
           <option value="${escapeHtml(item)}" ${item === sourceProvider ? "selected" : ""}>${escapeHtml(item)}</option>
         `).join("");
@@ -811,9 +1464,16 @@ _TEXT_PREFIX = r"""
               <label>用户环境变量名称
                 <input data-provider-config-field="env_key" value="${escapeHtml(target?.envKey || (isNew ? suggestedProviderEnvironmentKey(normalizedProvider) : ""))}" autocomplete="off">
               </label>
-              <label>API key
-                <input data-provider-config-field="api_key" type="password" value="" placeholder="${isNew ? "请输入 API key" : (target?.hasApiKey ? "留空保持当前密钥" : "请输入 API key")}" autocomplete="new-password">
-              </label>
+              <div class="codex-usage-hud-provider-config-apikey">
+                <label>API key
+                  <span class="codex-usage-hud-provider-config-apikey-field">
+                    <input data-provider-config-field="api_key" type="password" value="${escapeHtml(isNew ? "" : (target?.currentApiKey || ""))}" placeholder="${isNew ? "请输入 API key" : (target?.hasApiKey ? "已填充当前密钥，可修改" : "请输入 API key")}" autocomplete="new-password">
+                    <button type="button" class="codex-usage-hud-settings-icon-action codex-usage-hud-provider-config-eye" data-action="settings-provider-toggle-api-key" aria-label="显示明文" title="显示明文"><span aria-hidden="true">👁</span></button>
+                    <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-provider-config-fetch" data-action="settings-provider-test-connectivity">测试连通性</button>
+                  </span>
+                </label>
+                <div class="codex-usage-hud-provider-config-fetch-status" data-provider-config-connectivity-status="" aria-live="polite"></div>
+              </div>
               ${isNew ? `<fieldset class="codex-usage-hud-provider-config-scope">
                 <legend>统计范围</legend>
                 <label><input type="radio" name="codex-provider-scope" value="notification" checked> 仅气泡通知不统计</label>
@@ -827,7 +1487,7 @@ _TEXT_PREFIX = r"""
                 <span>此处内容会写回用户 config.toml；Base URL 和环境变量名会与上面的字段同步。</span>
               </label>
             </details>
-            <div class="codex-usage-hud-settings-confirm-body">保存设置后会更新用户的 config.toml；API key 只写入用户环境变量，不会保存到 HUD 配置或回显到页面。</div>
+            <div class="codex-usage-hud-settings-confirm-body">保存设置后会更新用户的 config.toml；API key 只写入用户环境变量，不会保存到 HUD 配置。编辑时已填充当前密钥，点击 👁 可查看明文。</div>
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-cancel" data-variant="ghost">取消</button>
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-apply" data-primary="true">${isNew ? "添加" : "应用"}</button>
@@ -839,22 +1499,38 @@ _TEXT_PREFIX = r"""
         const envNode = layer.querySelector('[data-provider-config-field="env_key"]');
         const sectionNode = layer.querySelector('[data-provider-config-field="section_text"]');
         const baseUrlNode = layer.querySelector('[data-provider-config-field="base_url"]');
+        let generatedEnvKey = isNew
+          ? suggestedProviderEnvironmentKey(idNode?.value)
+          : "";
         if (isNew && idNode && envNode) {
-          let generated = suggestedProviderEnvironmentKey(idNode.value);
           idNode.addEventListener("input", () => {
-            if (envNode.value === generated || !envNode.value) {
-              generated = suggestedProviderEnvironmentKey(idNode.value);
-              envNode.value = generated;
+            if (envNode.value === generatedEnvKey || !envNode.value) {
+              generatedEnvKey = suggestedProviderEnvironmentKey(idNode.value);
+              envNode.value = generatedEnvKey;
+            } else {
+              generatedEnvKey = suggestedProviderEnvironmentKey(idNode.value);
             }
             syncProviderSectionFromFields(layer);
           });
         }
         [baseUrlNode, envNode].forEach((node) => {
-          node?.addEventListener("input", () => syncProviderSectionFromFields(layer));
+          node?.addEventListener("input", () => {
+            if (isNew && node === baseUrlNode && idNode) {
+              const suggestedProvider = suggestedProviderIdFromBaseUrl(baseUrlNode.value);
+              if (suggestedProvider) {
+                const shouldUpdateEnvKey = !envNode || envNode.value === generatedEnvKey || !envNode.value;
+                idNode.value = suggestedProvider;
+                generatedEnvKey = suggestedProviderEnvironmentKey(suggestedProvider);
+                if (shouldUpdateEnvKey && envNode) envNode.value = generatedEnvKey;
+              }
+            }
+            syncProviderSectionFromFields(layer);
+          });
         });
         sectionNode?.addEventListener("input", () => syncProviderFieldsFromSection(layer));
-        idNode?.focus?.();
-        idNode?.select?.();
+        const initialFocusNode = isNew ? baseUrlNode : idNode;
+        initialFocusNode?.focus?.();
+        initialFocusNode?.select?.();
       }
 
       function applyProviderConfigDialog() {
@@ -941,7 +1617,8 @@ _TEXT_PREFIX = r"""
         closeSettingsConfirm();
         renderSettingsProviderEditor();
         renderSettingsProviderTabs();
-        setSettingsStatus(isNew ? "供应商已加入草稿；点击保存后写入 config.toml。" : "供应商配置已加入保存草稿。", "");
+        // 新增/编辑供应商后直接自动保存生效，无需再点设置页「保存」。
+        commitSettingsFromDraft(`正在保存供应商 ${provider} 配置...`);
         return true;
       }
 
@@ -967,7 +1644,7 @@ _TEXT_PREFIX = r"""
         layer.innerHTML = `
           <div class="codex-usage-hud-settings-confirm-card codex-usage-hud-provider-delete-card" data-tone="danger" role="alertdialog" aria-modal="true" aria-label="删除供应商">
             <div class="codex-usage-hud-settings-confirm-title">删除供应商：${escapeHtml(normalizedProvider)}？</div>
-            <div class="codex-usage-hud-settings-confirm-body">默认会删除 config.toml 中该供应商的相关配置，以及引用它的 Provider profile。API key 用户环境变量会保留。下面两项为可选删除内容，默认不勾选。</div>
+            <div class="codex-usage-hud-settings-confirm-body">默认会删除 config.toml 中该供应商的相关配置，引用它的 Provider profile，以及响应的 API key 用户环境变量。下面两项为可选删除内容，默认不勾选。</div>
             <div class="codex-usage-hud-provider-delete-options">
               <label><input type="checkbox" data-provider-delete-model-prices="true"><span>同时删除模型单价配置</span></label>
               <label><input type="checkbox" data-provider-delete-session-history="true"><span>同时删除会话历史记录</span></label>
@@ -1549,7 +2226,9 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
             setSettingsStatus(status.message || "", status.kind || "");
           }
           setSettingsRestartVisible(!!status.restartVisible);
+          applyCodexCliCommandStatus(status);
           applyPricingCommandStatus(status);
+          applyProviderConnectivityStatus(status);
           const restSaveRequestId = String(status.restReminderSaveRequestId || "");
           if (
             status.restReminderSaved === true
@@ -2324,6 +3003,28 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         );
       }
 
+      function commitSettingsFromDraft(pendingMessage) {
+        const settings = collectSettingsForm();
+        if (pricingChanged(settings)) {
+          openPricingEffectiveDialog({
+            mode: "save",
+            settings,
+            provider: String(settingsProviderDraft?.activeProvider || "").trim().toLowerCase(),
+          });
+          return;
+        }
+        const codexProviders = collectCodexProviderUpdates();
+        const submitted = submitSettingsCommand(
+          { action: "save", settings, ...(codexProviders.length ? { codexProviders } : {}) },
+          pendingMessage || "正在保存设置..."
+        );
+        if (submitted) {
+          settingsDirtyProviders.clear();
+          codexProviderDirty.clear();
+          renderSettingsProviderTabs();
+        }
+      }
+
       function saveSettingsFromModal({ section = "" } = {}) {
         const settings = collectSettingsForm();
         if (!section && pricingChanged(settings)) {
@@ -2579,6 +3280,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           openSettingsDiscardConfirm();
           return;
         }
+        closeCodexCliDialog();
         closeSettingsConfirm();
         if (settingsActiveTab === "backgroundUsage") {
           captureBackgroundUsageScrollPositions();
@@ -2649,6 +3351,13 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       ensureCodexProviderDraft,
       providerDraftFromSettings,
       ensureSettingsProviderDraft,
+      openCodexCliDialog,
+      closeCodexCliDialog,
+      refreshCodexCliDialog,
+      codexCliCopyCommand,
+      codexCliFieldInput,
+      codexCliFieldChange,
+      launchCodexCliFromDialog,
       settingsProviderTabBadge,
       settingsProviderMeta,
       settingsProviderTabsHtml,
@@ -2664,6 +3373,10 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       markSettingsProviderDirty,
       renderSettingsProviderEditor,
       switchSettingsProvider,
+      providerConfigDialogLayer,
+      toggleProviderApiKeyVisibility,
+      testProviderConnectivityFromDialog,
+      applyProviderConnectivityStatus,
       openProviderConfigDialog,
       applyProviderConfigDialog,
       openProviderDeleteDialog,
@@ -2694,6 +3407,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       openSettingsLoading,
       collectSettingsForm,
       collectCodexProviderUpdates,
+      commitSettingsFromDraft,
       saveSettingsFromModal,
       fetchPricesFromModal,
       confirmPricingEffectiveAt,
@@ -2755,6 +3469,13 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     ensureCodexProviderDraft,
     providerDraftFromSettings,
     ensureSettingsProviderDraft,
+    openCodexCliDialog,
+    closeCodexCliDialog,
+    refreshCodexCliDialog,
+    codexCliCopyCommand,
+    codexCliFieldInput,
+    codexCliFieldChange,
+    launchCodexCliFromDialog,
     settingsProviderTabBadge,
     settingsProviderMeta,
     settingsProviderTabsHtml,
@@ -2770,6 +3491,10 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       markSettingsProviderDirty,
     renderSettingsProviderEditor,
     switchSettingsProvider,
+    providerConfigDialogLayer,
+    toggleProviderApiKeyVisibility,
+    testProviderConnectivityFromDialog,
+    applyProviderConnectivityStatus,
     openProviderConfigDialog,
     applyProviderConfigDialog,
     openProviderDeleteDialog,
@@ -2800,6 +3525,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     openSettingsLoading,
     collectSettingsForm,
     collectCodexProviderUpdates,
+    commitSettingsFromDraft,
     saveSettingsFromModal,
     fetchPricesFromModal,
     confirmPricingEffectiveAt,

@@ -492,6 +492,7 @@ class ParsedSession:
     follow_state: str = ""
     follow_reason: str = ""
     follow_timing: dict[str, int] = field(default_factory=dict)
+    match_candidates: list[dict[str, object]] = field(default_factory=list)
     today_tokens: int = 0
     today_cost_usd: float | None = 0.0
     week_tokens: int = 0
