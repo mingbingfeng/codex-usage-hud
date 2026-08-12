@@ -408,7 +408,7 @@ def test_general_command_dispatches_fetch_provider_models() -> None:
         pyside_version=lambda: "",
         default_overlay_limit=lambda: 1,
         dismiss_warnings_today=lambda: True,
-        verify_provider_connectivity=lambda base, key: calls.append((base, key)) or True,
+        fetch_provider_models=lambda base, key: calls.append((base, key)) or ["gpt-5", "gpt-5.6"],
     )
 
     status = dispatch_command(
@@ -424,6 +424,7 @@ def test_general_command_dispatches_fetch_provider_models() -> None:
 
     assert calls == [("https://api.example.com/v1", "sk-secret")]
     assert status["providerConnected"] is True
+    assert status["models"] == ["gpt-5", "gpt-5.6"]
     assert status["requestId"] == "models-1"
 
 
@@ -446,7 +447,7 @@ def test_general_command_fetch_provider_models_surfaces_errors() -> None:
         pyside_version=lambda: "",
         default_overlay_limit=lambda: 1,
         dismiss_warnings_today=lambda: True,
-        verify_provider_connectivity=lambda base, key: (_ for _ in ()).throw(
+        fetch_provider_models=lambda base, key: (_ for _ in ()).throw(
             ValueError("API key 不能为空。")
         ),
     )
@@ -458,4 +459,81 @@ def test_general_command_fetch_provider_models_surfaces_errors() -> None:
     )
 
     assert status["kind"] == "error"
-    assert status["message"] == "API key 不能为空。"
+
+
+def test_general_command_dispatches_codex_cli_fetch_models() -> None:
+    received: list[str] = []
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        fetch_cli_provider_models=lambda provider: received.append(provider) or {
+            "provider": provider,
+            "baseUrl": "https://api.example.com/v1",
+            "envKey": "MY_API_KEY",
+            "models": ["gpt-5", "gpt-5.6"],
+        },
+    )
+
+    status = dispatch_command(
+        {
+            "action": "codexCliFetchModels",
+            "provider": "muyuan",
+            "requestId": "cli-models-1",
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert received == ["muyuan"]
+    assert status["codexCliModels"]["models"] == ["gpt-5", "gpt-5.6"]
+    assert status["codexCliModels"]["envKey"] == "MY_API_KEY"
+    assert status["requestId"] == "cli-models-1"
+
+
+def test_general_command_codex_cli_fetch_models_surfaces_errors() -> None:
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        fetch_cli_provider_models=lambda provider: (_ for _ in ()).throw(
+            ValueError("用户环境变量中没有可用的 API key。")
+        ),
+    )
+
+    status = dispatch_command(
+        {"action": "codexCliFetchModels", "provider": "muyuan"},
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert status["kind"] == "error"
+    assert status["message"] == "用户环境变量中没有可用的 API key。"

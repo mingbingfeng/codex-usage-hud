@@ -20,7 +20,6 @@ from .codex_provider_config import (
     fetch_provider_models,
     fetch_provider_models_for_cli,
     save_provider_configs,
-    verify_provider_connectivity,
 )
 from .codex_cli_launcher import discover_codex_cli_options, launch_codex_cli
 from .config import (

@@ -296,12 +296,7 @@ TEXT = r"""
       switchSettingsProvider(providers[nextIndex], { focusTab: true });
     });
     rootScope.listen(root, "click", (event) => {
-      if (event.target?.id === settingsModalId) {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsModal();
-        return;
-      }
+      // 设置弹窗只能通过右上角 × 或底部“关闭”按钮关闭，点击遮罩空白区域不应关闭。
       const copyNode = event.target?.closest?.("[data-copyable='true']");
       if (copyNode && root.contains(copyNode)) {
         event.preventDefault();

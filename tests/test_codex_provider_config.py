@@ -14,6 +14,8 @@ if str(SRC_ROOT) not in sys.path:
 from codex_usage_hud.codex_provider_config import (
     _delete_user_environment_value,
     delete_provider_config,
+    fetch_provider_models,
+    fetch_provider_models_for_cli,
     read_provider_definitions,
     save_provider_configs,
     verify_provider_connectivity,
@@ -526,6 +528,142 @@ class VerifyProviderConnectivityTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "HTTP 401"):
                 verify_provider_connectivity("https://api.example.com/v1", "key")
+
+
+class FetchProviderModelsTests(unittest.TestCase):
+    def _fake_urlopen(self, body: bytes):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self, length: int = -1) -> bytes:
+                del length
+                return body
+
+        return FakeResponse()
+
+    def test_fetch_provider_models_parses_data_ids(self) -> None:
+        body = b'{"object": "list", "data": [{"id": "gpt-5"}, {"id": "gpt-5.6"}, {"id": "gpt-5.6"}]}'
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=lambda request, timeout: self._fake_urlopen(body),
+        ):
+            models = fetch_provider_models("https://api.example.com/v1", "key")
+
+        self.assertEqual(models, ["gpt-5", "gpt-5.6"])
+
+    def test_fetch_provider_models_accepts_bare_array_and_name_field(self) -> None:
+        body = b'[{"name": "claude-3", "model": "claude-3"}]'
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=lambda request, timeout: self._fake_urlopen(body),
+        ):
+            models = fetch_provider_models("https://api.example.com/v1", "key")
+
+        self.assertEqual(models, ["claude-3"])
+
+    def test_fetch_provider_models_returns_empty_for_non_json_body(self) -> None:
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=lambda request, timeout: self._fake_urlopen(b"not json"),
+        ):
+            self.assertEqual(
+                fetch_provider_models("https://api.example.com/v1", "key"), []
+            )
+
+    def test_fetch_provider_models_uses_models_endpoint(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout: float = 8.0):
+            captured["url"] = request.full_url
+            return self._fake_urlopen(b'{"data": [{"id": "gpt-5"}]}')
+
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            fetch_provider_models("https://api.example.com/v1/", "sk-test")
+
+        self.assertEqual(captured["url"], "https://api.example.com/v1/models")
+
+    def test_fetch_provider_models_rejects_missing_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "base_url"):
+            fetch_provider_models("", "key")
+        with self.assertRaisesRegex(ValueError, "API key"):
+            fetch_provider_models("https://api.example.com/v1", "")
+
+
+class FetchProviderModelsForCliTests(unittest.TestCase):
+    def test_missing_provider_definition_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[model_providers]\nother = { base_url = "https://x" }\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "未在 config.toml 中找到"):
+                fetch_provider_models_for_cli("missing", config_path=config_path)
+
+    @patch("codex_usage_hud.codex_provider_config._user_environment_value")
+    @patch("codex_usage_hud.codex_provider_config.urlopen")
+    def test_resolves_base_url_env_key_and_queries_models(
+        self, fake_urlopen, fake_env
+    ) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self, length: int = -1) -> bytes:
+                del length
+                return b'{"data": [{"id": "gpt-5"}]}'
+
+        fake_urlopen.return_value = FakeResponse()
+        fake_env.return_value = "sk-from-env"
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[model_providers.muyuan]\n'
+                'name = "muyuan"\n'
+                'base_url = "https://api.example.com/v1"\n'
+                'env_key = "MUYUAN_API_KEY"\n',
+                encoding="utf-8",
+            )
+            result = fetch_provider_models_for_cli(
+                "muyuan", config_path=config_path
+            )
+
+        self.assertEqual(fake_env.call_count, 2)
+        for call_args in fake_env.call_args_list:
+            self.assertEqual(call_args.args, ("MUYUAN_API_KEY",))
+        self.assertEqual(result["provider"], "muyuan")
+        self.assertEqual(result["models"], ["gpt-5"])
+        self.assertEqual(result["envKey"], "MUYUAN_API_KEY")
+        self.assertEqual(result["baseUrl"], "https://api.example.com/v1")
+
+    def test_missing_api_key_raises(self) -> None:
+        with patch(
+            "codex_usage_hud.codex_provider_config._user_environment_value",
+            return_value="",
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.toml"
+                config_path.write_text(
+                    '[model_providers.muyuan]\n'
+                    'name = "muyuan"\n'
+                    'base_url = "https://api.example.com/v1"\n'
+                    'env_key = "MUYUAN_API_KEY"\n',
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "没有可用的 API key"):
+                    fetch_provider_models_for_cli(
+                        "muyuan", config_path=config_path
+                    )
 
 
 if __name__ == "__main__":

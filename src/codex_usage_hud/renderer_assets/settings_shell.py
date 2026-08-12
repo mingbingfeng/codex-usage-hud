@@ -23,6 +23,9 @@ _TEXT_PREFIX = r"""
         open: false,
         provider: "",
         requestId: "",
+        models: [],
+        modelsFetching: false,
+        modelsError: "",
         options: null,
         terminalId: "",
         useProxy: false,
@@ -313,6 +316,34 @@ _TEXT_PREFIX = r"""
         codexCliSyncControls();
       }
 
+      function codexCliModelOptions() {
+        const models = Array.isArray(codexCliState.models) ? codexCliState.models : [];
+        const current = String(codexCliState.model || "").trim();
+        const unique = [...new Set(models)];
+        const hasCurrent = !!current && unique.some((model) => String(model) === current);
+        const options = ['<option value="">留空用默认</option>'];
+        if (unique.length) {
+          unique.forEach((model) => {
+            const value = String(model);
+            options.push(`<option value="${escapeHtml(value)}" ${value === current ? "selected" : ""}>${escapeHtml(value)}</option>`);
+          });
+        } else if (codexCliState.modelsFetching) {
+          options.push('<option value="" disabled>正在获取模型列表…</option>');
+        }
+        if (current && !hasCurrent) {
+          options.push(`<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}（自定义）</option>`);
+        }
+        return options.join("");
+      }
+
+      function codexCliModelNote() {
+        if (codexCliState.modelsFetching) return "正在获取当前 Provider 的模型列表…";
+        if (codexCliState.modelsError) return escapeHtml(codexCliState.modelsError);
+        const count = Array.isArray(codexCliState.models) ? codexCliState.models.length : 0;
+        if (count) return `已从当前 Provider 获取 ${count} 个模型。`;
+        return "";
+      }
+
       function codexCliFormHtml() {
         const options = codexCliState.options || {};
         const terminals = Array.isArray(options.terminals) ? options.terminals : [];
@@ -368,9 +399,10 @@ _TEXT_PREFIX = r"""
             </label>
             <label class="codex-usage-hud-codex-cli-field" title="启动参数覆盖为 -c model=；留空则用 profile 或默认模型">
               <span>模型（可选）</span>
-              <input data-codex-cli-field="model" value="${escapeHtml(codexCliState.model)}" placeholder="如 gpt-5，留空用默认" autocomplete="off">
+              <select data-codex-cli-field="model">${codexCliModelOptions()}</select>
+              <div class="codex-usage-hud-codex-cli-model-note" data-codex-cli-model-note="true">${codexCliModelNote()}</div>
             </label>
-            <label class="codex-usage-hud-codex-cli-field codex-usage-hud-codex-cli-wide">
+            <label class="codex-usage-hud-codex-cli-field">
               <span>工作目录</span>
               <select data-codex-cli-field="workdirSelect">
                 <option value="__custom__">自定义路径…</option>
@@ -428,6 +460,21 @@ _TEXT_PREFIX = r"""
         );
       }
 
+      function requestCodexCliModels() {
+        if (!codexCliState.open || !codexCliState.provider) return;
+        codexCliState.modelsFetching = true;
+        codexCliState.modelsError = "";
+        submitSettingsCommand(
+          {
+            action: "codexCliFetchModels",
+            provider: codexCliState.provider,
+            requestId: typedSettingsRequestId("codex-cli-models"),
+          },
+          "正在获取模型列表...",
+          { preserveOverlay: true },
+        );
+      }
+
       function openCodexCliDialog(provider = "") {
         const dialog = settingsDialogRoot();
         if (!dialog) return;
@@ -435,6 +482,9 @@ _TEXT_PREFIX = r"""
         codexCliState.open = true;
         codexCliState.provider = String(provider || settingsProviderDraft?.appProvider || "").trim().toLowerCase();
         codexCliState.options = null;
+        codexCliState.models = [];
+        codexCliState.modelsFetching = false;
+        codexCliState.modelsError = "";
         codexCliState.commandEdited = false;
         codexCliState.commandText = "";
         const layer = document.createElement("div");
@@ -443,6 +493,7 @@ _TEXT_PREFIX = r"""
         dialog.appendChild(layer);
         renderCodexCliDialog();
         requestCodexCliDiscovery();
+        requestCodexCliModels();
       }
 
       function closeCodexCliDialog() {
@@ -450,6 +501,9 @@ _TEXT_PREFIX = r"""
         codexCliState.open = false;
         codexCliState.requestId = "";
         codexCliState.options = null;
+        codexCliState.models = [];
+        codexCliState.modelsFetching = false;
+        codexCliState.modelsError = "";
         codexCliState.commandEdited = false;
         codexCliState.commandText = "";
       }
@@ -459,6 +513,7 @@ _TEXT_PREFIX = r"""
         codexCliState.options = null;
         renderCodexCliDialog();
         requestCodexCliDiscovery();
+        requestCodexCliModels();
       }
 
       function codexCliCopyCommand() {
@@ -523,6 +578,21 @@ _TEXT_PREFIX = r"""
       function applyCodexCliCommandStatus(status) {
         if (!status || typeof status !== "object") return;
         const action = String(status.action || "");
+        if (action === "codexCliFetchModels" && codexCliState.open) {
+          codexCliState.modelsFetching = false;
+          const payload = status.codexCliModels;
+          if (String(status.kind || "") === "error" || !payload) {
+            codexCliState.modelsError = status?.message || "模型列表获取失败。";
+            codexCliState.models = [];
+          } else {
+            codexCliState.modelsError = "";
+            codexCliState.models = Array.isArray(payload.models)
+              ? payload.models.filter(Boolean).map(String)
+              : [];
+          }
+          renderCodexCliDialog();
+          return;
+        }
         if (action === "codexCliDiscover" && status.codexCli && codexCliState.open) {
           const expected = String(codexCliState.requestId || "");
           const received = String(status.requestId || "");
@@ -1411,11 +1481,32 @@ _TEXT_PREFIX = r"""
             statusNode.textContent = status?.message && isError ? status.message : "连通性测试失败。";
             statusNode.classList.add("codex-usage-hud-provider-config-fetch-status-error");
           }
+          const modelsNode = layer?.querySelector('[data-provider-config-models=""]');
+          if (modelsNode) {
+            modelsNode.hidden = true;
+            modelsNode.innerHTML = "";
+          }
           return;
         }
         if (statusNode) {
-          statusNode.textContent = "连通性测试成功。";
+          statusNode.textContent = status?.message || "连通性测试成功。";
           statusNode.classList.remove("codex-usage-hud-provider-config-fetch-status-error");
+        }
+        const modelList = Array.isArray(status?.models) ? status.models.filter(Boolean).map(String) : [];
+        const modelsNode = layer?.querySelector('[data-provider-config-models=""]');
+        if (modelsNode) {
+          if (modelList.length) {
+            modelsNode.hidden = false;
+            const unique = [...new Set(modelList)];
+            modelsNode.innerHTML = `
+              <div class="codex-usage-hud-provider-config-models-title">可用模型（${unique.length}）</div>
+              <ul class="codex-usage-hud-provider-config-models-list">${unique.map((model) =>
+                `<li title="${escapeHtml(model)}">${escapeHtml(model)}</li>`).join("")}</ul>
+            `;
+          } else {
+            modelsNode.hidden = true;
+            modelsNode.innerHTML = "";
+          }
         }
       }
 
@@ -1473,6 +1564,7 @@ _TEXT_PREFIX = r"""
                   </span>
                 </label>
                 <div class="codex-usage-hud-provider-config-fetch-status" data-provider-config-connectivity-status="" aria-live="polite"></div>
+                <div class="codex-usage-hud-provider-config-models" data-provider-config-models="" hidden></div>
               </div>
               ${isNew ? `<fieldset class="codex-usage-hud-provider-config-scope">
                 <legend>统计范围</legend>
@@ -2209,15 +2301,19 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
               const hasSessionHistory = pricingWorkflowState.providerDeleteHasSessionHistory === true;
               const acceptedRequestId = String(status.providerDeleteRequestId || "");
               const terminalError = String(status.kind || "") === "error";
-              if (!hasSessionHistory || terminalError || !acceptedRequestId) {
-                const loadingLayer = modal.querySelector('[data-provider-delete-loading="true"]');
-                const loadingRequestId = String(loadingLayer?.dataset.providerDeleteRequestId || "");
-                if (
-                  loadingLayer
-                  && (!loadingRequestId || !statusRequestId || loadingRequestId === statusRequestId)
-                ) {
-                  closeSettingsConfirm();
-                }
+              // 会话历史删除已在后台会话清理线程执行；一旦 daemon 确认入队，就立即
+              // 关闭全屏 loading 遮罩释放设置面板，避免历史会话较多时锁住整个 UI。
+              // 此时保留 workflow，等后台 terminal 事件到达后再刷新供应商列表与结果。
+              const backgroundHistoryDelete = hasSessionHistory && Boolean(acceptedRequestId) && !terminalError;
+              const loadingLayer = modal.querySelector('[data-provider-delete-loading="true"]');
+              const loadingRequestId = String(loadingLayer?.dataset.providerDeleteRequestId || "");
+              if (
+                loadingLayer
+                && (!loadingRequestId || !statusRequestId || loadingRequestId === statusRequestId)
+              ) {
+                closeSettingsConfirm();
+              }
+              if (!backgroundHistoryDelete) {
                 clearProviderDeleteWorkflow();
               }
             }
@@ -2349,7 +2445,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           kicker: "正在删除",
           title: "正在删除供应商",
           body: deleteSessionHistory
-            ? "正在更新 config.toml、模型单价和会话列表，请勿关闭此窗口。"
+            ? "正在更新 config.toml 和模型单价配置；会话历史较多时会在后台清理，可关闭此窗口继续操作。"
             : "正在更新 config.toml 和模型单价配置，请勿关闭此窗口。",
           mode: "provider-delete",
         });
