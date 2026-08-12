@@ -91,6 +91,7 @@ def apply_to_context(
     *,
     mtime: float | None,
     ports: ConfigApplyPorts,
+    include_history: bool = True,
 ) -> UserConfig:
     overrides = dict(getattr(context, "config_overrides", {}) or {})
     next_config = apply_cli_overrides(next_config, overrides)
@@ -104,13 +105,17 @@ def apply_to_context(
     registry = None
     if isinstance(sessions_root, Path):
         registry = ports.discover_providers(
-            user_config=next_config, sessions_root=sessions_root
+            user_config=next_config,
+            sessions_root=sessions_root,
+            include_history=include_history,
         )
         next_config = next_config.migrate_legacy_provider_settings(
             registry.providers(), app_provider=registry.app_provider
         )
         registry = ports.discover_providers(
-            user_config=next_config, sessions_root=sessions_root
+            user_config=next_config,
+            sessions_root=sessions_root,
+            include_history=include_history,
         )
     context.user_config = next_config
     context.settings_mtime = mtime
@@ -146,11 +151,22 @@ def apply_to_context(
     return next_config
 
 
-def reload_if_changed(context: object, ports: ConfigApplyPorts) -> bool:
+def reload_if_changed(
+    context: object,
+    ports: ConfigApplyPorts,
+    *,
+    include_history: bool = True,
+) -> bool:
     mtime = context.settings_store.mtime()
     if mtime == context.settings_mtime:
         return False
-    apply_to_context(context, context.settings_store.load(), mtime=mtime, ports=ports)
+    apply_to_context(
+        context,
+        context.settings_store.load(),
+        mtime=mtime,
+        ports=ports,
+        include_history=include_history,
+    )
     return True
 
 

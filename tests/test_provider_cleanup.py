@@ -133,14 +133,18 @@ def test_delete_provider_for_context_refreshes_registry_after_config_delete() ->
     ) as delete_config, patch(
         "codex_usage_hud.provider_cleanup.discover_provider_registry",
         return_value=registry,
-    ):
+    ) as discover_registry:
         result = delete_provider_for_context(
             context,
             {"provider": "muyuan", "deleteModelPrices": True},
         )
 
     delete_config.assert_called_once_with("muyuan")
-    context.reload_user_config.assert_called_once_with()
+    context.reload_user_config.assert_called_once_with(include_history=False)
+    assert all(
+        call.kwargs.get("include_history") is False
+        for call in discover_registry.call_args_list
+    )
     assert context.provider_registry is registry
     assert result["status"] == "ok"
     assert result["pricing"]["providerSettings"] == 1

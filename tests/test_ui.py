@@ -13510,14 +13510,26 @@ class DaemonLifecycleTests(unittest.TestCase):
             "deleteModelPrices": False,
         }
 
-        status = _handle_renderer_settings_command(
-            command,
-            context,
-            MagicMock(),
-            MagicMock(),
-        )
+        # config.toml 删除在同步请求阶段完成（patch 掉真实文件操作），历史清理才入队。
+        with patch(
+            "codex_usage_hud.runtime_commands.delete_provider_for_context",
+            return_value={
+                "status": "ok",
+                "providerId": "muyuan",
+                "message": "供应商 muyuan 已删除。",
+                "config": {},
+                "pricing": {},
+            },
+        ):
+            status = _handle_renderer_settings_command(
+                command,
+                context,
+                MagicMock(),
+                MagicMock(),
+            )
 
         self.assertEqual(status["providerDeleteRequestId"], "provider-delete-1")
+        self.assertEqual(status["providerId"], "muyuan")
         self.assertEqual(status["action"], "deleteProvider")
         worker.enqueue.assert_called_once_with(
             {
@@ -13525,6 +13537,38 @@ class DaemonLifecycleTests(unittest.TestCase):
                 "action": "providerDelete",
             }
         )
+
+    def test_renderer_provider_delete_keeps_config_success_when_history_enqueue_fails(self) -> None:
+        worker = SimpleNamespace(
+            enqueue=MagicMock(side_effect=RuntimeError("worker unavailable"))
+        )
+        context = SimpleNamespace(session_cleanup_worker=worker)
+        command = {
+            "action": "deleteProvider",
+            "requestId": "provider-delete-queue-fail",
+            "provider": "muyuan",
+            "deleteSessionHistory": True,
+            "deleteModelPrices": False,
+        }
+
+        with patch(
+            "codex_usage_hud.runtime_commands.delete_provider_for_context",
+            return_value={
+                "status": "ok",
+                "providerId": "muyuan",
+                "message": "供应商 muyuan 已删除。",
+            },
+        ):
+            status = _handle_renderer_settings_command(
+                command,
+                context,
+                MagicMock(),
+                MagicMock(),
+            )
+
+        self.assertEqual(status["status"], "ok")
+        self.assertEqual(status["kind"], "warning")
+        self.assertTrue(status["providerDeleteHistoryEnqueueFailed"])
 
     def test_session_cleanup_manager_uses_local_store_without_cli_lookup(self) -> None:
         context = SimpleNamespace(

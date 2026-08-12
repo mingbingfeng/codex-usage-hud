@@ -2273,26 +2273,9 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
                 providerResult?.message || `供应商 ${expectedProvider} 已删除。`,
               );
               setSettingsStatus(message, "");
-              const settings = hudSettingsFromPayload();
-              if (settingsProviderDraft && !settingsProviderNames(settings).includes(expectedProvider)) {
-                delete settingsProviderDraft.providers?.[expectedProvider];
-                settingsProviderDraft.order = settingsProviderDraft.order.filter(
-                  (item) => item !== expectedProvider,
-                );
-                codexProviderDrafts.delete(expectedProvider);
-                codexProviderDirty.delete(expectedProvider);
-                settingsDirtyProviders.delete(expectedProvider);
-                if (settingsProviderDraft.activeProvider === expectedProvider) {
-                  settingsProviderDraft.activeProvider = settingsProviderDraft.order.includes(
-                    settingsProviderDraft.appProvider,
-                  )
-                    ? settingsProviderDraft.appProvider
-                    : (settingsProviderDraft.order[0] || "");
-                  window[settingsProviderName] = settingsProviderDraft.activeProvider;
-                }
-                renderSettingsProviderEditor();
-                renderSettingsProviderTabs();
-              }
+              // config 删除已在同步 dispatch 阶段完成，此处幂等地确保供应商从界面移除
+              // （后台历史清理的 terminal 事件也能覆盖到这里）。
+              removeProviderFromSettingsUi(expectedProvider);
               providerDeleteTerminalHandled = true;
             }
             clearProviderDeleteWorkflow();
@@ -2312,13 +2295,14 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
               pricingWorkflowState.providerDeleteProvider = String(
                 status.provider || pricingWorkflowState.providerDeleteProvider || "",
               ).trim().toLowerCase();
-              const hasSessionHistory = pricingWorkflowState.providerDeleteHasSessionHistory === true;
-              const acceptedRequestId = String(status.providerDeleteRequestId || "");
               const terminalError = String(status.kind || "") === "error";
-              // 会话历史删除已在后台会话清理线程执行；一旦 daemon 确认入队，就立即
-              // 关闭全屏 loading 遮罩释放设置面板，避免历史会话较多时锁住整个 UI。
-              // 此时保留 workflow，等后台 terminal 事件到达后再刷新供应商列表与结果。
-              const backgroundHistoryDelete = hasSessionHistory && Boolean(acceptedRequestId) && !terminalError;
+              // config.toml / 单价删除已在 daemon 同步请求阶段完成，status 即是
+              // "供应商已删除" 的确认信号。这里统一关闭全屏 loading 遮罩、从设置
+              // 界面移除该供应商并释放 workflow；历史会话清理若勾选则已在后台线程
+              // 执行，不影响删除速度，也不等到历史清理完成才反映删除结果。
+              const providerToRemove = String(
+                status.provider || status.providerId || pricingWorkflowState.providerDeleteProvider || "",
+              ).trim().toLowerCase();
               const loadingLayer = modal.querySelector('[data-provider-delete-loading="true"]');
               const loadingRequestId = String(loadingLayer?.dataset.providerDeleteRequestId || "");
               if (
@@ -2327,9 +2311,10 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
               ) {
                 closeSettingsConfirm();
               }
-              if (!backgroundHistoryDelete) {
-                clearProviderDeleteWorkflow();
+              if (!terminalError) {
+                removeProviderFromSettingsUi(providerToRemove);
               }
+              clearProviderDeleteWorkflow();
             }
           }
           if (!providerDeleteTerminalHandled) {
@@ -2414,6 +2399,32 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         pricingWorkflowState.providerDeleteRequestId = "";
         pricingWorkflowState.providerDeleteProvider = "";
         pricingWorkflowState.providerDeleteHasSessionHistory = false;
+      }
+
+      // 从设置界面的 supplier draft 中移除已删除的供应商并刷新供应商 tab/编辑器。
+      // config.toml 删除已在 daemon 同步完成，status 或 terminal 事件到达时调用一次
+      // 即可让遮罩消失时供应商从设置界面移除；对重复事件保持幂等。
+      function removeProviderFromSettingsUi(provider) {
+        if (!settingsProviderDraft) return;
+        provider = String(provider || "").trim().toLowerCase();
+        if (!provider || !settingsProviderDraft.providers?.[provider]) return;
+        delete settingsProviderDraft.providers?.[provider];
+        settingsProviderDraft.order = settingsProviderDraft.order.filter(
+          (item) => item !== provider,
+        );
+        codexProviderDrafts.delete(provider);
+        codexProviderDirty.delete(provider);
+        settingsDirtyProviders.delete(provider);
+        if (settingsProviderDraft.activeProvider === provider) {
+          settingsProviderDraft.activeProvider = settingsProviderDraft.order.includes(
+            settingsProviderDraft.appProvider,
+          )
+            ? settingsProviderDraft.appProvider
+            : (settingsProviderDraft.order[0] || "");
+          window[settingsProviderName] = settingsProviderDraft.activeProvider;
+        }
+        renderSettingsProviderEditor();
+        renderSettingsProviderTabs();
       }
 
       function handleSettingsCommandSubmissionError(error, command = {}) {

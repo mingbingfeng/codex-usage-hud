@@ -61,9 +61,18 @@ def test_renderer_kernel_manifest_and_shared_contract_are_explicit() -> None:
     assert renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE == manifest.RENDERER_HUD_SCRIPT_TEMPLATE
 
     script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
-    assert len(script.encode("utf-8")) == manifest.P6_7_TEMPLATE_BYTE_LENGTH
-    assert hashlib.sha256(script.encode("utf-8")).hexdigest() == (
-        manifest.P6_7_TEMPLATE_SHA256
+    encoded = script.encode("utf-8")
+    actual_length = len(encoded)
+    actual_hash = hashlib.sha256(encoded).hexdigest()
+    assert actual_length == manifest.P6_7_TEMPLATE_BYTE_LENGTH, (
+        "Renderer template contract is stale: "
+        f"expected {manifest.P6_7_TEMPLATE_BYTE_LENGTH}, actual {actual_length}. "
+        "Run `python tools/update_renderer_contract.py --update` after review."
+    )
+    assert actual_hash == manifest.P6_7_TEMPLATE_SHA256, (
+        "Renderer template hash contract is stale: "
+        f"expected {manifest.P6_7_TEMPLATE_SHA256}, actual {actual_hash}. "
+        "Run `python tools/update_renderer_contract.py --update` after review."
     )
     assert script.count("function createRendererContext()") == 1
     assert script.count("const ctx = createRendererContext();") == 1

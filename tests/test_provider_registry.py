@@ -113,6 +113,31 @@ model_provider = "custom"
         self.assertIn("unknown", registry.entries)
         self.assertTrue(registry.entries["unknown"].historical_only)
 
+    def test_registry_can_skip_history_discovery_for_foreground_provider_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            session_path = root / "sessions" / "2026" / "recent.jsonl"
+            session_path.parent.mkdir(parents=True)
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-16T00:00:00+00:00",
+                        "type": "session_meta",
+                        "payload": {"model_provider": "history-only"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            registry = discover_provider_registry(
+                user_config=UserConfig.defaults(),
+                config_path=root / "missing.toml",
+                sessions_root=root / "sessions",
+                include_history=False,
+            )
+
+        self.assertNotIn("history-only", registry.entries)
+
 
 if __name__ == "__main__":
     unittest.main()

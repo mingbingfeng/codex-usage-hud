@@ -1408,26 +1408,48 @@ def _handle_renderer_settings_command(
         return fetch_provider_models_for_cli(provider)
 
     def delete_provider(command: Mapping[str, object]) -> Mapping[str, object]:
+        # config.toml / 单价删除始终在同步请求阶段完成，立即生效并让前端关闭
+        # loading 遮罩、移除供应商列表项；历史会话清理（若勾选）才进入后台 worker，
+        # 由 providerDelete 任务在后台线程执行，不影响删除动作的速度。
+        result = delete_provider_for_context(context, command)
         if bool(command.get("deleteSessionHistory")):
             worker = getattr(context, "session_cleanup_worker", None)
             enqueue = getattr(worker, "enqueue", None)
             if not callable(enqueue):
-                raise RuntimeError("会话历史删除当前不可用。")
+                return {
+                    **result,
+                    **_status(
+                        "供应商配置已删除，但会话历史后台清理未能启动，请在存储页重试。",
+                        kind="warning",
+                    ),
+                    "providerDeleteHistoryEnqueueFailed": True,
+                }
             provider_delete_command = dict(command)
             provider_delete_command["action"] = "providerDelete"
-            accepted = enqueue(provider_delete_command)
+            try:
+                accepted = enqueue(provider_delete_command)
+            except Exception as exc:
+                return {
+                    **result,
+                    **_status(
+                        f"供应商配置已删除，但会话历史后台清理未能启动：{exc}",
+                        kind="warning",
+                    ),
+                    "providerDeleteHistoryEnqueueFailed": True,
+                }
             request_id = str(
                 accepted.get("requestId")
                 if isinstance(accepted, Mapping)
                 else command.get("requestId") or command.get("id") or ""
             )
             return {
+                **result,
                 **_status(
-                    "供应商删除请求已提交，正在安全清理会话历史；完成后会移除 config.toml 配置。"
+                    "供应商配置已删除；正在后台清理该供应商的会话历史，可继续操作。"
                 ),
                 "providerDeleteRequestId": request_id,
             }
-        return delete_provider_for_context(context, command)
+        return result
 
     general_ports = GeneralCommandPorts(
         load_config=load_config,

@@ -57,10 +57,42 @@ your environment clean while still giving you a live editable install.
 
 ## 3. Run the test suite / 运行测试套件
 
-The canonical fast test command is:
+The canonical fast closeout command is staged: it stops at the first useful
+failure instead of making you wait for the complete suite:
 
 ```powershell
-python -m pytest
+python tools/run_validation.py
+```
+
+Use the direct pytest command when you specifically need the complete suite:
+
+```powershell
+python -m pytest -q --durations=10
+```
+
+### When to run the full suite / 什么时候跑全量
+
+The staged command is enough for ordinary isolated changes. Run
+`python tools/run_validation.py --full` when a change crosses module or
+runtime-owner boundaries, changes shared contracts or settings persistence,
+touches Renderer/CDP, daemon startup/restart, session tracking, refresh
+scheduling, filesystem/SQLite watching, platform integration, test/build
+configuration, or fixes a regression/flaky failure whose impact is not
+strictly local. It is also the required gate before a release or when a PR or
+merge check explicitly requests full regression coverage.
+
+`--full` uses the project's default pytest options, so it is the full default
+suite but still excludes tests marked `ui`. For real widget lifecycle changes,
+run the UI markers separately:
+
+```powershell
+python -m pytest -o addopts="" -m "ui or qt_ui" -q
+```
+
+If every collected marker must be included in one run, use:
+
+```powershell
+python -m pytest -o addopts="" -q --durations=10
 ```
 
 Real PySide6 widget lifecycle regressions are marked `ui` and skipped by default.
@@ -70,7 +102,7 @@ Run them explicitly when touching desktop-helper widget behavior:
 python -m pytest -m ui
 ```
 
-默认命令会跳过真实 PySide6 桌面 helper 生命周期回归；修改桌面气泡行为时再显式运行 `python -m pytest -m ui`。
+默认分阶段命令会跳过真实 PySide6 桌面 helper 生命周期回归；修改桌面气泡行为时再显式运行 `python -m pytest -m ui`。
 
 ## 4. Static syntax check / 静态语法检查
 
@@ -88,8 +120,12 @@ errors before CI or a reviewer does.
 ## 5. Suggested contributor workflow / 推荐贡献流程
 
 ```text
-clone -> install.bat -> edit -> unittest -> compileall -> PR
+clone -> install.bat -> edit -> run_validation -> review -> PR
 ```
+
+Renderer contract maintenance and the `--full` validation path are documented
+in section 3 above; keep the contract update explicit after reviewing a bundle
+change.
 
 For anything that touches daemon behavior, startup semantics, or platform
 integration, validate on the target OS before opening the PR.

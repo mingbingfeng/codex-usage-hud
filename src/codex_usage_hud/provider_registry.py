@@ -65,8 +65,9 @@ def discover_provider_registry(
     config_path: str | Path | None = None,
     sessions_root: Path | None = None,
     now: datetime | None = None,
+    include_history: bool = True,
 ) -> ProviderRegistry:
-    """Collect provider keys from Codex config, saved HUD settings, and recent JSONL."""
+    """Collect provider keys from config/settings and optionally recent JSONL."""
     raw_config = read_codex_config(config_path)
     provider_definitions = read_provider_definitions(config_path)
     entries: dict[str, dict[str, object]] = {}
@@ -117,7 +118,7 @@ def discover_provider_registry(
     for price in user_config.model_prices.values():
         include(price.provider, from_saved_settings=True)
 
-    if sessions_root is not None:
+    if include_history and sessions_root is not None:
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=30)
         for provider in discover_recent_session_providers(sessions_root, cutoff=cutoff):
             include(provider, from_history=True)

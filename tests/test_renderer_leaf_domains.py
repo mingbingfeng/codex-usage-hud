@@ -337,6 +337,7 @@ global.document = {{ getElementById: () => null }};
 global.location = window.location;
 const settingsCommandBindingName = "codexUsageHudSettingsCommand";
 const settingsModalId = "codex-usage-hud-settings";
+const backgroundUsageRequestTimeoutMs = 5000;
 const backgroundUsageState = {{
   policy: {{ desiredState: "enabled", policyRevision: 3 }},
   policyPending: false,
@@ -349,7 +350,7 @@ const ctx = {{
     available: () => true,
     send: (name, payload) => sent.push({{ name, payload }}),
   }},
-  lifecycle: {{ active: () => true }},
+  lifecycle: {{ active: () => true, clearTimeout: () => {{}}, timeout: () => 1 }},
 }};
 const shared = {{}};
 {background_usage_factory}
@@ -380,10 +381,94 @@ console.log("background-usage-policy-command-ok");
     assert "background-usage-policy-command-ok" in completed.stdout
 
 
+def test_background_usage_policy_target_and_copy_keep_enable_direction() -> None:
+    background_usage_factory = BACKGROUND_USAGE.split(
+        "  const backgroundUsageDomain = ctx.domains.register(", 1
+    )[0]
+    script = f"""
+const assert = require("node:assert/strict");
+global.window = {{ location: {{ href: "app://-/index.html" }} }};
+global.document = {{ getElementById: () => null }};
+global.location = window.location;
+const settingsCommandBindingName = "codexUsageHudSettingsCommand";
+const settingsModalId = "codex-usage-hud-settings";
+const backgroundUsageState = {{ policy: null, policyPending: false, policyError: "" }};
+const ctx = {{
+  bindings: {{ available: () => false, send: () => true }},
+  lifecycle: {{ active: () => true }},
+}};
+const shared = {{}};
+{background_usage_factory}
+const domain = createBackgroundUsageDomain(ctx, shared);
+
+const enablePolicy = {{
+  desiredState: "enabled",
+  effectiveState: "disabled",
+  verificationState: "requires_user_action",
+}};
+assert.equal(domain.backgroundUsagePolicyTargetState(enablePolicy), "enabled");
+assert.equal(
+  domain.backgroundUsagePolicyCopy(
+    {{ featureKey: "memory_consolidation", featureLabel: "记忆整理" }},
+    domain.backgroundUsagePolicyTargetState(enablePolicy),
+  ).title,
+  "启用“记忆整理”",
+);
+
+const disablePolicy = {{
+  desiredState: "disabled",
+  effectiveState: "enabled",
+  verificationState: "requires_user_action",
+}};
+assert.equal(domain.backgroundUsagePolicyTargetState(disablePolicy), "disabled");
+assert.equal(
+  domain.backgroundUsagePolicyCopy(
+    {{ featureKey: "memory_consolidation", featureLabel: "记忆整理" }},
+    domain.backgroundUsagePolicyTargetState(disablePolicy),
+).title,
+  "禁用“记忆整理”",
+);
+
+assert.equal(
+  domain.backgroundUsagePolicyTargetState({{
+    desiredState: "disabled",
+    effectiveState: "enabled",
+    verificationState: "failed",
+  }}),
+  "disabled",
+);
+assert.equal(
+  domain.backgroundUsagePolicyTargetState({{
+    desiredState: "enabled",
+    effectiveState: "disabled",
+    verificationState: "failed",
+  }}),
+  "enabled",
+);
+console.log("background-usage-policy-direction-ok");
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "background-usage-policy-direction-ok" in completed.stdout
+
+
 def test_background_usage_restart_confirmation_is_explicit_and_unverified_is_not_disabled() -> None:
     assert "backgroundUsagePolicyRestartConfirm" in BACKGROUND_USAGE
     assert "重启 Codex 以完成禁用" in BACKGROUND_USAGE
-    assert "立即重启 Codex" in BACKGROUND_USAGE
+    assert "重启 Codex 以完成启用" in BACKGROUND_USAGE
+    assert ">立即重启</button>" in BACKGROUND_USAGE
+    assert 'data-event-id="${escapeHtml(String(detail?.eventId || ""))}"' in BACKGROUND_USAGE
+    assert 'data-event-id="${escapeHtml(String(policy?.desiredState || "disabled"))}"' not in BACKGROUND_USAGE
+    assert 'disabled aria-disabled="true"' in BACKGROUND_USAGE
+    assert ".codex-usage-hud-settings-confirm-card > .codex-usage-hud-background-policy-message" in LAYOUT
+    assert "margin-inline: 18px;" in LAYOUT
     assert 'verification === "verified"' in BACKGROUND_USAGE
     assert '["verified", "configured_unverified"].includes(verification)' not in BACKGROUND_USAGE
 

@@ -1118,14 +1118,14 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("backgroundUsageHistoryScrollTops", script)
         self.assertIn("backgroundUsageDetailScrollTops", script)
         self.assertIn("const policyButton = policy && !disabled", script)
-        self.assertIn('禁止此类任务', script)
+        self.assertIn('禁用此类任务', script)
         self.assertIn('启用此类任务', script)
         self.assertNotIn('禁止此后台任务', script)
         self.assertIn("backgroundUsagePolicyConfirm(backgroundUsageState.detail)", script)
         self.assertIn("applyBackgroundUsagePolicy,", script)
         self.assertIn('role="switch"', script)
-        self.assertIn('aria-checked="${isDisabled ? "false" : "true"}"', script)
-        self.assertIn('data-desired-state="${disabling ? "disabled" : "enabled"}"', script)
+        self.assertIn('aria-checked="${displayDisabled ? "false" : "true"}"', script)
+        self.assertIn('data-desired-state="${desiredState}"', script)
         self.assertIn('backgroundUsageState.policyLoading = true', script)
         self.assertIn("后台任务控制能力当前不可用。", script)
         self.assertIn("policy && !disabled", script)
@@ -1378,6 +1378,15 @@ class RendererHudPayloadTests(unittest.TestCase):
             script.index("pricingWorkflowState.providerDeleteRequestId = requestId;"),
             script.index("openProviderDeleteLoading(requestId, provider, deleteSessionHistory);"),
         )
+
+    def test_provider_delete_removes_draft_even_when_latest_registry_has_no_provider(self) -> None:
+        script = renderer_hud.RENDERER_HUD_SCRIPT
+        start = script.index("function removeProviderFromSettingsUi(provider)")
+        end = script.index("function handleSettingsCommandSubmissionError", start)
+        removal = script[start:end]
+
+        self.assertIn("delete settingsProviderDraft.providers?.[provider];", removal)
+        self.assertNotIn("settingsProviderNames(settings)", removal)
 
     def test_renderer_payload_can_emit_domain_only_update(self) -> None:
         payload = payload_from_snapshot(

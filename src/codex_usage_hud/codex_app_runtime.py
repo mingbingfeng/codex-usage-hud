@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -35,6 +36,49 @@ class CodexDesktopProcess:
     name: str
     executable_path: str
     command_line: str
+    started_at: str = ""
+
+
+def _windows_process_started_at(value: object) -> str:
+    """Normalize a Win32/CIM CreationDate value to an UTC ISO timestamp."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    epoch_match = re.fullmatch(r"/Date\((?P<millis>-?\d+)(?:[+-]\d+)?\)/", text)
+    if epoch_match is not None:
+        try:
+            value_dt = datetime.fromtimestamp(
+                int(epoch_match.group("millis")) / 1000.0,
+                tz=timezone.utc,
+            )
+            return value_dt.isoformat().replace("+00:00", "Z")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return ""
+    iso_text = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        iso_value = datetime.fromisoformat(iso_text)
+    except ValueError:
+        iso_value = None
+    if iso_value is not None:
+        if iso_value.tzinfo is None:
+            iso_value = iso_value.replace(tzinfo=timezone.utc)
+        return iso_value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    match = re.fullmatch(
+        r"(?P<base>\d{14})(?:\.(?P<micro>\d{1,6}))?(?P<offset>[+-]\d{3})?",
+        text,
+    )
+    if match is None:
+        return ""
+    try:
+        micro = (match.group("micro") or "").ljust(6, "0")
+        value_dt = datetime.strptime(match.group("base"), "%Y%m%d%H%M%S")
+        if micro:
+            value_dt = value_dt.replace(microsecond=int(micro))
+        offset = int(match.group("offset") or "0")
+        value_dt = value_dt.replace(tzinfo=timezone(timedelta(minutes=offset)))
+        return value_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError, OverflowError):
+        return ""
 
 
 def _normalized_windows_path(value: str) -> str:
@@ -294,7 +338,7 @@ def windows_running_codex_processes() -> list[CodexDesktopProcess]:
     script = (
         "$items = @(Get-CimInstance Win32_Process "
         "-Filter \"Name='ChatGPT.exe' OR Name='Codex.exe'\" | "
-        "Select-Object ProcessId,Name,ExecutablePath,CommandLine); "
+        "Select-Object ProcessId,Name,ExecutablePath,CommandLine,CreationDate); "
         "ConvertTo-Json -InputObject $items -Compress"
     )
     try:
@@ -337,6 +381,7 @@ def windows_running_codex_processes() -> list[CodexDesktopProcess]:
                 name=name,
                 executable_path=executable_path,
                 command_line=str(row.get("CommandLine") or ""),
+                started_at=_windows_process_started_at(row.get("CreationDate")),
             )
         )
     return processes
@@ -387,40 +432,75 @@ def macos_executable_from_command_line(command_line: object) -> str:
     return match.group(1).strip("\"'") if match is not None else executable
 
 
-def macos_running_codex_desktop_processes() -> list[CodexDesktopProcess]:
-    if sys.platform != "darwin":
-        return []
+def _macos_process_rows(*, raise_on_error: bool = False) -> list[tuple[int, str, str, str]]:
+    """Return ``(pid, started_at, comm, command_line)`` process rows."""
     try:
         result = subprocess.run(
-            ["ps", "-axo", "pid=,command="],
+            ["ps", "-axo", "pid=,lstart=,comm=,command="],
             capture_output=True,
             text=True,
             timeout=3.0,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        if raise_on_error:
+            raise RuntimeError("macOS Codex process query failed") from exc
         _LOGGER.info("codex_app_process_query_failed platform=macos error=%s", exc)
         return []
     if result.returncode != 0:
+        if raise_on_error:
+            raise RuntimeError(
+                f"macOS Codex process query returned {result.returncode}"
+            )
         _LOGGER.info(
             "codex_app_process_query_failed platform=macos code=%s",
             result.returncode,
         )
         return []
-    processes: list[CodexDesktopProcess] = []
+    rows: list[tuple[int, str, str, str]] = []
     for line in result.stdout.splitlines():
         row = line.strip()
         if not row:
             continue
-        pid_text, separator, command_line = row.partition(" ")
-        if not separator:
+        parts = row.split(None, 7)
+        if len(parts) < 2:
             continue
         try:
-            pid = int(pid_text)
+            pid = int(parts[0])
         except (TypeError, ValueError):
             continue
-        executable = macos_executable_from_command_line(command_line)
-        if pid <= 0 or not is_macos_codex_desktop_command(executable, command_line):
+        started_at = ""
+        comm = ""
+        if (
+            len(parts) >= 7
+            and parts[1] in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+        ):
+            try:
+                started = datetime.strptime(
+                    " ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"
+                ).replace(tzinfo=datetime.now().astimezone().tzinfo)
+                started_at = started.astimezone(timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                )
+            except (TypeError, ValueError, OverflowError):
+                started_at = ""
+            comm = parts[6]
+            command_line = parts[7] if len(parts) >= 8 else comm
+        else:
+            command_line = row.partition(" ")[2]
+        if pid <= 0:
+            continue
+        rows.append((pid, started_at, comm, command_line))
+    return rows
+
+
+def macos_running_codex_desktop_processes() -> list[CodexDesktopProcess]:
+    if sys.platform != "darwin":
+        return []
+    processes: list[CodexDesktopProcess] = []
+    for pid, started_at, comm, command_line in _macos_process_rows():
+        executable = macos_executable_from_command_line(command_line) or comm
+        if not is_macos_codex_desktop_command(executable, command_line):
             continue
         processes.append(
             CodexDesktopProcess(
@@ -428,6 +508,7 @@ def macos_running_codex_desktop_processes() -> list[CodexDesktopProcess]:
                 name=Path(executable).name,
                 executable_path=executable,
                 command_line=command_line,
+                started_at=started_at,
             )
         )
     return processes
@@ -458,54 +539,40 @@ def audited_running_codex_desktop_processes() -> list[CodexDesktopProcess]:
 
 def running_standalone_codex_cli_pids() -> tuple[int, ...]:
     """Return Codex CLI PIDs, failing closed when audit is unavailable."""
+    return tuple(sorted(process.pid for process in running_standalone_codex_cli_processes()))
+
+
+def running_standalone_codex_cli_processes() -> list[CodexDesktopProcess]:
+    """Return standalone Codex CLI process rows with generation metadata."""
     if sys.platform.startswith("win"):
         rows = windows_running_codex_processes()
-        return tuple(
-            sorted(
-                {
-                    process.pid
-                    for process in rows
-                    if Path(process.name).stem.casefold() == "codex"
-                    and not is_codex_client_process(
-                        process.name,
-                        process.executable_path,
-                    )
-                }
-            )
-        )
+        return [
+            process
+            for process in rows
+            if Path(process.name).stem.casefold() == "codex"
+            and not is_codex_client_process(process.name, process.executable_path)
+        ]
     if sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["ps", "-axo", "pid=,comm=,command="],
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise RuntimeError("macOS Codex process query failed") from exc
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"macOS Codex process query returned {result.returncode}"
-            )
-        pids: set[int] = set()
-        for line in result.stdout.splitlines():
-            parts = line.strip().split(None, 2)
-            if len(parts) < 2:
-                continue
-            try:
-                pid = int(parts[0])
-            except (TypeError, ValueError):
-                continue
-            executable = parts[1]
-            command_line = parts[2] if len(parts) > 2 else executable
+        processes: list[CodexDesktopProcess] = []
+        for pid, started_at, comm, command_line in _macos_process_rows(
+            raise_on_error=True
+        ):
+            executable = macos_executable_from_command_line(command_line) or comm
             if Path(executable).name.casefold() != "codex":
                 continue
             if is_macos_codex_desktop_command(executable, command_line):
                 continue
             if pid > 0 and pid != os.getpid():
-                pids.add(pid)
-        return tuple(sorted(pids))
+                processes.append(
+                    CodexDesktopProcess(
+                        pid=pid,
+                        name=Path(executable).name,
+                        executable_path=executable,
+                        command_line=command_line,
+                        started_at=started_at,
+                    )
+                )
+        return processes
     raise RuntimeError(f"Codex process audit is unsupported on {sys.platform}")
 
 

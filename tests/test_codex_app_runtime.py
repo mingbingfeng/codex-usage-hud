@@ -20,6 +20,7 @@ def test_windows_process_audit_excludes_npm_cli(monkeypatch: pytest.MonkeyPatch)
             "Name": "codex.exe",
             "ExecutablePath": "C:\\Users\\test\\AppData\\Roaming\\npm\\codex.exe",
             "CommandLine": "codex.exe --remote-debugging-port=59999",
+            "CreationDate": "2026-08-12T12:00:24.37125+08:00",
         },
         {
             "ProcessId": 22,
@@ -29,6 +30,7 @@ def test_windows_process_audit_excludes_npm_cli(monkeypatch: pytest.MonkeyPatch)
                 "\\app\\ChatGPT.exe"
             ),
             "CommandLine": "ChatGPT.exe --remote-debugging-port=59629",
+            "CreationDate": "20260812120130.119660+480",
         },
     ]
     completed = SimpleNamespace(returncode=0, stdout=json.dumps(rows), stderr="")
@@ -40,6 +42,19 @@ def test_windows_process_audit_excludes_npm_cli(monkeypatch: pytest.MonkeyPatch)
 
     assert [process.pid for process in desktop] == [22]
     assert cli_pids == (11,)
+    assert desktop[0].started_at == "2026-08-12T04:01:30.119660Z"
+
+
+def test_windows_process_started_at_accepts_cim_iso_and_dmtf_values() -> None:
+    assert app._windows_process_started_at("2026-08-12T12:00:24.37125+08:00") == (
+        "2026-08-12T04:00:24.371250Z"
+    )
+    assert app._windows_process_started_at("20260812120130.119660+480") == (
+        "2026-08-12T04:01:30.119660Z"
+    )
+    assert app._windows_process_started_at("/Date(1786507290119)/") == (
+        "2026-08-12T04:01:30.119000Z"
+    )
 
 
 def test_windows_process_audit_fails_closed_on_invalid_output(

@@ -534,8 +534,18 @@ def test_renderer_bundle_matches_frozen_p0_contract() -> None:
     )
     current = contract["currentBundle"]
     encoded = RENDERER_HUD_SCRIPT.encode("utf-8")
-    assert len(encoded) == current["byteLength"]
-    assert hashlib.sha256(encoded).hexdigest() == current["sha256"]
+    actual_length = len(encoded)
+    actual_hash = hashlib.sha256(encoded).hexdigest()
+    assert actual_length == current["byteLength"], (
+        "Renderer injected bundle contract is stale: "
+        f"expected {current['byteLength']}, actual {actual_length}. "
+        "Run `python tools/update_renderer_contract.py --update` after review."
+    )
+    assert actual_hash == current["sha256"], (
+        "Renderer injected bundle hash contract is stale: "
+        f"expected {current['sha256']}, actual {actual_hash}. "
+        "Run `python tools/update_renderer_contract.py --update` after review."
+    )
 
     globals_found = sorted(
         set(re.findall(r"window\.(__codexUsageHud[A-Za-z0-9_]+)", RENDERER_HUD_SCRIPT))
@@ -555,12 +565,19 @@ def test_renderer_payload_order_and_lifecycle_match_contract() -> None:
     )[0]
     positions = [function.index(f'"{domain}" in domains') for domain in contract["payloadApplyOrder"]]
     assert positions == sorted(positions)
-    assert RENDERER_HUD_SCRIPT.count("new MutationObserver") == contract["lifecycleCounts"]["mutationObservers"]
-    assert RENDERER_HUD_SCRIPT.count("new ResizeObserver") == contract["lifecycleCounts"]["resizeObservers"]
-    assert RENDERER_HUD_SCRIPT.count("ctx.lifecycle.interval(") == contract["lifecycleCounts"]["setIntervals"]
-    assert RENDERER_HUD_SCRIPT.count("ctx.lifecycle.timeout(") == contract["lifecycleCounts"]["setTimeouts"]
-    assert RENDERER_HUD_SCRIPT.count("setInterval(") == contract["lifecycleCounts"]["kernelSetIntervals"]
-    assert RENDERER_HUD_SCRIPT.count("setTimeout(") == contract["lifecycleCounts"]["kernelSetTimeouts"]
+    lifecycle_counts = {
+        "mutationObservers": RENDERER_HUD_SCRIPT.count("new MutationObserver"),
+        "resizeObservers": RENDERER_HUD_SCRIPT.count("new ResizeObserver"),
+        "setIntervals": RENDERER_HUD_SCRIPT.count("ctx.lifecycle.interval("),
+        "setTimeouts": RENDERER_HUD_SCRIPT.count("ctx.lifecycle.timeout("),
+        "kernelSetIntervals": RENDERER_HUD_SCRIPT.count("setInterval("),
+        "kernelSetTimeouts": RENDERER_HUD_SCRIPT.count("setTimeout("),
+    }
+    assert lifecycle_counts == contract["lifecycleCounts"], (
+        "Renderer lifecycle contract is stale: "
+        f"actual {lifecycle_counts}, expected {contract['lifecycleCounts']}. "
+        "Run `python tools/update_renderer_contract.py --update` after review."
+    )
     for key in contract["sequenceKeys"]:
         assert key in RENDERER_HUD_SCRIPT
     inventory = contract["currentLifecycleInventory"]

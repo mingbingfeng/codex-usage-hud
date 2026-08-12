@@ -33,7 +33,6 @@ from .core.runtime_events import RuntimeEventBus
 from .platforms import ActiveSessionTracker, SessionPathResolver, get_current_platform
 from .platforms.base import BasePlatform
 from .provider_registry import ProviderRegistry, discover_provider_registry
-from .provider_cleanup import delete_provider_for_context
 from .runtime_diagnostics import ensure_runtime_error_diagnostics
 from .runtime_paths import hud_runtime_dir
 from . import runtime_config
@@ -107,7 +106,7 @@ class RuntimeContext:
     session_management_active_session_ids: set[str] = field(default_factory=set)
     rest_reminder: object | None = None
     config_overrides: dict[str, object] = field(default_factory=dict)
-    config_reload: Callable[["RuntimeContext"], object] | None = field(
+    config_reload: Callable[..., object] | None = field(
         default=None,
         repr=False,
     )
@@ -117,11 +116,11 @@ class RuntimeContext:
         if self.runtime_errors.event_bus is None:
             self.runtime_errors.event_bus = self.runtime_events
 
-    def reload_user_config(self) -> object | None:
+    def reload_user_config(self, *, include_history: bool = True) -> object | None:
         """Delegate reload mechanics to the injected configuration owner."""
         if self.config_reload is None:
             return None
-        return self.config_reload(self)
+        return self.config_reload(self, include_history=include_history)
 
     def close(self) -> None:
         """Release owned helpers in reverse dependency order, once."""
@@ -210,7 +209,6 @@ def _initialize_runtime_context_resources(context: RuntimeContext) -> None:
             context,
             context.session_cleanup_manager,
             on_deleted=_refresh_usage_after_session_delete,
-            provider_delete_callback=delete_provider_for_context,
         )
 
 
@@ -374,8 +372,8 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
         renderer_mode=renderer_active_session_bridge,
         defer_cold_renderer_budget=not bool(getattr(args, "once", False)),
         config_overrides=runtime_config.cli_overrides(args),
-        config_reload=lambda runtime: runtime_config.reload_if_changed(
-            runtime, _runtime_config_ports()
+        config_reload=lambda runtime, **kwargs: runtime_config.reload_if_changed(
+            runtime, _runtime_config_ports(), **kwargs
         ),
     )
     try:

@@ -84,15 +84,10 @@ class SessionCleanupWorker:
         manager: SessionCleanupManager,
         *,
         on_deleted: Callable[[object, str], None],
-        provider_delete_callback: Callable[
-            [object, Mapping[str, object]], Mapping[str, object]
-        ]
-        | None = None,
     ) -> None:
         self._context = context
         self.manager = manager
         self._on_deleted = on_deleted
-        self._provider_delete_callback = provider_delete_callback
         self._queue: queue.Queue[dict[str, object] | None] = queue.Queue()
         self._closed = Event()
         self._worker = Thread(
@@ -160,6 +155,8 @@ class SessionCleanupWorker:
                         request_id=request_id,
                     )
                 elif action == "providerDelete":
+                    # config.toml / 单价删除已在 dispatch 同步请求阶段完成；此处只负责
+                    # 后台清理该供应商的会话历史，避免历史较多时阻塞前端删除反馈。
                     provider_id = str(
                         command.get("provider") or command.get("providerId") or ""
                     ).strip().casefold()
@@ -176,14 +173,6 @@ class SessionCleanupWorker:
                             provider_id,
                             request_id=request_id,
                         )
-                    if self._provider_delete_callback is None:
-                        raise SessionCleanupError(
-                            "provider deletion callback is unavailable"
-                        )
-                    provider_result = self._provider_delete_callback(
-                        self._context,
-                        command,
-                    )
                     history_operation = (
                         history_snapshot.get("operation")
                         if isinstance(history_snapshot, Mapping)
@@ -205,7 +194,6 @@ class SessionCleanupWorker:
                         state="completed",
                         progress=100,
                         provider=provider_id,
-                        providerResult=dict(provider_result),
                         historyDeletedCount=history_deleted,
                         deletedCount=history_deleted,
                         actualBytes=history_actual_bytes,

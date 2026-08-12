@@ -2185,6 +2185,9 @@ TEXT = r"""
             font-size: 10px;
             line-height: 1.45;
           }
+          #${rootId} .codex-usage-hud-settings-confirm-card > .codex-usage-hud-background-policy-message {
+            margin-inline: 18px;
+          }
           #${rootId} .codex-usage-hud-background-detail-sub {
             color: var(--codex-usage-hud-info, #9ccbff);
             font: 10px Consolas, "Cascadia Mono", ui-monospace, monospace;

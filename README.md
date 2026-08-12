@@ -155,8 +155,9 @@ HUD 现在支持跟随 Codex App 当前主题，包含浅色/深色区分和 `Co
 ```powershell
 python -m pip install -e ".[desktop-overlay]"  # 可选：启用 PySide6 桌面会话气泡
 python -m compileall -q src tools tests
-python -m pytest
+python tools/run_validation.py
 python -m pytest -m ui        # 可选：PySide6 桌面 helper 的真实窗口回归
+python tools/run_validation.py --full  # 定向检查通过后再跑全量，并输出最慢测试
 python tools/build_exe.py
 python tools/build_installer.py
 ```
