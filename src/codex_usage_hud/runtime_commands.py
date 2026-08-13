@@ -20,6 +20,8 @@ from .codex_provider_config import (
     fetch_provider_models,
     fetch_provider_models_for_cli,
     save_provider_configs,
+    send_cli_chat_probe,
+    send_provider_chat_probe,
 )
 from .codex_cli_launcher import discover_codex_cli_options, launch_codex_cli
 from .config import (
@@ -154,6 +156,8 @@ class GeneralCommandPorts:
     delete_provider: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
     fetch_provider_models: Callable[[str, str], list[str]] | None = None
     fetch_cli_provider_models: Callable[[str], Mapping[str, object]] | None = None
+    send_provider_chat_probe: Callable[[str, str, str, str], Mapping[str, object]] | None = None
+    send_cli_chat_probe: Callable[[str, str, str], Mapping[str, object]] | None = None
     codex_cli_discover: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
     codex_cli_launch: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
 
@@ -606,18 +610,13 @@ def handle_background_command(
             apply = getattr(runtime, "policy_set", None)
             if not callable(apply):
                 return runtime_settings.background_usage_response_status("policyApply", request_id, error="后台任务控制当前不可用。")
-            restart_now = bool(command.get("restartNow"))
-            if restart_now:
-                restart = getattr(runtime, "policy_restart", None)
-                if callable(restart):
-                    payload = restart(command.get("featureKey"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
-                else:
-                    try:
-                        payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"), True)
-                    except TypeError:
-                        payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
-            else:
-                payload = apply(command.get("featureKey"), command.get("desiredState"), command.get("expectedPolicyRevision"), command.get("eventId", ""), command.get("source", "usage_detail"))
+            payload = apply(
+                command.get("featureKey"),
+                command.get("desiredState"),
+                command.get("expectedPolicyRevision"),
+                command.get("eventId", ""),
+                command.get("source", "usage_detail"),
+            )
             return runtime_settings.background_usage_response_status("policyApply", request_id, payload=payload, event_id=str(command.get("eventId") or ""), error=str(payload.get("message") or "") if isinstance(payload, Mapping) and payload.get("error") else "")
         if action == "backgroundUsageQuery":
             raw_filters = command.get("filters")
@@ -924,6 +923,33 @@ def handle_general_command(
                 f"已获取 {len([item for item in payload.get('models', [])])} 个模型。"
             )
             status["codexCliModels"] = dict(payload)
+            return status
+        if action == "providerChatTest":
+            if ports.send_provider_chat_probe is None:
+                return _status("聊天测试当前不可用。", kind="error")
+            base_url = str(command.get("baseUrl") or command.get("base_url") or "").strip()
+            api_key = str(command.get("apiKey") or command.get("api_key") or "").strip()
+            model = str(command.get("model") or "").strip()
+            message = str(command.get("message") or "hi").strip() or "hi"
+            result = ports.send_provider_chat_probe(base_url, api_key, model, message)
+            status = _status(
+                str(result.get("reply") or result.get("error") or "聊天测试无结果。"),
+                kind="" if result.get("ok") else "error",
+            )
+            status["providerChatTest"] = dict(result)
+            return status
+        if action == "codexCliChatTest":
+            if ports.send_cli_chat_probe is None:
+                return _status("聊天测试当前不可用。", kind="error")
+            provider = str(command.get("provider") or "").strip()
+            model = str(command.get("model") or "").strip()
+            message = str(command.get("message") or "hi").strip() or "hi"
+            result = ports.send_cli_chat_probe(provider, model, message)
+            status = _status(
+                str(result.get("reply") or result.get("error") or "聊天测试无结果。"),
+                kind="" if result.get("ok") else "error",
+            )
+            status["codexCliChatTest"] = dict(result)
             return status
         if action == "savePricing":
             codex_provider_result: Mapping[str, object] | None = None
@@ -1407,6 +1433,14 @@ def _handle_renderer_settings_command(
     def fetch_cli_provider_models(provider: str) -> Mapping[str, object]:
         return fetch_provider_models_for_cli(provider)
 
+    def chat_probe_for_provider(
+        base_url: str, api_key: str, model: str, message: str
+    ) -> Mapping[str, object]:
+        return send_provider_chat_probe(base_url, api_key, model, message)
+
+    def chat_probe_for_cli(provider: str, model: str, message: str) -> Mapping[str, object]:
+        return send_cli_chat_probe(provider, model, message)
+
     def delete_provider(command: Mapping[str, object]) -> Mapping[str, object]:
         # config.toml / 单价删除始终在同步请求阶段完成，立即生效并让前端关闭
         # loading 遮罩、移除供应商列表项；历史会话清理（若勾选）才进入后台 worker，
@@ -1481,6 +1515,8 @@ def _handle_renderer_settings_command(
         delete_provider=delete_provider,
         fetch_provider_models=lambda base_url, api_key: fetch_provider_models(base_url, api_key),
         fetch_cli_provider_models=fetch_cli_provider_models,
+        send_provider_chat_probe=chat_probe_for_provider,
+        send_cli_chat_probe=chat_probe_for_cli,
         codex_cli_discover=discover_cli,
         codex_cli_launch=launch_cli,
     )

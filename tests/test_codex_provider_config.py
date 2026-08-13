@@ -13,11 +13,14 @@ if str(SRC_ROOT) not in sys.path:
 
 from codex_usage_hud.codex_provider_config import (
     _delete_user_environment_value,
+    _chat_completions_url,
     delete_provider_config,
     fetch_provider_models,
     fetch_provider_models_for_cli,
     read_provider_definitions,
     save_provider_configs,
+    send_cli_chat_probe,
+    send_provider_chat_probe,
     verify_provider_connectivity,
 )
 
@@ -664,6 +667,212 @@ class FetchProviderModelsForCliTests(unittest.TestCase):
                     fetch_provider_models_for_cli(
                         "muyuan", config_path=config_path
                     )
+
+
+class SendProviderChatProbeTests(unittest.TestCase):
+    def _fake_urlopen(self, body: bytes = b""):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self, length: int = -1) -> bytes:
+                del length
+                return body
+
+        return FakeResponse()
+
+    def test_chat_completions_url_handles_full_path_base_url(self) -> None:
+        self.assertEqual(
+            _chat_completions_url(
+                "https://chatapi.weixin.qq.com/openai/v1/chat/completions"
+            ),
+            "https://chatapi.weixin.qq.com/openai/v1/chat/completions",
+        )
+        self.assertEqual(
+            _chat_completions_url("https://api.example.com/v1"),
+            "https://api.example.com/v1/chat/completions",
+        )
+        self.assertEqual(
+            _chat_completions_url("https://api.example.com/v1/"),
+            "https://api.example.com/v1/chat/completions",
+        )
+
+    def test_send_provider_chat_probe_posts_chat_completions_and_parses_reply(self) -> None:
+        captured = {}
+        body = b'{"choices": [{"message": {"role": "assistant", "content": "Hello!"}}]}'
+
+        def fake_urlopen(request, timeout: float = 30.0):
+            captured["url"] = request.full_url
+            captured["authorization"] = request.get_header("Authorization")
+            captured["content_type"] = request.get_header("Content-type")
+            captured["data"] = request.data.decode("utf-8")
+            captured["timeout"] = timeout
+            return self._fake_urlopen(body)
+
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            result = send_provider_chat_probe(
+                "https://api.example.com/v1", "sk-test", "gpt-5", message="hi"
+            )
+
+        self.assertEqual(
+            captured["url"], "https://api.example.com/v1/chat/completions"
+        )
+        self.assertEqual(captured["authorization"], "Bearer sk-test")
+        self.assertEqual(captured["content_type"], "application/json")
+        self.assertIn('"model": "gpt-5"', captured["data"])
+        self.assertIn('"content": "hi"', captured["data"])
+        self.assertEqual(result, {"ok": True, "reply": "Hello!", "model": "gpt-5"})
+
+    def test_send_provider_chat_probe_uses_full_path_base_url_as_is(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout: float = 30.0):
+            del timeout
+            captured["url"] = request.full_url
+            return self._fake_urlopen(
+                b'{"choices": [{"message": {"content": "ok"}}]}'
+            )
+
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            send_provider_chat_probe(
+                "https://chatapi.weixin.qq.com/openai/v1/chat/completions",
+                "key",
+                "Deepseek-v4-flash",
+            )
+
+        self.assertEqual(
+            captured["url"],
+            "https://chatapi.weixin.qq.com/openai/v1/chat/completions",
+        )
+
+    def test_send_provider_chat_probe_surfaces_http_error_detail(self) -> None:
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        def fake_urlopen(request, timeout: float = 30.0):
+            del request, timeout
+            raise HTTPError(
+                "https://x.example/chat/completions",
+                400,
+                "Bad Request",
+                None,
+                BytesIO(b'{"error": {"message": "invalid model: model name not found", "code": 400}}'),
+            )
+
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            result = send_provider_chat_probe(
+                "https://x.example/v1", "key", "bad-model"
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("HTTP 400", str(result["error"]))
+        self.assertIn("invalid model", str(result["error"]))
+
+    def test_send_provider_chat_probe_rejects_missing_inputs(self) -> None:
+        self.assertFalse(send_provider_chat_probe("", "key", "gpt-5")["ok"])
+        self.assertFalse(
+            send_provider_chat_probe("https://x.example/v1", "", "gpt-5")["ok"]
+        )
+        self.assertFalse(
+            send_provider_chat_probe("https://x.example/v1", "key", "")["ok"]
+        )
+
+    def test_send_provider_chat_probe_rejects_unrecognizable_reply(self) -> None:
+        with patch(
+            "codex_usage_hud.codex_provider_config.urlopen",
+            side_effect=lambda request, timeout: self._fake_urlopen(b"not json"),
+        ):
+            result = send_provider_chat_probe(
+                "https://api.example.com/v1", "key", "gpt-5"
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("未返回可识别", str(result["error"]))
+
+
+class SendCliChatProbeTests(unittest.TestCase):
+    @patch("codex_usage_hud.codex_provider_config._user_environment_value")
+    @patch("codex_usage_hud.codex_provider_config.urlopen")
+    def test_send_cli_chat_probe_resolves_config_and_posts(self, fake_urlopen, fake_env) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self, length: int = -1) -> bytes:
+                del length
+                return b'{"choices": [{"message": {"content": "ok"}}]}'
+
+        captured = {}
+        fake_urlopen.side_effect = lambda request, timeout: captured.update(
+            {"url": request.full_url}
+        ) or FakeResponse()
+        fake_env.return_value = "sk-from-env"
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[model_providers.qq]\n'
+                'name = "qq"\n'
+                'base_url = "https://chatapi.weixin.qq.com/openai/v1/chat/completions"\n'
+                'env_key = "QQ_API_KEY"\n',
+                encoding="utf-8",
+            )
+            result = send_cli_chat_probe(
+                "qq", "Deepseek-v4-flash", config_path=config_path
+            )
+
+        self.assertEqual(captured["url"], "https://chatapi.weixin.qq.com/openai/v1/chat/completions")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "qq")
+        self.assertEqual(result["baseUrl"], "https://chatapi.weixin.qq.com/openai/v1/chat/completions")
+        self.assertEqual(result["envKey"], "QQ_API_KEY")
+
+    def test_send_cli_chat_probe_missing_provider_returns_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                '[model_providers]\nother = { base_url = "https://x" }\n',
+                encoding="utf-8",
+            )
+            result = send_cli_chat_probe("missing", "gpt-5", config_path=config_path)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("未在 config.toml 中找到", str(result["error"]))
+
+    def test_send_cli_chat_probe_missing_api_key_returns_error(self) -> None:
+        with patch(
+            "codex_usage_hud.codex_provider_config._user_environment_value",
+            return_value="",
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.toml"
+                config_path.write_text(
+                    '[model_providers.muyuan]\n'
+                    'name = "muyuan"\n'
+                    'base_url = "https://api.example.com/v1"\n'
+                    'env_key = "MUYUAN_API_KEY"\n',
+                    encoding="utf-8",
+                )
+                result = send_cli_chat_probe(
+                    "muyuan", "gpt-5", config_path=config_path
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("没有可用的 API key", str(result["error"]))
 
 
 if __name__ == "__main__":

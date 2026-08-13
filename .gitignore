@@ -75,3 +75,6 @@ artifacts/
 .trellis/tasks/00-bootstrap-guidelines/
 output/
 .playwright-cli/
+
+# Reasonix tool metadata
+.reasonix/

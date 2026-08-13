@@ -366,6 +366,12 @@ TEXT = r"""
         launchCodexCliFromDialog();
         return;
       }
+      if (action.dataset.action === "codex-cli-chat-test") {
+        event.preventDefault();
+        event.stopPropagation();
+        chatTestCodexCliFromDialog();
+        return;
+      }
       if (action.dataset.action === "runtime-errors-toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -428,20 +434,9 @@ TEXT = r"""
       if (action.dataset.action === "background-usage-policy-cancel") {
         event.preventDefault(); event.stopPropagation(); closeSettingsConfirm(); return;
       }
-      if (action.dataset.action === "background-usage-policy-restart-cancel") {
-        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm(); return;
-      }
-      if (action.dataset.action === "background-usage-policy-restart-unavailable") {
-        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm(); return;
-      }
       if (action.dataset.action === "background-usage-policy-confirm") {
         event.preventDefault(); event.stopPropagation(); closeSettingsConfirm();
         applyBackgroundUsagePolicy(String(action.dataset.featureKey || ""), String(action.dataset.eventId || ""), String(action.dataset.desiredState || "disabled"));
-        return;
-      }
-      if (action.dataset.action === "background-usage-policy-restart-confirm") {
-        event.preventDefault(); event.stopPropagation(); closeSettingsConfirm();
-        applyBackgroundUsagePolicy(String(action.dataset.featureKey || "memory_consolidation"), String(action.dataset.eventId || ""), String(action.dataset.desiredState || "disabled"), true);
         return;
       }
       if (action.dataset.action === "settings-open") {
@@ -732,6 +727,12 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         testProviderConnectivityFromDialog();
+        return;
+      }
+      if (action.dataset.action === "settings-provider-chat-test") {
+        event.preventDefault();
+        event.stopPropagation();
+        chatTestProviderFromDialog();
         return;
       }
       if (action.dataset.action === "settings-add-model") {

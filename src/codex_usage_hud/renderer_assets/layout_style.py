@@ -2190,7 +2190,8 @@ TEXT = r"""
           }
           #${rootId} .codex-usage-hud-background-detail-sub {
             color: var(--codex-usage-hud-info, #9ccbff);
-            font: 10px Consolas, "Cascadia Mono", ui-monospace, monospace;
+            font-size: 10px;
+            line-height: 1.5;
           }
           #${rootId} .codex-usage-hud-background-detail-grid {
             display: grid;
@@ -2752,6 +2753,68 @@ TEXT = r"""
             color: var(--codex-usage-hud-muted, #8492a6);
             font-size: 10px;
             line-height: 1.4;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-test {
+            min-width: 0;
+            margin: 0;
+            padding: 0 0 8px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            line-height: 1.4;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-test > summary {
+            width: fit-content;
+            cursor: pointer;
+            color: inherit;
+            font-weight: 700;
+            list-style-position: inside;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-test > summary:hover,
+          #${rootId} .codex-usage-hud-codex-cli-chat-test > summary:focus-visible {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            outline: none;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-test-body {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: end;
+            margin-top: 8px;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-test-body label {
+            min-width: 0;
+            display: grid;
+            gap: 4px;
+            color: inherit;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-test-body input {
+            box-sizing: border-box;
+            width: 100%;
+            min-height: 31px;
+            padding: 5px 7px;
+            border: 1px solid #47494f;
+            border-radius: 5px;
+            background: #14171b;
+            color: #f1f3f5;
+            outline: none;
+            font: inherit;
+            font-weight: 400;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-test-body input:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-result {
+            grid-column: 1 / -1;
+            min-height: 14px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 400;
+            line-height: 1.4;
+            word-break: break-word;
+          }
+          #${rootId} .codex-usage-hud-codex-cli-chat-result-error {
+            color: #f27878;
           }
           #${rootId} .codex-usage-hud-provider-delete-action:hover,
           #${rootId} .codex-usage-hud-provider-delete-action:focus-visible {
@@ -3958,6 +4021,70 @@ TEXT = r"""
             line-height: 1.4;
           }
           #${rootId} .codex-usage-hud-provider-config-fetch-status-error {
+            color: #f27878;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test {
+            min-width: 0;
+            padding: 4px 0 0;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            line-height: 1.4;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test[hidden] {
+            display: none;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test > summary {
+            width: fit-content;
+            cursor: pointer;
+            color: inherit;
+            font-weight: 700;
+            list-style-position: inside;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test > summary:hover,
+          #${rootId} .codex-usage-hud-provider-config-chat-test > summary:focus-visible {
+            color: var(--codex-usage-hud-accent, #f3d27a);
+            outline: none;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test-body {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: end;
+            margin-top: 8px;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test-body label {
+            min-width: 0;
+            display: grid;
+            gap: 4px;
+            color: inherit;
+            font-weight: 700;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test-body input {
+            box-sizing: border-box;
+            width: 100%;
+            min-height: 31px;
+            padding: 5px 7px;
+            border: 1px solid #47494f;
+            border-radius: 5px;
+            background: #14171b;
+            color: #f1f3f5;
+            outline: none;
+            font: inherit;
+            font-weight: 400;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-test-body input:focus {
+            border-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-result {
+            grid-column: 1 / -1;
+            min-height: 14px;
+            color: var(--codex-usage-hud-muted, #8492a6);
+            font-size: 10px;
+            font-weight: 400;
+            line-height: 1.4;
+            word-break: break-word;
+          }
+          #${rootId} .codex-usage-hud-provider-config-chat-result-error {
             color: #f27878;
           }
           #${rootId} .codex-usage-hud-provider-delete-card {

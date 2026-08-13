@@ -229,14 +229,10 @@ TEXT = r"""
         const desiredState = String(policy?.desiredState || "enabled");
         const effectiveState = backgroundUsagePolicyEffectiveState(policy);
         const isDisabled = effectiveState === "disabled";
-        const waitingRestart = verification === "configured_unverified"
-          && policy?.requiresRestart === true;
         const actionState = backgroundUsagePolicyTargetState(policy);
         const displayDisabled = isDisabled;
         const label = backgroundUsageState.policyPending
           ? "正在提交..."
-          : waitingRestart
-          ? `重启以完成${actionState === "disabled" ? "禁用" : "启用"}`
           : actionState === "enabled"
           ? "启用此类任务"
           : "禁用此类任务";
@@ -249,11 +245,20 @@ TEXT = r"""
         const workdirHtml = workdir && eventId && workdirAvailable
           ? `<button type="button" class="codex-usage-hud-background-workdir-link" data-action="background-usage-open-workdir" data-event-id="${escapeHtml(eventId)}" aria-label="打开记录时运行目录 ${escapeHtml(workdir)}" title="记录时运行目录 · ${escapeHtml(workdirAssociation)} · ${escapeHtml(workdir)}">${escapeHtml(workdir)}</button>`
           : `<strong title="${workdir ? `记录时运行目录 · ${escapeHtml(workdirAssociation)} · 当前目录不可用` : "未记录运行目录"}">${escapeHtml(workdir || "--")}</strong>`;
+        const detailLabel = String(detail.featureLabel || "未知后台任务");
+        const detailEnLabel = String(detail.featureEnLabel || "").trim();
+        const detailPurpose = String(detail.featurePurpose || "").trim();
+        const detailTitle = detailEnLabel
+          ? `${detailLabel}（${detailEnLabel}）`
+          : detailLabel;
+        const detailSubText = detailPurpose
+          ? `由 Codex App 官方 agent 工具在后台发起的请求 · 官方作用：${detailPurpose}`
+          : "由 Codex App 官方 agent 工具在后台发起的请求";
         return `
           <div class="codex-usage-hud-background-detail-head">
             <div>
-              <h3>${escapeHtml(detail.featureLabel || "未知后台任务")}</h3>
-              <span class="codex-usage-hud-background-detail-sub">Codex App 后台用量 · 本地记录</span>
+              <h3>${escapeHtml(detailTitle)}</h3>
+              <span class="codex-usage-hud-background-detail-sub">${escapeHtml(detailSubText)}</span>
             </div>
             ${policyButton}
           </div>
@@ -760,7 +765,7 @@ TEXT = r"""
       function backgroundUsagePolicyTargetState(policy) {
         const desiredState = String(policy?.desiredState || "enabled");
         const verification = String(policy?.verificationState || "");
-        if (["configured_unverified", "requires_user_action"].includes(verification)) {
+        if (verification === "requires_user_action") {
           return desiredState;
         }
         const effectiveState = backgroundUsagePolicyEffectiveState(policy);
@@ -775,7 +780,7 @@ TEXT = r"""
         const desiredState = String(policy?.desiredState || "enabled");
         const verification = String(policy?.verificationState || "");
         if (verification === "verified") return desiredState;
-        if (["configured_unverified", "requires_user_action"].includes(verification)) {
+        if (verification === "requires_user_action") {
           return desiredState === "disabled" ? "enabled" : "disabled";
         }
         return "enabled";
@@ -793,8 +798,8 @@ TEXT = r"""
             : "“建议安全检查”没有独立公开开关。继续操作会打开 Codex 设置；启用上下文建议后，这条建议链路及其后续安全检查请求也可以恢复，前台会话不受影响。";
         } else if (featureKey === "memory_consolidation") {
           body = disabling
-            ? "将关闭 Codex 的 Memories 总开关。以后新的记忆整理后台任务不会启动；已有后台用量和请求明细会保留，不会被删除或重算。确认后会重新读取配置；如果当前进程需要重启，HUD 会在验证完成前保留当前生效状态。"
-            : "将开启 Codex 的 Memories 总开关。以后新的记忆整理后台任务可以恢复；已有后台用量和请求明细不会被删除或重算。确认后会重新读取配置；如果当前进程需要重启，HUD 会在验证完成前保留当前生效状态。";
+            ? "将关闭 Codex 的 Memories 总开关。以后新的记忆整理后台任务不会启动；已有后台用量和请求明细会保留，不会被删除或重算。"
+            : "将开启 Codex 的 Memories 总开关。以后新的记忆整理后台任务可以恢复；已有后台用量和请求明细不会被删除或重算。";
         } else {
           body = `将打开 Codex 设置以${disabling ? "关闭" : "启用"} Suggested prompts。HUD 当前无法自动读取该开关状态，请以 Codex 设置页显示的状态为准。`;
         }
@@ -808,10 +813,6 @@ TEXT = r"""
       function backgroundUsagePolicyConfirm(detail) {
         const policy = backgroundUsageState.policy || {};
         const featureKey = String(detail?.featureKey || "");
-        if (policy?.requiresRestart === true && policy?.verificationState === "configured_unverified") {
-          backgroundUsagePolicyRestartConfirm(detail, policy);
-          return;
-        }
         const desiredState = backgroundUsagePolicyTargetState(policy);
         const copy = backgroundUsagePolicyCopy(detail, desiredState);
         const dialog = settingsDialogRoot(); if (!dialog) return;
@@ -821,39 +822,30 @@ TEXT = r"""
         dialog.appendChild(layer);
       }
 
-      function backgroundUsagePolicyRestartConfirm(detail, policy) {
+      function backgroundUsagePolicyNotice(detail, policy) {
         const dialog = settingsDialogRoot(); if (!dialog) return;
         const disabling = String(policy?.desiredState || "disabled") === "disabled";
-        const restartAvailable = policy?.restartAvailable !== false;
-        const title = disabling ? "重启 Codex 以完成禁用" : "重启 Codex 以完成启用";
-        const body = disabling
-          ? `Memories 设置已成功写入。当前 Codex 进程仍在使用旧配置，重启后“记忆整理”才会真正停止。${restartAvailable ? "重启会暂时中断当前 Codex 会话，请先保存正在进行的工作。是否立即重启？" : "当前运行环境没有可安全自动重启的 Codex 通道，请手动退出并重新启动 Codex。"}`
-          : `Memories 设置已成功写入。当前 Codex 进程仍在使用旧配置，重启后记忆功能才会启用。${restartAvailable ? "重启会暂时中断当前 Codex 会话，请先保存正在进行的工作。是否立即重启？" : "当前运行环境没有可安全自动重启的 Codex 通道，请手动退出并重新启动 Codex。"}`;
+        const title = disabling ? "Memories 已禁用" : "Memories 已启用";
+        const body = String(policy?.message || "设置已写入并立即更新显示状态。部分 Codex 版本可能需要重启后才会完全采用新配置。");
         closeSettingsConfirm();
         const layer = document.createElement("div");
         layer.className = "codex-usage-hud-settings-confirm-layer";
         layer.dataset.settingsConfirm = "true";
-        const restartDisabled = restartAvailable
-          ? ""
-          : ' disabled aria-disabled="true" title="当前运行环境没有可安全自动重启的 Codex 通道"';
-        const restartAction = `<button type="button" class="codex-usage-hud-settings-action" data-primary="true" data-action="background-usage-policy-restart-confirm" data-feature-key="${escapeHtml(String(detail?.featureKey || "memory_consolidation"))}" data-event-id="${escapeHtml(String(detail?.eventId || ""))}" data-desired-state="${escapeHtml(String(policy?.desiredState || "disabled"))}"${restartDisabled}>立即重启</button>`;
-        layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card"><div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div>${policy?.restartAvailable === false ? `<div class="codex-usage-hud-background-policy-message" role="status">设置不会被标记为已${disabling ? "禁用" : "启用"}，直到你手动重启并重新验证。</div>` : ""}<div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-action="background-usage-policy-restart-cancel">稍后重启</button>${restartAction}</div></div>`;
+        layer.innerHTML = `<div class="codex-usage-hud-settings-confirm-card"><div class="codex-usage-hud-settings-confirm-title">${escapeHtml(title)}</div><div class="codex-usage-hud-settings-confirm-body">${escapeHtml(body)}</div><div class="codex-usage-hud-settings-confirm-actions"><button type="button" class="codex-usage-hud-settings-action" data-primary="true" data-action="background-usage-policy-cancel">知道了</button></div></div>`;
         dialog.appendChild(layer);
       }
 
-      function applyBackgroundUsagePolicy(featureKey, eventId, desiredState, restartNow = false) {
+      function applyBackgroundUsagePolicy(featureKey, eventId, desiredState) {
         const requestSeq = ++backgroundUsagePolicySeq;
         const policyKey = `${String(featureKey || "")}\u0000${String(eventId || "")}`;
         clearBackgroundUsagePolicyTimeout();
         backgroundUsageState.policyRequestId = "";
         backgroundUsageState.policyPending = true;
-        backgroundUsageState.policyError = restartNow
-          ? `正在重启 Codex 并验证 Memories ${desiredState === "disabled" ? "禁用" : "启用"}设置...`
-          : desiredState === "disabled"
+        backgroundUsageState.policyError = desiredState === "disabled"
           ? "正在写入 Codex 禁用设置..."
           : "正在写入 Codex 启用设置...";
         syncBackgroundUsagePanel();
-        const command = { featureKey, eventId, desiredState, restartNow, expectedPolicyRevision: backgroundUsageState.policy?.policyRevision, source: "usage_detail" };
+        const command = { featureKey, eventId, desiredState, expectedPolicyRevision: backgroundUsageState.policy?.policyRevision, source: "usage_detail" };
         const requestId = submitBackgroundUsageCommand("backgroundUsagePolicySet", command);
         if (requestId) {
           backgroundUsageState.policyRequestId = requestId;
@@ -870,7 +862,7 @@ TEXT = r"""
           if (response.ok && payload?.status === "ok") {
             backgroundUsageState.policy = payload.backgroundUsagePolicy || null;
             backgroundUsageState.policyError = String(payload?.backgroundUsagePolicy?.message || "");
-            if (payload?.backgroundUsagePolicy?.requiresRestart === true && payload?.backgroundUsagePolicy?.restartAttempted !== true) backgroundUsagePolicyRestartConfirm(backgroundUsageState.detail, payload.backgroundUsagePolicy);
+            backgroundUsagePolicyNotice(backgroundUsageState.detail, payload.backgroundUsagePolicy);
           } else {
             backgroundUsageState.policyError = payload?.message || "后台任务控制失败。";
           }
@@ -1051,13 +1043,8 @@ TEXT = r"""
             backgroundUsageState.policy = response.payload || null;
             backgroundUsageState.policyError = responseError;
             syncBackgroundUsagePanel();
-            if (
-              kind === "policyApply"
-              && response.payload?.requiresRestart === true
-              && response.payload?.restartAttempted !== true
-              && response.payload?.verificationState === "configured_unverified"
-            ) {
-              backgroundUsagePolicyRestartConfirm(backgroundUsageState.detail, response.payload);
+            if (kind === "policyApply" && !responseError) {
+              backgroundUsagePolicyNotice(backgroundUsageState.detail, response.payload);
             }
             return;
           }
@@ -1196,7 +1183,7 @@ TEXT = r"""
       backgroundUsagePolicyEffectiveState,
       backgroundUsagePolicyCopy,
       backgroundUsagePolicyConfirm,
-      backgroundUsagePolicyRestartConfirm,
+      backgroundUsagePolicyNotice,
       applyBackgroundUsagePolicy,
       loadBackgroundUsage,
       backgroundUsageSelectedDetail,
@@ -1239,7 +1226,7 @@ TEXT = r"""
     backgroundUsagePolicyEffectiveState,
     backgroundUsagePolicyCopy,
     backgroundUsagePolicyConfirm,
-    backgroundUsagePolicyRestartConfirm,
+    backgroundUsagePolicyNotice,
     applyBackgroundUsagePolicy,
     loadBackgroundUsage,
     backgroundUsageSelectedDetail,

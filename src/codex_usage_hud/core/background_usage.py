@@ -45,6 +45,48 @@ BACKGROUND_FEATURE_LABELS = {
     UNKNOWN_FEATURE_KEY: UNKNOWN_FEATURE_LABEL,
 }
 
+# 官方后台任务的实际英文名称。
+# memory_consolidation: 官方 feature flag Feature::MemoryTool 注释
+#   "Enable startup memory extraction and file-backed memory consolidation."
+# context_suggestions: Codex 官方设置文档用语 "context-aware suggestions"，
+#   官方内部 feature 名为 ambient_suggestions。
+# suggestion_safety: 官方内部 feature 名为 ambient_suggestion_safety，官方指令
+#   "Classify Codex ambient suggestion candidates for policy safety."
+# title_description / description_refresh: 无公开官方界面名，按官方 prompt
+#   特征（"provide a short title for a task" / "fork of an existing codex
+#   thread" + "structured description field"）命名。
+BACKGROUND_FEATURE_EN_LABELS = {
+    "memory_consolidation": "Memory consolidation",
+    "context_suggestions": "Context-aware suggestions",
+    "suggestion_safety": "Ambient suggestion safety",
+    "title_description": "Title & description generation",
+    "description_refresh": "Description refresh",
+}
+
+# 官方定义的后台任务实际作用（中文译文）。
+# 依据：Codex 官方文档（Settings 的 Memories / Suggested prompts 章节）与
+# 官方源码/逆向出的官方指令原文。
+BACKGROUND_FEATURE_PURPOSES = {
+    "memory_consolidation": (
+        "在启动时提取记忆并落盘整合，让 ChatGPT 把过往对话中有用的上下文"
+        "带入未来的工作"
+    ),
+    "context_suggestions": (
+        "在你开始使用或回到 ChatGPT 时，浮现你可能想要继续的后续任务"
+        "与建议"
+    ),
+    "suggestion_safety": (
+        "对 Codex 环境建议（ambient suggestions）候选进行政策安全分类，"
+        "过滤不符合安全与合规标准的建议"
+    ),
+    "title_description": (
+        "为任务生成一个简短标题，并写入结构化描述字段"
+    ),
+    "description_refresh": (
+        "在分叉已有 Codex 线程后，重新生成并刷新该任务的结构化描述"
+    ),
+}
+
 _PROMPT_MARKER = 'Text { text: '
 _MODEL_RE = re.compile(r"\bmodel=([^\s}:]+)")
 _TOTAL_TOKENS_RE = re.compile(r"\btotal_usage_tokens=(\d+)")
@@ -93,6 +135,18 @@ def background_feature_label(key: object, fallback: object = "") -> str:
     if normalized in BACKGROUND_FEATURE_LABELS:
         return BACKGROUND_FEATURE_LABELS[normalized]
     return str(fallback or normalized or UNKNOWN_FEATURE_LABEL).strip() or UNKNOWN_FEATURE_LABEL
+
+
+def background_feature_en_label(key: object) -> str:
+    """Return the official English name for a stored feature key."""
+    normalized = str(key or "").strip()
+    return BACKGROUND_FEATURE_EN_LABELS.get(normalized, "")
+
+
+def background_feature_purpose(key: object) -> str:
+    """Return the official-purpose Chinese description for a feature key."""
+    normalized = str(key or "").strip()
+    return BACKGROUND_FEATURE_PURPOSES.get(normalized, "")
 
 
 def classify_background_feature(prompt: str) -> BackgroundFeature:
@@ -910,6 +964,8 @@ class BackgroundUsageStore:
             "featureLabel": background_feature_label(
                 row["feature_key"], row["feature_label"]
             ),
+            "featureEnLabel": background_feature_en_label(row["feature_key"]),
+            "featurePurpose": background_feature_purpose(row["feature_key"]),
             "cwd": cwd,
             "workdirAvailable": _workdir_available(cwd),
             "workdirAssociation": workdir_association,
@@ -1774,6 +1830,9 @@ __all__ = [
     "BackgroundScanResult",
     "BackgroundUsageScanner",
     "BackgroundUsageStore",
+    "background_feature_en_label",
+    "background_feature_label",
+    "background_feature_purpose",
     "classify_background_feature",
     "decode_request_context",
     "decode_request_evidence",

@@ -15,6 +15,7 @@ from codex_usage_hud.renderer_assets.composer import TEXT as COMPOSER
 from codex_usage_hud.renderer_assets.rest_reminder import TEXT as REST_REMINDER
 from codex_usage_hud.renderer_assets.session_view import TEXT as SESSION_VIEW
 from codex_usage_hud.renderer_assets.shared import TEXT as SHARED
+from codex_usage_hud.renderer_assets.settings_shell import TEXT as SETTINGS_SHELL
 from codex_usage_hud.renderer_assets.theme import TEXT as THEME
 
 
@@ -459,18 +460,107 @@ console.log("background-usage-policy-direction-ok");
     assert "background-usage-policy-direction-ok" in completed.stdout
 
 
-def test_background_usage_restart_confirmation_is_explicit_and_unverified_is_not_disabled() -> None:
-    assert "backgroundUsagePolicyRestartConfirm" in BACKGROUND_USAGE
-    assert "重启 Codex 以完成禁用" in BACKGROUND_USAGE
-    assert "重启 Codex 以完成启用" in BACKGROUND_USAGE
-    assert ">立即重启</button>" in BACKGROUND_USAGE
+def test_background_usage_detail_head_shows_official_en_name_and_purpose() -> None:
+    background_usage_factory = BACKGROUND_USAGE.split(
+        "  const backgroundUsageDomain = ctx.domains.register(", 1
+    )[0]
+    script = f"""
+const assert = require("node:assert/strict");
+global.window = {{ location: {{ href: "app://-/index.html" }} }};
+global.document = {{ getElementById: () => null }};
+global.location = window.location;
+function escapeHtml(value) {{
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({{
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }}[char]));
+}}
+function humanizeTokens(value) {{
+  const n = Math.max(0, Math.round(Number(value) || 0));
+  if (n >= 1000000) return `${{(n / 1000000).toFixed(1)}}M`;
+  if (n >= 1000) return `${{(n / 1000).toFixed(1)}}k`;
+  return String(n);
+}}
+const settingsCommandBindingName = "codexUsageHudSettingsCommand";
+const settingsModalId = "codex-usage-hud-settings";
+const backgroundUsageState = {{
+  detailLoading: false,
+  detail: {{
+    featureKey: "memory_consolidation",
+    featureLabel: "记忆整理",
+    featureEnLabel: "Memory consolidation",
+    featurePurpose: "在启动时提取记忆并落盘整合，让 ChatGPT 把过往对话中有用的上下文带入未来的工作",
+    eventId: "event-1",
+    firstSeenAt: "2025-01-01T00:00:00+08:00",
+    lastSeenAt: "2025-01-01T00:00:00+08:00",
+    models: ["gpt-5.4"],
+    requestCount: 1,
+    processUuid: "",
+    threadId: "",
+    prompt: "",
+    requests: [],
+  }},
+  promptExpanded: false,
+  policy: null,
+  policyLoading: false,
+  policyError: "",
+  policyPending: false,
+}};
+const ctx = {{
+  bindings: {{ available: () => false, send: () => true }},
+  lifecycle: {{ active: () => true }},
+}};
+const shared = {{}};
+{background_usage_factory}
+const domain = createBackgroundUsageDomain(ctx, shared);
+const html = domain.backgroundUsageDetailHtml(backgroundUsageState.detail);
+assert.match(html, /记忆整理（Memory consolidation）/);
+assert.match(html, /由 Codex App 官方 agent 工具在后台发起的请求/);
+assert.match(html, /官方作用：在启动时提取记忆/);
+assert.ok(!html.includes("Codex App 后台用量 · 本地记录"), html);
+const noEnHtml = domain.backgroundUsageDetailHtml({{
+  ...backgroundUsageState.detail,
+  featureEnLabel: "",
+  featurePurpose: "",
+}});
+assert.match(noEnHtml, /<h3>记忆整理<\\/h3>/);
+assert.ok(!noEnHtml.includes("（Memory consolidation）"), noEnHtml);
+console.log("background-usage-detail-head-ok");
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=commonjs"],
+        input=script,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "background-usage-detail-head-ok" in completed.stdout
+
+
+def test_background_usage_policy_is_immediate_with_restart_notice() -> None:
+    assert "backgroundUsagePolicyNotice" in BACKGROUND_USAGE
+    assert "Memories 已禁用" in BACKGROUND_USAGE
+    assert "Memories 已启用" in BACKGROUND_USAGE
+    assert ">立即重启</button>" not in BACKGROUND_USAGE
+    assert "部分 Codex 版本可能需要重启" in BACKGROUND_USAGE
     assert 'data-event-id="${escapeHtml(String(detail?.eventId || ""))}"' in BACKGROUND_USAGE
     assert 'data-event-id="${escapeHtml(String(policy?.desiredState || "disabled"))}"' not in BACKGROUND_USAGE
-    assert 'disabled aria-disabled="true"' in BACKGROUND_USAGE
-    assert ".codex-usage-hud-settings-confirm-card > .codex-usage-hud-background-policy-message" in LAYOUT
-    assert "margin-inline: 18px;" in LAYOUT
+    assert 'disabled aria-disabled="true"' not in BACKGROUND_USAGE
     assert 'verification === "verified"' in BACKGROUND_USAGE
     assert '["verified", "configured_unverified"].includes(verification)' not in BACKGROUND_USAGE
+    assert 'kind === "policyApply" && !responseError' in BACKGROUND_USAGE
+
+
+def test_settings_modal_preserves_secondary_layers_during_same_tab_refresh() -> None:
+    assert "preserveSecondaryLayers" in SETTINGS_SHELL
+    assert ".codex-usage-hud-settings-dialog > .codex-usage-hud-settings-confirm-layer" in SETTINGS_SHELL
+    assert ".codex-usage-hud-settings-dialog > .codex-usage-hud-codex-cli-layer" in SETTINGS_SHELL
+    assert "nextDialog.appendChild(layer)" in SETTINGS_SHELL
 
 
 def test_router_is_registry_first_and_no_continuous_legacy_asset_remains() -> None:
@@ -561,6 +651,6 @@ console.log("renderer-leaf-domains-ok");
 def test_leaf_bundle_keeps_one_iife_and_one_boot_placeholder() -> None:
     script = manifest.RENDERER_HUD_SCRIPT_TEMPLATE
     assert script.lstrip().startswith("(() => {")
-    assert script.count('const version = "52";') == 1
+    assert script.count('const version = "53";') == 1
     assert script.count("__CODEX_MODEL_PICKER_CATALOG__") == 1
     assert script.rstrip().endswith("})()")

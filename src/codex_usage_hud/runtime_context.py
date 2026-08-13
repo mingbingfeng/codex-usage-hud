@@ -12,7 +12,6 @@ from .background_usage_runtime import (
     BACKGROUND_USAGE_DATABASE_FILENAME,
     BackgroundUsageRuntime,
 )
-from .background_control import default_memory_restart, default_memory_restart_probe
 from .config import (
     DEFAULT_COMPOSER_TIKTOKEN_BADGE_ENABLED,
     UserConfig,
@@ -391,8 +390,6 @@ def build_runtime_context(args: argparse.Namespace) -> RuntimeContext:
                     pricing_versions=getattr(user_config, "pricing_versions", ()),
                     event_bus=context.runtime_events,
                     runtime_errors=context.runtime_errors,
-                    restart_probe=default_memory_restart_probe,
-                    restart_codex=default_memory_restart,
                 ).start()
             except Exception as exc:
                 context.runtime_errors.record(

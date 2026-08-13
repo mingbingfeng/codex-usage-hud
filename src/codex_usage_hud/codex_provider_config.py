@@ -919,6 +919,191 @@ def fetch_provider_models_for_cli(
     }
 
 
+MAX_PROVIDER_CHAT_RESPONSE_BYTES = 512 * 1024
+CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
+
+
+def _chat_completions_url(base_url: str) -> str:
+    """Resolve the chat completions endpoint for a provider base URL.
+
+    Some providers (for example ``chatapi.weixin.qq.com``) store the full
+    ``.../chat/completions`` path in ``base_url`` and expose no ``/models``
+    endpoint, so appending a suffix would produce a broken URL.
+    """
+    target = str(base_url or "").strip().rstrip("/")
+    if target.casefold().endswith(CHAT_COMPLETIONS_SUFFIX):
+        return target
+    return f"{target}{CHAT_COMPLETIONS_SUFFIX}"
+
+
+def _parse_chat_reply(body: str) -> str:
+    """Extract the assistant text from an OpenAI-style chat response."""
+    text = str(body or "").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        return ""
+    message = first.get("message")
+    if isinstance(message, Mapping):
+        content = message.get("content")
+        if content is not None:
+            return str(content).strip()
+    return str(first.get("text") or "").strip()
+
+
+def _http_error_message(exc: HTTPError) -> str:
+    """Read a provider error detail (``{"error": {"message": ...}}``)."""
+    raw: bytes | None = None
+    fp = getattr(exc, "fp", None)
+    if isinstance(fp, bytes):
+        raw = fp
+    elif fp is not None:
+        try:
+            raw = fp.read(MAX_PROVIDER_CHAT_RESPONSE_BYTES)
+        except Exception:
+            raw = None
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:
+        return raw.decode("utf-8", errors="replace")[:200].strip()
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            message = str(error.get("message") or "").strip()
+            if message:
+                return message
+            code = str(error.get("code") or "").strip()
+            if code:
+                return f"错误码 {code}"
+        if str(payload.get("message") or "").strip():
+            return str(payload.get("message") or "").strip()
+        if str(payload.get("detail") or "").strip():
+            return str(payload.get("detail") or "").strip()
+    return ""
+
+
+def send_provider_chat_probe(
+    base_url: str,
+    api_key: str,
+    model: str,
+    message: str = "hi",
+    timeout_seconds: float = 30.0,
+) -> dict[str, object]:
+    """Send a short chat message to verify model availability.
+
+    Unlike the models-list endpoint, some providers with no ``/models``
+    route still answer chat completions.  This probe posts ``hi`` (or a
+    caller-supplied message) and returns ``{"ok": True, "reply": ...}`` on
+    success or ``{"ok": False, "error": ...}`` otherwise instead of raising,
+    so the settings UI can show the provider's own error detail (for example
+    an invalid model name).
+    """
+    target = str(base_url or "").strip()
+    if not target:
+        return {"ok": False, "error": "base_url 不能为空。"}
+    parsed_target = urlsplit(target)
+    if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+        return {"ok": False, "error": "base_url 必须使用 HTTP(S)。"}
+    key = str(api_key or "").strip()
+    if not key:
+        return {"ok": False, "error": "API key 不能为空。"}
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return {"ok": False, "error": "请输入自定义模型名称。"}
+    probe_message = str(message or "").strip() or "hi"
+    chat_url = _chat_completions_url(target)
+    payload = json.dumps(
+        {
+            "model": normalized_model,
+            "messages": [{"role": "user", "content": probe_message}],
+            "max_tokens": 16,
+        }
+    ).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "User-Agent": "codex-usage-hud",
+    }
+    try:
+        request = Request(chat_url, data=payload, headers=headers, method="POST")
+        with urlopen(request, timeout=max(1.0, timeout_seconds)) as response:
+            raw = response.read(MAX_PROVIDER_CHAT_RESPONSE_BYTES + 1)
+    except HTTPError as exc:
+        detail = _http_error_message(exc)
+        suffix = f"：{detail}" if detail else ""
+        return {"ok": False, "error": f"聊天测试失败（HTTP {exc.code}）{suffix}"}
+    except (OSError, URLError) as exc:
+        return {"ok": False, "error": f"聊天测试失败：{exc}"}
+    if len(raw) > MAX_PROVIDER_CHAT_RESPONSE_BYTES:
+        return {"ok": False, "error": "聊天响应体过大，已中止解析。"}
+    reply = _parse_chat_reply(raw.decode("utf-8", errors="replace"))
+    if not reply:
+        return {
+            "ok": False,
+            "error": "聊天测试未返回可识别的回复内容（端点可能不是 OpenAI 兼容的 chat/completions）。",
+        }
+    return {"ok": True, "reply": reply, "model": normalized_model}
+
+
+def send_cli_chat_probe(
+    provider_id: str,
+    model: str,
+    message: str = "hi",
+    *,
+    config_path: str | Path | None = None,
+    timeout_seconds: float = 30.0,
+) -> dict[str, object]:
+    """Resolve a provider's stored configuration and run a chat probe.
+
+    Mirrors :func:`fetch_provider_models_for_cli`: reads ``base_url`` and
+    ``env_key`` from ``config.toml``, reads the API key from the matching user
+    environment variable, and posts a short chat message.
+    """
+    provider = str(provider_id or "").strip()
+    if not provider or not PROVIDER_ID_PATTERN.fullmatch(provider):
+        return {"ok": False, "error": "Provider ID 无效。"}
+    definitions = read_provider_definitions(config_path)
+    definition = definitions.get(provider.casefold())
+    if definition is None:
+        return {"ok": False, "error": f"未在 config.toml 中找到 Provider {provider} 的配置。"}
+    base_url = definition.base_url
+    env_key = definition.env_key
+    if not base_url:
+        return {"ok": False, "error": f"Provider {provider} 未配置 base_url。"}
+    if not env_key:
+        return {"ok": False, "error": f"Provider {provider} 未配置用户环境变量名称。"}
+    api_key = _user_environment_value(env_key)
+    if not api_key:
+        return {
+            "ok": False,
+            "error": f"用户环境变量 {env_key} 中没有可用的 API key，请先在新增/编辑供应商中保存。",
+        }
+    result = send_provider_chat_probe(
+        base_url,
+        api_key,
+        model,
+        message=message,
+        timeout_seconds=timeout_seconds,
+    )
+    result.setdefault("provider", provider)
+    result.setdefault("baseUrl", base_url)
+    result.setdefault("envKey", env_key)
+    return result
+
+
 __all__ = [
     "CodexProviderDefinition",
     "default_codex_config_path",
@@ -927,5 +1112,7 @@ __all__ = [
     "fetch_provider_models_for_cli",
     "read_provider_definitions",
     "save_provider_configs",
+    "send_cli_chat_probe",
+    "send_provider_chat_probe",
     "verify_provider_connectivity",
 ]

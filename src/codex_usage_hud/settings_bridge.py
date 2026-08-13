@@ -35,7 +35,6 @@ class SettingsBridgeServer:
         background_usage_confirm_callback: Callable[[str], bool] | None = None,
         background_usage_policy_query_callback: Callable[[str, str], dict[str, object]] | None = None,
         background_usage_policy_set_callback: Callable[..., dict[str, object]] | None = None,
-        background_usage_policy_restart_callback: Callable[[str, object, str, str], dict[str, object]] | None = None,
     ) -> None:
         self.store = store
         self.host = host
@@ -49,7 +48,6 @@ class SettingsBridgeServer:
         self.background_usage_confirm_callback = background_usage_confirm_callback
         self.background_usage_policy_query_callback = background_usage_policy_query_callback
         self.background_usage_policy_set_callback = background_usage_policy_set_callback
-        self.background_usage_policy_restart_callback = background_usage_policy_restart_callback
         self.background_usage_access_token = secrets.token_urlsafe(24)
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
@@ -112,7 +110,6 @@ class SettingsBridgeServer:
         background_usage_confirm_callback = self.background_usage_confirm_callback
         background_usage_policy_query_callback = self.background_usage_policy_query_callback
         background_usage_policy_set_callback = self.background_usage_policy_set_callback
-        background_usage_policy_restart_callback = self.background_usage_policy_restart_callback
         background_usage_access_token = self.background_usage_access_token
 
         class Handler(BaseHTTPRequestHandler):
@@ -293,27 +290,14 @@ class SettingsBridgeServer:
                     return
                 body = self._read_json()
                 try:
-                    if bool(body.get("restartNow")) and background_usage_policy_restart_callback is not None:
-                        payload = background_usage_policy_restart_callback(
-                            str(body.get("featureKey") or ""),
-                            body.get("expectedPolicyRevision"),
-                            str(body.get("eventId") or ""),
-                            str(body.get("source") or "usage_detail"),
-                        )
-                    else:
-                        args = (
-                            str(body.get("featureKey") or ""),
-                            str(body.get("desiredState") or ""),
-                            body.get("expectedPolicyRevision"),
-                            str(body.get("eventId") or ""),
-                            str(body.get("source") or "usage_detail"),
-                        )
-                        try:
-                            payload = background_usage_policy_set_callback(*args, bool(body.get("restartNow")))
-                        except TypeError:
-                            # Keep the HTTP fallback compatible with older
-                            # adapters that accepted the original five args.
-                            payload = background_usage_policy_set_callback(*args)
+                    args = (
+                        str(body.get("featureKey") or ""),
+                        str(body.get("desiredState") or ""),
+                        body.get("expectedPolicyRevision"),
+                        str(body.get("eventId") or ""),
+                        str(body.get("source") or "usage_detail"),
+                    )
+                    payload = background_usage_policy_set_callback(*args)
                 except Exception as exc:
                     self._send_json({"status": "failed", "message": f"background policy update failed: {exc}"}, 500)
                     return

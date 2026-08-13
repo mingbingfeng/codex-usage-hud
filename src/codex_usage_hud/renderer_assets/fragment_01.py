@@ -1,6 +1,6 @@
 HEAD = r"""
 (() => {
-  const version = "52";
+  const version = "53";
   const rootId = "codex-usage-hud-root";
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";

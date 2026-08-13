@@ -6,7 +6,7 @@ never presented as proof that Codex stopped issuing requests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -28,179 +28,6 @@ CAPABILITIES = {
     UNKNOWN_FEATURE_KEY: "unknown",
 }
 _DISABLEABLE = frozenset({"memory_consolidation", "context_suggestions", "suggestion_safety"})
-
-
-def _parse_utc_timestamp(value: object) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _stale_processes(processes: object, effective_at: object) -> list[object]:
-    boundary = _parse_utc_timestamp(effective_at)
-    values = list(processes) if isinstance(processes, (list, tuple)) else []
-    if boundary is None:
-        return values
-    stale: list[object] = []
-    for process in values:
-        started_at = _parse_utc_timestamp(getattr(process, "started_at", ""))
-        if started_at is None or started_at <= boundary:
-            stale.append(process)
-    return stale
-
-
-def _process_pids(processes: object) -> list[int]:
-    values = list(processes) if isinstance(processes, (list, tuple)) else []
-    result: set[int] = set()
-    for process in values:
-        try:
-            pid = int(getattr(process, "pid", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if pid > 0:
-            result.add(pid)
-    return sorted(result)
-
-
-def default_memory_restart_probe(effective_at: object = "") -> dict[str, object]:
-    """Describe whether a Codex restart is needed and safe to automate.
-
-    The Memories setting is read by the Codex process at startup.  A config
-    read-back therefore cannot prove that an already-running process changed
-    behaviour.  Desktop can be restarted through the existing audited
-    lifecycle helper, but standalone CLI processes are intentionally never
-    terminated by the HUD.  The probe fails closed when process discovery is
-    unavailable.
-    """
-    try:
-        from .codex_app_runtime import (
-            audited_running_codex_desktop_processes,
-            running_standalone_codex_cli_processes,
-        )
-
-        cli_processes = tuple(running_standalone_codex_cli_processes())
-        desktop_processes = tuple(audited_running_codex_desktop_processes())
-        if str(effective_at or "").strip():
-            stale_cli = tuple(_stale_processes(cli_processes, effective_at))
-            stale_desktop = tuple(_stale_processes(desktop_processes, effective_at))
-            if stale_cli:
-                cli_pids = _process_pids(stale_cli)
-                return {
-                    "required": True,
-                    "available": False,
-                    "code": "standalone_cli_running",
-                    "message": (
-                        "检测到设置写入前仍在运行的 Codex CLI 进程（"
-                        + ", ".join(str(pid) for pid in cli_pids)
-                        + "）。HUD 不会强制终止 CLI 会话，请手动退出并重新启动。"
-                    ),
-                    "cliPids": cli_pids,
-                }
-            if stale_desktop:
-                return {
-                    "required": True,
-                    "available": True,
-                    "code": "desktop_restart_available",
-                    "message": "检测到设置写入前仍在运行的 Codex Desktop 进程，需要重启后才能读取新的 Memories 设置。",
-                    "desktopPids": _process_pids(stale_desktop),
-                }
-            if cli_processes or desktop_processes:
-                return {
-                    "required": False,
-                    "available": False,
-                    "code": "process_restart_verified",
-                    "message": "已检测到设置写入后启动的 Codex 进程；新的 Memories 配置已被读取。",
-                    "cliPids": _process_pids(cli_processes),
-                    "desktopPids": _process_pids(desktop_processes),
-                }
-            return {
-                "required": False,
-                "available": False,
-                "code": "no_codex_process_running",
-                "message": "没有检测到运行中的 Codex 进程；新的进程启动时会读取该设置。",
-            }
-
-        cli_pids = _process_pids(cli_processes)
-        if cli_processes:
-            return {
-                "required": True,
-                "available": False,
-                "code": "standalone_cli_running",
-                "message": (
-                    "检测到仍在运行的 Codex CLI 进程（"
-                    + ", ".join(str(pid) for pid in cli_pids)
-                    + "）。HUD 不会强制终止 CLI 会话，请手动退出并重新启动。"
-                ),
-                "cliPids": list(cli_pids),
-            }
-    except Exception as exc:
-        return {
-            "required": True,
-            "available": False,
-            "code": "process_audit_unavailable",
-            "message": f"无法确认运行中的 Codex 进程，不能保证新的 Memories 设置已生效：{exc}",
-        }
-
-    if desktop_processes:
-        return {
-            "required": True,
-            "available": True,
-            "code": "desktop_restart_available",
-            "message": "当前 Codex Desktop 进程需要重启才能读取新的 Memories 设置。",
-        }
-    return {
-        "required": False,
-        "available": False,
-        "code": "no_codex_process_running",
-        "message": "没有检测到运行中的 Codex 进程；新的进程启动时会读取该设置。",
-    }
-
-
-def default_memory_restart(effective_at: object = "") -> dict[str, object]:
-    """Restart Codex Desktop only when the process audit says it is safe."""
-    status = default_memory_restart_probe(effective_at=effective_at)
-    if not bool(status.get("required")):
-        return {"ok": True, "verified": True, "code": str(status.get("code") or "")}
-    if not bool(status.get("available")):
-        return {
-            "ok": False,
-            "verified": False,
-            "code": str(status.get("code") or "restart_unavailable"),
-            "message": str(status.get("message") or "当前没有可安全执行的 Codex 重启通道。"),
-        }
-    try:
-        from .codex_app_runtime import restart_codex_app
-
-        restarted = bool(restart_codex_app(debugger=False))
-    except Exception as exc:
-        return {
-            "ok": False,
-            "verified": False,
-            "code": "restart_failed",
-            "message": f"Codex 重启失败：{exc}",
-        }
-    if not restarted:
-        return {
-            "ok": False,
-            "verified": False,
-            "code": "restart_failed",
-            "message": "Codex 重启未完成，不能确认新的 Memories 设置已经生效。",
-        }
-    return {
-        "ok": True,
-        "verified": True,
-        "code": "desktop_restart_verified",
-        "message": "Codex 已重启并重新读取 Memories 设置。",
-    }
 
 
 def _utc_now() -> str:
@@ -307,17 +134,18 @@ class BackgroundPolicy:
 class BackgroundControlService:
     """Policy persistence and adapter dispatch owned by the Python runtime."""
 
-    def __init__(self, storage_dir: str | Path, *, codex_config_path: str | Path | None = None,
-                 open_settings: Callable[[], bool] | None = None,
-                 restart_probe: Callable[[], object] | None = None,
-                 restart_codex: Callable[[], object] | None = None) -> None:
+    def __init__(
+        self,
+        storage_dir: str | Path,
+        *,
+        codex_config_path: str | Path | None = None,
+        open_settings: Callable[[], bool] | None = None,
+    ) -> None:
         self.storage_dir = Path(storage_dir)
         self.policy_path = self.storage_dir / "background-policies.json"
         self.audit_path = self.storage_dir / "background-policy-audit.jsonl"
         self.codex_config_path = Path(codex_config_path) if codex_config_path else default_codex_config_path()
         self._open_settings = open_settings or (lambda: bool(webbrowser.open("codex://settings")))
-        self._restart_probe = restart_probe
-        self._restart_codex = restart_codex
 
     def query(self, feature_key: object, event_id: object = "") -> dict[str, object]:
         key = self._key(feature_key)
@@ -327,7 +155,7 @@ class BackgroundControlService:
         return self._response(policy, "policyQuery", event_id)
 
     def set(self, feature_key: object, desired_state: object, expected_revision: object = None,
-            event_id: object = "", source: object = "usage_detail", restart_now: object = False) -> dict[str, object]:
+            event_id: object = "", source: object = "usage_detail") -> dict[str, object]:
         key, desired = self._key(feature_key), str(desired_state or "").strip()
         if desired not in {"enabled", "disabled"}:
             return self._failed(key, "invalid_state", "desiredState 必须是 enabled 或 disabled。")
@@ -340,121 +168,8 @@ class BackgroundControlService:
             return self._unsupported(current)
         linked_key = "context_suggestions" if key == "suggestion_safety" else key
         if linked_key == "memory_consolidation":
-            if bool(restart_now):
-                return self.restart(key, current, expected_revision, event_id, source)
             return self._apply_memories(policies, current, desired, event_id, source)
         return self._apply_native_guidance(policies, current, desired, event_id, source, linked_key)
-
-    def restart(
-        self,
-        feature_key: object,
-        current: BackgroundPolicy | None = None,
-        expected_revision: object = None,
-        event_id: object = "",
-        source: object = "usage_detail",
-    ) -> dict[str, object]:
-        """Restart a pending Memories policy, then verify the transition.
-
-        This is deliberately separate from writing the config.  A refused or
-        unavailable restart leaves the policy configured-but-unverified and
-        never reports the requested state as effective before verification.
-        """
-        key = self._key(feature_key)
-        policies = self._load()
-        policy = current or policies.get(key) or self._default(key)
-        policy = self._refresh_loaded_policy(policies, key, policy, event_id)
-        if expected_revision not in (None, "") and int(expected_revision) != policy.policy_revision:
-            return self._failed(key, "revision_conflict", "控制状态已变化，请刷新后重试。", policy)
-        if key != "memory_consolidation" or policy.desired_state not in {"disabled", "enabled"}:
-            return self._failed(key, "restart_not_required", "当前后台任务没有等待中的 Memories 重启。", policy)
-        if not policy.requires_restart:
-            result = self._response(policy, "policyApply", event_id)
-            result.update({"kind": "policyApply", "evidence": "no_restart_required", "error": "", "restartAttempted": False})
-            return result
-        if not policy.restart_available or self._restart_codex is None:
-            message = policy.last_error_message or "设置已写入，但当前没有可安全执行的 Codex 重启通道；请手动退出并重新启动 Codex。"
-            result = self._response(policy, "policyApply", event_id)
-            result.update({
-                "kind": "policyApply",
-                "evidence": "config_readback",
-                "error": {"code": "restart_unavailable", "message": message},
-                "message": message,
-                "restartAttempted": True,
-            })
-            return result
-        try:
-            raw_restart = self._restart_codex(effective_at=policy.effective_at)
-        except TypeError:
-            raw_restart = self._restart_codex()
-        outcome = self._restart_outcome(raw_restart)
-        if not outcome["ok"] or not outcome["verified"]:
-            message = str(outcome["message"] or "Codex 重启未完成，不能确认新的 Memories 设置已经生效。")
-            failed_policy = BackgroundPolicy(
-                policy.feature_key,
-                policy.desired_state,
-                policy.capability,
-                policy.effective_at,
-                policy.policy_revision + 1,
-                _utc_now(),
-                policy.last_verified_at,
-                "configured_unverified",
-                policy.adapter_id,
-                policy.adapter_version,
-                policy.external_state_fingerprint,
-                str(outcome["code"] or "restart_failed"),
-                message,
-                policy.source,
-                True,
-                bool(policy.restart_available),
-                policy.response()["effectiveState"],
-            )
-            policies[key] = failed_policy
-            self._save(policies)
-            self._audit(failed_policy, event_id, "restart_failed")
-            result = self._response(failed_policy, "policyApply", event_id)
-            result.update({
-                "kind": "policyApply",
-                "evidence": "config_readback",
-                "error": {"code": failed_policy.last_error_code, "message": message},
-                "message": message,
-                "restartAttempted": True,
-            })
-            return result
-        verified_policy = BackgroundPolicy(
-            policy.feature_key,
-            policy.desired_state,
-            policy.capability,
-            policy.effective_at,
-            policy.policy_revision + 1,
-            _utc_now(),
-            _utc_now(),
-            "verified",
-            policy.adapter_id,
-            policy.adapter_version,
-            policy.external_state_fingerprint,
-            "",
-            "",
-            policy.source,
-            False,
-            False,
-            policy.desired_state,
-        )
-        policies[key] = verified_policy
-        self._save(policies)
-        self._audit(verified_policy, event_id, "config_readback_process_restart")
-        result = self._response(verified_policy, "policyApply", event_id)
-        result.update({
-            "kind": "policyApply",
-            "evidence": "config_readback_process_restart",
-            "error": "",
-            "message": (
-                "已重启 Codex 并验证 Memories 设置，后续“记忆整理”请求将被停止。"
-                if verified_policy.desired_state == "disabled"
-                else "已重启 Codex 并验证 Memories 设置，后续记忆功能已恢复。"
-            ),
-            "restartAttempted": True,
-        })
-        return result
 
     def _apply_memories(self, policies: dict[str, BackgroundPolicy], current: BackgroundPolicy, desired: str, event_id: object, source: object) -> dict[str, object]:
         try:
@@ -468,88 +183,20 @@ class BackgroundControlService:
         except Exception as exc:
             action = "禁用" if desired == "disabled" else "启用"
             return self._failed(current.feature_key, "config_write_failed", f"{action}失败，现有配置未改变。{exc}", current)
-        # Mark the boundary after the atomic write/read-back. A process created
-        # while the file was being replaced must still be treated as old.
         effective_at = _utc_now()
-        restart_status = self._memory_restart_status(effective_at)
-        requires_restart = bool(restart_status["required"])
-        restart_available = bool(restart_status["available"])
-        restart_message = str(restart_status["message"] or "")
         next_policy = BackgroundPolicy(current.feature_key, desired, current.capability, effective_at, current.policy_revision + 1,
-            _utc_now(), "", "configured_unverified", "memories_toml", "1", f"features.memories={str(actual).lower()}", "", restart_message if requires_restart else "", str(source or "usage_detail"), requires_restart, restart_available, str(current.response()["effectiveState"]))
+            _utc_now(), _utc_now(), "verified", "memories_toml", "1", f"features.memories={str(actual).lower()}", "", "", str(source or "usage_detail"), False, False, desired)
         policies[next_policy.feature_key] = next_policy
         self._save(policies)
         self._audit(next_policy, event_id, "config_readback")
         result = self._response(next_policy, "policyApply", event_id)
-        if next_policy.requires_restart:
-            message = restart_message or (
-                "Memories 设置已成功写入；当前 Codex 进程仍在使用旧配置，需要重启后才能生效。"
-            )
-        else:
-            message = "设置已写入，但尚未获得足够证据验证实际生效状态。"
-        result.update({"kind": "policyApply", "evidence": "config_readback", "error": "", "message": message, "restartAttempted": False})
-        return result
-
-    def _memory_restart_status(self, effective_at: object = "") -> dict[str, object]:
-        if self._restart_probe is None:
-            return {"required": False, "available": False, "code": "restart_probe_unconfigured", "message": ""}
-        try:
-            try:
-                raw = self._restart_probe(effective_at=effective_at)
-            except TypeError:
-                raw = self._restart_probe()
-        except Exception as exc:
-            return {"required": True, "available": False, "code": "process_audit_unavailable", "message": f"无法确认运行中的 Codex 进程，不能保证新的 Memories 设置已生效：{exc}"}
-        if isinstance(raw, Mapping):
-            return {
-                "required": bool(raw.get("required")),
-                "available": bool(raw.get("available")),
-                "code": str(raw.get("code") or ""),
-                "message": str(raw.get("message") or ""),
-            }
-        required = bool(raw)
-        return {"required": required, "available": required and self._restart_codex is not None, "code": "restart_required" if required else "", "message": "当前 Codex 进程需要重启才能读取新的 Memories 设置。" if required else ""}
-
-    def _refresh_restart_requirement(self, policy: BackgroundPolicy) -> BackgroundPolicy:
-        """Migrate old configured policies when a live process needs restart."""
-        if (
-            policy.feature_key != "memory_consolidation"
-            or policy.desired_state not in {"disabled", "enabled"}
-            or policy.verification_state != "configured_unverified"
-            or self._restart_probe is None
-        ):
-            return policy
-        status = self._memory_restart_status(policy.effective_at)
-        required = bool(status["required"])
-        available = bool(status["available"])
-        message = str(status["message"] or "")
-        if (
-            not required
-            and status["code"] == "process_restart_verified"
-            and self._memories_config_matches(policy.desired_state)
-        ):
-            return replace(
-                policy,
-                last_verified_at=policy.last_verified_at or _utc_now(),
-                verification_state="verified",
-                last_error_code="",
-                last_error_message="",
-                requires_restart=False,
-                restart_available=False,
-                effective_state=policy.desired_state,
-            )
-        if (
-            bool(policy.requires_restart) == required
-            and bool(policy.restart_available) == available
-            and (not required or policy.last_error_message == message)
-        ):
-            return policy
-        return replace(
-            policy,
-            requires_restart=required,
-            restart_available=available,
-            last_error_message=message if required else policy.last_error_message,
+        action = "已禁用" if desired == "disabled" else "已启用"
+        message = (
+            f"Memories {action}。设置已写入，HUD 已立即按目标状态更新；"
+            "部分 Codex 版本可能需要重启后才会完全采用新配置。"
         )
+        result.update({"kind": "policyApply", "evidence": "config_readback", "error": "", "message": message})
+        return result
 
     def _refresh_loaded_policy(
         self,
@@ -558,16 +205,38 @@ class BackgroundControlService:
         policy: BackgroundPolicy,
         event_id: object = "",
     ) -> BackgroundPolicy:
-        refreshed = self._refresh_restart_requirement(policy)
+        refreshed = policy
+        if (
+            policy.feature_key == "memory_consolidation"
+            and policy.verification_state == "configured_unverified"
+            and policy.desired_state in {"enabled", "disabled"}
+            and self._memories_config_matches(policy.desired_state)
+        ):
+            refreshed = BackgroundPolicy(
+                policy.feature_key,
+                policy.desired_state,
+                policy.capability,
+                policy.effective_at,
+                policy.policy_revision,
+                policy.last_attempt_at,
+                policy.last_verified_at or _utc_now(),
+                "verified",
+                policy.adapter_id,
+                policy.adapter_version,
+                policy.external_state_fingerprint,
+                "",
+                "",
+                policy.source,
+                False,
+                False,
+                policy.desired_state,
+            )
         if key not in policies or refreshed == policy:
             return refreshed
         policies[key] = refreshed
         self._save(policies)
-        if (
-            policy.verification_state != "verified"
-            and refreshed.verification_state == "verified"
-        ):
-            self._audit(refreshed, event_id, "process_restart_detected")
+        if policy.verification_state != "verified" and refreshed.verification_state == "verified":
+            self._audit(refreshed, event_id, "config_readback_migration")
         return refreshed
 
     def _memories_config_matches(self, desired_state: str) -> bool:
@@ -577,14 +246,6 @@ class BackgroundControlService:
             return False
         actual = features.get("memories") if isinstance(features, Mapping) else None
         return actual == (str(desired_state or "") == "enabled")
-
-    @staticmethod
-    def _restart_outcome(raw: object) -> dict[str, object]:
-        if isinstance(raw, Mapping):
-            ok = bool(raw.get("ok"))
-            return {"ok": ok, "verified": bool(raw.get("verified", ok)), "code": str(raw.get("code") or ""), "message": str(raw.get("message") or "")}
-        ok = bool(raw)
-        return {"ok": ok, "verified": ok, "code": "desktop_restart_verified" if ok else "restart_failed", "message": ""}
 
     def _apply_native_guidance(self, policies: dict[str, BackgroundPolicy], current: BackgroundPolicy, desired: str, event_id: object, source: object, linked_key: str) -> dict[str, object]:
         opened = False
@@ -678,6 +339,4 @@ __all__ = [
     "BackgroundPolicy",
     "CAPABILITIES",
     "default_codex_config_path",
-    "default_memory_restart",
-    "default_memory_restart_probe",
 ]

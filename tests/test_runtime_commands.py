@@ -78,15 +78,13 @@ def test_background_exception_keeps_request_and_response_kind() -> None:
     assert "boom" in response["error"]
 
 
-def test_background_policy_restart_uses_explicit_restart_path() -> None:
+def test_background_policy_set_uses_only_normal_policy_path() -> None:
     runtime = SimpleNamespace(
-        policy_set=MagicMock(),
-        policy_restart=MagicMock(
+        policy_set=MagicMock(
             return_value={
                 "featureKey": "memory_consolidation",
                 "verificationState": "verified",
                 "effectiveState": "disabled",
-                "restartAttempted": True,
             }
         ),
     )
@@ -94,21 +92,19 @@ def test_background_policy_restart_uses_explicit_restart_path() -> None:
     status = handle_background_command(
         {
             "action": "backgroundUsagePolicySet",
-            "requestId": "policy-restart-1",
+            "requestId": "policy-1",
             "featureKey": "memory_consolidation",
             "desiredState": "disabled",
             "expectedPolicyRevision": 4,
-            "restartNow": True,
         },
         RuntimeCommandPorts(background_usage=runtime),
     )
 
-    runtime.policy_restart.assert_called_once_with(
-        "memory_consolidation", 4, "", "usage_detail"
+    runtime.policy_set.assert_called_once_with(
+        "memory_consolidation", "disabled", 4, "", "usage_detail"
     )
-    runtime.policy_set.assert_not_called()
     response = status["backgroundUsageResponse"]
-    assert response["requestId"] == "policy-restart-1"
+    assert response["requestId"] == "policy-1"
     assert response["kind"] == "policyApply"
     assert response["payload"]["verificationState"] == "verified"
 
@@ -537,3 +533,175 @@ def test_general_command_codex_cli_fetch_models_surfaces_errors() -> None:
 
     assert status["kind"] == "error"
     assert status["message"] == "用户环境变量中没有可用的 API key。"
+
+
+def test_general_command_dispatches_provider_chat_test() -> None:
+    calls: list[tuple[str, str, str, str]] = []
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        send_provider_chat_probe=lambda base, key, model, message: calls.append(
+            (base, key, model, message)
+        ) or {"ok": True, "reply": "Hello!", "model": model},
+    )
+
+    status = dispatch_command(
+        {
+            "action": "providerChatTest",
+            "baseUrl": "https://api.example.com/v1",
+            "apiKey": "sk-secret",
+            "model": "Deepseek-v4-flash",
+            "message": "hi",
+            "requestId": "chat-1",
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert calls == [
+        ("https://api.example.com/v1", "sk-secret", "Deepseek-v4-flash", "hi")
+    ]
+    assert status["providerChatTest"]["ok"] is True
+    assert status["providerChatTest"]["reply"] == "Hello!"
+    assert status["requestId"] == "chat-1"
+
+
+def test_general_command_provider_chat_test_surfaces_failure() -> None:
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        send_provider_chat_probe=lambda base, key, model, message: {
+            "ok": False,
+            "error": "聊天测试失败（HTTP 400）：invalid model",
+        },
+    )
+
+    status = dispatch_command(
+        {
+            "action": "providerChatTest",
+            "baseUrl": "https://x.example/v1",
+            "apiKey": "key",
+            "model": "bad-model",
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert status["kind"] == "error"
+    assert "invalid model" in str(status["message"])
+
+
+def test_general_command_dispatches_codex_cli_chat_test() -> None:
+    calls: list[tuple[str, str, str]] = []
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        send_cli_chat_probe=lambda provider, model, message: calls.append(
+            (provider, model, message)
+        ) or {
+            "ok": True,
+            "reply": "Hello!",
+            "model": model,
+            "provider": provider,
+        },
+    )
+
+    status = dispatch_command(
+        {
+            "action": "codexCliChatTest",
+            "provider": "qq",
+            "model": "Deepseek-v4-flash",
+            "requestId": "cli-chat-1",
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert calls == [("qq", "Deepseek-v4-flash", "hi")]
+    assert status["codexCliChatTest"]["ok"] is True
+    assert status["codexCliChatTest"]["provider"] == "qq"
+    assert status["requestId"] == "cli-chat-1"
+
+
+def test_general_command_codex_cli_chat_test_surfaces_failure() -> None:
+    ports = GeneralCommandPorts(
+        load_config=lambda: UserConfig.defaults(),
+        save_config=lambda value: None,
+        fetch_prices=lambda url: {},
+        rest_reminder=None,
+        update_manager=None,
+        work_overlay=None,
+        request_restart=lambda: None,
+        request_exit=lambda: None,
+        check_update=lambda: SimpleNamespace(error="", available=False, current_version="1"),
+        install_update=lambda info: None,
+        overlay_status=lambda: {},
+        start_overlay_install=lambda: False,
+        clear_forced_missing=lambda: None,
+        forced_missing_with_real_install=lambda: False,
+        pyside_version=lambda: "",
+        default_overlay_limit=lambda: 1,
+        dismiss_warnings_today=lambda: True,
+        send_cli_chat_probe=lambda provider, model, message: {
+            "ok": False,
+            "error": "用户环境变量 QQ_API_KEY 中没有可用的 API key。",
+        },
+    )
+
+    status = dispatch_command(
+        {
+            "action": "codexCliChatTest",
+            "provider": "qq",
+            "model": "Deepseek-v4-flash",
+        },
+        RuntimeCommandPorts(),
+        ports,
+    )
+
+    assert status["kind"] == "error"
+    assert "QQ_API_KEY" in str(status["message"])

@@ -402,6 +402,17 @@ _TEXT_PREFIX = r"""
               <select data-codex-cli-field="model">${codexCliModelOptions()}</select>
               <div class="codex-usage-hud-codex-cli-model-note" data-codex-cli-model-note="true">${codexCliModelNote()}</div>
             </label>
+            <details class="codex-usage-hud-codex-cli-chat-test" data-codex-cli-chat-test="true" ${codexCliState.modelsError ? "open" : ""}>
+              <summary>没有模型列表？改用自定义模型名发送简短聊天测试</summary>
+              <div class="codex-usage-hud-codex-cli-chat-test-body">
+                <label>
+                  <span>自定义模型名称</span>
+                  <input data-codex-cli-field="chatModel" value="${escapeHtml(codexCliState.model || "")}" placeholder="例如 Deepseek-v4-flash" autocomplete="off">
+                </label>
+                <button type="button" class="codex-usage-hud-settings-action" data-action="codex-cli-chat-test">发送聊天测试 (hi)</button>
+                <div class="codex-usage-hud-codex-cli-chat-result" data-codex-cli-chat-result="true" aria-live="polite"></div>
+              </div>
+            </details>
             <label class="codex-usage-hud-codex-cli-field">
               <span>工作目录</span>
               <select data-codex-cli-field="workdirSelect">
@@ -575,6 +586,38 @@ _TEXT_PREFIX = r"""
         );
       }
 
+      function chatTestCodexCliFromDialog() {
+        const layer = codexCliDialogLayer();
+        if (!layer) return false;
+        const model = String(
+          layer.querySelector('[data-codex-cli-field="chatModel"]')?.value || "",
+        ).trim();
+        const resultNode = layer.querySelector('[data-codex-cli-chat-result="true"]');
+        const chatButton = layer.querySelector('[data-action="codex-cli-chat-test"]');
+        if (!model) {
+          if (resultNode) resultNode.textContent = "请输入自定义模型名称。";
+          return false;
+        }
+        if (!codexCliState.provider) {
+          if (resultNode) resultNode.textContent = "当前 Provider 不可用。";
+          return false;
+        }
+        if (resultNode) resultNode.textContent = "正在发送聊天测试...";
+        if (chatButton) chatButton.disabled = true;
+        submitSettingsCommand(
+          {
+            action: "codexCliChatTest",
+            provider: codexCliState.provider,
+            model,
+            message: "hi",
+            requestId: typedSettingsRequestId("codex-cli-chat-test"),
+          },
+          "正在发送聊天测试...",
+          { preserveOverlay: true },
+        );
+        return true;
+      }
+
       function applyCodexCliCommandStatus(status) {
         if (!status || typeof status !== "object") return;
         const action = String(status.action || "");
@@ -591,6 +634,30 @@ _TEXT_PREFIX = r"""
               : [];
           }
           renderCodexCliDialog();
+          return;
+        }
+        if (action === "codexCliChatTest" && codexCliState.open) {
+          const result = status?.codexCliChatTest;
+          const resultNode = codexCliDialogLayer()?.querySelector('[data-codex-cli-chat-result="true"]');
+          const chatButton = codexCliDialogLayer()?.querySelector('[data-action="codex-cli-chat-test"]');
+          if (chatButton) chatButton.disabled = false;
+          const ok = result?.ok === true;
+          const reply = String(result?.reply || "").trim();
+          const error = String(result?.error || "").trim();
+          if (resultNode) {
+            if (ok) {
+              resultNode.textContent = `模型 ${result?.model || "?"} 可用：${reply}`;
+              resultNode.classList.remove("codex-usage-hud-codex-cli-chat-result-error");
+            } else {
+              resultNode.textContent = error || "聊天测试失败。";
+              resultNode.classList.add("codex-usage-hud-codex-cli-chat-result-error");
+            }
+          }
+          if (ok && result?.model) {
+            // 测试成功的模型直接作为启动模型选择，便于直接用该模型启动。
+            codexCliState.model = String(result.model).trim();
+            renderCodexCliDialog();
+          }
           return;
         }
         if (action === "codexCliDiscover" && status.codexCli && codexCliState.open) {
@@ -1500,12 +1567,14 @@ _TEXT_PREFIX = r"""
             modelsNode.hidden = true;
             modelsNode.innerHTML = "";
           }
+          showProviderChatTest(layer, { force: true });
           return;
         }
         if (statusNode) {
           statusNode.textContent = status?.message || "连通性测试成功。";
           statusNode.classList.remove("codex-usage-hud-provider-config-fetch-status-error");
         }
+        showProviderChatTest(layer, { force: false });
         const modelList = Array.isArray(status?.models) ? status.models.filter(Boolean).map(String) : [];
         const modelsNode = layer?.querySelector('[data-provider-config-models=""]');
         if (modelsNode) {
@@ -1521,6 +1590,78 @@ _TEXT_PREFIX = r"""
             modelsNode.hidden = true;
             modelsNode.innerHTML = "";
           }
+        }
+      }
+
+      function showProviderChatTest(layer, { force = false } = {}) {
+        if (!layer) return;
+        const chatTest = layer.querySelector('[data-provider-config-chat-test=""]');
+        if (!chatTest) return;
+        chatTest.hidden = false;
+        if (force) chatTest.open = true;
+      }
+
+      function chatTestProviderFromDialog() {
+        const layer = providerConfigDialogLayer();
+        if (!layer) return false;
+        const baseUrl = String(
+          layer.querySelector('[data-provider-config-field="base_url"]')?.value || "",
+        ).trim();
+        const apiKey = String(
+          layer.querySelector('[data-provider-config-field="api_key"]')?.value || "",
+        ).trim();
+        const model = String(
+          layer.querySelector('[data-provider-config-field="chat_model"]')?.value || "",
+        ).trim();
+        const resultNode = layer.querySelector('[data-provider-config-chat-result=""]');
+        const chatButton = layer.querySelector('[data-action="settings-provider-chat-test"]');
+        if (!baseUrl) {
+          setSettingsStatus("请先填写 Base URL。", "error");
+          return false;
+        }
+        if (!apiKey) {
+          setSettingsStatus("请先填写 API key（或输入已保存的密钥）。", "error");
+          return false;
+        }
+        if (!model) {
+          setSettingsStatus("请输入自定义模型名称。", "error");
+          if (resultNode) resultNode.textContent = "请输入自定义模型名称。";
+          return false;
+        }
+        if (resultNode) resultNode.textContent = "正在发送聊天测试...";
+        if (chatButton) chatButton.disabled = true;
+        return submitSettingsCommand(
+          {
+            action: "providerChatTest",
+            requestId: typedSettingsRequestId("provider-chat-test"),
+            baseUrl,
+            apiKey,
+            model,
+            message: "hi",
+          },
+          "正在发送聊天测试...",
+          { preserveOverlay: true },
+        );
+      }
+
+      function applyProviderChatTestStatus(status) {
+        const layer = providerConfigDialogLayer();
+        if (!layer || !status || typeof status !== "object") return;
+        if (String(status.action || "") !== "providerChatTest") return;
+        const result = status?.providerChatTest;
+        const resultNode = layer.querySelector('[data-provider-config-chat-result=""]');
+        const chatButton = layer.querySelector('[data-action="settings-provider-chat-test"]');
+        if (chatButton) chatButton.disabled = false;
+        if (!resultNode) return;
+        const ok = result?.ok === true;
+        const reply = String(result?.reply || "").trim();
+        const error = String(result?.error || "").trim();
+        if (ok) {
+          resultNode.textContent = `模型 ${result?.model || "?"} 可用：${reply}`;
+          resultNode.classList.remove("codex-usage-hud-provider-config-chat-result-error");
+        } else {
+          resultNode.textContent = error || "聊天测试失败。";
+          resultNode.classList.add("codex-usage-hud-provider-config-chat-result-error");
         }
       }
 
@@ -1579,6 +1720,16 @@ _TEXT_PREFIX = r"""
                   </span>
                 </label>
                 <div class="codex-usage-hud-provider-config-fetch-status" data-provider-config-connectivity-status="" aria-live="polite"></div>
+                <details class="codex-usage-hud-provider-config-chat-test" data-provider-config-chat-test="" hidden>
+                  <summary>没有可用的模型列表？改用自定义模型名发送简短聊天测试</summary>
+                  <div class="codex-usage-hud-provider-config-chat-test-body">
+                    <label>自定义模型名称
+                      <input data-provider-config-field="chat_model" value="${escapeHtml(target?.model || "")}" placeholder="例如 Deepseek-v4-flash" autocomplete="off">
+                    </label>
+                    <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-chat-test">发送聊天测试 (hi)</button>
+                    <div class="codex-usage-hud-provider-config-chat-result" data-provider-config-chat-result="" aria-live="polite"></div>
+                  </div>
+                </details>
               </div>
               ${isNew ? `<fieldset class="codex-usage-hud-provider-config-scope">
                 <legend>统计范围</legend>
@@ -1720,12 +1871,52 @@ _TEXT_PREFIX = r"""
         });
         codexProviderDirty.add(provider);
         settingsDirtyProviders.add(provider);
+        // 输入了自定义模型名时，把它一并写入该供应商的模型单价列表（单价默认 0）。
+        addCustomModelPriceToDraft(
+          provider,
+          String(
+            layer.querySelector('[data-provider-config-field="chat_model"]')?.value || "",
+          ).trim(),
+        );
         closeSettingsConfirm();
         renderSettingsProviderEditor();
         renderSettingsProviderTabs();
         // 新增/编辑供应商后直接自动保存生效，无需再点设置页「保存」。
         commitSettingsFromDraft(`正在保存供应商 ${provider} 配置...`);
         return true;
+      }
+
+      function addCustomModelPriceToDraft(provider, model) {
+        // 把对话框中输入的「自定义模型名称」也写入该供应商的模型单价列表，
+        // 单价默认全为 0，便于用户后续直接在此列表填写真实价格。
+        const normalizedProvider = String(provider || "").trim().toLowerCase();
+        const normalizedModel = String(model || "").trim();
+        if (!normalizedProvider || !normalizedModel) return;
+        const entry = settingsProviderDraft?.providers?.[normalizedProvider];
+        if (!entry) return;
+        const table = entry.settings?.model_prices && typeof entry.settings.model_prices === "object"
+          ? entry.settings.model_prices
+          : {};
+        const exists = Object.entries(table).some(([key, row]) => {
+          const rowModel = String(row?.model || key || "").trim().toLowerCase();
+          return rowModel === normalizedModel.toLowerCase();
+        });
+        if (exists) return;
+        entry.settings = {
+          ...entry.settings,
+          model_prices: {
+            ...table,
+            [normalizedModel]: {
+              model: normalizedModel,
+              input: 0,
+              cached_input: 0,
+              cache_write: 0,
+              output: 0,
+              reasoning: 0,
+              provider: normalizedProvider,
+            },
+          },
+        };
       }
 
       function openProviderDeleteDialog(provider = "") {
@@ -1812,6 +2003,16 @@ _TEXT_PREFIX = r"""
         const root = document.getElementById(rootId);
         const modal = document.getElementById(settingsModalId);
         if (!root || !modal) return;
+        const activeTab = ["storage", "backgroundUsage", "support", "about"].includes(tab) ? tab : "settings";
+        const preserveSecondaryLayers = !modal.hidden
+          && settingsActiveTab === activeTab
+          && !resetProviderDraft;
+        const preservedSecondaryLayers = preserveSecondaryLayers
+          ? Array.from(modal.querySelectorAll(
+            ".codex-usage-hud-settings-dialog > .codex-usage-hud-settings-confirm-layer, "
+            + ".codex-usage-hud-settings-dialog > .codex-usage-hud-codex-cli-layer"
+          ))
+          : [];
         const sessionCleanupConfirmToken = String(
           modal.querySelector('[data-session-cleanup-confirm="true"]')?.dataset.sessionCleanupConfirmToken || "",
         );
@@ -1823,7 +2024,6 @@ _TEXT_PREFIX = r"""
           if (settingsActiveTab === "storage") captureStorageUiState();
         }
         const settings = hudSettingsFromPayload();
-        const activeTab = ["storage", "backgroundUsage", "support", "about"].includes(tab) ? tab : "settings";
         settingsActiveTab = activeTab;
         writeSettingsUiState(true, activeTab);
         if (activeTab === "settings") ensureSettingsProviderDraft(settings, resetProviderDraft);
@@ -1860,6 +2060,10 @@ _TEXT_PREFIX = r"""
             </div>
           </div>
         `;
+        const nextDialog = modal.querySelector(".codex-usage-hud-settings-dialog");
+        if (nextDialog) {
+          for (const layer of preservedSecondaryLayers) nextDialog.appendChild(layer);
+        }
         modal.hidden = false;
         ensureRestReminderCountdownTicker();
         ensureSessionCleanupElapsedTicker();
@@ -2324,6 +2528,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           applyCodexCliCommandStatus(status);
           applyPricingCommandStatus(status);
           applyProviderConnectivityStatus(status);
+          applyProviderChatTestStatus(status);
           const restSaveRequestId = String(status.restReminderSaveRequestId || "");
           if (
             status.restReminderSaved === true
@@ -3479,6 +3684,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       codexCliFieldInput,
       codexCliFieldChange,
       launchCodexCliFromDialog,
+      chatTestCodexCliFromDialog,
       settingsProviderTabBadge,
       settingsProviderMeta,
       settingsProviderTabsHtml,
@@ -3498,6 +3704,9 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       toggleProviderApiKeyVisibility,
       testProviderConnectivityFromDialog,
       applyProviderConnectivityStatus,
+      showProviderChatTest,
+      chatTestProviderFromDialog,
+      applyProviderChatTestStatus,
       openProviderConfigDialog,
       applyProviderConfigDialog,
       openProviderDeleteDialog,
@@ -3597,6 +3806,7 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     codexCliFieldInput,
     codexCliFieldChange,
     launchCodexCliFromDialog,
+    chatTestCodexCliFromDialog,
     settingsProviderTabBadge,
     settingsProviderMeta,
     settingsProviderTabsHtml,
@@ -3616,6 +3826,9 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     toggleProviderApiKeyVisibility,
     testProviderConnectivityFromDialog,
     applyProviderConnectivityStatus,
+    showProviderChatTest,
+    chatTestProviderFromDialog,
+    applyProviderChatTestStatus,
     openProviderConfigDialog,
     applyProviderConfigDialog,
     openProviderDeleteDialog,

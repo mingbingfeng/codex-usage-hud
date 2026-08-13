@@ -946,6 +946,11 @@ class BackgroundUsageScannerTests(unittest.TestCase):
             self.assertIsNotNone(detail)
             assert detail is not None
             self.assertEqual(detail["featureKey"], "memory_consolidation")
+            self.assertEqual(detail["featureLabel"], "记忆整理")
+            self.assertEqual(
+                detail["featureEnLabel"], "Memory consolidation"
+            )
+            self.assertIn("提取记忆", detail["featurePurpose"])
             self.assertEqual(detail["requests"][0]["estimatedInputTokens"], 33673)
             self.assertEqual(detail["requests"][0]["estimatedOutputTokens"], 0)
             self.assertEqual(detail["requests"][1]["estimatedInputTokens"], 33673)

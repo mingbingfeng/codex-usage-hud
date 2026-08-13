@@ -40,16 +40,12 @@ class BackgroundUsageRuntime:
         runtime_errors: RuntimeErrorRegistry | None = None,
         watcher_factory: Callable[..., FileChangeWatcher] = FileChangeWatcher,
         clock: Callable[[], float] | None = None,
-        restart_probe: Callable[[], object] | None = None,
-        restart_codex: Callable[[], object] | None = None,
     ) -> None:
         self.logs_path = Path(logs_path)
         self.state_path = Path(state_path)
         self.store = BackgroundUsageStore(database_path)
         self.control = BackgroundControlService(
             Path(database_path).parent,
-            restart_probe=restart_probe,
-            restart_codex=restart_codex,
         )
         self.event_bus = event_bus
         self.runtime_errors = runtime_errors
@@ -148,7 +144,6 @@ class BackgroundUsageRuntime:
         expected_policy_revision: object = None,
         event_id: object = "",
         source: object = "usage_detail",
-        restart_now: object = False,
     ) -> dict[str, object]:
         return self.control.set(
             feature_key,
@@ -156,21 +151,6 @@ class BackgroundUsageRuntime:
             expected_policy_revision,
             event_id,
             source,
-            restart_now,
-        )
-
-    def policy_restart(
-        self,
-        feature_key: object,
-        expected_policy_revision: object = None,
-        event_id: object = "",
-        source: object = "usage_detail",
-    ) -> dict[str, object]:
-        return self.control.restart(
-            feature_key,
-            expected_revision=expected_policy_revision,
-            event_id=event_id,
-            source=source,
         )
 
     def pending_today(self) -> list[dict[str, object]]:

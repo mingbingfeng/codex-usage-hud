@@ -7,6 +7,13 @@ and this repository follows Semantic Versioning for release tags.
 
 ## [Unreleased]
 
+### Added
+
+- Background usage detail panel now shows the official English name of each
+  Codex App background task next to its Chinese label, and the subtitle line
+  now explains that the requests are initiated by the official agent tool and
+  describes the official purpose of the selected background task.
+
 ### Removed
 
 - Removed the legacy standalone Qt and Tk HUD implementations and their

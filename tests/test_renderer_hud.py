@@ -1163,7 +1163,9 @@ class RendererHudPayloadTests(unittest.TestCase):
             script,
         )
         self.assertIn("费用不可估", script)
-        self.assertIn("Codex App 后台用量 · 本地记录", script)
+        self.assertIn("由 Codex App 官方 agent 工具在后台发起的请求", script)
+        self.assertIn("featureEnLabel", script)
+        self.assertIn("featurePurpose", script)
         self.assertNotIn('label: "待处理"', script)
         self.assertNotIn('label: "已处理"', script)
         self.assertNotIn("function backgroundUsageStatusMeta", script)
@@ -1762,7 +1764,7 @@ class RendererHudPayloadTests(unittest.TestCase):
     def test_renderer_top_redesign_styles_are_theme_tokenized(self) -> None:
         script = renderer_hud.RENDERER_HUD_SCRIPT
 
-        self.assertIn('const version = "52";', script)
+        self.assertIn('const version = "53";', script)
         self.assertIn("function refreshProgressRailBadge", script)
         self.assertIn("function progressBadgeCandidates", script)
         self.assertIn("function progressRailLeftLabelFits", script)
