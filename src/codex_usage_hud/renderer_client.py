@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
+import threading
 import time
 from typing import Any
 
@@ -34,6 +37,7 @@ from .renderer_payload_builder import (
     _runtime_expression_params,
     payload_from_snapshot,
 )
+from .renderer_metrics import RendererMetricsWindow
 from .support_assets import support_qr_payload
 
 
@@ -105,6 +109,14 @@ class RendererHudClient:
         self._cached_websocket_url = ""
         self._target_cache_at = 0.0
         self._support_images_sent = False
+        self._update_lock = threading.Lock()
+        self._update_failure_count = 0
+        self._update_retry_not_before = 0.0
+        self._update_cooldown_until = 0.0
+        self._metrics_window = RendererMetricsWindow()
+        self._payload_domain_digests: dict[str, str] = {}
+        self._payload_extras_digest: str | None = None
+        self._payload_digest_target_id = ""
         self._target_discovery = _RendererTargetDiscovery(
             port=self.port,
             timeout_seconds=self.timeout_seconds,
@@ -261,6 +273,8 @@ class RendererHudClient:
             if target_id != self._target_id or not self._script_identifier:
                 stage = "script_install"
                 self._install(websocket_url, target_id)
+                self.record_renderer_metric("script_installs")
+                self.record_renderer_metric("binding_rebuilds")
             if self._active_session_binding is not None:
                 stage = "active_session_binding"
                 self._active_session_binding.ensure(websocket_url, target_id)
@@ -364,6 +378,10 @@ class RendererHudClient:
         request_rows_limit: int = 30,
     ) -> bool:
         started = time.perf_counter()
+        deferred = self._update_gate_state()
+        if deferred is not None:
+            self._defer_update(*deferred)
+            return False
         support_images = [] if self._support_images_sent else support_qr_payload()
         theme_started = time.perf_counter()
         theme_snapshot = self._theme_snapshot
@@ -420,6 +438,27 @@ class RendererHudClient:
         if not self.enabled:
             self.last_status = "disabled"
             return False
+        deferred = self._update_gate_state()
+        if deferred is not None:
+            self._defer_update(*deferred)
+            return False
+        lock = getattr(self, "_update_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._update_lock = lock
+        if not lock.acquire(blocking=False):
+            self._defer_update("busy", 0.0)
+            return False
+        try:
+            self.record_renderer_metric("payload_updates")
+            return self._update_payload_once(payload)
+        finally:
+            lock.release()
+
+    def _update_payload_once(self, payload: dict[str, object]) -> bool:
+        if not self.enabled:
+            self.last_status = "disabled"
+            return False
         started = time.perf_counter()
         stage = "target_discovery"
         try:
@@ -430,14 +469,51 @@ class RendererHudClient:
             target_id = str(target.get("id") or websocket_url)
             if not websocket_url:
                 raise RuntimeError("CDP target has no websocket URL")
-            if target_id != self._target_id or not self._script_identifier:
+            target_changed = target_id != str(
+                getattr(self, "_payload_digest_target_id", "") or ""
+            )
+            script_reinstall_needed = bool(
+                target_id != self._target_id or not self._script_identifier
+            )
+            if target_changed or script_reinstall_needed:
+                self._payload_domain_digests.clear()
+                self._payload_extras_digest = None
+                self._payload_digest_target_id = target_id
+            if script_reinstall_needed:
                 stage = "script_install"
                 self._install(websocket_url, target_id)
+                self.record_renderer_metric("script_installs")
+                self.record_renderer_metric("binding_rebuilds")
             if self._theme_binding is not None:
                 stage = "theme_binding"
                 self._theme_binding.ensure(websocket_url, target_id)
+            (
+                prepared_payload,
+                pending_domain_digests,
+                skipped_domain_count,
+                pending_extras_digest,
+            ) = self._prepare_payload_domain_delta(payload)
+            if prepared_payload is None:
+                self._record_update_success()
+                metrics = dict(self.last_update_metrics)
+                metrics.update(
+                    {
+                        "targetDiscoveryMs": target_discovery_ms,
+                        "totalMs": (time.perf_counter() - started) * 1000.0,
+                        "failureStage": "",
+                        "payloadBytes": 0,
+                        "payloadDomains": [],
+                        "duplicateDomainUpdateSkipped": True,
+                        "skippedDuplicateDomains": skipped_domain_count,
+                        "changedDomains": [],
+                    }
+                )
+                self.last_update_metrics = metrics
+                self.last_status = "unchanged"
+                self.last_error = ""
+                return True
             stage = "payload_apply"
-            if not self._send_update(websocket_url, payload):
+            if not self._send_update(websocket_url, prepared_payload):
                 raise RuntimeError("renderer update function did not acknowledge payload")
             if self._active_session_binding is not None:
                 stage = "active_session_binding"
@@ -475,9 +551,26 @@ class RendererHudClient:
                 }
             )
             self.last_update_metrics = metrics
-            self._clear_target_cache(clear_script=True)
+            failure_text = f"{type(exc).__name__}: {exc}".lower()
+            target_lost = stage == "target_discovery" or any(
+                marker in failure_text
+                for marker in (
+                    "target closed",
+                    "no such target",
+                    "websocket",
+                    "connection reset",
+                    "broken pipe",
+                    "connection refused",
+                )
+            )
+            if target_lost:
+                self._clear_target_cache(clear_script=True)
+                self._payload_domain_digests.clear()
+                self._payload_extras_digest = None
+                self._payload_digest_target_id = ""
             self.last_status = "failed"
             self.last_error = f"{type(exc).__name__}: {exc}"
+            self._record_update_failure(stage=stage, error=exc)
             return False
         metrics = dict(self.last_update_metrics)
         metrics.update(
@@ -485,12 +578,197 @@ class RendererHudClient:
                 "targetDiscoveryMs": target_discovery_ms,
                 "totalMs": (time.perf_counter() - started) * 1000.0,
                 "failureStage": "",
+                "duplicateDomainUpdateSkipped": False,
+                "skippedDuplicateDomains": skipped_domain_count,
+                "changedDomains": sorted(pending_domain_digests),
             }
         )
         self.last_update_metrics = metrics
         self.last_status = "ok"
         self.last_error = ""
+        self._record_update_success()
+        self._payload_domain_digests.update(pending_domain_digests)
+        if pending_extras_digest is not None:
+            self._payload_extras_digest = pending_extras_digest
         return True
+
+    @staticmethod
+    def _payload_domain_digest(value: object) -> str:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _prepare_payload_domain_delta(
+        self,
+        payload: dict[str, object],
+    ) -> tuple[dict[str, object] | None, dict[str, str], int, str | None]:
+        """Return a compatible payload containing only changed domains.
+
+        Digests are committed by the caller only after the enclosing CDP
+        update succeeds, so a failed send always retries the full changed
+        payload.
+        """
+        raw_domains = payload.get("payloadDomains")
+        if not isinstance(raw_domains, Mapping) or not raw_domains:
+            return payload, {}, 0, None
+
+        domains = dict(raw_domains)
+        all_alias_keys: set[str] = set()
+        alias_keys_by_domain: dict[object, set[str]] = {}
+        all_digests: dict[str, str] = {}
+        for name, value in domains.items():
+            aliases = (
+                {str(key) for key in value}
+                if isinstance(value, Mapping)
+                else set()
+            )
+            alias_keys_by_domain[name] = aliases
+            all_alias_keys.update(aliases)
+            all_digests[str(name)] = self._payload_domain_digest(value)
+
+        extras = {
+            key: value
+            for key, value in payload.items()
+            if key != "payloadDomains" and str(key) not in all_alias_keys
+        }
+        extras_digest = self._payload_domain_digest(extras)
+        previous_extras_digest = getattr(self, "_payload_extras_digest", None)
+        if previous_extras_digest is None or extras_digest != previous_extras_digest:
+            return payload, all_digests, 0, extras_digest
+
+        previous_domains = getattr(self, "_payload_domain_digests", {}) or {}
+        changed: dict[object, object] = {}
+        pending: dict[str, str] = {}
+        changed_alias_keys: set[str] = set()
+        for name, value in domains.items():
+            domain_name = str(name)
+            digest = all_digests[domain_name]
+            if previous_domains.get(domain_name) == digest:
+                continue
+            changed[name] = value
+            pending[domain_name] = digest
+            changed_alias_keys.update(alias_keys_by_domain[name])
+
+        if not changed:
+            return None, {}, len(domains), extras_digest
+        if len(changed) == len(domains):
+            return payload, pending, 0, extras_digest
+
+        reduced = dict(payload)
+        reduced["payloadDomains"] = changed
+        reduced = {
+            key: value
+            for key, value in reduced.items()
+            if key == "payloadDomains"
+            or str(key) not in all_alias_keys
+            or str(key) in changed_alias_keys
+        }
+        return reduced, pending, len(domains) - len(changed), extras_digest
+
+    def _update_gate_state(self) -> tuple[str, float] | None:
+        now = time.monotonic()
+        cooldown_until = float(getattr(self, "_update_cooldown_until", 0.0) or 0.0)
+        if now < cooldown_until:
+            return ("cooldown", cooldown_until - now)
+        retry_not_before = float(
+            getattr(self, "_update_retry_not_before", 0.0) or 0.0
+        )
+        if now < retry_not_before:
+            return ("backoff", retry_not_before - now)
+        return None
+
+    def update_gate_state(self) -> tuple[bool, str, float]:
+        """Inspect the local update gate without issuing a CDP command."""
+        if not self.enabled:
+            return False, "disabled", 5.0
+        lock = getattr(self, "_update_lock", None)
+        if lock is not None and lock.locked():
+            return False, "busy", 0.05
+        deferred = self._update_gate_state()
+        if deferred is None:
+            return True, "", 0.0
+        reason, remaining = deferred
+        return False, str(reason), max(0.0, float(remaining))
+
+    def record_renderer_metric(self, name: str, amount: float = 1.0) -> None:
+        window = getattr(self, "_metrics_window", None)
+        if not isinstance(window, RendererMetricsWindow):
+            return
+        summary = window.record(name, amount)
+        if summary is not None:
+            _LOGGER.info("renderer_metrics_window %s", json.dumps(summary, sort_keys=True))
+
+    def _start_renderer_cooldown_metric(self, duration: float) -> None:
+        window = getattr(self, "_metrics_window", None)
+        if not isinstance(window, RendererMetricsWindow):
+            return
+        summary = window.start_cooldown(duration)
+        if summary is not None:
+            _LOGGER.info("renderer_metrics_window %s", json.dumps(summary, sort_keys=True))
+
+
+
+    def _defer_update(self, status: str, remaining: float) -> None:
+        self.last_status = status
+        self.last_error = ""
+        metrics = dict(getattr(self, "last_update_metrics", {}) or {})
+        metrics.update(
+            {
+                "deferred": True,
+                "deferredReason": status,
+                "cooldownRemaining": (
+                    max(0.0, float(remaining)) if status == "cooldown" else 0.0
+                ),
+                "retryNotBefore": time.monotonic() + max(0.0, float(remaining)),
+            }
+        )
+        self.last_update_metrics = metrics
+
+    def _record_update_failure(self, *, stage: str, error: Exception) -> None:
+        now = time.monotonic()
+        attempt = int(getattr(self, "_update_failure_count", 0) or 0) + 1
+        self._update_failure_count = attempt
+        if attempt >= 3:
+            delay = 30.0
+            self._update_cooldown_until = now + delay
+            self._start_renderer_cooldown_metric(delay)
+        else:
+            delay = (1.0, 2.0, 4.0)[min(attempt - 1, 2)]
+            self._update_cooldown_until = 0.0
+        self._update_retry_not_before = now + delay
+        metrics = dict(getattr(self, "last_update_metrics", {}) or {})
+        metrics.update(
+            {
+                "retryAttempt": attempt,
+                "retryNotBefore": self._update_retry_not_before,
+                "cooldownRemaining": delay if attempt >= 3 else 0.0,
+                "failureStage": stage,
+                "failureKind": type(error).__name__,
+            }
+        )
+        self.last_update_metrics = metrics
+
+    def _record_update_success(self) -> None:
+        self._update_failure_count = 0
+        self._update_retry_not_before = 0.0
+        self._update_cooldown_until = 0.0
+        window = getattr(self, "_metrics_window", None)
+        if isinstance(window, RendererMetricsWindow):
+            window.clear_cooldown()
+        metrics = dict(getattr(self, "last_update_metrics", {}) or {})
+        metrics.update(
+            {
+                "retryAttempt": 0,
+                "retryNotBefore": 0.0,
+                "cooldownRemaining": 0.0,
+            }
+        )
+        self.last_update_metrics = metrics
 
     def probe_connection(self, *, timeout_seconds: float | None = None) -> bool:
         """Cheap CDP liveness check used by conditional heartbeat.
@@ -758,6 +1036,8 @@ class RendererHudClient:
         persistent_ms: float | None = None
         persistent_fallback_reason = ""
         fallback_ms: float | None = None
+        self.record_renderer_metric("cdp_commands")
+        self.record_renderer_metric("payload_bytes", len(payload_json.encode("utf-8")))
         send_persistent = getattr(self._active_session_binding, "send_command", None)
         if callable(send_persistent):
             persistent_started = time.perf_counter()
@@ -773,14 +1053,8 @@ class RendererHudClient:
             except Exception as exc:
                 persistent_ms = (time.perf_counter() - persistent_started) * 1000.0
                 persistent_fallback_reason = f"{type(exc).__name__}: {exc}"
-                fallback_started = time.perf_counter()
-                result = send_cdp_command(
-                    websocket_url,
-                    "Runtime.evaluate",
-                    _runtime_expression_params(expression),
-                    self.timeout_seconds,
-                )
-                fallback_ms = (time.perf_counter() - fallback_started) * 1000.0
+                transport = "active-session-binding"
+                result = {"result": {"result": {"value": {"ok": False}}}}
         else:
             result = send_cdp_command(
                 websocket_url,

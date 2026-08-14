@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
+from threading import Lock, Thread, current_thread
 
 from .renderer_event_loop import RendererLoopState, RendererTickInputs
 
@@ -37,11 +39,14 @@ class RendererPreRefreshPorts:
     changed_config_keys: Callable[[object, object], set[str]]
     partial_domains_for_changes: Callable[[set[str]], set[str] | None]
     request_usage_insights_refresh: Callable[[], None] | None = None
+    wake: Callable[[], None] | None = None
 
 
 class RendererPreRefreshExecutor:
     """Apply command/background/settings-file work before snapshot execution."""
 
+    _CODEX_CLI_LAUNCH_ACTION = "codexCliLaunch"
+    _CODEX_CLI_LAUNCH_PENDING_ACTION = "codexCliLaunchPending"
     _BACKGROUND_QUERY_ACTIONS = frozenset(
         {
             "openBackgroundUsage",
@@ -60,12 +65,155 @@ class RendererPreRefreshExecutor:
     ) -> None:
         self.state = state
         self.ports = ports
+        self._async_lock = Lock()
+        self._closed = False
+        self._codex_cli_launch_request_id = ""
+        self._codex_cli_launch_thread: Thread | None = None
+        self._codex_cli_launch_results: deque[tuple[str, dict[str, object]]] = deque()
+
+    def close(self) -> None:
+        """Stop accepting launch results and bound the worker during shutdown."""
+        with self._async_lock:
+            self._closed = True
+            thread = self._codex_cli_launch_thread
+        if thread is not None and thread is not current_thread() and thread.is_alive():
+            thread.join(timeout=2.0)
+        with self._async_lock:
+            self._codex_cli_launch_results.clear()
+            self._codex_cli_launch_request_id = ""
+            self._codex_cli_launch_thread = None
 
     def apply(self, inputs: RendererTickInputs) -> None:
+        self.apply_async_command_results(inputs)
         self.apply_usage_insights_refresh(inputs)
         self.apply_settings_command(inputs)
         self.apply_background_usage_change(inputs)
         self.apply_partial_settings_file_change(inputs)
+
+    def apply_async_command_results(self, inputs: RendererTickInputs) -> None:
+        with self._async_lock:
+            results = list(self._codex_cli_launch_results)
+            self._codex_cli_launch_results.clear()
+        for request_id, status in results:
+            with self._async_lock:
+                if request_id != self._codex_cli_launch_request_id:
+                    continue
+                self._codex_cli_launch_request_id = ""
+            self.state.settings_command_status = dict(status)
+            inputs.update_state = self.ports.update_status()
+            self._request_settings_domain(inputs)
+
+    @staticmethod
+    def _command_status(
+        *,
+        action: str,
+        request_id: str,
+        message: str,
+        kind: str = "",
+    ) -> dict[str, object]:
+        return {
+            "action": action,
+            "requestId": request_id,
+            "message": message,
+            "kind": kind,
+            "restartVisible": False,
+        }
+
+    def _request_settings_domain(self, inputs: RendererTickInputs) -> None:
+        if self._can_replace_snapshot_with_domains(inputs, {"settings"}):
+            inputs.event_refresh_request.snapshot = False
+        inputs.event_refresh_request.request_domains("settings", force_fast=True)
+
+    def _start_codex_cli_launch(
+        self,
+        command: dict[str, object],
+        inputs: RendererTickInputs,
+    ) -> None:
+        request_id = str(
+            command.get("requestId") or command.get("id") or "codex-cli-launch"
+        ).strip()
+        with self._async_lock:
+            if self._closed:
+                self.state.settings_command_status = self._command_status(
+                    action=self._CODEX_CLI_LAUNCH_ACTION,
+                    request_id=request_id,
+                    message="Codex CLI 启动器已停止。",
+                    kind="error",
+                )
+                self._request_settings_domain(inputs)
+                return
+            if self._codex_cli_launch_request_id:
+                self.state.settings_command_status = self._command_status(
+                    action=self._CODEX_CLI_LAUNCH_ACTION,
+                    request_id=request_id,
+                    message="上一次 Codex CLI 启动仍在进行，请稍候。",
+                    kind="error",
+                )
+                self._request_settings_domain(inputs)
+                return
+            self._codex_cli_launch_request_id = request_id
+            thread = Thread(
+                target=self._run_codex_cli_launch,
+                args=(dict(command), request_id),
+                name="codex-usage-hud-cli-launch",
+                daemon=True,
+            )
+            self._codex_cli_launch_thread = thread
+        self.state.settings_command_status = self._command_status(
+            action=self._CODEX_CLI_LAUNCH_PENDING_ACTION,
+            request_id=request_id,
+            message="正在打开终端并启动 Codex CLI...",
+        )
+        inputs.update_state = self.ports.update_status()
+        self._request_settings_domain(inputs)
+        _LOGGER.info("renderer_codex_cli_launch_started request_id=%s", request_id)
+        try:
+            thread.start()
+        except Exception as exc:
+            _LOGGER.exception("renderer_codex_cli_launch_thread_start_failed")
+            with self._async_lock:
+                self._codex_cli_launch_request_id = ""
+                self._codex_cli_launch_thread = None
+            self.state.settings_command_status = self._command_status(
+                action=self._CODEX_CLI_LAUNCH_ACTION,
+                request_id=request_id,
+                message=f"Codex CLI 启动失败：{exc}",
+                kind="error",
+            )
+            self._request_settings_domain(inputs)
+
+    def _run_codex_cli_launch(
+        self,
+        command: dict[str, object],
+        request_id: str,
+    ) -> None:
+        try:
+            status = dict(self.ports.execute_command(command))
+        except Exception as exc:
+            _LOGGER.exception(
+                "renderer_codex_cli_launch_failed request_id=%s",
+                request_id,
+            )
+            status = self._command_status(
+                action=self._CODEX_CLI_LAUNCH_ACTION,
+                request_id=request_id,
+                message=f"Codex CLI 启动失败：{exc}",
+                kind="error",
+            )
+        status.setdefault("action", self._CODEX_CLI_LAUNCH_ACTION)
+        status.setdefault("requestId", request_id)
+        with self._async_lock:
+            if self._closed:
+                return
+            self._codex_cli_launch_results.append((request_id, status))
+        wake = self.ports.wake
+        if callable(wake):
+            wake()
+        _LOGGER.info(
+            "renderer_codex_cli_launch_finished request_id=%s kind=%s",
+            request_id,
+            str(status.get("kind") or "ok"),
+        )
 
     def apply_usage_insights_refresh(self, inputs: RendererTickInputs) -> None:
         if not inputs.event_refresh_request.usage_insights_refresh:
@@ -77,12 +225,15 @@ class RendererPreRefreshExecutor:
     def apply_settings_command(self, inputs: RendererTickInputs) -> None:
         if not inputs.command:
             return
-        previous_config = self.ports.current_config()
         action = str(inputs.command.get("action") or "").strip()
         if action == self._REQUEST_ROWS_LOAD_MORE_ACTION:
             self.state.request_rows_limit += self._REQUEST_ROWS_PAGE_SIZE
             self.state.settings_command_status = {}
             return
+        if action == self._CODEX_CLI_LAUNCH_ACTION:
+            self._start_codex_cli_launch(dict(inputs.command), inputs)
+            return
+        previous_config = self.ports.current_config()
         if action in self._BACKGROUND_QUERY_ACTIONS:
             self.ports.reset_background_retry()
         self.state.settings_command_status = self.ports.execute_command(inputs.command)

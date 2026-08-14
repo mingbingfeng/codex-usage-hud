@@ -213,6 +213,56 @@ class CodexProviderConfigTests(unittest.TestCase):
         self.assertEqual(definitions["muyuan"].base_url, "https://new.example/v1")
         self.assertEqual(definitions["muyuan"].env_key, "NEW_API_KEY")
 
+    def test_numeric_leading_provider_id_requires_underscore_env_key(self) -> None:
+        # 数字开头的 Provider ID（如 123abc）本身合法，但自动生成的环境变量名
+        # 若保持数字开头（123ABC_API_KEY）会被 ENVIRONMENT_KEY_PATTERN 拒绝；
+        # 修复后前端生成 _ 前缀（_123ABC_API_KEY），后端应接受该形式。
+        config_text = 'model_provider = "custom"\n'
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.toml"
+            path.write_text(config_text, encoding="utf-8")
+            environment: dict[str, str] = {}
+            with patch(
+                "codex_usage_hud.codex_provider_config._user_environment_value",
+                side_effect=lambda name: environment.get(name, ""),
+            ), patch(
+                "codex_usage_hud.codex_provider_config._set_user_environment_value",
+                side_effect=lambda name, value: environment.__setitem__(name, value),
+            ):
+                # 修复前的数字开头 env_key 必须被拒绝。
+                with self.assertRaisesRegex(ValueError, "环境变量"):
+                    save_provider_configs(
+                        [
+                            {
+                                "provider_id": "123abc",
+                                "base_url": "https://123.example/v1",
+                                "env_key": "123ABC_API_KEY",
+                                "api_key": "secret",
+                            }
+                        ],
+                        config_path=path,
+                    )
+                # 修复后的 _ 前缀 env_key（前端自动生成）必须被接受。
+                result = save_provider_configs(
+                    [
+                        {
+                            "provider_id": "123abc",
+                            "base_url": "https://123.example/v1",
+                            "env_key": "_123ABC_API_KEY",
+                            "api_key": "secret",
+                        }
+                    ],
+                    config_path=path,
+                )
+            updated = path.read_text(encoding="utf-8")
+            definitions = read_provider_definitions(path)
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(environment["_123ABC_API_KEY"], "secret")
+        self.assertIn("[model_providers.123abc]", updated)
+        self.assertIn('env_key = "_123ABC_API_KEY"', updated)
+        self.assertEqual(definitions["123abc"].env_key, "_123ABC_API_KEY")
+
     def test_editor_section_text_replaces_full_provider_body(self) -> None:
         config_text = (
             'model_provider = "custom"\n'

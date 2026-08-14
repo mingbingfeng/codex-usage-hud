@@ -39,6 +39,9 @@ REST_REMINDER_IDLE_RESET_MIN = 0
 REST_REMINDER_IDLE_RESET_MAX = 60
 REST_REMINDER_IDLE_RETURN_POLL_SECONDS = 30.0
 REST_REMINDER_COMPLETION_FEEDBACK_SECONDS = 1.5
+REST_REMINDER_EARLY_REST_OPTIONS: tuple[int, ...] = (3, 5, 10)
+REST_REMINDER_EARLY_REST_MINUTES_MIN = 1
+REST_REMINDER_EARLY_REST_MINUTES_MAX = 24 * 60
 
 _LOGGER = logging.getLogger("codex_usage_hud.rest_reminder")
 _LOGGER.addHandler(logging.NullHandler())
@@ -365,8 +368,10 @@ class RestReminderScheduler:
     def seconds_until_prompt_end(self, now: float | None = None) -> float | None:
         if not self.showing:
             return None
-        current = self._clock() if now is None else float(now)
-        return max(0.0, self._prompt_until - current)
+        # Prompt interaction is intentionally unbounded.  Keep the optional
+        # argument for API compatibility with the other deadline helpers.
+        del now
+        return None
 
     def seconds_until_break_end(self, now: float | None = None) -> float | None:
         if not self.resting:
@@ -385,11 +390,13 @@ class RestReminderScheduler:
         current = self._clock() if now is None else float(now)
         if not self._config.enabled:
             return None
+        if self.showing:
+            # There is no prompt timeout anymore.  Renderer/overlay commands
+            # are event-driven and will wake the runtime when the user acts.
+            return None
         wall_now = float(self._wall_clock())
         state, boundary = self._schedule_state(wall_now)
-        if self.showing:
-            delay = max(0.0, self._prompt_until - current)
-        elif self.resting:
+        if self.resting:
             delay = max(0.0, self._rest_until - current)
         else:
             delay = max(0.0, self._next_fire_at - current)
@@ -457,7 +464,10 @@ class RestReminderScheduler:
             "reminderMessage": self._active_message,
         }
         if self.showing:
-            snapshot["promptEndsAtMs"] = int(round(self._prompt_until_wall * 1000.0))
+            # Zero explicitly represents an infinite wait.  Retaining the key
+            # keeps the persisted schema compatible with older installations.
+            snapshot["promptEndsAtMs"] = 0
+            snapshot["promptWaitInfinite"] = True
             snapshot["reminderCanPostpone"] = not self._postpone_used
         elif self._phase == "postponed":
             snapshot["postponeEndsAtMs"] = int(round(self._postpone_until_wall * 1000.0))
@@ -571,27 +581,20 @@ class RestReminderScheduler:
             return True
 
         if phase == "prompt":
-            try:
-                prompt_ends_wall = float(state.get("promptEndsAtMs") or 0.0) / 1000.0
-            except (TypeError, ValueError):
-                prompt_ends_wall = 0.0
-            if prompt_ends_wall > wall_now:
-                self._phase = "prompt"
-                self._prompt_until_wall = prompt_ends_wall
-                self._prompt_until = current + (prompt_ends_wall - wall_now)
-                self._last_event = RestReminderEvent(
-                    message=self._active_message or REST_REMINDER_MESSAGES[0],
-                    can_postpone=not self._postpone_used,
-                    interval_minutes=self._config.interval_minutes,
-                    break_minutes=self._config.break_minutes,
-                    postpone_minutes=self._config.postpone_minutes,
-                    fired_at=current,
-                    ends_at=self._prompt_until,
-                )
-                return True
-            self._phase = "focus"
-            self._postpone_used = False
-            self._arm_from(current, wall_now)
+            # Prompt state is restored indefinitely, including snapshots made
+            # by older versions that stored a finite prompt deadline.
+            self._phase = "prompt"
+            self._prompt_until_wall = 0.0
+            self._prompt_until = 0.0
+            self._last_event = RestReminderEvent(
+                message=self._active_message or REST_REMINDER_MESSAGES[0],
+                can_postpone=not self._postpone_used,
+                interval_minutes=self._config.interval_minutes,
+                break_minutes=self._config.break_minutes,
+                postpone_minutes=self._config.postpone_minutes,
+                fired_at=current,
+                ends_at=0.0,
+            )
             return True
 
         if phase == "postponed":
@@ -665,6 +668,10 @@ class RestReminderScheduler:
         wall_now = float(self._wall_clock())
         self._refresh_daily_date(wall_now)
         schedule_state, boundary = self._schedule_state(wall_now)
+        if self.showing:
+            # A prompt remains visible until an explicit user choice.  In
+            # particular, work-hour/lunch boundaries must not auto-skip it.
+            return None
         if schedule_state != "work":
             if self.resting:
                 self._finalize_rest(current, wall_now, "schedule_ended", arm=False)
@@ -689,15 +696,6 @@ class RestReminderScheduler:
             return None
         if self._schedule_waiting:
             self._schedule_waiting = False
-            self._arm_from(current, wall_now)
-            return None
-        if self.showing:
-            if current < self._prompt_until:
-                return None
-            self._clear_prompt()
-            self._phase = "focus"
-            self._postpone_used = False
-            self._record_transition("auto_skipped", 0.0)
             self._arm_from(current, wall_now)
             return None
         if self.resting:
@@ -740,6 +738,35 @@ class RestReminderScheduler:
         self._rest_until = current + duration
         self._rest_until_wall = wall_now + duration
         self._pending_transition = None
+        return True
+
+    def credit_early_rest(self, minutes: object, now: float | None = None) -> bool:
+        """Credit a rest the user already took before this reminder."""
+        if self._phase not in {"prompt", "postponed"}:
+            return False
+        try:
+            amount = int(minutes)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not (
+            REST_REMINDER_EARLY_REST_MINUTES_MIN
+            <= amount
+            <= REST_REMINDER_EARLY_REST_MINUTES_MAX
+        ):
+            return False
+        current = self._clock() if now is None else float(now)
+        wall_now = float(self._wall_clock())
+        duration = float(amount) * 60.0
+        self._refresh_daily_date(wall_now)
+        self._daily_rested_seconds += duration
+        self._daily_rested_count += 1
+        self._last_rest_duration_seconds = duration
+        self._clear_prompt()
+        self._phase = "focus"
+        self._postpone_until_wall = 0.0
+        self._postpone_used = False
+        self._record_transition("credited_early", duration)
+        self._arm_from(current, wall_now)
         return True
 
     def finish_rest(self, now: float | None = None) -> bool:
@@ -803,7 +830,6 @@ class RestReminderScheduler:
         return dict(transition) if transition is not None else None
 
     def _begin_prompt(self, current: float, wall_now: float) -> RestReminderEvent:
-        wait_seconds = float(self._config.break_minutes) * 60.0
         message = str(self._pick_message() or REST_REMINDER_MESSAGES[0])
         event = RestReminderEvent(
             message=message,
@@ -812,12 +838,12 @@ class RestReminderScheduler:
             break_minutes=self._config.break_minutes,
             postpone_minutes=self._config.postpone_minutes,
             fired_at=current,
-            ends_at=current + wait_seconds,
+            ends_at=0.0,
         )
         self._phase = "prompt"
         self._active_message = message
-        self._prompt_until = event.ends_at
-        self._prompt_until_wall = wall_now + wait_seconds
+        self._prompt_until = 0.0
+        self._prompt_until_wall = 0.0
         self._postpone_until_wall = 0.0
         self._last_event = event
         return event
@@ -1074,6 +1100,17 @@ class RestReminderPresenter:
         else:
             self.start_rest()
 
+    def credit_early_rest(self, minutes: object) -> bool:
+        """Credit a rest the user already took before this reminder."""
+        ok = self.scheduler.credit_early_rest(minutes)
+        if ok:
+            self._clear_completion()
+            transition = self.scheduler.take_transition()
+            if transition is not None:
+                self._show_completion(transition)
+            self._persist_state()
+        return ok
+
     def postpone(self) -> bool:
         if self._preview_event is not None:
             self._clear_preview()
@@ -1187,6 +1224,8 @@ class RestReminderPresenter:
             "canPostpone": bool(
                 phase == "prompt" and not self.scheduler.postpone_used
             ),
+            "promptWaitInfinite": bool(phase == "prompt" and not preview),
+            "earlyRestOptionsMinutes": [3, 5, 10],
             "intervalMinutes": int(config.interval_minutes),
             "breakMinutes": int(config.break_minutes),
             "postponeMinutes": int(config.postpone_minutes),
@@ -1226,6 +1265,8 @@ class RestReminderPresenter:
             "postponeMinutes",
             "promptEndsAtMs",
             "postponeEndsAtMs",
+            "promptWaitInfinite",
+            "earlyRestOptionsMinutes",
             "restStartedAtMs",
             "restEndsAtMs",
             "todayRestedSeconds",

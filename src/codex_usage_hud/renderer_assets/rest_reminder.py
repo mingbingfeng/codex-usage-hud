@@ -21,6 +21,18 @@ TEXT = r"""
             <span data-rest-reminder-break-countdown="true">休息结束后会自动开始下一轮</span>
           </p>
         </div>
+        <div class="codex-usage-hud-rest-toast-early-actions" data-rest-reminder-early-actions="true" hidden>
+          <span>我已提前休息过了：</span>
+          <button type="button" data-action="rest-reminder-credit" data-minutes="3">3分钟</button>
+          <button type="button" data-action="rest-reminder-credit" data-minutes="5">5分钟</button>
+          <button type="button" data-action="rest-reminder-credit" data-minutes="10">10分钟</button>
+          <button type="button" data-action="rest-reminder-credit-more">更多</button>
+          <span class="codex-usage-hud-rest-credit-custom" data-rest-reminder-credit-custom="true" hidden>
+            <input type="number" min="1" max="1440" step="1" value="15" aria-label="我已提前休息了多少分钟" data-rest-reminder-credit-custom-input="true">
+            <button type="button" data-action="rest-reminder-credit-custom-confirm">确认</button>
+            <button type="button" data-action="rest-reminder-credit-custom-cancel">取消</button>
+          </span>
+        </div>
         <div class="codex-usage-hud-rest-toast-actions">
           <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-postpone" hidden>稍后提醒</button>
           <button type="button" class="codex-usage-hud-settings-action" data-action="rest-reminder-start" data-primary="true">开始休息</button>
@@ -32,6 +44,18 @@ TEXT = r"""
           <span data-rest-reminder-bubble-title="true">休息提醒</span>
         </div>
         <div class="codex-usage-hud-rest-bubble-detail" data-rest-reminder-bubble-detail="true"></div>
+        <div class="codex-usage-hud-rest-bubble-early-actions" data-rest-reminder-bubble-early-actions="true" hidden>
+          <span>我已提前休息过了：</span>
+          <button type="button" data-action="rest-reminder-credit" data-minutes="3">3分钟</button>
+          <button type="button" data-action="rest-reminder-credit" data-minutes="5">5分钟</button>
+          <button type="button" data-action="rest-reminder-credit" data-minutes="10">10分钟</button>
+          <button type="button" data-action="rest-reminder-credit-more">更多</button>
+          <span class="codex-usage-hud-rest-credit-custom" data-rest-reminder-credit-custom="true" hidden>
+            <input type="number" min="1" max="1440" step="1" value="15" aria-label="我已提前休息了多少分钟" data-rest-reminder-credit-custom-input="true">
+            <button type="button" data-action="rest-reminder-credit-custom-confirm">确认</button>
+            <button type="button" data-action="rest-reminder-credit-custom-cancel">取消</button>
+          </span>
+        </div>
         <div class="codex-usage-hud-rest-bubble-foot">
           <span class="codex-usage-hud-rest-bubble-status" data-rest-reminder-bubble-status="true"></span>
           <button type="button" data-action="rest-reminder-postpone" data-rest-reminder-bubble-secondary="true" hidden></button>
@@ -69,7 +93,7 @@ TEXT = r"""
     if (phase === "prompt") {
       const remaining = Math.max(0, (Number(reminder?.promptEndsAtMs) - now) / 1000);
       title = "该休息一下了";
-      status = `等待选择 ${formatRestReminderBubbleDuration(remaining)} · 超时自动跳过 · 今日已休息 ${formatRestReminderBubbleDuration(completedToday)}`;
+      status = `等待你的选择 · 不会自动跳过 · 今日已休息 ${formatRestReminderBubbleDuration(completedToday)}`;
       if (reminder?.canPostpone) {
         const minutes = Math.max(1, Math.round(Number(reminder?.postponeMinutes) || 10));
         actions.push({ action: "rest-reminder-postpone", label: `延迟 ${minutes} 分钟`, primary: false });
@@ -113,6 +137,8 @@ TEXT = r"""
     if (title) title.textContent = copy.title;
     if (detail) detail.textContent = copy.detail;
     if (status) status.textContent = copy.status;
+    const earlyActions = bubble.querySelector('[data-rest-reminder-bubble-early-actions="true"]');
+    if (earlyActions) earlyActions.hidden = String(reminder?.phase || "") !== "prompt";
     const secondary = bubble.querySelector('[data-rest-reminder-bubble-secondary="true"]');
     const primary = bubble.querySelector('[data-rest-reminder-bubble-primary="true"]');
     const secondaryAction = copy.actions.find((item) => !item.primary);
@@ -169,12 +195,25 @@ TEXT = r"""
       return;
     }
     const reminder = currentPayload()?.restReminder;
+    const phase = String(reminder?.phase || "");
+    const infinitePrompt = reminder?.promptWaitInfinite === true && !reminder?.preview;
+    const needsTicker = (
+      (toastVisible && phase === "preview")
+      || (bubbleVisible && (phase === "postponed" || phase === "resting"))
+      || (toastVisible && phase === "prompt" && !infinitePrompt)
+    );
+    if (!needsTicker) {
+      stopRestReminderOverlayTicker();
+    }
     if (bubbleVisible) applyRestReminderBubbleContent(bubble, reminder);
     if (toastVisible) {
       const countdown = toast.querySelector('[data-rest-reminder-break-countdown="true"]');
+      const infinite = reminder?.promptWaitInfinite === true && !reminder?.preview;
       const seconds = (Number(reminder?.promptEndsAtMs) - Date.now()) / 1000;
       const remaining = formatRestReminderRemaining(Math.max(0, seconds));
-      if (!Number.isFinite(seconds) || seconds <= 0) {
+      if (infinite) {
+        if (countdown) countdown.textContent = "等待你的选择 · 不会自动跳过本次休息";
+      } else if (!Number.isFinite(seconds) || seconds <= 0) {
         if (countdown) {
           countdown.textContent = reminder?.preview ? "正在关闭预览..." : "正在跳过本次休息...";
         }
@@ -187,13 +226,24 @@ TEXT = r"""
       } else if (countdown) {
         countdown.textContent = reminder?.preview
           ? `测试预览 · ${remaining} 后自动关闭，不改动当前计时`
-          : `等待选择 ${remaining} · 超时自动跳过本次休息`;
+          : "等待你的选择 · 不会自动跳过本次休息";
       }
     }
   }
 
   function ensureRestReminderOverlayTicker() {
     syncRestReminderOverlayCountdown();
+    const reminder = currentPayload()?.restReminder;
+    const phase = String(reminder?.phase || "");
+    const infinitePrompt = reminder?.promptWaitInfinite === true && !reminder?.preview;
+    const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
+    const bubble = document.querySelector(`#${rootId} [data-rest-reminder-bubble="true"]`);
+    const needsTicker = (
+      (toast?.dataset.visible === "true" && phase === "preview")
+      || (bubble?.dataset.visible === "true" && (phase === "postponed" || phase === "resting"))
+      || (toast?.dataset.visible === "true" && phase === "prompt" && !infinitePrompt)
+    );
+    if (!needsTicker) return;
     if (!restReminderOverlayTimer) {
       restReminderOverlayTimer = ctx.lifecycle.interval(
         "rest_reminder_overlay",
@@ -223,12 +273,16 @@ TEXT = r"""
     const reminder = payload?.restReminder && typeof payload.restReminder === "object"
       ? payload.restReminder
       : {};
-    const promptEndsAtMs = Number(reminder.promptEndsAtMs);
     const phase = String(reminder.phase || "");
+    const promptEndsAtMs = Number(reminder.promptEndsAtMs);
     const visible = !!reminder.visible
-      && (phase === "prompt" || phase === "preview")
-      && Number.isFinite(promptEndsAtMs)
-      && promptEndsAtMs > Date.now();
+      && (
+        phase === "prompt"
+          ? reminder.promptWaitInfinite === true
+          : phase === "preview"
+            && Number.isFinite(promptEndsAtMs)
+            && promptEndsAtMs > Date.now()
+      );
     const wasVisible = toast.dataset.visible === "true";
     toast.dataset.visible = visible ? "true" : "false";
     if (mask) {
@@ -255,6 +309,8 @@ TEXT = r"""
       ackBtn.dataset.action = reminder.preview ? "rest-reminder-ack" : "rest-reminder-start";
       ackBtn.textContent = reminder.preview ? "关闭预览" : "开始休息";
     }
+    const earlyActions = toast.querySelector('[data-rest-reminder-early-actions="true"]');
+    if (earlyActions) earlyActions.hidden = phase !== "prompt";
     const bubbleVisible = renderRestReminderBubble(host, reminder);
     if (visible || bubbleVisible) {
       ensureRestReminderOverlayTicker();

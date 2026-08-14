@@ -601,6 +601,7 @@ def run_daemon(
                             title="正在重启 Codex",
                             message="正在以调试/CDP 模式重启 Codex App，并重新尝试注入 HUD...",
                         ).start()
+                        previous_pid = _manager_primary_pid(manager)
                         if not restart():
                             startup_loading.close()
                             _close_overlay_handoff(overlay_handoff)

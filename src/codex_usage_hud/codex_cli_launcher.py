@@ -500,6 +500,28 @@ def _shell_quote(value: object, shell: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+def _clean_terminal_title_part(value: object) -> str:
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", str(value or "").strip())
+    return " ".join(text.split())
+
+
+def build_codex_cli_title(*, provider: str, workdir: str | Path) -> str:
+    """Build the stable terminal title for a Provider/work-directory launch."""
+    normalized_provider = str(provider or "").strip().lower()
+    if not _PROVIDER_ID_PATTERN.fullmatch(normalized_provider):
+        return ""
+    workdir_text = str(workdir or "").strip()
+    if not workdir_text:
+        return ""
+    try:
+        workdir_path = Path(workdir_text)
+        workdir_label = workdir_path.name or workdir_path.anchor or workdir_text
+    except (OSError, ValueError):
+        workdir_label = workdir_text
+    workdir_label = _clean_terminal_title_part(workdir_label)
+    return f"[{normalized_provider}] {workdir_label}" if workdir_label else ""
+
+
 def build_codex_cli_command(
     *,
     provider: str,
@@ -640,6 +662,7 @@ def _terminal_process_command(
     workdir: str,
     *,
     open_as_tab: bool = False,
+    title: str = "",
 ) -> list[str]:
     kind = str(terminal.get("kind") or "shell")
     executable = str(terminal.get("executable") or "").strip()
@@ -647,10 +670,27 @@ def _terminal_process_command(
         terminal.get("shellExecutable") or terminal.get("executable") or ""
     ).strip()
     shell = str(terminal.get("shell") or "powershell").strip().lower()
+    command_text = str(command or "")
+    if title:
+        if shell == "powershell":
+            title_command = (
+                "$Host.UI.RawUI.WindowTitle = "
+                f"{_shell_quote(title, shell)}"
+            )
+        elif shell == "cmd":
+            title_command = f"title {_shell_quote(title, shell)}"
+        else:
+            title_command = (
+                r"printf '\033]0;%s\007' "
+                f"{_shell_quote(title, shell)}"
+            )
+        command_text = f"{title_command}\n{command_text}"
     if kind == "windows_terminal":
         args = [executable]
         if open_as_tab:
             args.extend(("-w", "0", "new-tab"))
+        if title:
+            args.extend(("--title", title, "--suppressApplicationTitle"))
         args.extend(
             (
                 "-d",
@@ -659,30 +699,30 @@ def _terminal_process_command(
             )
         )
         if shell == "cmd":
-            args.extend(("/D", "/K", command))
+            args.extend(("/D", "/K", command_text))
         elif shell in {"bash", "zsh"}:
             shell_name = Path(shell_executable).stem.casefold()
             if shell_name == "wsl":
-                args.extend(("--", "bash", "-lc", f"{command}\nexec bash"))
+                args.extend(("--", "bash", "-lc", f"{command_text}\nexec bash"))
             else:
                 args.extend(
                     (
                         "--login",
                         "-i",
                         "-c",
-                        f"{command}\nexec {_shell_quote(shell_executable, 'bash')}",
+                        f"{command_text}\nexec {_shell_quote(shell_executable, 'bash')}",
                     )
                 )
         else:
-            args.extend(("-NoLogo", "-NoExit", "-Command", command))
+            args.extend(("-NoLogo", "-NoExit", "-Command", command_text))
         return args
     if shell == "powershell":
-        return [executable, "-NoLogo", "-NoExit", "-Command", command]
+        return [executable, "-NoLogo", "-NoExit", "-Command", command_text]
     if shell == "cmd":
-        return [executable, "/D", "/K", command]
+        return [executable, "/D", "/K", command_text]
     if kind in {"terminal_app", "iterm2"}:
         apple_command = (
-            command.replace("\\", "\\\\")
+            command_text.replace("\\", "\\\\")
             .replace('"', '\\"')
             .replace("\r\n", "\n")
             .replace("\r", "\n")
@@ -722,12 +762,34 @@ def _terminal_process_command(
                 script = f'tell application "Terminal" to do script "{apple_command}"'
         return [executable, "-e", script]
     if kind == "gnome_terminal":
-        return [executable, "--working-directory", workdir, "--", shell_executable, "-lc", command]
+        return [
+            executable,
+            "--working-directory",
+            workdir,
+            "--",
+            shell_executable,
+            "-lc",
+            command_text,
+        ]
     if kind == "konsole":
-        return [executable, "--workdir", workdir, "-e", shell_executable, "-lc", command]
+        return [
+            executable,
+            "--workdir",
+            workdir,
+            "-e",
+            shell_executable,
+            "-lc",
+            command_text,
+        ]
     if kind == "xterm":
-        return [executable, "-e", shell_executable, "-lc", command]
-    return [executable, "--login", "-i", "-c", f"{command}\nexec {shell_executable}"]
+        return [executable, "-e", shell_executable, "-lc", command_text]
+    return [
+        executable,
+        "--login",
+        "-i",
+        "-c",
+        f"{command_text}\nexec {shell_executable}",
+    ]
 
 
 def _terminal_process_probe(
@@ -818,6 +880,7 @@ def launch_codex_cli(
     terminal_id: str,
     command: str,
     workdir: str,
+    provider: str = "",
     platform_name: str | None = None,
 ) -> dict[str, object]:
     """Launch the user-edited command in a new terminal window or tab."""
@@ -859,6 +922,7 @@ def launch_codex_cli(
         if platform == "windows"
         else 0
     )
+    title = build_codex_cli_title(provider=provider, workdir=str(path))
     # Redirected stdio makes PowerShell treat -NoExit as non-interactive and
     # exit after -Command completes. Let the new terminal own its stdio.
     process = subprocess.Popen(
@@ -867,6 +931,7 @@ def launch_codex_cli(
             command_text,
             str(path),
             open_as_tab=opened_as_tab,
+            title=title,
         ),
         cwd=str(path),
         env=_launch_environment(platform_name=platform_name),
@@ -879,6 +944,7 @@ def launch_codex_cli(
         "workdir": str(path),
         "openedAsTab": opened_as_tab,
         "launchMode": "new-tab" if opened_as_tab else "new-window",
+        "title": title,
     }
 
 
@@ -888,6 +954,7 @@ __all__ = [
     "REFERENCE_TERMINAL_PROFILE",
     "build_codex_cli_args",
     "build_codex_cli_command",
+    "build_codex_cli_title",
     "discover_codex_cli_options",
     "discover_terminals",
     "discover_workdirs",

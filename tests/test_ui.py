@@ -3345,15 +3345,27 @@ class BudgetHelperTests(unittest.TestCase):
             {
                 **base,
                 "phase": "prompt",
-                "promptEndsAtMs": 160_000,
+                "promptEndsAtMs": 0,
+                "promptWaitInfinite": True,
             }
         )
         prompt_copy = _rest_reminder_card_copy(prompt, now_ms=100_000)
         self.assertEqual(prompt_copy["headerMeta"], "今日已休息 01:05")
-        self.assertEqual(prompt_copy["statusText"], "等待选择 01:00 · 超时跳过")
+        self.assertEqual(prompt_copy["statusText"], "等待你的选择 · 不会自动跳过")
         self.assertEqual(
             [action["action"] for action in prompt_copy["actions"]],
-            ["restReminderPostpone", "restReminderStart"],
+            [
+                "restReminderPostpone",
+                "restReminderCredit",
+                "restReminderCredit",
+                "restReminderCredit",
+                "restReminderCreditMore",
+                "restReminderStart",
+            ],
+        )
+        self.assertEqual(
+            [action.get("minutes") for action in prompt_copy["actions"] if "minutes" in action],
+            [3, 5, 10],
         )
 
         postponed = _rest_reminder_overlay_item(
@@ -3579,6 +3591,7 @@ class BudgetHelperTests(unittest.TestCase):
             take_commands=MagicMock(
                 return_value=[
                     {"action": "restReminderPostpone", "phase": "prompt"},
+                    {"action": "restReminderCredit", "phase": "prompt", "minutes": 5},
                     {"action": "restReminderStart", "phase": "postponed"},
                     {"action": "restReminderFinish", "phase": "resting"},
                 ]
@@ -3595,13 +3608,18 @@ class BudgetHelperTests(unittest.TestCase):
             rest_reminder_command_callback=callback,
         )
 
-        self.assertEqual(handled, 3)
-        self.assertEqual(callback.call_count, 3)
+        self.assertEqual(handled, 4)
+        self.assertEqual(callback.call_count, 4)
         session_controller.activate_session.assert_not_called()
         events = runtime_events.drain()
         self.assertEqual(
             [event.context["action"] for event in events],
-            ["restReminderPostpone", "restReminderStart", "restReminderFinish"],
+            [
+                "restReminderPostpone",
+                "restReminderCredit",
+                "restReminderStart",
+                "restReminderFinish",
+            ],
         )
         self.assertTrue(all(event.context["restReminder"] for event in events))
 
@@ -15318,6 +15336,54 @@ class DaemonLifecycleTests(unittest.TestCase):
         restart_codex.assert_called_once_with()
         manager.wait_for_codex_replacement.assert_called_once_with(27172)
         self.assertEqual(renderer_session.call_count, 2)
+
+    def test_daemon_renderer_recovery_restart_captures_previous_pid(self) -> None:
+        manager = SimpleNamespace(
+            last_snapshot=SimpleNamespace(primary_pid=27172),
+            wait_for_codex=MagicMock(),
+            wait_for_codex_replacement=MagicMock(return_value=True),
+            poll_seconds=0.0,
+        )
+        loading = MagicMock()
+        loading.start.return_value = loading
+        renderer = MagicMock(
+            side_effect=[
+                RENDERER_HUD_UNAVAILABLE,
+                RENDERER_HUD_UNAVAILABLE,
+                RENDERER_HUD_UNAVAILABLE,
+                0,
+            ]
+        )
+        restart = MagicMock(return_value=True)
+        args = SimpleNamespace(daemon_poll_ms=500, no_startup_prompt=True)
+        services = _daemon_services_for_test(
+            manager=manager,
+            startup_decision=MagicMock(
+                return_value=daemon_runtime.DaemonStartupDecision(
+                    DAEMON_STARTUP_RENDERER,
+                    launch_codex=False,
+                )
+            ),
+            create_loading=MagicMock(return_value=loading),
+            run_renderer=renderer,
+        )
+
+        with (
+            patch(
+                "codex_usage_hud.daemon_runtime._default_restart_codex",
+                side_effect=restart,
+            ),
+            patch(
+                "codex_usage_hud.daemon_runtime._wait_for_renderer_recovery_retry",
+                return_value=True,
+            ),
+        ):
+            exit_code = run_daemon(args, services=services)
+
+        self.assertEqual(exit_code, 0)
+        restart.assert_called_once_with()
+        manager.wait_for_codex_replacement.assert_called_once_with(27172)
+        self.assertEqual(renderer.call_count, 4)
 
     def test_daemon_passes_its_own_codex_launch_to_renderer_attach(self) -> None:
         manager = SimpleNamespace(

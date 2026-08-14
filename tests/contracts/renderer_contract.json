@@ -6,8 +6,8 @@
   },
   "currentBundle": {
     "phase": "P6.7",
-    "sha256": "23fb002ef6ab62e717221cf7803f178d3d51858227e71248999ca31eda109edf",
-    "byteLength": 826171
+    "sha256": "14da2280707140b5844175f27d5f1efced2d50cff0e21ff9af92367d37a21444",
+    "byteLength": 862476
   },
   "sha256": "f83d65265c55143fa775f509f09ce109c2aa75a03946b42cf462cb6cbd4ea637",
   "byteLength": 548705,
@@ -41,7 +41,7 @@
     "mutationObservers": 6,
     "resizeObservers": 1,
     "setIntervals": 4,
-    "setTimeouts": 22,
+    "setTimeouts": 24,
     "kernelSetIntervals": 1,
     "kernelSetTimeouts": 1
   },
@@ -136,7 +136,8 @@
     "background_usage_policy",
     "settings_restart", "settings_export", "composer_attachments", "layout_report",
     "layout_settle", "layout_settle", "layout_settle", "composer_layout", "layout_bootstrap",
-    "session_view_progress", "copy_feedback", "stale_guard"
+    "session_view_progress", "copy_feedback", "stale_guard", "codex_cli_launch_timeout",
+    "codex_cli_launch_min_visible"
   ],
   "timeoutInventory": [
     {"owner": "model_picker", "creation": "ctx.lifecycle.timeout(\"model_picker\", patchCodexModelPicker, delay)", "cleanup": "ctx.lifecycle.clearTimeout(timer)"},

@@ -105,6 +105,8 @@ def _normalized_rest_reminder(value: object) -> dict[str, object] | None:
         "breakMinutes": max(1, int(value.get("breakMinutes") or 2)),
         "postponeMinutes": max(1, int(value.get("postponeMinutes") or 10)),
         "promptEndsAtMs": max(0, int(value.get("promptEndsAtMs") or 0)),
+        "promptWaitInfinite": bool(value.get("promptWaitInfinite")),
+        "earlyRestOptionsMinutes": [3, 5, 10],
         "postponeEndsAtMs": max(0, int(value.get("postponeEndsAtMs") or 0)),
         "restStartedAtMs": max(0, int(value.get("restStartedAtMs") or 0)),
         "restEndsAtMs": max(0, int(value.get("restEndsAtMs") or 0)),
@@ -148,10 +150,9 @@ def _rest_reminder_card_copy(
     color_status = "waiting_user"
     actions: list[dict[str, object]] = []
     if phase == "prompt":
-        remaining = max(0.0, (int(item.get("promptEndsAtMs") or 0) - current_ms) / 1000.0)
         title = "☕ 该休息一下了"
         header_meta = f"今日已休息 {_format_rest_duration(completed_today)}"
-        status = f"等待选择 {_format_rest_duration(remaining)} · 超时跳过"
+        status = "等待你的选择 · 不会自动跳过"
         if bool(item.get("canPostpone")):
             minutes = max(1, int(item.get("postponeMinutes") or 10))
             actions.append(
@@ -161,9 +162,17 @@ def _rest_reminder_card_copy(
                     "primary": False,
                 }
             )
-        actions.append(
-            {"action": "restReminderStart", "label": "开始休息", "primary": True}
+        actions.extend(
+            {
+                "action": "restReminderCredit",
+                "label": f"{minutes}分钟",
+                "minutes": minutes,
+                "primary": False,
+            }
+            for minutes in (3, 5, 10)
         )
+        actions.append({"action": "restReminderCreditMore", "label": "更多", "primary": False})
+        actions.append({"action": "restReminderStart", "label": "开始休息", "primary": True})
     elif phase == "postponed":
         remaining = max(
             0.0, (int(item.get("postponeEndsAtMs") or 0) - current_ms) / 1000.0
@@ -232,6 +241,8 @@ def _rest_reminder_overlay_item(reminder: Mapping[str, object]) -> dict[str, obj
         "breakMinutes": normalized["breakMinutes"],
         "postponeMinutes": normalized["postponeMinutes"],
         "promptEndsAtMs": normalized["promptEndsAtMs"],
+        "promptWaitInfinite": normalized["promptWaitInfinite"],
+        "earlyRestOptionsMinutes": normalized["earlyRestOptionsMinutes"],
         "postponeEndsAtMs": normalized["postponeEndsAtMs"],
         "restStartedAtMs": normalized["restStartedAtMs"],
         "restEndsAtMs": normalized["restEndsAtMs"],

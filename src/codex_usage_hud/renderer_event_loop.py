@@ -67,6 +67,8 @@ class RendererLoopState:
     activity_wake_pending: str = ""
     request_rows_limit: int = 30
     request_rows_session_id: str = ""
+    pending_refresh_plan: RefreshPlan = field(default_factory=RefreshPlan)
+    pending_retry_not_before: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +87,8 @@ class RendererLoopExecutorPorts:
     after_iteration: Callable[[object | None], None]
     compute_wait_delay: Callable[[object, RendererTickInputs, bool], float]
     wait: Callable[[float], object]
+    update_gate: Callable[[], tuple[bool, str, float]] = lambda: (True, "", 0.0)
+    record_refresh_merge: Callable[[], None] = lambda: None
 
 
 @dataclass(frozen=True, slots=True)
@@ -651,22 +655,67 @@ class RendererEventLoop:
             if self.ports.restart_requested():
                 return self.ports.restart_result()
             force_fast = self.ports.compute_force_fast(inputs)
+            plan = inputs.event_refresh_request
+            if self.state.pending_refresh_plan.has_work:
+                pending = self.state.pending_refresh_plan
+                self.ports.record_refresh_merge()
+                pending.merge(plan)
+                plan = pending
+                self.state.pending_refresh_plan = RefreshPlan()
+                inputs.event_refresh_request = plan
             snapshot_requested = bool(
-                inputs.event_refresh_request.snapshot
+                plan.snapshot
                 or self.state.latest_snapshot is None
                 or self.state.soft_reinstall_pending
             )
-            if snapshot_requested:
+            if snapshot_requested and not plan.snapshot:
+                plan.request_snapshot(force_fast=force_fast)
+            allowed, _reason, remaining = self.ports.update_gate()
+            if not allowed:
+                if plan.has_work:
+                    self.state.pending_refresh_plan.merge(plan)
+                self.state.pending_retry_not_before = max(
+                    self.state.pending_retry_not_before,
+                    inputs.started + max(0.05, float(remaining or 0.0)),
+                )
+                snapshot = self.ports.current_snapshot()
+            elif snapshot_requested:
                 snapshot = self.ports.apply_refresh(inputs, force_fast)
-                if self.state.soft_reinstall_pending and self.state.failures == 0:
-                    self.state.soft_reinstall_pending = False
+                if self.state.failures:
+                    self.state.pending_refresh_plan.merge(plan)
+                else:
+                    self.state.pending_retry_not_before = 0.0
+                    if self.state.soft_reinstall_pending:
+                        self.state.soft_reinstall_pending = False
             else:
                 snapshot = self.ports.current_snapshot()
-                self.ports.apply_domain_update(inputs)
+                domain_ok = self.ports.apply_domain_update(inputs)
+                if domain_ok:
+                    self.state.pending_retry_not_before = 0.0
+                elif plan.has_work and self._should_retain_failed_plan(plan):
+                    self.state.pending_refresh_plan.merge(plan)
                 self.ports.keep_alive()
+            allowed_after, _reason_after, remaining_after = self.ports.update_gate()
+            if not allowed_after:
+                self.state.pending_retry_not_before = max(
+                    self.state.pending_retry_not_before,
+                    inputs.started + max(0.05, float(remaining_after or 0.0)),
+                )
             self.ports.after_iteration(snapshot)
             delay = self.ports.compute_wait_delay(snapshot, inputs, force_fast)
             self.ports.wait(delay)
+
+    def _should_retain_failed_plan(self, plan: RefreshPlan) -> bool:
+        # Background-usage responses have their own bounded retry budget.
+        # When that budget is exhausted, do not requeue the same response
+        # through the generic CDP pending-plan path.
+        if not (plan.background_usage or "backgroundUsage" in plan.domains):
+            return True
+        non_background_domains = plan.domains - {"backgroundUsage"}
+        return bool(
+            non_background_domains
+            or self.state.background_usage_response_retry_attempts > 0,
+        )
 
 
 @dataclass(frozen=True, slots=True)

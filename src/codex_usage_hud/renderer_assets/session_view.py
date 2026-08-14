@@ -579,9 +579,76 @@ TEXT = r"""
     }
   }
 
-  function renderTopDetails(root, payload) {
+  function activityTaskItems(details) {
+    return Array.isArray(details?.activityTasks)
+      ? details.activityTasks.filter((item) => item && typeof item === "object")
+      : [];
+  }
+
+  function activityTaskSelection(root, payload, details, tasks) {
+    if (!tasks.length) {
+      delete root.dataset.activityTaskSessionKey;
+      delete root.dataset.activityTaskIndex;
+      return null;
+    }
+    const sessionKey = String(
+      payload?.rendererSessionId || payload?.sessionId || details?.title || "",
+    );
+    const count = tasks.length;
+    const payloadIndex = Number(details?.activityTaskIndex || 0);
+    const previousSessionKey = String(root.dataset.activityTaskSessionKey || "");
+    const previousCount = Number(root.dataset.activityTaskCount || 0);
+    let selected = Number(root.dataset.activityTaskIndex || 0);
+    if (
+      !Number.isFinite(selected)
+      || selected < 1
+      || previousSessionKey !== sessionKey
+      || previousCount !== count
+    ) {
+      selected = payloadIndex > 0 ? payloadIndex : count;
+    }
+    selected = clamp(Math.round(selected), 1, count);
+    root.dataset.activityTaskSessionKey = sessionKey;
+    root.dataset.activityTaskCount = String(count);
+    root.dataset.activityTaskIndex = String(selected);
+    return tasks.find((item) => Number(item.index || 0) === selected) || tasks[count - 1];
+  }
+
+  function renderActivityTaskNav(root, details, tasks, selected) {
+    const nav = root.querySelector('[data-field="topActivityTaskNav"]');
+    if (!nav) return;
+    const navigable = details?.activityTaskNavigable === true && tasks.length > 1 && !!selected;
+    nav.hidden = !navigable;
+    if (!navigable) return;
+    const index = Math.max(1, Number(selected.index || 1));
+    const count = Math.max(1, Number(selected.count || tasks.length));
+    const previous = nav.querySelector('[data-action="activity-task-prev"]');
+    const next = nav.querySelector('[data-action="activity-task-next"]');
+    if (previous) previous.disabled = index <= 1;
+    if (next) next.disabled = index >= count;
+    setText(root, "topActivityTaskOrdinal", `Req ${index}/${count}`);
+  }
+
+  function selectActivityTask(root, delta) {
+    const payload = currentPayload() || {};
     const details = payload?.topDetails || {};
-    const copies = payload?.topCopies || {};
+    const tasks = activityTaskItems(details);
+    if (details?.activityTaskNavigable !== true || tasks.length < 2) return false;
+    const current = Number(root.dataset.activityTaskIndex || details.activityTaskIndex || tasks.length);
+    const next = clamp(Math.round(current) + Number(delta || 0), 1, tasks.length);
+    root.dataset.activityTaskIndex = String(next);
+    renderTopDetails(root, payload);
+    return true;
+  }
+
+  function renderTopDetails(root, payload) {
+    const rawDetails = payload?.topDetails || {};
+    const tasks = activityTaskItems(rawDetails);
+    const selected = activityTaskSelection(root, payload, rawDetails, tasks);
+    const details = selected ? { ...rawDetails, ...selected } : rawDetails;
+    const copies = selected && selected.copies && typeof selected.copies === "object"
+      ? selected.copies
+      : (payload?.topCopies || {});
     const mapping = {
       topTitle: details.title || "Codex 会话 / 预算",
       topSession: details.session || "",
@@ -613,9 +680,12 @@ TEXT = r"""
       topActivityLast: details.activityLast || "",
       topSlow: details.slow || "",
       topGap: details.gap || "",
+      topActivityTaskOrdinal: selected?.taskOrdinal || "",
     };
     for (const [field, value] of Object.entries(mapping)) setText(root, field, value);
+    renderActivityTaskNav(root, rawDetails, tasks, selected);
     setFieldTitle(root, "topActivityLast", details.activityLastTooltip || details.activityLast || "");
+    setFieldTitle(root, "topActivityTaskOrdinal", selected?.taskOrdinal || "");
     renderHeavyRounds(root, details);
     renderActivityTimeline(root, details);
     const hasWarnings = !!String(details.warnings || "").trim();
@@ -725,6 +795,8 @@ TEXT = r"""
       refreshAllMarquees,
       refreshMarquee,
       renderActivityTimeline,
+      renderTopDetails,
+      selectActivityTask,
       setFieldTitle,
       setText,
     };

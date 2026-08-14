@@ -233,7 +233,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
         assert event2 is not None
         self.assertEqual(event2.message, "msg-b")
 
-    def test_prompt_timeout_auto_skips_and_repeats_without_rest_credit(self) -> None:
+    def test_prompt_waits_indefinitely_without_rest_credit(self) -> None:
         clock = {"now": 0.0}
         messages = iter(["first", "second"])
         scheduler = RestReminderScheduler(
@@ -257,30 +257,73 @@ class RestReminderSchedulerTests(unittest.TestCase):
         first = scheduler.tick()
         self.assertIsNotNone(first)
         self.assertTrue(scheduler.showing)
-        self.assertEqual(scheduler.state, "prompt")
-        self.assertAlmostEqual(scheduler.seconds_until_wake() or 0.0, 60.0)
 
-        clock["now"] = 120.9
-        self.assertIsNone(scheduler.tick())
-        self.assertTrue(scheduler.showing)
-        clock["now"] = 121.0
-        self.assertIsNone(scheduler.tick())
+    def test_credit_early_rest_adds_duration_and_count_and_rearms_focus(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        scheduler.configure(
+            RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                break_minutes=2,
+                idle_reset_minutes=0,
+            ),
+            force_reset=True,
+        )
+        clock["now"] = 61.0
+        wall["now"] += 61.0
+        self.assertIsNotNone(scheduler.tick())
+        self.assertTrue(scheduler.credit_early_rest(3))
         self.assertFalse(scheduler.showing)
+        self.assertEqual(scheduler.phase, "focus")
+        self.assertEqual(scheduler.today_rested_seconds, 180)
+        self.assertEqual(scheduler.today_rested_count, 1)
+        self.assertEqual(scheduler.completed_today_seconds, 180)
+        self.assertEqual(scheduler.completed_today_count, 1)
+        self.assertEqual(scheduler.last_rest_duration_seconds, 180)
         transition = scheduler.take_transition()
+        self.assertIsNotNone(transition)
         assert transition is not None
-        self.assertEqual(transition["kind"], "auto_skipped")
-        self.assertEqual(transition["todayRestedSeconds"], 0)
-        self.assertEqual(transition["todayRestedCount"], 0)
-        self.assertEqual(scheduler.cycle_started_at, 121.0)
-        self.assertEqual(scheduler.next_fire_at, 181.0)
+        self.assertEqual(transition["kind"], "credited_early")
+        self.assertEqual(transition["restDurationSeconds"], 180)
+        self.assertEqual(scheduler.next_fire_at, clock["now"] + 60.0)
 
-        clock["now"] = 181.1
-        second = scheduler.tick()
-        self.assertIsNotNone(second)
-        assert second is not None
-        self.assertEqual(second.message, "second")
+    def test_credit_early_rest_accepts_more_minutes_and_rejects_invalid_values(self) -> None:
+        clock = {"now": 0.0}
+        wall = {"now": self.WORK_WALL}
+        scheduler = RestReminderScheduler(
+            idle_seconds_provider=lambda: 0.0,
+            message_picker=lambda: "rest",
+            clock=lambda: clock["now"],
+            wall_clock=lambda: wall["now"],
+        )
+        scheduler.configure(
+            RestReminderConfig(enabled=True, interval_minutes=1, idle_reset_minutes=0),
+            force_reset=True,
+        )
+        clock["now"] = 61.0
+        self.assertIsNotNone(scheduler.tick())
+        self.assertFalse(scheduler.credit_early_rest(0))
+        self.assertTrue(scheduler.showing)
+        self.assertFalse(scheduler.credit_early_rest(1441))
+        self.assertTrue(scheduler.showing)
+        self.assertFalse(scheduler.credit_early_rest("5.5"))
+        self.assertTrue(scheduler.showing)
+        self.assertTrue(scheduler.credit_early_rest(15))
+        self.assertEqual(scheduler.today_rested_seconds, 900)
+        self.assertEqual(scheduler.today_rested_count, 1)
+        self.assertEqual(scheduler.phase, "focus")
+        self.assertFalse(scheduler.showing)
+        self.assertIsNone(scheduler.seconds_until_prompt_end())
+        self.assertIsNotNone(scheduler.seconds_until_wake())
 
-    def test_presenter_emits_due_once_then_auto_skip_transition(self) -> None:
+    def test_presenter_keeps_due_prompt_visible_until_explicit_choice(self) -> None:
         clock = {"now": 0.0}
         scheduler = RestReminderScheduler(
             idle_seconds_provider=lambda: 0.0,
@@ -320,14 +363,13 @@ class RestReminderSchedulerTests(unittest.TestCase):
             notify.assert_called_once()
 
         clock["now"] = 121.0
-        completed = presenter.tick()
-        assert completed is not None
-        self.assertFalse(completed["visible"])
-        self.assertFalse(completed["bubbleVisible"])
-        self.assertTrue(completed["autoSkipped"])
-        self.assertFalse(completed["preview"])
-        self.assertEqual(completed["todayRestedSeconds"], 0)
-        self.assertFalse(presenter.renderer_payload()["visible"])
+        self.assertIsNone(presenter.tick())
+        payload = presenter.renderer_payload()
+        self.assertTrue(payload["visible"])
+        self.assertTrue(payload["bubbleVisible"])
+        self.assertTrue(payload["promptWaitInfinite"])
+        self.assertNotIn("autoSkipped", payload)
+        self.assertEqual(payload["todayRestedSeconds"], 0)
 
     def test_postpone_once_only(self) -> None:
         clock = {"now": 0.0}
@@ -711,7 +753,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
             self.assertIn(False, {item.get("scheduleWaiting") for item in written})
             self.assertIn(True, {item.get("scheduleWaiting") for item in written})
 
-    def test_lunch_boundary_closes_visible_break_and_defers_next_round(self) -> None:
+    def test_lunch_boundary_does_not_close_visible_prompt(self) -> None:
         clock = {"now": 0.0}
         wall = {"now": self.WORK_WALL + 118 * 60}
         scheduler = RestReminderScheduler(
@@ -737,14 +779,19 @@ class RestReminderSchedulerTests(unittest.TestCase):
         wall["now"] += 61.0
         self.assertIsNotNone(scheduler.tick())
         self.assertTrue(scheduler.showing)
-        self.assertLess(scheduler.seconds_until_wake() or 999.0, 60.0)
+        self.assertIsNone(scheduler.seconds_until_wake())
 
         clock["now"] = 120.0
         wall["now"] = self.WORK_WALL + 120 * 60
         self.assertIsNone(scheduler.tick())
-        self.assertFalse(scheduler.showing)
+        self.assertTrue(scheduler.showing)
         self.assertEqual(scheduler.state, "lunch")
-        self.assertGreater(scheduler.seconds_until_wake() or 0.0, 0.0)
+        self.assertIsNone(scheduler.seconds_until_wake())
+
+        clock["now"] = 120.0 + 95 * 60
+        wall["now"] = self.WORK_WALL + (120 + 95) * 60
+        self.assertIsNone(scheduler.tick())
+        self.assertTrue(scheduler.showing)
 
     def test_idle_break_starts_new_round_when_user_returns(self) -> None:
         clock = {"now": 0.0}
@@ -1116,7 +1163,7 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertAlmostEqual(restarted.seconds_until_break_end() or 0.0, 40.0)
         self.assertIsNone(restarted.tick())
 
-    def test_active_prompt_snapshot_restores_waiting_choice_deadline(self) -> None:
+    def test_active_prompt_snapshot_restores_unbounded_waiting_choice(self) -> None:
         clock = {"now": 0.0}
         wall = {"now": self.WORK_WALL}
         scheduler = RestReminderScheduler(
@@ -1138,6 +1185,8 @@ class RestReminderSchedulerTests(unittest.TestCase):
         snapshot = scheduler.export_wall_state()
         assert snapshot is not None
         self.assertEqual(snapshot["phase"], "prompt")
+        self.assertEqual(snapshot["promptEndsAtMs"], 0)
+        self.assertTrue(snapshot["promptWaitInfinite"])
 
         wall["now"] += 20.0
         restarted = RestReminderScheduler(
@@ -1149,7 +1198,8 @@ class RestReminderSchedulerTests(unittest.TestCase):
         self.assertTrue(restarted.restore_wall_state(snapshot))
         self.assertTrue(restarted.showing)
         self.assertEqual(restarted.phase, "prompt")
-        self.assertAlmostEqual(restarted.seconds_until_prompt_end() or 0.0, 40.0)
+        self.assertIsNone(restarted.seconds_until_prompt_end())
+        self.assertIsNone(restarted.seconds_until_wake())
 
     def test_expired_focus_snapshot_fires_on_first_tick_after_restart(self) -> None:
         clock = {"now": 0.0}
@@ -1319,6 +1369,44 @@ class RestReminderSchedulerTests(unittest.TestCase):
             )
             remaining = presenter2.scheduler.seconds_until_next() or 0.0
             self.assertAlmostEqual(remaining, 45 * 60 - 300.0, places=1)
+
+    def test_presenter_credit_early_rest_persists_daily_accounting(self) -> None:
+        from codex_usage_hud.config import load_rest_reminder_state
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hud_settings.json"
+            clock = {"now": 0.0}
+            wall = {"now": self.WORK_WALL}
+            scheduler = RestReminderScheduler(
+                idle_seconds_provider=lambda: 0.0,
+                message_picker=lambda: "rest",
+                clock=lambda: clock["now"],
+                wall_clock=lambda: wall["now"],
+            )
+            presenter = RestReminderPresenter(
+                scheduler,
+                wall_clock=lambda: wall["now"],
+                state_path=path,
+            )
+            config = RestReminderConfig(
+                enabled=True,
+                interval_minutes=1,
+                break_minutes=2,
+                idle_reset_minutes=0,
+            )
+            presenter.configure(config, force_reset=True)
+            clock["now"] = 61.0
+            wall["now"] += 61.0
+            self.assertIsNotNone(presenter.tick())
+            self.assertTrue(presenter.credit_early_rest(5))
+
+            payload = presenter.renderer_payload()
+            self.assertEqual(payload["todayRestedSeconds"], 300)
+            self.assertEqual(payload["todayRestedCount"], 1)
+            saved = load_rest_reminder_state(path)
+            self.assertEqual(saved["dailyRestedSeconds"], 300)
+            self.assertEqual(saved["dailyRestedCount"], 1)
+            self.assertEqual(saved["phase"], "focus")
 
     def test_presenter_keeps_expired_snapshot_due_until_first_tick(self) -> None:
         from codex_usage_hud.config import (

@@ -11,7 +11,7 @@ from typing import Any
 
 from PySide6.QtCore import QPoint, QTimer, Qt
 from PySide6.QtGui import QCursor, QFont, QFontMetrics, QTextLayout, QTextOption
-from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QWidget
+from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QInputDialog, QWidget
 
 from ... import overlay_ipc
 from ...config import normalize_work_overlay_max_items
@@ -447,20 +447,36 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             if not _item_is_rest_reminder(item):
                 return
             action = str(item.get("action") or "").strip()
+            if action == "restReminderCreditMore":
+                minutes, accepted = QInputDialog.getInt(
+                    self,
+                    "提前休息",
+                    "我已提前休息了多少分钟？",
+                    15,
+                    1,
+                    1440,
+                    1,
+                )
+                if not accepted:
+                    return
+                action = "restReminderCredit"
+                item = {**dict(item), "minutes": int(minutes)}
             if action not in {
                 "restReminderAck",
                 "restReminderPostpone",
                 "restReminderStart",
                 "restReminderFinish",
+                "restReminderCredit",
             }:
                 return
-            if not self._append_command(
-                {
-                    "action": action,
-                    "phase": str(item.get("phase") or "").strip(),
-                    "requestedAt": time.time(),
-                }
-            ):
+            command = {
+                "action": action,
+                "phase": str(item.get("phase") or "").strip(),
+                "requestedAt": time.time(),
+            }
+            if action == "restReminderCredit":
+                command["minutes"] = int(item.get("minutes") or 0)
+            if not self._append_command(command):
                 return
             for window in self._rest_action_windows:
                 window.hide()

@@ -26,6 +26,7 @@ _TEXT_PREFIX = r"""
         models: [],
         modelsFetching: false,
         modelsError: "",
+        chatTestOk: false,
         options: null,
         terminalId: "",
         useProxy: false,
@@ -37,7 +38,14 @@ _TEXT_PREFIX = r"""
         model: "",
         commandEdited: false,
         commandText: "",
+        launchRequestId: "",
+        launchSubmitFrameId: 0,
+        launchTimeoutTimerId: 0,
+        launchMinVisibleTimerId: 0,
+        launchStartedAt: 0,
       };
+      const codexCliLaunchMinVisibleMs = 240;
+      const codexCliLaunchTimeoutMs = 15000;
 
       function codexCliLaunchStateKey() {
         const options = codexCliState.options || {};
@@ -338,9 +346,22 @@ _TEXT_PREFIX = r"""
 
       function codexCliModelNote() {
         if (codexCliState.modelsFetching) return "正在获取当前 Provider 的模型列表…";
-        if (codexCliState.modelsError) return escapeHtml(codexCliState.modelsError);
         const count = Array.isArray(codexCliState.models) ? codexCliState.models.length : 0;
         if (count) return `已从当前 Provider 获取 ${count} 个模型。`;
+        return "";
+      }
+
+      function codexCliChatTestSummarySuffix() {
+        if (!codexCliState.modelsError) return "";
+        const error = String(codexCliState.modelsError).trim();
+        return `（${escapeHtml(error)}）`;
+      }
+
+      function codexCliChatTestState() {
+        if (codexCliState.chatTestOk) return "hidden";
+        if (codexCliState.modelsError) return "open";
+        const count = Array.isArray(codexCliState.models) ? codexCliState.models.length : 0;
+        if (count) return "hidden";
         return "";
       }
 
@@ -364,6 +385,7 @@ _TEXT_PREFIX = r"""
             ${escapeHtml(item.label)} · ${escapeHtml(item.path)}
           </option>
         `).join("");
+        const chatTestState = codexCliChatTestState();
         const powershell7 = options.powershell7 || {};
         const powershellNotice = options.platform === "windows" && powershell7.available !== true
           ? `<div class="codex-usage-hud-codex-cli-notice" data-tone="warning">
@@ -402,8 +424,16 @@ _TEXT_PREFIX = r"""
               <select data-codex-cli-field="model">${codexCliModelOptions()}</select>
               <div class="codex-usage-hud-codex-cli-model-note" data-codex-cli-model-note="true">${codexCliModelNote()}</div>
             </label>
-            <details class="codex-usage-hud-codex-cli-chat-test" data-codex-cli-chat-test="true" ${codexCliState.modelsError ? "open" : ""}>
-              <summary>没有模型列表？改用自定义模型名发送简短聊天测试</summary>
+            <label class="codex-usage-hud-codex-cli-field">
+              <span>工作目录</span>
+              <select data-codex-cli-field="workdirSelect">
+                <option value="__custom__">自定义路径…</option>
+                ${workdirOptions}
+              </select>
+              <input data-codex-cli-field="workdirInput" value="${escapeHtml(codexCliState.workdir)}" placeholder="输入目录绝对路径" aria-label="工作目录路径">
+            </label>
+            <details class="codex-usage-hud-codex-cli-chat-test codex-usage-hud-codex-cli-wide" data-codex-cli-chat-test="true" ${chatTestState === "open" ? "open" : ""} ${chatTestState === "hidden" ? "hidden" : ""}>
+              <summary>没有模型列表？改用自定义模型名发送简短聊天测试${codexCliChatTestSummarySuffix()}</summary>
               <div class="codex-usage-hud-codex-cli-chat-test-body">
                 <label>
                   <span>自定义模型名称</span>
@@ -413,14 +443,6 @@ _TEXT_PREFIX = r"""
                 <div class="codex-usage-hud-codex-cli-chat-result" data-codex-cli-chat-result="true" aria-live="polite"></div>
               </div>
             </details>
-            <label class="codex-usage-hud-codex-cli-field">
-              <span>工作目录</span>
-              <select data-codex-cli-field="workdirSelect">
-                <option value="__custom__">自定义路径…</option>
-                ${workdirOptions}
-              </select>
-              <input data-codex-cli-field="workdirInput" value="${escapeHtml(codexCliState.workdir)}" placeholder="输入目录绝对路径" aria-label="工作目录路径">
-            </label>
           </div>
           <div class="codex-usage-hud-codex-cli-meta">调整上方选项会重新生成命令；直接编辑命令后，选项会尽量同步。</div>
           ${powershellNotice}
@@ -496,8 +518,10 @@ _TEXT_PREFIX = r"""
         codexCliState.models = [];
         codexCliState.modelsFetching = false;
         codexCliState.modelsError = "";
+        codexCliState.chatTestOk = false;
         codexCliState.commandEdited = false;
         codexCliState.commandText = "";
+        codexCliState.launchRequestId = "";
         const layer = document.createElement("div");
         layer.className = "codex-usage-hud-codex-cli-layer";
         layer.dataset.codexCliDialog = "true";
@@ -508,6 +532,7 @@ _TEXT_PREFIX = r"""
       }
 
       function closeCodexCliDialog() {
+        clearCodexCliLaunchLifecycle();
         codexCliDialogLayer()?.remove();
         codexCliState.open = false;
         codexCliState.requestId = "";
@@ -515,13 +540,35 @@ _TEXT_PREFIX = r"""
         codexCliState.models = [];
         codexCliState.modelsFetching = false;
         codexCliState.modelsError = "";
+        codexCliState.chatTestOk = false;
         codexCliState.commandEdited = false;
         codexCliState.commandText = "";
+        codexCliState.launchRequestId = "";
+        codexCliState.launchStartedAt = 0;
+      }
+
+      function clearCodexCliLaunchLifecycle() {
+        if (codexCliState.launchSubmitFrameId) {
+          ctx.lifecycle.clearFrame(codexCliState.launchSubmitFrameId);
+          codexCliState.launchSubmitFrameId = 0;
+        }
+        if (codexCliState.launchTimeoutTimerId) {
+          ctx.lifecycle.clearTimeout(codexCliState.launchTimeoutTimerId);
+          codexCliState.launchTimeoutTimerId = 0;
+        }
+        if (codexCliState.launchMinVisibleTimerId) {
+          ctx.lifecycle.clearTimeout(codexCliState.launchMinVisibleTimerId);
+          codexCliState.launchMinVisibleTimerId = 0;
+        }
       }
 
       function refreshCodexCliDialog() {
         if (!codexCliState.open) return;
         codexCliState.options = null;
+        codexCliState.models = [];
+        codexCliState.modelsFetching = false;
+        codexCliState.modelsError = "";
+        codexCliState.chatTestOk = false;
         renderCodexCliDialog();
         requestCodexCliDiscovery();
         requestCodexCliModels();
@@ -553,6 +600,7 @@ _TEXT_PREFIX = r"""
       function launchCodexCliFromDialog() {
         const layer = codexCliDialogLayer();
         if (!layer) return;
+        if (codexCliState.launchRequestId) return;
         codexCliReadControls();
         const command = String(layer.querySelector('[data-codex-cli-field="command"]')?.value || "");
         const status = layer.querySelector('[data-codex-cli-status="true"]');
@@ -567,23 +615,61 @@ _TEXT_PREFIX = r"""
         codexCliPersistLaunchState(command);
         const launch = layer.querySelector('[data-action="codex-cli-launch"]');
         if (launch) launch.disabled = true;
-        submitSettingsCommand(
-          {
-            action: "codexCliLaunch",
-            provider: codexCliState.provider,
-            profile: String(codexCliState.options?.profile || ""),
-            terminalId: codexCliState.terminalId,
-            useProxy: codexCliState.useProxy === true,
-            proxyPort: codexCliState.proxyPort,
-            permission: codexCliState.permission,
-            resume: codexCliState.resume === true,
-            command,
-            workdir: codexCliState.workdir,
-            workdirCustom: codexCliState.workdirCustom === true,
+        const requestId = typedSettingsRequestId("codex-cli-launch");
+        codexCliState.launchRequestId = requestId;
+        codexCliState.launchStartedAt = Date.now();
+        openSettingsLoading({
+          kicker: "正在启动",
+          title: "正在打开终端",
+          body: "正在检查终端并启动 Codex CLI，请稍候。",
+          mode: "codex-cli-launch",
+        });
+        const launchCommand = {
+          action: "codexCliLaunch",
+          requestId,
+          provider: codexCliState.provider,
+          profile: String(codexCliState.options?.profile || ""),
+          terminalId: codexCliState.terminalId,
+          useProxy: codexCliState.useProxy === true,
+          proxyPort: codexCliState.proxyPort,
+          permission: codexCliState.permission,
+          resume: codexCliState.resume === true,
+          command,
+          workdir: codexCliState.workdir,
+          workdirCustom: codexCliState.workdirCustom === true,
+        };
+        codexCliState.launchTimeoutTimerId = ctx.lifecycle.timeout(
+          "codex_cli_launch_timeout",
+          () => {
+            if (codexCliState.launchRequestId !== requestId) return;
+            clearCodexCliLaunchLifecycle();
+            codexCliState.launchRequestId = "";
+            codexCliState.launchStartedAt = 0;
+            closeSettingsConfirm();
+            const currentLayer = codexCliDialogLayer();
+            const launchButton = currentLayer?.querySelector('[data-action="codex-cli-launch"]');
+            const statusNode = currentLayer?.querySelector('[data-codex-cli-status="true"]');
+            if (launchButton) launchButton.disabled = false;
+            if (statusNode) statusNode.textContent = "启动请求超时，请检查终端是否已打开后再重试。";
           },
-          "正在打开终端并启动 Codex CLI...",
-          { preserveOverlay: true },
+          codexCliLaunchTimeoutMs,
         );
+        codexCliState.launchSubmitFrameId = ctx.lifecycle.frame("codex_cli_launch_submit", () => {
+          codexCliState.launchSubmitFrameId = 0;
+          if (!codexCliState.open || codexCliState.launchRequestId !== requestId) return;
+          const submitted = submitSettingsCommand(
+            launchCommand,
+            "正在打开终端并启动 Codex CLI...",
+            { preserveOverlay: true },
+          );
+          if (!submitted) {
+            clearCodexCliLaunchLifecycle();
+            codexCliState.launchRequestId = "";
+            codexCliState.launchStartedAt = 0;
+            closeSettingsConfirm();
+            if (launch) launch.disabled = false;
+          }
+        });
       }
 
       function chatTestCodexCliFromDialog() {
@@ -621,6 +707,17 @@ _TEXT_PREFIX = r"""
       function applyCodexCliCommandStatus(status) {
         if (!status || typeof status !== "object") return;
         const action = String(status.action || "");
+        if (action === "codexCliLaunchPending" && codexCliState.open) {
+          const expected = String(codexCliState.launchRequestId || "");
+          const received = String(status.requestId || "");
+          if (!expected || !received || expected !== received) return;
+          setSettingsLoadingText({
+            kicker: "正在启动",
+            title: "正在打开终端",
+            body: "启动命令已提交，正在等待终端响应。",
+          });
+          return;
+        }
         if (action === "codexCliFetchModels" && codexCliState.open) {
           codexCliState.modelsFetching = false;
           const payload = status.codexCliModels;
@@ -656,6 +753,7 @@ _TEXT_PREFIX = r"""
           if (ok && result?.model) {
             // 测试成功的模型直接作为启动模型选择，便于直接用该模型启动。
             codexCliState.model = String(result.model).trim();
+            codexCliState.chatTestOk = true;
             renderCodexCliDialog();
           }
           return;
@@ -680,11 +778,39 @@ _TEXT_PREFIX = r"""
           return;
         }
         if (action === "codexCliLaunch" && codexCliState.open) {
-          const launch = codexCliDialogLayer()?.querySelector('[data-action="codex-cli-launch"]');
-          if (launch) launch.disabled = false;
-          if (String(status.kind || "") !== "error" && status.codexCliLaunch) {
-            closeCodexCliDialog();
+          const expected = String(codexCliState.launchRequestId || "");
+          const received = String(status.requestId || "");
+          if (!expected || !received || expected !== received) return;
+          const finish = () => {
+            if (codexCliState.launchRequestId !== received) return;
+            clearCodexCliLaunchLifecycle();
+            codexCliState.launchRequestId = "";
+            codexCliState.launchStartedAt = 0;
+            const launch = codexCliDialogLayer()?.querySelector('[data-action="codex-cli-launch"]');
+            closeSettingsConfirm();
+            if (String(status.kind || "") !== "error" && status.codexCliLaunch) {
+              closeCodexCliDialog();
+            } else if (launch) {
+              launch.disabled = false;
+              const statusNode = codexCliDialogLayer()?.querySelector('[data-codex-cli-status="true"]');
+              if (statusNode) statusNode.textContent = String(status.message || "Codex CLI 启动失败，请检查命令和终端设置。");
+            }
+          };
+          const elapsed = Math.max(0, Date.now() - Number(codexCliState.launchStartedAt || Date.now()));
+          if (codexCliState.launchTimeoutTimerId) {
+            ctx.lifecycle.clearTimeout(codexCliState.launchTimeoutTimerId);
+            codexCliState.launchTimeoutTimerId = 0;
           }
+          const remaining = codexCliLaunchMinVisibleMs - elapsed;
+          if (remaining > 0) {
+            codexCliState.launchMinVisibleTimerId = ctx.lifecycle.timeout(
+              "codex_cli_launch_min_visible",
+              finish,
+              remaining,
+            );
+            return;
+          }
+          finish();
         }
       }
 
@@ -999,7 +1125,11 @@ _TEXT_PREFIX = r"""
           .replace(/[^A-Za-z0-9]+/g, "_")
           .replace(/^_+|_+$/g, "")
           .toUpperCase();
-        return `${normalized || "PROVIDER"}_API_KEY`;
+        // 环境变量名必须以字母或下划线开头；数字开头的 Provider ID（如 123abc）
+        // 自动生成的键名如果保持数字开头，会同时被前端和 codex_provider_config 的
+        // ENVIRONMENT_KEY_PATTERN 拒绝且提示不可见，表现为「添加」无反应。
+        const prefix = /^[0-9]/.test(normalized) ? "_" : "";
+        return `${prefix}${normalized || "PROVIDER"}_API_KEY`;
       }
 
       function suggestedProviderIdFromBaseUrl(baseUrl) {
@@ -1271,21 +1401,42 @@ _TEXT_PREFIX = r"""
         return { text: parts.join(" · "), tone };
       }
 
+      function settingsProviderTabHtml(settings, provider) {
+        const draft = ensureSettingsProviderDraft(settings);
+        const badge = settingsProviderTabBadge(settings, provider);
+        const dirty = settingsDirtyProviders.has(provider);
+        return `
+          <button type="button" class="codex-usage-hud-provider-tab" role="tab"
+            data-action="settings-provider-tab" data-provider-tab="true" data-provider="${escapeHtml(provider)}"
+            aria-selected="${provider === draft.activeProvider}"
+            aria-label="切换到 Provider ${escapeHtml(provider)}">
+            <span>${escapeHtml(provider)}</span>
+            ${badge ? `<span class="codex-usage-hud-provider-tab-badge">${escapeHtml(badge)}</span>` : ""}
+            ${dirty ? '<span class="codex-usage-hud-provider-dirty-dot" aria-hidden="true"></span><span class="codex-usage-hud-settings-visually-hidden">有未保存修改</span>' : ""}
+          </button>
+        `;
+      }
+
       function settingsProviderTabsHtml(settings) {
         const draft = ensureSettingsProviderDraft(settings);
-        return draft.order.map((provider) => {
-          const badge = settingsProviderTabBadge(settings, provider);
-          const dirty = settingsDirtyProviders.has(provider);
-          return `
-            <button type="button" class="codex-usage-hud-provider-tab" role="tab"
-              data-action="settings-provider-tab" data-provider-tab="true" data-provider="${escapeHtml(provider)}"
-              aria-selected="${provider === draft.activeProvider}">
-              <span>${escapeHtml(provider)}</span>
-              ${badge ? `<span class="codex-usage-hud-provider-tab-badge">${escapeHtml(badge)}</span>` : ""}
-              ${dirty ? '<span class="codex-usage-hud-provider-dirty-dot" aria-hidden="true"></span><span class="codex-usage-hud-settings-visually-hidden">有未保存修改</span>' : ""}
-            </button>
-          `;
-        }).join("");
+        const appProvider = draft.appProvider && draft.order.includes(draft.appProvider)
+          ? draft.appProvider
+          : "";
+        const railProviders = draft.order.filter((provider) => provider !== appProvider);
+        const appTab = appProvider
+          ? `<div class="codex-usage-hud-provider-tab-fixed" data-provider-tab-fixed="true">${settingsProviderTabHtml(settings, appProvider)}</div>`
+          : "";
+        const railTabs = railProviders.map((provider) => settingsProviderTabHtml(settings, provider)).join("");
+        return `
+          <div class="codex-usage-hud-provider-navigation" data-provider-navigation="true" role="tablist" aria-label="Provider">
+            ${appTab}
+            <div class="codex-usage-hud-provider-tab-viewport" data-provider-tab-viewport="true">
+              <button type="button" class="codex-usage-hud-provider-nav-button" data-action="settings-provider-nav" data-direction="prev" aria-label="显示前一个 Provider" title="显示前一个 Provider" hidden>‹</button>
+              <div class="codex-usage-hud-provider-tabs" data-provider-tabs="true">${railTabs}</div>
+              <button type="button" class="codex-usage-hud-provider-nav-button" data-action="settings-provider-nav" data-direction="next" aria-label="显示后一个 Provider" title="显示后一个 Provider" hidden>›</button>
+            </div>
+          </div>
+        `;
       }
 
       function settingsProviderEditorHtml(settings) {
@@ -1294,9 +1445,7 @@ _TEXT_PREFIX = r"""
         const head = `
           <div class="codex-usage-hud-provider-editor-head">
             <div class="codex-usage-hud-price-title">模型单价</div>
-            <div class="codex-usage-hud-provider-tabs" data-provider-tabs="true" role="tablist" aria-label="Provider">
-              ${settingsProviderTabsHtml(settings)}
-            </div>
+            ${settingsProviderTabsHtml(settings)}
             <div class="codex-usage-hud-price-unit-wrap">
               <div class="codex-usage-hud-price-unit">USD / 1M tokens</div>
               <button type="button" class="codex-usage-hud-settings-action codex-usage-hud-provider-add-action" data-action="settings-add-provider">新增供应商</button>
@@ -1356,7 +1505,7 @@ _TEXT_PREFIX = r"""
       }
 
       function revealSettingsProviderTab(tab) {
-        const tabs = tab?.parentElement;
+        const tabs = tab?.closest?.('[data-provider-tabs="true"]');
         if (!tab || !tabs) return;
         const left = tab.offsetLeft;
         const right = left + tab.offsetWidth;
@@ -1367,11 +1516,76 @@ _TEXT_PREFIX = r"""
         }
       }
 
+      function settingsProviderNavigationRoot(node = null) {
+        if (node?.matches?.('[data-provider-navigation="true"]')) return node;
+        return node?.closest?.('[data-provider-navigation="true"]')
+          || document.querySelector(`#${settingsModalId} [data-provider-navigation="true"]`);
+      }
+
+      function syncSettingsProviderTabNavigation(node = null) {
+        const navigation = settingsProviderNavigationRoot(node);
+        const viewport = navigation?.querySelector?.('[data-provider-tab-viewport="true"]');
+        const tabs = viewport?.querySelector?.('[data-provider-tabs="true"]');
+        if (!navigation || !viewport || !tabs) return;
+        const hasTabs = !!tabs.querySelector('[data-provider-tab="true"]');
+        viewport.hidden = !hasTabs;
+        if (!hasTabs) return;
+        const hasOverflow = tabs.scrollWidth > tabs.clientWidth + 1;
+        const canPrev = tabs.scrollLeft > 1;
+        const canNext = tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1;
+        navigation.dataset.providerOverflow = String(hasOverflow);
+        const previous = viewport.querySelector('[data-direction="prev"]');
+        const next = viewport.querySelector('[data-direction="next"]');
+        if (previous) {
+          previous.hidden = !hasOverflow;
+          previous.disabled = !canPrev;
+        }
+        if (next) {
+          next.hidden = !hasOverflow;
+          next.disabled = !canNext;
+        }
+      }
+
+      function settingsProviderRailDirectionForTab(tab) {
+        const tabs = tab?.closest?.('[data-provider-tabs="true"]');
+        if (!tabs || tabs.clientWidth <= 0 || tabs.scrollWidth <= tabs.clientWidth + 1) return 0;
+        const tabRect = tab.getBoundingClientRect();
+        const railRect = tabs.getBoundingClientRect();
+        if (tabs.scrollLeft > 1 && tabRect.left <= railRect.left + 1) return -1;
+        if (tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1 && tabRect.right >= railRect.right - 1) return 1;
+        return 0;
+      }
+
+      function scrollSettingsProviderRail(direction = 0, node = null) {
+        const navigation = settingsProviderNavigationRoot(node);
+        const tabs = navigation?.querySelector?.('[data-provider-tabs="true"]');
+        if (!tabs || !direction) return false;
+        const items = Array.from(tabs.querySelectorAll('[data-provider-tab="true"]'));
+        if (!items.length) return false;
+        const railRect = tabs.getBoundingClientRect();
+        let target = null;
+        if (direction < 0) {
+          target = items.filter((item) => item.getBoundingClientRect().right <= railRect.left + 1).pop() || items[0];
+        } else {
+          target = items.find((item) => item.getBoundingClientRect().left >= railRect.right - 1) || items[items.length - 1];
+        }
+        // offsetLeft may be relative to the outer navigation wrapper rather
+        // than this scroll container. Convert the target's visible position
+        // back into the rail's content coordinate so the edge button can
+        // actually move away from the current scroll boundary.
+        const targetLeft = tabs.scrollLeft + (target.getBoundingClientRect().left - railRect.left);
+        const nextLeft = Math.max(0, Math.min(targetLeft, tabs.scrollWidth - tabs.clientWidth));
+        tabs.scrollTo({ left: nextLeft, behavior: "smooth" });
+        return true;
+      }
+
       function renderSettingsProviderTabs() {
-        const tabs = document.querySelector(`#${settingsModalId} [data-provider-tabs="true"]`);
-        if (!tabs || !settingsProviderDraft) return;
-        tabs.innerHTML = settingsProviderTabsHtml(hudSettingsFromPayload());
-        revealSettingsProviderTab(tabs.querySelector('[aria-selected="true"]'));
+        const navigation = document.querySelector(`#${settingsModalId} [data-provider-navigation="true"]`);
+        if (!navigation || !settingsProviderDraft) return;
+        navigation.outerHTML = settingsProviderTabsHtml(hudSettingsFromPayload());
+        const nextNavigation = document.querySelector(`#${settingsModalId} [data-provider-navigation="true"]`);
+        revealSettingsProviderTab(nextNavigation?.querySelector('[aria-selected="true"]'));
+        syncSettingsProviderTabNavigation(nextNavigation);
       }
 
       function captureSettingsProviderForm() {
@@ -1452,17 +1666,30 @@ _TEXT_PREFIX = r"""
         editor.innerHTML = settingsProviderEditorHtml(hudSettingsFromPayload());
         const activeTab = editor.querySelector('[data-provider-tab="true"][aria-selected="true"]');
         revealSettingsProviderTab(activeTab);
+        syncSettingsProviderTabNavigation(editor);
         if (focusTab) activeTab?.focus?.();
         updateSettingsProviderDraftStatus();
       }
 
-      function switchSettingsProvider(provider, { focusTab = false } = {}) {
+      function switchSettingsProvider(provider, { focusTab = false, railDirection = 0 } = {}) {
         const nextProvider = String(provider || "").trim().toLowerCase();
         if (!settingsProviderDraft?.order.includes(nextProvider) || nextProvider === settingsProviderDraft.activeProvider) return;
         captureSettingsProviderForm();
         settingsProviderDraft.activeProvider = nextProvider;
         window[settingsProviderName] = nextProvider;
         renderSettingsProviderEditor({ focusTab });
+        if (railDirection) scrollSettingsProviderRail(railDirection);
+      }
+
+      function activateSettingsProviderTab(tab) {
+        const provider = String(tab?.dataset?.provider || "").trim().toLowerCase();
+        if (!provider) return;
+        const railDirection = settingsProviderRailDirectionForTab(tab);
+        if (provider === settingsProviderDraft?.activeProvider) {
+          if (railDirection) scrollSettingsProviderRail(railDirection);
+          return;
+        }
+        switchSettingsProvider(provider, { railDirection });
       }
 
       function cloneProviderModelPrices(value, provider) {
@@ -1672,6 +1899,18 @@ _TEXT_PREFIX = r"""
         ensureSettingsProviderDraft(settings);
         const normalizedProvider = String(provider || "").trim().toLowerCase();
         const target = isNew ? null : ensureCodexProviderDraft(settings, normalizedProvider);
+        // 每次打开编辑对话框都从 provider registry 刷新 API key 回显值，
+        // 避免使用会话内缓存的旧 draft 值。
+        if (target) {
+          const registryEntry = settings.provider_registry?.[normalizedProvider] || {};
+          target.currentApiKey = String(registryEntry.apiKey || "");
+          if (typeof registryEntry.hasApiKey === "boolean") {
+            target.hasApiKey = registryEntry.hasApiKey;
+          }
+          target.envKey = String(registryEntry.envKey || target.originalEnvKey || target.envKey || "");
+          target.baseUrl = String(registryEntry.baseUrl || target.baseUrl || "");
+          target.configText = String(registryEntry.configText || target.configText || "");
+        }
         const targetEnvKey = target?.envKey || (isNew ? suggestedProviderEnvironmentKey(normalizedProvider) : "");
         const initialConfigText = String(
           target?.configText
@@ -1703,7 +1942,7 @@ _TEXT_PREFIX = r"""
                   <option value="">不复制，使用当前默认价格</option>
                   ${sourceOptions}
                 </select>
-              </label>` : ""}
+              </label>` : `<div class="codex-usage-hud-provider-config-grid-placeholder" aria-hidden="true"></div>`}
               <label>Base URL
                 <input data-provider-config-field="base_url" value="${escapeHtml(target?.baseUrl || "")}" placeholder="https://api.example.com/v1" autocomplete="url">
               </label>
@@ -1745,6 +1984,7 @@ _TEXT_PREFIX = r"""
               </label>
             </details>
             <div class="codex-usage-hud-settings-confirm-body">保存设置后会更新用户的 config.toml；API key 只写入用户环境变量，不会保存到 HUD 配置。编辑时已填充当前密钥，点击 👁 可查看明文。</div>
+            <div class="codex-usage-hud-provider-config-status" data-provider-config-status="true" role="alert" aria-live="polite"></div>
             <div class="codex-usage-hud-settings-confirm-actions">
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-cancel" data-variant="ghost">取消</button>
               <button type="button" class="codex-usage-hud-settings-action" data-action="settings-provider-apply" data-primary="true">${isNew ? "添加" : "应用"}</button>
@@ -1785,9 +2025,22 @@ _TEXT_PREFIX = r"""
           });
         });
         sectionNode?.addEventListener("input", () => syncProviderFieldsFromSection(layer));
-        const initialFocusNode = isNew ? baseUrlNode : idNode;
+        // 编辑时自动选中 API key 输入框，便于直接替换密钥；
+        // 新增时聚焦 Base URL 方便输入地址。
+        const apiKeyNode = layer.querySelector('[data-provider-config-field="api_key"]');
+        const initialFocusNode = isNew ? baseUrlNode : apiKeyNode;
         initialFocusNode?.focus?.();
         initialFocusNode?.select?.();
+      }
+
+      function setProviderConfigDialogError(message) {
+        setSettingsStatus(message, "error");
+        const layer = document.querySelector(`#${settingsModalId} [data-provider-config-dialog="true"]`);
+        const target = layer?.querySelector('[data-provider-config-status="true"]');
+        if (target) {
+          target.textContent = String(message || "");
+          target.dataset.kind = "error";
+        }
       }
 
       function applyProviderConfigDialog() {
@@ -1810,29 +2063,29 @@ _TEXT_PREFIX = r"""
           : String(envNode?.value || "").trim();
         const apiKey = String(apiKeyNode?.value || "");
         if (!/^[A-Za-z0-9_-]+$/.test(provider) || (isNew && provider === "custom")) {
-          setSettingsStatus("Provider ID 只能使用字母、数字、连字符或下划线，且不能是 custom。", "error");
+          setProviderConfigDialogError("Provider ID 只能使用字母、数字、连字符或下划线，且不能是 custom。");
           return false;
         }
         if (!baseUrl || /[\r\n]/.test(baseUrl)) {
-          setSettingsStatus("Base URL 不能为空且必须是单行文本。", "error");
+          setProviderConfigDialogError("Base URL 不能为空且必须是单行文本。");
           return false;
         }
         const existingCodex = codexProviderDrafts.get(provider);
         if (envKey && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey)) {
-          setSettingsStatus("请输入有效的用户环境变量名称。", "error");
+          setProviderConfigDialogError("请输入有效的用户环境变量名称。");
           return false;
         }
         if (!envKey && (isNew || existingCodex?.originalEnvKey)) {
-          setSettingsStatus("请输入有效的用户环境变量名称。", "error");
+          setProviderConfigDialogError("请输入有效的用户环境变量名称。");
           return false;
         }
         const existing = settingsProviderDraft.providers[provider];
         if (isNew && existing) {
-          setSettingsStatus(`Provider ${provider} 已存在。`, "error");
+          setProviderConfigDialogError(`Provider ${provider} 已存在。`);
           return false;
         }
         if (!apiKey && isNew && !existingCodex?.hasApiKey) {
-          setSettingsStatus("新增供应商时请输入 API key。", "error");
+          setProviderConfigDialogError("新增供应商时请输入 API key。");
           return false;
         }
         const settings = hudSettingsFromPayload();
@@ -1856,7 +2109,7 @@ _TEXT_PREFIX = r"""
           settingsProviderDraft.activeProvider = provider;
           window[settingsProviderName] = provider;
         } else if (!existing) {
-          setSettingsStatus(`Provider ${provider} 当前没有可编辑的价格草稿。`, "error");
+          setProviderConfigDialogError(`Provider ${provider} 当前没有可编辑的价格草稿。`);
           return false;
         }
         codexProviderDrafts.set(provider, {
@@ -1882,7 +2135,24 @@ _TEXT_PREFIX = r"""
         renderSettingsProviderEditor();
         renderSettingsProviderTabs();
         // 新增/编辑供应商后直接自动保存生效，无需再点设置页「保存」。
-        commitSettingsFromDraft(`正在保存供应商 ${provider} 配置...`);
+        if (isNew) {
+          // 新增供应商时直接保存新价格，不再弹出「保存新价格」确认对话框。
+          commitSettingsFromDraft(`正在保存供应商 ${provider} 配置...`, {
+            skipPricingDialog: true,
+          });
+          return true;
+        }
+        // 编辑供应商只保存 provider 配置（Base URL / 环境变量 / API key / config.toml 段），
+        // 不提交 model 单价，避免触发价格变更校验或「保存新价格」确认流程。
+        const submitted = submitSettingsCommand(
+          { action: "save", codexProviders: collectCodexProviderUpdates() },
+          `正在保存供应商 ${provider} 配置...`,
+        );
+        if (submitted) {
+          settingsDirtyProviders.clear();
+          codexProviderDirty.clear();
+          renderSettingsProviderTabs();
+        }
         return true;
       }
 
@@ -2025,6 +2295,8 @@ _TEXT_PREFIX = r"""
         }
         const settings = hudSettingsFromPayload();
         settingsActiveTab = activeTab;
+        // 重新打开设置界面时重置粘性错误，避免上一轮的旧错误残留到新一轮。
+        settingsStatusErrorSticky = false;
         writeSettingsUiState(true, activeTab);
         if (activeTab === "settings") ensureSettingsProviderDraft(settings, resetProviderDraft);
         const path = settingsPathLabel();
@@ -2065,6 +2337,7 @@ _TEXT_PREFIX = r"""
           for (const layer of preservedSecondaryLayers) nextDialog.appendChild(layer);
         }
         modal.hidden = false;
+        if (activeTab === "settings") syncSettingsProviderTabNavigation(nextDialog);
         ensureRestReminderCountdownTicker();
         ensureSessionCleanupElapsedTicker();
         updateAboutActionButtons(currentUpdateState());
@@ -2174,10 +2447,23 @@ _TEXT_PREFIX = r"""
 
 """
 
-_TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
+_TEXT_SUFFIX = r"""      // 状态栏是否正在展示一条「粘性错误」。为 true 时，兜底刷新（后台每轮
+      // 渲染都会清空 settings_command_status，下一轮只带来 updateState 文案）
+      // 不得覆盖当前错误文本，只有真实的新结果或用户操作才会清除，从而
+      // 让错误信息显示久一点，不被后来的信息刷掉。
+      let settingsStatusErrorSticky = false;
+
+      function setSettingsStatus(text, kind = "") {
         const node = document.querySelector(`#${settingsModalId} [data-settings-status="true"]`);
         if (!node) return;
-        node.textContent = String(text || "");
+        text = String(text || "");
+        kind = String(kind || "");
+        if (text && kind === "error") {
+          settingsStatusErrorSticky = true;
+        } else {
+          settingsStatusErrorSticky = false;
+        }
+        node.textContent = text;
         node.dataset.kind = kind;
       }
 
@@ -2273,9 +2559,11 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
               (Number(timing?.restEndsAtMs || timing?.breakEndsAtMs) - Date.now()) / 1000,
             );
           } else if (state === "prompt") {
-            remaining.textContent = formatRestReminderRemaining(
-              (Number(timing?.promptEndsAtMs) - Date.now()) / 1000,
-            );
+            remaining.textContent = timing?.promptWaitInfinite === true
+              ? "等待你的选择"
+              : formatRestReminderRemaining(
+                (Number(timing?.promptEndsAtMs) - Date.now()) / 1000,
+              );
           } else if (state === "postponed") {
             remaining.textContent = formatRestReminderRemaining(
               (Number(timing?.postponeEndsAtMs) - Date.now()) / 1000,
@@ -2542,7 +2830,13 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
           }
           return;
         }
-        setSettingsStatus(state.message || state.title || "", state.error ? "error" : "");
+        // 兜底：仅在确实有非空文案、且当前没有粘性错误在展示时才覆盖状态栏。
+        // 后台的 settings_command_status 每轮渲染后会清空，若这里无条件写空串，
+        // 会把当轮刚展示的错误信息在下一轮刷新时立刻刷掉（一闪而过）。
+        const fallbackText = String(state?.message || state?.title || "").trim();
+        if (fallbackText && !settingsStatusErrorSticky) {
+          setSettingsStatus(state.message || state.title || "", state.error ? "error" : "");
+        }
         setSettingsRestartVisible(false);
       }
 
@@ -3329,9 +3623,27 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
         );
       }
 
-      function commitSettingsFromDraft(pendingMessage) {
+      function commitSettingsFromDraft(pendingMessage, { skipPricingDialog = false } = {}) {
         const settings = collectSettingsForm();
         if (pricingChanged(settings)) {
+          // 新增供应商时直接保存新价格，跳过「保存新价格」确认对话框。
+          if (skipPricingDialog) {
+            const codexProviders = collectCodexProviderUpdates();
+            const submitted = submitSettingsCommand(
+              {
+                action: "savePricing",
+                settings,
+                ...(codexProviders.length ? { codexProviders } : {}),
+              },
+              pendingMessage || "正在保存新的价格版本...",
+            );
+            if (submitted) {
+              settingsDirtyProviders.clear();
+              codexProviderDirty.clear();
+              renderSettingsProviderTabs();
+            }
+            return;
+          }
           openPricingEffectiveDialog({
             mode: "save",
             settings,
@@ -3685,21 +3997,25 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
       codexCliFieldChange,
       launchCodexCliFromDialog,
       chatTestCodexCliFromDialog,
-      settingsProviderTabBadge,
-      settingsProviderMeta,
-      settingsProviderTabsHtml,
-      settingsProviderEditorHtml,
+       settingsProviderTabBadge,
+       settingsProviderMeta,
+       settingsProviderTabHtml,
+       settingsProviderTabsHtml,
+       settingsProviderEditorHtml,
       applyPricingToAllProviders,
-      syncCurrentProviderPricesToOthers,
-      revealSettingsProviderTab,
-      renderSettingsProviderTabs,
+       syncCurrentProviderPricesToOthers,
+       revealSettingsProviderTab,
+       syncSettingsProviderTabNavigation,
+       scrollSettingsProviderRail,
+       renderSettingsProviderTabs,
       captureSettingsProviderForm,
       priceClipboardValues,
       fillPriceRowFromClipboard,
       updateSettingsProviderDraftStatus,
       markSettingsProviderDirty,
-      renderSettingsProviderEditor,
-      switchSettingsProvider,
+       renderSettingsProviderEditor,
+       activateSettingsProviderTab,
+       switchSettingsProvider,
       providerConfigDialogLayer,
       toggleProviderApiKeyVisibility,
       testProviderConnectivityFromDialog,
@@ -3809,18 +4125,22 @@ _TEXT_SUFFIX = r"""      function setSettingsStatus(text, kind = "") {
     chatTestCodexCliFromDialog,
     settingsProviderTabBadge,
     settingsProviderMeta,
+    settingsProviderTabHtml,
     settingsProviderTabsHtml,
       settingsProviderEditorHtml,
       applyPricingToAllProviders,
-      syncCurrentProviderPricesToOthers,
-      revealSettingsProviderTab,
-      renderSettingsProviderTabs,
+    syncCurrentProviderPricesToOthers,
+    revealSettingsProviderTab,
+    syncSettingsProviderTabNavigation,
+    scrollSettingsProviderRail,
+    renderSettingsProviderTabs,
       captureSettingsProviderForm,
       priceClipboardValues,
       fillPriceRowFromClipboard,
       updateSettingsProviderDraftStatus,
       markSettingsProviderDirty,
     renderSettingsProviderEditor,
+    activateSettingsProviderTab,
     switchSettingsProvider,
     providerConfigDialogLayer,
     toggleProviderApiKeyVisibility,

@@ -527,6 +527,11 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("@container (max-width: 560px)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("@container (max-width: 440px)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("codex-usage-hud-activity-timeline", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-action="activity-task-prev"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-action="activity-task-next"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn('data-field="topActivityTaskOrdinal"', renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("function selectActivityTask", renderer_hud.RENDERER_HUD_SCRIPT)
+        self.assertIn("activityTaskNavigable", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn('data-field="topActivityLoadMore"', renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertNotIn("list.appendChild(button)", renderer_hud.RENDERER_HUD_SCRIPT)
         self.assertIn("height: calc(34px * 4 + 7px * 3);", renderer_hud.RENDERER_HUD_SCRIPT)
@@ -639,6 +644,18 @@ class RendererHudPayloadTests(unittest.TestCase):
 
         self.assertIn('data-action="settings-provider-tab"', script)
         self.assertIn('data-provider-tab="true"', script)
+        self.assertIn('data-provider-navigation="true"', script)
+        self.assertIn('data-provider-tab-fixed="true"', script)
+        self.assertIn('data-provider-tab-viewport="true"', script)
+        self.assertIn('data-action="settings-provider-nav"', script)
+        self.assertIn('data-direction="prev"', script)
+        self.assertIn('data-direction="next"', script)
+        self.assertIn("function syncSettingsProviderTabNavigation", script)
+        self.assertIn("function scrollSettingsProviderRail", script)
+        self.assertIn("tabs.scrollLeft + (target.getBoundingClientRect().left - railRect.left)", script)
+        self.assertIn("function activateSettingsProviderTab", script)
+        self.assertIn("settingsProviderRailDirectionForTab", script)
+        self.assertIn("scrollbar-width: none", script)
         self.assertIn('data-action="settings-add-provider"', script)
         self.assertIn('data-action="settings-edit-provider"', script)
         self.assertIn('data-action="settings-delete-provider"', script)
@@ -648,6 +665,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function confirmProviderDeleteDialog", script)
         self.assertIn('data-provider-config-field="section_text"', script)
         self.assertIn('<details class="codex-usage-hud-provider-config-preview">', script)
+        self.assertIn('<label>复制模型列表 / 单价配置', script)
+        self.assertIn('<div class="codex-usage-hud-provider-config-grid-placeholder" aria-hidden="true"></div>', script)
         self.assertIn('data-provider-delete-model-prices="true"', script)
         self.assertIn('data-provider-delete-session-history="true"', script)
         self.assertIn("删除供应商：", script)
@@ -661,9 +680,14 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn("function suggestedProviderIdFromBaseUrl", script)
         self.assertIn("new URL(candidate).hostname", script)
         self.assertIn("suggestedProviderIdFromBaseUrl(baseUrlNode.value)", script)
-        self.assertIn("const initialFocusNode = isNew ? baseUrlNode : idNode;", script)
+        self.assertIn("const initialFocusNode = isNew ? baseUrlNode : apiKeyNode;", script)
+        self.assertIn("编辑时自动选中 API key 输入框", script)
         self.assertIn("仅气泡通知不统计", script)
         self.assertIn("codexProviders: collectCodexProviderUpdates()", script)
+        # 编辑供应商只保存 provider 配置，不提交 model 单价。
+        self.assertIn('{ action: "save", codexProviders: collectCodexProviderUpdates() }', script)
+        self.assertIn("编辑供应商只保存 provider 配置", script)
+        self.assertIn("从 provider registry 刷新 API key 回显值", script)
         self.assertIn('data-provider-enabled="true"', script)
         self.assertIn('data-provider-notification-only="true"', script)
         self.assertIn("仅气泡通知不统计", script)
@@ -713,6 +737,15 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("data-advanced=", script)
         self.assertNotIn("price-table[data-advanced", script)
         self.assertNotIn("未保存的输入不会自动保留", script)
+        # 数字开头的 Provider ID 自动生成的环境变量名必须以 _ 前缀开头，
+        # 否则会被 front-end 与 codex_provider_config 的 ENVIRONMENT_KEY_PATTERN
+        # （^[A-Za-z_][A-Za-z0-9_]*$）同时拒绝（issue: 新增供应商「添加」无反应）。
+        self.assertIn('const prefix = /^[0-9]/.test(normalized) ? "_" : "";', script)
+        self.assertIn('return `${prefix}${normalized || "PROVIDER"}_API_KEY`;', script)
+        # 校验错误必须显示在 provider 配置对话框内部，避免被 confirm-layer 遮罩遮挡。
+        self.assertIn("function setProviderConfigDialogError", script)
+        self.assertIn('data-provider-config-status="true"', script)
+        self.assertIn('layer?.querySelector(\'[data-provider-config-status="true"]\')', script)
 
     def test_renderer_payload_exposes_default_prices_for_new_providers(self) -> None:
         payload = payload_from_snapshot(ParsedSession(status="waiting")).to_json()
@@ -1469,6 +1502,44 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("10000000-0000-4000-8000-000000000001", repr(partial))
         self.assertNotIn("C:\\Users", repr(partial))
 
+    def test_update_payload_backoff_skips_retry_and_preserves_target(self) -> None:
+        client = RendererHudClient(port=9229, enabled=True)
+        target = {"id": "target-1", "webSocketDebuggerUrl": "ws://target-1"}
+        with (
+            patch.object(client, "_page_target", return_value=target),
+            patch.object(client, "_install") as install,
+            patch.object(client, "_send_update", return_value=False) as send,
+            patch.object(client, "_clear_target_cache") as clear_target,
+        ):
+            self.assertFalse(client.update_payload({"payloadDomains": {}}))
+            self.assertEqual(client.last_status, "failed")
+            self.assertEqual(install.call_count, 1)
+            clear_target.assert_not_called()
+
+            self.assertFalse(client.update_payload({"payloadDomains": {}}))
+            self.assertEqual(client.last_status, "backoff")
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(install.call_count, 1)
+
+    def test_send_update_does_not_fallback_after_persistent_binding_failure(self) -> None:
+        client = RendererHudClient(port=9229, enabled=True)
+        binding = MagicMock()
+        binding.send_command.side_effect = TimeoutError("binding timed out")
+        client._active_session_binding = binding
+        with patch("codex_usage_hud.renderer_client.send_cdp_command") as send:
+            self.assertFalse(
+                client._send_update(
+                    "ws://target-1",
+                    {"payloadDomains": {}},
+                )
+            )
+        send.assert_not_called()
+        self.assertEqual(
+            client.last_update_metrics["persistentFallbackReason"],
+            "TimeoutError: binding timed out",
+        )
+        self.assertIsNone(client.last_update_metrics["fallbackMs"])
+
     def test_update_payload_reports_failed_update_without_reinstall_retry(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
         install_force_flags = []
@@ -2025,7 +2096,18 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertIn('"rest_reminder_overlay"', script)
         self.assertIn("stopRestReminderOverlayTicker()", script)
         self.assertIn('toast.dataset.visible = "false"', script)
-        self.assertIn("等待选择 ${remaining} · 超时自动跳过本次休息", script)
+        self.assertIn("等待你的选择 · 不会自动跳过本次休息", script)
+        self.assertIn('data-action="rest-reminder-credit"', script)
+        self.assertIn('data-minutes="3"', script)
+        self.assertIn('data-minutes="5"', script)
+        self.assertIn('data-minutes="10"', script)
+        self.assertIn('data-action="rest-reminder-credit-more"', script)
+        self.assertIn('action: "restReminderCredit"', script)
+        self.assertIn("rest-reminder-credit-custom-input", script)
+        self.assertIn("rest-reminder-credit-custom-confirm", script)
+        self.assertIn("rest-reminder-credit-custom-cancel", script)
+        self.assertNotIn("window.prompt", script)
+        self.assertIn("promptWaitInfinite === true", script)
         self.assertIn("专注休息", script)
         self.assertIn('data-action="rest-reminder-ack"', script)
         self.assertIn('data-action="rest-reminder-start"', script)
@@ -2479,6 +2561,87 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertEqual(top_details["activityLastLabel"], "处理花费")
         self.assertEqual(top_details["activityLast"], "$0.003")
         self.assertEqual(top_details["activityLastTooltip"], "180Tokens/$0.003/80%")
+
+    def test_payload_exposes_completed_task_activity_history_for_navigation(self) -> None:
+        started = datetime(2026, 6, 5, 13, 0, 0).astimezone()
+        first_done = datetime(2026, 6, 5, 13, 0, 10).astimezone()
+        second_start = datetime(2026, 6, 5, 13, 0, 11).astimezone()
+        second_done = datetime(2026, 6, 5, 13, 0, 25).astimezone()
+        snapshot = ParsedSession(
+            session_id="session-history-123",
+            session_title="History",
+            status="parsed",
+            task_index=2,
+            task_count=2,
+            task_prompt="第二需求",
+            task_started_at=second_start,
+            task_completed_at=second_done,
+            request=RequestTokens(status="confirmed", model="gpt-5.5"),
+        )
+        snapshot.request_history = [
+            RequestRound(
+                index=1,
+                status="confirmed",
+                model="gpt-5.5",
+                input_tokens=30,
+                cached_tokens=10,
+                output_tokens=5,
+                reasoning_tokens=0,
+                total_tokens=35,
+                estimated=False,
+                cost_usd=0.02,
+                started_at=second_start,
+                completed_at=second_done,
+            )
+        ]
+        from codex_usage_hud.core.parser import TaskHistory
+
+        snapshot.activity_tasks = [
+            TaskHistory(
+                index=1,
+                count=2,
+                prompt="第一需求",
+                started_at=started,
+                completed_at=first_done,
+                request=RequestTokens(status="confirmed", model="gpt-5.5"),
+                request_history=[
+                    RequestRound(
+                        index=1,
+                        status="confirmed",
+                        model="gpt-5.5",
+                        input_tokens=100,
+                        cached_tokens=50,
+                        output_tokens=10,
+                        reasoning_tokens=0,
+                        total_tokens=110,
+                        estimated=False,
+                        cost_usd=0.01,
+                        started_at=started,
+                        completed_at=first_done,
+                    )
+                ],
+            ),
+            TaskHistory(
+                index=2,
+                count=2,
+                prompt="第二需求",
+                started_at=second_start,
+                completed_at=second_done,
+                request=snapshot.request,
+                request_history=snapshot.request_history,
+            ),
+        ]
+
+        details = payload_from_snapshot(snapshot).to_json()["topDetails"]
+        self.assertEqual(details["activityTaskIndex"], 2)
+        self.assertEqual(details["activityTaskCount"], 2)
+        self.assertTrue(details["activityTaskNavigable"])
+        self.assertEqual(
+            [(item["taskOrdinal"], item["currentTask"]) for item in details["activityTasks"]],
+            [("Req 1/2", "第一需求"), ("Req 2/2", "第二需求")],
+        )
+        self.assertEqual(details["activityTasks"][0]["activityGap"], "1轮")
+        self.assertEqual(details["activityTasks"][1]["activityGap"], "1轮")
 
     def test_payload_merges_same_second_activity_nodes_and_suppresses_token_details(self) -> None:
         started_at = datetime(2026, 6, 5, 13, 0, 0).astimezone()

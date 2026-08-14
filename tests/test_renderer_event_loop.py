@@ -695,6 +695,61 @@ def test_pre_refresh_command_replaces_full_snapshot_with_partial_domains() -> No
     )
 
 
+def test_pre_refresh_codex_cli_launch_runs_async_and_wakes_renderer() -> None:
+    started = Event()
+    release = Event()
+    woke = Event()
+
+    def execute(command: dict[str, object]) -> dict[str, object]:
+        started.set()
+        assert release.wait(timeout=1.0)
+        return {
+            "action": "codexCliLaunch",
+            "requestId": command["requestId"],
+            "message": "已启动 Codex CLI。",
+            "kind": "",
+            "codexCliLaunch": {"pid": 42},
+        }
+
+    state = RendererLoopState(latest_snapshot=SimpleNamespace())
+    executor = RendererPreRefreshExecutor(
+        state,
+        _pre_refresh_ports(execute_command=execute, wake=woke.set),
+    )
+    inputs = _tick_inputs(
+        plan=RefreshPlan(snapshot=True),
+        command={"action": "codexCliLaunch", "requestId": "launch-1"},
+    )
+
+    try:
+        executor.apply_settings_command(inputs)
+
+        assert started.wait(timeout=1.0)
+        assert state.settings_command_status == {
+            "action": "codexCliLaunchPending",
+            "requestId": "launch-1",
+            "message": "正在打开终端并启动 Codex CLI...",
+            "kind": "",
+            "restartVisible": False,
+        }
+        assert inputs.event_refresh_request.domains == {"settings"}
+        assert not inputs.event_refresh_request.snapshot
+
+        release.set()
+        assert woke.wait(timeout=1.0)
+
+        result_inputs = _tick_inputs(plan=RefreshPlan(snapshot=True))
+        executor.apply(result_inputs)
+
+        assert state.settings_command_status["action"] == "codexCliLaunch"
+        assert state.settings_command_status["codexCliLaunch"] == {"pid": 42}
+        assert result_inputs.event_refresh_request.domains == {"settings"}
+        assert not result_inputs.event_refresh_request.snapshot
+    finally:
+        release.set()
+        executor.close()
+
+
 def test_pre_refresh_request_rows_command_advances_only_the_page_limit() -> None:
     executed = MagicMock()
     state = RendererLoopState(request_rows_limit=30)

@@ -146,6 +146,15 @@ TEXT = r"""
                     <div class="codex-usage-hud-card-head">
                       <div class="codex-usage-hud-card-title">当前活动</div>
                       <div class="codex-usage-hud-card-actions">
+                        <div class="codex-usage-hud-activity-task-nav" data-field="topActivityTaskNav" hidden>
+                          <button class="codex-usage-hud-activity-task-button" data-action="activity-task-prev" type="button" title="上一项需求" aria-label="上一项需求" disabled>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m15 18-6-6 6-6"></path></svg>
+                          </button>
+                          <span class="codex-usage-hud-chip codex-usage-hud-activity-task-index" data-field="topActivityTaskOrdinal"></span>
+                          <button class="codex-usage-hud-activity-task-button" data-action="activity-task-next" type="button" title="下一项需求" aria-label="下一项需求" disabled>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m9 18 6-6-6-6"></path></svg>
+                          </button>
+                        </div>
                         <div class="codex-usage-hud-chip" data-field="topTaskOrdinalActivity"></div>
                         <div class="codex-usage-hud-chip" data-tone="warning" data-field="topActivityState"></div>
                       </div>

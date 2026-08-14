@@ -311,23 +311,56 @@ class OverlayRenderingMixin:
         status_label.setFixedHeight(status_label.fontMetrics().height() + 4)
         footer_layout.addWidget(status_label, 1)
 
-        secondary_action_label = QLabel("", footer_container)
+        rest_actions_row = QWidget(card)
+        rest_actions_row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        rest_row_layout = QVBoxLayout(rest_actions_row)
+        rest_row_layout.setContentsMargins(0, 0, 0, 0)
+        rest_row_layout.setSpacing(4)
+
+        rest_secondary_row = QWidget(rest_actions_row)
+        rest_secondary_row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        rest_secondary_layout = QHBoxLayout(rest_secondary_row)
+        rest_secondary_layout.setContentsMargins(0, 0, 0, 0)
+        rest_secondary_layout.setSpacing(8)
+
+        secondary_action_label = QLabel("", rest_secondary_row)
         secondary_action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         secondary_action_label.setTextFormat(text_format.PlainText)
         secondary_action_label.setAlignment(alignment.AlignCenter)
         secondary_action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
         secondary_action_label.setFixedHeight(24)
         secondary_action_label.setVisible(False)
-        footer_layout.addWidget(secondary_action_label, 0)
+        rest_secondary_layout.addWidget(secondary_action_label, 0)
 
-        primary_action_label = QLabel("", footer_container)
+        extra_rest_action_labels: list[QLabel] = []
+        for _ in range(4):
+            action_label = QLabel("", rest_secondary_row)
+            action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+            action_label.setTextFormat(text_format.PlainText)
+            action_label.setAlignment(alignment.AlignCenter)
+            action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
+            action_label.setFixedHeight(24)
+            action_label.setVisible(False)
+            rest_secondary_layout.addWidget(action_label, 0)
+            extra_rest_action_labels.append(action_label)
+
+        rest_primary_row = QWidget(rest_actions_row)
+        rest_primary_row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        rest_primary_layout = QHBoxLayout(rest_primary_row)
+        rest_primary_layout.setContentsMargins(0, 0, 0, 0)
+        rest_primary_layout.setSpacing(8)
+
+        primary_action_label = QLabel("", rest_primary_row)
         primary_action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         primary_action_label.setTextFormat(text_format.PlainText)
         primary_action_label.setAlignment(alignment.AlignCenter)
         primary_action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
         primary_action_label.setFixedHeight(24)
         primary_action_label.setVisible(False)
-        footer_layout.addWidget(primary_action_label, 0)
+        rest_primary_layout.addWidget(primary_action_label, 0)
+
+        rest_row_layout.addWidget(rest_secondary_row)
+        rest_row_layout.addWidget(rest_primary_row)
 
         round_badge = QLabel("", footer_container)
         round_badge.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -358,6 +391,7 @@ class OverlayRenderingMixin:
         footer_layout.addWidget(round_badge, 0)
 
         card_layout.addWidget(footer_container)
+        card_layout.addWidget(rest_actions_row)
         switch_overlay = CardSwitchPendingOverlayWidget(card)
 
         record = {
@@ -368,9 +402,17 @@ class OverlayRenderingMixin:
             "header_meta": header_meta,
             "detail": detail,
             "footer_container": footer_container,
+            "rest_actions_row": rest_actions_row,
+            "rest_secondary_row": rest_secondary_row,
+            "rest_primary_row": rest_primary_row,
             "status_label": status_label,
             "secondary_action_label": secondary_action_label,
             "primary_action_label": primary_action_label,
+            "rest_action_labels": [
+                secondary_action_label,
+                primary_action_label,
+                *extra_rest_action_labels,
+            ],
             "round_badge": round_badge,
             "workdir_label": workdir_label,
             "switch_overlay": switch_overlay,
@@ -551,10 +593,10 @@ class OverlayRenderingMixin:
             else str(item.get("statusText") or item.get("statusLabel") or "").strip()
         )
         footer_container = record["footer_container"]
-        footer_container.setVisible(bool(status_text or workdir_footer_text))
+        footer_container.setVisible(bool(status_text or workdir_footer_text or rest_reminder))
 
         status_label = record["status_label"]
-        if status_text:
+        if status_text and not rest_reminder:
             status_text_color = (
                 accent
                 if status in {"recent", "error", "background_usage"}
@@ -582,28 +624,42 @@ class OverlayRenderingMixin:
             if rest_reminder
             else []
         )
-        secondary_action = next(
-            (action for action in rest_actions if not bool(action.get("primary"))),
-            None,
+        action_labels = [
+            label for label in record.get("rest_action_labels", [])
+            if isinstance(label, QLabel)
+        ]
+        # Rest buttons live in their own rows so the footer stays tidy.
+        # Secondary actions (延迟 / 3分钟 / 5分钟 / 10分钟 / 更多) go left on the
+        # first row; the primary action (开始休息 / 提前结束) is right-aligned on
+        # its own row.
+        rest_actions_row = record.get("rest_actions_row")
+        rest_secondary_row = record.get("rest_secondary_row")
+        rest_primary_row = record.get("rest_primary_row")
+        rest_secondary_layout = (
+            rest_secondary_row.layout()
+            if isinstance(rest_secondary_row, QWidget)
+            and rest_secondary_row.layout() is not None
+            else None
         )
-        primary_action = next(
-            (action for action in rest_actions if bool(action.get("primary"))),
-            None,
+        rest_primary_layout = (
+            rest_primary_row.layout()
+            if isinstance(rest_primary_row, QWidget)
+            and rest_primary_row.layout() is not None
+            else None
         )
-        for key, action, primary in (
-            ("secondary_action_label", secondary_action, False),
-            ("primary_action_label", primary_action, True),
-        ):
-            label = record.get(key)
-            if not isinstance(label, QLabel):
-                continue
+        if isinstance(rest_actions_row, QWidget):
+            rest_actions_row.setVisible(bool(rest_actions))
+        primary_visible = False
+        for index, label in enumerate(action_labels):
+            action = rest_actions[index] if index < len(rest_actions) else None
             if action is None:
                 label.setText("")
                 label.setVisible(False)
                 continue
+            primary = bool(action.get("primary"))
             label.setText(str(action.get("label") or ""))
-            label.setMinimumWidth(72)
-            label.setMaximumWidth(118)
+            label.setMinimumWidth(44)
+            label.setMaximumWidth(96)
             label.setStyleSheet(
                 "QLabel {"
                 f"color: {theme['surface'] if primary else theme['text']};"
@@ -615,11 +671,26 @@ class OverlayRenderingMixin:
             )
             label.adjustSize()
             label.setFixedHeight(24)
-            label.setFixedWidth(max(72, min(118, label.sizeHint().width() + 12)))
+            label.setFixedWidth(max(44, min(96, label.sizeHint().width() + 10)))
             label.setVisible(True)
+            if primary:
+                primary_visible = True
+                if isinstance(rest_primary_layout, QHBoxLayout):
+                    while rest_primary_layout.count():
+                        rest_primary_layout.takeAt(0)
+                    rest_primary_layout.addStretch(1)
+                    rest_primary_layout.addWidget(label, 0)
+            elif isinstance(rest_secondary_layout, QHBoxLayout):
+                rest_secondary_layout.addWidget(label, 0)
+        if isinstance(rest_secondary_row, QWidget):
+            rest_secondary_row.setVisible(
+                any(bool(not (a.get("primary"))) for a in rest_actions)
+            )
+        if isinstance(rest_primary_row, QWidget):
+            rest_primary_row.setVisible(primary_visible)
 
         workdir_label = record["workdir_label"]
-        if workdir_footer_text:
+        if workdir_footer_text and not rest_reminder:
             workdir_label.setText(workdir_footer_text)
             workdir_label.setToolTip((full_workdir or workdir_text) if workdir_clickable else "")
             workdir_label.setStyleSheet(
@@ -640,16 +711,14 @@ class OverlayRenderingMixin:
             if system_action:
                 self._system_action_anchors.append((status_label, dict(item)))
             elif rest_reminder:
-                for key, action in (
-                    ("secondary_action_label", secondary_action),
-                    ("primary_action_label", primary_action),
-                ):
-                    if action is None:
+                for index, action in enumerate(rest_actions):
+                    if index >= len(action_labels):
                         continue
+                    label = action_labels[index]
                     action_item = dict(item)
                     action_item["action"] = str(action.get("action") or "")
                     action_item["actionLabel"] = str(action.get("label") or "")
-                    self._rest_action_anchors.append((record[key], action_item))
+                    self._rest_action_anchors.append((label, action_item))
             elif not system_notice:
                 self._close_anchors.append(
                     (record["close_anchor"], dict(item), card_bg, pill_bg, accent)

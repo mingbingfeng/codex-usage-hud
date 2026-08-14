@@ -130,6 +130,12 @@ def _record_cdp_update_failure(
     *,
     failures: int,
 ) -> None:
+    if str(getattr(client, "last_status", "") or "") in {
+        "backoff",
+        "cooldown",
+        "busy",
+    }:
+        return
     _ensure_runtime_error_diagnostics(context)
     registry = getattr(context, "runtime_errors", None)
     if registry is None:

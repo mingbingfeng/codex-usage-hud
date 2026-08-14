@@ -166,6 +166,29 @@ def _status(message: str, *, kind: str = "") -> dict[str, object]:
     return runtime_settings.settings_status(message, kind=kind)
 
 
+_ERROR_MESSAGE_MAX = 160
+
+
+def _exc_detail_log(exc: BaseException, *, tag: str) -> str:
+    """把完整异常写入日志，并返回适合放进状态栏的短文本。
+
+    状态栏只展示异常文本的压缩单行（超长截断，空文本退回异常类型名），避免把
+    完整 traceback 或 OSError 细节塞进界面；完整堆栈通过日志保留用于诊断。
+    """
+    _LOGGER.warning(
+        "%s exc=%s",
+        tag,
+        type(exc).__name__,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    detail = " ".join(str(exc).strip().split())
+    if not detail:
+        detail = type(exc).__name__
+    elif len(detail) > _ERROR_MESSAGE_MAX:
+        detail = detail[:_ERROR_MESSAGE_MAX].rstrip() + "…"
+    return detail
+
+
 def _price_updates(
     previous: UserConfig, current: UserConfig
 ) -> list[tuple[str, dict[str, ModelPrice]]]:
@@ -511,8 +534,12 @@ def handle_active_session_command(
     try:
         accepted = resolver(command)
     except Exception as exc:
-        _LOGGER.debug("renderer_active_session_candidate_failed error=%s", exc)
-        return _status(f"会话候选匹配失败：{exc}", kind="error")
+        return _status(
+            f"会话候选匹配失败：{_exc_detail_log(
+                exc, tag='renderer_active_session_candidate_failed'
+            )}",
+            kind="error",
+        )
     if not bool(accepted):
         return _status(
             "会话候选已失效，请重新选择当前列表中的未归档会话。",
@@ -636,13 +663,23 @@ def handle_background_command(
             try:
                 workdir = background_usage_workdir(runtime, event_id)
             except Exception as exc:
-                return _status(f"无法读取后台任务工作目录：{exc}", kind="error")
+                return _status(
+                    f"无法读取后台任务工作目录：{_exc_detail_log(
+                        exc, tag='background_usage_workdir_read_failed'
+                    )}",
+                    kind="error",
+                )
             if workdir is None:
                 return _status("该后台任务没有可打开的工作目录。", kind="error")
             try:
                 _open_system_path(workdir)
             except OSError as exc:
-                return _status(f"无法打开工作目录：{exc}", kind="error")
+                return _status(
+                    f"无法打开工作目录：{_exc_detail_log(
+                        exc, tag='background_usage_workdir_open_failed'
+                    )}",
+                    kind="error",
+                )
             return _status("已打开工作目录。")
         if action == "backgroundUsageDetail":
             detail = getattr(runtime, "detail", None)
@@ -696,7 +733,9 @@ def handle_background_command(
             kind,
             request_id,
             event_id=str(command.get("eventId") or "").strip(),
-            error=f"用量总览读取失败：{exc}",
+            error=f"用量总览读取失败：{_exc_detail_log(
+                exc, tag='background_usage_read_failed'
+            )}"
         )
 
 
@@ -714,7 +753,12 @@ def handle_cleanup_command(
                 str(command.get("inventoryRevision") or "").strip(),
             )
         except Exception as exc:
-            return _status(f"无法读取会话工作目录：{exc}", kind="error")
+            return _status(
+                f"无法读取会话工作目录：{_exc_detail_log(
+                    exc, tag='session_cleanup_workdir_read_failed'
+                )}",
+                kind="error",
+            )
         try:
             valid_workdir = (
                 isinstance(workdir, Path)
@@ -728,7 +772,12 @@ def handle_cleanup_command(
         try:
             _open_system_path(workdir)
         except OSError as exc:
-            return _status(f"无法打开工作目录：{exc}", kind="error")
+            return _status(
+                f"无法打开工作目录：{_exc_detail_log(
+                    exc, tag='session_cleanup_workdir_open_failed'
+                )}",
+                kind="error",
+            )
         return _status("已打开工作目录。")
     if action not in runtime_settings.SESSION_CLEANUP_COMMANDS:
         return UNHANDLED
@@ -742,7 +791,10 @@ def handle_cleanup_command(
     try:
         accepted = enqueue(command)
     except Exception as exc:
-        status = _status(str(exc), kind="error")
+        status = _status(
+            _exc_detail_log(exc, tag='session_cleanup_enqueue_failed'),
+            kind="error",
+        )
         status["sessionCleanupRequestId"] = request_id
         status["sessionCleanupAction"] = action
         return status
@@ -837,7 +889,12 @@ def handle_insights_command(
         try:
             _open_system_path(workdir)
         except OSError as exc:
-            return _status(f"无法打开工作目录：{exc}", kind="error")
+            return _status(
+                f"无法打开工作目录：{_exc_detail_log(
+                    exc, tag='usage_insights_workdir_open_failed'
+                )}",
+                kind="error",
+            )
         return _status("已打开工作目录。")
     if session_id not in actionable_session_ids(ports.insights_payload):
         return _status(
@@ -906,7 +963,10 @@ def handle_general_command(
             try:
                 models = ports.fetch_provider_models(base_url, api_key)
             except ValueError as exc:
-                return _status(str(exc), kind="error")
+                return _status(
+                    _exc_detail_log(exc, tag='fetch_provider_models_failed'),
+                    kind="error",
+                )
             status = _status(f"已获取 {len(models)} 个模型。")
             status["providerConnected"] = True
             status["models"] = list(models)
@@ -918,7 +978,10 @@ def handle_general_command(
             try:
                 payload = ports.fetch_cli_provider_models(provider)
             except ValueError as exc:
-                return _status(str(exc), kind="error")
+                return _status(
+                    _exc_detail_log(exc, tag='fetch_cli_provider_models_failed'),
+                    kind="error",
+                )
             status = _status(
                 f"已获取 {len([item for item in payload.get('models', [])])} 个模型。"
             )
@@ -1071,7 +1134,12 @@ def handle_general_command(
                     ports.load_config()
                 )
             except (OSError, ValueError) as exc:
-                return _status(f"价格 JSON 生成失败：{exc}", kind="error")
+                return _status(
+                    f"价格 JSON 生成失败：{_exc_detail_log(
+                        exc, tag='pricing_export_failed'
+                    )}",
+                    kind="error",
+                )
             if used_template:
                 message = (
                     "模型价格表为空，已使用 gpt-5.6-sol 内置价格模板生成："
@@ -1093,7 +1161,12 @@ def handle_general_command(
                 path = _pricing_file_path(command.get("filename"))
                 ports.pricing_open_path(path)
             except (OSError, ValueError) as exc:
-                return _status(f"价格文件打开失败：{exc}", kind="error")
+                return _status(
+                    f"价格文件打开失败：{_exc_detail_log(
+                        exc, tag='pricing_open_failed'
+                    )}",
+                    kind="error",
+                )
             status = _status(f"已请求打开价格 JSON：{path}")
             status["pricingPath"] = str(path)
             return status
@@ -1159,6 +1232,22 @@ def handle_general_command(
                     "本次休息已结束，新一轮专注计时已开始。"
                     if ok
                     else "当前没有正在进行的休息。",
+                    kind="" if ok else "error",
+                )
+            if action == "restReminderCredit":
+                ok = bool(
+                    reminder.credit_early_rest(command.get("minutes"))
+                    if reminder is not None
+                    else False
+                )
+                try:
+                    minutes = int(command.get("minutes") or 0)
+                except (TypeError, ValueError):
+                    minutes = 0
+                return _status(
+                    f"已记录提前休息 {minutes} 分钟。"
+                    if ok
+                    else "提前休息时长无效或当前状态不能记录。",
                     kind="" if ok else "error",
                 )
             if action == "restReminderPostpone":
@@ -1291,7 +1380,12 @@ def handle_general_command(
             return _status("今天不再显示预算预警。")
         return _status(f"无法处理未知设置命令：{action or 'empty'}", kind="error")
     except Exception as exc:
-        return _status(f"设置命令执行失败：{exc}", kind="error")
+        return _status(
+            f"设置命令执行失败：{_exc_detail_log(
+                exc, tag='renderer_settings_command_failed'
+            )}",
+            kind="error",
+        )
 
 
 
@@ -1428,6 +1522,11 @@ def _handle_renderer_settings_command(
             terminal_id=str(command.get("terminalId") or "").strip(),
             command=str(command.get("command") or ""),
             workdir=str(command.get("workdir") or "").strip(),
+            provider=str(
+                command.get("provider")
+                or getattr(context, "app_provider", "")
+                or ""
+            ).strip(),
         )
 
     def fetch_cli_provider_models(provider: str) -> Mapping[str, object]:
@@ -1466,7 +1565,9 @@ def _handle_renderer_settings_command(
                 return {
                     **result,
                     **_status(
-                        f"供应商配置已删除，但会话历史后台清理未能启动：{exc}",
+                        f"供应商配置已删除，但会话历史后台清理未能启动：{_exc_detail_log(
+                            exc, tag='provider_delete_history_enqueue_failed'
+                        )}",
                         kind="warning",
                     ),
                     "providerDeleteHistoryEnqueueFailed": True,

@@ -1001,6 +1001,54 @@ TEXT = r"""
             gap: 6px;
             overflow: hidden;
           }
+          #${rootId} .codex-usage-hud-activity-task-nav {
+            min-width: 0;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+          }
+          #${rootId} .codex-usage-hud-activity-task-nav[hidden] {
+            display: none;
+          }
+          #${rootId} .codex-usage-hud-activity-task-button {
+            box-sizing: border-box;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 22px;
+            width: 22px;
+            height: 22px;
+            padding: 0;
+            border: 1px solid rgba(132, 146, 166, .24);
+            border-radius: 5px;
+            background: #1c2330;
+            color: #c9d8e8;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-activity-task-button svg {
+            width: 14px;
+            height: 14px;
+            fill: none;
+            stroke: currentColor;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            stroke-width: 2;
+          }
+          #${rootId} .codex-usage-hud-activity-task-button:hover:not(:disabled) {
+            border-color: rgba(243, 210, 122, .52);
+            color: #f3d27a;
+          }
+          #${rootId} .codex-usage-hud-activity-task-button:disabled {
+            opacity: .36;
+            cursor: default;
+          }
+          #${rootId} .codex-usage-hud-activity-task-index {
+            min-width: 54px;
+            padding-left: 7px;
+            padding-right: 7px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
           #${rootId} .codex-usage-hud-chip {
             display: inline-flex;
             align-items: center;
@@ -2446,19 +2494,77 @@ TEXT = r"""
             padding-top: 5px;
             border-bottom: 1px solid var(--codex-usage-hud-divider, #273241);
           }
+          #${rootId} .codex-usage-hud-provider-navigation {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            overflow: hidden;
+          }
+          #${rootId} .codex-usage-hud-provider-tab-fixed {
+            min-width: 0;
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            padding-right: 4px;
+            border-right: 1px solid var(--codex-usage-hud-divider, #273241);
+          }
+          #${rootId} .codex-usage-hud-provider-tab-viewport {
+            min-width: 0;
+            flex: 1 1 auto;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            overflow: hidden;
+          }
+          #${rootId} .codex-usage-hud-provider-tab-viewport[hidden] {
+            display: none !important;
+          }
           #${rootId} .codex-usage-hud-provider-tabs {
             min-width: 0;
+            flex: 1 1 auto;
             display: flex;
             gap: 2px;
             overflow-x: auto;
             overscroll-behavior-inline: contain;
-            scrollbar-width: thin;
-            scrollbar-color: var(--codex-usage-hud-divider, #273241) transparent;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+          }
+          #${rootId} .codex-usage-hud-provider-tabs::-webkit-scrollbar {
+            display: none;
+          }
+          #${rootId} .codex-usage-hud-provider-nav-button {
+            box-sizing: border-box;
+            flex: 0 0 23px;
+            width: 23px;
+            height: 29px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--codex-usage-hud-divider, #273241);
+            border-radius: 5px;
+            background: var(--codex-usage-hud-header-surface, #202833);
+            color: var(--codex-usage-hud-muted, #a9bcd2);
+            padding: 0;
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-provider-nav-button:hover:not(:disabled) {
+            border-color: color-mix(in srgb, var(--codex-usage-hud-accent, #f3d27a) 54%, transparent);
+            color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-provider-nav-button:disabled {
+            opacity: .28;
+            cursor: default;
+          }
+          #${rootId} .codex-usage-hud-provider-nav-button[hidden] {
+            display: none !important;
           }
           #${rootId} .codex-usage-hud-provider-tab {
             position: relative;
             flex: 0 0 auto;
-            min-width: 88px;
+            min-width: 76px;
             min-height: 34px;
             display: inline-flex;
             align-items: center;
@@ -3824,6 +3930,16 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-provider-config-card {
             width: min(680px, calc(100% - 28px));
           }
+          #${rootId} .codex-usage-hud-provider-config-status {
+            min-height: 16px;
+            padding: 2px 18px 0;
+            font-size: 11px;
+            color: var(--codex-usage-hud-request-muted, #a9bcd2);
+            overflow-wrap: anywhere;
+          }
+          #${rootId} .codex-usage-hud-provider-config-status[data-kind="error"] {
+            color: var(--codex-usage-hud-warning, #ffb86b);
+          }
           #${rootId} .codex-usage-hud-provider-config-preview {
             min-width: 0;
             display: grid;
@@ -3880,6 +3996,9 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-provider-config-grid > label input[readonly] {
             opacity: .7;
             cursor: not-allowed;
+          }
+          #${rootId} .codex-usage-hud-provider-config-grid-placeholder {
+            min-width: 0;
           }
           #${rootId} .codex-usage-hud-provider-config-section {
             min-width: 0;
@@ -3985,8 +4104,10 @@ TEXT = r"""
           }
           #${rootId} .codex-usage-hud-provider-config-eye {
             flex: 0 0 auto;
+            box-sizing: border-box;
+            width: 34px;
             min-height: 31px;
-            padding: 0 8px;
+            padding: 0;
             line-height: 1;
           }
           #${rootId} .codex-usage-hud-provider-config-fetch {
@@ -4637,6 +4758,70 @@ TEXT = r"""
             gap: 10px;
             padding: 0 22px 20px;
           }
+          #${rootId} .codex-usage-hud-rest-toast-early-actions,
+          #${rootId} .codex-usage-hud-rest-bubble-early-actions {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 7px;
+            color: rgba(169, 188, 210, 0.95);
+            font-size: 12px;
+          }
+          #${rootId} .codex-usage-hud-rest-toast-early-actions {
+            padding: 0 22px 10px;
+          }
+          #${rootId} .codex-usage-hud-rest-bubble-early-actions {
+            padding-top: 2px;
+          }
+          #${rootId} .codex-usage-hud-rest-toast-early-actions button,
+          #${rootId} .codex-usage-hud-rest-bubble-early-actions button {
+            min-height: 28px;
+            min-width: 48px;
+            padding: 0 9px;
+            border-radius: 8px;
+            border: 1px solid rgba(156, 203, 255, 0.24);
+            background: rgba(156, 203, 255, 0.08);
+            color: var(--codex-usage-hud-text, #dce7f2);
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 650;
+          }
+          #${rootId} .codex-usage-hud-rest-toast-early-actions button:hover,
+          #${rootId} .codex-usage-hud-rest-bubble-early-actions button:hover {
+            border-color: rgba(243, 210, 122, 0.5);
+            background: rgba(243, 210, 122, 0.12);
+          }
+          #${rootId} .codex-usage-hud-rest-credit-custom {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+          }
+          #${rootId} .codex-usage-hud-rest-credit-custom input[type="number"] {
+            width: 64px;
+            min-height: 28px;
+            padding: 0 6px;
+            border-radius: 8px;
+            border: 1px solid rgba(156, 203, 255, 0.24);
+            background: rgba(7, 11, 18, 0.55);
+            color: var(--codex-usage-hud-text, #dce7f2);
+            font-size: 12px;
+          }
+          #${rootId} .codex-usage-hud-rest-credit-custom button {
+            min-width: 48px;
+            min-height: 28px;
+            padding: 0 9px;
+            border-radius: 8px;
+            border: 1px solid rgba(156, 203, 255, 0.24);
+            background: rgba(156, 203, 255, 0.08);
+            color: var(--codex-usage-hud-text, #dce7f2);
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 650;
+          }
+          #${rootId} .codex-usage-hud-rest-credit-custom button:hover {
+            border-color: rgba(243, 210, 122, 0.5);
+            background: rgba(243, 210, 122, 0.12);
+          }
           #${rootId} .codex-usage-hud-rest-toast button {
             pointer-events: auto;
             cursor: pointer;
@@ -5072,6 +5257,19 @@ TEXT = r"""
             #${rootId} .codex-usage-hud-activity-metrics .codex-usage-hud-activity-metric:last-child {
               display: none;
             }
+            #${rootId} .codex-usage-hud-activity-task-nav {
+              gap: 3px;
+            }
+            #${rootId} .codex-usage-hud-activity-task-button {
+              flex-basis: 20px;
+              width: 20px;
+              height: 20px;
+            }
+            #${rootId} .codex-usage-hud-activity-task-index {
+              min-width: 48px;
+              padding-left: 5px;
+              padding-right: 5px;
+            }
           }
           @media (max-width: 760px) {
             #${rootId} .codex-usage-hud-session-meta {
@@ -5112,6 +5310,10 @@ TEXT = r"""
             }
             #${rootId} .codex-usage-hud-provider-editor-head {
               grid-template-columns: auto minmax(0, 1fr);
+            }
+            #${rootId} .codex-usage-hud-provider-navigation {
+              grid-column: 1 / -1;
+              grid-row: 2;
             }
             #${rootId} .codex-usage-hud-provider-editor-head .codex-usage-hud-price-unit {
               display: none;

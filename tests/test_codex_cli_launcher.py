@@ -78,6 +78,32 @@ def test_build_codex_cli_command_model_override_can_combine_with_profile() -> No
     )
 
 
+def test_build_codex_cli_title_uses_provider_and_workdir_name(tmp_path: Path) -> None:
+    assert launcher.build_codex_cli_title(
+        provider="CunAI",
+        workdir=str(tmp_path),
+    ) == f"[cunai] {tmp_path.name}"
+
+
+def test_terminal_process_command_sets_shell_title() -> None:
+    command = launcher._terminal_process_command(
+        {
+            "executable": "C:/pwsh.exe",
+            "shell": "powershell",
+            "kind": "shell",
+            "shellExecutable": "C:/pwsh.exe",
+        },
+        "codex --help",
+        "C:/project",
+        title="[cunai] project",
+    )
+
+    assert command[-1] == (
+        "$Host.UI.RawUI.WindowTitle = '[cunai] project'\n"
+        "codex --help"
+    )
+
+
 def test_resolve_cli_profile_prefers_provider_profile_file(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text('model_provider = "custom"\n', encoding="utf-8")
     (tmp_path / "cunai.config.toml").write_text(
@@ -390,6 +416,49 @@ def test_windows_terminal_host_wraps_selected_shell_in_new_tab(
     assert process_calls[0]["args"][6] == "C:/pwsh.exe"
     assert result["terminalId"] == "powershell7"
     assert result["openedAsTab"] is True
+
+
+def test_windows_terminal_launch_sets_provider_workdir_title(
+    tmp_path: Path, monkeypatch
+) -> None:
+    process_calls: list[dict[str, object]] = []
+
+    class FakeProcess:
+        pid = 989
+
+    def fake_popen(args, **kwargs):
+        process_calls.append({"args": args, **kwargs})
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        launcher,
+        "discover_terminals",
+        lambda **_: [
+            {
+                "id": "windows-terminal",
+                "label": "Windows Terminal",
+                "executable": "C:/WindowsApps/wt.exe",
+                "shell": "powershell",
+                "kind": "windows_terminal",
+                "shellExecutable": "C:/pwsh.exe",
+            }
+        ],
+    )
+    monkeypatch.setattr(launcher, "is_terminal_open", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+
+    result = launcher.launch_codex_cli(
+        terminal_id="windows-terminal",
+        provider="cunai",
+        command="codex --help",
+        workdir=str(tmp_path),
+        platform_name="windows",
+    )
+
+    args = process_calls[0]["args"]
+    assert args[1:4] == ["--title", f"[cunai] {tmp_path.name}", "--suppressApplicationTitle"]
+    assert f"[cunai] {tmp_path.name}" in args[-1]
+    assert result["title"] == f"[cunai] {tmp_path.name}"
 
 
 def test_macos_terminal_tab_command_targets_front_window() -> None:

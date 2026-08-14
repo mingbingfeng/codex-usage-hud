@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import logging
+import threading
 import time
 
 from .core.connection_health import ConnectionHealth
@@ -53,6 +54,8 @@ class RendererConnectionManager:
         self.health = health or ConnectionHealth()
         self.wall_time = wall_time
         self._light_push_enabled = False
+        self._connection_attempt_lock = threading.Lock()
+        self._connection_attempt_generation = 0
 
     def enable_light_push(self) -> None:
         self._light_push_enabled = True
@@ -66,7 +69,26 @@ class RendererConnectionManager:
                 pass
         self.wake()
 
+    def _run_connection_attempt(self, operation: Callable[[], object]) -> bool:
+        """Serialize probe/report/rebind calls so only one can touch CDP."""
+        if not self._connection_attempt_lock.acquire(blocking=False):
+            return False
+        self._connection_attempt_generation += 1
+        generation = self._connection_attempt_generation
+        try:
+            return generation == self._connection_attempt_generation and bool(operation())
+        finally:
+            self._connection_attempt_lock.release()
+
     def push_light(self) -> bool:
+        gate = getattr(self.client, "update_gate_state", None)
+        if callable(gate):
+            try:
+                allowed, _reason, _remaining = gate()
+                if not allowed:
+                    return False
+            except Exception:
+                pass
         payload = diagnostics_light_payload(
             self.health.to_payload(),
             debug=self.debug_enabled(),
@@ -121,6 +143,14 @@ class RendererConnectionManager:
         )
 
     def maybe_probe(self, snapshot: object | None, *, update_failures: int) -> bool:
+        gate = getattr(self.client, "update_gate_state", None)
+        if callable(gate):
+            try:
+                allowed, _reason, _remaining = gate()
+                if not allowed:
+                    return False
+            except Exception:
+                pass
         self.sync_follow(snapshot)
         follow_state, _, follow_elapsed_ms = self.follow_values(snapshot)
         if not self.health.should_probe(
@@ -131,7 +161,7 @@ class RendererConnectionManager:
             return False
         before = self._health_signature()
         probe = getattr(self.client, "probe_connection", None)
-        ok = bool(callable(probe) and probe())
+        ok = bool(callable(probe) and self._run_connection_attempt(probe))
         if ok:
             self.health.note_success("probe-ok")
             self.sync_follow(snapshot)
@@ -148,6 +178,14 @@ class RendererConnectionManager:
         return True
 
     def maybe_heal(self, snapshot: object | None) -> bool:
+        gate = getattr(self.client, "update_gate_state", None)
+        if callable(gate):
+            try:
+                allowed, _reason, _remaining = gate()
+                if not allowed:
+                    return False
+            except Exception:
+                pass
         self.sync_follow(snapshot)
         tracker = self.tracker_provider()
         follow_state, follow_reason, follow_elapsed_ms = self.follow_values(snapshot)
@@ -198,7 +236,9 @@ class RendererConnectionManager:
                     exc,
                 )
 
-        if callable(report) and report(f"self-heal:{heal_reason}"):
+        if callable(report) and self._run_connection_attempt(
+            lambda: report(f"self-heal:{heal_reason}")
+        ):
             if self._follow_advanced(tracker, before):
                 return self._finish_heal("l1_report", heal_reason)
             self.health.note_heal_no_progress("heal-no-progress")
@@ -209,8 +249,10 @@ class RendererConnectionManager:
                 before,
                 self._follow_snapshot(tracker),
             )
-        if callable(rebind) and rebind():
-            if callable(report) and report(f"self-heal-rebind:{heal_reason}"):
+        if callable(rebind) and self._run_connection_attempt(rebind):
+            if callable(report) and self._run_connection_attempt(
+                lambda: report(f"self-heal-rebind:{heal_reason}")
+            ):
                 if self._follow_advanced(tracker, before):
                     return self._finish_heal("l2_rebind", heal_reason)
                 self.health.note_heal_no_progress("heal-no-progress")
@@ -243,6 +285,14 @@ class RendererConnectionManager:
         return False
 
     def activity_wake(self, snapshot: object | None, *, reason: str) -> bool:
+        gate = getattr(self.client, "update_gate_state", None)
+        if callable(gate):
+            try:
+                allowed, _reason, _remaining = gate()
+                if not allowed:
+                    return False
+            except Exception:
+                pass
         tracker = self.tracker_provider()
         follow_state, follow_reason, _ = self.follow_values(snapshot)
         if follow_state not in {"new-session", "pending"}:
@@ -285,7 +335,9 @@ class RendererConnectionManager:
         report = getattr(self.client, "report_active_session", None)
         if not callable(report):
             return False
-        ok = bool(report(f"activity-wake:{reason}"))
+        ok = self._run_connection_attempt(
+            lambda: report(f"activity-wake:{reason}")
+        )
         after = self._follow_snapshot(tracker)
         advanced = self._follow_advanced(
             tracker,

@@ -119,6 +119,14 @@ TEXT = r"""
         top: event.deltaY,
       });
     }, { capture: true, passive: false });
+    rootScope.listen(root, "scroll", (event) => {
+      const tabs = event.target?.closest?.('[data-provider-tabs="true"]');
+      if (!tabs || !root.contains(tabs)) return;
+      syncSettingsProviderTabNavigation(tabs);
+    }, { capture: true, passive: true });
+    rootScope.listen(window, "resize", () => {
+      syncSettingsProviderTabNavigation();
+    }, { passive: true });
     const commitSessionCleanupSearch = (sessionSearch) => {
       if (!sessionSearch || !root.contains(sessionSearch)) return false;
       const search = String(sessionSearch.value || "");
@@ -397,7 +405,17 @@ TEXT = r"""
           const current = Number(list.dataset.visibleCount || 4);
           list.dataset.visibleCount = String(current + 4);
         }
-        renderActivityTimeline(root, currentPayload()?.topDetails || {});
+        sessionViewDomain.renderTopDetails(root, currentPayload() || {});
+        return;
+      }
+      if (
+        action.dataset.action === "activity-task-prev"
+        || action.dataset.action === "activity-task-next"
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        const delta = action.dataset.action === "activity-task-prev" ? -1 : 1;
+        sessionViewDomain.selectActivityTask(root, delta);
         return;
       }
       if (action.dataset.action === "background-usage-open-notification") {
@@ -672,7 +690,16 @@ TEXT = r"""
       if (action.dataset.action === "settings-provider-tab") {
         event.preventDefault();
         event.stopPropagation();
-        switchSettingsProvider(action.dataset.provider || "");
+        activateSettingsProviderTab(action);
+        return;
+      }
+      if (action.dataset.action === "settings-provider-nav") {
+        event.preventDefault();
+        event.stopPropagation();
+        scrollSettingsProviderRail(
+          action.dataset.direction === "prev" ? -1 : 1,
+          action,
+        );
         return;
       }
       if (action.dataset.action === "settings-add-provider") {
@@ -776,6 +803,77 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         submitSettingsCommand({ action: "restReminderStart" }, "正在开始休息计时...");
+        const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
+        if (toast) toast.dataset.visible = "false";
+        const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
+        if (mask) {
+          mask.dataset.visible = "false";
+          mask.setAttribute("aria-hidden", "true");
+        }
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-credit-more") {
+        event.preventDefault();
+        event.stopPropagation();
+        // Expand an inline minute input for embedded renderer contexts.
+        // unreliable inside the Codex renderer (Electron disables it).
+        const custom = event.target?.closest?.("[data-rest-reminder-credit-custom='true']");
+        const target = action.closest?.("[data-rest-reminder-early-actions='true']")
+          ?.querySelector?.("[data-rest-reminder-credit-custom='true']")
+          || custom;
+        if (!target) return;
+        target.hidden = !target.hidden;
+        if (!target.hidden) {
+          const input = target.querySelector("[data-rest-reminder-credit-custom-input='true']");
+          if (input) {
+            input.focus({ preventScroll: true });
+            input.select();
+          }
+        }
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-credit-custom-confirm") {
+        event.preventDefault();
+        event.stopPropagation();
+        const custom = action.closest?.("[data-rest-reminder-credit-custom='true']");
+        const input = custom?.querySelector?.("[data-rest-reminder-credit-custom-input='true']");
+        const minutes = Number(input?.value || 0);
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+          setSettingsStatus("请输入 1–1440 之间的整数分钟数。", "error");
+          return;
+        }
+        submitSettingsCommand(
+          { action: "restReminderCredit", minutes },
+          `正在记录提前休息 ${minutes} 分钟...`,
+        );
+        const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
+        if (toast) toast.dataset.visible = "false";
+        const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);
+        if (mask) {
+          mask.dataset.visible = "false";
+          mask.setAttribute("aria-hidden", "true");
+        }
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-credit-custom-cancel") {
+        event.preventDefault();
+        event.stopPropagation();
+        const custom = action.closest?.("[data-rest-reminder-credit-custom='true']");
+        if (custom) custom.hidden = true;
+        return;
+      }
+      if (action.dataset.action === "rest-reminder-credit") {
+        event.preventDefault();
+        event.stopPropagation();
+        const minutes = Number(action.dataset.minutes || 0);
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+          setSettingsStatus("请输入 1–1440 之间的整数分钟数。", "error");
+          return;
+        }
+        submitSettingsCommand(
+          { action: "restReminderCredit", minutes },
+          `正在记录提前休息 ${minutes} 分钟...`,
+        );
         const toast = document.querySelector(`#${rootId} [data-rest-reminder-toast="true"]`);
         if (toast) toast.dataset.visible = "false";
         const mask = document.querySelector(`#${rootId} [data-rest-reminder-mask="true"]`);

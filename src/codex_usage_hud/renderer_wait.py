@@ -78,6 +78,11 @@ class RendererWaitPlanner:
                     else None
                 ),
                 background_retry_at=background_retry_at,
+                retry_at=(
+                    self.state.pending_retry_not_before
+                    if self.state.pending_retry_not_before > 0.0
+                    else None
+                ),
                 probe_in=self.ports.probe_in(),
                 heal_in=self.ports.heal_in(),
             ),
@@ -102,6 +107,7 @@ class ScheduledDeadlines:
     daemon_at: float | None = None
     active_work_at: float | None = None
     background_retry_at: float | None = None
+    retry_at: float | None = None
     probe_in: float | None = None
     heal_in: float | None = None
 
@@ -135,6 +141,8 @@ def scheduled_wait_delay(
             delay,
             max(0.05, float(deadlines.background_retry_at) - now),
         )
+    if deadlines.retry_at is not None:
+        delay = min(delay, max(0.05, float(deadlines.retry_at) - now))
     if deadlines.probe_in is not None:
         delay = min(delay, max(0.05, float(deadlines.probe_in)))
     if deadlines.heal_in is not None and deadlines.heal_in > 0:

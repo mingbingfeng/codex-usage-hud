@@ -173,6 +173,17 @@ def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> N
     assert launch.index("codexCliPersistLaunchState(command);") < launch.index(
         "submitSettingsCommand("
     )
+    assert 'const requestId = typedSettingsRequestId("codex-cli-launch");' in launch
+    assert 'mode: "codex-cli-launch"' in launch
+    assert launch.index("openSettingsLoading(") < launch.index(
+        'ctx.lifecycle.frame("codex_cli_launch_submit"'
+    ) < launch.index("submitSettingsCommand(")
+    assert '"codex_cli_launch_timeout"' in launch
+    assert "codexCliLaunchMinVisibleMs = 240" in SETTINGS_SHELL
+    assert '"codex_cli_launch_min_visible"' in SETTINGS_SHELL
+    assert "clearCodexCliLaunchLifecycle();" in SETTINGS_SHELL
+    assert "closeSettingsConfirm();" in launch
+    assert "codexCliState.launchRequestId" in launch
     assert "codex-usage-hud-codex-cli-proxy {" in LAYOUT_STYLE
     assert "width: 76px;" in LAYOUT_STYLE
 

@@ -25,6 +25,19 @@ class RefreshPlan:
     domains: set[str] = field(default_factory=set)
     theme_payload: dict[str, object] | None = None
 
+    @property
+    def has_work(self) -> bool:
+        """Return whether the coalesced plan contains executable work."""
+        return bool(
+            self.snapshot
+            or self.active_session
+            or self.diagnostics
+            or self.background_usage
+            or self.usage_insights_refresh
+            or self.domains
+            or self.theme_payload
+        )
+
     def request_snapshot(self, *, force_fast: bool = False) -> None:
         self.snapshot = True
         self.force_fast = self.force_fast or force_fast

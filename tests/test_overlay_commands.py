@@ -114,6 +114,26 @@ def test_overlay_runtime_commands_update_rest_reminder_projection() -> None:
     overlay.update_rest_reminder.assert_called_once_with({"phase": "postponed"})
 
 
+def test_overlay_runtime_commands_credit_early_rest_minutes() -> None:
+    presenter = SimpleNamespace(
+        credit_early_rest=MagicMock(return_value=True),
+        desktop_bubble_payload=MagicMock(return_value={"phase": "focus"}),
+    )
+    overlay = SimpleNamespace(update_rest_reminder=MagicMock())
+    callbacks = OverlayRuntimeCommandCallbacks(
+        background_runtime=None,
+        rest_reminder=presenter,
+        work_overlay=overlay,
+        enqueue_renderer_command=MagicMock(),
+    )
+
+    assert callbacks.handle_rest_reminder(
+        {"action": "restReminderCredit", "minutes": 5}
+    )
+    presenter.credit_early_rest.assert_called_once_with(5)
+    overlay.update_rest_reminder.assert_called_once_with({"phase": "focus"})
+
+
 def test_overlay_activation_context_uses_injected_clock() -> None:
     context = activation_context(
         {"action": "activateSession", "requestedAt": 10.0},

@@ -7,6 +7,7 @@ imports while callers migrate to this owner.
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 import json
 from pathlib import Path
@@ -21,6 +22,7 @@ from .core.parser import (
     CostEstimator,
     ParsedSession,
     RequestRound,
+    TaskHistory,
     seconds_between,
 )
 from .core.runtime_errors import RuntimeErrorEvent
@@ -475,6 +477,62 @@ def _top_copy_texts(snapshot: ParsedSession) -> dict[str, str]:
     if gap_detail:
         copies["gap"] = gap_detail
     return copies
+
+
+def _task_snapshot(snapshot: ParsedSession, task: TaskHistory) -> ParsedSession:
+    """Project one historical task through the existing activity presenters."""
+    projected = copy.copy(snapshot)
+    projected.task_prompt = task.prompt
+    projected.task_index = task.index
+    projected.task_count = task.count
+    projected.task_started_at = task.started_at
+    projected.task_completed_at = task.completed_at
+    projected.task_aborted_at = task.aborted_at
+    projected.final_answer_at = task.final_answer_at
+    projected.last_event_time = task.last_event_time
+    projected.request = task.request
+    projected.request_history = list(task.request_history)
+    projected.activity = task.activity
+    projected.last_output = task.last_output
+    projected.slow = task.slow
+    projected.error = task.error
+    return projected
+
+
+def _activity_task_payload(
+    snapshot: ParsedSession,
+    task: TaskHistory,
+) -> dict[str, object]:
+    projected = _task_snapshot(snapshot, task)
+    labels = _top_activity_labels(projected)
+    return {
+        "index": task.index,
+        "count": task.count,
+        "taskOrdinal": f"Req {task.index}/{task.count}",
+        "currentTask": _top_current_task(projected),
+        "executing": _top_executing_text(projected),
+        "executingLabel": labels["executingLabel"],
+        "currentTaskLabel": labels["currentTaskLabel"],
+        "activityState": _top_activity_state(projected),
+        "activityElapsed": _top_activity_elapsed(projected),
+        "activityElapsedLabel": labels["activityElapsedLabel"],
+        "activityGap": _top_activity_gap_value(projected),
+        "activityGapLabel": labels["activityGapLabel"],
+        "activityLast": _top_activity_last(projected),
+        "activityLastLabel": labels["activityLastLabel"],
+        "activityLastTooltip": _top_activity_last_tooltip(projected),
+        "activityTrail": _top_activity_trail(projected),
+        "slow": _top_slow_chip(projected),
+        "gap": _top_gap_chip(projected),
+        "copies": _top_copy_texts(projected),
+    }
+
+
+def _activity_tasks(snapshot: ParsedSession) -> list[dict[str, object]]:
+    tasks = list(getattr(snapshot, "activity_tasks", []) or [])
+    if not tasks:
+        return []
+    return [_activity_task_payload(snapshot, task) for task in tasks]
 
 
 def _compact(value: Any, limit: int = 120) -> str:
@@ -1494,6 +1552,15 @@ def _top_details(snapshot: ParsedSession, session_cost: float | None) -> dict[st
         "slow": _top_slow_chip(snapshot),
         "gap": _top_gap_chip(snapshot),
     }
+    activity_tasks = _activity_tasks(snapshot)
+    if activity_tasks:
+        details["activityTasks"] = activity_tasks
+        details["activityTaskIndex"] = int(snapshot.task_index or 0)
+        details["activityTaskCount"] = len(activity_tasks)
+        details["activityTaskNavigable"] = bool(
+            snapshot.task_completed_at is not None
+            or snapshot.task_aborted_at is not None
+        ) and len(activity_tasks) > 1
     details.update(session_parts)
     details.update(activity_labels)
     return details

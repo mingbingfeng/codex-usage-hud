@@ -102,6 +102,8 @@ class OverlayRuntimeCommandCallbacks:
             ok = bool(presenter.start_rest())
         elif action == "restReminderFinish":
             ok = bool(presenter.finish_rest())
+        elif action == "restReminderCredit":
+            ok = bool(presenter.credit_early_rest(command.get("minutes")))
         else:
             return False
         self.work_overlay.update_rest_reminder(
@@ -261,7 +263,13 @@ def _route_work_overlay_command(
     if _handle_work_overlay_runtime_error_command(command, runtime_events, runtime_errors):
         return "completed", {"handled": True}
     action = str(command.get("action") or "").strip()
-    if action in {"restReminderAck", "restReminderPostpone", "restReminderStart", "restReminderFinish"}:
+    if action in {
+        "restReminderAck",
+        "restReminderPostpone",
+        "restReminderStart",
+        "restReminderFinish",
+        "restReminderCredit",
+    }:
         callback_handled = rest_reminder_command_callback is not None
         callback_ok = bool(rest_reminder_command_callback(dict(command))) if rest_reminder_command_callback else False
         meta = {"handled": callback_handled, "ok": callback_ok, "restReminder": True}

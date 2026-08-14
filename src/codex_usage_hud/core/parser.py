@@ -447,6 +447,26 @@ class SlowSummary:
 
 
 @dataclass
+class TaskHistory:
+    """The parsed activity and request state for one task in a session."""
+
+    index: int
+    count: int
+    prompt: str = ""
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    aborted_at: datetime | None = None
+    final_answer_at: datetime | None = None
+    last_event_time: datetime | None = None
+    request: RequestTokens = field(default_factory=RequestTokens)
+    request_history: list[RequestRound] = field(default_factory=list)
+    activity: Activity = field(default_factory=Activity)
+    last_output: Activity = field(default_factory=Activity)
+    slow: SlowSummary = field(default_factory=SlowSummary)
+    error: str = ""
+
+
+@dataclass
 class ParsedSession:
     """Parsed view of a Codex session JSONL file."""
 
@@ -476,6 +496,7 @@ class ParsedSession:
     request: RequestTokens = field(default_factory=RequestTokens)
     request_history: list[RequestRound] = field(default_factory=list)
     session_request_history: list[RequestRound] = field(default_factory=list)
+    activity_tasks: list[TaskHistory] = field(default_factory=list)
     activity: Activity = field(default_factory=Activity)
     last_output: Activity = field(default_factory=Activity)
     slow: SlowSummary = field(default_factory=SlowSummary)
@@ -897,6 +918,11 @@ class JsonlSessionParser:
             jsonl_rounds,
             sse_tracker,
         )
+        parsed.activity_tasks = self.build_task_history(
+            records,
+            parsed,
+            task_started_index,
+        )
         parsed.status = "parsed"
         return parsed
 
@@ -1089,6 +1115,208 @@ class JsonlSessionParser:
         if user_message_indices:
             return len(user_message_indices), len(user_message_indices)
         return 0, 0
+
+    def task_start_indices(
+        self, records: Sequence[Mapping[str, Any]]
+    ) -> list[int]:
+        """Return task markers in file order for activity history grouping."""
+        indices: list[int] = []
+        for index, record in enumerate(records):
+            payload = record.get("payload") or {}
+            if (
+                record.get("type") == "event_msg"
+                and isinstance(payload, Mapping)
+                and payload.get("type") == "task_started"
+            ):
+                indices.append(index)
+        return indices
+
+    def task_prompt_in_range(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        segment_start: int,
+        task_started_index: int,
+        segment_end: int,
+    ) -> str:
+        """Find the user message belonging to one task segment."""
+        for record in reversed(records[task_started_index:segment_end]):
+            payload = record.get("payload") or {}
+            if (
+                record.get("type") == "event_msg"
+                and isinstance(payload, Mapping)
+                and payload.get("type") == "user_message"
+            ):
+                text = compact_text(payload.get("message"), 260)
+                if text:
+                    return text
+
+        for record in reversed(records[segment_start:task_started_index]):
+            payload = record.get("payload") or {}
+            if not isinstance(payload, Mapping):
+                continue
+            if (
+                record.get("type") == "event_msg"
+                and payload.get("type") == "user_message"
+            ):
+                text = compact_text(payload.get("message"), 260)
+                if text:
+                    return text
+            if (
+                record.get("type") == "event_msg"
+                and payload.get("type") == "task_started"
+            ):
+                break
+        return ""
+
+    def task_terminal_times(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        segment_start: int,
+        segment_end: int,
+    ) -> tuple[datetime | None, datetime | None]:
+        completed_at: datetime | None = None
+        aborted_at: datetime | None = None
+        for record in records[segment_start:segment_end]:
+            payload = record.get("payload") or {}
+            if record.get("type") != "event_msg" or not isinstance(payload, Mapping):
+                continue
+            payload_type = payload.get("type")
+            if payload_type == "task_complete":
+                completed_at = record.get("_dt")
+            elif payload_type == "turn_aborted":
+                aborted_at = record.get("_dt")
+        return completed_at, aborted_at
+
+    def final_answer_in_range(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        segment_start: int,
+        segment_end: int,
+    ) -> datetime | None:
+        for record in reversed(records[segment_start:segment_end]):
+            payload = record.get("payload") or {}
+            if not isinstance(payload, Mapping):
+                continue
+            if str(payload.get("phase") or "") != "final_answer":
+                continue
+            record_type = record.get("type")
+            payload_type = payload.get("type")
+            if record_type == "event_msg" and payload_type == "agent_message":
+                if compact_text(payload.get("message"), 8):
+                    return record.get("_dt")
+            if record_type == "response_item" and payload_type == "message":
+                role = response_message_role(payload)
+                if role and role != "assistant":
+                    continue
+                if compact_text(message_text(payload), 8):
+                    return record.get("_dt")
+        return None
+
+    def request_from_task_rows(
+        self,
+        rows: Sequence[RequestRound],
+        model: str,
+        started_at: datetime | None,
+        completed_at: datetime | None,
+        aborted_at: datetime | None,
+    ) -> RequestTokens:
+        last = rows[-1] if rows else None
+        if last is None:
+            return RequestTokens(
+                status="waiting",
+                model=model,
+                source="jsonl",
+                started_at=started_at,
+                completed_at=aborted_at or completed_at,
+                updated_at=aborted_at or completed_at,
+            )
+        return RequestTokens(
+            status="confirmed" if completed_at or aborted_at else last.status,
+            round_index=len(rows),
+            model=last.model or model,
+            input_tokens=last.input_tokens,
+            cached_tokens=last.cached_tokens,
+            cache_write_tokens=last.cache_write_tokens,
+            output_tokens=last.output_tokens,
+            reasoning_tokens=last.reasoning_tokens,
+            total_tokens=last.total_tokens,
+            estimated=last.estimated,
+            source="jsonl",
+            updated_at=last.completed_at or last.started_at,
+            started_at=started_at or last.started_at,
+            completed_at=aborted_at or completed_at or last.completed_at,
+            cost_usd=last.cost_usd,
+        )
+
+    def build_task_history(
+        self,
+        records: Sequence[Mapping[str, Any]],
+        parsed: ParsedSession,
+        latest_task_started_index: int | None,
+    ) -> list[TaskHistory]:
+        starts = self.task_start_indices(records)
+        if not starts:
+            return []
+        count = len(starts)
+        history: list[TaskHistory] = []
+        for ordinal, start in enumerate(starts, 1):
+            end = starts[ordinal] if ordinal < count else len(records)
+            segment_start = starts[ordinal - 2] if ordinal > 1 else 0
+            started_at = records[start].get("_dt")
+            completed_at, aborted_at = self.task_terminal_times(records, start, end)
+            rows = self.reindex_rounds(
+                self.token_rounds_since_task(records, start, end)
+            )
+            is_latest = start == latest_task_started_index
+            if is_latest:
+                rows = list(parsed.request_history)
+                request = parsed.request
+                activity = parsed.activity
+                last_output = parsed.last_output
+                slow = parsed.slow
+                last_event_time = parsed.last_event_time
+            else:
+                model = self.latest_model(records[start:end]) or parsed.request.model
+                request = self.request_from_task_rows(
+                    rows,
+                    model,
+                    started_at,
+                    completed_at,
+                    aborted_at,
+                )
+                activity = self.latest_activity(records[start:end])
+                last_output = self.latest_output(records[start:end])
+                slow = self.slow_summary(
+                    records[start:end],
+                    records[end - 1].get("_dt") if end > start else started_at,
+                )
+                last_event_time = (
+                    records[end - 1].get("_dt") if end > start else started_at
+                )
+            history.append(
+                TaskHistory(
+                    index=ordinal,
+                    count=count,
+                    prompt=self.task_prompt_in_range(
+                        records,
+                        segment_start,
+                        start,
+                        end,
+                    ),
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    aborted_at=aborted_at,
+                    final_answer_at=self.final_answer_in_range(records, start, end),
+                    last_event_time=last_event_time,
+                    request=request,
+                    request_history=rows,
+                    activity=activity,
+                    last_output=last_output,
+                    slow=slow,
+                    error=parsed.error if is_latest else "",
+                )
+            )
+        return history
 
     def latest_task_completed_after(
         self,
@@ -1590,7 +1818,10 @@ class JsonlSessionParser:
         return display, f"{label}：\n{copy_text}"
 
     def token_rounds_since_task(
-        self, records: Sequence[Mapping[str, Any]], task_started_index: int | None
+        self,
+        records: Sequence[Mapping[str, Any]],
+        task_started_index: int | None,
+        end_index: int | None = None,
     ) -> list[RequestRound]:
         rounds: list[RequestRound] = []
         model_provider = self.session_model_provider(records)
@@ -1613,7 +1844,7 @@ class JsonlSessionParser:
             if task_started_index is not None
             else None
         )
-        for record in records[start_index:]:
+        for record in records[start_index:end_index]:
             payload = record.get("payload") or {}
             if not isinstance(payload, Mapping):
                 continue

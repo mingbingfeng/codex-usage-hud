@@ -572,6 +572,16 @@ class JsonlSessionParserTests(unittest.TestCase):
         self.assertEqual(len(snapshot.session_request_history), 2)
         self.assertEqual([item.input_tokens for item in snapshot.session_request_history], [20, 30])
         self.assertEqual([item.index for item in snapshot.session_request_history], [1, 2])
+        self.assertEqual(len(snapshot.activity_tasks), 3)
+        self.assertEqual([item.index for item in snapshot.activity_tasks], [1, 2, 3])
+        self.assertEqual([item.count for item in snapshot.activity_tasks], [3, 3, 3])
+        self.assertEqual(
+            [len(item.request_history) for item in snapshot.activity_tasks],
+            [1, 1, 1],
+        )
+        self.assertTrue(snapshot.activity_tasks[0].completed_at)
+        self.assertTrue(snapshot.activity_tasks[1].completed_at)
+        self.assertIsNone(snapshot.activity_tasks[2].completed_at)
 
     def test_parse_records_extracts_prompt_for_latest_task(self) -> None:
         parser = JsonlSessionParser()
