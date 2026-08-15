@@ -3898,6 +3898,222 @@ TEXT = r"""
           #${rootId} .codex-usage-hud-settings-confirm-card[data-tone="danger"] {
             border-color: #5e3a3d;
           }
+          #${rootId} .codex-usage-hud-session-transfer-card {
+            width: min(720px, calc(100% - 18px));
+            max-height: calc(100% - 18px);
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            gap: 0;
+            padding: 0;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 16px 18px 12px;
+            border-bottom: 1px solid var(--codex-usage-hud-divider, #393b40);
+          }
+          #${rootId} .codex-usage-hud-session-transfer-head .codex-usage-hud-settings-confirm-title {
+            padding: 0;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-body {
+            min-height: 0;
+            overflow: auto;
+            display: grid;
+            gap: 10px;
+            padding: 14px 18px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-context {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: auto minmax(90px, 1fr) auto minmax(150px, 1fr);
+            align-items: center;
+            gap: 7px 10px;
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-context strong {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--codex-usage-hud-text, #f1f3f5);
+            font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-context select,
+          #${rootId} .codex-usage-hud-session-transfer-search {
+            min-width: 0;
+            box-sizing: border-box;
+            min-height: 31px;
+            border: 1px solid #44464c;
+            border-radius: 5px;
+            background: #111214;
+            color: var(--codex-usage-hud-text, #e8eef7);
+            font: inherit;
+            font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-context select {
+            width: 100%;
+            padding: 4px 7px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-mode {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-mode label {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: auto 1fr;
+            grid-template-rows: auto auto;
+            column-gap: 7px;
+            align-items: center;
+            padding: 8px 9px;
+            border: 1px solid #3d424b;
+            border-radius: 6px;
+            color: var(--codex-usage-hud-text, #e8eef7);
+            cursor: pointer;
+            font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-mode label:has(input:checked) {
+            border-color: #4c78a9;
+            background: #192631;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-mode input {
+            grid-row: 1 / span 2;
+            accent-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-session-transfer-mode small {
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font-size: 9px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-search {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 0 9px;
+            color: var(--codex-usage-hud-muted, #9da1a8);
+          }
+          #${rootId} .codex-usage-hud-session-transfer-search input {
+            min-width: 0;
+            width: 100%;
+            border: 0;
+            outline: 0;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-toolbar label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--codex-usage-hud-text, #e8eef7);
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-toolbar input,
+          #${rootId} .codex-usage-hud-session-transfer-row input {
+            accent-color: var(--codex-usage-hud-accent, #f3d27a);
+          }
+          #${rootId} .codex-usage-hud-session-transfer-list {
+            min-height: 96px;
+            max-height: 290px;
+            overflow: auto;
+            display: grid;
+            align-content: start;
+            gap: 5px;
+            padding: 2px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-row {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 8px;
+            border: 1px solid #30353d;
+            border-radius: 5px;
+            background: #171a1e;
+            cursor: pointer;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-row:hover {
+            border-color: #4c78a9;
+            background: #19232d;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-main {
+            min-width: 0;
+            display: grid;
+            gap: 2px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-main strong,
+          #${rootId} .codex-usage-hud-session-transfer-main small {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-main strong {
+            color: var(--codex-usage-hud-text, #e8eef7);
+            font-size: 11px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-main small,
+          #${rootId} .codex-usage-hud-session-transfer-time {
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font-size: 9px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-time {
+            white-space: nowrap;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-empty {
+            display: grid;
+            place-items: center;
+            min-height: 86px;
+            color: var(--codex-usage-hud-muted, #9da1a8);
+            font-size: 10px;
+            text-align: center;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-progress,
+          #${rootId} .codex-usage-hud-session-transfer-result {
+            display: grid;
+            gap: 4px;
+            padding: 8px 9px;
+            border: 1px solid #35475b;
+            border-radius: 5px;
+            background: #17212b;
+            color: #c7e0ff;
+            font-size: 10px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-progress {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-result[data-kind="success"] {
+            border-color: #315b41;
+            background: #18271e;
+            color: #a7e4b3;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-result[data-kind="error"] {
+            border-color: #5e3a3d;
+            background: #2a1d20;
+            color: #ffb9bd;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-error {
+            overflow-wrap: anywhere;
+            color: #ffcf9a;
+          }
+          #${rootId} .codex-usage-hud-session-transfer-card > .codex-usage-hud-settings-confirm-actions {
+            flex-wrap: wrap;
+            padding: 10px 18px 12px;
+            border-top: 1px solid var(--codex-usage-hud-divider, #393b40);
+          }
           #${rootId} .codex-usage-hud-settings-confirm-main {
             padding: 18px 19px 16px;
           }

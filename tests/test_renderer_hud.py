@@ -12,7 +12,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -1502,7 +1502,7 @@ class RendererHudPayloadTests(unittest.TestCase):
         self.assertNotIn("10000000-0000-4000-8000-000000000001", repr(partial))
         self.assertNotIn("C:\\Users", repr(partial))
 
-    def test_update_payload_backoff_skips_retry_and_preserves_target(self) -> None:
+    def test_update_payload_backoff_skips_retry_after_invalidating_renderer(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
         target = {"id": "target-1", "webSocketDebuggerUrl": "ws://target-1"}
         with (
@@ -1513,13 +1513,13 @@ class RendererHudPayloadTests(unittest.TestCase):
         ):
             self.assertFalse(client.update_payload({"payloadDomains": {}}))
             self.assertEqual(client.last_status, "failed")
-            self.assertEqual(install.call_count, 1)
-            clear_target.assert_not_called()
+            self.assertEqual(install.call_count, 2)
+            clear_target.assert_called_once_with(clear_script=True)
 
             self.assertFalse(client.update_payload({"payloadDomains": {}}))
             self.assertEqual(client.last_status, "backoff")
-            self.assertEqual(send.call_count, 1)
-            self.assertEqual(install.call_count, 1)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual(install.call_count, 2)
 
     def test_send_update_does_not_fallback_after_persistent_binding_failure(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
@@ -1540,7 +1540,42 @@ class RendererHudPayloadTests(unittest.TestCase):
         )
         self.assertIsNone(client.last_update_metrics["fallbackMs"])
 
-    def test_update_payload_reports_failed_update_without_reinstall_retry(self) -> None:
+    def test_send_update_verifies_unacknowledged_persistent_response(self) -> None:
+        client = RendererHudClient(port=9229, enabled=True)
+        persistent = MagicMock(
+            return_value={
+                "result": {"result": {"value": {"ok": False, "applyMs": 0.0}}}
+            }
+        )
+        client._active_session_binding = SimpleNamespace(send_command=persistent)
+        verified = {
+            "result": {"result": {"value": {"ok": True, "applyMs": 1.5}}}
+        }
+
+        with patch(
+            "codex_usage_hud.renderer_client.send_cdp_command",
+            return_value=verified,
+        ) as verify:
+            self.assertTrue(
+                client._send_update(
+                    "ws://target-1",
+                    {"payloadDomains": {"settings": {}}},
+                )
+            )
+
+        persistent.assert_called_once()
+        verify.assert_called_once()
+        self.assertEqual(
+            client.last_update_metrics["transport"],
+            "active-session-binding-verified",
+        )
+        self.assertEqual(
+            client.last_update_metrics["persistentVerification"],
+            "ephemeral-acknowledged",
+        )
+        self.assertGreater(client.last_update_metrics["fallbackMs"], 0.0)
+
+    def test_update_payload_reports_failed_update_after_in_place_recovery_fails(self) -> None:
         client = RendererHudClient(port=9229, enabled=True)
         install_force_flags = []
         send_payloads = []
@@ -1566,8 +1601,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         result = client.update_payload({"debug": True})
 
         self.assertFalse(result)
-        self.assertEqual(install_force_flags, [False])
-        self.assertEqual(len(send_payloads), 1)
+        self.assertEqual(install_force_flags, [False, True])
+        self.assertEqual(len(send_payloads), 2)
         self.assertEqual(client.last_status, "failed")
         self.assertIn("renderer update function did not acknowledge payload", client.last_error)
 
@@ -2206,7 +2241,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             "function normalizePayloadDomains(payload)",
             1,
         )[0]
-        remove_section = script.split("window.__codexUsageHudRemove = () =>", 1)[1].split(
+        remove_section = script.split("window.__codexUsageHudRemove = ", 1)[1].split(
             "window[scheduleName] =",
             1,
         )[0]
@@ -2438,6 +2473,7 @@ class RendererHudPayloadTests(unittest.TestCase):
             session_id="session-abcdef123456",
             session_title="Live Renderer Thread",
             status="parsed",
+            task_prompt="分析一个很大的日志文件",
             request=RequestTokens(status="confirmed", model="gpt-5.5"),
         )
         snapshot.session_request_history = [
@@ -2488,7 +2524,8 @@ class RendererHudPayloadTests(unittest.TestCase):
         payload = payload_from_snapshot(snapshot).to_json()
 
         heavy = payload["topDetails"]["heavyRounds"][0]
-        self.assertEqual(heavy["title"], "#28 $1.06 · ∑210k")
+        self.assertEqual(heavy["title"], "Req1-#28 $1.06 · ∑210k")
+        self.assertEqual(heavy["taskPrompt"], "分析一个很大的日志文件")
         self.assertEqual(heavy["detail"], "输入：分析一个很大的日志文件")
         self.assertIn("分析一个很大的日志文件", heavy["copyText"])
         self.assertNotIn("gpt-5.5", heavy["detail"])
@@ -2722,6 +2759,173 @@ class RendererHudClientTests(unittest.TestCase):
 
         self.assertEqual(observed_stages, ["reading_session", "showing_hud"])
         self.assertIn("snapshotBuildMs", client.last_attach_metrics)
+
+    def test_wait_for_renderer_retries_cold_start_until_payload_is_acknowledged(
+        self,
+    ) -> None:
+        class Clock:
+            now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def sleep(self, seconds: float) -> None:
+                self.now += seconds
+
+        class ColdStartClient:
+            last_status = "starting"
+            last_update_metrics: dict[str, object] = {}
+
+            def __init__(self) -> None:
+                self.startup_updates = 0
+                self.last_attach_metrics: dict[str, object] = {}
+
+            def update_startup(self, _snapshot: ParsedSession) -> bool:
+                self.startup_updates += 1
+                return self.startup_updates == 3
+
+        clock = Clock()
+        client = ColdStartClient()
+        snapshot_factory = MagicMock(return_value=ParsedSession(status="waiting"))
+        observed_stages: list[str] = []
+
+        self.assertTrue(
+            renderer_hud.wait_for_renderer(
+                client,  # type: ignore[arg-type]
+                snapshot_factory,
+                timeout_seconds=1.0,
+                retry_until_ready=True,
+                retry_interval_seconds=0.25,
+                monotonic=clock.monotonic,
+                sleep=clock.sleep,
+                progress_callback=observed_stages.append,
+            )
+        )
+
+        snapshot_factory.assert_called_once_with()
+        self.assertEqual(client.startup_updates, 3)
+        self.assertEqual(clock.now, 0.5)
+        self.assertEqual(observed_stages, [])
+        self.assertEqual(client.last_attach_metrics["attempts"], 3)
+        self.assertTrue(client.last_attach_metrics["retryUntilReady"])
+
+    def test_startup_payload_failure_does_not_open_normal_retry_gate(self) -> None:
+        client = RendererHudClient(enabled=True)
+        client._page_target = MagicMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("Codex splash is not ready")
+        )
+
+        with patch.object(client, "_clear_target_cache") as clear_target:
+            self.assertFalse(client.update_payload({}, startup_retry=True))
+
+        clear_target.assert_called_once_with(clear_script=True)
+        allowed, reason, remaining = client.update_gate_state()
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "")
+        self.assertEqual(remaining, 0.0)
+        self.assertEqual(client._update_failure_count, 0)
+
+    def test_startup_payload_primes_persistent_binding_before_first_update(self) -> None:
+        client = RendererHudClient(enabled=True)
+        target = {
+            "id": "target-1",
+            "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+        }
+        binding = MagicMock()
+        binding.wait_ready.return_value = True
+        binding.send_command.return_value = {
+            "result": {"result": {"value": {"ok": True, "applyMs": 0.5}}}
+        }
+        client._active_session_binding = binding
+
+        def install(websocket_url: str, target_id: str, *, force: bool = False) -> None:
+            del force
+            client._script_identifier = "script-1"
+            client._target_id = target_id
+            client._websocket_url = websocket_url
+
+        client._page_target = MagicMock(return_value=target)  # type: ignore[method-assign]
+        client._install = install  # type: ignore[method-assign]
+
+        self.assertTrue(
+            client.update_payload(
+                {"payloadDomains": {}, "debug": True},
+                startup_retry=True,
+            )
+        )
+
+        self.assertEqual(
+            binding.method_calls[:3],
+            [
+                call.ensure(
+                    "ws://127.0.0.1/devtools/page/1",
+                    "target-1",
+                ),
+                call.wait_ready(client.timeout_seconds),
+                call.send_command(
+                    "ws://127.0.0.1/devtools/page/1",
+                    "Runtime.evaluate",
+                    ANY,
+                    client.timeout_seconds,
+                ),
+            ],
+        )
+        binding.wait_ready.assert_called_once_with(client.timeout_seconds)
+        binding.send_command.assert_called_once()
+
+    def test_first_existing_cdp_attach_waits_for_binding_before_payload(self) -> None:
+        client = RendererHudClient(enabled=True)
+        target = {
+            "id": "target-1",
+            "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+        }
+        binding = MagicMock()
+        binding.wait_ready.return_value = True
+        binding.send_command.return_value = {
+            "result": {"result": {"value": {"ok": True, "applyMs": 0.5}}}
+        }
+        client._active_session_binding = binding
+        client._page_target = MagicMock(return_value=target)  # type: ignore[method-assign]
+        client._install = MagicMock()  # type: ignore[method-assign]
+
+        self.assertTrue(client.update_payload({"payloadDomains": {}, "debug": True}))
+
+        self.assertEqual(
+            binding.method_calls[:3],
+            [
+                call.ensure(
+                    "ws://127.0.0.1/devtools/page/1",
+                    "target-1",
+                ),
+                call.wait_ready(client.timeout_seconds),
+                call.send_command(
+                    "ws://127.0.0.1/devtools/page/1",
+                    "Runtime.evaluate",
+                    ANY,
+                    client.timeout_seconds,
+                ),
+            ],
+        )
+
+    def test_startup_payload_rechecks_target_after_unacknowledged_update(self) -> None:
+        client = RendererHudClient(enabled=True)
+        target = {
+            "id": "target-1",
+            "webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1",
+        }
+        client._page_target = MagicMock(return_value=target)  # type: ignore[method-assign]
+        client._install = MagicMock()  # type: ignore[method-assign]
+        client._send_update = MagicMock(return_value=False)  # type: ignore[method-assign]
+
+        with patch.object(client, "_clear_target_cache") as clear_target:
+            self.assertFalse(
+                client.update_payload(
+                    {"payloadDomains": {}, "debug": True},
+                    startup_retry=True,
+                )
+            )
+
+        clear_target.assert_called_once_with(clear_script=True)
 
     def test_client_installs_renderer_script_with_model_catalog(self) -> None:
         install_calls: list[str] = []

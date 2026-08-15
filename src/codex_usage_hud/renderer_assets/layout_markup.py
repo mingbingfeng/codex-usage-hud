@@ -190,7 +190,7 @@ TEXT = r"""
                         </div>
                       </div>
                       <div class="codex-usage-hud-activity-timeline" data-field="topActivityTrail"></div>
-                      <button class="codex-usage-hud-activity-load-more" data-field="topActivityLoadMore" data-action="activity-load-more" type="button">查看更多</button>
+                      <button class="codex-usage-hud-activity-load-more" data-field="topActivityLoadMore" data-action="activity-load-more" data-page-size="12" type="button">查看更多</button>
                     </div>
                   </section>
                 </div>

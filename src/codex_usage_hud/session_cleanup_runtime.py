@@ -11,8 +11,10 @@ import uuid
 
 from .core.session_cleanup import (
     SessionCleanupError,
+    SessionCleanupItem,
     SessionCleanupManager,
 )
+from .core.session_transfer import CodexAppServerClient
 from .core.deleted_usage import DeletedUsageLedger, DeletedUsageLedgerError
 
 
@@ -76,6 +78,7 @@ class SessionCleanupWorker:
         "sessionCleanupExecute",
         "sessionCleanupCancel",
         "providerDelete",
+        "sessionTransfer",
     }
 
     def __init__(
@@ -200,6 +203,46 @@ class SessionCleanupWorker:
                         failedCount=0,
                     )
                     refresh_after_delete = history_deleted > 0
+                elif action == "sessionTransfer":
+                    source_provider = str(
+                        command.get("sourceProvider") or command.get("source_provider") or ""
+                    ).strip().casefold()
+                    target_provider = str(
+                        command.get("targetProvider") or command.get("target_provider") or ""
+                    ).strip().casefold()
+                    mode = str(command.get("mode") or "copy").strip().casefold()
+                    self._validate_transfer_provider(
+                        source_provider,
+                        target_provider,
+                    )
+                    item_ids = cleanup_string_list(
+                        command.get("itemIds") or command.get("sessionIds")
+                    )
+                    revision = str(command.get("inventoryRevision") or "")
+                    previous_publisher = getattr(self.manager, "progress_publisher", None)
+                    self.manager.progress_publisher = self._publish
+                    try:
+                        with CodexAppServerClient() as app_server:
+                            snapshot = self.manager.transfer(
+                                item_ids,
+                                revision,
+                                source_provider,
+                                target_provider,
+                                mode,
+                                fork=lambda session_id, provider, cwd: app_server.fork(
+                                    session_id,
+                                    provider,
+                                    cwd=cwd,
+                                ),
+                                request_id=request_id,
+                            )
+                    finally:
+                        self.manager.progress_publisher = previous_publisher
+                    transfer_operation = snapshot.get("operation")
+                    refresh_after_delete = bool(
+                        isinstance(transfer_operation, Mapping)
+                        and int(transfer_operation.get("migratedCount") or 0) > 0
+                    )
                 else:
                     snapshot = self.manager.execute(
                         cleanup_string_list(command.get("itemIds") or command.get("sessionIds")),
@@ -234,6 +277,32 @@ class SessionCleanupWorker:
                     name="codex-usage-hud-deleted-usage-refresh",
                     daemon=True,
                 ).start()
+
+    def _validate_transfer_provider(self, source: str, target: str) -> None:
+        if not source or not target:
+            raise SessionCleanupError("会话迁移需要源和目标 Provider。")
+        if source == target:
+            raise SessionCleanupError("源 Provider 与目标 Provider 不能相同。")
+        registry = getattr(self._context, "provider_registry", None)
+        entries = getattr(registry, "entries", {})
+        target_entry = entries.get(target) if isinstance(entries, Mapping) else None
+        app_provider = str(
+            getattr(self._context, "app_provider", "") or ""
+        ).strip().casefold()
+        if target != app_provider and target_entry is None:
+            raise SessionCleanupError("目标 Provider 不在当前 Codex 配置中。")
+        if target != app_provider and target_entry is not None:
+            configured = any(
+                bool(getattr(target_entry, name, False))
+                for name in (
+                    "from_base_config",
+                    "from_profile",
+                    "from_provider_definition",
+                    "from_saved_settings",
+                )
+            )
+            if not configured:
+                raise SessionCleanupError("目标 Provider 只有历史记录，尚未配置。")
 
     def _refresh_deleted_usage(self, request_id: str) -> None:
         try:

@@ -104,6 +104,21 @@ def _allow_foreground_process(
         return bool(user32.AllowSetForegroundWindow(int(process_id)))
     except (AttributeError, OSError, TypeError, ValueError):
         return False
+
+
+def _state_has_persistent_sidecar(
+    system_action: Mapping[str, object] | None,
+    system_notice: Mapping[str, object] | None,
+    rest_reminder: Mapping[str, object] | None,
+) -> bool:
+    """Return whether an unchanged overlay state must remain visible."""
+    return bool(
+        (system_action and system_action.get("persistent"))
+        or (system_notice and system_notice.get("persistent"))
+        or rest_reminder
+    )
+
+
 class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
         def __init__(
         self,
@@ -629,9 +644,10 @@ class OverlayWindow(OverlayTransitionsMixin, OverlayRenderingMixin, QWidget):
             if self._owner_pid is not None and not self._process_exists(self._owner_pid):
                 self.shutdown()
                 return True
-            persistent_sidecar = bool(
-                (system_action and system_action.get("persistent"))
-                or (system_notice and system_notice.get("persistent"))
+            persistent_sidecar = _state_has_persistent_sidecar(
+                system_action,
+                system_notice,
+                rest_reminder,
             )
             if should_close or (file_stale and not persistent_sidecar):
                 self.shutdown()

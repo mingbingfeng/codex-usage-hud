@@ -145,12 +145,14 @@ def _rest_reminder_card_copy(
     message = str(item.get("message") or "").strip() or "该休息一下了。"
     title = "☕ 休息提醒"
     detail = message
+    hint = ""
     status = ""
     header_meta = ""
     color_status = "waiting_user"
     actions: list[dict[str, object]] = []
     if phase == "prompt":
         title = "☕ 该休息一下了"
+        hint = "如果您已提前休息过了，可以点击下方分钟数按钮标记已休息"
         header_meta = f"今日已休息 {_format_rest_duration(completed_today)}"
         status = "等待你的选择 · 不会自动跳过"
         if bool(item.get("canPostpone")):
@@ -221,6 +223,7 @@ def _rest_reminder_card_copy(
         "title": title,
         "headerMeta": header_meta,
         "detail": detail,
+        "hint": hint,
         "statusText": status,
         "status": color_status,
         "actions": actions,
@@ -256,6 +259,7 @@ def _rest_reminder_overlay_item(reminder: Mapping[str, object]) -> dict[str, obj
         "statusLabel": copy["statusText"],
         "statusText": copy["statusText"],
         "lastText": copy["detail"],
+        "restHint": copy["hint"],
         "elapsedText": "",
         "restActions": copy["actions"],
     }

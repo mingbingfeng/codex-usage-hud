@@ -24,7 +24,17 @@ TEXT = r"""
   function ensureRoot() {
     ensureStyle();
     let root = document.getElementById(rootId);
-    if (root?.dataset.version === version) return root;
+    if (root?.dataset.version === version) {
+      // A renderer script can be reinjected while the page is still alive.
+      // The previous runtime has already disposed its delegated listeners, so
+      // keep the existing DOM (including settings dialogs and their drafts)
+      // but bind it to this runtime again.
+      if (root.dataset.bound !== "true") {
+        applyPanelStates(root);
+        bindRoot(root);
+      }
+      return root;
+    }
     if (!document.body) return null;
     root?.remove();
     root = document.createElement("div");
@@ -137,17 +147,38 @@ TEXT = r"""
       renderSettingsModal("storage");
       return true;
     };
+    const commitSessionTransferSearch = (sessionSearch) => {
+      if (!sessionSearch || !root.contains(sessionSearch)) return false;
+      const search = String(sessionSearch.value || "");
+      if (search === sessionTransferState.search) return false;
+      sessionTransferState.search = search;
+      sessionTransferState.selectedIds.clear();
+      renderSessionTransferDialog();
+      return true;
+    };
     rootScope.listen(root, "keydown", (event) => {
       const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
-      if (!sessionSearch || root.contains(sessionSearch) === false) return;
+      if (sessionSearch && root.contains(sessionSearch)) {
+        if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+        event.preventDefault();
+        commitSessionCleanupSearch(sessionSearch);
+        return;
+      }
+      const sessionTransferSearch = event.target?.closest?.('[data-session-transfer-search="true"]');
+      if (!sessionTransferSearch || root.contains(sessionTransferSearch) === false) return;
       if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
-      commitSessionCleanupSearch(sessionSearch);
+      commitSessionTransferSearch(sessionTransferSearch);
     });
     rootScope.listen(root, "focusout", (event) => {
       const sessionSearch = event.target?.closest?.('[data-session-cleanup-search="true"]');
-      if (!sessionSearch || root.contains(sessionSearch) === false) return;
-      commitSessionCleanupSearch(sessionSearch);
+      if (sessionSearch && root.contains(sessionSearch)) {
+        commitSessionCleanupSearch(sessionSearch);
+        return;
+      }
+      const sessionTransferSearch = event.target?.closest?.('[data-session-transfer-search="true"]');
+      if (!sessionTransferSearch || root.contains(sessionTransferSearch) === false) return;
+      commitSessionTransferSearch(sessionTransferSearch);
     });
     rootScope.listen(root, "input", (event) => {
       const codexCliField = event.target?.closest?.("[data-codex-cli-field]");
@@ -174,6 +205,11 @@ TEXT = r"""
       if (sessionSearch && root.contains(sessionSearch)) {
         // IME composition emits input events before the final text is committed.
         // Re-rendering here replaces the input and aborts Chinese composition.
+        return;
+      }
+      const sessionTransferSearch = event.target?.closest?.('[data-session-transfer-search="true"]');
+      if (sessionTransferSearch && root.contains(sessionTransferSearch)) {
+        // Keep the input stable while an IME composition is in progress.
         return;
       }
       const editor = event.target?.closest?.('[data-provider-editor="true"]');
@@ -219,6 +255,39 @@ TEXT = r"""
       const pricingApplyAll = event.target?.closest?.('[data-pricing-apply-all="true"]');
       if (pricingApplyAll && root.contains(pricingApplyAll)) {
         updatePricingApplyAllPreview(!!pricingApplyAll.checked);
+        return;
+      }
+      const sessionTransferTarget = event.target?.closest?.('[data-session-transfer-target="true"]');
+      if (sessionTransferTarget && root.contains(sessionTransferTarget)) {
+        sessionTransferState.targetProvider = String(sessionTransferTarget.value || "").trim().toLowerCase();
+        renderSessionTransferDialog();
+        return;
+      }
+      const sessionTransferMode = event.target?.closest?.('[data-session-transfer-mode]');
+      if (sessionTransferMode && root.contains(sessionTransferMode)) {
+        sessionTransferState.mode = String(sessionTransferMode.value || "copy").toLowerCase() === "migrate"
+          ? "migrate"
+          : "copy";
+        renderSessionTransferDialog();
+        return;
+      }
+      const sessionTransferSelectAll = event.target?.closest?.('[data-session-transfer-select-all="true"]');
+      if (sessionTransferSelectAll && root.contains(sessionTransferSelectAll)) {
+        for (const item of sessionTransferRows()) {
+          const id = String(item?.id || "");
+          if (!id || item?.selectable !== true) continue;
+          if (sessionTransferSelectAll.checked) sessionTransferState.selectedIds.add(id);
+          else sessionTransferState.selectedIds.delete(id);
+        }
+        renderSessionTransferDialog();
+        return;
+      }
+      const sessionTransferItem = event.target?.closest?.('[data-session-transfer-id]');
+      if (sessionTransferItem && root.contains(sessionTransferItem)) {
+        const id = String(sessionTransferItem.dataset.sessionTransferId || "");
+        if (sessionTransferItem.checked) sessionTransferState.selectedIds.add(id);
+        else sessionTransferState.selectedIds.delete(id);
+        renderSessionTransferDialog();
         return;
       }
       const sessionFilter = event.target?.closest?.("[data-session-cleanup-filter]");
@@ -273,10 +342,12 @@ TEXT = r"""
         const modal = document.getElementById(settingsModalId);
         if (modal && !modal.hidden) {
           const codexCli = modal.querySelector('[data-codex-cli-dialog="true"]');
+          const sessionTransfer = modal.querySelector('[data-session-transfer-dialog="true"]');
           const confirm = modal.querySelector('[data-settings-confirm="true"]');
           event.preventDefault();
           event.stopPropagation();
           if (codexCli) closeCodexCliDialog();
+          else if (sessionTransfer) closeSessionTransferDialog();
           else if (confirm) closeSettingsConfirm();
           else closeSettingsModal();
           return;
@@ -312,6 +383,16 @@ TEXT = r"""
         void copyHudText(copyNode.dataset.copyText || "").then((ok) => {
           flashCopyState(copyNode, ok);
         });
+        if (copyNode.dataset.copyField === "heavy") {
+          sessionViewDomain.selectActivityTaskIndex(
+            root,
+            Number(copyNode.dataset.activityTaskIndex || 0),
+          );
+          sessionViewDomain.scrollToActivityRound(
+            copyNode.dataset.copyText || "",
+            copyNode.dataset.activityTaskPrompt || "",
+          );
+        }
         return;
       }
       const sessionCleanupRow = event.target?.closest?.(".codex-usage-hud-session-row");
@@ -348,6 +429,12 @@ TEXT = r"""
         event.preventDefault();
         event.stopPropagation();
         openCodexCliDialog(action.dataset.provider || "");
+        return;
+      }
+      if (action.dataset.action === "settings-transfer-provider") {
+        event.preventDefault();
+        event.stopPropagation();
+        openSessionTransferDialog(action.dataset.provider || "");
         return;
       }
       if (action.dataset.action === "codex-cli-close") {
@@ -403,7 +490,9 @@ TEXT = r"""
         const list = root.querySelector('[data-field="topActivityTrail"]');
         if (list) {
           const current = Number(list.dataset.visibleCount || 4);
-          list.dataset.visibleCount = String(current + 4);
+          const button = root.querySelector('[data-field="topActivityLoadMore"]');
+          const pageSize = Math.max(1, Number(button?.dataset.pageSize || 12));
+          list.dataset.visibleCount = String(current + pageSize);
         }
         sessionViewDomain.renderTopDetails(root, currentPayload() || {});
         return;
@@ -474,6 +563,24 @@ TEXT = r"""
         event.stopPropagation();
         const tab = action.dataset.tab || "settings";
         renderSettingsModal(tab);
+        return;
+      }
+      if (action.dataset.action === "session-transfer-close") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSessionTransferDialog();
+        return;
+      }
+      if (action.dataset.action === "session-transfer-scan") {
+        event.preventDefault();
+        event.stopPropagation();
+        requestSessionTransferScan();
+        return;
+      }
+      if (action.dataset.action === "session-transfer-submit") {
+        event.preventDefault();
+        event.stopPropagation();
+        submitSessionTransfer();
         return;
       }
       if (action.dataset.action === "session-cleanup-date-toggle") {
@@ -1350,12 +1457,20 @@ TEXT = r"""
     return true;
   };
 
-  window.__codexUsageHudRemove = () => {
+  window.__codexUsageHudRemove = ({ preserveState = false } = {}) => {
     const root = document.getElementById(rootId);
     root?.querySelectorAll(".codex-usage-hud-line").forEach(cancelNumericAnimation);
     ctx.teardown.run();
-    root?.remove();
-    document.getElementById(styleId)?.remove();
+    if (preserveState) {
+      // Reinstallation must not make an open settings child dialog vanish.
+      // The DOM is the only place holding unsaved form values, so retain it in
+      // memory and let the next runtime rebind/re-hydrate it.
+      if (root) root.dataset.bound = "false";
+      document.getElementById(styleId)?.remove();
+    } else {
+      root?.remove();
+      document.getElementById(styleId)?.remove();
+    }
     observedHeaderNode = null;
     observedComposerNode = null;
     restReminderCountdownTimer = 0;

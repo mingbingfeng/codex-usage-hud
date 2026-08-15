@@ -171,6 +171,31 @@ def test_discover_workdirs_tolerates_missing_global_state(tmp_path: Path) -> Non
     assert result[0]["path"] == str(current)
 
 
+def test_discover_codex_cli_options_does_not_choose_a_default_workdir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.setattr(
+        launcher,
+        "discover_terminals",
+        lambda **_: [{"id": "shell", "recommended": True}],
+    )
+
+    result = launcher.discover_codex_cli_options(
+        provider="custom",
+        sessions_root=sessions,
+        current_workdir=current,
+        codex_home=tmp_path,
+        platform_name="linux",
+    )
+
+    assert result["defaultWorkdir"] == ""
+    assert [item["path"] for item in result["workdirs"]] == [str(current)]
+
+
 def test_discover_terminals_marks_powershell7_as_recommended(monkeypatch) -> None:
     def fake_first_available(*candidates: object) -> str:
         values = " ".join(str(candidate) for candidate in candidates).lower()

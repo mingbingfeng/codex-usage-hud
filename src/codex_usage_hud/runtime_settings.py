@@ -13,6 +13,7 @@ SESSION_CLEANUP_COMMANDS = frozenset(
         "sessionCleanupPreview",
         "sessionCleanupExecute",
         "sessionCleanupCancel",
+        "sessionTransfer",
     }
 )
 

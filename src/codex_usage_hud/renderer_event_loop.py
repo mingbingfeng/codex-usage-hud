@@ -694,7 +694,10 @@ class RendererEventLoop:
                     self.state.pending_retry_not_before = 0.0
                 elif plan.has_work and self._should_retain_failed_plan(plan):
                     self.state.pending_refresh_plan.merge(plan)
-                self.ports.keep_alive()
+            # The desktop overlay is independent of CDP success.  Keep its
+            # state fresh while a full-snapshot retry is pending too; otherwise
+            # a failed Renderer update makes a visible rest reminder stale.
+            self.ports.keep_alive()
             allowed_after, _reason_after, remaining_after = self.ports.update_gate()
             if not allowed_after:
                 self.state.pending_retry_not_before = max(

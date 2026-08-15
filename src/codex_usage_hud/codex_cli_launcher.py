@@ -652,7 +652,7 @@ def discover_codex_cli_options(
         ],
         "defaultPermission": "full",
         "workdirs": workdirs,
-        "defaultWorkdir": str(workdirs[0].get("path") or "") if workdirs else "",
+        "defaultWorkdir": "",
     }
 
 

@@ -369,9 +369,20 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                         return ports.RENDERER_HUD_UNAVAILABLE
                 initial_timeout = ports.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS if cold_start_attach else ports.DAEMON_RENDERER_INITIAL_TIMEOUT_SECONDS if wait_for_window else ports.RENDERER_INITIAL_TIMEOUT_SECONDS
                 if local_loading is not None and not seamless_recovery:
-                    local_loading.update(title='正在切换到 Renderer HUD' if cold_start_attach else '正在启动 Renderer HUD', message='正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...')
+                    local_loading.update(
+                        title='正在切换到 Renderer HUD' if cold_start_attach else '正在启动 Renderer HUD',
+                        message=(
+                            '正在等待 Codex 完成启动并准备 HUD 注入...'
+                            if cold_start_attach
+                            else '正在把 HUD 注入 Codex 界面，通常只需 1 到 3 秒...'
+                        ),
+                    )
                 renderer_startup_visible = False
-                if not seamless_recovery:
+                # A visible Desktop splash window is not an injectable Codex
+                # renderer. Keep the desktop loading bubble alive until a real
+                # HUD payload is acknowledged; sending startup payloads here
+                # would otherwise consume the normal client retry gate.
+                if not cold_start_attach and not seamless_recovery:
                     renderer_startup_visible = startup_feedback.update(step='第 1 步，共 4 步', detail='已连接 Codex，正在准备 HUD…', progress=18)
                 if renderer_startup_visible and local_loading is not None:
                     local_loading.close()
@@ -384,12 +395,16 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                         time.sleep(ports.RENDERER_STARTUP_STEP_MIN_VISIBLE_SECONDS)
                     startup_feedback.update(step='第 2 步，共 4 步', detail='正在建立安全的 HUD 通道…', progress=35)
                 initial_wait_kwargs: dict[str, object] = {'timeout_seconds': initial_timeout}
-                if renderer_startup_visible or initial_bootstrapped:
+                if cold_start_attach:
+                    initial_wait_kwargs['retry_until_ready'] = True
+                elif renderer_startup_visible or initial_bootstrapped:
                     initial_wait_kwargs['progress_callback'] = startup_feedback.progress
-                skip_redundant_existing_attach = bool(codex_was_running and (not launched_codex) and (not renderer_startup_visible) and (local_loading is not None))
                 renderer_attached = False
-                if not skip_redundant_existing_attach:
-                    renderer_attached = wait_for_renderer(client, snapshot_or_error, **initial_wait_kwargs)
+                # The native loading bubble only reports startup progress; it
+                # is not an attach acknowledgement. Existing Codex + valid CDP
+                # must still perform the real Renderer probe before the
+                # loading/overlay resources are handed off or closed.
+                renderer_attached = wait_for_renderer(client, snapshot_or_error, **initial_wait_kwargs)
                 if not renderer_attached:
                     original_error = client.last_error
                     restart_can_help = bool(startup_plan.scenario in {ports.RENDERER_STARTUP_ATTACH, ports.RENDERER_STARTUP_ATTACH_OBSERVED} and (ports._renderer_initial_failure_should_recover_cdp_port(original_error) or ports._renderer_initial_failure_can_be_fixed_by_restart(original_error)))
@@ -406,7 +421,7 @@ def run_renderer_hud_session(args: argparse.Namespace, *, lock_already_held: boo
                     if local_loading is not None:
                         local_loading.close()
                     ports._LOGGER.info('renderer_hud_initial_connect_failed status=%s error=%s', client.last_status, client.last_error)
-                    ports._append_renderer_diagnostic('initial_connect_failed', status=client.last_status, error=client.last_error, display_mode=display_mode, daemon_mode=daemon_manager is not None, initial_timeout_seconds=initial_timeout, cdp_timeout_seconds=getattr(client, 'timeout_seconds', None))
+                    ports._append_renderer_diagnostic('initial_connect_failed', status=client.last_status, error=client.last_error, display_mode=display_mode, daemon_mode=daemon_manager is not None, initial_timeout_seconds=initial_timeout, cdp_timeout_seconds=getattr(client, 'timeout_seconds', None), cold_start_attach=cold_start_attach, renderer_attach_attempts=getattr(client, 'last_attach_metrics', {}).get('attempts'))
                     return ports.RENDERER_HUD_UNAVAILABLE
                 else:
                     ports._remember_successful_renderer_cdp_port(getattr(client, 'port', None))

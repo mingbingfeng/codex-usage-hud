@@ -40,12 +40,12 @@ from .constants import (
 )
 from .geometry import (
     OverlayRect,
-    _card_slot_rect,
     _completed_badge_row_width,
     _completed_slot_rect,
     _defer_other_transition_items,
     _detect_transition,
     _detect_transition_item_id,
+    _find_item_rect,
     _overlay_items_required_height,
     _overlay_window_top_y,
     _transition_layout_width,
@@ -297,6 +297,18 @@ class OverlayRenderingMixin:
         detail.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
         card_layout.addWidget(detail)
 
+        rest_hint = QLabel("", card)
+        rest_hint.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
+        rest_hint.setWordWrap(False)
+        rest_hint.setTextFormat(text_format.PlainText)
+        rest_hint.setAlignment(alignment.AlignTop | alignment.AlignLeft)
+        rest_hint.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        rest_hint.setFont(QFont("Microsoft YaHei UI", 7))
+        rest_hint.setFixedWidth(WORK_OVERLAY_TEXT_WRAP_WIDTH)
+        rest_hint.setFixedHeight(rest_hint.fontMetrics().height() + 4)
+        rest_hint.setVisible(False)
+        card_layout.addWidget(rest_hint)
+
         footer_container = QWidget(card)
         footer_container.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         footer_layout = QHBoxLayout(footer_container)
@@ -313,54 +325,40 @@ class OverlayRenderingMixin:
 
         rest_actions_row = QWidget(card)
         rest_actions_row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-        rest_row_layout = QVBoxLayout(rest_actions_row)
+        rest_row_layout = QHBoxLayout(rest_actions_row)
         rest_row_layout.setContentsMargins(0, 0, 0, 0)
         rest_row_layout.setSpacing(4)
+        rest_actions_row.setFixedHeight(24)
 
-        rest_secondary_row = QWidget(rest_actions_row)
-        rest_secondary_row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-        rest_secondary_layout = QHBoxLayout(rest_secondary_row)
-        rest_secondary_layout.setContentsMargins(0, 0, 0, 0)
-        rest_secondary_layout.setSpacing(8)
-
-        secondary_action_label = QLabel("", rest_secondary_row)
+        secondary_action_label = QLabel("", rest_actions_row)
         secondary_action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         secondary_action_label.setTextFormat(text_format.PlainText)
         secondary_action_label.setAlignment(alignment.AlignCenter)
         secondary_action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
         secondary_action_label.setFixedHeight(24)
         secondary_action_label.setVisible(False)
-        rest_secondary_layout.addWidget(secondary_action_label, 0)
+        rest_row_layout.addWidget(secondary_action_label, 0)
 
         extra_rest_action_labels: list[QLabel] = []
         for _ in range(4):
-            action_label = QLabel("", rest_secondary_row)
+            action_label = QLabel("", rest_actions_row)
             action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
             action_label.setTextFormat(text_format.PlainText)
             action_label.setAlignment(alignment.AlignCenter)
             action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.DemiBold))
             action_label.setFixedHeight(24)
             action_label.setVisible(False)
-            rest_secondary_layout.addWidget(action_label, 0)
+            rest_row_layout.addWidget(action_label, 0)
             extra_rest_action_labels.append(action_label)
 
-        rest_primary_row = QWidget(rest_actions_row)
-        rest_primary_row.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
-        rest_primary_layout = QHBoxLayout(rest_primary_row)
-        rest_primary_layout.setContentsMargins(0, 0, 0, 0)
-        rest_primary_layout.setSpacing(8)
-
-        primary_action_label = QLabel("", rest_primary_row)
+        primary_action_label = QLabel("", rest_actions_row)
         primary_action_label.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
         primary_action_label.setTextFormat(text_format.PlainText)
         primary_action_label.setAlignment(alignment.AlignCenter)
         primary_action_label.setFont(QFont("Microsoft YaHei UI", 8, QFont.Weight.Bold))
         primary_action_label.setFixedHeight(24)
         primary_action_label.setVisible(False)
-        rest_primary_layout.addWidget(primary_action_label, 0)
-
-        rest_row_layout.addWidget(rest_secondary_row)
-        rest_row_layout.addWidget(rest_primary_row)
+        rest_row_layout.addWidget(primary_action_label, 0)
 
         round_badge = QLabel("", footer_container)
         round_badge.setAttribute(widget_attrs.WA_TransparentForMouseEvents, True)
@@ -401,10 +399,10 @@ class OverlayRenderingMixin:
             "header": header,
             "header_meta": header_meta,
             "detail": detail,
+            "rest_hint": rest_hint,
             "footer_container": footer_container,
             "rest_actions_row": rest_actions_row,
-            "rest_secondary_row": rest_secondary_row,
-            "rest_primary_row": rest_primary_row,
+            "rest_actions_layout": rest_row_layout,
             "status_label": status_label,
             "secondary_action_label": secondary_action_label,
             "primary_action_label": primary_action_label,
@@ -572,6 +570,21 @@ class OverlayRenderingMixin:
             "}"
         )
 
+        rest_hint = record["rest_hint"]
+        rest_hint_text = (
+            str(item.get("restHint") or "").strip() if rest_reminder else ""
+        )
+        rest_hint.setText(rest_hint_text)
+        rest_hint.setToolTip("")
+        rest_hint.setStyleSheet(
+            "QLabel {"
+            f"color: {theme['muted']};"
+            "border: none;"
+            "background: transparent;"
+            "}"
+        )
+        rest_hint.setVisible(bool(rest_hint_text))
+
         workdir_text = _workdir_display_name(item)
         workdir_footer_text = _workdir_footer_display_name(item)
         full_workdir = str(item.get("workdir") or "").strip()
@@ -628,28 +641,14 @@ class OverlayRenderingMixin:
             label for label in record.get("rest_action_labels", [])
             if isinstance(label, QLabel)
         ]
-        # Rest buttons live in their own rows so the footer stays tidy.
-        # Secondary actions (延迟 / 3分钟 / 5分钟 / 10分钟 / 更多) go left on the
-        # first row; the primary action (开始休息 / 提前结束) is right-aligned on
-        # its own row.
+        # Keep every rest action in one compact horizontal bar. Secondary actions
+        # stay on the left; the highlighted primary action is pushed to the right.
         rest_actions_row = record.get("rest_actions_row")
-        rest_secondary_row = record.get("rest_secondary_row")
-        rest_primary_row = record.get("rest_primary_row")
-        rest_secondary_layout = (
-            rest_secondary_row.layout()
-            if isinstance(rest_secondary_row, QWidget)
-            and rest_secondary_row.layout() is not None
-            else None
-        )
-        rest_primary_layout = (
-            rest_primary_row.layout()
-            if isinstance(rest_primary_row, QWidget)
-            and rest_primary_row.layout() is not None
-            else None
-        )
+        rest_actions_layout = record.get("rest_actions_layout")
         if isinstance(rest_actions_row, QWidget):
             rest_actions_row.setVisible(bool(rest_actions))
-        primary_visible = False
+        secondary_labels: list[QLabel] = []
+        primary_label: QLabel | None = None
         for index, label in enumerate(action_labels):
             action = rest_actions[index] if index < len(rest_actions) else None
             if action is None:
@@ -658,36 +657,33 @@ class OverlayRenderingMixin:
                 continue
             primary = bool(action.get("primary"))
             label.setText(str(action.get("label") or ""))
-            label.setMinimumWidth(44)
-            label.setMaximumWidth(96)
+            label.setMinimumWidth(36)
+            label.setMaximumWidth(92)
             label.setStyleSheet(
                 "QLabel {"
                 f"color: {theme['surface'] if primary else theme['text']};"
                 f"background-color: {accent if primary else pill_bg};"
                 f"border: 1px solid {accent if primary else border_color};"
                 "border-radius: 7px;"
-                "padding: 0 8px;"
+                "padding: 0 5px;"
                 "}"
             )
             label.adjustSize()
             label.setFixedHeight(24)
-            label.setFixedWidth(max(44, min(96, label.sizeHint().width() + 10)))
+            label.setFixedWidth(max(32, min(88, label.sizeHint().width() + 4)))
             label.setVisible(True)
             if primary:
-                primary_visible = True
-                if isinstance(rest_primary_layout, QHBoxLayout):
-                    while rest_primary_layout.count():
-                        rest_primary_layout.takeAt(0)
-                    rest_primary_layout.addStretch(1)
-                    rest_primary_layout.addWidget(label, 0)
-            elif isinstance(rest_secondary_layout, QHBoxLayout):
-                rest_secondary_layout.addWidget(label, 0)
-        if isinstance(rest_secondary_row, QWidget):
-            rest_secondary_row.setVisible(
-                any(bool(not (a.get("primary"))) for a in rest_actions)
-            )
-        if isinstance(rest_primary_row, QWidget):
-            rest_primary_row.setVisible(primary_visible)
+                primary_label = label
+            else:
+                secondary_labels.append(label)
+        if isinstance(rest_actions_layout, QHBoxLayout):
+            while rest_actions_layout.count():
+                rest_actions_layout.takeAt(0)
+            for label in secondary_labels:
+                rest_actions_layout.addWidget(label, 0)
+            if primary_label is not None:
+                rest_actions_layout.addStretch(1)
+                rest_actions_layout.addWidget(primary_label, 0)
 
         workdir_label = record["workdir_label"]
         if workdir_footer_text and not rest_reminder:
@@ -718,6 +714,8 @@ class OverlayRenderingMixin:
                     action_item = dict(item)
                     action_item["action"] = str(action.get("action") or "")
                     action_item["actionLabel"] = str(action.get("label") or "")
+                    if "minutes" in action:
+                        action_item["minutes"] = action.get("minutes")
                     self._rest_action_anchors.append((label, action_item))
             elif not system_notice:
                 self._close_anchors.append(
@@ -908,15 +906,20 @@ class OverlayRenderingMixin:
 
     def _card_record_geometry(
         self,
-        index_from_top: int,
-        completed_count: int,
+        item_id: str,
+        visible_items: Sequence[Mapping[str, object]],
     ) -> QRect:
-        return self._card_geometry_for_slot(
-            _card_slot_rect(
-                index_from_top,
-                completed_count,
-                layout_width=self._layout_width,
-            )
+        rect = _find_item_rect(
+            visible_items,
+            item_id,
+            "card",
+            layout_width=self._layout_width,
+        )
+        return QRect(
+            int(round(rect[0])),
+            int(round(rect[1])),
+            max(1, int(round(rect[2]))),
+            max(1, int(round(rect[3]))),
         )
 
     def _qrect_from_rectf(self, rect: QRectF) -> QRect:
@@ -947,14 +950,6 @@ class OverlayRenderingMixin:
             WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT,
         )
 
-    def _card_geometry_for_slot(self, slot_rect: OverlayRect) -> QRect:
-        return QRect(
-            int(round(slot_rect[0])),
-            int(round(slot_rect[1])),
-            WORK_OVERLAY_WIDTH,
-            WORK_OVERLAY_TRANSITION_CARD_HEIGHT,
-        )
-
     def _sync_item_widget_geometries(
         self,
         visible_items: Sequence[Mapping[str, object]],
@@ -971,12 +966,15 @@ class OverlayRenderingMixin:
             )
             widget.show()
 
-        for index_from_top, record in enumerate(self.rects):
+        for record in self.rects:
             widget = self._record_visual_widget(record)
             if widget is None:
                 continue
             widget.setGeometry(
-                self._card_record_geometry(index_from_top, completed_count)
+                self._card_record_geometry(
+                    str(record.get("item_id") or ""),
+                    visible_items,
+                )
             )
             switch_overlay = record.get("switch_overlay")
             if isinstance(switch_overlay, CardSwitchPendingOverlayWidget):

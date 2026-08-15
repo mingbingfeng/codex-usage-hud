@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .config import UserConfig
 from .core.connection_health import ConnectionHealth, PROBE_TIMEOUT_SECONDS
@@ -44,6 +44,7 @@ from .support_assets import support_qr_payload
 DEFAULT_RENDERER_TIMEOUT_SECONDS = 0.45
 DEFAULT_RENDERER_TARGET_CACHE_SECONDS = 2.0
 SLOW_RENDERER_UPDATE_LOG_MS = 250.0
+RENDERER_STARTUP_RETRY_INTERVAL_SECONDS = 0.5
 ACTIVE_SESSION_BINDING_NAME = "codexUsageHudActiveSession"
 SETTINGS_COMMAND_BINDING_NAME = "codexUsageHudSettingsCommand"
 COMPOSER_ATTACHMENTS_BINDING_NAME = "codexUsageHudComposerAttachments"
@@ -376,12 +377,14 @@ class RendererHudClient:
         session_cleanup: dict[str, object] | None = None,
         connection_health: dict[str, object] | ConnectionHealth | None = None,
         request_rows_limit: int = 30,
+        startup_retry: bool = False,
     ) -> bool:
         started = time.perf_counter()
-        deferred = self._update_gate_state()
-        if deferred is not None:
-            self._defer_update(*deferred)
-            return False
+        if not startup_retry:
+            deferred = self._update_gate_state()
+            if deferred is not None:
+                self._defer_update(*deferred)
+                return False
         support_images = [] if self._support_images_sent else support_qr_payload()
         theme_started = time.perf_counter()
         theme_snapshot = self._theme_snapshot
@@ -414,7 +417,11 @@ class RendererHudClient:
             connection_health=connection_health,
             request_rows_limit=request_rows_limit,
         ).to_json()
-        update_ok = self.update_payload(payload)
+        update_ok = (
+            self.update_payload(payload, startup_retry=True)
+            if startup_retry
+            else self.update_payload(payload)
+        )
         metrics = dict(self.last_update_metrics)
         metrics.update(
             {
@@ -430,18 +437,28 @@ class RendererHudClient:
             return True
         return False
 
+    def update_startup(self, snapshot: ParsedSession) -> bool:
+        """Try a cold-start payload without poisoning the normal retry gate."""
+        return self.update(snapshot, startup_retry=True)
+
     def show_startup(self, payload: dict[str, object]) -> bool:
         """Paint a startup-only payload before normal HUD domain updates begin."""
         return self.update_payload(payload)
 
-    def update_payload(self, payload: dict[str, object]) -> bool:
+    def update_payload(
+        self,
+        payload: dict[str, object],
+        *,
+        startup_retry: bool = False,
+    ) -> bool:
         if not self.enabled:
             self.last_status = "disabled"
             return False
-        deferred = self._update_gate_state()
-        if deferred is not None:
-            self._defer_update(*deferred)
-            return False
+        if not startup_retry:
+            deferred = self._update_gate_state()
+            if deferred is not None:
+                self._defer_update(*deferred)
+                return False
         lock = getattr(self, "_update_lock", None)
         if lock is None:
             lock = threading.Lock()
@@ -451,11 +468,16 @@ class RendererHudClient:
             return False
         try:
             self.record_renderer_metric("payload_updates")
-            return self._update_payload_once(payload)
+            return self._update_payload_once(payload, startup_retry=startup_retry)
         finally:
             lock.release()
 
-    def _update_payload_once(self, payload: dict[str, object]) -> bool:
+    def _update_payload_once(
+        self,
+        payload: dict[str, object],
+        *,
+        startup_retry: bool = False,
+    ) -> bool:
         if not self.enabled:
             self.last_status = "disabled"
             return False
@@ -512,10 +534,52 @@ class RendererHudClient:
                 self.last_status = "unchanged"
                 self.last_error = ""
                 return True
+            active_session_binding_primed = False
+            if (
+                self._active_session_binding is not None
+                and (startup_retry or script_reinstall_needed)
+            ):
+                stage = "active_session_binding"
+                self._active_session_binding.ensure(websocket_url, target_id)
+                active_session_binding_primed = True
+                wait_ready = getattr(self._active_session_binding, "wait_ready", None)
+                if callable(wait_ready) and not wait_ready(self.timeout_seconds):
+                    raise RuntimeError(
+                        "renderer active-session binding was not ready"
+                    )
             stage = "payload_apply"
             if not self._send_update(websocket_url, prepared_payload):
-                raise RuntimeError("renderer update function did not acknowledge payload")
-            if self._active_session_binding is not None:
+                # Both the persistent binding and its fresh-websocket
+                # verification reported that the page cannot apply a payload.
+                # Reinstall and rehydrate immediately: waiting for the normal
+                # one-second retry makes the top and bottom HUD visibly blink.
+                first_update_metrics = dict(self.last_update_metrics)
+                recovery_started = time.perf_counter()
+                stage = "payload_recovery"
+                self._install(websocket_url, target_id, force=True)
+                self.record_renderer_metric("script_installs")
+                self.record_renderer_metric("binding_rebuilds")
+                recovered = self._send_update(websocket_url, payload)
+                recovery_metrics = dict(self.last_update_metrics)
+                recovery_metrics.update(
+                    {
+                        "inPlaceRecovery": True,
+                        "recoveryMs": (time.perf_counter() - recovery_started)
+                        * 1000.0,
+                        "initialPersistentVerification": first_update_metrics.get(
+                            "persistentVerification", ""
+                        ),
+                        "initialRendererApplyMs": first_update_metrics.get(
+                            "rendererApplyMs"
+                        ),
+                    }
+                )
+                self.last_update_metrics = recovery_metrics
+                if not recovered:
+                    raise RuntimeError(
+                        "renderer update function did not acknowledge payload"
+                    )
+            if self._active_session_binding is not None and not active_session_binding_primed:
                 stage = "active_session_binding"
                 self._active_session_binding.ensure(websocket_url, target_id)
             if self._settings_command_binding is not None:
@@ -563,14 +627,31 @@ class RendererHudClient:
                     "connection refused",
                 )
             )
-            if target_lost:
+            # A live page can replace its document without closing the CDP
+            # target.  In that case the cached target still looks healthy, but
+            # the injected HUD function is gone and no payload can be applied.
+            # Treat a missing acknowledgement as a document loss so the next
+            # retry reinstalls and immediately evaluates the renderer script.
+            renderer_context_lost = stage in {"payload_apply", "payload_recovery"}
+            if target_lost or renderer_context_lost:
                 self._clear_target_cache(clear_script=True)
                 self._payload_domain_digests.clear()
                 self._payload_extras_digest = None
                 self._payload_digest_target_id = ""
+            elif startup_retry:
+                # A launched Desktop app can replace its startup page with the
+                # real main renderer without closing the original target. Do
+                # not pin every retry to the first page selected during splash.
+                self._clear_target_cache(clear_script=False)
             self.last_status = "failed"
             self.last_error = f"{type(exc).__name__}: {exc}"
-            self._record_update_failure(stage=stage, error=exc)
+            if startup_retry:
+                # A splash page is an expected transient during a launched
+                # Desktop cold start. Keep each probe eligible for the next
+                # attempt instead of entering the normal 1/2/30 second gate.
+                self._reset_update_retry_state()
+            else:
+                self._record_update_failure(stage=stage, error=exc)
             return False
         metrics = dict(self.last_update_metrics)
         metrics.update(
@@ -752,6 +833,11 @@ class RendererHudClient:
             }
         )
         self.last_update_metrics = metrics
+
+    def _reset_update_retry_state(self) -> None:
+        self._update_failure_count = 0
+        self._update_retry_not_before = 0.0
+        self._update_cooldown_until = 0.0
 
     def _record_update_success(self) -> None:
         self._update_failure_count = 0
@@ -1036,6 +1122,8 @@ class RendererHudClient:
         persistent_ms: float | None = None
         persistent_fallback_reason = ""
         fallback_ms: float | None = None
+        persistent_verification = "not-needed"
+        persistent_verification_error = ""
         self.record_renderer_metric("cdp_commands")
         self.record_renderer_metric("payload_bytes", len(payload_json.encode("utf-8")))
         send_persistent = getattr(self._active_session_binding, "send_command", None)
@@ -1055,6 +1143,43 @@ class RendererHudClient:
                 persistent_fallback_reason = f"{type(exc).__name__}: {exc}"
                 transport = "active-session-binding"
                 result = {"result": {"result": {"value": {"ok": False}}}}
+            else:
+                persistent_ok, _persistent_apply_ms = self._update_acknowledgement(
+                    result
+                )
+                if not persistent_ok:
+                    # The persistent binding is useful for low-latency updates,
+                    # but a valid response without an acknowledgement can also
+                    # come from a stale CDP execution context.  Verify once on
+                    # a fresh websocket before declaring the HUD document lost
+                    # and reinstalling the entire surface.
+                    persistent_verification = "ephemeral-unacknowledged"
+                    verification_started = time.perf_counter()
+                    self.record_renderer_metric("cdp_commands")
+                    try:
+                        result = send_cdp_command(
+                            websocket_url,
+                            "Runtime.evaluate",
+                            _runtime_expression_params(expression),
+                            self.timeout_seconds,
+                        )
+                        fallback_ms = (
+                            time.perf_counter() - verification_started
+                        ) * 1000.0
+                        verified_ok, _verified_apply_ms = (
+                            self._update_acknowledgement(result)
+                        )
+                        if verified_ok:
+                            transport = "active-session-binding-verified"
+                            persistent_verification = "ephemeral-acknowledged"
+                    except Exception as exc:
+                        fallback_ms = (
+                            time.perf_counter() - verification_started
+                        ) * 1000.0
+                        persistent_verification = "ephemeral-error"
+                        persistent_verification_error = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
         else:
             result = send_cdp_command(
                 websocket_url,
@@ -1063,17 +1188,7 @@ class RendererHudClient:
                 self.timeout_seconds,
             )
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        value = result.get("result", {}).get("result", {}).get("value", False)
-        renderer_apply_ms: float | None = None
-        ok: bool
-        if isinstance(value, dict):
-            ok = bool(value.get("ok", False))
-            try:
-                renderer_apply_ms = float(value.get("applyMs"))
-            except (TypeError, ValueError):
-                renderer_apply_ms = None
-        else:
-            ok = bool(value)
+        ok, renderer_apply_ms = self._update_acknowledgement(result)
         domains_value = payload.get("payloadDomains")
         payload_domains = (
             sorted(str(key) for key in domains_value)
@@ -1090,6 +1205,8 @@ class RendererHudClient:
             "persistentMs": persistent_ms,
             "persistentFallbackReason": persistent_fallback_reason,
             "fallbackMs": fallback_ms,
+            "persistentVerification": persistent_verification,
+            "persistentVerificationError": persistent_verification_error,
             "attribution": (
                 "hud_dom"
                 if renderer_apply_ms is not None and renderer_apply_ms >= log_threshold
@@ -1107,19 +1224,40 @@ class RendererHudClient:
             renderer_apply_ms is not None and renderer_apply_ms >= log_threshold
         ):
             _LOGGER.info(
-                "renderer_update_timing attribution=%s transport=%s cdp_ms=%.1f persistent_ms=%s fallback_ms=%s fallback_reason=%s renderer_apply_ms=%s payload_bytes=%s domains=%s ok=%s",
+                "renderer_update_timing attribution=%s transport=%s cdp_ms=%.1f persistent_ms=%s fallback_ms=%s fallback_reason=%s verification=%s verification_error=%s renderer_apply_ms=%s payload_bytes=%s domains=%s ok=%s",
                 self.last_update_metrics["attribution"],
                 transport,
                 elapsed_ms,
                 f"{persistent_ms:.1f}" if persistent_ms is not None else "-",
                 f"{fallback_ms:.1f}" if fallback_ms is not None else "-",
                 persistent_fallback_reason or "-",
+                persistent_verification,
+                persistent_verification_error or "-",
                 f"{renderer_apply_ms:.1f}" if renderer_apply_ms is not None else "-",
                 self.last_update_metrics["payloadBytes"],
                 ",".join(payload_domains),
                 ok,
             )
         return ok
+
+    @staticmethod
+    def _update_acknowledgement(result: object) -> tuple[bool, float | None]:
+        if not isinstance(result, dict):
+            return False, None
+        result_payload = result.get("result")
+        if not isinstance(result_payload, dict):
+            return False, None
+        evaluation_result = result_payload.get("result")
+        if not isinstance(evaluation_result, dict):
+            return False, None
+        value = evaluation_result.get("value", False)
+        if not isinstance(value, dict):
+            return bool(value), None
+        try:
+            renderer_apply_ms = float(value.get("applyMs"))
+        except (TypeError, ValueError):
+            renderer_apply_ms = None
+        return bool(value.get("ok", False)), renderer_apply_ms
 
 
 def wait_for_renderer(
@@ -1128,10 +1266,15 @@ def wait_for_renderer(
     *,
     timeout_seconds: float,
     progress_callback: Any = None,
+    retry_until_ready: bool = False,
+    retry_interval_seconds: float = RENDERER_STARTUP_RETRY_INTERVAL_SECONDS,
+    monotonic: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> bool:
-    """Attempt one renderer attach without startup polling or retrying."""
-    del timeout_seconds
-    if callable(progress_callback):
+    """Attach once, or use a bounded cold-start retry when explicitly asked."""
+    clock = monotonic or time.monotonic
+    wait = sleep or time.sleep
+    if callable(progress_callback) and not retry_until_ready:
         try:
             progress_callback("reading_session")
         except Exception:
@@ -1140,18 +1283,41 @@ def wait_for_renderer(
     snapshot_started = time.perf_counter()
     snapshot = snapshot_factory()
     snapshot_ms = (time.perf_counter() - snapshot_started) * 1000.0
-    if callable(progress_callback):
+    if callable(progress_callback) and not retry_until_ready:
         try:
             progress_callback("showing_hud")
         except Exception:
             pass
-    update_started = time.perf_counter()
-    attached = bool(client.update(snapshot))
-    update_ms = (time.perf_counter() - update_started) * 1000.0
+    update_ms = 0.0
+    attempts = 0
+    attached = False
+    deadline = clock() + max(0.0, float(timeout_seconds))
+    while True:
+        attempts += 1
+        attempt_started = time.perf_counter()
+        if retry_until_ready:
+            update_startup = getattr(client, "update_startup", None)
+            if callable(update_startup):
+                attached = bool(update_startup(snapshot))
+            else:
+                attached = bool(client.update(snapshot))
+        else:
+            attached = bool(client.update(snapshot))
+        update_ms += (time.perf_counter() - attempt_started) * 1000.0
+        if attached or not retry_until_ready:
+            break
+        if str(getattr(client, "last_status", "") or "") == "disabled":
+            break
+        remaining = deadline - clock()
+        if remaining <= 0.0:
+            break
+        wait(min(max(0.01, float(retry_interval_seconds)), remaining))
     metrics = {
         "totalMs": (time.perf_counter() - started) * 1000.0,
         "snapshotBuildMs": snapshot_ms,
         "hudUpdateMs": update_ms,
+        "attempts": attempts,
+        "retryUntilReady": bool(retry_until_ready),
         "update": dict(getattr(client, "last_update_metrics", {}) or {}),
     }
     client.last_attach_metrics = metrics

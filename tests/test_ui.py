@@ -137,6 +137,7 @@ from codex_usage_hud.core.parser import (
 )
 from codex_usage_hud.ui.work_overlay_qt import (
     WORK_OVERLAY_QT_TRANSITION_ANIMATIONS_ENABLED,
+    WORK_OVERLAY_STACK_SPACING,
     WORK_OVERLAY_STATE_READ_FAILURE_GRACE_SECONDS,
     WORK_OVERLAY_STATE_READ_RETRY_MS,
     WORK_OVERLAY_TEXT_WRAP_WIDTH,
@@ -3351,6 +3352,14 @@ class BudgetHelperTests(unittest.TestCase):
         )
         prompt_copy = _rest_reminder_card_copy(prompt, now_ms=100_000)
         self.assertEqual(prompt_copy["headerMeta"], "今日已休息 01:05")
+        self.assertEqual(
+            prompt_copy["hint"],
+            "如果您已提前休息过了，可以点击下方分钟数按钮标记已休息",
+        )
+        self.assertEqual(
+            prompt["restHint"],
+            "如果您已提前休息过了，可以点击下方分钟数按钮标记已休息",
+        )
         self.assertEqual(prompt_copy["statusText"], "等待你的选择 · 不会自动跳过")
         self.assertEqual(
             [action["action"] for action in prompt_copy["actions"]],
@@ -7648,6 +7657,21 @@ class WorkOverlayTransitionTests(unittest.TestCase):
 
         self.assertRectAlmostEqual(first, (0.0, 188.0, 430.0, 110.0))
         self.assertRectAlmostEqual(second, (0.0, 306.0, 430.0, 110.0))
+
+    def test_rest_reminder_card_keeps_compact_single_action_row_height(self) -> None:
+        items = [
+            {"id": "rest", "kind": "rest_reminder", "bubbleVisible": True},
+            {"id": "next", "status": "tool"},
+        ]
+
+        rest = _find_item_rect(items, "rest", "card", layout_width=430)
+        next_card = _find_item_rect(items, "next", "card", layout_width=430)
+
+        self.assertEqual(rest[3], 110.0)
+        self.assertEqual(
+            next_card[1],
+            rest[1] + rest[3] + float(WORK_OVERLAY_STACK_SPACING),
+        )
 
 
 @unittest.skip("legacy standalone HUD removed")
@@ -14516,7 +14540,7 @@ class DaemonLifecycleTests(unittest.TestCase):
                     return_value=(True, "visible", "", 123),
                 ),
                 patch("codex_usage_hud.runtime_orchestration._wait_for_visible_codex_window") as wait_window,
-                patch("codex_usage_hud.renderer_runtime.wait_for_renderer") as wait_renderer,
+                patch("codex_usage_hud.renderer_runtime.wait_for_renderer", return_value=False) as wait_renderer,
                 patch(
                     "codex_usage_hud.runtime_orchestration._assign_fresh_renderer_cdp_port",
                     side_effect=RuntimeError("no available CDP port"),
@@ -14538,7 +14562,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             renderer_calls[0][1],
             runtime_orchestration.RENDERER_CDP_TIMEOUT_SECONDS,
         )
-        wait_renderer.assert_not_called()
+        wait_renderer.assert_called_once()
         wait_window.assert_not_called()
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
@@ -14993,6 +15017,7 @@ class DaemonLifecycleTests(unittest.TestCase):
             wait_renderer.call_args.kwargs["timeout_seconds"],
             runtime_orchestration.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS,
         )
+        self.assertTrue(wait_renderer.call_args.kwargs["retry_until_ready"])
         restart_card.assert_not_called()
         fake_client.close.assert_called_once()
         fake_bridge.close.assert_called_once()
@@ -16470,7 +16495,6 @@ class DaemonLifecycleTests(unittest.TestCase):
             "第 2 步，共 4 步",
         )
         fake_client.set_settings_command_callback.assert_called_once()
-
     def test_renderer_loop_registers_audit_callback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -19502,6 +19526,8 @@ class DaemonLifecycleTests(unittest.TestCase):
             timeout_seconds=1.0,
             take_settings_command=MagicMock(return_value=None),
             update=MagicMock(side_effect=KeyboardInterrupt),
+            show_startup=MagicMock(return_value=True),
+            bootstrap_active_session=MagicMock(return_value=True),
         )
         fake_bridge = MagicMock()
         fake_bridge.start.return_value = "http://127.0.0.1:8765"
@@ -19558,6 +19584,9 @@ class DaemonLifecycleTests(unittest.TestCase):
             wait_renderer.call_args.kwargs["timeout_seconds"],
             runtime_orchestration.RENDERER_RESTART_INITIAL_TIMEOUT_SECONDS,
         )
+        self.assertTrue(wait_renderer.call_args.kwargs["retry_until_ready"])
+        fake_client.show_startup.assert_not_called()
+        fake_client.bootstrap_active_session.assert_not_called()
 
     def test_run_renderer_hud_session_drains_work_overlay_commands_with_window_prep(self) -> None:
         runtime_events = RuntimeEventBus()

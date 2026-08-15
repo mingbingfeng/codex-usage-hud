@@ -1265,27 +1265,47 @@ def _session_round_rows(snapshot: ParsedSession) -> list[RequestRound]:
 
 
 def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
-    rows = [
-        item
-        for item in _session_round_rows(snapshot)
-        if item.status != "waiting"
-        or item.total_tokens
-        or item.input_tokens
-        or item.output_tokens
-        or item.reasoning_tokens
-        or item.cost_usd
-    ]
-    ranked: list[tuple[float, int, RequestRound, float | None, bool]] = []
-    for item in rows:
+    task_rows: list[tuple[int, RequestRound]] = []
+    for task in getattr(snapshot, "activity_tasks", []) or []:
+        task_index = max(1, int(getattr(task, "index", 0) or 1))
+        task_rows.extend(
+            (task_index, item)
+            for item in (getattr(task, "request_history", []) or [])
+        )
+    if not task_rows:
+        fallback_task_index = max(1, int(getattr(snapshot, "task_index", 0) or 1))
+        task_rows = [
+            (fallback_task_index, item) for item in _session_round_rows(snapshot)
+        ]
+    ranked: list[tuple[float, int, int, RequestRound, float | None, bool]] = []
+    task_prompts = {
+        max(1, int(getattr(task, "index", 0) or 1)): str(
+            getattr(task, "prompt", "") or ""
+        ).strip()
+        for task in (getattr(snapshot, "activity_tasks", []) or [])
+    }
+    fallback_prompt = str(getattr(snapshot, "task_prompt", "") or "").strip()
+    for task_index, item in task_rows:
+        if not (
+            item.status != "waiting"
+            or item.total_tokens
+            or item.input_tokens
+            or item.output_tokens
+            or item.reasoning_tokens
+            or item.cost_usd
+        ):
+            continue
         cost, estimated = _round_cost_value(item, snapshot.request.model)
         total = int(item.total_tokens or 0)
         if total <= 0:
             total = int(item.input_tokens or 0) + int(item.output_tokens or 0)
-        ranked.append((float(cost if cost is not None else -1.0), total, item, cost, estimated))
+        ranked.append(
+            (float(cost if cost is not None else -1.0), total, task_index, item, cost, estimated)
+        )
     ranked.sort(key=lambda value: (value[0], value[1]), reverse=True)
 
-    details: list[dict[str, str]] = []
-    for _score_cost, total, item, cost, estimated in ranked[:3]:
+    details: list[dict[str, object]] = []
+    for _score_cost, total, task_index, item, cost, estimated in ranked[:3]:
         duration = _round_duration_text(item)
         breakdown = (
             f"↑{_short_num(item.input_tokens)} "
@@ -1293,10 +1313,10 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
             f"↓{_short_num(item.output_tokens)} "
             f"◇{_short_num(item.reasoning_tokens)}"
         )
-        title = f"#{item.index} {_format_fixed_money(cost, estimated)} · ∑{_short_num(total)}"
+        title = f"Req{task_index}-#{item.index} {_format_fixed_money(cost, estimated)} · ∑{_short_num(total)}"
         detail = _compact(item.activity_summary or f"消耗构成：{breakdown}", 112)
         copy_text = item.copy_text or (
-            f"轮次 #{item.index}\n"
+            f"Req{task_index}-#{item.index}\n"
             f"金额 {_format_fixed_money(cost, estimated)}\n"
             f"Tokens {total:,}\n"
             f"{breakdown}"
@@ -1306,6 +1326,9 @@ def _top_heavy_rounds(snapshot: ParsedSession) -> list[dict[str, object]]:
                 "title": title,
                 "detail": detail,
                 "copyText": copy_text,
+                "taskIndex": task_index,
+                "roundIndex": int(item.index),
+                "taskPrompt": task_prompts.get(task_index, "") or fallback_prompt,
                 "tooltip": (
                     f"轮次 #{item.index} · {duration}\n"
                     f"金额 {_format_fixed_money(cost, estimated)} · Tokens {total:,}\n"

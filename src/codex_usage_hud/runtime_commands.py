@@ -804,6 +804,7 @@ def handle_cleanup_command(
         "sessionCleanupPreview": "正在生成永久删除确认。",
         "sessionCleanupExecute": "永久删除请求已进入本地事务门禁。",
         "sessionCleanupCancel": "已取消会话删除确认。",
+        "sessionTransfer": "会话 Provider 复制/迁移请求已提交。",
     }
     status = _status(labels.get(action, "会话清理命令已提交。"))
     status["sessionCleanupRequestId"] = request_id

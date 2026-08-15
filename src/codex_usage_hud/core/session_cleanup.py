@@ -71,6 +71,7 @@ class SessionCleanupItem:
     model_provider: str = "unknown"
     client_kind: str = "unknown"
     _session_id: str = field(default="", repr=False, compare=False)
+    _cwd: str = field(default="", repr=False, compare=False)
     _descendant_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
     _rollout_paths: tuple[Path, ...] = field(default=(), repr=False, compare=False)
 
@@ -458,6 +459,7 @@ class SessionCleanupManager:
                     model_provider=metadata.model_provider,
                     client_kind=metadata.client_kind,
                     _session_id=root_id,
+                    _cwd=root.cwd,
                     _descendant_ids=tuple(descendants),
                     _rollout_paths=rollout_paths,
                 )
@@ -592,6 +594,189 @@ class SessionCleanupManager:
             deletedCount=deleted_count,
             failedCount=0,
             actualBytes=actual_bytes,
+        )
+
+    def transfer(
+        self,
+        item_ids: Sequence[str],
+        revision: str,
+        source_provider: str,
+        target_provider: str,
+        mode: str,
+        *,
+        fork: Callable[[str, str, str], str],
+        request_id: str = "",
+    ) -> dict[str, object]:
+        """Fork selected sessions to another Provider, optionally removing sources.
+
+        ``fork`` is injected by the runtime worker so this manager remains
+        responsible for inventory/revalidation and local deletion safety while
+        the App Server protocol stays outside the storage layer.
+        """
+        normalized_source = str(source_provider or "").strip().casefold()
+        normalized_target = str(target_provider or "").strip().casefold()
+        normalized_mode = str(mode or "copy").strip().casefold()
+        if not normalized_source or not normalized_target:
+            raise SessionCleanupError("会话迁移需要源和目标 Provider。")
+        if normalized_source == normalized_target:
+            raise SessionCleanupError("源 Provider 与目标 Provider 不能相同。")
+        if normalized_mode not in {"copy", "migrate"}:
+            raise SessionCleanupError("不支持的会话迁移模式。")
+        if not callable(fork):
+            raise SessionCleanupError("Codex fork 服务当前不可用。")
+        items = self._selected_items(item_ids, revision)
+        if any(
+            item.model_provider.casefold() != normalized_source
+            for item in items
+        ):
+            raise SessionCleanupError(
+                "所选会话已不属于当前源 Provider，请重新扫描后再试。"
+            )
+        results: list[dict[str, object]] = []
+        publisher = getattr(self, "progress_publisher", None)
+        total = len(items)
+
+        def publish_progress() -> None:
+            snapshot = self.mark_operation(
+                request_id=request_id,
+                action="sessionTransfer",
+                state="running",
+                progress=min(99, round(100 * len(results) / max(1, total))),
+                sourceProvider=normalized_source,
+                targetProvider=normalized_target,
+                mode=normalized_mode,
+                selectedIds=[item.id for item in items],
+                results=list(results),
+                completedCount=len(results),
+                copiedCount=sum(
+                    bool(result.get("forked")) for result in results
+                ),
+                migratedCount=sum(
+                    result.get("state") == "migrated" for result in results
+                ),
+                failedCount=(
+                    len(results) - sum(result.get("state") == "migrated" for result in results)
+                    if normalized_mode == "migrate"
+                    else sum(result.get("state") == "failed" for result in results)
+                ),
+            )
+            if callable(publisher):
+                publisher(snapshot)
+
+        for item in items:
+            forked = False
+            try:
+                new_session_id = str(
+                    fork(item._session_id, normalized_target, item._cwd) or ""
+                ).strip()
+                if not _canonical_uuid(new_session_id) or new_session_id == item._session_id:
+                    raise SessionCleanupError(
+                        "Codex fork 未返回新的目标会话。"
+                    )
+                forked = True
+                source_deleted = False
+                if normalized_mode == "migrate":
+                    preview = self.preview(
+                        [item.id],
+                        self._revision,
+                        request_id=request_id,
+                    )
+                    preview_operation = preview.get("operation")
+                    confirmation_token = str(
+                        preview_operation.get("confirmationToken")
+                        if isinstance(preview_operation, Mapping)
+                        else ""
+                    )
+                    if not confirmation_token:
+                        raise SessionCleanupError("源会话删除确认令牌生成失败。")
+                    deleted = self.execute(
+                        [item.id],
+                        self._revision,
+                        confirmation_token,
+                        request_id=request_id,
+                    )
+                    deleted_operation = deleted.get("operation")
+                    source_deleted = bool(
+                        isinstance(deleted_operation, Mapping)
+                        and deleted_operation.get("state") == "completed"
+                        and int(deleted_operation.get("deletedCount") or 0) == 1
+                    )
+                    if not source_deleted:
+                        raise SessionCleanupError(
+                            "目标会话已创建，但源会话未能安全删除。"
+                        )
+                results.append(
+                    {
+                        "id": item.id,
+                        "title": item.title,
+                        "state": "migrated" if source_deleted else "copied",
+                        "forked": True,
+                        "sourceDeleted": source_deleted,
+                        "error": "",
+                    }
+                )
+            except Exception as exc:
+                error_text = str(exc) or type(exc).__name__
+                if forked:
+                    results.append(
+                        {
+                            "id": item.id,
+                            "title": item.title,
+                            "state": "copied",
+                            "forked": True,
+                            "sourceDeleted": False,
+                            "error": error_text,
+                        }
+                    )
+                    publish_progress()
+                    continue
+                results.append(
+                    {
+                        "id": item.id,
+                        "title": item.title,
+                        "state": "failed",
+                        "forked": False,
+                        "sourceDeleted": False,
+                        "error": error_text,
+                    }
+                )
+            publish_progress()
+
+        if any(bool(result.get("forked")) for result in results):
+            try:
+                self.scan(request_id=request_id)
+            except Exception:
+                # The transfer result is still useful even if the follow-up
+                # inventory refresh is unavailable; the next manual scan will
+                # reconcile the list.
+                pass
+        copied_count = sum(bool(result.get("forked")) for result in results)
+        migrated_count = sum(result.get("state") == "migrated" for result in results)
+        failed_count = (
+            total - migrated_count
+            if normalized_mode == "migrate"
+            else total - copied_count
+        )
+        completed = (
+            migrated_count == total
+            if normalized_mode == "migrate"
+            else copied_count == total
+        )
+        state = "completed" if completed else ("partial" if copied_count else "failed")
+        return self.mark_operation(
+            request_id=request_id,
+            action="sessionTransfer",
+            state=state,
+            progress=100,
+            sourceProvider=normalized_source,
+            targetProvider=normalized_target,
+            mode=normalized_mode,
+            selectedIds=[item.id for item in items],
+            results=results,
+            sessionCount=total,
+            copiedCount=copied_count,
+            migratedCount=migrated_count,
+            failedCount=max(0, failed_count),
         )
 
     def preview(

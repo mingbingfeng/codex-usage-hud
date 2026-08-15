@@ -55,7 +55,12 @@ from .constants import (
     WORK_OVERLAY_ELAPSED_TEXT_TIMER_MS,
     DEFAULT_WORK_OVERLAY_THEME,
 )
-from .model import _clamp01, _item_id, _item_is_completed, _item_kind
+from .model import (
+    _clamp01,
+    _item_id,
+    _item_is_completed,
+    _item_kind,
+)
 
 OverlayRect = tuple[float, float, float, float]
 
@@ -65,6 +70,7 @@ def work_overlay_max_items_for_screen_height(screen_height: int) -> int:
         int(screen_height) - WORK_OVERLAY_TOP_OFFSET - (WORK_OVERLAY_MARGIN * 2),
     )
     return max(1, available_height // WORK_OVERLAY_ESTIMATED_ITEM_HEIGHT)
+
 
 def _pending_workdir_window_rect(
     anchor_x: int,
@@ -207,15 +213,15 @@ def _card_slot_rect(
     row_top = 0
     if int(completed_count) > 0:
         row_top += WORK_OVERLAY_COMPLETED_BADGE_ROW_HEIGHT + WORK_OVERLAY_STACK_SPACING
-    row_top += max(0, int(index_from_top)) * (
-        WORK_OVERLAY_TRANSITION_CARD_HEIGHT + WORK_OVERLAY_STACK_SPACING
-    )
+    index_from_top = max(0, int(index_from_top))
+    card_height = WORK_OVERLAY_TRANSITION_CARD_HEIGHT
+    row_top += index_from_top * (card_height + WORK_OVERLAY_STACK_SPACING)
     x = max(0, int(layout_width) - WORK_OVERLAY_WIDTH)
     return (
         float(x),
         float(row_top),
         float(WORK_OVERLAY_WIDTH),
-        float(WORK_OVERLAY_TRANSITION_CARD_HEIGHT),
+        float(card_height),
     )
 
 def _overlay_required_height_for_counts(

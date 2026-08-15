@@ -2,6 +2,19 @@ HEAD = r"""
 (() => {
   const version = "53";
   const rootId = "codex-usage-hud-root";
+  // Reinstalling the same Renderer bundle in a live document must be
+  // idempotent.  In particular, do not tear down the old runtime while a
+  // settings child dialog is open: its unsaved form values and pending
+  // command state live in that runtime's closure.  The new-document script
+  // still runs normally on a fresh document where no root exists.
+  const existingRoot = document.getElementById(rootId);
+  if (
+    existingRoot?.dataset.version === version
+    && typeof window.__codexUsageHudUpdate === "function"
+    && typeof window.__codexUsageHudRemove === "function"
+  ) {
+    return;
+  }
   const styleId = "codex-usage-hud-style";
   const topClass = "codex-usage-hud-top";
   const requestClass = "codex-usage-hud-request";
@@ -179,6 +192,18 @@ previewTokenShown: "",
 scanStartedAt: 0,
 ...readSessionCleanupFilters(),
 };
+  const sessionTransferState = {
+    open: false,
+    sourceProvider: "",
+    targetProvider: "",
+    mode: "copy",
+    search: "",
+    selectedIds: new Set(),
+    scanRequestId: "",
+    requestId: "",
+    data: null,
+    operation: null,
+  };
   let backgroundUsageFetchSeq = 0;
   let backgroundUsageDetailSeq = 0;
   const backgroundUsageRequestTimeoutMs = 5000;

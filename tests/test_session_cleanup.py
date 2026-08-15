@@ -248,6 +248,70 @@ class SessionCleanupManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(SessionCleanupError, "受保护会话"):
             manager.delete_provider_history("openai-custom")
 
+    def test_session_transfer_copy_keeps_source_and_uses_private_session_context(self) -> None:
+        fixture = self._fixture()
+        temporary, root, _state, _index, _rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        calls: list[tuple[str, str, str]] = []
+        target_id = "10000000-0000-4000-8000-000000000004"
+
+        def fork(session_id: str, provider: str, cwd: str) -> str:
+            calls.append((session_id, provider, cwd))
+            return target_id
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "OPENAI-CUSTOM",
+            "ROUTIN",
+            "copy",
+            fork=fork,
+            request_id="transfer-copy",
+        )
+
+        operation = result["operation"]
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["migratedCount"], 0)
+        self.assertEqual(calls, [(ROOT_ID, "routin", str(root / "project-a"))])
+        self.assertTrue(_rollouts[ROOT_ID].exists())
+
+    def test_session_transfer_migrate_deletes_source_only_after_fork(self) -> None:
+        fixture = self._fixture()
+        temporary, _root, state, _index, rollouts, manager = fixture
+        self.addCleanup(temporary.cleanup)
+
+        payload = manager.scan(request_id="transfer-scan")
+        root_row = next(row for row in payload["sessions"] if row["title"] == "Root")
+        forked: list[str] = []
+
+        def fork(session_id: str, _provider: str, _cwd: str) -> str:
+            forked.append(session_id)
+            return "10000000-0000-4000-8000-000000000005"
+
+        result = manager.transfer(
+            [root_row["id"]],
+            payload["revision"],
+            "openai-custom",
+            "routin",
+            "migrate",
+            fork=fork,
+            request_id="transfer-migrate",
+        )
+
+        operation = result["operation"]
+        self.assertEqual(operation["state"], "completed")
+        self.assertEqual(operation["copiedCount"], 1)
+        self.assertEqual(operation["migratedCount"], 1)
+        self.assertEqual(forked, [ROOT_ID])
+        self.assertFalse(rollouts[ROOT_ID].exists())
+        self.assertFalse(rollouts[CHILD_ID].exists())
+        with closing(sqlite3.connect(state)) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM threads").fetchone()[0], 1)
+
     def test_ambiguous_spawn_relation_blocks_every_affected_root(self) -> None:
         fixture = self._fixture()
         temporary, _root, state, _index, _rollouts, manager = fixture

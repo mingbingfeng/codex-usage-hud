@@ -1814,7 +1814,8 @@ class JsonlSessionParser:
 
         _side, label, text = preferred
         display = f"{label}：{compact_text(text, 92)}"
-        copy_text = text if len(text) <= 6000 else text[:5997] + "..."
+        # Keep the clipboard source complete; display formatting remains compact.
+        copy_text = text
         return display, f"{label}：\n{copy_text}"
 
     def token_rounds_since_task(

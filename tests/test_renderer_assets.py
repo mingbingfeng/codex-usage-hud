@@ -147,6 +147,17 @@ def test_settings_support_panels_are_a_static_subdomain_fragment() -> None:
     )
 
 
+def test_provider_settings_expose_session_copy_and_transfer_workflow() -> None:
+    assert 'data-action="settings-transfer-provider"' in SETTINGS_SHELL
+    assert "function openSessionTransferDialog" in SETTINGS_SHELL
+    assert "function submitSessionTransfer" in SETTINGS_SHELL
+    assert 'data-session-transfer-mode="copy"' in SETTINGS_SHELL
+    assert 'data-session-transfer-mode="migrate"' in SETTINGS_SHELL
+    assert 'action: "sessionTransfer"' in SETTINGS_SHELL
+    assert "sessionTransferState.selectedIds" in SETTINGS_SHELL
+    assert "codex-usage-hud-session-transfer-card" in LAYOUT_STYLE
+
+
 def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> None:
     form_start = SETTINGS_SHELL.index("function codexCliFormHtml()")
     form_end = SETTINGS_SHELL.index("function renderCodexCliDialog()", form_start)
@@ -166,6 +177,11 @@ def test_codex_cli_dialog_is_compact_and_persists_profile_scoped_launches() -> N
     assert "function codexCliLaunchTitle" in SETTINGS_SHELL
     assert 'return ["启动 Codex", ...args].join(" ");' in SETTINGS_SHELL
     assert '<strong>${escapeHtml(codexCliLaunchTitle())}</strong>' in SETTINGS_SHELL
+    assert '<option value="" disabled' in form
+    assert "请选择工作目录" in form
+    assert 'codexCliState.workdir = "";' in SETTINGS_SHELL
+    assert 'launch.disabled = !codexCliTerminal().id;' in SETTINGS_SHELL
+    assert "请先选择工作目录后再启动 Codex CLI" in SETTINGS_SHELL
     assert 'data-codex-cli-field="resume"' in form
     assert form.index('data-codex-cli-field="resume"') < form.index("启动终端")
     assert "codex-usage-hud-codex-cli-check codex-usage-hud-codex-cli-wide" not in form
@@ -197,7 +213,27 @@ def test_renderer_reinject_captures_active_session_sequences_before_remove() -> 
     )
 
     assert selection_capture < applied_capture < previous_remove
-    assert "__codexUsageHudRemove" not in script[:selection_capture]
+    # Same-version reinjection now exits before touching the old runtime.  The
+    # fallback preserve-state remove remains below the sequence handoff.
+    assert "window.__codexUsageHudRemove({ preserveState: true });" not in script[:selection_capture]
+
+
+def test_renderer_same_version_reinject_reuses_live_runtime_before_teardown() -> None:
+    script = renderer_script._RENDERER_HUD_SCRIPT_TEMPLATE
+    guard_start = script.index('const existingRoot = document.getElementById(rootId);')
+    guard_end = script.index('const styleId = "codex-usage-hud-style";', guard_start)
+    guard = script[guard_start:guard_end]
+
+    assert 'existingRoot?.dataset.version === version' in guard
+    assert 'typeof window.__codexUsageHudUpdate === "function"' in guard
+    assert 'typeof window.__codexUsageHudRemove === "function"' in guard
+    assert "return;" in guard
+    assert script.index("return;", guard_start) < script.index(
+        'const styleId = "codex-usage-hud-style";', guard_start
+    )
+    assert script.index('const styleId = "codex-usage-hud-style";') < script.index(
+        'window.__codexUsageHudRemove({ preserveState: true });'
+    )
 
 
 def test_active_session_container_prefers_thread_role_list() -> None:

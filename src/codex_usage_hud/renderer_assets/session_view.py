@@ -484,6 +484,9 @@ TEXT = r"""
         row.dataset.copyField = "heavy";
         row.title = row.dataset.copyTitle;
       }
+      if (item.taskIndex) row.dataset.activityTaskIndex = String(item.taskIndex);
+      if (item.roundIndex) row.dataset.activityRoundIndex = String(item.roundIndex);
+      if (item.taskPrompt) row.dataset.activityTaskPrompt = String(item.taskPrompt);
       const title = document.createElement("span");
       title.className = "codex-usage-hud-heavy-round-title";
       title.textContent = String(item.title || "");
@@ -638,6 +641,66 @@ TEXT = r"""
     const next = clamp(Math.round(current) + Number(delta || 0), 1, tasks.length);
     root.dataset.activityTaskIndex = String(next);
     renderTopDetails(root, payload);
+    return true;
+  }
+
+  function selectActivityTaskIndex(root, index) {
+    const payload = currentPayload() || {};
+    const details = payload?.topDetails || {};
+    const tasks = activityTaskItems(details);
+    if (details?.activityTaskNavigable !== true || tasks.length < 2) return false;
+    const next = clamp(Math.round(Number(index || 0)), 1, tasks.length);
+    root.dataset.activityTaskIndex = String(next);
+    renderTopDetails(root, payload);
+    return true;
+  }
+
+  function scrollToActivityRequest(taskPrompt) {
+    const prompt = String(taskPrompt || "").replace(/\s+/g, " ").trim();
+    if (!prompt) return false;
+    const needle = prompt.slice(0, 220);
+    const candidates = [
+      ...Array.from(document.querySelectorAll("[data-content-search-unit-key]")),
+      ...Array.from(document.querySelectorAll("[data-turn-key]")),
+    ];
+    const match = candidates.find((node) => {
+      const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ");
+      return text.includes("你说：") && text.includes(needle);
+    });
+    if (!match) return false;
+    const target = match.closest("[data-content-search-unit-key], [data-turn-key]") || match;
+    target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+    return true;
+  }
+
+  function scrollToActivityRound(copyText, taskPrompt) {
+    if (scrollToActivityRequest(taskPrompt)) return true;
+    const source = String(copyText || "").replace(/\s+/g, " ").trim();
+    if (!source) return false;
+    const lines = String(copyText || "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter((line) => line.length >= 12 && !/^Req\d+-#\d+/.test(line));
+    const needle = (lines.sort((a, b) => b.length - a.length)[0] || source).slice(0, 180);
+    const selectors = [
+      "[data-content-search-unit-key]",
+      "[data-turn-key]",
+      "[data-markdown-text-style='assistant-message']",
+      "[data-message-author-role]",
+    ];
+    const candidates = [
+      ...Array.from(document.querySelectorAll("[data-content-search-unit-key]")),
+      ...Array.from(document.querySelectorAll(selectors.join(","))),
+    ];
+    const match = candidates.find((node) => {
+      const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ");
+      return text.includes(needle);
+    });
+    if (!match) return false;
+    const target = match.closest("[data-content-search-unit-key], [data-turn-key]") || match;
+    target.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+    target.dataset.codexHudLocatePulse = "true";
+    window.setTimeout(() => delete target.dataset.codexHudLocatePulse, 1200);
     return true;
   }
 
@@ -797,6 +860,9 @@ TEXT = r"""
       renderActivityTimeline,
       renderTopDetails,
       selectActivityTask,
+      selectActivityTaskIndex,
+      scrollToActivityRequest,
+      scrollToActivityRound,
       setFieldTitle,
       setText,
     };

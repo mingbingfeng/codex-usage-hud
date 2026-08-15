@@ -389,7 +389,7 @@ def test_event_loop_snapshot_plan_runs_refresh_before_wait() -> None:
     with pytest.raises(StopLoop):
         loop.run()
 
-    assert order == ["inputs", "refresh", "after"]
+    assert order == ["inputs", "refresh", "keepalive", "after"]
 
 
 def _sampler_ports(

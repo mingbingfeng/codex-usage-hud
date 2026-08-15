@@ -69,14 +69,17 @@ TEXT = r"""
         return `<div class="codex-usage-hud-cleanup-workspace"><div class="codex-usage-hud-cleanup-content">${sessionCleanupPanelHtml()}</div><div class="codex-usage-hud-cleanup-footer"><span class="codex-usage-hud-cleanup-footer-meta">${footerMeta}</span>${footerActions}</div></div>`;
       }
 
-      function sessionCleanupRows(data = sessionCleanupFromPayload()) {
-        const search = String(sessionCleanupState.search || "").trim().toLowerCase();
-        const archive = String(sessionCleanupState.archive || "all");
-        const availability = String(sessionCleanupState.availability || "all");
-        const clientKind = String(sessionCleanupState.clientKind || "all");
-        const modelProvider = String(sessionCleanupState.modelProvider || "all");
-        const startAt = sessionCleanupDateValue(sessionCleanupState.dateStart);
-        const endAt = sessionCleanupDateValue(sessionCleanupState.dateEnd);
+      function sessionCleanupRows(data = sessionCleanupFromPayload(), filters = sessionCleanupState) {
+        const filterState = filters && typeof filters === "object"
+          ? filters
+          : sessionCleanupState;
+        const search = String(filterState.search || "").trim().toLowerCase();
+        const archive = String(filterState.archive || "all");
+        const availability = String(filterState.availability || "all");
+        const clientKind = String(filterState.clientKind || "all");
+        const modelProvider = String(filterState.modelProvider || "all");
+        const startAt = sessionCleanupDateValue(filterState.dateStart);
+        const endAt = sessionCleanupDateValue(filterState.dateEnd);
         const rows = (Array.isArray(data?.sessions) ? data.sessions : []).filter((item) => {
           const archived = item?.archived === true;
           const status = String(item?.status || "idle");
@@ -94,7 +97,7 @@ TEXT = r"""
           if (!search) return true;
           return `${item?.title || ""} ${item?.workdirName || ""} ${item?.modelProvider || ""} ${item?.clientKind || ""}`.toLowerCase().includes(search);
         });
-        const sort = String(sessionCleanupState.sort || "recommended");
+        const sort = String(filterState.sort || "recommended");
         return rows.sort((left, right) => {
           const leftUpdated = sessionCleanupDateValue(left?.updatedAt) || 0;
           const rightUpdated = sessionCleanupDateValue(right?.updatedAt) || 0;

@@ -16,9 +16,6 @@ session, config, or filesystem event should mean no recurring CPU work. Polling
 is acceptable only as a temporary fallback with conservative backoff and should
 be retired whenever a reliable listener exists.
 
-See `docs/RENDERER_MODE_STRATEGY.md` before changing renderer injection,
-session tracking, refresh scheduling, or platform integration.
-
 ## Codebase graph memory
 
 For every project-related task, first run
@@ -44,44 +41,4 @@ In Bash-compatible shells:
 ```bash
 python tools/build_exe.py > build_exe.log 2>&1
 tail -n 80 build_exe.log
-```
-
-## Validation policy
-
-Use the staged validation command for ordinary, isolated changes:
-
-```powershell
-python tools/run_validation.py
-```
-
-Run the full default pytest regression gate when a change has a broad or
-uncertain impact. This is required for changes that:
-
-- cross module or runtime-owner boundaries, change shared contracts, payloads,
-  schemas, settings persistence, pytest configuration, dependencies, or build
-  and packaging behavior;
-- touch Renderer/CDP injection, daemon startup/restart, process detection,
-  session tracking or cleanup, event-loop scheduling, refresh policy, JSONL/
-  SQLite/filesystem watching, or Windows/macOS integration;
-- fix a regression or flaky test, change behavior without narrow regression
-  coverage, or have an impact surface that cannot be confidently bounded; or
-- are being prepared for a release, tag, or an explicit merge/release gate.
-
-Use:
-
-```powershell
-python tools/run_validation.py --full
-```
-
-The default full gate follows `pyproject.toml` and excludes tests marked
-`ui`. When real widget lifecycle behavior changes, also run the UI markers:
-
-```powershell
-python -m pytest -o addopts="" -m "ui or qt_ui" -q
-```
-
-To run every collected marker in one command, including UI tests, use:
-
-```powershell
-python -m pytest -o addopts="" -q --durations=10
 ```
